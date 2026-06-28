@@ -2055,6 +2055,138 @@ fn install_collections(it: &mut Interp) {
     install_map_like(it, "Set", true, set_ctor);
     install_weak(it, "WeakMap", false, weakmap_ctor);
     install_weak(it, "WeakSet", true, weakset_ctor);
+    install_set_methods(it);
+}
+
+/// The receiver Set's values (deduped insertion order). Errors if `this` isn't a Set.
+fn set_values(i: &mut Interp, this: &Value) -> Result<Vec<Value>, Value> {
+    let ptr = map_ptr(this).filter(|p| i.map_data.contains_key(p));
+    match ptr {
+        Some(p) => Ok(i.map_data[&p].iter().map(|(k, _)| k.clone()).collect()),
+        None => Err(i.make_error("TypeError", "method called on an incompatible receiver")),
+    }
+}
+/// Build a fresh Set from `values` (deduped via SameValueZero).
+fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
+    let proto = i.extra_protos.get("Set").cloned();
+    let obj = Object::new(proto);
+    let ptr = Rc::as_ptr(&obj) as usize;
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    for v in values {
+        if !entries.iter().any(|(k, _)| same_value_zero(k, &v)) {
+            entries.push((v.clone(), v));
+        }
+    }
+    i.map_data.insert(ptr, entries);
+    Value::Obj(obj)
+}
+/// GetSetRecord: a set-like `other` exposes a numeric `size`, and callable `has` and `keys`.
+fn set_record(i: &mut Interp, other: &Value) -> Result<(Value, Value), Value> {
+    if !matches!(other, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "argument is not an object"));
+    }
+    let size_v = ab(i.get_member(other, "size"))?;
+    let size = ab(i.to_number(&size_v))?;
+    if size.is_nan() {
+        return Err(i.make_error("TypeError", "set-like size is NaN"));
+    }
+    let has = ab(i.get_member(other, "has"))?;
+    if !has.is_callable() {
+        return Err(i.make_error("TypeError", "set-like has is not callable"));
+    }
+    let keys = ab(i.get_member(other, "keys"))?;
+    if !keys.is_callable() {
+        return Err(i.make_error("TypeError", "set-like keys is not callable"));
+    }
+    Ok((has, keys))
+}
+fn set_like_has(i: &mut Interp, has: &Value, other: &Value, v: &Value) -> Result<bool, Value> {
+    let r = ab(i.call(has.clone(), other.clone(), std::slice::from_ref(v)))?;
+    Ok(i.to_boolean(&r))
+}
+fn set_like_keys(i: &mut Interp, keys: &Value, other: &Value) -> Result<Vec<Value>, Value> {
+    let iter = ab(i.call(keys.clone(), other.clone(), &[]))?;
+    ab(i.iterate(&iter))
+}
+
+fn install_set_methods(it: &mut Interp) {
+    let sp = it.extra_protos.get("Set").cloned().unwrap();
+    it.def_method(&sp, "union", 1, |i, this, a| {
+        let mut vals = set_values(i, &this)?;
+        let (_has, keys) = set_record(i, &arg(a, 0))?;
+        for k in set_like_keys(i, &keys, &arg(a, 0))? {
+            vals.push(k);
+        }
+        Ok(new_set(i, vals))
+    });
+    it.def_method(&sp, "intersection", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        let mut out = Vec::new();
+        for v in vals {
+            if set_like_has(i, &has, &arg(a, 0), &v)? {
+                out.push(v);
+            }
+        }
+        Ok(new_set(i, out))
+    });
+    it.def_method(&sp, "difference", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        let mut out = Vec::new();
+        for v in vals {
+            if !set_like_has(i, &has, &arg(a, 0), &v)? {
+                out.push(v);
+            }
+        }
+        Ok(new_set(i, out))
+    });
+    it.def_method(&sp, "symmetricDifference", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (has, keys) = set_record(i, &arg(a, 0))?;
+        let mut out = Vec::new();
+        for v in &vals {
+            if !set_like_has(i, &has, &arg(a, 0), v)? {
+                out.push(v.clone());
+            }
+        }
+        for k in set_like_keys(i, &keys, &arg(a, 0))? {
+            if !vals.iter().any(|v| same_value_zero(v, &k)) {
+                out.push(k);
+            }
+        }
+        Ok(new_set(i, out))
+    });
+    it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        for v in vals {
+            if !set_like_has(i, &has, &arg(a, 0), &v)? {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&sp, "isSupersetOf", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (_has, keys) = set_record(i, &arg(a, 0))?;
+        for k in set_like_keys(i, &keys, &arg(a, 0))? {
+            if !vals.iter().any(|v| same_value_zero(v, &k)) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&sp, "isDisjointFrom", 1, |i, this, a| {
+        let vals = set_values(i, &this)?;
+        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        for v in vals {
+            if set_like_has(i, &has, &arg(a, 0), &v)? {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    });
 }
 
 // Non-capturing constructor entry points (native fns must be bare `fn` pointers).

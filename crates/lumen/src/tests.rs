@@ -1353,3 +1353,17 @@ fn proxy_keys() {
     assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['x','y']},getOwnPropertyDescriptor(t,k){return {value:1,enumerable:true,configurable:true}}}); Object.keys(p).join(',')"), "x,y");
     assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['x','y']},getOwnPropertyDescriptor(t,k){return {value:1,enumerable:k==='x',configurable:true}}}); Object.keys(p).join(',')"), "x");
 }
+#[test]
+fn set_methods() {
+    assert_eq!(run("[...new Set([1,2,3]).union(new Set([3,4]))].join(',')"), "1,2,3,4");
+    assert_eq!(run("[...new Set([1,2,3]).intersection(new Set([2,3,4]))].join(',')"), "2,3");
+    assert_eq!(run("[...new Set([1,2,3]).difference(new Set([2,3]))].join(',')"), "1");
+    assert_eq!(run("[...new Set([1,2,3]).symmetricDifference(new Set([3,4]))].join(',')"), "1,2,4");
+    assert_eq!(run("new Set([1,2]).isSubsetOf(new Set([1,2,3]))"), "true");
+    assert_eq!(run("new Set([1,2,4]).isSubsetOf(new Set([1,2,3]))"), "false");
+    assert_eq!(run("new Set([1,2,3]).isSupersetOf(new Set([1,2]))"), "true");
+    assert_eq!(run("new Set([1,2]).isDisjointFrom(new Set([3,4]))"), "true");
+    assert_eq!(run("new Set([1,2]).isDisjointFrom(new Set([2,3]))"), "false");
+    assert_eq!(run("new Set([1,2,3]).union(new Set([3,4])) instanceof Set"), "true");
+    assert_eq!(throws("new Set([1]).union(5)"), "TypeError");
+}
