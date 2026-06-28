@@ -874,6 +874,10 @@ impl Parser {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
                 expr = Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: false };
+            } else if let Tok::Template(parts) = self.cur().clone() {
+                // A template immediately after an expression is a tagged template.
+                self.advance();
+                expr = self.build_tagged_template(expr, parts)?;
             } else if self.eat_punct("?.") {
                 if self.is_punct("(") {
                     let args = self.parse_args()?;
@@ -1046,7 +1050,7 @@ impl Parser {
         let mut expr: Option<Expr> = None;
         for part in parts {
             let piece = match part {
-                TplPart::Str(s) => Expr::Str(Rc::from(s.as_str())),
+                TplPart::Str { cooked, .. } => Expr::Str(Rc::from(cooked.as_str())),
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
@@ -1062,6 +1066,23 @@ impl Parser {
             });
         }
         Ok(expr.unwrap_or(Expr::Str(Rc::from(""))))
+    }
+
+    fn build_tagged_template(&mut self, tag: Expr, parts: Vec<TplPart>) -> Result<Expr, ParseError> {
+        let mut quasis = Vec::new();
+        let mut subs = Vec::new();
+        for part in parts {
+            match part {
+                TplPart::Str { cooked, raw } => quasis.push((Some(cooked), raw)),
+                TplPart::Sub(src) => {
+                    let tokens = tokenize(&src)
+                        .map_err(|e| ParseError { message: e.message, line: e.line })?;
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    subs.push(sub.parse_expr()?);
+                }
+            }
+        }
+        Ok(Expr::TaggedTemplate { tag: Box::new(tag), quasis, subs })
     }
 
     fn parse_array(&mut self) -> Result<Expr, ParseError> {

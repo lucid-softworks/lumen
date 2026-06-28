@@ -1241,3 +1241,16 @@ fn for_head_no_in() {
     assert_eq!(run("var c=0; for (var k in {a:1,b:2,c:3}) c++; c"), "3");
     assert_eq!(run("'q' in {q:1}"), "true");
 }
+#[test]
+fn tagged_templates() {
+    assert_eq!(run("function t(s){return s[0]} t`hi`"), "hi");
+    assert_eq!(run("function t(s,a){return s[0]+a+s[1]} t`x${5}y`"), "x5y");
+    assert_eq!(run("function t(s){return s.raw[0]} t`a\\nb`"), "a\\nb");
+    assert_eq!(run("function t(s){return s.length} t`a${1}b${2}c`"), "3");
+    assert_eq!(run("function t(s){return s[0]} t`a\\nb`"), "a\nb");
+    assert_eq!(run("function t(s){return Object.isFrozen(s)&&Object.isFrozen(s.raw)} t`x`"), "true");
+    assert_eq!(run("var o={m(s){return s[0]}}; o.m`hi`"), "hi");
+    assert_eq!(run("typeof String.raw"), "function");
+    assert_eq!(run("String.raw`a\\nb`"), "a\\nb");
+    assert_eq!(run("String.raw`${1}+${2}`"), "1+2");
+}

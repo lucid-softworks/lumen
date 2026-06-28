@@ -245,27 +245,39 @@ impl<'a> Lexer<'a> {
         self.bump(); // opening backtick
         let mut parts: Vec<TplPart> = Vec::new();
         let mut cooked = String::new();
+        let mut raw_start = self.pos; // raw source of the current chunk starts here
         loop {
-            match self.bump() {
+            match self.peek() {
                 None => return Err(self.err("unterminated template literal")),
-                Some('`') => break,
+                Some('`') => {
+                    let raw: String = self.chars[raw_start..self.pos].iter().collect();
+                    self.bump();
+                    parts.push(TplPart::Str { cooked: std::mem::take(&mut cooked), raw });
+                    break;
+                }
+                Some('$') if self.chars.get(self.pos + 1) == Some(&'{') => {
+                    let raw: String = self.chars[raw_start..self.pos].iter().collect();
+                    parts.push(TplPart::Str { cooked: std::mem::take(&mut cooked), raw });
+                    self.bump(); // '$'
+                    self.bump(); // '{'
+                    parts.push(TplPart::Sub(self.read_template_sub()?));
+                    raw_start = self.pos;
+                }
                 Some('\\') => {
                     // Octal / `\8` / `\9` escapes are never allowed in template literals.
                     self.pending_legacy = false;
+                    self.bump(); // consume the backslash
                     self.read_escape(&mut cooked)?;
                     if self.pending_legacy {
                         return Err(self.err("octal escape sequences are not allowed in template literals"));
                     }
                 }
-                Some('$') if self.peek() == Some('{') => {
-                    self.bump(); // consume '{'
-                    parts.push(TplPart::Str(std::mem::take(&mut cooked)));
-                    parts.push(TplPart::Sub(self.read_template_sub()?));
+                Some(c) => {
+                    self.bump();
+                    cooked.push(c);
                 }
-                Some(c) => cooked.push(c),
             }
         }
-        parts.push(TplPart::Str(cooked));
         self.push(Tok::Template(parts));
         Ok(())
     }

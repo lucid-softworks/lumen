@@ -895,6 +895,9 @@ impl Interp {
                 self.get_member(&base, &key)
             }
             Expr::Call { callee, args } => self.eval_call(callee, args, env),
+            Expr::TaggedTemplate { tag, quasis, subs } => {
+                self.eval_tagged_template(tag, quasis, subs, env)
+            }
             Expr::New { callee, args } => {
                 let c = self.eval(callee, env)?;
                 let argv = self.eval_args(args, env)?;
@@ -1048,6 +1051,64 @@ impl Interp {
             }
         }
         Ok(out)
+    }
+
+    /// Freeze an object in place (non-extensible, all own props non-writable/non-configurable).
+    pub(crate) fn freeze_object(&self, v: &Value) {
+        if let Value::Obj(o) = v {
+            o.borrow_mut().extensible = false;
+            let keys = o.borrow().props.keys();
+            for k in keys {
+                if let Some(p) = o.borrow_mut().props.get_mut(&k) {
+                    p.writable = false;
+                    p.configurable = false;
+                }
+            }
+        }
+    }
+
+    fn eval_tagged_template(
+        &mut self,
+        tag: &Expr,
+        quasis: &[(Option<String>, String)],
+        subs: &[Expr],
+        env: &Env,
+    ) -> Result<Value, Abrupt> {
+        // The template object: a frozen array of cooked strings with a frozen `.raw` array.
+        let cooked: Vec<Value> = quasis
+            .iter()
+            .map(|(c, _)| c.as_ref().map(|s| Value::from_string(s.clone())).unwrap_or(Value::Undefined))
+            .collect();
+        let raw: Vec<Value> = quasis.iter().map(|(_, r)| Value::from_string(r.clone())).collect();
+        let strings = self.make_array(cooked);
+        let raw_arr = self.make_array(raw);
+        self.freeze_object(&raw_arr);
+        self.set_member(&strings, "raw", raw_arr)?;
+        self.freeze_object(&strings);
+        // Evaluate the tag callee, capturing `this` for method tags (`obj.tag\`...\``).
+        let (func, this) = match tag {
+            Expr::Member { obj, prop, .. } => {
+                let base = self.eval(obj, env)?;
+                let f = self.get_member(&base, prop)?;
+                (f, base)
+            }
+            Expr::Index { obj, index, .. } => {
+                let base = self.eval(obj, env)?;
+                let idx = self.eval(index, env)?;
+                let key = self.to_property_key(&idx)?;
+                let f = self.get_member(&base, &key)?;
+                (f, base)
+            }
+            _ => (self.eval(tag, env)?, Value::Undefined),
+        };
+        if !func.is_callable() {
+            return Err(self.throw("TypeError", "tag is not a function"));
+        }
+        let mut argv = vec![strings];
+        for s in subs {
+            argv.push(self.eval(s, env)?);
+        }
+        self.call(func, this, &argv)
     }
 
     fn eval_call(&mut self, callee: &Expr, args: &[ArrayElem], env: &Env) -> Result<Value, Abrupt> {

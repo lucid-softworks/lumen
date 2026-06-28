@@ -5043,6 +5043,23 @@ fn install_string(it: &mut Interp) {
         }
         Ok(Value::from_string(s))
     });
+    it.def_method(&ctor, "raw", 1, |i, _this, args| {
+        let template = arg(args, 0);
+        let raw = ab(i.get_member(&template, "raw"))?;
+        let raw_obj = this_obj(&raw).ok_or_else(|| i.make_error("TypeError", "raw is not an object"))?;
+        let len = ab(i.to_length(&raw_obj))?;
+        let mut out = String::new();
+        for k in 0..len {
+            let seg = ab(i.get_member(&raw, &k.to_string()))?;
+            out.push_str(&ab(i.to_string(&seg))?);
+            if k + 1 < len {
+                if let Some(sub) = args.get(k + 1) {
+                    out.push_str(&ab(i.to_string(sub))?);
+                }
+            }
+        }
+        Ok(Value::from_string(out))
+    });
     it.def_method(&ctor, "fromCodePoint", 1, |i, _this, args| {
         let mut s = String::new();
         for a in args {

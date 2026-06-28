@@ -33,10 +33,11 @@ pub enum Tok {
     Eof,
 }
 
-/// One piece of a template literal: a cooked literal chunk or the raw source of a `${...}` hole.
+/// One piece of a template literal: a literal chunk (with both the cooked value and the raw source,
+/// the latter needed for tagged templates' `strings.raw`) or the raw source of a `${...}` hole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TplPart {
-    Str(String),
+    Str { cooked: String, raw: String },
     Sub(String),
 }
 

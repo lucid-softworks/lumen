@@ -148,6 +148,8 @@ pub enum Expr {
     Member { obj: P<Expr>, prop: String, optional: bool },
     Index { obj: P<Expr>, index: P<Expr>, optional: bool },
     Seq(Vec<Expr>),
+    /// `tag\`a${x}b\`` — `quasis` are (cooked, raw) chunks (one more than `subs`).
+    TaggedTemplate { tag: P<Expr>, quasis: Vec<(Option<String>, String)>, subs: Vec<Expr> },
 }
 
 /// An array element or call argument: a value, a spread (`...x`), or a hole (`[1,,3]`).
