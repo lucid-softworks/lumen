@@ -1526,7 +1526,7 @@ fn b64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let chars: Vec<char> = s.chars().collect();
@@ -1619,6 +1619,41 @@ fn install_uint8_base64(it: &mut Interp) {
         let bytes = b64_decode(&s, url).ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
         make_u8array(i, bytes)
     });
+    it.def_method(&proto, "setFromHex", 1, |i, this, a| {
+        let s = match arg(a, 0) {
+            Value::Str(s) => s,
+            _ => return Err(i.make_error("TypeError", "setFromHex requires a string")),
+        };
+        let bytes = hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
+        u8_set_bytes(i, &this, &bytes, s.len())
+    });
+    it.def_method(&proto, "setFromBase64", 1, |i, this, a| {
+        let s = match arg(a, 0) {
+            Value::Str(s) => s,
+            _ => return Err(i.make_error("TypeError", "setFromBase64 requires a string")),
+        };
+        let url = b64_option_url(i, &arg(a, 1))?;
+        let bytes = b64_decode(&s, url).ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
+        u8_set_bytes(i, &this, &bytes, s.len())
+    });
+}
+
+/// Write decoded `bytes` into the Uint8Array receiver (truncating to its length); returns
+/// `{read, written}`.
+fn u8_set_bytes(i: &mut Interp, this: &Value, bytes: &[u8], src_len: usize) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    if !matches!(info.kind, TaKind::U8) {
+        return Err(i.make_error("TypeError", "requires a Uint8Array"));
+    }
+    let written = bytes.len().min(info.len);
+    if let Some(buf) = i.array_buffers.get_mut(&info.buffer) {
+        buf[info.offset..info.offset + written].copy_from_slice(&bytes[..written]);
+    }
+    let result = i.new_object();
+    set_data(&result, "read", Value::Num(src_len as f64));
+    set_data(&result, "written", Value::Num(written as f64));
+    Ok(Value::Obj(result))
 }
 
 fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {

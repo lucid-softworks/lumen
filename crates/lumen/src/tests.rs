@@ -1416,3 +1416,9 @@ fn uint8_base64_hex() {
     assert_eq!(run("var r=Uint8Array.fromHex('48656c6c6f'); String.fromCharCode(...r)"), "Hello");
     assert_eq!(run("typeof Symbol.metadata"), "symbol");
 }
+#[test]
+fn uint8_setfrom() {
+    assert_eq!(run("var a=new Uint8Array(4); var r=a.setFromHex('41424344'); a.join(',')+'/'+r.written+','+r.read"), "65,66,67,68/4,8");
+    assert_eq!(run("var a=new Uint8Array(2); a.setFromHex('414243'); a.join(',')"), "65,66");
+    assert_eq!(run("var a=new Uint8Array(3); a.setFromBase64('SGk='); a.join(',')"), "72,105,0");
+}
