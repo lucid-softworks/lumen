@@ -286,6 +286,48 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
     Ok(Value::Undefined)
 }
 
+fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let little = i.to_boolean(&arg(args, 1));
+    if byte_off + 8 > len {
+        return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
+    }
+    let start = off + byte_off;
+    let mut b = match i.array_buffers.get(&buf) {
+        Some(buf) if start + 8 <= buf.len() => buf[start..start + 8].to_vec(),
+        _ => return Err(i.make_error("TypeError", "detached buffer")),
+    };
+    if !little {
+        b.reverse();
+    }
+    let raw = u64::from_le_bytes(b.try_into().unwrap());
+    Ok(Value::BigInt(if signed { raw as i64 as i128 } else { raw as i128 }))
+}
+
+fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let value = ab(i.to_bigint(&arg(args, 1)))?;
+    let little = i.to_boolean(&arg(args, 2));
+    if byte_off + 8 > len {
+        return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
+    }
+    let mut bytes = (value as u64).to_le_bytes().to_vec();
+    if !little {
+        bytes.reverse();
+    }
+    let start = off + byte_off;
+    if let Some(b) = i.array_buffers.get_mut(&buf) {
+        if start + 8 <= b.len() {
+            b[start..start + 8].copy_from_slice(&bytes);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
 fn install_dataview(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("DataView", proto.clone());
@@ -303,6 +345,10 @@ fn install_dataview(it: &mut Interp) {
     dvm!("getUint32", "setUint32", TaKind::U32);
     dvm!("getFloat32", "setFloat32", TaKind::F32);
     dvm!("getFloat64", "setFloat64", TaKind::F64);
+    it.def_method(&proto, "getBigInt64", 1, |i, this, a| dv_get_big(i, &this, a, true));
+    it.def_method(&proto, "getBigUint64", 1, |i, this, a| dv_get_big(i, &this, a, false));
+    it.def_method(&proto, "setBigInt64", 2, |i, this, a| dv_set_big(i, &this, a));
+    it.def_method(&proto, "setBigUint64", 2, |i, this, a| dv_set_big(i, &this, a));
 
     let ctor = it.make_native("DataView", 1, |i, _t, a| {
         let bp = match arg(a, 0) {
@@ -1909,28 +1955,40 @@ fn set_internal_obj(target: &Value, key: &str, v: Value) {
     }
 }
 
+fn make_proxy(i: &mut Interp, target: Value, handler: Value) -> Result<Value, Value> {
+    if !matches!(target, Value::Obj(_)) || !matches!(handler, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "Cannot create proxy with a non-object as target or handler"));
+    }
+    let proto = match &target {
+        Value::Obj(o) => o.borrow().proto.clone(),
+        _ => None,
+    };
+    let obj = Object::new(proto);
+    if target.is_callable() {
+        obj.borrow_mut().call = Callable::Native(proxy_uncallable);
+        obj.borrow_mut().is_constructor = true;
+    }
+    let p = Rc::as_ptr(&obj) as usize;
+    i.proxies.insert(p, (target, handler));
+    Ok(Value::Obj(obj))
+}
+
+fn revoke_proxy(i: &mut Interp, _this: Value, a: &[Value]) -> Result<Value, Value> {
+    if let Value::Obj(o) = arg(a, 0) {
+        i.proxies.remove(&(Rc::as_ptr(&o) as usize));
+    }
+    Ok(Value::Undefined)
+}
+
 fn install_proxy(it: &mut Interp) {
-    let ctor = it.make_native("Proxy", 2, |i, _t, a| {
-        let target = arg(a, 0);
-        let handler = arg(a, 1);
-        if !matches!(target, Value::Obj(_)) || !matches!(handler, Value::Obj(_)) {
-            return Err(i.make_error(
-                "TypeError",
-                "Cannot create proxy with a non-object as target or handler",
-            ));
-        }
-        let proto = match &target {
-            Value::Obj(o) => o.borrow().proto.clone(),
-            _ => None,
-        };
-        let obj = Object::new(proto);
-        if target.is_callable() {
-            obj.borrow_mut().call = Callable::Native(proxy_uncallable);
-            obj.borrow_mut().is_constructor = true;
-        }
-        let p = Rc::as_ptr(&obj) as usize;
-        i.proxies.insert(p, (target, handler));
-        Ok(Value::Obj(obj))
+    let ctor = it.make_native("Proxy", 2, |i, _t, a| make_proxy(i, arg(a, 0), arg(a, 1)));
+    it.def_method(&ctor, "revocable", 2, |i, _t, a| {
+        let proxy = make_proxy(i, arg(a, 0), arg(a, 1))?;
+        let revoke = make_bound(i, revoke_proxy, vec![proxy.clone()]);
+        let result = i.new_object();
+        set_data(&result, "proxy", proxy);
+        set_data(&result, "revoke", revoke);
+        Ok(Value::Obj(result))
     });
     set_builtin(&it.global, "Proxy", Value::Obj(ctor));
 }
