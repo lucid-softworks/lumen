@@ -788,6 +788,11 @@ fn set_internal(obj: &Gc, key: &str, v: Value) {
 }
 
 fn date_ms(i: &mut Interp, this: &Value) -> Result<f64, Value> {
+    // thisTimeValue: the receiver must be a Date (carry the internal time slot), else TypeError.
+    match this {
+        Value::Obj(o) if o.borrow().props.contains("__date_ms") => {}
+        _ => return Err(i.make_error("TypeError", "this is not a Date object")),
+    }
     Ok(match ab(i.get_member(this, "__date_ms"))? {
         Value::Num(n) => n,
         _ => f64::NAN,

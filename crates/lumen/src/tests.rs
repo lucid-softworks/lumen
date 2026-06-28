@@ -559,3 +559,4 @@ fn temporal_zoned() {
     assert_eq!(run("new Temporal.ZonedDateTime(0n, 'UTC').offset"), "+00:00");
     assert_eq!(run("new Temporal.ZonedDateTime(3600000000000n,'UTC').toInstant().epochMilliseconds"), "3600000");
 }
+
