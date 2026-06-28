@@ -490,10 +490,21 @@ fn install_host(it: &mut Interp) {
     it.def_method(&host, "detachArrayBuffer", 1, |i, _t, args| {
         if let Value::Obj(o) = arg(args, 0) {
             let p = Rc::as_ptr(&o) as usize;
-            if let Some(buf) = i.array_buffers.get_mut(&p) {
-                buf.clear();
-            }
+            // Truly detach: drop the backing store (so views see it as detached) and zero the views.
+            i.array_buffers.remove(&p);
             set_internal(&o, "byteLength", Value::Num(0.0));
+            set_internal(&o, "detached", Value::Bool(true));
+            let views: Vec<usize> = i
+                .typed_arrays
+                .iter()
+                .filter(|(_, info)| info.buffer == p)
+                .map(|(k, _)| *k)
+                .collect();
+            for vp in views {
+                if let Some(info) = i.typed_arrays.get_mut(&vp) {
+                    info.len = 0;
+                }
+            }
         }
         Ok(Value::Undefined)
     });
@@ -1338,9 +1349,14 @@ fn install_array_buffer(it: &mut Interp) {
 /// A %TypedArray%.prototype method: brand-check the receiver, then delegate to the like-named
 /// Array.prototype method.
 fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Result<Value, Value> {
-    let ok = map_ptr(this).map(|p| i.typed_arrays.contains_key(&p)).unwrap_or(false);
-    if !ok {
-        return Err(i.make_error("TypeError", "method called on a non-TypedArray receiver"));
+    let info = map_ptr(this).and_then(|p| i.typed_arrays.get(&p).copied());
+    let info = match info {
+        Some(info) => info,
+        None => return Err(i.make_error("TypeError", "method called on a non-TypedArray receiver")),
+    };
+    // ValidateTypedArray: a detached backing buffer makes the operation throw.
+    if !i.array_buffers.contains_key(&info.buffer) {
+        return Err(i.make_error("TypeError", "Cannot perform operation on a detached ArrayBuffer"));
     }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;

@@ -1459,8 +1459,14 @@ fn async_disposable_stack() {
     assert_eq!(run("var s=new AsyncDisposableStack(); s.use({[Symbol.asyncDispose](){}}); var s2=s.move(); s.disposed+','+s2.disposed"), "true,false");
 }
 #[test]
-fn probe56_tmp() {
-    for src in ["/(?<=a)b/.test('ab')","/(?<!a)b/.test('xb')","/(?i:a)/.test('A')","/(?:a)/.test('a')","/(?<n>a)/.test('a')","/a(?=b)/.test('ab')","/a(?!b)/.test('ac')","/(?i)abc/.test('ABC')","/(?<=\\d)x/.test('5x')"] {
-        eprintln!("RG {src:?} => {}", match crate::Engine::new().eval(src,false){Ok(crate::Completion::Value(v))=>format!("V:{v}"),Ok(crate::Completion::Throw{name,..})=>format!("T:{name}"),Err(e)=>format!("P:{}",&e.message[..28.min(e.message.len())])});
-    }
+fn detached_typedarray() {
+    assert_eq!(run("var a=new Int8Array(4); $262.detachArrayBuffer(a.buffer); a.length"), "0");
+    assert_eq!(run("var a=new Int8Array(4); $262.detachArrayBuffer(a.buffer); a.byteLength"), "0");
+    assert_eq!(run("var a=new Int8Array(4); $262.detachArrayBuffer(a.buffer); a[0]"), "undefined");
+    assert_eq!(throws("var a=new Int8Array([1,2,3]); $262.detachArrayBuffer(a.buffer); a.fill(0)"), "TypeError");
+    assert_eq!(throws("var a=new Int8Array([3,1,2]); $262.detachArrayBuffer(a.buffer); a.sort()"), "TypeError");
+    assert_eq!(throws("var a=new Int8Array(4); $262.detachArrayBuffer(a.buffer); a.join()"), "TypeError");
+    assert_eq!(run("var a=new Int8Array(4); a.length"), "4");
+    assert_eq!(run("var a=new Int32Array(4); a.byteLength"), "16");
+    assert_eq!(run("var a=new Int8Array([1,2,3]); a.fill(9); a.join(',')"), "9,9,9");
 }

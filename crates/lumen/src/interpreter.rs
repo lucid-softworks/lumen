@@ -521,9 +521,25 @@ impl Interp {
                     }
                 }
                 // TypedArray integer-index reads come from the backing buffer, not the property map.
+                // length/byteLength/byteOffset are computed (and 0 once the buffer is detached).
                 if let Some(info) = self.typed_arrays.get(&ptr).copied() {
                     if let Ok(idx) = key.parse::<usize>() {
                         return Ok(self.ta_read(&info, idx));
+                    }
+                    let detached = !self.array_buffers.contains_key(&info.buffer);
+                    match key {
+                        "length" => return Ok(Value::Num(if detached { 0.0 } else { info.len as f64 })),
+                        "byteLength" => {
+                            return Ok(Value::Num(if detached {
+                                0.0
+                            } else {
+                                (info.len * info.kind.elsize()) as f64
+                            }))
+                        }
+                        "byteOffset" => {
+                            return Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
+                        }
+                        _ => {}
                     }
                 }
                 self.get_from_chain(&o, key, base)
