@@ -530,16 +530,61 @@ fn epoch_days(d: IsoDate) -> i64 {
     days_from_civil(d.year, d.month as i64, d.day as i64)
 }
 
-/// Read a string option (e.g. `largestUnit`) from an options argument, defaulting if absent.
+/// Read a string option (e.g. `largestUnit`) from an options argument, defaulting if absent. A bare
+/// string options arg (the `smallestUnit` shorthand) is returned directly.
 fn opt_str(i: &mut Interp, opts: &Value, key: &str, default: &str) -> Result<String, Value> {
-    if matches!(opts, Value::Undefined) {
-        return Ok(default.to_string());
-    }
-    let v = getm(i, opts, key)?;
-    match v {
+    match opts {
         Value::Undefined => Ok(default.to_string()),
-        _ => Ok(i.to_string(&v).map_err(unab)?.to_string()),
+        Value::Str(s) => Ok(s.to_string()),
+        _ => {
+            let v = getm(i, opts, key)?;
+            match v {
+                Value::Undefined => Ok(default.to_string()),
+                _ => Ok(i.to_string(&v).map_err(unab)?.to_string()),
+            }
+        }
     }
+}
+fn opt_num(i: &mut Interp, opts: &Value, key: &str, default: i64) -> Result<i64, Value> {
+    match opts {
+        Value::Undefined | Value::Str(_) => Ok(default),
+        _ => {
+            let v = getm(i, opts, key)?;
+            to_int_default(i, &v, default)
+        }
+    }
+}
+/// Nanoseconds per time unit, or None for calendar units.
+fn unit_ns(u: &str) -> Option<i128> {
+    Some(match u {
+        "hour" => 3_600_000_000_000,
+        "minute" => 60_000_000_000,
+        "second" => 1_000_000_000,
+        "millisecond" => 1_000_000,
+        "microsecond" => 1000,
+        "nanosecond" => 1,
+        _ => return None,
+    })
+}
+/// Round `value` (signed ns) to a multiple of `inc` ns using a rounding mode.
+fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
+    if inc <= 1 {
+        return value;
+    }
+    let q = value.div_euclid(inc);
+    let r = value.rem_euclid(inc);
+    if r == 0 {
+        return value;
+    }
+    let up = match mode {
+        "ceil" | "expand" => true,
+        "floor" | "trunc" => false,
+        "halfFloor" | "halfTrunc" => r * 2 > inc,
+        "halfCeil" | "halfExpand" => r * 2 >= inc,
+        "halfEven" => r * 2 > inc || (r * 2 == inc && q % 2 != 0),
+        _ => r * 2 >= inc,
+    };
+    (q + if up { 1 } else { 0 }) * inc
 }
 
 /// Difference between two ISO dates as a calendar duration honoring `largest`
@@ -708,6 +753,17 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         let diff = (time_to_ns(x) - time_to_ns(y)) as i128;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+    });
+    it.def_method(&proto, "round", 1, |i, t, a| {
+        let x = as_time(i, &t)?;
+        let o = arg(a, 0);
+        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let unit = unit_ns(&smallest)
+            .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
+        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        let r = round_ns(time_to_ns(x) as i128, unit * incr, &mode).rem_euclid(86_400_000_000_000);
+        Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(r))))
     });
 
     let ctor = add_ctor(it, ns, "PlainTime", 0, proto, |i, _t, a| {
@@ -896,6 +952,24 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let nd = check_date(i, IsoDate { year, month, day })?;
         let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns: nsf })?;
         Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, nt)))
+    });
+    it.def_method(&proto, "round", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let o = arg(a, 0);
+        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let unit = if smallest == "day" {
+            86_400_000_000_000
+        } else {
+            unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
+        };
+        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        let rounded = round_ns(dt_ns(d, tm), unit * incr, &mode);
+        let z = rounded.div_euclid(86_400_000_000_000) as i64;
+        let rem = rounded.rem_euclid(86_400_000_000_000);
+        let (y, mo, da) = civil_from_days(z);
+        let nd = check_date(i, IsoDate { year: y, month: mo, day: da })?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ns_to_time(rem))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -1205,6 +1279,23 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         let o = to_duration(i, &arg(a, 0))?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(add_duration(d, o, -1))))
     });
+    it.def_method(&proto, "total", 1, |i, t, a| {
+        let d = as_duration(i, &t)?;
+        let unit = opt_str(i, &arg(a, 0), "unit", "")?;
+        if unit.is_empty() {
+            return Err(i.make_error("RangeError", "unit is required"));
+        }
+        if d.years != 0 || d.months != 0 || d.weeks != 0 {
+            return Err(i.make_error("RangeError", "total of a calendar duration requires relativeTo"));
+        }
+        let total_ns = d.days as i128 * 86_400_000_000_000 + duration_time_ns(d);
+        let u = if unit == "day" {
+            86_400_000_000_000i128
+        } else {
+            unit_ns(&unit).ok_or_else(|| i.make_error("RangeError", "invalid unit"))?
+        };
+        Ok(Value::Num(total_ns as f64 / u as f64))
+    });
 
     let ctor = add_ctor(it, ns, "Duration", 0, proto, |i, _t, a| {
         require_new(i)?;
@@ -1397,6 +1488,16 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             return Err(i.make_error("RangeError", "Instant.subtract does not accept calendar units"));
         }
         Ok(make(i, "Temporal.Instant", Temporal::Instant(x - duration_time_ns(dur))))
+    });
+    it.def_method(&proto, "round", 1, |i, t, a| {
+        let x = as_instant(i, &t)?;
+        let o = arg(a, 0);
+        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let unit = unit_ns(&smallest)
+            .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
+        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(round_ns(x, unit * incr, &mode))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
