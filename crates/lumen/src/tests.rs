@@ -582,3 +582,12 @@ fn to_string_tag() {
     assert_eq!(run("Object.prototype.toString.call(new Temporal.PlainDate(2021,1,1))"), "[object Temporal.PlainDate]");
     assert_eq!(run("Object.prototype.toString.call({[Symbol.toStringTag]:'Foo'})"), "[object Foo]");
 }
+
+#[test]
+fn temporal_tostring_options() {
+    assert_eq!(run("new Temporal.PlainTime(1,2,3,456).toString({smallestUnit:'minute'})"), "01:02");
+    assert_eq!(run("new Temporal.PlainTime(1,2,3).toString({fractionalSecondDigits:2})"), "01:02:03.00");
+    assert_eq!(run("new Temporal.PlainTime(1,2,3,456).toString({fractionalSecondDigits:3})"), "01:02:03.456");
+    assert_eq!(run("new Temporal.PlainDate(2021,7,15).toString({calendarName:'always'})"), "2021-07-15[u-ca=iso8601]");
+    assert_eq!(run("new Temporal.PlainDate(2021,7,15).toString()"), "2021-07-15");
+}

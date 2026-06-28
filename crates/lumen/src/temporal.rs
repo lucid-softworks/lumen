@@ -256,6 +256,69 @@ fn fmt_time(t: IsoTime) -> String {
     }
     s
 }
+/// Read `fractionalSecondDigits` (0..=9 or "auto"); None means auto (trim trailing zeros).
+fn read_frac_digits(i: &mut Interp, opts: &Value) -> Result<Option<usize>, Value> {
+    if matches!(opts, Value::Undefined | Value::Str(_)) {
+        return Ok(None);
+    }
+    let v = getm(i, opts, "fractionalSecondDigits")?;
+    match v {
+        Value::Undefined => Ok(None),
+        Value::Str(s) if &*s == "auto" => Ok(None),
+        _ => {
+            let n = to_int(i, &v)?;
+            if !(0..=9).contains(&n) {
+                return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
+            }
+            Ok(Some(n as usize))
+        }
+    }
+}
+/// Format a time honoring `smallestUnit` / `fractionalSecondDigits` options.
+fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Value> {
+    let smallest = opt_str(i, opts, "smallestUnit", "")?;
+    let smallest = smallest.strip_suffix('s').unwrap_or(&smallest);
+    let base = format!("{:02}:{:02}", t.hour, t.minute);
+    if smallest == "minute" {
+        return Ok(base);
+    }
+    let mut s = format!("{}:{:02}", base, t.second);
+    let subsec = t.ms as u32 * 1_000_000 + t.us as u32 * 1000 + t.ns as u32;
+    let digits = match smallest {
+        "second" => Some(0),
+        "millisecond" => Some(3),
+        "microsecond" => Some(6),
+        "nanosecond" => Some(9),
+        _ => read_frac_digits(i, opts)?,
+    };
+    match digits {
+        Some(0) => {}
+        Some(n) => {
+            let f = format!("{subsec:09}");
+            s.push('.');
+            s.push_str(&f[..n]);
+        }
+        None => {
+            if subsec > 0 {
+                let mut f = format!("{subsec:09}");
+                while f.ends_with('0') {
+                    f.pop();
+                }
+                s.push('.');
+                s.push_str(&f);
+            }
+        }
+    }
+    Ok(s)
+}
+/// The `[u-ca=iso8601]` calendar annotation per the `calendarName` option.
+fn cal_suffix(i: &mut Interp, opts: &Value) -> Result<&'static str, Value> {
+    match opt_str(i, opts, "calendarName", "auto")?.as_str() {
+        "always" | "critical" => Ok("[u-ca=iso8601]"),
+        _ => Ok(""),
+    }
+}
+
 fn fmt_duration(d: IsoDuration) -> String {
     let sign = duration_sign(d);
     let neg = sign < 0;
@@ -469,7 +532,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(Value::Bool(is_leap(as_date(i, &t)?.year)))
     });
 
-    it.def_method(&proto, "toString", 0, |i, t, _| Ok(Value::str(fmt_date(as_date(i, &t)?))));
+    it.def_method(&proto, "toString", 0, |i, t, a| { let d=as_date(i,&t)?; Ok(Value::str(format!("{}{}", fmt_date(d), cal_suffix(i,&arg(a,0))?))) });
     it.def_method(&proto, "toJSON", 0, |i, t, _| Ok(Value::str(fmt_date(as_date(i, &t)?))));
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.PlainDate has no valueOf; use compare"))
@@ -789,7 +852,7 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "microsecond", |i, t, _| Ok(Value::Num(as_time(i, &t)?.us as f64)));
     def_getter(it, &proto, "nanosecond", |i, t, _| Ok(Value::Num(as_time(i, &t)?.ns as f64)));
 
-    it.def_method(&proto, "toString", 0, |i, t, _| Ok(Value::str(fmt_time(as_time(i, &t)?))));
+    it.def_method(&proto, "toString", 0, |i, t, a| { let x=as_time(i,&t)?; Ok(Value::str(fmt_time_opts(i, x, &arg(a,0))?)) });
     it.def_method(&proto, "toJSON", 0, |i, t, _| Ok(Value::str(fmt_time(as_time(i, &t)?))));
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.PlainTime has no valueOf; use compare"))
@@ -986,9 +1049,10 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "inLeapYear", |i, t, _| Ok(Value::Bool(is_leap(as_datetime(i, &t)?.0.year))));
 
-    it.def_method(&proto, "toString", 0, |i, t, _| {
+    it.def_method(&proto, "toString", 0, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        Ok(Value::str(format!("{}T{}", fmt_date(d), fmt_time(tm))))
+        let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
+        Ok(Value::str(format!("{}T{}{}", fmt_date(d), ts, cal_suffix(i, &arg(a, 0))?)))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -1176,9 +1240,9 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         Ok(Value::Num(12.0))
     });
     def_getter(it, &proto, "inLeapYear", |i, t, _| Ok(Value::Bool(is_leap(as_yearmonth(i, &t)?.year))));
-    it.def_method(&proto, "toString", 0, |i, t, _| {
+    it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::str(format!("{}-{:02}", pad_year(d.year), d.month)))
+        Ok(Value::str(format!("{}-{:02}{}", pad_year(d.year), d.month, cal_suffix(i, &arg(a, 0))?)))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_yearmonth(i, &t)?;
@@ -1285,9 +1349,9 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "monthCode", |i, t, _| Ok(Value::str(month_code(as_monthday(i, &t)?.month))));
     def_getter(it, &proto, "day", |i, t, _| Ok(Value::Num(as_monthday(i, &t)?.day as f64)));
     def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
-    it.def_method(&proto, "toString", 0, |i, t, _| {
+    it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        Ok(Value::str(format!("{:02}-{:02}", d.month, d.day)))
+        Ok(Value::str(format!("{:02}-{:02}{}", d.month, d.day, cal_suffix(i, &arg(a, 0))?)))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_monthday(i, &t)?;
@@ -1598,7 +1662,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "epochNanoseconds", |i, t, _| {
         Ok(Value::BigInt(as_instant(i, &t)?))
     });
-    it.def_method(&proto, "toString", 0, |i, t, _| {
+    it.def_method(&proto, "toString", 0, |i, t, a| {
         let ns = as_instant(i, &t)?;
         let z = ns.div_euclid(86_400_000_000_000) as i64;
         let rem = ns.rem_euclid(86_400_000_000_000) as i64;
@@ -1612,7 +1676,8 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             us: ((rem / 1000) % 1000) as u16,
             ns: (rem % 1000) as u16,
         };
-        Ok(Value::str(format!("{}T{}Z", fmt_date(IsoDate { year: y, month: mo, day: da }), fmt_time(t))))
+        let ts = fmt_time_opts(i, t, &arg(a, 0))?;
+        Ok(Value::str(format!("{}T{}Z", fmt_date(IsoDate { year: y, month: mo, day: da }), ts)))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.Instant has no valueOf; use compare"))
@@ -1876,10 +1941,11 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.ZonedDateTime has no valueOf; use compare"))
     });
-    it.def_method(&proto, "toString", 0, |i, t, _| {
+    it.def_method(&proto, "toString", 0, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
-        Ok(Value::str(format!("{}T{}{}[{}]", fmt_date(d), fmt_time(tm), offset_string(o), tz)))
+        let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
+        Ok(Value::str(format!("{}T{}{}[{}]{}", fmt_date(d), ts, offset_string(o), tz, cal_suffix(i, &arg(a, 0))?)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
