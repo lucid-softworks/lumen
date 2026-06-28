@@ -549,7 +549,10 @@ impl Parser {
             if is_assign_op(op) {
                 self.advance();
                 let value = self.parse_assign()?;
-                if !is_valid_assign_target(&left) {
+                // Plain `=` also accepts an array/object literal reinterpreted as a destructuring
+                // assignment target.
+                let destructuring = op == "=" && matches!(left, Expr::Array(_) | Expr::Object(_));
+                if !is_valid_assign_target(&left) && !destructuring {
                     return self.err("invalid assignment target");
                 }
                 return Ok(Expr::Assign { op, target: Box::new(left), value: Box::new(value) });

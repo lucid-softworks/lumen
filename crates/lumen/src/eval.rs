@@ -1472,8 +1472,88 @@ impl Interp {
                 let key = self.to_property_key(&idx)?;
                 self.set_member(&base, &key, value)
             }
+            // Destructuring assignment: an array/object literal reinterpreted as a target.
+            Expr::Array(elems) => {
+                let items = self.iterate(&value)?;
+                let mut idx = 0usize;
+                for el in elems {
+                    match el {
+                        ArrayElem::Hole => idx += 1,
+                        ArrayElem::Spread(t) => {
+                            let rest: Vec<Value> = items.get(idx..).map(|s| s.to_vec()).unwrap_or_default();
+                            let arr = self.make_array(rest);
+                            self.assign_to_target(t, arr, env)?;
+                            break;
+                        }
+                        ArrayElem::Item(t) => {
+                            let v = items.get(idx).cloned().unwrap_or(Value::Undefined);
+                            idx += 1;
+                            self.assign_destructure_elem(t, v, env)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Expr::Object(props) => {
+                if matches!(value, Value::Undefined | Value::Null) {
+                    return Err(self.throw("TypeError", "cannot destructure null or undefined"));
+                }
+                let mut taken: Vec<String> = Vec::new();
+                for prop in props {
+                    match prop {
+                        PropDef::KeyValue { key, value: t } => {
+                            let k = self.propkey_to_string(key, env)?;
+                            let v = self.get_member(&value, &k)?;
+                            taken.push(k);
+                            self.assign_destructure_elem(t, v, env)?;
+                        }
+                        PropDef::Spread(t) => {
+                            let rest = self.new_object();
+                            if let Value::Obj(src) = &value {
+                                let keys: Vec<Rc<str>> = src.borrow().props.keys();
+                                for k in keys {
+                                    if Interp::is_sym_key(&k) || taken.iter().any(|x| x.as_str() == &*k) {
+                                        continue;
+                                    }
+                                    let enumerable =
+                                        src.borrow().props.get(&k).map(|p| p.enumerable).unwrap_or(false);
+                                    if enumerable {
+                                        let v = self.get_member(&value, &k)?;
+                                        rest.borrow_mut().props.insert(k, crate::value::Property::plain(v));
+                                    }
+                                }
+                            }
+                            self.assign_to_target(t, Value::Obj(rest), env)?;
+                        }
+                        _ => return Err(self.throw("SyntaxError", "invalid destructuring target")),
+                    }
+                }
+                Ok(())
+            }
             _ => Err(self.throw("ReferenceError", "invalid assignment target")),
         }
+    }
+
+    /// Assign one destructured element, honoring a `target = default` cover.
+    fn assign_destructure_elem(&mut self, t: &Expr, v: Value, env: &Env) -> Result<(), Abrupt> {
+        if let Expr::Assign { op: "=", target, value: dflt } = t {
+            let v = if matches!(v, Value::Undefined) { self.eval(dflt, env)? } else { v };
+            self.assign_to_target(target, v, env)
+        } else {
+            self.assign_to_target(t, v, env)
+        }
+    }
+
+    fn propkey_to_string(&mut self, key: &PropKey, env: &Env) -> Result<String, Abrupt> {
+        Ok(match key {
+            PropKey::Ident(s) => s.clone(),
+            PropKey::Str(s) => s.to_string(),
+            PropKey::Num(n) => self.num_to_str(*n),
+            PropKey::Computed(e) => {
+                let kv = self.eval(e, env)?;
+                self.to_property_key(&kv)?
+            }
+        })
     }
 
     // ----- operators --------------------------------------------------------------------------

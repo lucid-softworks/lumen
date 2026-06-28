@@ -660,3 +660,16 @@ fn misc_globals() {
     assert_eq!(run("typeof new FinalizationRegistry(()=>{})"), "object");
     assert_eq!(throws("new WeakRef(5)"), "TypeError");
 }
+
+#[test]
+fn destructuring_assignment() {
+    assert_eq!(run("var a,b; [a,b]=[1,2]; a+','+b"), "1,2");
+    assert_eq!(run("var a,b; ({a,b}={a:3,b:4}); a+','+b"), "3,4");
+    assert_eq!(run("var a,r; [a,...r]=[1,2,3]; a+'/'+r.join(',')"), "1/2,3");
+    assert_eq!(run("var o={}; [o.x,o.y]=[5,6]; o.x+','+o.y"), "5,6");
+    assert_eq!(run("var a=9; [a=7]=[]; a"), "7");
+    assert_eq!(run("var a,b; ({x:a,y:b}={x:1,y:2}); a+','+b"), "1,2");
+    assert_eq!(run("var a,rest; ({a,...rest}={a:1,b:2,c:3}); a+'/'+Object.keys(rest).join(',')"), "1/b,c");
+    assert_eq!(run("var a,b; [a,,b]=[1,2,3]; a+','+b"), "1,3");
+    assert_eq!(run("var a,b; [[a],{x:b}]=[[7],{x:8}]; a+','+b"), "7,8");
+}
