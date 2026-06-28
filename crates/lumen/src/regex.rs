@@ -244,6 +244,10 @@ impl Parser {
     }
 
     fn parse_quantified(&mut self) -> Result<Node, String> {
+        // A quantifier at the start of a term (after `(`, `|`, or `^`) has nothing to repeat.
+        if matches!(self.peek(), Some('*' | '+' | '?')) {
+            return Err("nothing to repeat".into());
+        }
         let atom = self.parse_atom()?;
         let (min, max) = match self.peek() {
             Some('*') => {
@@ -270,6 +274,10 @@ impl Parser {
         } else {
             true
         };
+        // A quantifier cannot itself be quantified (`a**`, `a+?` is lazy and already consumed).
+        if matches!(self.peek(), Some('*' | '+' | '?')) {
+            return Err("nothing to repeat".into());
+        }
         Ok(Node::Repeat(Box::new(atom), min, max, greedy))
     }
 
@@ -316,6 +324,11 @@ impl Parser {
             return Ok(None);
         }
         self.bump(); // }
+        if let Some(mx) = max {
+            if min > mx {
+                return Err("numbers out of order in {} quantifier".into());
+            }
+        }
         Ok(Some((min, max)))
     }
 
@@ -422,7 +435,12 @@ impl Parser {
                 self.bump();
                 let hi = self.class_atom()?;
                 match (lo, hi) {
-                    (ClassAtom::Char(a), ClassAtom::Char(b)) => cc.ranges.push((a, b)),
+                    (ClassAtom::Char(a), ClassAtom::Char(b)) => {
+                        if a > b {
+                            return Err("range out of order in character class".into());
+                        }
+                        cc.ranges.push((a, b));
+                    }
                     (a, b) => {
                         push_class_atom(&mut cc, a);
                         cc.ranges.push(('-', '-'));

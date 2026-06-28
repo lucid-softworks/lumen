@@ -906,3 +906,28 @@ fn frozen_array_throws() {
     assert_eq!(run("var a=[1,2]; a.push(3); a.join(',')"), "1,2,3"); // normal still works
     assert_eq!(run("var a=[1,2,3]; a.length=1; a.join(',')"), "1");
 }
+#[test]
+fn proto_wrapper_exotics() {
+    assert_eq!(run("Number.prototype == 0"), "true");
+    assert_eq!(run("Number.prototype.valueOf()"), "0");
+    assert_eq!(run("String.prototype == ''"), "true");
+    assert_eq!(run("String.prototype.length"), "0");
+    assert_eq!(run("Boolean.prototype.valueOf()"), "false");
+    assert_eq!(run("Number.prototype.toFixed(2)"), "0.00");
+    assert_eq!(run("(5).toFixed(2)"), "5.00");
+    assert_eq!(run("new Number(7) == 7"), "true");
+}
+#[test]
+fn regex_validation() {
+    for src in ["RegExp('a**')","RegExp('?a')","RegExp('*a')","RegExp('[b-a]')","RegExp('a{2,1}')","RegExp('+')"] {
+        assert_eq!(throws(src), "SyntaxError", "should reject: {src}");
+    }
+    // valid patterns still compile
+    assert_eq!(run("/a+b*/.test('aab')"), "true");
+    assert_eq!(run("/a{2,3}/.test('aa')"), "true");
+    assert_eq!(run("/[a-z]/.test('m')"), "true");
+    assert_eq!(run("/a+?/.test('a')"), "true"); // lazy
+    assert_eq!(run("/a{1,2}?/.source"), "a{1,2}?");
+    assert_eq!(run("/[*+?]/.test('*')"), "true"); // quantifiers literal in class
+    assert_eq!(run("/\\*/.test('*')"), "true"); // escaped
+}

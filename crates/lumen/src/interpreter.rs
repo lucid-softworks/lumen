@@ -197,6 +197,11 @@ impl Interp {
         let string_proto = Object::new(Some(object_proto.clone()));
         let number_proto = Object::new(Some(object_proto.clone()));
         let boolean_proto = Object::new(Some(object_proto.clone()));
+        // These prototypes are themselves wrapper exotics with default primitive data, so e.g.
+        // `Number.prototype.valueOf()` / `Number.prototype == 0` work.
+        string_proto.borrow_mut().exotic = Exotic::StrWrap(Rc::from(""));
+        number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
+        boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
         let global = Object::new(Some(object_proto.clone()));
         let global_env = new_scope(None);
