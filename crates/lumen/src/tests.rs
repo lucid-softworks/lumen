@@ -560,3 +560,12 @@ fn temporal_zoned() {
     assert_eq!(run("new Temporal.ZonedDateTime(3600000000000n,'UTC').toInstant().epochMilliseconds"), "3600000");
 }
 
+
+#[test]
+fn collection_brand_check() {
+    assert_eq!(run("var m=new Map(); m.set('a',1); m.get('a')"), "1");   // still works
+    assert_eq!(run("new Set([1,2,2]).size"), "2");
+    assert_eq!(throws("Map.prototype.get.call({}, 1)"), "TypeError");
+    assert_eq!(throws("Set.prototype.add.call([], 1)"), "TypeError");
+    assert_eq!(throws("Map.prototype.has.call(5, 1)"), "TypeError");
+}

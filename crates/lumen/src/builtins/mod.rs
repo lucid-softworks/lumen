@@ -1071,6 +1071,22 @@ fn map_ptr(this: &Value) -> Option<usize> {
     this.as_obj().map(|o| Rc::as_ptr(o) as usize)
 }
 
+/// Brand-check a Map/Set receiver: it must be an object carrying a collection data slot (every
+/// Map/Set/WeakMap/WeakSet gets one at construction), else TypeError.
+fn coll_ptr(i: &Interp, this: &Value) -> Result<usize, Value> {
+    match this.as_obj() {
+        Some(o) => {
+            let ptr = Rc::as_ptr(o) as usize;
+            if i.map_data.contains_key(&ptr) {
+                Ok(ptr)
+            } else {
+                Err(i.make_error("TypeError", "method called on an incompatible receiver"))
+            }
+        }
+        None => Err(i.make_error("TypeError", "method called on an incompatible receiver")),
+    }
+}
+
 /// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
 fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Map or Set"))?;
@@ -1139,7 +1155,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
 
     let adder: NativeFn = if is_set {
         |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-Set"))?;
+            let ptr = coll_ptr(i, &this)?;
             let key = arg(a, 0);
             let e = i.map_data.entry(ptr).or_default();
             if !e.iter().any(|(k, _)| same_value_zero(k, &key)) {
@@ -1149,7 +1165,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         }
     } else {
         |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-Map"))?;
+            let ptr = coll_ptr(i, &this)?;
             let (key, val) = (arg(a, 0), arg(a, 1));
             let e = i.map_data.entry(ptr).or_default();
             if let Some(slot) = e.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
@@ -1163,7 +1179,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     it.def_method(&proto, if is_set { "add" } else { "set" }, if is_set { 1 } else { 2 }, adder);
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-Map"))?;
+            let ptr = coll_ptr(i, &this)?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
@@ -1172,14 +1188,14 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         });
     }
     it.def_method(&proto, "has", 1, |i, this, a| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "has on non-collection"))?;
+        let ptr = coll_ptr(i, &this)?;
         let key = arg(a, 0);
         Ok(Value::Bool(
             i.map_data.get(&ptr).map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key))).unwrap_or(false),
         ))
     });
     it.def_method(&proto, "delete", 1, |i, this, a| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "delete on non-collection"))?;
+        let ptr = coll_ptr(i, &this)?;
         let key = arg(a, 0);
         let mut removed = false;
         if let Some(e) = i.map_data.get_mut(&ptr) {
@@ -1198,7 +1214,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         Ok(Value::Undefined)
     });
     it.def_method(&proto, "forEach", 1, |i, this, a| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "forEach on non-collection"))?;
+        let ptr = coll_ptr(i, &this)?;
         let cb = arg(a, 0);
         let cb_this = arg(a, 1);
         let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
@@ -1213,7 +1229,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
 
     // `size` accessor.
     let size_getter = it.make_native("get size", 0, |i, this, _| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "size on non-collection"))?;
+        let ptr = coll_ptr(i, &this)?;
         Ok(Value::Num(i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64))
     });
     proto.borrow_mut().props.insert(
