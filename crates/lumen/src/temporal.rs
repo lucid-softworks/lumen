@@ -618,6 +618,18 @@ fn unit_ns(u: &str) -> Option<i128> {
         _ => return None,
     })
 }
+/// Validate a `roundingMode` option, else RangeError.
+fn check_mode(i: &Interp, m: &str) -> Result<(), Value> {
+    const MODES: [&str; 9] = [
+        "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc",
+        "halfEven",
+    ];
+    if MODES.contains(&m) {
+        Ok(())
+    } else {
+        Err(i.make_error("RangeError", "invalid roundingMode"))
+    }
+}
 /// Round `value` (signed ns) to a multiple of `inc` ns using a rounding mode.
 fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
     if inc <= 1 {
@@ -642,6 +654,7 @@ fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
 /// Difference between two ISO dates as a calendar duration honoring `largest`
 /// (years/months/weeks/days). Assumes nothing about ordering; the result carries the sign.
 fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
+    let largest = largest.strip_suffix('s').unwrap_or(largest); // accept plural unit names
     let sign = cmp_date(a, b);
     let mut out = IsoDuration::default();
     if sign == 0 {
@@ -832,6 +845,7 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        check_mode(i, &mode)?;
         let r = round_ns(time_to_ns(x) as i128, unit * incr, &mode).rem_euclid(86_400_000_000_000);
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(r))))
     });
@@ -888,6 +902,7 @@ fn ns_to_time(ns: i128) -> IsoTime {
 }
 /// Balance a nanosecond span into a Duration whose largest unit is `largest`.
 fn balance_ns(total: i128, largest: &str) -> IsoDuration {
+    let largest = largest.strip_suffix('s').unwrap_or(largest); // accept plural unit names
     let neg = total < 0;
     let mut n = total.abs();
     let nanos = (n % 1000) as i64;
@@ -1062,6 +1077,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         };
         let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        check_mode(i, &mode)?;
         let rounded = round_ns(dt_ns(d, tm), unit * incr, &mode);
         let z = rounded.div_euclid(86_400_000_000_000) as i64;
         let rem = rounded.rem_euclid(86_400_000_000_000);
@@ -1396,6 +1412,7 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         }
         let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        check_mode(i, &mode)?;
         let unit = if smallest == "day" { 86_400_000_000_000 } else { unit_ns(&smallest).unwrap() };
         let total = d.days as i128 * 86_400_000_000_000 + duration_time_ns(d);
         let rounded = round_ns(total, unit * incr, &mode);
@@ -1639,6 +1656,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        check_mode(i, &mode)?;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(round_ns(x, unit * incr, &mode))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
@@ -1891,6 +1909,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         };
         let incr = opt_num(i, &opts, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
+        check_mode(i, &mode)?;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
         Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz }))
