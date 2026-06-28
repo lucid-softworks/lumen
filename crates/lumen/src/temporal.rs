@@ -1801,6 +1801,20 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     date_get!("daysInMonth", |d: IsoDate| Value::Num(days_in_month(d.year, d.month) as f64));
     date_get!("daysInYear", |d: IsoDate| Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }));
     date_get!("inLeapYear", |d: IsoDate| Value::Bool(is_leap(d.year)));
+    date_get!("weekOfYear", |d: IsoDate| Value::Num(iso_week(d).0 as f64));
+    date_get!("yearOfWeek", |d: IsoDate| Value::Num(iso_week(d).1 as f64));
+    date_get!("daysInWeek", |_d: IsoDate| Value::Num(7.0));
+    date_get!("monthsInYear", |_d: IsoDate| Value::Num(12.0));
+    def_getter(it, &proto, "hoursInDay", |i, t, _| {
+        as_zoned(i, &t)?;
+        Ok(Value::Num(24.0))
+    });
+    def_getter(it, &proto, "epochSeconds", |i, t, _| {
+        Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000_000) as f64))
+    });
+    def_getter(it, &proto, "epochMicroseconds", |i, t, _| {
+        Ok(Value::BigInt(as_zoned(i, &t)?.0.div_euclid(1000)))
+    });
     time_get!("hour", |t: IsoTime| Value::Num(t.hour as f64));
     time_get!("minute", |t: IsoTime| Value::Num(t.minute as f64));
     time_get!("second", |t: IsoTime| Value::Num(t.second as f64));
@@ -1834,6 +1848,21 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, _) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
         Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+    });
+    it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(zoned_local(e, o).0)))
+    });
+    it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(zoned_local(e, o).0)))
+    });
+    it.def_method(&proto, "startOfDay", 0, |i, t, _| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, _) = zoned_local(e, o);
+        let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
+        let epoch = dt_ns(d, midnight) - o as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (e, _, tz) = as_zoned(i, &t)?;
