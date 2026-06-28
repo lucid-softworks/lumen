@@ -1724,6 +1724,10 @@ impl Interp {
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
                 if let Value::Obj(o) = &base {
+                    let ptr = Rc::as_ptr(o) as usize;
+                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                        return Ok(Value::Bool(self.proxy_delete(target, handler, prop)?));
+                    }
                     let configurable = o.borrow().props.get(prop).map(|p| p.configurable).unwrap_or(true);
                     if configurable {
                         o.borrow_mut().props.remove(prop);
@@ -1738,6 +1742,10 @@ impl Interp {
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
                 if let Value::Obj(o) = &base {
+                    let ptr = Rc::as_ptr(o) as usize;
+                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                        return Ok(Value::Bool(self.proxy_delete(target, handler, &key)?));
+                    }
                     let configurable = o.borrow().props.get(&key).map(|p| p.configurable).unwrap_or(true);
                     if configurable {
                         o.borrow_mut().props.remove(&key);
@@ -1748,6 +1756,26 @@ impl Interp {
                 Ok(Value::Bool(true))
             }
             _ => Ok(Value::Bool(true)),
+        }
+    }
+
+    /// Proxy `[[Delete]]`: call the deleteProperty trap, or forward to the target.
+    pub(crate) fn proxy_delete(&mut self, target: Value, handler: Value, key: &str) -> Result<bool, Abrupt> {
+        let trap = self.get_member(&handler, "deleteProperty")?;
+        if trap.is_callable() {
+            let kv = self.sym_from_key(key).unwrap_or_else(|| Value::from_string(key.to_string()));
+            let res = self.call(trap, handler, &[target, kv])?;
+            Ok(self.to_boolean(&res))
+        } else if let Value::Obj(t) = &target {
+            let configurable = t.borrow().props.get(key).map(|p| p.configurable).unwrap_or(true);
+            if configurable {
+                t.borrow_mut().props.remove(key);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(true)
         }
     }
 

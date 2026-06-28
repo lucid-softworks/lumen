@@ -2330,6 +2330,9 @@ fn install_reflect(it: &mut Interp) {
     it.def_method(&r, "deleteProperty", 2, |i, _t, a| {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if let Value::Obj(o) = arg(a, 0) {
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                return Ok(Value::Bool(ab(i.proxy_delete(target, handler, &key))?));
+            }
             let configurable = o.borrow().props.get(&key).map(|p| p.configurable).unwrap_or(true);
             if configurable {
                 o.borrow_mut().props.remove(&key);
@@ -3343,9 +3346,33 @@ fn install_object(it: &mut Interp) {
             }
         }
     });
-    it.def_method(&ctor, "setPrototypeOf", 2, |_i, _this, args| {
+    it.def_method(&ctor, "setPrototypeOf", 2, |i, _this, args| {
+        let proto = arg(args, 1);
+        if !matches!(proto, Value::Obj(_) | Value::Null) {
+            return Err(i.make_error("TypeError", "Object prototype may only be an Object or null"));
+        }
+        if matches!(arg(args, 0), Value::Undefined | Value::Null) {
+            return Err(i.make_error("TypeError", "Object.setPrototypeOf called on null or undefined"));
+        }
         if let Value::Obj(o) = arg(args, 0) {
-            o.borrow_mut().proto = match arg(args, 1) {
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                let trap = ab(i.get_member(&handler, "setPrototypeOf"))?;
+                if trap.is_callable() {
+                    let res = ab(i.call(trap, handler, &[target, proto.clone()]))?;
+                    if !i.to_boolean(&res) {
+                        return Err(i.make_error("TypeError", "setPrototypeOf trap returned a falsish value"));
+                    }
+                    return Ok(arg(args, 0));
+                }
+                if let Value::Obj(t) = &target {
+                    t.borrow_mut().proto = match &proto {
+                        Value::Obj(p) => Some(p.clone()),
+                        _ => None,
+                    };
+                }
+                return Ok(arg(args, 0));
+            }
+            o.borrow_mut().proto = match proto {
                 Value::Obj(p) => Some(p),
                 _ => None,
             };
@@ -3455,13 +3482,37 @@ fn install_object(it: &mut Interp) {
         }
         Ok(arg(args, 0))
     });
-    it.def_method(&ctor, "preventExtensions", 1, |_i, _this, args| {
+    it.def_method(&ctor, "preventExtensions", 1, |i, _this, args| {
         if let Value::Obj(o) = arg(args, 0) {
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                let trap = ab(i.get_member(&handler, "preventExtensions"))?;
+                if trap.is_callable() {
+                    let res = ab(i.call(trap, handler, &[target]))?;
+                    if !i.to_boolean(&res) {
+                        return Err(i.make_error("TypeError", "preventExtensions trap returned a falsish value"));
+                    }
+                    return Ok(arg(args, 0));
+                }
+                if let Value::Obj(t) = &target {
+                    t.borrow_mut().extensible = false;
+                }
+                return Ok(arg(args, 0));
+            }
             o.borrow_mut().extensible = false;
         }
         Ok(arg(args, 0))
     });
-    it.def_method(&ctor, "isExtensible", 1, |_i, _this, args| {
+    it.def_method(&ctor, "isExtensible", 1, |i, _this, args| {
+        if let Value::Obj(o) = arg(args, 0) {
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                let trap = ab(i.get_member(&handler, "isExtensible"))?;
+                if trap.is_callable() {
+                    let res = ab(i.call(trap, handler, &[target]))?;
+                    return Ok(Value::Bool(i.to_boolean(&res)));
+                }
+                return Ok(Value::Bool(matches!(&target, Value::Obj(t) if t.borrow().extensible)));
+            }
+        }
         Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if o.borrow().extensible)))
     });
     it.def_method(&ctor, "assign", 2, |i, _this, args| {

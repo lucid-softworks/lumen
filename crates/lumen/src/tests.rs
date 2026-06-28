@@ -1330,3 +1330,20 @@ fn proxy_defineprop_trap() {
     assert_eq!(run("var p=new Proxy({},{defineProperty(){return false}}); Reflect.defineProperty(p,'x',{value:1})"), "false");
     assert_eq!(run("var t={}; var p=new Proxy(t,{}); Object.defineProperty(p,'a',{value:5,configurable:true}); t.a"), "5");
 }
+#[test]
+fn proxy_delete_trap() {
+    assert_eq!(run("var log=''; var p=new Proxy({},{deleteProperty(t,k){log+=k;return true}}); delete p.x; log"), "x");
+    assert_eq!(run("var p=new Proxy({},{deleteProperty(){return false}}); delete p.x"), "false");
+    assert_eq!(run("var t={a:1}; var p=new Proxy(t,{}); delete p.a; 'a' in t"), "false");
+    assert_eq!(run("var p=new Proxy({},{deleteProperty(){return true}}); delete p['k']"), "true");
+}
+#[test]
+fn proxy_misc_traps() {
+    assert_eq!(run("var log=''; var p=new Proxy({},{setPrototypeOf(t,pr){log+='sp';return true}}); Object.setPrototypeOf(p,null); log"), "sp");
+    assert_eq!(throws("var p=new Proxy({},{setPrototypeOf(){return false}}); Object.setPrototypeOf(p,{})"), "TypeError");
+    assert_eq!(run("var p=new Proxy({},{isExtensible(){return false}}); Object.isExtensible(p)"), "false");
+    assert_eq!(run("var log=''; var p=new Proxy({},{preventExtensions(t){log+='pe';return true}}); Object.preventExtensions(p); log"), "pe");
+    assert_eq!(throws("var p=new Proxy({},{preventExtensions(){return false}}); Object.preventExtensions(p)"), "TypeError");
+    assert_eq!(throws("Object.setPrototypeOf({},5)"), "TypeError");
+    assert_eq!(run("var t={}; var p=new Proxy(t,{}); Object.setPrototypeOf(p,Array.prototype); Object.getPrototypeOf(t)===Array.prototype"), "true");
+}
