@@ -1447,3 +1447,20 @@ fn dataview_float16() {
     assert_eq!(run("typeof DataView.prototype.getFloat16"), "function");
     assert_eq!(run("var d=new DataView(new ArrayBuffer(2)); d.setFloat16(0,1.337); d.getFloat16(0)"), "1.3369140625");
 }
+#[test]
+fn async_disposable_stack() {
+    assert_eq!(run("typeof AsyncDisposableStack"), "function");
+    assert_eq!(run("typeof Symbol.asyncDispose"), "symbol");
+    assert_eq!(run("var s=new AsyncDisposableStack(); s.disposed"), "false");
+    assert_eq!(run("typeof new AsyncDisposableStack()[Symbol.asyncDispose]"), "function");
+    let mut e = Engine::new();
+    e.eval("var log=''; var s=new AsyncDisposableStack(); s.defer(()=>{log+='a'}); s.defer(()=>{log+='b'}); s.disposeAsync().then(()=>log+='!')", false).unwrap();
+    assert_eq!(match e.eval("log",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "ba!");
+    assert_eq!(run("var s=new AsyncDisposableStack(); s.use({[Symbol.asyncDispose](){}}); var s2=s.move(); s.disposed+','+s2.disposed"), "true,false");
+}
+#[test]
+fn probe56_tmp() {
+    for src in ["/(?<=a)b/.test('ab')","/(?<!a)b/.test('xb')","/(?i:a)/.test('A')","/(?:a)/.test('a')","/(?<n>a)/.test('a')","/a(?=b)/.test('ab')","/a(?!b)/.test('ac')","/(?i)abc/.test('ABC')","/(?<=\\d)x/.test('5x')"] {
+        eprintln!("RG {src:?} => {}", match crate::Engine::new().eval(src,false){Ok(crate::Completion::Value(v))=>format!("V:{v}"),Ok(crate::Completion::Throw{name,..})=>format!("T:{name}"),Err(e)=>format!("P:{}",&e.message[..28.min(e.message.len())])});
+    }
+}

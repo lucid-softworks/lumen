@@ -68,27 +68,27 @@ pub fn install(it: &mut Interp) {
 
 /// `DisposableStack` (explicit resource management). Disposers are stored as `[fn, thisArg]` pairs
 /// in an internal array and run last-in-first-out on `dispose()`.
+fn ds_list(i: &mut Interp, this: &Value) -> Result<Value, Value> {
+    let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "not a DisposableStack"))?;
+    if !o.borrow().props.contains("__ds") {
+        return Err(i.make_error("TypeError", "not a DisposableStack"));
+    }
+    ab(i.get_member(this, "__ds"))
+}
+fn ds_disposed(i: &mut Interp, this: &Value) -> Result<bool, Value> {
+    let v = ab(i.get_member(this, "__ds_disposed"))?;
+    Ok(i.to_boolean(&v))
+}
+fn ds_push(i: &mut Interp, this: &Value, entry: Value) -> Result<(), Value> {
+    let list = ds_list(i, this)?;
+    let push = ab(i.get_member(&list, "push"))?;
+    ab(i.call(push, list, &[entry]))?;
+    Ok(())
+}
+
 fn install_disposable_stack(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("DisposableStack", proto.clone());
-
-    fn ds_list(i: &mut Interp, this: &Value) -> Result<Value, Value> {
-        let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "not a DisposableStack"))?;
-        if !o.borrow().props.contains("__ds") {
-            return Err(i.make_error("TypeError", "not a DisposableStack"));
-        }
-        ab(i.get_member(this, "__ds"))
-    }
-    fn ds_disposed(i: &mut Interp, this: &Value) -> Result<bool, Value> {
-        let v = ab(i.get_member(this, "__ds_disposed"))?;
-        Ok(i.to_boolean(&v))
-    }
-    fn ds_push(i: &mut Interp, this: &Value, entry: Value) -> Result<(), Value> {
-        let list = ds_list(i, this)?;
-        let push = ab(i.get_member(&list, "push"))?;
-        ab(i.call(push, list, &[entry]))?;
-        Ok(())
-    }
 
     it.def_method(&proto, "use", 1, |i, this, a| {
         if ds_disposed(i, &this)? {
@@ -193,6 +193,133 @@ fn install_disposable_stack(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "DisposableStack", Value::Obj(ctor));
+
+    install_async_disposable_stack(it);
+}
+
+/// `AsyncDisposableStack`: like DisposableStack but disposers may be async; `disposeAsync` returns a
+/// promise and awaits each disposer (lumen runs them synchronously and settles the promise).
+fn install_async_disposable_stack(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("AsyncDisposableStack", proto.clone());
+
+    it.def_method(&proto, "use", 1, |i, this, a| {
+        if ds_disposed(i, &this)? {
+            return Err(i.make_error("ReferenceError", "AsyncDisposableStack already disposed"));
+        }
+        let v = arg(a, 0);
+        if !matches!(v, Value::Undefined | Value::Null) {
+            // Prefer @@asyncDispose, falling back to @@dispose.
+            let akey = well_known_key(i, "asyncDispose").unwrap_or_default();
+            let mut disp = ab(i.get_member(&v, &akey))?;
+            if !disp.is_callable() {
+                let dkey = well_known_key(i, "dispose").unwrap_or_default();
+                disp = ab(i.get_member(&v, &dkey))?;
+            }
+            if !disp.is_callable() {
+                return Err(i.make_error("TypeError", "value is not async-disposable"));
+            }
+            let entry = i.make_array(vec![disp, v.clone()]);
+            ds_push(i, &this, entry)?;
+        }
+        Ok(v)
+    });
+    it.def_method(&proto, "adopt", 2, |i, this, a| {
+        if ds_disposed(i, &this)? {
+            return Err(i.make_error("ReferenceError", "AsyncDisposableStack already disposed"));
+        }
+        let v = arg(a, 0);
+        let on = arg(a, 1);
+        if !on.is_callable() {
+            return Err(i.make_error("TypeError", "onDisposeAsync is not callable"));
+        }
+        let entry = i.make_array(vec![on, Value::Undefined, v.clone()]);
+        ds_push(i, &this, entry)?;
+        Ok(v)
+    });
+    it.def_method(&proto, "defer", 1, |i, this, a| {
+        if ds_disposed(i, &this)? {
+            return Err(i.make_error("ReferenceError", "AsyncDisposableStack already disposed"));
+        }
+        let on = arg(a, 0);
+        if !on.is_callable() {
+            return Err(i.make_error("TypeError", "onDisposeAsync is not callable"));
+        }
+        let entry = i.make_array(vec![on, Value::Undefined]);
+        ds_push(i, &this, entry)?;
+        Ok(Value::Undefined)
+    });
+    it.def_method(&proto, "disposeAsync", 0, |i, this, _| {
+        let result = i.new_promise();
+        if ds_disposed(i, &this).unwrap_or(true) {
+            i.resolve_promise(&result, Value::Undefined);
+            return Ok(result);
+        }
+        set_internal(this.as_obj().unwrap(), "__ds_disposed", Value::Bool(true));
+        // Run disposers LIFO, awaiting any returned promise; reject on the first failure.
+        let outcome = (|| -> Result<(), Value> {
+            let list = ds_list(i, &this)?;
+            let len = ab(i.get_member(&list, "length"))?;
+            let n = ab(i.to_number(&len))? as i64;
+            for idx in (0..n).rev() {
+                let entry = ab(i.get_member(&list, &idx.to_string()))?;
+                let f = ab(i.get_member(&entry, "0"))?;
+                let t = ab(i.get_member(&entry, "1"))?;
+                let has_arg = ab(i.get_member(&entry, "length"))?;
+                let args = if ab(i.to_number(&has_arg))? >= 3.0 {
+                    vec![ab(i.get_member(&entry, "2"))?]
+                } else {
+                    Vec::new()
+                };
+                let r = ab(i.call(f, t, &args))?;
+                ab(i.await_value(r))?;
+            }
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => i.resolve_promise(&result, Value::Undefined),
+            Err(e) => i.reject_promise(&result, e),
+        }
+        Ok(result)
+    });
+    it.def_method(&proto, "move", 0, |i, this, _| {
+        if ds_disposed(i, &this)? {
+            return Err(i.make_error("ReferenceError", "AsyncDisposableStack already disposed"));
+        }
+        let fresh = Object::new(i.extra_protos.get("AsyncDisposableStack").cloned());
+        let list = ds_list(i, &this)?;
+        set_internal(&fresh, "__ds", list);
+        set_internal(&fresh, "__ds_disposed", Value::Bool(false));
+        let empty = i.make_array(Vec::new());
+        set_internal(this.as_obj().unwrap(), "__ds", empty);
+        set_internal(this.as_obj().unwrap(), "__ds_disposed", Value::Bool(true));
+        Ok(Value::Obj(fresh))
+    });
+    let disposed_getter = it.make_native("get disposed", 0, |i, this, _| Ok(Value::Bool(ds_disposed(i, &this)?)));
+    proto.borrow_mut().props.insert(
+        "disposed",
+        Property { value: Value::Undefined, get: Some(Value::Obj(disposed_getter)), set: None, accessor: true, writable: false, enumerable: false, configurable: true },
+    );
+    if let Some(key) = well_known_key(it, "asyncDispose") {
+        let d = proto.borrow().props.get("disposeAsync").map(|p| p.value.clone());
+        if let Some(d) = d {
+            proto.borrow_mut().props.insert(key, Property::builtin(d));
+        }
+    }
+
+    let ctor = it.make_native("AsyncDisposableStack", 0, |i, _t, _a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "Constructor AsyncDisposableStack requires 'new'"));
+        }
+        let obj = Object::new(i.extra_protos.get("AsyncDisposableStack").cloned());
+        let list = i.make_array(Vec::new());
+        set_internal(&obj, "__ds", list);
+        set_internal(&obj, "__ds_disposed", Value::Bool(false));
+        Ok(Value::Obj(obj))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "AsyncDisposableStack", Value::Obj(ctor));
 }
 
 /// WeakRef / FinalizationRegistry. lumen's collector never observably reclaims during a test, so
