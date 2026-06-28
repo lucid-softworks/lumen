@@ -1048,8 +1048,12 @@ fn install_typed_arrays(it: &mut Interp) {
 
     // The abstract %TypedArray% intrinsic: each concrete TypedArray constructor inherits from it,
     // and its `.prototype` is the shared `ta_proto`. Tests reach it via Object.getPrototypeOf(Int8Array).
-    let ta_ctor = it.make_native("TypedArray", 0, |i, _t, _a| {
-        Err(i.make_error("TypeError", "Abstract class TypedArray not directly constructable"))
+    let ta_ctor = it.make_native("TypedArray", 0, |i, t, _a| {
+        // Abstract: a direct `new %TypedArray%()` throws; subclass `super()` (this is set) is allowed.
+        if matches!(t, Value::Undefined) {
+            return Err(i.make_error("TypeError", "Abstract class TypedArray not directly constructable"));
+        }
+        Ok(t)
     });
     ta_ctor.borrow_mut().is_constructor = true;
     ta_ctor.borrow_mut().props.insert(
@@ -3854,8 +3858,13 @@ fn install_iterator(it: &mut Interp) {
         Ok(Value::Undefined)
     });
 
-    let ctor = it.make_native("Iterator", 0, |i, _t, _a| {
-        Err(i.make_error("TypeError", "Abstract class Iterator not directly constructable"))
+    let ctor = it.make_native("Iterator", 0, |i, t, _a| {
+        // Abstract: `new Iterator()` (this === undefined) throws, but `super()` from a subclass
+        // (this is the instance) is allowed.
+        if matches!(t, Value::Undefined) {
+            return Err(i.make_error("TypeError", "Abstract class Iterator not directly constructable"));
+        }
+        Ok(t)
     });
     ctor.borrow_mut().is_constructor = true;
     it.def_method(&ctor, "from", 1, |i, _t, a| {

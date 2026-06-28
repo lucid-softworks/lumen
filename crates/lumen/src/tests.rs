@@ -1084,3 +1084,13 @@ fn reflect_construct_newtarget() {
     assert_eq!(run("typeof Reflect.construct(function(){this.x=1},[])"), "object");
     assert_eq!(run("class C{}; Reflect.construct(C,[]) instanceof C"), "true");
 }
+#[test]
+fn abstract_subclass() {
+    assert_eq!(throws("new Iterator()"), "TypeError");
+    assert_eq!(run("class MyIter extends Iterator { next(){return {done:true}} }; typeof new MyIter()"), "object");
+    assert_eq!(run("class MyIter extends Iterator {}; new MyIter() instanceof Iterator"), "true");
+    var_check();
+}
+fn var_check() {
+    assert_eq!(run("var TA=Object.getPrototypeOf(Int8Array); class T extends Int8Array {}; new T(3).length"), "3");
+}
