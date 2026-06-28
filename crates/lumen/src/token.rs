@@ -8,6 +8,9 @@ pub struct Token {
     pub kind: Tok,
     pub line: u32,
     pub nl_before: bool,
+    /// A legacy-octal number (`010`) or a string with a legacy octal/`\8`/`\9` escape — a
+    /// SyntaxError in strict mode.
+    pub legacy_octal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

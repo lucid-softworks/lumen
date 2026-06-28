@@ -836,6 +836,10 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        // Legacy octal numbers and octal/`\8`/`\9` string escapes are SyntaxErrors in strict mode.
+        if self.strict && self.toks[self.pos].legacy_octal {
+            return self.err("legacy octal literals are not allowed in strict mode");
+        }
         match self.cur().clone() {
             Tok::Num(n) => {
                 self.advance();

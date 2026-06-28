@@ -16,6 +16,8 @@ struct Lexer<'a> {
     line: u32,
     out: Vec<Token>,
     nl_pending: bool,
+    /// Set while reading a string that contained a legacy octal / `\8` / `\9` escape.
+    pending_legacy: bool,
 }
 
 /// Tokenize `src`. A lex error is reported as a SyntaxError by the caller.
@@ -27,6 +29,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
         line: 1,
         out: Vec::new(),
         nl_pending: false,
+        pending_legacy: false,
     };
     lx.run()?;
     Ok(lx.out)
@@ -72,7 +75,13 @@ impl<'a> Lexer<'a> {
     fn push(&mut self, kind: Tok) {
         let nl = self.nl_pending;
         self.nl_pending = false;
-        self.out.push(Token { kind, line: self.line, nl_before: nl });
+        self.out.push(Token { kind, line: self.line, nl_before: nl, legacy_octal: false });
+    }
+    /// Flag the most recently pushed token as a legacy-octal construct.
+    fn mark_legacy_octal(&mut self) {
+        if let Some(t) = self.out.last_mut() {
+            t.legacy_octal = true;
+        }
     }
 
     fn run(&mut self) -> Result<(), LexError> {
@@ -212,6 +221,7 @@ impl<'a> Lexer<'a> {
     fn read_string(&mut self, quote: char) -> Result<(), LexError> {
         self.bump();
         let mut s = String::new();
+        self.pending_legacy = false;
         loop {
             match self.bump() {
                 None => return Err(self.err("unterminated string literal")),
@@ -224,6 +234,10 @@ impl<'a> Lexer<'a> {
             }
         }
         self.push(Tok::Str(s));
+        if self.pending_legacy {
+            self.mark_legacy_octal();
+            self.pending_legacy = false;
+        }
         Ok(())
     }
 
@@ -434,6 +448,25 @@ impl<'a> Lexer<'a> {
                 out.push('\0');
                 Ok(())
             }
+            // Legacy octal escape: 1-3 octal digits (first three only if value <= 0o377).
+            Some(c @ '0'..='7') => {
+                let mut val = c.to_digit(8).unwrap();
+                let max = if c <= '3' { 2 } else { 1 };
+                let mut taken = 0;
+                while taken < max && self.peek().is_some_and(|d| ('0'..='7').contains(&d)) {
+                    val = val * 8 + self.bump().unwrap().to_digit(8).unwrap();
+                    taken += 1;
+                }
+                out.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                self.pending_legacy = true;
+                Ok(())
+            }
+            // `\8` / `\9` (NonOctalDecimalEscape): the digit itself, but still legacy.
+            Some(c @ ('8' | '9')) => {
+                out.push(c);
+                self.pending_legacy = true;
+                Ok(())
+            }
             Some('x') => {
                 let hi = self.bump().ok_or_else(|| self.err("bad \\x escape"))?;
                 let lo = self.bump().ok_or_else(|| self.err("bad \\x escape"))?;
@@ -514,6 +547,25 @@ impl<'a> Lexer<'a> {
         // Decimal: integer . fraction e exponent
         while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
             self.bump();
+        }
+        // Legacy octal (`010`) / non-octal-decimal (`08`): a leading-zero integer with no fraction,
+        // exponent, or `n` suffix. Octal value in sloppy mode; the parser rejects it in strict.
+        if self.chars[start] == '0'
+            && self.pos - start > 1
+            && !matches!(self.peek(), Some('.' | 'e' | 'E' | 'n' | '_'))
+        {
+            let text: String = self.chars[start..self.pos].iter().collect();
+            if text.chars().all(|c| ('0'..='7').contains(&c)) {
+                let n = i64::from_str_radix(&text, 8).unwrap_or(0);
+                self.push(Tok::Num(n as f64));
+                self.mark_legacy_octal();
+                return Ok(());
+            } else if text.chars().all(|c| c.is_ascii_digit()) {
+                let n: f64 = text.parse().unwrap_or(0.0);
+                self.push(Tok::Num(n));
+                self.mark_legacy_octal();
+                return Ok(());
+            }
         }
         // A BigInt literal is an integer immediately followed by `n` (no fraction/exponent).
         if self.peek() == Some('n') {
