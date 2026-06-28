@@ -22,10 +22,11 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     Ok(body)
 }
 
-/// Parse a module (always strict; `import`/`export` are allowed only here).
+/// Parse a module (always strict; `import`/`export` are allowed only here). Modules permit top-level
+/// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: false, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
     p.parse_stmts_until_eof()
 }
 
@@ -600,12 +601,31 @@ impl Parser {
         }
     }
     fn parse_module_specifier(&mut self) -> Result<Rc<str>, ParseError> {
-        match self.cur().clone() {
+        let spec = match self.cur().clone() {
             Tok::Str(s) => {
                 self.advance();
-                Ok(Rc::from(s.as_str()))
+                Rc::from(s.as_str())
             }
-            _ => self.err("expected a module specifier string"),
+            _ => return self.err("expected a module specifier string"),
+        };
+        self.skip_import_attributes();
+        Ok(spec)
+    }
+    /// Consume (and ignore) an import-attributes clause: `with { … }` or `assert { … }`.
+    fn skip_import_attributes(&mut self) {
+        if self.is_kw("with") || self.is_ident_word("assert") {
+            self.advance();
+            if self.eat_punct("{") {
+                let mut depth = 1;
+                while depth > 0 && !self.at_eof() {
+                    if self.is_punct("{") {
+                        depth += 1;
+                    } else if self.is_punct("}") {
+                        depth -= 1;
+                    }
+                    self.advance();
+                }
+            }
         }
     }
 

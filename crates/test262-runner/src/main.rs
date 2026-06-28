@@ -495,7 +495,7 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     let fm = Frontmatter::parse(&src);
 
     if fm.has_flag("module") {
-        return Outcome::Skip("module".into());
+        return run_module(path, &src, harness, &fm);
     }
     if fm.has_flag("async") {
         return Outcome::Skip("async".into());
@@ -530,6 +530,75 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
         Outcome::Pass
     } else {
         Outcome::Skip("no-variant".into())
+    }
+}
+
+/// Normalize a path, collapsing `.`/`..` segments (without touching the filesystem).
+fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Run a `module`-flagged test: evaluate the harness as a script (for the global helpers), then
+/// load the test as an ES module with a filesystem loader resolving relative specifiers.
+fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Outcome {
+    let mut engine = Engine::new();
+    let mut preamble = harness.base.clone();
+    for inc in &fm.includes {
+        preamble.push_str(&harness.include(inc));
+        preamble.push('\n');
+    }
+    if let Ok(Completion::Throw { name, message }) = engine.eval(&preamble, false) {
+        return Outcome::Fail(format!("harness threw {name}: {message}"));
+    }
+    let key = path.to_string_lossy().into_owned();
+    let loader = |spec: &str, referrer: &str| -> Option<(String, String)> {
+        let base = Path::new(referrer).parent()?;
+        let resolved = normalize_path(&base.join(spec));
+        let text = std::fs::read_to_string(&resolved).ok()?;
+        Some((resolved.to_string_lossy().into_owned(), text))
+    };
+    let result = engine.eval_module(src, &key, loader);
+    judge_module(result, fm)
+}
+
+fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter) -> Outcome {
+    match (&fm.negative, result) {
+        (None, Ok(Completion::Value(_))) => Outcome::Pass,
+        (None, Ok(Completion::Throw { name, message })) => {
+            Outcome::Fail(format!("unexpected throw {name}: {message}"))
+        }
+        (None, Err(e)) => Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
+        // A parse/early/resolution error surfaces as a SyntaxError (thrown or at parse time).
+        (Some(neg), Err(_)) if matches!(neg.phase, Phase::Parse | Phase::Early | Phase::Resolution) => {
+            if neg.error_type == "SyntaxError" {
+                Outcome::Pass
+            } else {
+                Outcome::Fail(format!("parse error but expected {}", neg.error_type))
+            }
+        }
+        (Some(neg), Ok(Completion::Throw { name, .. })) => {
+            if name == neg.error_type {
+                Outcome::Pass
+            } else {
+                Outcome::Fail(format!("expected {}, threw {name}", neg.error_type))
+            }
+        }
+        (Some(neg), Ok(Completion::Value(_))) => {
+            Outcome::Fail(format!("expected {} but completed normally", neg.error_type))
+        }
+        (Some(neg), Err(e)) => {
+            Outcome::Fail(format!("expected runtime {} but parse failed: {}", neg.error_type, e.message))
+        }
     }
 }
 
