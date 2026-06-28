@@ -942,3 +942,24 @@ fn poison_pill() {
     assert_eq!(run("function f(){}; f.name"), "f");
     assert_eq!(run("function f(){return 1}; f()"), "1");
 }
+#[test]
+fn define_property_semantics() {
+    // validation throws
+    assert_eq!(throws("Object.defineProperty(5,'x',{})"), "TypeError");
+    assert_eq!(throws("Object.defineProperty({},'x',{value:1,get(){}})"), "TypeError");
+    assert_eq!(throws("Object.defineProperty({},'x',{get:5})"), "TypeError");
+    assert_eq!(throws("Object.defineProperty({},'x',5)"), "TypeError");
+    // partial redefine keeps other fields
+    assert_eq!(run("var o={}; Object.defineProperty(o,'x',{value:1,writable:true,enumerable:true,configurable:true}); Object.defineProperty(o,'x',{enumerable:false}); var d=Object.getOwnPropertyDescriptor(o,'x'); d.value+','+d.writable+','+d.enumerable"), "1,true,false");
+    // non-configurable can't be redefined incompatibly
+    assert_eq!(throws("var o={}; Object.defineProperty(o,'x',{value:1,configurable:false}); Object.defineProperty(o,'x',{value:2})"), "TypeError");
+    assert_eq!(throws("var o={}; Object.defineProperty(o,'x',{value:1,configurable:false}); Object.defineProperty(o,'x',{configurable:true})"), "TypeError");
+    // non-extensible
+    assert_eq!(throws("var o=Object.preventExtensions({}); Object.defineProperty(o,'x',{value:1})"), "TypeError");
+    // Reflect returns false (no throw) on invariant failure
+    assert_eq!(run("var o={}; Object.defineProperty(o,'x',{value:1,configurable:false}); Reflect.defineProperty(o,'x',{value:2})"), "false");
+    // normal cases work
+    assert_eq!(run("var o={}; Object.defineProperty(o,'x',{value:42}); o.x"), "42");
+    assert_eq!(run("var o={}; Object.defineProperty(o,'x',{get(){return 7}}); o.x"), "7");
+    assert_eq!(run("var o={}; Object.defineProperty(o,'x',{value:1,configurable:true}); Object.defineProperty(o,'x',{value:2}); o.x"), "2");
+}

@@ -1923,9 +1923,8 @@ fn install_reflect(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Reflect.defineProperty on non-object")),
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
-        let prop = ab(build_descriptor(i, &arg(a, 2)))?;
-        o.borrow_mut().props.insert(key, prop);
-        Ok(Value::Bool(true))
+        let ok = ab(define_own_property(i, &o, &key, &arg(a, 2)))?;
+        Ok(Value::Bool(ok))
     });
     it.def_method(&r, "apply", 3, |i, _t, a| {
         let args = match arg(a, 2) {
@@ -2714,8 +2713,9 @@ fn install_object(it: &mut Interp) {
         if let Value::Obj(descs) = arg(args, 1) {
             for k in descs.borrow().props.keys() {
                 let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
-                let prop = ab(build_descriptor(i, &d))?;
-                obj.borrow_mut().props.insert(k, prop);
+                if !ab(define_own_property(i, &obj, &k, &d))? {
+                    return Err(i.make_error("TypeError", "Cannot define property"));
+                }
             }
         }
         Ok(Value::Obj(obj))
@@ -2726,8 +2726,9 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Object.defineProperty called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
-        let prop = ab(build_descriptor(i, &arg(args, 2)))?;
-        o.borrow_mut().props.insert(key, prop);
+        if !ab(define_own_property(i, &o, &key, &arg(args, 2)))? {
+            return Err(i.make_error("TypeError", "Cannot redefine property"));
+        }
         Ok(Value::Obj(o))
     });
     it.def_method(&ctor, "getOwnPropertyDescriptor", 2, |i, _this, args| {
@@ -2856,8 +2857,9 @@ fn install_object(it: &mut Interp) {
         if let Value::Obj(descs) = arg(args, 1) {
             for k in descs.borrow().props.keys() {
                 let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
-                let prop = ab(build_descriptor(i, &d))?;
-                o.borrow_mut().props.insert(k, prop);
+                if !ab(define_own_property(i, &o, &k, &d))? {
+                    return Err(i.make_error("TypeError", "Cannot define property"));
+                }
             }
         }
         Ok(Value::Obj(o))
@@ -2913,51 +2915,175 @@ fn descriptor_from_prop(i: &mut Interp, p: Property) -> Value {
     Value::Obj(d)
 }
 
-fn build_descriptor(i: &mut Interp, desc: &Value) -> Result<Property, Abrupt> {
+/// A property descriptor with only the explicitly-present fields populated.
+#[derive(Default)]
+struct PartialDesc {
+    value: Option<Value>,
+    get: Option<Value>,
+    set: Option<Value>,
+    writable: Option<bool>,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
+}
+impl PartialDesc {
+    fn is_accessor(&self) -> bool {
+        self.get.is_some() || self.set.is_some()
+    }
+    fn is_data(&self) -> bool {
+        self.value.is_some() || self.writable.is_some()
+    }
+}
+
+/// Read + validate a descriptor object into a PartialDesc (ToPropertyDescriptor).
+fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
     let o = match desc {
         Value::Obj(o) => o.clone(),
-        _ => return Err(i.throw("TypeError", "property descriptor must be an object")),
+        _ => return Err(i.throw("TypeError", "Property description must be an object")),
     };
     let has = |k: &str| o.borrow().props.contains(k);
     let base = Value::Obj(o.clone());
-
-    // Resolve each present field into a local first (avoids overlapping borrows of `i`).
-    let bool_field = |i: &mut Interp, k: &str| -> Result<bool, Abrupt> {
+    let bool_field = |i: &mut Interp, k: &str| -> Result<Option<bool>, Abrupt> {
         if has(k) {
             let v = i.get_member(&base, k)?;
-            Ok(i.to_boolean(&v))
+            Ok(Some(i.to_boolean(&v)))
         } else {
-            Ok(false)
+            Ok(None)
         }
     };
     let enumerable = bool_field(i, "enumerable")?;
     let configurable = bool_field(i, "configurable")?;
-
-    if has("get") || has("set") {
-        let get = if has("get") { Some(i.get_member(&base, "get")?) } else { None };
-        let set = if has("set") { Some(i.get_member(&base, "set")?) } else { None };
-        Ok(Property {
-            value: Value::Undefined,
-            get,
-            set,
-            accessor: true,
-            writable: false,
-            enumerable,
-            configurable,
-        })
-    } else {
-        let writable = bool_field(i, "writable")?;
-        let value = if has("value") { i.get_member(&base, "value")? } else { Value::Undefined };
-        Ok(Property {
-            value,
-            get: None,
-            set: None,
-            accessor: false,
-            writable,
-            enumerable,
-            configurable,
-        })
+    let writable = bool_field(i, "writable")?;
+    let value = if has("value") { Some(i.get_member(&base, "value")?) } else { None };
+    let get = if has("get") { Some(i.get_member(&base, "get")?) } else { None };
+    let set = if has("set") { Some(i.get_member(&base, "set")?) } else { None };
+    if (get.is_some() || set.is_some()) && (value.is_some() || writable.is_some()) {
+        return Err(i.throw(
+            "TypeError",
+            "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
+        ));
     }
+    if let Some(g) = &get {
+        if !matches!(g, Value::Undefined) && !g.is_callable() {
+            return Err(i.throw("TypeError", "Getter must be a function"));
+        }
+    }
+    if let Some(s) = &set {
+        if !matches!(s, Value::Undefined) && !s.is_callable() {
+            return Err(i.throw("TypeError", "Setter must be a function"));
+        }
+    }
+    Ok(PartialDesc { value, get, set, writable, enumerable, configurable })
+}
+
+fn opt_norm(v: Option<Value>) -> Option<Value> {
+    v.filter(|x| !matches!(x, Value::Undefined))
+}
+
+/// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
+fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
+    let d = build_partial(i, desc)?;
+    let existing = o.borrow().props.get(key).cloned();
+
+    let mut cur = match existing {
+        None => {
+            if !o.borrow().extensible {
+                return Ok(false);
+            }
+            let prop = if d.is_accessor() {
+                Property {
+                    value: Value::Undefined,
+                    get: opt_norm(d.get),
+                    set: opt_norm(d.set),
+                    accessor: true,
+                    writable: false,
+                    enumerable: d.enumerable.unwrap_or(false),
+                    configurable: d.configurable.unwrap_or(false),
+                }
+            } else {
+                Property {
+                    value: d.value.unwrap_or(Value::Undefined),
+                    get: None,
+                    set: None,
+                    accessor: false,
+                    writable: d.writable.unwrap_or(false),
+                    enumerable: d.enumerable.unwrap_or(false),
+                    configurable: d.configurable.unwrap_or(false),
+                }
+            };
+            o.borrow_mut().props.insert(key, prop);
+            return Ok(true);
+        }
+        Some(p) => p,
+    };
+    // Redefining an existing property: a non-configurable property restricts what may change.
+    if !cur.configurable {
+        if d.configurable == Some(true) {
+            return Ok(false);
+        }
+        if let Some(e) = d.enumerable {
+            if e != cur.enumerable {
+                return Ok(false);
+            }
+        }
+        if d.is_accessor() != cur.accessor && (d.is_accessor() || d.is_data()) {
+            return Ok(false);
+        }
+        if cur.accessor {
+            if let Some(g) = &d.get {
+                if !same_value(g, cur.get.as_ref().unwrap_or(&Value::Undefined)) {
+                    return Ok(false);
+                }
+            }
+            if let Some(s) = &d.set {
+                if !same_value(s, cur.set.as_ref().unwrap_or(&Value::Undefined)) {
+                    return Ok(false);
+                }
+            }
+        } else if !cur.writable {
+            if d.writable == Some(true) {
+                return Ok(false);
+            }
+            if let Some(v) = &d.value {
+                if !same_value(v, &cur.value) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    // Apply the present fields.
+    if d.is_accessor() {
+        cur.accessor = true;
+        cur.value = Value::Undefined;
+        cur.writable = false;
+        if let Some(g) = d.get {
+            cur.get = opt_norm(Some(g));
+        }
+        if let Some(s) = d.set {
+            cur.set = opt_norm(Some(s));
+        }
+    } else if d.is_data() || !cur.accessor {
+        if cur.accessor {
+            cur.get = None;
+            cur.set = None;
+            cur.accessor = false;
+            cur.value = Value::Undefined;
+            cur.writable = false;
+        }
+        if let Some(v) = d.value {
+            cur.value = v;
+        }
+        if let Some(w) = d.writable {
+            cur.writable = w;
+        }
+    }
+    if let Some(e) = d.enumerable {
+        cur.enumerable = e;
+    }
+    if let Some(c) = d.configurable {
+        cur.configurable = c;
+    }
+    o.borrow_mut().props.insert(key, cur);
+    Ok(true)
 }
 
 fn same_value(a: &Value, b: &Value) -> bool {
