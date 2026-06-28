@@ -207,6 +207,7 @@ fn install_atomics(it: &mut Interp) {
         target(i, a)?;
         Ok(Value::Num(0.0)) // no agents are waiting
     });
+    set_to_string_tag(it, &atomics, "Atomics");
     set_builtin(&it.global, "Atomics", Value::Obj(atomics));
 }
 
@@ -1405,6 +1406,15 @@ pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
     None
 }
 
+/// Install a non-enumerable, configurable `@@toStringTag` data property.
+fn set_to_string_tag(i: &Interp, obj: &Gc, tag: &str) {
+    if let Some(key) = to_string_tag_key(i) {
+        obj.borrow_mut()
+            .props
+            .insert(key, Property::data(Value::from_string(tag.to_string()), false, false, true));
+    }
+}
+
 /// The Object.prototype.toString builtin tag for `this` (the `[object <tag>]` body without an
 /// overriding `@@toStringTag`).
 fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
@@ -1830,6 +1840,7 @@ fn install_reflect(it: &mut Interp) {
         }
         Ok(Value::Bool(true))
     });
+    set_to_string_tag(it, &r, "Reflect");
     set_builtin(&it.global, "Reflect", Value::Obj(r));
 }
 
@@ -2042,6 +2053,7 @@ fn install_json(it: &mut Interp) {
         }
         Ok(v)
     });
+    set_to_string_tag(it, &j, "JSON");
     set_builtin(&it.global, "JSON", Value::Obj(j));
 }
 
@@ -4435,6 +4447,7 @@ fn install_math(it: &mut Interp) {
         }
         Ok(Value::Num(m))
     });
+    set_to_string_tag(it, &math, "Math");
     set_builtin(&it.global, "Math", Value::Obj(math));
 }
 

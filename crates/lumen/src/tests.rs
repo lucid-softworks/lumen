@@ -721,8 +721,11 @@ fn ctor_requires_new() {
     assert_eq!(run("typeof new Promise(()=>{})"), "object");
 }
 #[test]
-fn probe13_tmp() {
-    for src in ["Object.prototype.toString.call(Math)","Object.prototype.toString.call(JSON)","typeof AggregateError","typeof Promise.any","typeof Promise.allSettled","typeof globalThis[Symbol.toStringTag]","Object.prototype.toString.call(new Int8Array(1))","Object.prototype.toString.call(Reflect)","Object.prototype.toString.call(Atomics)","typeof Array.prototype[Symbol.iterator]","Math[Symbol.toStringTag]","typeof Symbol.for","Symbol.keyFor(Symbol.for('x'))","new Int8Array(1)[Symbol.toStringTag]"] {
-        eprintln!("PD {src:?} => {}", match crate::Engine::new().eval(src,false){Ok(crate::Completion::Value(v))=>v,Ok(crate::Completion::Throw{name,..})=>format!("T:{name}"),Err(e)=>format!("PARSE {}",e.message)});
-    }
+fn subclass_state() {
+    assert_eq!(run("class M extends Map{}; new M([[1,2]]).get(1)"), "2");
+    assert_eq!(run("class S extends Set{}; var s=new S([3,4]); s.has(3)+''+s.size"), "true2");
+    assert_eq!(run("class I extends Int8Array{}; var a=new I([5,6,7]); a[1]"), "6");
+    assert_eq!(run("class A extends Array{}; new A(1,2,3).length"), "3");
+    assert_eq!(throws("Map()"), "TypeError");
+    assert_eq!(throws("Int8Array(3)"), "TypeError");
 }

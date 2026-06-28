@@ -1318,13 +1318,42 @@ impl Interp {
                 Ok(())
             }
             Callable::Native(f) => {
-                // Native parent (e.g. Error): run it, then graft its own properties onto `this`.
-                let made = f(self, this.clone(), args).map_err(Abrupt::Throw)?;
+                // Native parent (e.g. Error/Map): a super() call is a construct, so set the flag for
+                // constructors that require `new`. Run it, then graft its own props onto `this`.
+                let saved = self.constructing;
+                self.constructing = true;
+                let made = f(self, this.clone(), args).map_err(Abrupt::Throw);
+                self.constructing = saved;
+                let made = made?;
                 if let (Value::Obj(src), Value::Obj(dst)) = (&made, this) {
                     if !Rc::ptr_eq(src, dst) {
                         for k in src.borrow().props.keys() {
                             let p = src.borrow().props.get(&k).cloned().unwrap();
                             dst.borrow_mut().props.insert(k, p);
+                        }
+                        // Move the native object's internal slots (Map/Set/TypedArray/buffer/etc.)
+                        // onto `this`, so a subclass instance carries the built-in's state.
+                        let (sp, dp) = (Rc::as_ptr(src) as usize, Rc::as_ptr(dst) as usize);
+                        if let Some(v) = self.map_data.remove(&sp) {
+                            self.map_data.insert(dp, v);
+                        }
+                        if let Some(v) = self.typed_arrays.remove(&sp) {
+                            self.typed_arrays.insert(dp, v);
+                        }
+                        if let Some(v) = self.data_views.remove(&sp) {
+                            self.data_views.insert(dp, v);
+                        }
+                        if let Some(v) = self.array_buffers.remove(&sp) {
+                            self.array_buffers.insert(dp, v);
+                        }
+                        if let Some(v) = self.regexps.remove(&sp) {
+                            self.regexps.insert(dp, v);
+                        }
+                        if let Some(v) = self.promises.remove(&sp) {
+                            self.promises.insert(dp, v);
+                        }
+                        if let Some(v) = self.temporal.remove(&sp) {
+                            self.temporal.insert(dp, v);
                         }
                     }
                 }
