@@ -45,6 +45,9 @@ pub enum Temporal {
     MonthDay(IsoDate),
     Duration(IsoDuration),
     Instant(i128), // epoch nanoseconds
+    /// epoch nanoseconds + a fixed UTC offset (named zones are treated as their fixed offset; no
+    /// DST database) + the time-zone id string.
+    Zoned { epoch_ns: i128, offset_ns: i64, tz: Rc<str> },
 }
 
 // ----- ISO calendar math ----------------------------------------------------------------------
@@ -376,6 +379,7 @@ pub fn install(it: &mut Interp) {
     install_month_day(it, &ns);
     install_duration(it, &ns);
     install_instant(it, &ns);
+    install_zoned(it, &ns);
     install_now(it, &ns);
     it.global.borrow_mut().props.insert("Temporal", Property::builtin(Value::Obj(ns)));
 }
@@ -1301,13 +1305,178 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
 }
 fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
-    if let Some(Temporal::Instant(n)) = get(i, v) {
-        return Ok(n);
+    match get(i, v) {
+        Some(Temporal::Instant(n)) => return Ok(n),
+        Some(Temporal::Zoned { epoch_ns, .. }) => return Ok(epoch_ns),
+        _ => {}
     }
     match v {
         Value::BigInt(n) => Ok(*n),
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.Instant")),
     }
+}
+
+// ===== ZonedDateTime ==========================================================================
+
+/// Parse a time-zone id to a fixed offset in nanoseconds. "UTC"/"Z" and `±HH:MM[:SS]` are exact;
+/// any other (named) zone is treated as UTC (no DST database).
+fn tz_offset_ns(tz: &str) -> i64 {
+    let t = tz.trim();
+    if t.eq_ignore_ascii_case("utc") || t == "Z" {
+        return 0;
+    }
+    let (sign, rest) = match t.strip_prefix('-') {
+        Some(r) => (-1i64, r),
+        None => (1, t.strip_prefix('+').unwrap_or(t)),
+    };
+    if t.starts_with('+') || t.starts_with('-') {
+        let mut p = rest.split(':');
+        let h: i64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let m: i64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let s: i64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        return sign * ((h * 3600 + m * 60 + s) * 1_000_000_000);
+    }
+    0
+}
+fn offset_string(offset_ns: i64) -> String {
+    let neg = offset_ns < 0;
+    let secs = offset_ns.abs() / 1_000_000_000;
+    let h = secs / 3600;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    let sign = if neg { "-" } else { "+" };
+    if s == 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}:{m:02}:{s:02}")
+    }
+}
+fn zoned_local(epoch_ns: i128, offset_ns: i64) -> (IsoDate, IsoTime) {
+    let local = epoch_ns + offset_ns as i128;
+    let z = local.div_euclid(86_400_000_000_000) as i64;
+    let rem = local.rem_euclid(86_400_000_000_000) as i64;
+    let (y, mo, da) = civil_from_days(z);
+    let secs = rem / 1_000_000_000;
+    let t = IsoTime {
+        hour: (secs / 3600) as u8,
+        minute: ((secs / 60) % 60) as u8,
+        second: (secs % 60) as u8,
+        ms: ((rem / 1_000_000) % 1000) as u16,
+        us: ((rem / 1000) % 1000) as u16,
+        ns: (rem % 1000) as u16,
+    };
+    (IsoDate { year: y, month: mo, day: da }, t)
+}
+fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
+    match get(i, this) {
+        Some(Temporal::Zoned { epoch_ns, offset_ns, tz }) => Ok((epoch_ns, offset_ns, tz)),
+        _ => Err(i.make_error("TypeError", "receiver is not a Temporal.ZonedDateTime")),
+    }
+}
+
+fn install_zoned(it: &mut Interp, ns: &Gc) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("Temporal.ZonedDateTime", proto.clone());
+
+    macro_rules! date_get {
+        ($name:literal, $f:expr) => {
+            def_getter(it, &proto, $name, |i, t, _| {
+                let (e, o, _) = as_zoned(i, &t)?;
+                let (d, _tm) = zoned_local(e, o);
+                Ok($f(d))
+            });
+        };
+    }
+    macro_rules! time_get {
+        ($name:literal, $f:expr) => {
+            def_getter(it, &proto, $name, |i, t, _| {
+                let (e, o, _) = as_zoned(i, &t)?;
+                let (_d, tm) = zoned_local(e, o);
+                Ok($f(tm))
+            });
+        };
+    }
+    date_get!("year", |d: IsoDate| Value::Num(d.year as f64));
+    date_get!("month", |d: IsoDate| Value::Num(d.month as f64));
+    date_get!("day", |d: IsoDate| Value::Num(d.day as f64));
+    date_get!("monthCode", |d: IsoDate| Value::str(month_code(d.month)));
+    date_get!("dayOfWeek", |d: IsoDate| Value::Num(iso_day_of_week(d) as f64));
+    date_get!("dayOfYear", |d: IsoDate| Value::Num(iso_day_of_year(d) as f64));
+    date_get!("daysInMonth", |d: IsoDate| Value::Num(days_in_month(d.year, d.month) as f64));
+    date_get!("daysInYear", |d: IsoDate| Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }));
+    date_get!("inLeapYear", |d: IsoDate| Value::Bool(is_leap(d.year)));
+    time_get!("hour", |t: IsoTime| Value::Num(t.hour as f64));
+    time_get!("minute", |t: IsoTime| Value::Num(t.minute as f64));
+    time_get!("second", |t: IsoTime| Value::Num(t.second as f64));
+    time_get!("millisecond", |t: IsoTime| Value::Num(t.ms as f64));
+    time_get!("microsecond", |t: IsoTime| Value::Num(t.us as f64));
+    time_get!("nanosecond", |t: IsoTime| Value::Num(t.ns as f64));
+    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
+    def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
+        Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000) as f64))
+    });
+    def_getter(it, &proto, "epochNanoseconds", |i, t, _| Ok(Value::BigInt(as_zoned(i, &t)?.0)));
+    def_getter(it, &proto, "offsetNanoseconds", |i, t, _| Ok(Value::Num(as_zoned(i, &t)?.1 as f64)));
+    def_getter(it, &proto, "offset", |i, t, _| Ok(Value::str(offset_string(as_zoned(i, &t)?.1))));
+    def_getter(it, &proto, "timeZoneId", |i, t, _| {
+        Ok(Value::Str(as_zoned(i, &t)?.2))
+    });
+
+    it.def_method(&proto, "toInstant", 0, |i, t, _| {
+        let (e, _, _) = as_zoned(i, &t)?;
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(e)))
+    });
+    it.def_method(&proto, "toPlainDate", 0, |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(make(i, "Temporal.PlainDate", Temporal::Date(zoned_local(e, o).0)))
+    });
+    it.def_method(&proto, "toPlainTime", 0, |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(make(i, "Temporal.PlainTime", Temporal::Time(zoned_local(e, o).1)))
+    });
+    it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        let (d, tm) = zoned_local(e, o);
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+    });
+    it.def_method(&proto, "equals", 1, |i, t, a| {
+        let (e, _, tz) = as_zoned(i, &t)?;
+        match get(i, &arg(a, 0)) {
+            Some(Temporal::Zoned { epoch_ns, tz: otz, .. }) => {
+                Ok(Value::Bool(e == epoch_ns && tz == otz))
+            }
+            _ => Ok(Value::Bool(false)),
+        }
+    });
+    it.def_method(&proto, "valueOf", 0, |i, _t, _| {
+        Err(i.make_error("TypeError", "Temporal.ZonedDateTime has no valueOf; use compare"))
+    });
+    it.def_method(&proto, "toString", 0, |i, t, _| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, tm) = zoned_local(e, o);
+        Ok(Value::str(format!("{}T{}{}[{}]", fmt_date(d), fmt_time(tm), offset_string(o), tz)))
+    });
+
+    let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
+        require_new(i)?;
+        let epoch_ns = match arg(a, 0) {
+            Value::BigInt(n) => n,
+            _ => return Err(i.make_error("TypeError", "epochNanoseconds must be a BigInt")),
+        };
+        let tzv = arg(a, 1);
+        let tz: Rc<str> = match &tzv {
+            Value::Str(s) => s.clone(),
+            Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
+            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+        };
+        let offset_ns = tz_offset_ns(&tz);
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns, offset_ns, tz }))
+    });
+    it.def_method(&ctor, "compare", 2, |i, _t, a| {
+        let x = to_instant(i, &arg(a, 0))?;
+        let y = to_instant(i, &arg(a, 1))?;
+        Ok(Value::Num(x.cmp(&y) as i64 as f64))
+    });
 }
 
 // ===== Now ====================================================================================

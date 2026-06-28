@@ -548,3 +548,14 @@ fn temporal_until_since() {
     assert_eq!(run("Temporal.PlainTime.from('10:00').until('12:30').minutes"), "30");
     assert_eq!(run("Temporal.Instant.fromEpochMilliseconds(0).until(Temporal.Instant.fromEpochMilliseconds(5000)).seconds"), "5");
 }
+
+#[test]
+fn temporal_zoned() {
+    assert_eq!(run("typeof Temporal.ZonedDateTime"), "function");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n, 'UTC').year"), "1970");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n, 'UTC').epochNanoseconds"), "0");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n, 'UTC').toPlainDate().toString()"), "1970-01-01");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n, '+05:00').hour"), "5");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n, 'UTC').offset"), "+00:00");
+    assert_eq!(run("new Temporal.ZonedDateTime(3600000000000n,'UTC').toInstant().epochMilliseconds"), "3600000");
+}
