@@ -2457,6 +2457,26 @@ fn install_function_proto(it: &mut Interp) {
         Ok(Value::str("function () { [native code] }"))
     });
 
+    // The %ThrowTypeError% poison pill: `caller`/`arguments` accessors on Function.prototype that
+    // throw on get or set (CallerArguments restriction).
+    let throw_type_error = it.make_native("", 0, |i, _t, _a| {
+        Err(i.make_error("TypeError", "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions"))
+    });
+    for name in ["caller", "arguments"] {
+        fp.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(throw_type_error.clone())),
+                set: Some(Value::Obj(throw_type_error.clone())),
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+
     // The `Function` constructor: `Function(p1, p2, ..., body)` compiles a new function in the
     // global scope. We synthesize source and reuse the in-crate parser (no eval engine needed).
     let ctor = it.make_native("Function", 1, |i, _this, args| {

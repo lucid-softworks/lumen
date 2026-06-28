@@ -931,3 +931,14 @@ fn regex_validation() {
     assert_eq!(run("/[*+?]/.test('*')"), "true"); // quantifiers literal in class
     assert_eq!(run("/\\*/.test('*')"), "true"); // escaped
 }
+#[test]
+fn poison_pill() {
+    assert_eq!(throws("function f(){}; f.caller"), "TypeError");
+    assert_eq!(throws("function f(){}; f.arguments"), "TypeError");
+    assert_eq!(throws("(function(){}).caller"), "TypeError");
+    assert_eq!(throws("'use strict'; function f(){ return f.caller; }; f()"), "TypeError");
+    // normal function members still work
+    assert_eq!(run("function f(a,b){}; f.length"), "2");
+    assert_eq!(run("function f(){}; f.name"), "f");
+    assert_eq!(run("function f(){return 1}; f()"), "1");
+}
