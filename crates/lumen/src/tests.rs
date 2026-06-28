@@ -1385,3 +1385,19 @@ fn map_getorinsert() {
     assert_eq!(run("var m=new Map(); m.getOrInsert('a',1); m.getOrInsert('a',2); m.get('a')"), "1");
     assert_eq!(run("var m=new Map(); m.getOrInsert('x',7); m.size"), "1");
 }
+#[test]
+fn promise_try_regexp_escape() {
+    assert_eq!(run("typeof Promise.try"), "function");
+    let mut e = Engine::new();
+    e.eval("var r; Promise.try((a,b)=>a+b,2,3).then(v=>r=v)", false).unwrap();
+    assert_eq!(match e.eval("r",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "5");
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Promise.try(()=>{throw new Error('x')}).catch(e=>r2=e.message)", false).unwrap();
+    assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "x");
+    assert_eq!(run("typeof RegExp.escape"), "function");
+    assert_eq!(run("RegExp.escape('a.b')"), "\\x61\\.b");
+    assert_eq!(run("RegExp.escape('.*+')"), "\\.\\*\\+");
+    assert_eq!(run("new RegExp(RegExp.escape('a.b')).test('a.b')"), "true");
+    assert_eq!(run("new RegExp(RegExp.escape('a.b')).test('axb')"), "false");
+    assert_eq!(throws("RegExp.escape(5)"), "TypeError");
+}

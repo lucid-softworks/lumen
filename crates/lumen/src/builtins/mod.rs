@@ -641,7 +641,47 @@ fn install_regexp(it: &mut Interp) {
             proto.borrow_mut().props.insert(key, Property::builtin(Value::Obj(m)));
         }
     }
+    it.def_method(&ctor, "escape", 1, |i, _t, a| {
+        let s = match arg(a, 0) {
+            Value::Str(s) => s,
+            _ => return Err(i.make_error("TypeError", "RegExp.escape requires a string")),
+        };
+        let mut out = String::new();
+        for (idx, c) in s.chars().enumerate() {
+            out.push_str(&regexp_escape_char(c, idx == 0));
+        }
+        Ok(Value::from_string(out))
+    });
     set_builtin(&it.global, "RegExp", Value::Obj(ctor));
+}
+
+/// EncodeForRegExpEscape: escape one code point for `RegExp.escape`.
+fn regexp_escape_char(c: char, first: bool) -> String {
+    let cp = c as u32;
+    // The first character, if alphanumeric, is hex-escaped so the result can't start an identifier.
+    if first && c.is_ascii_alphanumeric() {
+        return format!("\\x{cp:02x}");
+    }
+    if "^$\\.*+?()[]{}|/".contains(c) {
+        return format!("\\{c}");
+    }
+    match c {
+        '\t' => "\\t".into(),
+        '\n' => "\\n".into(),
+        '\u{0b}' => "\\v".into(),
+        '\u{0c}' => "\\f".into(),
+        '\r' => "\\r".into(),
+        _ if ",-=<>#&!%:;@~'`\"".contains(c) || c.is_whitespace() || c.is_control() => {
+            if cp <= 0xff {
+                format!("\\x{cp:02x}")
+            } else if cp <= 0xffff {
+                format!("\\u{cp:04x}")
+            } else {
+                format!("\\u{{{cp:x}}}")
+            }
+        }
+        _ => c.to_string(),
+    }
 }
 
 fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
@@ -2807,6 +2847,17 @@ fn install_promise(it: &mut Interp) {
             let on_f = i.make_resolver(&result, true);
             let on_r = make_bound(i, promise_any_reject, vec![result.clone(), Value::Num(idx as f64)]);
             i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "try", 1, |i, _t, a| {
+        // Promise.try(fn, ...args): call fn synchronously, settling a promise with its result/throw.
+        let result = i.new_promise();
+        let func = arg(a, 0);
+        let rest: Vec<Value> = a.iter().skip(1).cloned().collect();
+        match ab(i.call(func, Value::Undefined, &rest)) {
+            Ok(v) => i.resolve_promise(&result, v),
+            Err(e) => i.reject_promise(&result, e),
         }
         Ok(result)
     });
