@@ -972,3 +972,24 @@ fn coll_brand_checks() {
     assert_eq!(run("[...new Map([[1,2]]).entries()][0].join(',')"), "1,2");
     assert_eq!(run("[...new Set([3,4]).values()].join(',')"), "3,4");
 }
+#[test]
+fn string_lastindexof() {
+    assert_eq!(run("'abcabc'.lastIndexOf('b')"), "4");
+    assert_eq!(run("'abcabc'.lastIndexOf('b',3)"), "1");
+    assert_eq!(run("'abcabc'.lastIndexOf('x')"), "-1");
+    assert_eq!(run("'canal'.lastIndexOf('a')"), "3");
+    assert_eq!(run("'hello'.lastIndexOf('')"), "5");
+    assert_eq!(run("'ABC'.toLocaleLowerCase()"), "abc");
+    assert_eq!(run("'abc'.toLocaleUpperCase()"), "ABC");
+    assert_eq!(run("'abab'.lastIndexOf('ab')"), "2");
+}
+#[test]
+fn arraylike_huge_length() {
+    assert_eq!(run("Array.prototype.indexOf.call({0:0,length:Infinity},0)"), "0");
+    assert_eq!(run("Array.prototype.includes.call({0:5,length:Infinity},5)"), "true");
+    assert_eq!(run("Array.prototype.some.call({0:1,length:Infinity},x=>x===1)"), "true");
+    assert_eq!(run("Array.prototype.every.call({0:1,length:Infinity},x=>x!==1)"), "false");
+    assert_eq!(run("Array.prototype.find.call({0:7,length:Infinity},x=>x===7)"), "7");
+    assert_eq!(run("[1,2,3].indexOf(2)"), "1");
+    assert_eq!(run("[1,2,3].includes(3)"), "true");
+}
