@@ -1180,3 +1180,13 @@ fn arraylike_string_length() {
     assert_eq!(run("[1,2,3].forEach(()=>{}); 'ok'"), "ok");
     assert_eq!(run("Array.prototype.some.call({0:5,length:'1'},x=>x===5)"), "true");
 }
+#[test]
+fn sparse_array_holes() {
+    assert_eq!(run("var c=0; [1,,3].forEach(()=>c++); c"), "2");
+    assert_eq!(run("var a=[1,,3].map(x=>x*2); a.length+','+(1 in a)+','+a[0]+','+a[2]"), "3,false,2,6");
+    assert_eq!(run("[1,,3].filter(()=>true).length"), "2");
+    assert_eq!(run("[1,,3].every(x=>x>0)"), "true");
+    assert_eq!(run("[1,,3].some(x=>x===undefined)"), "false");
+    assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
+    assert_eq!(throws("[1,2,3].forEach(5)"), "TypeError");
+}

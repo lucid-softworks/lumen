@@ -1916,10 +1916,20 @@ fn map_ptr(this: &Value) -> Option<usize> {
 
 /// ArraySpeciesCreate(originalArray, length): build the result array for a method like map/filter,
 /// honoring `this.constructor[@@species]`; for an ordinary array (or no species) it's a plain array.
+fn make_sparse_array(i: &mut Interp, len: usize) -> Value {
+    let arr = i.make_array(Vec::new());
+    if let Value::Obj(o) = &arr {
+        o.borrow_mut()
+            .props
+            .insert("length", crate::value::Property::data(Value::Num(len as f64), true, false, false));
+    }
+    arr
+}
+
 fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<Value, Value> {
     let is_array = matches!(original, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array));
     if !is_array {
-        return Ok(i.make_array(vec![Value::Undefined; len]));
+        return Ok(make_sparse_array(i, len));
     }
     let ctor = ab(i.get_member(original, "constructor"))?;
     let mut species = Value::Undefined;
@@ -1929,12 +1939,12 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
         }
     }
     if matches!(species, Value::Undefined | Value::Null) {
-        return Ok(i.make_array(vec![Value::Undefined; len]));
+        return Ok(make_sparse_array(i, len));
     }
     let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value.clone());
     if let (Value::Obj(s), Some(Value::Obj(ac))) = (&species, &array_ctor) {
         if Rc::ptr_eq(s, ac) {
-            return Ok(i.make_array(vec![Value::Undefined; len]));
+            return Ok(make_sparse_array(i, len));
         }
     }
     if !species.is_callable() {
@@ -3790,8 +3800,14 @@ fn install_array(it: &mut Interp) {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "forEach on non-object"))?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "Array.prototype.forEach callback is not callable"));
+        }
         let cb_this = arg(args, 1);
         for k in 0..len {
+            if !i.has_property(&o, &k.to_string()) {
+                continue; // skip array holes
+            }
             let v = ab(i.get_member(&this, &k.to_string()))?;
             ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
         }
@@ -3807,6 +3823,9 @@ fn install_array(it: &mut Interp) {
         let cb_this = arg(args, 1);
         let result = array_species_create(i, &this, len)?;
         for k in 0..len {
+            if !i.has_property(&o, &k.to_string()) {
+                continue; // holes stay holes in the result
+            }
             let v = ab(i.get_member(&this, &k.to_string()))?;
             let mapped = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
             ab(i.set_member(&result, &k.to_string(), mapped))?;
@@ -3824,6 +3843,9 @@ fn install_array(it: &mut Interp) {
         let result = array_species_create(i, &this, 0)?;
         let mut to = 0usize;
         for k in 0..len {
+            if !i.has_property(&o, &k.to_string()) {
+                continue;
+            }
             let v = ab(i.get_member(&this, &k.to_string()))?;
             let keep = ab(i.call(cb.clone(), cb_this.clone(), &[v.clone(), Value::Num(k as f64), this.clone()]))?;
             if i.to_boolean(&keep) {
@@ -4165,8 +4187,14 @@ fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) ->
     let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "some/every on non-object"))?;
     let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
+    if !cb.is_callable() {
+        return Err(i.make_error("TypeError", "predicate is not callable"));
+    }
     let cb_this = arg(args, 1);
     for k in 0..len {
+        if !i.has_property(&o, &k.to_string()) {
+            continue; // skip holes
+        }
         let v = ab(i.get_member(&this, &k.to_string()))?;
         let r = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
         let b = i.to_boolean(&r);

@@ -755,6 +755,12 @@ impl Interp {
     }
 
     pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
+        // TypedArray elements live in the backing buffer, not the property map.
+        if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
+            if let Ok(idx) = key.parse::<usize>() {
+                return idx < info.len;
+            }
+        }
         let mut cur = Some(obj.clone());
         while let Some(o) = cur {
             if o.borrow().props.contains(key) {
@@ -896,18 +902,28 @@ impl Interp {
     }
 
     fn eval_array(&mut self, elems: &[ArrayElem], env: &Env) -> Result<Value, Abrupt> {
-        let mut items = Vec::new();
+        // Holes leave the index absent (a real elision), not `undefined`.
+        let arr = self.make_array(Vec::new());
+        let mut idx: usize = 0;
         for e in elems {
             match e {
-                ArrayElem::Item(e) => items.push(self.eval(e, env)?),
-                ArrayElem::Hole => items.push(Value::Undefined),
+                ArrayElem::Item(e) => {
+                    let v = self.eval(e, env)?;
+                    self.set_member(&arr, &idx.to_string(), v)?;
+                    idx += 1;
+                }
+                ArrayElem::Hole => idx += 1,
                 ArrayElem::Spread(e) => {
                     let v = self.eval(e, env)?;
-                    items.extend(self.iterate(&v)?);
+                    for item in self.iterate(&v)? {
+                        self.set_member(&arr, &idx.to_string(), item)?;
+                        idx += 1;
+                    }
                 }
             }
         }
-        Ok(self.make_array(items))
+        self.set_member(&arr, "length", Value::Num(idx as f64))?;
+        Ok(arr)
     }
 
     /// NamedEvaluation: give an anonymous function/class the binding/property name it's assigned to,
