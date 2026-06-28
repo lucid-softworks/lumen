@@ -766,7 +766,11 @@ impl Interp {
             }
             cur = parent;
         }
-        // Undeclared: strict → ReferenceError; sloppy → create a global property.
+        // A declared global `var`/`function` lives as a property of the global object.
+        if self.has_property(&self.global.clone(), name) {
+            return self.set_member(&Value::Obj(self.global.clone()), name, value);
+        }
+        // Truly undeclared: strict → ReferenceError; sloppy → create a global property.
         if self.strict {
             return Err(self.throw("ReferenceError", format!("{name} is not defined")));
         }

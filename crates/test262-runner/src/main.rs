@@ -497,32 +497,36 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     if fm.has_flag("module") {
         return run_module(path, &src, harness, &fm);
     }
-    if fm.has_flag("async") {
-        return Outcome::Skip("async".into());
-    }
+    let is_async = fm.has_flag("async");
 
     if fm.has_flag("raw") {
-        return check(&src, false, &fm);
+        return if is_async { check_async(&src, false, &fm) } else { check(&src, false, &fm) };
     }
 
     let mut preamble = harness.base.clone();
+    // Async tests report completion via `$DONE`, defined in the implicitly-included doneprintHandle.
+    if is_async && !fm.includes.iter().any(|i| i == "doneprintHandle.js") {
+        preamble.push_str(&harness.include("doneprintHandle.js"));
+        preamble.push('\n');
+    }
     for inc in &fm.includes {
         preamble.push_str(&harness.include(inc));
         preamble.push('\n');
     }
     let program = format!("{preamble}\n{src}");
+    let judge = |p: &str, strict: bool| if is_async { check_async(p, strict, &fm) } else { check(p, strict, &fm) };
 
     let mut ran = false;
     if !fm.has_flag("onlyStrict") {
         ran = true;
-        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = check(&program, false, &fm) {
+        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = judge(&program, false) {
             return r;
         }
     }
     if !fm.has_flag("noStrict") {
         ran = true;
         let strict = format!("\"use strict\";\n{program}");
-        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = check(&strict, true, &fm) {
+        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = judge(&strict, true) {
             return r;
         }
     }
@@ -530,6 +534,26 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
         Outcome::Pass
     } else {
         Outcome::Skip("no-variant".into())
+    }
+}
+
+/// Run an `async`-flagged test, judging by the `$DONE` completion message printed to the console.
+fn check_async(program: &str, strict: bool, _fm: &Frontmatter) -> Outcome {
+    let mut engine = Engine::new();
+    match engine.eval(program, strict) {
+        Err(e) => return Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
+        Ok(Completion::Throw { name, message }) => {
+            return Outcome::Fail(format!("unexpected throw {name}: {message}"));
+        }
+        Ok(Completion::Value(_)) => {}
+    }
+    let console = engine.take_console();
+    if console.iter().any(|l| l == "Test262:AsyncTestComplete") {
+        Outcome::Pass
+    } else if let Some(fail) = console.iter().find(|l| l.starts_with("Test262:AsyncTestFailure:")) {
+        Outcome::Fail(format!("async: {}", &fail["Test262:AsyncTestFailure:".len()..]))
+    } else {
+        Outcome::Fail("async test did not signal completion".into())
     }
 }
 

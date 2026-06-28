@@ -6632,6 +6632,12 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
 }
 
 fn install_globals(it: &mut Interp) {
+    // The test262 async harness ($DONE) reports completion via `print`; route it to the console.
+    global_fn(it, "print", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        i.console.push(s.to_string());
+        Ok(Value::Undefined)
+    });
     global_fn(it, "parseInt", 2, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
         let radix = match arg(a, 1) {

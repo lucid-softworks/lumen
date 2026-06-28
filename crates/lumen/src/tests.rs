@@ -1523,3 +1523,14 @@ fn modules_live_bindings() {
     e.eval_module(&f["/main.js"].clone(), "/main.js", move |spec,_r| f.get(spec).map(|s|(spec.to_string(),s.clone()))).unwrap();
     assert_eq!(match e.eval("globalThis.__r", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "2:2");
 }
+#[test]
+fn global_object_sync() {
+    assert_eq!(run("function f(){return 5}; globalThis.hasOwnProperty('f')+','+globalThis.f()"), "true,5");
+    assert_eq!(run("var x=10; globalThis.hasOwnProperty('x')+','+globalThis.x"), "true,10");
+    assert_eq!(run("var x=1; x=2; globalThis.x"), "2");
+    assert_eq!(run("globalThis.y=7; y"), "7");
+    assert_eq!(run("let z=1; globalThis.hasOwnProperty('z')"), "false");
+    assert_eq!(run("var a; globalThis.a=3; a"), "3");
+    assert_eq!(run("typeof globalThis.Object"), "function"); // builtins still there
+    assert_eq!(run("var undefined; typeof undefined"), "undefined"); // non-writable global kept
+}

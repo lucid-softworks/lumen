@@ -1216,6 +1216,30 @@ impl Interp {
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
         self.hoist(body, &self.global_env.clone(), true);
+        // The global Environment Record is object-backed: top-level `var`/`function` bindings (which
+        // `hoist` just placed in `global_env`) become properties of the global object, so they are
+        // visible as `globalThis.<name>` and writes stay in sync.
+        let hoisted: Vec<String> = self.global_env.borrow().vars.keys().cloned().collect();
+        for name in hoisted {
+            let binding = self.global_env.borrow_mut().vars.remove(&name).unwrap();
+            let existing = self.global.borrow().props.get(name.as_str()).map(|p| (p.writable, p.configurable));
+            match existing {
+                None => {
+                    self.global.borrow_mut().props.insert(
+                        name.as_str(),
+                        Property::data(binding.value, true, true, false),
+                    );
+                }
+                // A function declaration overwrites an existing writable global; `var` keeps it.
+                Some((true, _)) if !matches!(binding.value, Value::Undefined) => {
+                    self.global.borrow_mut().props.insert(
+                        name.as_str(),
+                        Property::data(binding.value, true, true, false),
+                    );
+                }
+                _ => {}
+            }
+        }
         // Top-level `let`/`const` are pre-declared in their temporal dead zone.
         self.declare_block_lexicals(body, &self.global_env.clone(), false);
         let env = self.global_env.clone();
