@@ -3089,7 +3089,7 @@ fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
 fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Result<Value, Value> {
     let trap = ab(i.get_member(handler, "getPrototypeOf"))?;
     if trap.is_callable() {
-        let res = ab(i.call(trap, handler.clone(), &[target.clone()]))?;
+        let res = ab(i.call(trap, handler.clone(), std::slice::from_ref(target)))?;
         if !matches!(res, Value::Obj(_) | Value::Null) {
             return Err(i.make_error("TypeError", "getPrototypeOf trap must return an object or null"));
         }
@@ -3105,7 +3105,7 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
 fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec<Value>, Value> {
     let trap = ab(i.get_member(handler, "ownKeys"))?;
     if trap.is_callable() {
-        let res = ab(i.call(trap, handler.clone(), &[target.clone()]))?;
+        let res = ab(i.call(trap, handler.clone(), std::slice::from_ref(target)))?;
         if !matches!(res, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "ownKeys trap must return an array-like object"));
         }
@@ -3138,6 +3138,38 @@ fn proxy_define_property(
         Ok(i.to_boolean(&res))
     } else if let Value::Obj(t) = target {
         define_own_property(i, t, key, desc)
+    } else {
+        Ok(false)
+    }
+}
+
+/// A proxy's own enumerable string keys (for Object.keys/values/entries): the ownKeys trap result
+/// filtered by each key's [[GetOwnProperty]] enumerable flag.
+fn proxy_enum_string_keys(i: &mut Interp, proxy: &Value) -> Result<Vec<Value>, Value> {
+    let (target, handler) = proxy_pair(i, proxy).unwrap();
+    let keys = proxy_own_keys(i, &target, &handler)?;
+    let mut out = Vec::new();
+    for k in keys {
+        if let Value::Str(ks) = &k {
+            if proxy_key_enumerable(i, &target, &handler, ks)? {
+                out.push(k);
+            }
+        }
+    }
+    Ok(out)
+}
+fn proxy_key_enumerable(i: &mut Interp, target: &Value, handler: &Value, key: &str) -> Result<bool, Value> {
+    let trap = ab(i.get_member(handler, "getOwnPropertyDescriptor"))?;
+    if trap.is_callable() {
+        let kv = Value::from_string(key.to_string());
+        let res = ab(i.call(trap, handler.clone(), &[target.clone(), kv]))?;
+        if matches!(res, Value::Undefined) {
+            return Ok(false);
+        }
+        let enum_v = ab(i.get_member(&res, "enumerable"))?;
+        Ok(i.to_boolean(&enum_v))
+    } else if let Value::Obj(t) = target {
+        Ok(t.borrow().props.get(key).map(|p| p.enumerable).unwrap_or(false))
     } else {
         Ok(false)
     }
@@ -3286,6 +3318,10 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Object.keys called on non-object")),
         };
+        if proxy_pair(i, &Value::Obj(o.clone())).is_some() {
+            let keys = proxy_enum_string_keys(i, &Value::Obj(o.clone()))?;
+            return Ok(i.make_array(keys));
+        }
         let keys: Vec<Value> = ordered_enum_keys(&o).into_iter().map(Value::Str).collect();
         Ok(i.make_array(keys))
     });

@@ -1347,3 +1347,9 @@ fn proxy_misc_traps() {
     assert_eq!(throws("Object.setPrototypeOf({},5)"), "TypeError");
     assert_eq!(run("var t={}; var p=new Proxy(t,{}); Object.setPrototypeOf(p,Array.prototype); Object.getPrototypeOf(t)===Array.prototype"), "true");
 }
+#[test]
+fn proxy_keys() {
+    assert_eq!(run("var p=new Proxy({a:1,b:2},{}); Object.keys(p).join(',')"), "a,b");
+    assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['x','y']},getOwnPropertyDescriptor(t,k){return {value:1,enumerable:true,configurable:true}}}); Object.keys(p).join(',')"), "x,y");
+    assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['x','y']},getOwnPropertyDescriptor(t,k){return {value:1,enumerable:k==='x',configurable:true}}}); Object.keys(p).join(',')"), "x");
+}
