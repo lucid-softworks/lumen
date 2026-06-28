@@ -53,6 +53,7 @@ pub fn install(it: &mut Interp) {
     install_typed_arrays(it);
     install_dataview(it);
     install_shared_array_buffer(it);
+    install_regexp(it);
     install_globals(it);
     install_console(it);
 }
@@ -146,6 +147,234 @@ fn install_dataview(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "DataView", Value::Obj(ctor));
+}
+
+fn install_regexp(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("RegExp", proto.clone());
+    it.def_method(&proto, "exec", 1, regexp_exec);
+    it.def_method(&proto, "test", 1, |i, this, a| {
+        Ok(Value::Bool(!matches!(regexp_exec(i, this, a)?, Value::Null)))
+    });
+    it.def_method(&proto, "toString", 0, |i, this, _| {
+        let src_v = ab(i.get_member(&this, "source"))?;
+        let src = ab(i.to_string(&src_v))?;
+        let flags_v = ab(i.get_member(&this, "flags"))?;
+        let flags = ab(i.to_string(&flags_v))?;
+        Ok(Value::from_string(format!("/{src}/{flags}")))
+    });
+    let ctor = it.make_native("RegExp", 2, |i, _t, a| {
+        let (source, flags) = match arg(a, 0) {
+            Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(&o) as usize)) => {
+                let re = i.regexps[&(Rc::as_ptr(&o) as usize)].clone();
+                let fl = match arg(a, 1) {
+                    Value::Undefined => re.flags.clone(),
+                    v => ab(i.to_string(&v))?.to_string(),
+                };
+                (re.source.clone(), fl)
+            }
+            Value::Undefined => (
+                String::new(),
+                match arg(a, 1) {
+                    Value::Undefined => String::new(),
+                    v => ab(i.to_string(&v))?.to_string(),
+                },
+            ),
+            v => {
+                let src = ab(i.to_string(&v))?.to_string();
+                let fl = match arg(a, 1) {
+                    Value::Undefined => String::new(),
+                    v => ab(i.to_string(&v))?.to_string(),
+                };
+                (src, fl)
+            }
+        };
+        ab(i.make_regexp(&source, &flags))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "RegExp", Value::Obj(ctor));
+}
+
+/// `RegExp.prototype.exec`: returns the match array (with `index`/`input`) or `null`, advancing
+/// `lastIndex` for global/sticky regexes.
+fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
+    let re = i.regexps.get(&ptr).cloned().ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
+    let input = ab(i.to_string(&arg(args, 0)))?;
+    let chars: Vec<char> = input.chars().collect();
+    let use_last = re.global || re.sticky;
+    let last = if use_last {
+        let li = ab(i.get_member(&this, "lastIndex"))?;
+        ab(i.to_number(&li))?.max(0.0) as usize
+    } else {
+        0
+    };
+    if last > chars.len() {
+        if use_last {
+            ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+        }
+        return Ok(Value::Null);
+    }
+    match re.exec_at(&chars, last) {
+        None => {
+            if use_last {
+                ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+            }
+            Ok(Value::Null)
+        }
+        Some(caps) => {
+            let (start, end) = caps[0].unwrap();
+            if use_last {
+                ab(i.set_member(&this, "lastIndex", Value::Num(end as f64)))?;
+            }
+            let mut items = vec![Value::from_string(chars[start..end].iter().collect::<String>())];
+            for g in 1..=re.ngroups {
+                items.push(match caps[g] {
+                    Some((a, b)) => Value::from_string(chars[a..b].iter().collect::<String>()),
+                    None => Value::Undefined,
+                });
+            }
+            let result = i.make_array(items);
+            if let Value::Obj(o) = &result {
+                set_data(o, "index", Value::Num(start as f64));
+                set_data(o, "input", Value::Str(input));
+            }
+            Ok(result)
+        }
+    }
+}
+
+/// Coerce `v` to a RegExp object (returning it unchanged if already one).
+/// `$&` / `$$` / `$1`..`$99` / `` $` `` / `$'` substitution in a string replacement template.
+fn expand_dollar(template: &str, caps: &[Option<(usize, usize)>], chars: &[char]) -> String {
+    let (ms, me) = caps[0].unwrap();
+    let group = |g: usize| -> String {
+        caps.get(g).and_then(|c| *c).map(|(a, b)| chars[a..b].iter().collect()).unwrap_or_default()
+    };
+    let t: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < t.len() {
+        if t[i] == '$' && i + 1 < t.len() {
+            match t[i + 1] {
+                '$' => {
+                    out.push('$');
+                    i += 2;
+                }
+                '&' => {
+                    out.extend(chars[ms..me].iter());
+                    i += 2;
+                }
+                '`' => {
+                    out.extend(chars[..ms].iter());
+                    i += 2;
+                }
+                '\'' => {
+                    out.extend(chars[me..].iter());
+                    i += 2;
+                }
+                d if d.is_ascii_digit() => {
+                    // One or two digits (prefer two if that group exists).
+                    let mut g = d.to_digit(10).unwrap() as usize;
+                    let mut consumed = 2;
+                    if i + 2 < t.len() && t[i + 2].is_ascii_digit() {
+                        let two = g * 10 + t[i + 2].to_digit(10).unwrap() as usize;
+                        if two < caps.len() {
+                            g = two;
+                            consumed = 3;
+                        }
+                    }
+                    if g >= 1 && g < caps.len() {
+                        out.push_str(&group(g));
+                        i += consumed;
+                    } else {
+                        out.push('$');
+                        i += 1;
+                    }
+                }
+                _ => {
+                    out.push('$');
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(t[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn regex_replace(i: &mut Interp, s: &str, re_obj: &Value, repl: &Value) -> Result<Value, Value> {
+    let re = i.regexps[&map_ptr(re_obj).unwrap()].clone();
+    let chars: Vec<char> = s.chars().collect();
+    let matches = if re.global {
+        regex_find_all(&re, &chars)
+    } else {
+        match re.exec_at(&chars, 0) {
+            Some(c) => vec![c],
+            None => Vec::new(),
+        }
+    };
+    let mut out = String::new();
+    let mut last = 0;
+    for caps in &matches {
+        let (a, b) = caps[0].unwrap();
+        out.extend(chars[last..a].iter());
+        if repl.is_callable() {
+            let matched: String = chars[a..b].iter().collect();
+            let mut cbargs = vec![Value::from_string(matched)];
+            for g in 1..=re.ngroups {
+                cbargs.push(match caps[g] {
+                    Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
+                    None => Value::Undefined,
+                });
+            }
+            cbargs.push(Value::Num(a as f64));
+            cbargs.push(Value::from_string(s.to_string()));
+            let r = ab(i.call(repl.clone(), Value::Undefined, &cbargs))?;
+            out.push_str(&ab(i.to_string(&r))?);
+        } else {
+            let template = ab(i.to_string(repl))?;
+            out.push_str(&expand_dollar(&template, caps, &chars));
+        }
+        last = b;
+    }
+    out.extend(chars[last..].iter());
+    Ok(Value::from_string(out))
+}
+
+/// Coerce `v` to a RegExp object (returning it unchanged if already one).
+fn coerce_regexp(i: &mut Interp, v: Value) -> Result<Value, Value> {
+    match &v {
+        Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) => Ok(v),
+        Value::Undefined => ab(i.make_regexp("", "")),
+        _ => {
+            let s = ab(i.to_string(&v))?.to_string();
+            ab(i.make_regexp(&s, ""))
+        }
+    }
+}
+
+/// All non-overlapping matches of `re` in `chars`, each as capture spans.
+fn regex_find_all(re: &crate::regex::Regex, chars: &[char]) -> Vec<Vec<Option<(usize, usize)>>> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos <= chars.len() {
+        match re.exec_at(chars, pos) {
+            None => break,
+            Some(caps) => {
+                let (a, b) = caps[0].unwrap();
+                pos = if b > a { b } else { b + 1 };
+                out.push(caps);
+                if out.len() > MAX_ARRAY_OP_LEN {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn install_shared_array_buffer(it: &mut Interp) {
@@ -2614,6 +2843,31 @@ fn install_string(it: &mut Interp) {
         if s.len() > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "string too large to split in this engine"));
         }
+        // Regex separator: split on each match (group captures are inserted between pieces).
+        if let Value::Obj(o) = &arg(args, 0) {
+            if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
+                let re = i.regexps[&(Rc::as_ptr(o) as usize)].clone();
+                let chars: Vec<char> = s.chars().collect();
+                let mut parts = Vec::new();
+                let mut last = 0;
+                for caps in regex_find_all(&re, &chars) {
+                    let (a, b) = caps[0].unwrap();
+                    if b == 0 {
+                        continue; // skip a zero-width match at the start
+                    }
+                    parts.push(Value::from_string(chars[last..a].iter().collect::<String>()));
+                    for g in 1..=re.ngroups {
+                        parts.push(match caps[g] {
+                            Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
+                            None => Value::Undefined,
+                        });
+                    }
+                    last = b;
+                }
+                parts.push(Value::from_string(chars[last..].iter().collect::<String>()));
+                return Ok(i.make_array(parts));
+            }
+        }
         match arg(args, 0) {
             Value::Undefined => Ok(i.make_array(vec![Value::Str(s)])),
             sep => {
@@ -2657,9 +2911,73 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "padStart", 1, |i, this, args| string_pad(i, this, args, true));
     it.def_method(&sp, "padEnd", 1, |i, this, args| string_pad(i, this, args, false));
+    it.def_method(&sp, "match", 1, |i, this, a| {
+        let s = this_string(i, &this)?;
+        let re_obj = coerce_regexp(i, arg(a, 0))?;
+        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
+        let chars: Vec<char> = s.chars().collect();
+        if re.global {
+            ab(i.set_member(&re_obj, "lastIndex", Value::Num(0.0)))?;
+            let all = regex_find_all(&re, &chars);
+            if all.is_empty() {
+                return Ok(Value::Null);
+            }
+            let items: Vec<Value> = all
+                .iter()
+                .map(|c| {
+                    let (x, y) = c[0].unwrap();
+                    Value::from_string(chars[x..y].iter().collect::<String>())
+                })
+                .collect();
+            Ok(i.make_array(items))
+        } else {
+            regexp_exec(i, re_obj, &[Value::Str(s)])
+        }
+    });
+    it.def_method(&sp, "search", 1, |i, this, a| {
+        let s = this_string(i, &this)?;
+        let re_obj = coerce_regexp(i, arg(a, 0))?;
+        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
+        let chars: Vec<char> = s.chars().collect();
+        Ok(match re.exec_at(&chars, 0) {
+            Some(c) => Value::Num(c[0].unwrap().0 as f64),
+            None => Value::Num(-1.0),
+        })
+    });
+    it.def_method(&sp, "matchAll", 1, |i, this, a| {
+        let s = this_string(i, &this)?;
+        let re_obj = coerce_regexp(i, arg(a, 0))?;
+        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
+        let chars: Vec<char> = s.chars().collect();
+        let all = regex_find_all(&re, &chars);
+        let mut results = Vec::new();
+        for caps in all {
+            let (x, y) = caps[0].unwrap();
+            let mut items = vec![Value::from_string(chars[x..y].iter().collect::<String>())];
+            for g in 1..=re.ngroups {
+                items.push(match caps[g] {
+                    Some((aa, bb)) => Value::from_string(chars[aa..bb].iter().collect::<String>()),
+                    None => Value::Undefined,
+                });
+            }
+            let m = i.make_array(items);
+            if let Value::Obj(o) = &m {
+                set_data(o, "index", Value::Num(x as f64));
+                set_data(o, "input", Value::Str(s.clone()));
+            }
+            results.push(m);
+        }
+        let arr = i.make_array(results);
+        Ok(make_array_iterator(i, arr, 0))
+    });
     it.def_method(&sp, "replace", 2, |i, this, args| {
-        // String-pattern replace only (first occurrence); regex patterns are not yet supported.
         let s = this_string(i, &this)?.to_string();
+        // Regex pattern: replace first (or all, if global) matches with $-substitution / fn replacer.
+        if let Value::Obj(o) = &arg(args, 0) {
+            if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
+                return regex_replace(i, &s, &arg(args, 0), &arg(args, 1));
+            }
+        }
         let pat = ab(i.to_string(&arg(args, 0)))?;
         let repl = arg(args, 1);
         match s.find(pat.as_ref()) {

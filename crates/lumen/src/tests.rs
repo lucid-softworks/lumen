@@ -293,6 +293,28 @@ fn typed_arrays() {
 }
 
 #[test]
+fn regex() {
+    assert_eq!(run("/abc/.test('xabcy')"), "true");
+    assert_eq!(run("/^abc$/.test('abc')"), "true");
+    assert_eq!(run("/\\d+/.exec('a123b')[0]"), "123");
+    assert_eq!(run("/(\\w)(\\w)/.exec('hi')[2]"), "i");
+    assert_eq!(run("/a/gi.flags"), "gi");
+    assert_eq!(run("/[a-c]+/.exec('xxbcaxx')[0]"), "bca");
+    assert_eq!(run("'a1b2c3'.match(/\\d/g).join(',')"), "1,2,3");
+    assert_eq!(run("'hello world'.replace(/o/g, '0')"), "hell0 w0rld");
+    assert_eq!(run("'2023-06-15'.replace(/(\\d+)-(\\d+)-(\\d+)/, '$3/$2/$1')"), "15/06/2023");
+    assert_eq!(run("'a,b;c'.split(/[,;]/).join('|')"), "a|b|c");
+    assert_eq!(run("'foobar'.search(/bar/)"), "3");
+    assert_eq!(run("/colou?r/.test('color') && /colou?r/.test('colour')"), "true");
+    assert_eq!(run("/a(?=b)/.test('ab')"), "true");
+    assert_eq!(run("/a(?!b)/.test('ac')"), "true");
+    assert_eq!(run("'aaa'.replace(/a/g, x=>x.toUpperCase())"), "AAA");
+    assert_eq!(run("/(ab)+/.exec('ababab')[0]"), "ababab");
+    assert_eq!(run("/\\bword\\b/.test('a word here')"), "true");
+    assert_eq!(run("new RegExp('\\\\d{2,3}').exec('12345')[0]"), "123");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }

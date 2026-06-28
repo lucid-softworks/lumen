@@ -28,6 +28,7 @@ mod eval;
 mod interpreter;
 mod lexer;
 mod parser;
+mod regex;
 mod token;
 mod value;
 

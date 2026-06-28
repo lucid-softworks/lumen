@@ -615,7 +615,7 @@ impl Interp {
             Expr::Undefined => Ok(Value::Undefined),
             Expr::Ident(name) => self.get_var(name, env),
             Expr::This => self.get_var("this", env).or(Ok(Value::Undefined)),
-            Expr::Regex { .. } => Ok(Value::Obj(self.new_object())), // RegExp is a stub for now
+            Expr::Regex { body, flags } => self.make_regexp(body, flags),
             Expr::Array(elems) => self.eval_array(elems, env),
             Expr::Object(props) => self.eval_object(props, env),
             Expr::Func(func) => Ok(self.make_function(func.clone(), env.clone())),
@@ -889,6 +889,29 @@ impl Interp {
             return Err(self.throw("TypeError", format!("{desc} is not a function")));
         }
         self.call(func, this, &argv)
+    }
+
+    /// Compile a regular expression and build a RegExp object (its metadata stored as own props,
+    /// the compiled program in the `regexps` side table). A bad pattern throws a SyntaxError.
+    pub(crate) fn make_regexp(&mut self, source: &str, flags: &str) -> Result<Value, Abrupt> {
+        let re = crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
+        let obj = Object::new(self.extra_protos.get("RegExp").cloned());
+        let ptr = Rc::as_ptr(&obj) as usize;
+        let ro = |v: Value| Property::data(v, false, false, false);
+        {
+            let mut b = obj.borrow_mut();
+            b.props.insert("source", ro(Value::from_string(re.source.clone())));
+            b.props.insert("flags", ro(Value::from_string(re.flags.clone())));
+            b.props.insert("global", ro(Value::Bool(re.global)));
+            b.props.insert("ignoreCase", ro(Value::Bool(re.ignore_case)));
+            b.props.insert("multiline", ro(Value::Bool(re.multiline)));
+            b.props.insert("dotAll", ro(Value::Bool(re.dotall)));
+            b.props.insert("sticky", ro(Value::Bool(re.sticky)));
+            b.props.insert("unicode", ro(Value::Bool(re.unicode)));
+            b.props.insert("lastIndex", Property::data(Value::Num(0.0), true, false, false));
+        }
+        self.regexps.insert(ptr, Rc::new(re));
+        Ok(Value::Obj(obj))
     }
 
     /// Direct eval: a non-string argument is returned unchanged; a string is parsed and executed.

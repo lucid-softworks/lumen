@@ -114,6 +114,8 @@ pub struct Interp {
     pub typed_arrays: HashMap<usize, TaInfo>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
     pub data_views: HashMap<usize, (usize, usize, usize)>,
+    /// Compiled regular expressions, keyed by the RegExp object's pointer.
+    pub regexps: HashMap<usize, Rc<crate::regex::Regex>>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -174,6 +176,7 @@ impl Interp {
             array_buffers: HashMap::new(),
             typed_arrays: HashMap::new(),
             data_views: HashMap::new(),
+            regexps: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
