@@ -1262,3 +1262,18 @@ fn bigint_prop_names() {
     assert_eq!(run("var o={2n:'a',3n:'b'}; o[2]+o[3]"), "ab");
     assert_eq!(run("class C{1n=9}; new C()[1]"), "9");
 }
+#[test]
+fn optional_chaining() {
+    assert_eq!(run("var f=null; f?.()"), "undefined");
+    assert_eq!(run("var a=null; a?.b.c.d"), "undefined");      // whole chain short-circuits
+    assert_eq!(run("var a={b:null}; a?.b?.c"), "undefined");
+    assert_eq!(run("var a={b:{c:5}}; a?.b?.c"), "5");
+    assert_eq!(run("var a=null; a?.b['x'].y"), "undefined");
+    assert_eq!(run("var o={m(){return 7}}; o?.m()"), "7");
+    assert_eq!(run("var o=null; o?.m()"), "undefined");
+    assert_eq!(run("var o={a:{b(){return 3}}}; o?.a.b()"), "3");
+    assert_eq!(run("var o={f:null}; o.f?.()"), "undefined");
+    assert_eq!(run("var x={y:{z:1}}; (x?.y).z"), "1");
+    assert_eq!(throws("var a=null; (a?.b).c"), "TypeError"); // parens end the chain → .c on undefined throws
+    assert_eq!(run("var a={b:1}; a?.b"), "1");
+}

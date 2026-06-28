@@ -868,13 +868,29 @@ impl Interp {
                 self.binary(op, l, r)
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
+            Expr::OptionalChain(inner) => {
+                let saved = self.short_circuit;
+                self.short_circuit = false;
+                let v = self.eval(inner, env);
+                let short = self.short_circuit;
+                self.short_circuit = saved;
+                if short {
+                    Ok(Value::Undefined)
+                } else {
+                    v
+                }
+            }
             Expr::Member { obj, prop, optional } => {
                 if matches!(**obj, Expr::Super) {
                     let home = self.get_var("%superproto%", env)?;
                     return self.get_member(&home, prop);
                 }
                 let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Undefined); // an earlier `?.` link short-circuited
+                }
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
                     return Ok(Value::Undefined);
                 }
                 self.get_member(&base, prop)
@@ -887,14 +903,18 @@ impl Interp {
                     return self.get_member(&home, &key);
                 }
                 let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Undefined);
+                }
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
                     return Ok(Value::Undefined);
                 }
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
                 self.get_member(&base, &key)
             }
-            Expr::Call { callee, args } => self.eval_call(callee, args, env),
+            Expr::Call { callee, args, optional } => self.eval_call(callee, args, *optional, env),
             Expr::TaggedTemplate { tag, quasis, subs } => {
                 self.eval_tagged_template(tag, quasis, subs, env)
             }
@@ -1111,7 +1131,13 @@ impl Interp {
         self.call(func, this, &argv)
     }
 
-    fn eval_call(&mut self, callee: &Expr, args: &[ArrayElem], env: &Env) -> Result<Value, Abrupt> {
+    fn eval_call(
+        &mut self,
+        callee: &Expr,
+        args: &[ArrayElem],
+        optional: bool,
+        env: &Env,
+    ) -> Result<Value, Abrupt> {
         // Direct eval: `eval(src)` called by that exact name runs the code in the *caller's* scope
         // (so it can see/define local bindings). Any other way of reaching eval is indirect and runs
         // in the global scope (handled by the global `eval` native).
@@ -1165,7 +1191,11 @@ impl Interp {
         let (func, this) = match callee {
             Expr::Member { obj, prop, optional } => {
                 let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Undefined);
+                }
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
                     return Ok(Value::Undefined);
                 }
                 let f = self.get_member(&base, prop)?;
@@ -1173,7 +1203,11 @@ impl Interp {
             }
             Expr::Index { obj, index, optional } => {
                 let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Undefined);
+                }
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
                     return Ok(Value::Undefined);
                 }
                 let idx = self.eval(index, env)?;
@@ -1183,9 +1217,17 @@ impl Interp {
             }
             _ => {
                 let f = self.eval(callee, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Undefined);
+                }
                 (f, Value::Undefined)
             }
         };
+        // `f?.()` short-circuits the whole chain when the callee is nullish.
+        if optional && matches!(func, Value::Undefined | Value::Null) {
+            self.short_circuit = true;
+            return Ok(Value::Undefined);
+        }
         let argv = self.eval_args(args, env)?;
         if !func.is_callable() {
             let desc = describe_callee(callee);
@@ -2345,6 +2387,7 @@ fn default_constructor(derived: bool) -> Function {
         vec![Stmt::Expr(Expr::Call {
             callee: Box::new(Expr::Super),
             args: vec![ArrayElem::Spread(Expr::Ident("args".to_string()))],
+            optional: false,
         })]
     } else {
         Vec::new()

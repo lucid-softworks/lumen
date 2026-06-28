@@ -143,13 +143,16 @@ pub enum Expr {
     Logical { op: &'static str, left: P<Expr>, right: P<Expr> },
     Assign { op: &'static str, target: P<Expr>, value: P<Expr> },
     Cond { test: P<Expr>, cons: P<Expr>, alt: P<Expr> },
-    Call { callee: P<Expr>, args: Vec<ArrayElem> },
+    Call { callee: P<Expr>, args: Vec<ArrayElem>, optional: bool },
     New { callee: P<Expr>, args: Vec<ArrayElem> },
     Member { obj: P<Expr>, prop: String, optional: bool },
     Index { obj: P<Expr>, index: P<Expr>, optional: bool },
     Seq(Vec<Expr>),
     /// `tag\`a${x}b\`` — `quasis` are (cooked, raw) chunks (one more than `subs`).
     TaggedTemplate { tag: P<Expr>, quasis: Vec<(Option<String>, String)>, subs: Vec<Expr> },
+    /// An optional chain (`a?.b.c`): evaluates the inner LHS, short-circuiting to `undefined` if any
+    /// `?.` link sees a nullish base.
+    OptionalChain(P<Expr>),
 }
 
 /// An array element or call argument: a value, a spread (`...x`), or a hole (`[1,,3]`).

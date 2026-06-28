@@ -110,6 +110,9 @@ pub struct Interp {
     pub eval_fn: Option<Gc>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
     pub iterator_sym: Option<Rc<SymbolData>>,
+    /// Set while a `?.` link in the current optional chain saw a nullish base, so the rest of the
+    /// chain short-circuits to `undefined`. Reset at each `OptionalChain` boundary.
+    pub short_circuit: bool,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
     pub map_data: HashMap<usize, Vec<(Value, Value)>>,
@@ -226,6 +229,7 @@ impl Interp {
             class_info: HashMap::new(),
             eval_fn: None,
             iterator_sym: None,
+            short_circuit: false,
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),

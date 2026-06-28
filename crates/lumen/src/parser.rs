@@ -863,10 +863,11 @@ impl Parser {
 
     fn parse_lhs(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_member_expr()?;
+        let mut had_optional = false;
         loop {
             if self.is_punct("(") {
                 let args = self.parse_args()?;
-                expr = Expr::Call { callee: Box::new(expr), args };
+                expr = Expr::Call { callee: Box::new(expr), args, optional: false };
             } else if self.eat_punct(".") {
                 let name = self.parse_property_name_ident()?;
                 expr = Expr::Member { obj: Box::new(expr), prop: name, optional: false };
@@ -875,13 +876,17 @@ impl Parser {
                 self.expect_punct("]")?;
                 expr = Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: false };
             } else if let Tok::Template(parts) = self.cur().clone() {
+                if had_optional {
+                    return self.err("tagged template cannot appear in an optional chain");
+                }
                 // A template immediately after an expression is a tagged template.
                 self.advance();
                 expr = self.build_tagged_template(expr, parts)?;
             } else if self.eat_punct("?.") {
+                had_optional = true;
                 if self.is_punct("(") {
                     let args = self.parse_args()?;
-                    expr = Expr::Call { callee: Box::new(expr), args };
+                    expr = Expr::Call { callee: Box::new(expr), args, optional: true };
                 } else if self.eat_punct("[") {
                     let index = self.parse_expr_allow_in()?;
                     self.expect_punct("]")?;
@@ -894,6 +899,10 @@ impl Parser {
             } else {
                 break;
             }
+        }
+        // Wrap a chain that used `?.` so the whole thing short-circuits to undefined on a nullish link.
+        if had_optional {
+            expr = Expr::OptionalChain(Box::new(expr));
         }
         Ok(expr)
     }
