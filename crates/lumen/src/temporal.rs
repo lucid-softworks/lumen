@@ -467,6 +467,20 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let nd = add_to_date(i, d, dur, -1)?;
         Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
     });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let d = as_date(i, &t)?;
+        let o = to_date(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
+        let largest = if largest == "auto" { "day".to_string() } else { largest };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(diff_date(d, o, &largest))))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let d = as_date(i, &t)?;
+        let o = to_date(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
+        let largest = if largest == "auto" { "day".to_string() } else { largest };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(diff_date(d, o, &largest)))))
+    });
     it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
         let d = as_date(i, &t)?;
         let time = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
@@ -507,6 +521,75 @@ fn cmp_date(x: IsoDate, y: IsoDate) -> i64 {
     let a = days_from_civil(x.year, x.month as i64, x.day as i64);
     let b = days_from_civil(y.year, y.month as i64, y.day as i64);
     a.cmp(&b) as i64
+}
+fn epoch_days(d: IsoDate) -> i64 {
+    days_from_civil(d.year, d.month as i64, d.day as i64)
+}
+
+/// Read a string option (e.g. `largestUnit`) from an options argument, defaulting if absent.
+fn opt_str(i: &mut Interp, opts: &Value, key: &str, default: &str) -> Result<String, Value> {
+    if matches!(opts, Value::Undefined) {
+        return Ok(default.to_string());
+    }
+    let v = getm(i, opts, key)?;
+    match v {
+        Value::Undefined => Ok(default.to_string()),
+        _ => Ok(i.to_string(&v).map_err(unab)?.to_string()),
+    }
+}
+
+/// Difference between two ISO dates as a calendar duration honoring `largest`
+/// (years/months/weeks/days). Assumes nothing about ordering; the result carries the sign.
+fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
+    let sign = cmp_date(a, b);
+    let mut out = IsoDuration::default();
+    if sign == 0 {
+        return out;
+    }
+    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
+    match largest {
+        "year" | "month" => {
+            let mut years = if largest == "year" { hi.year - lo.year } else { 0 };
+            let mut mid = constrain_add_ym(lo, years * 12);
+            if cmp_date(mid, hi) > 0 {
+                years -= 1;
+                mid = constrain_add_ym(lo, years * 12);
+            }
+            let mut months = 0i64;
+            loop {
+                let next = constrain_add_ym(mid, 1);
+                if cmp_date(next, hi) <= 0 {
+                    months += 1;
+                    mid = next;
+                } else {
+                    break;
+                }
+            }
+            let days = epoch_days(hi) - epoch_days(mid);
+            out.years = years;
+            out.months = months;
+            out.days = days;
+        }
+        "week" => {
+            let total = epoch_days(hi) - epoch_days(lo);
+            out.weeks = total / 7;
+            out.days = total % 7;
+        }
+        _ => {
+            out.days = epoch_days(hi) - epoch_days(lo);
+        }
+    }
+    if sign > 0 {
+        out = neg_duration(out);
+    }
+    out
+}
+/// Add `months` months to a date, clamping the day to the resulting month's length.
+fn constrain_add_ym(d: IsoDate, months: i64) -> IsoDate {
+    let total = d.year * 12 + (d.month as i64 - 1) + months;
+    let (y, m) = balance_year_month(total / 12, total % 12 + 1);
+    let day = (d.day).min(days_in_month(y, m));
+    IsoDate { year: y, month: m, day }
 }
 
 /// ToTemporalDate: accept a PlainDate/PlainDateTime, a fields object, or an ISO string.
@@ -584,6 +667,20 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns })?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(nt)))
     });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let x = as_time(i, &t)?;
+        let y = to_time(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
+        let diff = (time_to_ns(y) - time_to_ns(x)) as i128;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let x = as_time(i, &t)?;
+        let y = to_time(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
+        let diff = (time_to_ns(x) - time_to_ns(y)) as i128;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+    });
 
     let ctor = add_ctor(it, ns, "PlainTime", 0, proto, |i, _t, a| {
         require_new(i)?;
@@ -612,6 +709,45 @@ fn time_to_ns(t: IsoTime) -> i64 {
         + t.ms as i64 * 1_000_000
         + t.us as i64 * 1000
         + t.ns as i64
+}
+fn dt_ns(d: IsoDate, t: IsoTime) -> i128 {
+    epoch_days(d) as i128 * 86_400_000_000_000 + time_to_ns(t) as i128
+}
+/// Balance a nanosecond span into a Duration whose largest unit is `largest`.
+fn balance_ns(total: i128, largest: &str) -> IsoDuration {
+    let neg = total < 0;
+    let mut n = total.abs();
+    let nanos = (n % 1000) as i64;
+    n /= 1000;
+    let micros = (n % 1000) as i64;
+    n /= 1000;
+    let millis = (n % 1000) as i64;
+    n /= 1000;
+    let secs = n as i64; // remaining whole seconds
+    let mut out = IsoDuration { ms: millis, us: micros, ns: nanos, ..Default::default() };
+    match largest {
+        "day" => {
+            out.days = secs / 86400;
+            let r = secs % 86400;
+            out.hours = r / 3600;
+            out.minutes = (r / 60) % 60;
+            out.seconds = r % 60;
+        }
+        "hour" | "auto" => {
+            out.hours = secs / 3600;
+            out.minutes = (secs / 60) % 60;
+            out.seconds = secs % 60;
+        }
+        "minute" => {
+            out.minutes = secs / 60;
+            out.seconds = secs % 60;
+        }
+        _ => out.seconds = secs,
+    }
+    if neg {
+        out = neg_duration(out);
+    }
+    out
 }
 fn to_time(i: &mut Interp, v: &Value) -> Result<IsoTime, Value> {
     match get(i, v) {
@@ -685,6 +821,20 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0))?;
         Ok(Value::Bool(cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm)))
+    });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let (od, otm) = to_datetime(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
+        let diff = dt_ns(od, otm) - dt_ns(d, tm);
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let (od, otm) = to_datetime(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
+        let diff = dt_ns(d, tm) - dt_ns(od, otm);
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
     });
 
     let ctor = add_ctor(it, ns, "PlainDateTime", 3, proto, |i, _t, a| {
@@ -1108,6 +1258,18 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
         Ok(Value::Bool(x == y))
+    });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let x = as_instant(i, &t)?;
+        let y = to_instant(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(y - x, &largest))))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let x = as_instant(i, &t)?;
+        let y = to_instant(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(x - y, &largest))))
     });
     let ctor = add_ctor(it, ns, "Instant", 1, proto, |i, _t, a| {
         require_new(i)?;

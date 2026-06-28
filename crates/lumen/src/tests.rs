@@ -538,3 +538,13 @@ fn temporal_basics() {
     assert_eq!(throws("Temporal.PlainDate(2020,1,1)"), "TypeError"); // requires new
     assert_eq!(throws("new Temporal.PlainDate(2020,13,1)"), "RangeError");
 }
+
+#[test]
+fn temporal_until_since() {
+    assert_eq!(run("Temporal.PlainDate.from('2021-01-01').until('2021-02-10').days"), "40");
+    assert_eq!(run("Temporal.PlainDate.from('2020-01-01').until('2022-03-01',{largestUnit:'year'}).years"), "2");
+    assert_eq!(run("Temporal.PlainDate.from('2021-02-10').since('2021-01-01').days"), "40");
+    assert_eq!(run("Temporal.PlainTime.from('10:00').until('12:30').hours"), "2");
+    assert_eq!(run("Temporal.PlainTime.from('10:00').until('12:30').minutes"), "30");
+    assert_eq!(run("Temporal.Instant.fromEpochMilliseconds(0).until(Temporal.Instant.fromEpochMilliseconds(5000)).seconds"), "5");
+}
