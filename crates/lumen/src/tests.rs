@@ -742,3 +742,13 @@ fn named_evaluation() {
     assert_eq!(run("function named(){}; var x=named; x.name"), "named"); // keeps original
     assert_eq!(run("(function foo(){}).name"), "foo"); // named expr unchanged
 }
+#[test]
+fn label_validation() {
+    assert!(Engine::new().eval("break foo;", false).is_err());
+    assert!(Engine::new().eval("x: x: 1", false).is_err());
+    assert!(Engine::new().eval("foo: for(;;){ continue bar; }", false).is_err());
+    assert_eq!(run("var s=0; outer: for(var i=0;i<3;i++){ for(var j=0;j<3;j++){ if(j==1) continue outer; s++; } } s"), "3");
+    assert_eq!(run("a: { break a; } 'ok'"), "ok");
+    assert_eq!(run("function f(){ l: for(;;) break l; return 1 } f()"), "1");
+    assert_eq!(run("x: 1; x: 2; 'ok'"), "ok"); // sequential same label is fine
+}

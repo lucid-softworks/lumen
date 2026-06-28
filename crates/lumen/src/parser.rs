@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0 };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new() };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -40,6 +40,8 @@ struct Parser {
     fn_depth: u32,
     iter_depth: u32,
     switch_depth: u32,
+    /// Active labels in scope (reset at function boundaries).
+    labels: Vec<String>,
 }
 
 impl Parser {
@@ -163,8 +165,12 @@ impl Parser {
             Tok::Keyword("break") => {
                 self.advance();
                 let label = self.parse_opt_label();
-                if label.is_none() && self.iter_depth == 0 && self.switch_depth == 0 {
-                    return self.err("illegal 'break' statement");
+                match &label {
+                    Some(l) if !self.labels.contains(l) => return self.err("undefined break label"),
+                    None if self.iter_depth == 0 && self.switch_depth == 0 => {
+                        return self.err("illegal 'break' statement");
+                    }
+                    _ => {}
                 }
                 self.consume_semicolon()?;
                 Ok(Stmt::Break(label))
@@ -172,8 +178,10 @@ impl Parser {
             Tok::Keyword("continue") => {
                 self.advance();
                 let label = self.parse_opt_label();
-                if label.is_none() && self.iter_depth == 0 {
-                    return self.err("illegal 'continue' statement");
+                match &label {
+                    Some(l) if !self.labels.contains(l) => return self.err("undefined continue label"),
+                    None if self.iter_depth == 0 => return self.err("illegal 'continue' statement"),
+                    _ => {}
                 }
                 self.consume_semicolon()?;
                 Ok(Stmt::Continue(label))
@@ -199,8 +207,13 @@ impl Parser {
             Tok::Ident(name) if matches!(self.peek_kind(1), Tok::Punct(":")) => {
                 self.advance();
                 self.advance();
-                let body = self.parse_stmt()?;
-                Ok(Stmt::Labeled { label: name, body: Box::new(body) })
+                if self.labels.contains(&name) {
+                    return self.err(format!("label '{name}' has already been declared"));
+                }
+                self.labels.push(name.clone());
+                let body = self.parse_stmt();
+                self.labels.pop();
+                Ok(Stmt::Labeled { label: name, body: Box::new(body?) })
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -925,7 +938,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new() };
                     sub.parse_expr()?
                 }
             };
@@ -1262,15 +1275,18 @@ impl Parser {
         if inner_strict {
             self.strict = true;
         }
-        // A function body is a fresh context for return/break/continue.
+        // A function body is a fresh context for return/break/continue and labels.
         let (siter, sswitch) = (self.iter_depth, self.switch_depth);
+        let slabels = std::mem::take(&mut self.labels);
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
-        let body = self.parse_block_body()?;
+        let body = self.parse_block_body();
         self.fn_depth -= 1;
         self.iter_depth = siter;
         self.switch_depth = sswitch;
+        self.labels = slabels;
+        let body = body?;
         let result_strict = self.strict;
         self.strict = saved_strict;
         Ok((body, result_strict))
