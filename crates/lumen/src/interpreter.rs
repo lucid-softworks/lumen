@@ -102,6 +102,12 @@ pub struct Interp {
     pub eval_fn: Option<Gc>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
     pub iterator_sym: Option<Rc<SymbolData>>,
+    /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
+    /// pointer — the engine analogue of an internal `[[MapData]]` slot.
+    pub map_data: HashMap<usize, Vec<(Value, Value)>>,
+    /// Prototypes for builtins created after `new()` (Map/Set/Date/...), looked up by name so their
+    /// native constructors can stamp the right `[[Prototype]]`.
+    pub extra_protos: HashMap<&'static str, Gc>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -157,6 +163,8 @@ impl Interp {
             class_info: HashMap::new(),
             eval_fn: None,
             iterator_sym: None,
+            map_data: HashMap::new(),
+            extra_protos: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).

@@ -45,8 +45,624 @@ pub fn install(it: &mut Interp) {
     install_boolean(it);
     install_math(it);
     install_errors(it);
+    install_reflect(it);
+    install_json(it);
+    install_collections(it);
     install_globals(it);
     install_console(it);
+}
+
+fn map_ptr(this: &Value) -> Option<usize> {
+    this.as_obj().map(|o| Rc::as_ptr(o) as usize)
+}
+
+/// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
+fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Map or Set"))?;
+    let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
+    let mut arr = Vec::with_capacity(snap.len());
+    for (k, v) in snap {
+        arr.push(match kind {
+            1 => k,
+            2 => i.make_array(vec![k, v]),
+            _ => v,
+        });
+    }
+    let arrv = i.make_array(arr);
+    Ok(make_array_iterator(i, arrv, 0))
+}
+
+fn install_collections(it: &mut Interp) {
+    install_map_like(it, "Map", false, map_ctor);
+    install_map_like(it, "Set", true, set_ctor);
+    install_weak(it, "WeakMap", false, weakmap_ctor);
+    install_weak(it, "WeakSet", true, weakset_ctor);
+}
+
+// Non-capturing constructor entry points (native fns must be bare `fn` pointers).
+fn map_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    collection_ctor(i, a, "Map", false)
+}
+fn set_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    collection_ctor(i, a, "Set", true)
+}
+fn weakmap_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    collection_ctor(i, a, "WeakMap", false)
+}
+fn weakset_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    collection_ctor(i, a, "WeakSet", true)
+}
+
+fn collection_ctor(i: &mut Interp, args: &[Value], name: &str, is_set: bool) -> Result<Value, Value> {
+    let proto = i.extra_protos.get(name).cloned();
+    let obj = Object::new(proto);
+    let ptr = Rc::as_ptr(&obj) as usize;
+    i.map_data.insert(ptr, Vec::new());
+    let mv = Value::Obj(obj);
+    if let Some(src) = args.first() {
+        if !matches!(src, Value::Undefined | Value::Null) {
+            let add_fn = ab(i.get_member(&mv, if is_set { "add" } else { "set" }))?;
+            let items = ab(i.iterate(src))?;
+            for item in items {
+                if is_set {
+                    ab(i.call(add_fn.clone(), mv.clone(), &[item]))?;
+                } else {
+                    let k = ab(i.get_member(&item, "0"))?;
+                    let v = ab(i.get_member(&item, "1"))?;
+                    ab(i.call(add_fn.clone(), mv.clone(), &[k, v]))?;
+                }
+            }
+        }
+    }
+    Ok(mv)
+}
+
+/// Map and Set share almost everything; `is_set` flips key/value handling and method names.
+fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert(name, proto.clone());
+
+    let adder: NativeFn = if is_set {
+        |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-Set"))?;
+            let key = arg(a, 0);
+            let e = i.map_data.entry(ptr).or_default();
+            if !e.iter().any(|(k, _)| same_value_zero(k, &key)) {
+                e.push((key.clone(), key));
+            }
+            Ok(this)
+        }
+    } else {
+        |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-Map"))?;
+            let (key, val) = (arg(a, 0), arg(a, 1));
+            let e = i.map_data.entry(ptr).or_default();
+            if let Some(slot) = e.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
+                slot.1 = val;
+            } else {
+                e.push((key, val));
+            }
+            Ok(this)
+        }
+    };
+    it.def_method(&proto, if is_set { "add" } else { "set" }, if is_set { 1 } else { 2 }, adder);
+    if !is_set {
+        it.def_method(&proto, "get", 1, |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-Map"))?;
+            let key = arg(a, 0);
+            Ok(i.map_data
+                .get(&ptr)
+                .and_then(|e| e.iter().find(|(k, _)| same_value_zero(k, &key)).map(|(_, v)| v.clone()))
+                .unwrap_or(Value::Undefined))
+        });
+    }
+    it.def_method(&proto, "has", 1, |i, this, a| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "has on non-collection"))?;
+        let key = arg(a, 0);
+        Ok(Value::Bool(
+            i.map_data.get(&ptr).map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key))).unwrap_or(false),
+        ))
+    });
+    it.def_method(&proto, "delete", 1, |i, this, a| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "delete on non-collection"))?;
+        let key = arg(a, 0);
+        let mut removed = false;
+        if let Some(e) = i.map_data.get_mut(&ptr) {
+            let before = e.len();
+            e.retain(|(k, _)| !same_value_zero(k, &key));
+            removed = e.len() < before;
+        }
+        Ok(Value::Bool(removed))
+    });
+    it.def_method(&proto, "clear", 0, |i, this, _| {
+        if let Some(ptr) = map_ptr(&this) {
+            if let Some(e) = i.map_data.get_mut(&ptr) {
+                e.clear();
+            }
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&proto, "forEach", 1, |i, this, a| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "forEach on non-collection"))?;
+        let cb = arg(a, 0);
+        let cb_this = arg(a, 1);
+        let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
+        for (k, v) in snap {
+            ab(i.call(cb.clone(), cb_this.clone(), &[v, k, this.clone()]))?;
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&proto, "values", 0, |i, this, _| collection_iter(i, &this, 0));
+    it.def_method(&proto, "keys", 0, |i, this, _| collection_iter(i, &this, 1));
+    it.def_method(&proto, "entries", 0, |i, this, _| collection_iter(i, &this, 2));
+
+    // `size` accessor.
+    let size_getter = it.make_native("get size", 0, |i, this, _| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "size on non-collection"))?;
+        Ok(Value::Num(i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64))
+    });
+    proto.borrow_mut().props.insert(
+        "size",
+        Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(size_getter)),
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
+    // @@iterator: Set -> values, Map -> entries.
+    if let Some(sym) = it.iterator_sym.clone() {
+        let default = if is_set { "values" } else { "entries" };
+        let f = proto.borrow().props.get(default).map(|p| p.value.clone()).unwrap();
+        proto.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(f));
+    }
+
+    let ctor = it.make_native(name, 0, ctor_fn);
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, name, Value::Obj(ctor));
+}
+
+/// WeakMap/WeakSet: like Map/Set but keys must be objects and there is no iteration/size (we do not
+/// model weakness — entries simply persist, which is unobservable to non-GC tests).
+fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert(name, proto.clone());
+    let adder: NativeFn = if is_set {
+        |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-WeakSet"))?;
+            let key = arg(a, 0);
+            if !matches!(key, Value::Obj(_)) {
+                return Err(i.make_error("TypeError", "Invalid value used in weak set"));
+            }
+            let e = i.map_data.entry(ptr).or_default();
+            if !e.iter().any(|(k, _)| same_value_zero(k, &key)) {
+                e.push((key.clone(), key));
+            }
+            Ok(this)
+        }
+    } else {
+        |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-WeakMap"))?;
+            let (key, val) = (arg(a, 0), arg(a, 1));
+            if !matches!(key, Value::Obj(_)) {
+                return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
+            }
+            let e = i.map_data.entry(ptr).or_default();
+            if let Some(slot) = e.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
+                slot.1 = val;
+            } else {
+                e.push((key, val));
+            }
+            Ok(this)
+        }
+    };
+    it.def_method(&proto, if is_set { "add" } else { "set" }, if is_set { 1 } else { 2 }, adder);
+    if !is_set {
+        it.def_method(&proto, "get", 1, |i, this, a| {
+            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-WeakMap"))?;
+            let key = arg(a, 0);
+            Ok(i.map_data
+                .get(&ptr)
+                .and_then(|e| e.iter().find(|(k, _)| same_value_zero(k, &key)).map(|(_, v)| v.clone()))
+                .unwrap_or(Value::Undefined))
+        });
+    }
+    it.def_method(&proto, "has", 1, |i, this, a| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "has on non-weak"))?;
+        let key = arg(a, 0);
+        Ok(Value::Bool(
+            i.map_data.get(&ptr).map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key))).unwrap_or(false),
+        ))
+    });
+    it.def_method(&proto, "delete", 1, |i, this, a| {
+        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "delete on non-weak"))?;
+        let key = arg(a, 0);
+        let mut removed = false;
+        if let Some(e) = i.map_data.get_mut(&ptr) {
+            let before = e.len();
+            e.retain(|(k, _)| !same_value_zero(k, &key));
+            removed = e.len() < before;
+        }
+        Ok(Value::Bool(removed))
+    });
+    let ctor = it.make_native(name, 0, ctor_fn);
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, name, Value::Obj(ctor));
+}
+
+fn install_reflect(it: &mut Interp) {
+    let r = it.new_object();
+    it.def_method(&r, "get", 2, |i, _t, a| {
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        ab(i.get_member(&arg(a, 0), &key))
+    });
+    it.def_method(&r, "set", 3, |i, _t, a| {
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        ab(i.set_member(&arg(a, 0), &key, arg(a, 2)))?;
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&r, "has", 2, |i, _t, a| {
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        match arg(a, 0) {
+            Value::Obj(o) => Ok(Value::Bool(i.has_property(&o, &key))),
+            _ => Err(i.make_error("TypeError", "Reflect.has called on non-object")),
+        }
+    });
+    it.def_method(&r, "deleteProperty", 2, |i, _t, a| {
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        if let Value::Obj(o) = arg(a, 0) {
+            let configurable = o.borrow().props.get(&key).map(|p| p.configurable).unwrap_or(true);
+            if configurable {
+                o.borrow_mut().props.remove(&key);
+                return Ok(Value::Bool(true));
+            }
+            return Ok(Value::Bool(false));
+        }
+        Err(i.make_error("TypeError", "Reflect.deleteProperty called on non-object"))
+    });
+    it.def_method(&r, "ownKeys", 1, |i, _t, a| {
+        let o = match arg(a, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Reflect.ownKeys called on non-object")),
+        };
+        // String keys first, then symbols (per spec ordering, simplified).
+        let mut out: Vec<Value> = o
+            .borrow()
+            .props
+            .keys()
+            .into_iter()
+            .filter(|k| !Interp::is_sym_key(k))
+            .map(Value::Str)
+            .collect();
+        let syms: Vec<Value> = o
+            .borrow()
+            .props
+            .keys()
+            .into_iter()
+            .filter(|k| Interp::is_sym_key(k))
+            .filter_map(|k| i.sym_from_key(&k))
+            .collect();
+        out.extend(syms);
+        Ok(i.make_array(out))
+    });
+    it.def_method(&r, "getPrototypeOf", 1, |i, _t, a| match arg(a, 0) {
+        Value::Obj(o) => Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null)),
+        _ => Err(i.make_error("TypeError", "Reflect.getPrototypeOf called on non-object")),
+    });
+    it.def_method(&r, "setPrototypeOf", 2, |_i, _t, a| {
+        if let Value::Obj(o) = arg(a, 0) {
+            o.borrow_mut().proto = match arg(a, 1) {
+                Value::Obj(p) => Some(p),
+                _ => None,
+            };
+        }
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&r, "defineProperty", 3, |i, _t, a| {
+        let o = match arg(a, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Reflect.defineProperty on non-object")),
+        };
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        let prop = ab(build_descriptor(i, &arg(a, 2)))?;
+        o.borrow_mut().props.insert(key, prop);
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&r, "apply", 3, |i, _t, a| {
+        let args = match arg(a, 2) {
+            Value::Undefined | Value::Null => Vec::new(),
+            list => ab(i.iterate(&list))?,
+        };
+        ab(i.call(arg(a, 0), arg(a, 1), &args))
+    });
+    it.def_method(&r, "construct", 2, |i, _t, a| {
+        let args = match arg(a, 1) {
+            Value::Undefined | Value::Null => Vec::new(),
+            list => ab(i.iterate(&list))?,
+        };
+        ab(i.construct(arg(a, 0), &args))
+    });
+    it.def_method(&r, "isExtensible", 1, |_i, _t, a| {
+        Ok(Value::Bool(matches!(arg(a, 0), Value::Obj(o) if o.borrow().extensible)))
+    });
+    it.def_method(&r, "preventExtensions", 1, |_i, _t, a| {
+        if let Value::Obj(o) = arg(a, 0) {
+            o.borrow_mut().extensible = false;
+        }
+        Ok(Value::Bool(true))
+    });
+    set_builtin(&it.global, "Reflect", Value::Obj(r));
+}
+
+fn install_json(it: &mut Interp) {
+    let j = it.new_object();
+    it.def_method(&j, "stringify", 3, |i, _t, args| {
+        let value = arg(args, 0);
+        let gap = match arg(args, 2) {
+            Value::Num(n) => " ".repeat((n.max(0.0) as usize).min(10)),
+            Value::Str(s) => s.chars().take(10).collect(),
+            _ => String::new(),
+        };
+        let mut seen = Vec::new();
+        match json_str(i, &value, &gap, "", &mut seen)? {
+            Some(s) => Ok(Value::from_string(s)),
+            None => Ok(Value::Undefined),
+        }
+    });
+    it.def_method(&j, "parse", 2, |i, _t, args| {
+        let text = ab(i.to_string(&arg(args, 0)))?;
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = 0;
+        let v = json_parse_value(i, &chars, &mut pos)?;
+        json_skip_ws(&chars, &mut pos);
+        if pos != chars.len() {
+            return Err(i.make_error("SyntaxError", "Unexpected non-whitespace after JSON"));
+        }
+        Ok(v)
+    });
+    set_builtin(&it.global, "JSON", Value::Obj(j));
+}
+
+fn json_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_str(
+    i: &mut Interp,
+    value: &Value,
+    gap: &str,
+    indent: &str,
+    seen: &mut Vec<usize>,
+) -> Result<Option<String>, Value> {
+    // Honor a `toJSON` method.
+    let value = if matches!(value, Value::Obj(_)) {
+        let tojson = ab(i.get_member(value, "toJSON"))?;
+        if tojson.is_callable() {
+            ab(i.call(tojson, value.clone(), &[]))?
+        } else {
+            value.clone()
+        }
+    } else {
+        value.clone()
+    };
+    match &value {
+        Value::Undefined | Value::Sym(_) => Ok(None),
+        Value::Null => Ok(Some("null".to_string())),
+        Value::Bool(b) => Ok(Some(if *b { "true" } else { "false" }.to_string())),
+        Value::Num(n) => Ok(Some(if n.is_finite() { i.num_to_str(*n) } else { "null".to_string() })),
+        Value::Str(s) => Ok(Some(json_quote(s))),
+        Value::Obj(o) => {
+            if !matches!(o.borrow().call, Callable::None) {
+                return Ok(None); // functions are omitted
+            }
+            let ptr = Rc::as_ptr(o) as usize;
+            if seen.contains(&ptr) {
+                return Err(i.make_error("TypeError", "Converting circular structure to JSON"));
+            }
+            seen.push(ptr);
+            let new_indent = format!("{indent}{gap}");
+            let is_array = matches!(o.borrow().exotic, Exotic::Array);
+            let result = if is_array {
+                let len = i.array_length(o);
+                let mut items = Vec::with_capacity(len);
+                for k in 0..len {
+                    let elem = ab(i.get_member(&value, &k.to_string()))?;
+                    items.push(json_str(i, &elem, gap, &new_indent, seen)?.unwrap_or_else(|| "null".to_string()));
+                }
+                join_json("[", "]", items, gap, &new_indent, indent)
+            } else {
+                let keys: Vec<Rc<str>> = o
+                    .borrow()
+                    .props
+                    .iter()
+                    .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                let mut parts = Vec::new();
+                for k in keys {
+                    let v = ab(i.get_member(&value, &k))?;
+                    if let Some(vs) = json_str(i, &v, gap, &new_indent, seen)? {
+                        let colon = if gap.is_empty() { ":" } else { ": " };
+                        parts.push(format!("{}{colon}{vs}", json_quote(&k)));
+                    }
+                }
+                join_json("{", "}", parts, gap, &new_indent, indent)
+            };
+            seen.pop();
+            Ok(Some(result))
+        }
+    }
+}
+
+fn join_json(open: &str, close: &str, parts: Vec<String>, gap: &str, inner: &str, outer: &str) -> String {
+    if parts.is_empty() {
+        format!("{open}{close}")
+    } else if gap.is_empty() {
+        format!("{open}{}{close}", parts.join(","))
+    } else {
+        format!("{open}\n{inner}{}\n{outer}{close}", parts.join(&format!(",\n{inner}")))
+    }
+}
+
+fn json_skip_ws(chars: &[char], pos: &mut usize) {
+    while *pos < chars.len() && matches!(chars[*pos], ' ' | '\t' | '\n' | '\r') {
+        *pos += 1;
+    }
+}
+
+fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<Value, Value> {
+    json_skip_ws(chars, pos);
+    let c = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Unexpected end of JSON input"))?;
+    match c {
+        '{' => {
+            *pos += 1;
+            let obj = i.new_object();
+            json_skip_ws(chars, pos);
+            if chars.get(*pos) == Some(&'}') {
+                *pos += 1;
+                return Ok(Value::Obj(obj));
+            }
+            loop {
+                json_skip_ws(chars, pos);
+                if chars.get(*pos) != Some(&'"') {
+                    return Err(i.make_error("SyntaxError", "Expected string key in JSON object"));
+                }
+                let key = json_parse_string(i, chars, pos)?;
+                json_skip_ws(chars, pos);
+                if chars.get(*pos) != Some(&':') {
+                    return Err(i.make_error("SyntaxError", "Expected ':' in JSON object"));
+                }
+                *pos += 1;
+                let v = json_parse_value(i, chars, pos)?;
+                set_data(&obj, &key, v);
+                json_skip_ws(chars, pos);
+                match chars.get(*pos) {
+                    Some(',') => {
+                        *pos += 1;
+                    }
+                    Some('}') => {
+                        *pos += 1;
+                        break;
+                    }
+                    _ => return Err(i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")),
+                }
+            }
+            Ok(Value::Obj(obj))
+        }
+        '[' => {
+            *pos += 1;
+            let mut items = Vec::new();
+            json_skip_ws(chars, pos);
+            if chars.get(*pos) == Some(&']') {
+                *pos += 1;
+                return Ok(i.make_array(items));
+            }
+            loop {
+                items.push(json_parse_value(i, chars, pos)?);
+                json_skip_ws(chars, pos);
+                match chars.get(*pos) {
+                    Some(',') => {
+                        *pos += 1;
+                    }
+                    Some(']') => {
+                        *pos += 1;
+                        break;
+                    }
+                    _ => return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array")),
+                }
+            }
+            Ok(i.make_array(items))
+        }
+        '"' => Ok(Value::from_string(json_parse_string(i, chars, pos)?)),
+        't' => json_parse_lit(i, chars, pos, "true", Value::Bool(true)),
+        'f' => json_parse_lit(i, chars, pos, "false", Value::Bool(false)),
+        'n' => json_parse_lit(i, chars, pos, "null", Value::Null),
+        '-' | '0'..='9' => {
+            let start = *pos;
+            if chars[*pos] == '-' {
+                *pos += 1;
+            }
+            while *pos < chars.len() && matches!(chars[*pos], '0'..='9' | '.' | 'e' | 'E' | '+' | '-') {
+                *pos += 1;
+            }
+            let s: String = chars[start..*pos].iter().collect();
+            s.parse::<f64>()
+                .map(Value::Num)
+                .map_err(|_| i.make_error("SyntaxError", "Invalid number in JSON"))
+        }
+        _ => Err(i.make_error("SyntaxError", "Unexpected token in JSON")),
+    }
+}
+
+fn json_parse_lit(
+    i: &mut Interp,
+    chars: &[char],
+    pos: &mut usize,
+    lit: &str,
+    val: Value,
+) -> Result<Value, Value> {
+    for expect in lit.chars() {
+        if chars.get(*pos) != Some(&expect) {
+            return Err(i.make_error("SyntaxError", "Invalid literal in JSON"));
+        }
+        *pos += 1;
+    }
+    Ok(val)
+}
+
+fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<String, Value> {
+    *pos += 1; // opening quote
+    let mut s = String::new();
+    loop {
+        let c = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Unterminated JSON string"))?;
+        *pos += 1;
+        match c {
+            '"' => return Ok(s),
+            '\\' => {
+                let e = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Bad escape in JSON"))?;
+                *pos += 1;
+                match e {
+                    '"' => s.push('"'),
+                    '\\' => s.push('\\'),
+                    '/' => s.push('/'),
+                    'n' => s.push('\n'),
+                    't' => s.push('\t'),
+                    'r' => s.push('\r'),
+                    'b' => s.push('\u{0008}'),
+                    'f' => s.push('\u{000C}'),
+                    'u' => {
+                        let hex: String = chars[*pos..(*pos + 4).min(chars.len())].iter().collect();
+                        *pos += 4;
+                        let n = u32::from_str_radix(&hex, 16)
+                            .map_err(|_| i.make_error("SyntaxError", "Bad \\u escape in JSON"))?;
+                        s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+                    }
+                    _ => return Err(i.make_error("SyntaxError", "Bad escape in JSON")),
+                }
+            }
+            c => s.push(c),
+        }
+    }
 }
 
 fn global_fn(it: &Interp, name: &str, len: usize, f: NativeFn) {
@@ -771,7 +1387,7 @@ fn install_array(it: &mut Interp) {
         array_flatten(i, &arr, 1, &mut out)?;
         Ok(i.make_array(out))
     });
-    it.def_method(&ap, "splice", 2, |i, this, args| array_splice(i, this, args));
+    it.def_method(&ap, "splice", 2, array_splice);
     it.def_method(&ap, "sort", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "sort on non-object"))?;
         let len = ab(i.checked_array_len(&o))?;

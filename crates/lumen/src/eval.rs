@@ -593,7 +593,7 @@ impl Interp {
         self.set_member(&g, name, value)
     }
 
-    fn has_property(&self, obj: &Gc, key: &str) -> bool {
+    pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
         let mut cur = Some(obj.clone());
         while let Some(o) = cur {
             if o.borrow().props.contains(key) {

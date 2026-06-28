@@ -229,6 +229,38 @@ fn iterator_protocol() {
 }
 
 #[test]
+fn json_and_reflect() {
+    assert_eq!(run("JSON.stringify({a:1,b:[2,3],c:'x'})"), "{\"a\":1,\"b\":[2,3],\"c\":\"x\"}");
+    assert_eq!(run("JSON.stringify([1,null,true,'s'])"), "[1,null,true,\"s\"]");
+    assert_eq!(run("JSON.stringify({a:undefined,b:function(){},c:1})"), "{\"c\":1}");
+    assert_eq!(run("JSON.parse('{\"a\":1,\"b\":[2,3]}').b[1]"), "3");
+    assert_eq!(run("JSON.parse('\"hi\\\\n\"').length"), "3");
+    assert_eq!(run("JSON.stringify({a:1}, null, 2)"), "{\n  \"a\": 1\n}");
+    assert_eq!(throws("var o={}; o.self=o; JSON.stringify(o)"), "TypeError");
+    assert_eq!(run("Reflect.has({a:1}, 'a')"), "true");
+    assert_eq!(run("Reflect.get({x:7}, 'x')"), "7");
+    assert_eq!(run("var o={}; Reflect.set(o,'k',9); o.k"), "9");
+    assert_eq!(run("Reflect.ownKeys({a:1,b:2}).join(',')"), "a,b");
+    assert_eq!(run("Reflect.apply((a,b)=>a+b, null, [3,4])"), "7");
+}
+
+#[test]
+fn map_and_set() {
+    assert_eq!(run("var m = new Map(); m.set('a',1).set('b',2); m.get('b')"), "2");
+    assert_eq!(run("var m = new Map([['x',10],['y',20]]); m.size"), "2");
+    assert_eq!(run("var m = new Map(); m.set(1,'a'); m.has(1)"), "true");
+    assert_eq!(run("var m = new Map([['a',1]]); m.delete('a'); m.size"), "0");
+    assert_eq!(run("var m = new Map([['a',1],['b',2]]); [...m.keys()].join(',')"), "a,b");
+    assert_eq!(run("var m = new Map([['a',1],['b',2]]); var s=0; m.forEach(v=>s+=v); s"), "3");
+    assert_eq!(run("var s = new Set([1,2,2,3,3,3]); s.size"), "3");
+    assert_eq!(run("var s = new Set(); s.add(1).add(1); s.has(1) && s.size===1"), "true");
+    assert_eq!(run("[...new Set([3,1,2])].join(',')"), "3,1,2");
+    assert_eq!(run("var w = new WeakMap(); var k={}; w.set(k,5); w.get(k)"), "5");
+    assert_eq!(throws("new WeakMap().set('str', 1)"), "TypeError"); // non-object key
+    assert_eq!(run("NaN === NaN ? 'x' : (new Set([NaN]).has(NaN) ? 'svz' : 'no')"), "svz");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
