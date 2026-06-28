@@ -637,3 +637,14 @@ fn array_bycopy_groupby() {
     assert_eq!(run("var g=Object.groupBy([1,2,3,4],x=>x%2?'odd':'even'); g.odd.join(',')+'|'+g.even.join(',')"), "1,3|2,4");
     assert_eq!(run("var r=Promise.withResolvers(); typeof r.promise+typeof r.resolve+typeof r.reject"), "objectfunctionfunction");
 }
+
+#[test]
+fn resizable_arraybuffer() {
+    assert_eq!(run("new ArrayBuffer(8).resizable"), "false");
+    assert_eq!(run("new ArrayBuffer(8, {maxByteLength:16}).resizable"), "true");
+    assert_eq!(run("new ArrayBuffer(8, {maxByteLength:16}).maxByteLength"), "16");
+    assert_eq!(run("var b=new ArrayBuffer(4,{maxByteLength:16}); b.resize(12); b.byteLength"), "12");
+    assert_eq!(throws("new ArrayBuffer(4).resize(8)"), "TypeError"); // not resizable
+    assert_eq!(throws("new ArrayBuffer(4,{maxByteLength:8}).resize(16)"), "RangeError");
+    assert_eq!(run("var b=new ArrayBuffer(4); var c=b.transfer(); b.detached+','+c.byteLength"), "true,4");
+}

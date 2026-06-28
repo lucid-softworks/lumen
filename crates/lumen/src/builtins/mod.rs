@@ -596,6 +596,9 @@ fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
     let p = Rc::as_ptr(&obj) as usize;
     i.array_buffers.insert(p, vec![0u8; byte_len]);
     set_internal(&obj, "byteLength", Value::Num(byte_len as f64));
+    set_internal(&obj, "maxByteLength", Value::Num(byte_len as f64));
+    set_internal(&obj, "resizable", Value::Bool(false));
+    set_internal(&obj, "detached", Value::Bool(false));
     (Value::Obj(obj), p)
 }
 
@@ -618,12 +621,64 @@ fn install_array_buffer(it: &mut Interp) {
         }
         Ok(bv)
     });
+    it.def_method(&proto, "resize", 1, |i, this, a| {
+        let o = this.as_obj().cloned().ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        let rv = ab(i.get_member(&this, "resizable"))?;
+        if !i.to_boolean(&rv) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is not resizable"));
+        }
+        let mv = ab(i.get_member(&this, "maxByteLength"))?;
+        let max = ab(i.to_number(&mv))? as usize;
+        let new_len = ab(i.to_number(&arg(a, 0)))?;
+        if !new_len.is_finite() || new_len < 0.0 || new_len as usize > max {
+            return Err(i.make_error("RangeError", "ArrayBuffer resize out of range"));
+        }
+        let n = new_len as usize;
+        if let Some(buf) = i.array_buffers.get_mut(&(Rc::as_ptr(&o) as usize)) {
+            buf.resize(n, 0);
+        }
+        set_internal(&o, "byteLength", Value::Num(n as f64));
+        Ok(Value::Undefined)
+    });
+    it.def_method(&proto, "transfer", 1, |i, this, a| {
+        let o = this.as_obj().cloned().ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        let bytes = i.array_buffers.get(&(Rc::as_ptr(&o) as usize)).cloned().unwrap_or_default();
+        let new_len = match arg(a, 0) {
+            Value::Undefined => bytes.len(),
+            v => ab(i.to_number(&v))?.max(0.0) as usize,
+        };
+        let (bv, bp) = make_array_buffer(i, new_len);
+        if let Some(buf) = i.array_buffers.get_mut(&bp) {
+            let n = bytes.len().min(new_len);
+            buf[..n].copy_from_slice(&bytes[..n]);
+        }
+        // Detach the source.
+        i.array_buffers.insert(Rc::as_ptr(&o) as usize, Vec::new());
+        set_internal(&o, "byteLength", Value::Num(0.0));
+        set_internal(&o, "detached", Value::Bool(true));
+        Ok(bv)
+    });
     let ctor = it.make_native("ArrayBuffer", 1, |i, _t, a| {
         let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
         if len > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "Invalid ArrayBuffer length"));
         }
-        Ok(make_array_buffer(i, len).0)
+        let (bv, _) = make_array_buffer(i, len);
+        // The options bag's maxByteLength makes the buffer resizable.
+        if let Value::Obj(_) = arg(a, 1) {
+            let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;
+            if !matches!(mbl, Value::Undefined) {
+                let m = ab(i.to_number(&mbl))?;
+                if !m.is_finite() || (m as usize) < len || m as usize > MAX_ARRAY_OP_LEN {
+                    return Err(i.make_error("RangeError", "Invalid maxByteLength"));
+                }
+                if let Value::Obj(o) = &bv {
+                    set_internal(o, "maxByteLength", Value::Num(m));
+                    set_internal(o, "resizable", Value::Bool(true));
+                }
+            }
+        }
+        Ok(bv)
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
