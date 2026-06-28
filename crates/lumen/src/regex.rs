@@ -165,6 +165,7 @@ impl Regex {
                 input,
                 caps: vec![None; 2 * (self.ngroups + 1)],
                 steps: 0,
+                depth: 0,
             };
             if m.run(&self.prog, 0, from) {
                 let mut out = Vec::with_capacity(self.ngroups + 1);
@@ -632,11 +633,17 @@ fn clone_class(cc: &CharClass) -> CharClass {
 // Backtracking matcher
 // ---------------------------------------------------------------------------------------------
 
+/// Recursion-depth ceiling for the backtracking matcher (separate from the step budget): a long
+/// input against a greedy quantifier recurses once per consumed char, which would overflow the
+/// native stack on big inputs.
+const MAX_MATCH_DEPTH: u32 = 3000;
+
 struct Matcher<'a> {
     re: &'a Regex,
     input: &'a [char],
     caps: Vec<Option<usize>>,
     steps: u64,
+    depth: u32,
 }
 
 impl Matcher<'_> {
@@ -652,9 +659,16 @@ impl Matcher<'_> {
 
     fn run(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
         self.steps += 1;
-        if self.steps > STEP_LIMIT {
+        if self.steps > STEP_LIMIT || self.depth > MAX_MATCH_DEPTH {
             return false;
         }
+        self.depth += 1;
+        let r = self.run_inner(prog, pc, pos);
+        self.depth -= 1;
+        r
+    }
+
+    fn run_inner(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
         match &prog[pc] {
             Inst::Match => true,
             Inst::Char(c) => {

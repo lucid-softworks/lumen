@@ -2824,6 +2824,35 @@ fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
     Value::Obj(obj)
 }
 
+/// `next()` for a generator object built by `make_generator`: walk the buffered values, then throw
+/// any stored error, then return `{ value: <return>, done: true }`.
+pub(crate) fn generator_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let arr = ab(i.get_member(&this, "__gen_arr"))?;
+    let idx_v = ab(i.get_member(&this, "__gen_idx"))?;
+    let idx = ab(i.to_number(&idx_v))? as usize;
+    let len = match &arr {
+        Value::Obj(o) => i.array_length(o),
+        _ => 0,
+    };
+    let result = i.new_object();
+    if idx < len {
+        let v = ab(i.get_member(&arr, &idx.to_string()))?;
+        ab(i.set_member(&this, "__gen_idx", Value::Num((idx + 1) as f64)))?;
+        set_data(&result, "value", v);
+        set_data(&result, "done", Value::Bool(false));
+        return Ok(Value::Obj(result));
+    }
+    let has_err = ab(i.get_member(&this, "__gen_haserr"))?;
+    if i.to_boolean(&has_err) {
+        ab(i.set_member(&this, "__gen_haserr", Value::Bool(false)))?;
+        return Err(ab(i.get_member(&this, "__gen_err"))?);
+    }
+    let ret = ab(i.get_member(&this, "__gen_ret"))?;
+    set_data(&result, "value", ret);
+    set_data(&result, "done", Value::Bool(true));
+    Ok(Value::Obj(result))
+}
+
 fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
     let target = ab(i.get_member(&this, "__ai_target"))?;
     let idx_v = ab(i.get_member(&this, "__ai_index"))?;

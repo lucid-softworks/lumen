@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0 };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -31,6 +31,10 @@ struct Parser {
     pos: usize,
     strict: bool,
     depth: u32,
+    /// Whether the body currently being parsed is a generator / async function — controls whether
+    /// `yield` / `await` are keywords here.
+    in_generator: bool,
+    in_async: bool,
 }
 
 impl Parser {
@@ -125,6 +129,12 @@ impl Parser {
             }
             Tok::Keyword("function") => {
                 let f = self.parse_function(false)?;
+                Ok(Stmt::FuncDecl(Rc::new(f)))
+            }
+            // `async function f(){}` declaration (async is a contextual keyword).
+            Tok::Ident(w) if w == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) => {
+                self.advance();
+                let f = self.parse_function(true)?;
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
             Tok::Keyword("class") => {
@@ -512,6 +522,10 @@ impl Parser {
     }
 
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
+        // `yield` / `yield*` (only a keyword inside a generator body).
+        if self.in_generator && self.is_ident_word("yield") {
+            return self.parse_yield();
+        }
         // Arrow functions: `ident =>` or `( ... ) =>`.
         if let Some(arrow) = self.try_parse_arrow()? {
             return Ok(arrow);
@@ -529,6 +543,19 @@ impl Parser {
             }
         }
         Ok(left)
+    }
+
+    fn parse_yield(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // yield
+        let delegate = self.eat_punct("*");
+        // A bare `yield` has no argument (before a line terminator or a token that can't start one).
+        let no_arg = (!delegate && self.nl_before())
+            || matches!(
+                self.cur(),
+                Tok::Punct(";" | ")" | "]" | "}" | "," | ":") | Tok::Eof
+            );
+        let arg = if no_arg { None } else { Some(Box::new(self.parse_assign()?)) };
+        Ok(Expr::Yield { delegate, arg })
     }
 
     fn parse_cond(&mut self) -> Result<Expr, ParseError> {
@@ -602,6 +629,12 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
+        // `await expr` (only a keyword inside an async function body).
+        if self.in_async && self.is_ident_word("await") {
+            self.advance();
+            let arg = self.parse_unary()?;
+            return Ok(Expr::Await(Box::new(arg)));
+        }
         let op = match self.cur() {
             Tok::Punct(p @ ("+" | "-" | "!" | "~")) => Some(*p),
             Tok::Keyword(k @ ("typeof" | "void" | "delete")) => Some(*k),
@@ -781,7 +814,7 @@ impl Parser {
             Tok::Ident(name) if name == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
-                let f = self.parse_function(false)?;
+                let f = self.parse_function(true)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
             Tok::Ident(name) => {
@@ -814,7 +847,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async };
                     sub.parse_expr()?
                 }
             };
@@ -935,9 +968,9 @@ impl Parser {
 
     // ----- functions --------------------------------------------------------------------------
 
-    fn parse_function(&mut self, _is_method: bool) -> Result<Function, ParseError> {
+    fn parse_function(&mut self, is_async: bool) -> Result<Function, ParseError> {
         self.eat_kw("function");
-        self.eat_punct("*"); // generators parse but are not yet executed
+        let is_generator = self.eat_punct("*");
         let name = if let Tok::Ident(n) = self.cur().clone() {
             self.advance();
             Some(n)
@@ -945,7 +978,12 @@ impl Parser {
             None
         };
         let params = self.parse_params()?;
+        let (sg, sa) = (self.in_generator, self.in_async);
+        self.in_generator = is_generator;
+        self.in_async = is_async;
         let (body, is_strict) = self.parse_function_body()?;
+        self.in_generator = sg;
+        self.in_async = sa;
         Ok(Function {
             name,
             params,
@@ -953,6 +991,8 @@ impl Parser {
             is_arrow: false,
             is_strict: is_strict || self.strict,
             expr_body: false,
+            is_generator,
+            is_async,
         })
     }
 
@@ -1010,16 +1050,16 @@ impl Parser {
             kind = if self.is_ident_word("get") { MemberKind::Get } else { MemberKind::Set };
             self.advance();
         }
-        // `async` and generator `*` markers are accepted but not yet executed specially.
-        if self.is_ident_word("async") && !self.next_is_member_terminator(1) {
+        let is_async = self.is_ident_word("async") && !self.next_is_member_terminator(1);
+        if is_async {
             self.advance();
         }
-        let _generator = self.eat_punct("*");
+        let is_generator = self.eat_punct("*");
 
         let key = self.parse_prop_key()?;
 
         if self.is_punct("(") {
-            let func = self.parse_method_function()?;
+            let func = self.parse_method_function_kind(is_generator, is_async)?;
             let kind = if kind == MemberKind::Method && !is_static && key_is(&key, "constructor") {
                 MemberKind::Constructor
             } else {
@@ -1035,8 +1075,21 @@ impl Parser {
     }
 
     fn parse_method_function(&mut self) -> Result<Function, ParseError> {
+        self.parse_method_function_kind(false, false)
+    }
+
+    fn parse_method_function_kind(
+        &mut self,
+        is_generator: bool,
+        is_async: bool,
+    ) -> Result<Function, ParseError> {
         let params = self.parse_params()?;
+        let (sg, sa) = (self.in_generator, self.in_async);
+        self.in_generator = is_generator;
+        self.in_async = is_async;
         let (body, is_strict) = self.parse_function_body()?;
+        self.in_generator = sg;
+        self.in_async = sa;
         Ok(Function {
             name: None,
             params,
@@ -1044,6 +1097,8 @@ impl Parser {
             is_arrow: false,
             is_strict: is_strict || self.strict,
             expr_body: false,
+            is_generator,
+            is_async,
         })
     }
 
@@ -1084,52 +1139,73 @@ impl Parser {
     // ----- arrow functions --------------------------------------------------------------------
 
     fn try_parse_arrow(&mut self) -> Result<Option<Expr>, ParseError> {
+        // Optional `async` prefix (on the same line) for an async arrow.
+        let async_arrow = self.is_ident_word("async")
+            && !self.toks.get(self.pos + 1).map(|t| t.nl_before).unwrap_or(true)
+            && matches!(self.peek_kind(1), Tok::Ident(_) | Tok::Punct("("));
+        let base = if async_arrow { 1 } else { 0 };
+
         // `ident => ...`
-        if let Tok::Ident(name) = self.cur().clone() {
-            if matches!(self.peek_kind(1), Tok::Punct("=>")) && !self.toks[self.pos + 1].nl_before {
-                self.advance(); // ident
+        if let Tok::Ident(name) = self.peek_kind(base) {
+            if matches!(self.peek_kind(base + 1), Tok::Punct("=>"))
+                && !self.toks[self.pos + base + 1].nl_before
+            {
+                for _ in 0..=base {
+                    self.advance(); // (async) ident
+                }
                 self.advance(); // =>
                 let params = vec![Param { pattern: Pattern::Ident(name), default: None, rest: false }];
-                return Ok(Some(self.finish_arrow(params)?));
+                return Ok(Some(self.finish_arrow(params, async_arrow)?));
             }
         }
         // `( params ) => ...`
-        if self.is_punct("(") {
-            if let Some(close) = self.matching_paren(self.pos) {
+        if matches!(self.peek_kind(base), Tok::Punct("(")) {
+            if let Some(close) = self.matching_paren(self.pos + base) {
                 if matches!(self.toks.get(close + 1).map(|t| &t.kind), Some(Tok::Punct("=>")))
                     && !self.toks[close + 1].nl_before
                 {
+                    if async_arrow {
+                        self.advance();
+                    }
                     let params = self.parse_params()?;
                     self.expect_punct("=>")?;
-                    return Ok(Some(self.finish_arrow(params)?));
+                    return Ok(Some(self.finish_arrow(params, async_arrow)?));
                 }
             }
         }
         Ok(None)
     }
 
-    fn finish_arrow(&mut self, params: Vec<Param>) -> Result<Expr, ParseError> {
-        if self.is_punct("{") {
+    fn finish_arrow(&mut self, params: Vec<Param>, is_async: bool) -> Result<Expr, ParseError> {
+        let sa = self.in_async;
+        self.in_async = is_async;
+        let result = if self.is_punct("{") {
             let (body, is_strict) = self.parse_function_body()?;
-            Ok(Expr::Func(Rc::new(Function {
+            Function {
                 name: None,
                 params,
                 body,
                 is_arrow: true,
                 is_strict: is_strict || self.strict,
                 expr_body: false,
-            })))
+                is_generator: false,
+                is_async,
+            }
         } else {
             let expr = self.parse_assign()?;
-            Ok(Expr::Func(Rc::new(Function {
+            Function {
                 name: None,
                 params,
                 body: vec![Stmt::Return(Some(expr))],
                 is_arrow: true,
                 is_strict: self.strict,
                 expr_body: true,
-            })))
-        }
+                is_generator: false,
+                is_async,
+            }
+        };
+        self.in_async = sa;
+        Ok(Expr::Func(Rc::new(result)))
     }
 
     /// Index of the `)` matching the `(` at `open`, scanning balanced brackets.

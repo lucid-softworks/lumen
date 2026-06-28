@@ -122,6 +122,9 @@ pub struct Interp {
     pub promises: HashMap<usize, PromiseState>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
     pub microtasks: std::collections::VecDeque<Job>,
+    /// When a generator body is being run eagerly, `yield`ed values are collected here instead of
+    /// suspending (lumen has no coroutine support — see `run_generator`).
+    pub yield_buffer: Option<Vec<Value>>,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -155,6 +158,10 @@ pub struct ClassInfo {
 /// Recursion ceiling for the interpreter. Paired with the large worker-thread stacks the runner
 /// uses; beyond this we raise "Maximum call stack size exceeded" (a RangeError).
 pub const MAX_EVAL_DEPTH: u32 = 1500;
+
+/// Per-test object-allocation ceiling (≈ a few hundred MB; lumen has no GC). Beyond this, `call`
+/// throws a RangeError so a runaway allocation loop fails instead of exhausting RAM.
+pub const MAX_ALLOCS: u64 = 3_000_000;
 
 /// Memory safety valves. lumen has no garbage collector and several built-ins iterate/allocate in
 /// proportion to a user-controlled `length`, so without these a single adversarial test (e.g.
@@ -204,7 +211,9 @@ impl Interp {
             proxies: HashMap::new(),
             promises: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
+            yield_buffer: None,
         };
+        crate::value::reset_alloc_count();
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
         let g = Value::Obj(interp.global.clone());
@@ -310,6 +319,29 @@ impl Interp {
             }
             b.props.insert("length", Property::data(Value::Num(len as f64), true, false, false));
         }
+        Value::Obj(obj)
+    }
+
+    /// Build a generator object (an iterator) over an eagerly-collected `buffer`, ending with the
+    /// `return` value, or throwing `thrown` once the buffer is exhausted.
+    fn make_generator(&mut self, buffer: Vec<Value>, ret: Value, thrown: Option<Value>) -> Value {
+        let arr = self.make_array(buffer);
+        let proto = self
+            .extra_protos
+            .get("%IteratorPrototype%")
+            .cloned()
+            .or_else(|| Some(self.object_proto.clone()));
+        let obj = Object::new(proto);
+        {
+            let mut b = obj.borrow_mut();
+            let ro = |v: Value| Property::data(v, true, false, false);
+            b.props.insert("__gen_arr", ro(arr));
+            b.props.insert("__gen_idx", ro(Value::Num(0.0)));
+            b.props.insert("__gen_ret", ro(ret));
+            b.props.insert("__gen_haserr", ro(Value::Bool(thrown.is_some())));
+            b.props.insert("__gen_err", ro(thrown.unwrap_or(Value::Undefined)));
+        }
+        self.def_method(&obj, "next", 0, crate::builtins::generator_next);
         Value::Obj(obj)
     }
 
@@ -607,6 +639,10 @@ impl Interp {
             self.depth -= 1;
             return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
         }
+        if crate::value::alloc_count() > MAX_ALLOCS {
+            self.depth -= 1;
+            return Err(self.throw("RangeError", "allocation limit exceeded"));
+        }
         let r = self.call_inner(callee, this, args);
         self.depth -= 1;
         r
@@ -687,7 +723,16 @@ impl Interp {
 
         let saved_strict = self.strict;
         self.strict = func.is_strict;
-        self.hoist(&func.body, &scope, true);
+
+        // Generators run eagerly into a yield buffer (lumen has no coroutines); see run_generator.
+        if func.is_generator {
+            let gen = self.run_generator(func, &scope);
+            self.strict = saved_strict;
+            return gen;
+        }
+
+        // Async functions: run synchronously (await unwraps settled promises), then wrap the result
+        // in a fulfilled/rejected promise.
         let mut result = Ok(Value::Undefined);
         for stmt in &func.body {
             match self.exec_stmt(stmt, &scope) {
@@ -703,7 +748,44 @@ impl Interp {
             }
         }
         self.strict = saved_strict;
+        if func.is_async {
+            let promise = self.new_promise();
+            match result {
+                Ok(v) => self.resolve_promise(&promise, v),
+                Err(Abrupt::Throw(e)) => self.reject_promise(&promise, e),
+                Err(_) => {}
+            }
+            return Ok(promise);
+        }
         result
+    }
+
+    /// Run a generator body eagerly, collecting all `yield`ed values, and return a generator object
+    /// (an iterator) over them ending with the `return` value. This is an approximation — side
+    /// effects happen up-front and `next(v)` arguments are ignored — but covers many simple cases.
+    fn run_generator(&mut self, func: &Rc<Function>, scope: &Env) -> Result<Value, Abrupt> {
+        let saved = self.yield_buffer.take();
+        self.yield_buffer = Some(Vec::new());
+        self.hoist(&func.body, scope, true);
+        let mut ret = Value::Undefined;
+        let mut thrown: Option<Value> = None;
+        for stmt in &func.body {
+            match self.exec_stmt(stmt, scope) {
+                Ok(_) => {}
+                Err(Abrupt::Return(v)) => {
+                    ret = v;
+                    break;
+                }
+                Err(Abrupt::Throw(e)) => {
+                    thrown = Some(e);
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        let buffer = self.yield_buffer.take().unwrap_or_default();
+        self.yield_buffer = saved;
+        Ok(self.make_generator(buffer, ret, thrown))
     }
 
     fn bind_params(&mut self, params: &[Param], args: &[Value], scope: &Env) -> Result<(), Abrupt> {

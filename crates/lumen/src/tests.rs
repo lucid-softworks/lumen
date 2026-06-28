@@ -373,8 +373,37 @@ fn promises() {
 }
 
 #[test]
+fn generators() {
+    assert_eq!(run("function* g(){ yield 1; yield 2; yield 3; } [...g()].join(',')"), "1,2,3");
+    assert_eq!(run("function* g(){ yield 1; yield 2; } var it = g(); it.next().value + ',' + it.next().value"), "1,2");
+    assert_eq!(run("function* g(){ yield 1; } var it=g(); it.next(); it.next().done"), "true");
+    assert_eq!(run("function* g(){ for (let i=0;i<3;i++) yield i*i; } [...g()].join(',')"), "0,1,4");
+    assert_eq!(run("function* g(){ yield* [1,2]; yield 3; } [...g()].join(',')"), "1,2,3");
+    assert_eq!(run("function* g(){ yield 1; return 99; } var it=g(); it.next(); var r=it.next(); r.value+':'+r.done"), "99:true");
+    assert_eq!(run("let s=0; function* g(){ yield 10; yield 20; } for (const x of g()) s+=x; s"), "30");
+    assert_eq!(run("class C { *items(){ yield 'a'; yield 'b'; } } [...new C().items()].join(',')"), "a,b");
+}
+
+#[test]
+fn async_functions() {
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    assert_eq!(run("async function f(){ return 5; } typeof f().then"), "function"); // returns a promise
+    assert_eq!(after("var r; async function f(){ return 7; } f().then(v=>{r=v;});", "r"), "7");
+    assert_eq!(after("var r; async function f(){ return await Promise.resolve(9); } f().then(v=>{r=v;});", "r"), "9");
+    assert_eq!(after("var r; async function f(){ try { await Promise.reject('e'); } catch(x){ return 'caught'; } } f().then(v=>{r=v;});", "r"), "caught");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
+
 
 

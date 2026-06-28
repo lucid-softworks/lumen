@@ -124,6 +124,10 @@ pub enum Expr {
     Object(Vec<PropDef>),
     Func(Rc<Function>),
     Class(Rc<Class>),
+    /// `yield expr` / `yield* expr` (only inside a generator).
+    Yield { delegate: bool, arg: Option<P<Expr>> },
+    /// `await expr` (only inside an async function).
+    Await(P<Expr>),
     /// The bare `super` keyword (only valid as `super(...)` or `super.x` / `super[x]`).
     Super,
     Unary { op: &'static str, arg: P<Expr> },
@@ -175,6 +179,8 @@ pub struct Function {
     pub is_strict: bool,
     /// Arrow with an expression body (`x => x+1`): the single statement is a synthetic `return`.
     pub expr_body: bool,
+    pub is_generator: bool,
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]

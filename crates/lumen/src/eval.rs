@@ -273,6 +273,11 @@ impl Interp {
         mut step: impl FnMut(&mut Interp, &Env) -> Result<LoopStep, Abrupt>,
     ) -> Completion {
         loop {
+            // Bound runaway allocation in tight loops (`for(;;){ x = {}; }`) — `call` alone misses
+            // loops that never call a function.
+            if crate::value::alloc_count() > crate::interpreter::MAX_ALLOCS {
+                return Err(self.throw("RangeError", "allocation limit exceeded"));
+            }
             match step(self, env) {
                 Ok(LoopStep::Continue) => {}
                 Ok(LoopStep::Done) => return Ok(Value::Undefined),
@@ -621,6 +626,33 @@ impl Interp {
             Expr::Object(props) => self.eval_object(props, env),
             Expr::Func(func) => Ok(self.make_function(func.clone(), env.clone())),
             Expr::Class(class) => self.eval_class(class, env),
+            Expr::Yield { delegate, arg } => {
+                let value = match arg {
+                    Some(e) => self.eval(e, env)?,
+                    None => Value::Undefined,
+                };
+                if self.yield_buffer.is_none() {
+                    return Err(self.throw("SyntaxError", "yield outside a generator"));
+                }
+                // Past the buffer cap, abort the body (an infinite generator can't be modeled
+                // eagerly). The thrown error stops execution and surfaces from the generator.
+                if self.yield_buffer.as_ref().map(|b| b.len()).unwrap_or(0) >= 5_000 {
+                    return Err(self.throw("RangeError", "generator produced too many values"));
+                }
+                if *delegate {
+                    let items = self.iterate(&value)?;
+                    if let Some(buf) = &mut self.yield_buffer {
+                        buf.extend(items.into_iter().take(5_000 - buf.len()));
+                    }
+                } else if let Some(buf) = &mut self.yield_buffer {
+                    buf.push(value);
+                }
+                Ok(Value::Undefined)
+            }
+            Expr::Await(e) => {
+                let v = self.eval(e, env)?;
+                self.await_value(v)
+            }
             Expr::Super => Err(self.throw("SyntaxError", "'super' keyword unexpected here")),
             Expr::Seq(items) => {
                 let mut last = Value::Undefined;
@@ -892,6 +924,24 @@ impl Interp {
         self.call(func, this, &argv)
     }
 
+    /// `await v`: if `v` is a promise, drain microtasks to settle it, then return its value (or
+    /// throw its reason). A non-promise is returned as-is. A still-pending promise yields undefined
+    /// (lumen cannot truly suspend).
+    pub(crate) fn await_value(&mut self, v: Value) -> Result<Value, Abrupt> {
+        let ptr = match &v {
+            Value::Obj(o) if self.promises.contains_key(&(Rc::as_ptr(o) as usize)) => {
+                Rc::as_ptr(o) as usize
+            }
+            _ => return Ok(v),
+        };
+        self.drain_microtasks();
+        match self.promises.get(&ptr) {
+            Some(s) if s.status == 1 => Ok(s.value.clone()),
+            Some(s) if s.status == 2 => Err(Abrupt::Throw(s.value.clone())),
+            _ => Ok(Value::Undefined),
+        }
+    }
+
     // ----- promises ---------------------------------------------------------------------------
 
     pub(crate) fn new_promise(&mut self) -> Value {
@@ -989,10 +1039,11 @@ impl Interp {
 
     /// Drain the microtask queue (called after the main script). Bounded to avoid an unbounded loop.
     pub(crate) fn drain_microtasks(&mut self) {
-        let mut budget = 1_000_000u32;
+        let mut budget = 100_000u32;
         while let Some(job) = self.microtasks.pop_front() {
             budget -= 1;
             if budget == 0 {
+                self.microtasks.clear();
                 break;
             }
             if job.handler.is_callable() {
@@ -1804,7 +1855,16 @@ fn default_constructor(derived: bool) -> Function {
     } else {
         Vec::new()
     };
-    Function { name: None, params, body, is_arrow: false, is_strict: true, expr_body: false }
+    Function {
+        name: None,
+        params,
+        body,
+        is_arrow: false,
+        is_strict: true,
+        expr_body: false,
+        is_generator: false,
+        is_async: false,
+    }
 }
 
 fn promise_resolve_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {

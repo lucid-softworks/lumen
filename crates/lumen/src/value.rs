@@ -111,6 +111,7 @@ pub struct Object {
 
 impl Object {
     pub fn new(proto: Option<Gc>) -> Gc {
+        ALLOC_COUNT.with(|c| c.set(c.get() + 1));
         Rc::new(RefCell::new(Object {
             proto,
             props: Props::new(),
@@ -120,6 +121,17 @@ impl Object {
             is_constructor: false,
         }))
     }
+}
+
+// Per-test object-allocation counter (lumen has no GC, so a runaway allocation loop would exhaust
+// memory). `Interp::new` resets it; `Interp::call` throws once it exceeds `MAX_ALLOCS`.
+thread_local!(static ALLOC_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+
+pub fn reset_alloc_count() {
+    ALLOC_COUNT.with(|c| c.set(0));
+}
+pub fn alloc_count() -> u64 {
+    ALLOC_COUNT.with(|c| c.get())
 }
 
 /// The element type of a TypedArray.

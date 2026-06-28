@@ -47,7 +47,7 @@ enum Outcome {
 
 /// Tests per worker child process. Small keeps the blast radius of a crash tiny AND recycles the
 /// worker often — since lumen has no GC, exiting the process is what reclaims any leaked memory.
-const CHUNK: usize = 200;
+const CHUNK: usize = 40;
 
 /// Max concurrent worker processes. lumen's per-op allocation caps keep each worker bounded (tens
 /// of MB in practice), so this can track core count; we still cap it so a huge box doesn't spawn an
@@ -63,7 +63,7 @@ const WORKER_AS_LIMIT_KIB: u64 = 2 * 1024 * 1024; // 2 GiB
 /// second; this only fires for a genuinely pathological test (e.g. an O(n²) `s += x` loop run a
 /// million times, or an infinite `while (true) {}`). On timeout the parent kills the worker, marks
 /// the test it was stuck on as a timeout-fail, and re-enqueues the rest — same path as a crash.
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct Harness {
     /// `assert.js` + `sta.js`, prepended to every non-raw test.
@@ -301,6 +301,19 @@ fn worker_loop(
 }
 
 fn run_worker(argv: &[String]) {
+    // Run on a thread with a large stack: a tree-walker (and especially generators/async, which
+    // add frames) needs headroom for legitimately deep — but depth-bounded — recursion. The child's
+    // 8 MiB main-thread stack is not enough.
+    let argv: Vec<String> = argv.to_vec();
+    std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(move || run_worker_inner(&argv))
+        .expect("spawn worker thread")
+        .join()
+        .expect("worker thread");
+}
+
+fn run_worker_inner(argv: &[String]) {
     std::panic::set_hook(Box::new(|_| {}));
     let root = PathBuf::from(&argv[2]);
     let paths_file = &argv[3];
