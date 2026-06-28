@@ -1677,6 +1677,15 @@ fn install_reflect(it: &mut Interp) {
             _ => Err(i.make_error("TypeError", "Reflect.has called on non-object")),
         }
     });
+    it.def_method(&r, "getOwnPropertyDescriptor", 2, |i, _t, a| {
+        let o = match arg(a, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Reflect.getOwnPropertyDescriptor on non-object")),
+        };
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        let prop = o.borrow().props.get(&key).cloned();
+        Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined))
+    });
     it.def_method(&r, "deleteProperty", 2, |i, _t, a| {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if let Value::Obj(o) = arg(a, 0) {
@@ -2287,6 +2296,50 @@ fn install_object(it: &mut Interp) {
         let has = this_obj(&this).map(|o| o.borrow().props.contains(&key)).unwrap_or(false);
         Ok(Value::Bool(has))
     });
+    // Annex B __defineGetter__/__defineSetter__/__lookupGetter__/__lookupSetter__.
+    fn define_accessor(i: &mut Interp, this: &Value, args: &[Value], is_get: bool) -> Result<Value, Value> {
+        let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "called on non-object"))?;
+        let f = arg(args, 1);
+        if !f.is_callable() {
+            return Err(i.make_error("TypeError", "accessor must be a function"));
+        }
+        let key = ab(i.to_property_key(&arg(args, 0)))?;
+        let mut existing = o.borrow().props.get(&key).cloned().filter(|p| p.accessor).unwrap_or(Property {
+            value: Value::Undefined,
+            get: None,
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: true,
+            configurable: true,
+        });
+        if is_get {
+            existing.get = Some(f);
+        } else {
+            existing.set = Some(f);
+        }
+        o.borrow_mut().props.insert(key, existing);
+        Ok(Value::Undefined)
+    }
+    fn lookup_accessor(i: &mut Interp, this: &Value, args: &[Value], is_get: bool) -> Result<Value, Value> {
+        let mut cur = this_obj(this);
+        let key = ab(i.to_property_key(&arg(args, 0)))?;
+        while let Some(o) = cur {
+            if let Some(p) = o.borrow().props.get(&key) {
+                if p.accessor {
+                    let f = if is_get { p.get.clone() } else { p.set.clone() };
+                    return Ok(f.unwrap_or(Value::Undefined));
+                }
+                return Ok(Value::Undefined);
+            }
+            cur = o.borrow().proto.clone();
+        }
+        Ok(Value::Undefined)
+    }
+    it.def_method(&op, "__defineGetter__", 2, |i, this, a| define_accessor(i, &this, a, true));
+    it.def_method(&op, "__defineSetter__", 2, |i, this, a| define_accessor(i, &this, a, false));
+    it.def_method(&op, "__lookupGetter__", 1, |i, this, a| lookup_accessor(i, &this, a, true));
+    it.def_method(&op, "__lookupSetter__", 1, |i, this, a| lookup_accessor(i, &this, a, false));
     it.def_method(&op, "isPrototypeOf", 1, |_i, this, args| {
         let target = match arg(args, 0) {
             Value::Obj(o) => o,
@@ -2468,19 +2521,7 @@ fn install_object(it: &mut Interp) {
         let prop = o.borrow().props.get(&key).cloned();
         match prop {
             None => Ok(Value::Undefined),
-            Some(p) => {
-                let d = i.new_object();
-                if p.accessor {
-                    set_data(&d, "get", p.get.unwrap_or(Value::Undefined));
-                    set_data(&d, "set", p.set.unwrap_or(Value::Undefined));
-                } else {
-                    set_data(&d, "value", p.value);
-                    set_data(&d, "writable", Value::Bool(p.writable));
-                }
-                set_data(&d, "enumerable", Value::Bool(p.enumerable));
-                set_data(&d, "configurable", Value::Bool(p.configurable));
-                Ok(Value::Obj(d))
-            }
+            Some(p) => Ok(descriptor_from_prop(i, p)),
         }
     });
     it.def_method(&ctor, "getOwnPropertyDescriptors", 1, |i, _this, args| {
@@ -2641,6 +2682,21 @@ fn install_object(it: &mut Interp) {
 }
 
 /// Build a property descriptor from a JS descriptor object.
+/// Build a descriptor object (`{value, writable, enumerable, configurable}` or `{get, set, ...}`).
+fn descriptor_from_prop(i: &mut Interp, p: Property) -> Value {
+    let d = i.new_object();
+    if p.accessor {
+        set_data(&d, "get", p.get.unwrap_or(Value::Undefined));
+        set_data(&d, "set", p.set.unwrap_or(Value::Undefined));
+    } else {
+        set_data(&d, "value", p.value);
+        set_data(&d, "writable", Value::Bool(p.writable));
+    }
+    set_data(&d, "enumerable", Value::Bool(p.enumerable));
+    set_data(&d, "configurable", Value::Bool(p.configurable));
+    Value::Obj(d)
+}
+
 fn build_descriptor(i: &mut Interp, desc: &Value) -> Result<Property, Abrupt> {
     let o = match desc {
         Value::Obj(o) => o.clone(),
