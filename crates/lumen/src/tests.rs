@@ -1534,3 +1534,19 @@ fn global_object_sync() {
     assert_eq!(run("typeof globalThis.Object"), "function"); // builtins still there
     assert_eq!(run("var undefined; typeof undefined"), "undefined"); // non-writable global kept
 }
+#[test]
+fn array_from_async() {
+    assert_eq!(run("typeof Array.fromAsync"), "function");
+    let mut e = Engine::new();
+    e.eval("var r; Array.fromAsync([1,2,3]).then(a=>r=a.join(','))", false).unwrap();
+    assert_eq!(match e.eval("r",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2,3");
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Array.fromAsync([Promise.resolve(5),6]).then(a=>r2=a.join(','))", false).unwrap();
+    assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "5,6");
+    let mut e3 = Engine::new();
+    e3.eval("var r3; Array.fromAsync([1,2,3], x=>x*2).then(a=>r3=a.join(','))", false).unwrap();
+    assert_eq!(match e3.eval("r3",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "2,4,6");
+    let mut e4 = Engine::new();
+    e4.eval("async function* g(){yield 1; yield 2;} var r4; Array.fromAsync(g()).then(a=>r4=a.join(','))", false).unwrap();
+    assert_eq!(match e4.eval("r4",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2");
+}

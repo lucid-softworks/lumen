@@ -5036,6 +5036,7 @@ fn install_array(it: &mut Interp) {
             Ok(i.make_array(out))
         }
     });
+    it.def_method(&ctor, "fromAsync", 1, array_from_async);
     install_species(it, &ctor);
     set_builtin(&it.global, "Array", Value::Obj(ctor));
 }
@@ -5289,6 +5290,76 @@ fn install_iterator(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Iterator", Value::Obj(ctor));
+}
+
+/// `Array.fromAsync(source, mapFn?, thisArg?)`: build an array from a sync/async iterable or an
+/// array-like, awaiting each element, and return a promise of the result. lumen drains microtasks
+/// synchronously, so the whole thing runs eagerly and settles the returned promise.
+fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let promise = i.new_promise();
+    let source = arg(a, 0);
+    let mapfn = arg(a, 1);
+    let this_arg = arg(a, 2);
+    let outcome = (|| -> Result<Value, Value> {
+        if !matches!(mapfn, Value::Undefined) && !mapfn.is_callable() {
+            return Err(i.make_error("TypeError", "Array.fromAsync: mapFn is not callable"));
+        }
+        let mut out: Vec<Value> = Vec::new();
+        // Prefer @@asyncIterator, then a sync iterator; otherwise treat `source` as array-like.
+        let async_it = match well_known_key(i, "asyncIterator") {
+            Some(k) => ab(i.get_member(&source, &k))?,
+            None => Value::Undefined,
+        };
+        if async_it.is_callable() {
+            let iter = ab(i.call(async_it, source.clone(), &[]))?;
+            let next = ab(i.get_member(&iter, "next"))?;
+            let mut k = 0.0;
+            loop {
+                let res = ab(i.call(next.clone(), iter.clone(), &[]))?;
+                let res = ab(i.await_value(res))?;
+                let done = ab(i.get_member(&res, "done"))?;
+                if i.to_boolean(&done) {
+                    break;
+                }
+                let raw = ab(i.get_member(&res, "value"))?;
+                let mut v = ab(i.await_value(raw))?;
+                if mapfn.is_callable() {
+                    let mapped = ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k)]))?;
+                    v = ab(i.await_value(mapped))?;
+                }
+                out.push(v);
+                k += 1.0;
+            }
+        } else if matches!(source, Value::Str(_)) || i.has_iterator(&source) {
+            for (k, raw) in ab(i.iterate(&source))?.into_iter().enumerate() {
+                let mut v = ab(i.await_value(raw))?;
+                if mapfn.is_callable() {
+                    let mapped = ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
+                    v = ab(i.await_value(mapped))?;
+                }
+                out.push(v);
+            }
+        } else if let Value::Obj(o) = &source {
+            let len = ab(i.to_length(&o.clone()))?;
+            for k in 0..len {
+                let raw = ab(i.get_member(&source, &k.to_string()))?;
+                let mut v = ab(i.await_value(raw))?;
+                if mapfn.is_callable() {
+                    let mapped = ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
+                    v = ab(i.await_value(mapped))?;
+                }
+                out.push(v);
+            }
+        } else {
+            return Err(i.make_error("TypeError", "Array.fromAsync requires an iterable or array-like"));
+        }
+        Ok(i.make_array(out))
+    })();
+    match outcome {
+        Ok(arr) => i.resolve_promise(&promise, arr),
+        Err(e) => i.reject_promise(&promise, e),
+    }
+    Ok(promise)
 }
 
 fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Result<Value, Value> {
