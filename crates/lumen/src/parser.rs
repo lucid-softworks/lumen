@@ -1269,6 +1269,44 @@ fn key_is(key: &PropKey, name: &str) -> bool {
 fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
     match e {
         Expr::Ident(name) => Some(Pattern::Ident(name.clone())),
+        Expr::Array(elems) => {
+            let mut out = Vec::new();
+            for el in elems {
+                match el {
+                    ArrayElem::Hole => out.push(ArrayPatElem::Hole),
+                    ArrayElem::Spread(t) => out.push(ArrayPatElem::Rest(expr_to_pattern(t)?)),
+                    ArrayElem::Item(Expr::Assign { op: "=", target, value }) => {
+                        out.push(ArrayPatElem::Elem {
+                            pattern: expr_to_pattern(target)?,
+                            default: Some((**value).clone()),
+                        })
+                    }
+                    ArrayElem::Item(t) => {
+                        out.push(ArrayPatElem::Elem { pattern: expr_to_pattern(t)?, default: None })
+                    }
+                }
+            }
+            Some(Pattern::Array(out))
+        }
+        Expr::Object(props) => {
+            let mut pat = ObjectPat { props: Vec::new(), rest: None };
+            for p in props {
+                match p {
+                    PropDef::KeyValue { key, value } => {
+                        let (value, default) = match value {
+                            Expr::Assign { op: "=", target, value: d } => {
+                                (expr_to_pattern(target)?, Some((**d).clone()))
+                            }
+                            v => (expr_to_pattern(v)?, None),
+                        };
+                        pat.props.push(ObjPatProp { key: key.clone(), value, default });
+                    }
+                    PropDef::Spread(Expr::Ident(name)) => pat.rest = Some(name.clone()),
+                    _ => return None,
+                }
+            }
+            Some(Pattern::Object(pat))
+        }
         _ => None,
     }
 }
