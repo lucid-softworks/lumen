@@ -1104,6 +1104,8 @@ impl Interp {
             b.props.insert("dotAll", ro(Value::Bool(re.dotall)));
             b.props.insert("sticky", ro(Value::Bool(re.sticky)));
             b.props.insert("unicode", ro(Value::Bool(re.unicode)));
+            b.props.insert("hasIndices", ro(Value::Bool(re.flags.contains('d'))));
+            b.props.insert("unicodeSets", ro(Value::Bool(re.flags.contains('v'))));
             b.props.insert("lastIndex", Property::data(Value::Num(0.0), true, false, false));
         }
         self.regexps.insert(ptr, Rc::new(re));

@@ -626,3 +626,4 @@ fn atomics_basic() {
     assert_eq!(throws("Atomics.add(new Float64Array(2),0,1)"), "TypeError");
     assert_eq!(throws("Atomics.add([],0,1)"), "TypeError");
 }
+

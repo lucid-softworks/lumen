@@ -123,10 +123,18 @@ struct Parser {
 
 impl Regex {
     pub fn new(pattern: &str, flags: &str) -> Result<Regex, String> {
+        let mut seen = String::new();
         for f in flags.chars() {
-            if !"gimsuy".contains(f) {
+            if !"dgimsuvy".contains(f) {
                 return Err(format!("invalid regular expression flag {f}"));
             }
+            if seen.contains(f) {
+                return Err(format!("duplicate regular expression flag {f}"));
+            }
+            seen.push(f);
+        }
+        if flags.contains('u') && flags.contains('v') {
+            return Err("the u and v regular expression flags are mutually exclusive".into());
         }
         let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0 };
         let ast = p.parse_alt()?;
@@ -138,11 +146,13 @@ impl Regex {
         compile(&ast, &mut prog)?;
         prog.push(Inst::Save(1));
         prog.push(Inst::Match);
+        // The `flags` accessor returns flags in canonical order.
+        let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
         Ok(Regex {
             prog,
             ngroups: p.ngroups,
             source: if pattern.is_empty() { "(?:)".into() } else { pattern.to_string() },
-            flags: flags.to_string(),
+            flags: canonical,
             global: flags.contains('g'),
             ignore_case: flags.contains('i'),
             multiline: flags.contains('m'),
