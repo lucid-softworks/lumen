@@ -381,8 +381,44 @@ fn duration_sign(d: IsoDuration) -> i64 {
 
 // ----- string parsing (basic ISO) -------------------------------------------------------------
 
+/// Validate ISO `[..]` annotations: keys lowercase, at most one calendar and one time-zone
+/// annotation, no unknown critical (`[!key=val]`) annotation.
+fn valid_annotations(s: &str) -> bool {
+    let mut rest = s;
+    let (mut tz, mut cal) = (0u32, 0u32);
+    while let Some(start) = rest.find('[') {
+        let end = match rest[start..].find(']') {
+            Some(e) => e + start,
+            None => return false,
+        };
+        let inner = &rest[start + 1..end];
+        let critical = inner.starts_with('!');
+        let body = inner.strip_prefix('!').unwrap_or(inner);
+        if let Some(eq) = body.find('=') {
+            let key = &body[..eq];
+            if key.is_empty()
+                || !key.bytes().all(|c| c.is_ascii_lowercase() || c == b'-' || c.is_ascii_digit())
+            {
+                return false;
+            }
+            if key == "u-ca" {
+                cal += 1;
+            } else if critical {
+                return false; // unknown critical annotation
+            }
+        } else {
+            tz += 1;
+        }
+        rest = &rest[end + 1..];
+    }
+    cal <= 1 && tz <= 1
+}
+
 fn parse_date_str(s: &str) -> Option<IsoDate> {
     let s = s.trim();
+    if s.is_empty() || s.contains('\u{2212}') || !valid_annotations(s) {
+        return None; // reject empty, Unicode minus, malformed annotations
+    }
     let s = s.split('[').next().unwrap_or(s); // drop [..] annotations
     let datepart = s.split(['T', 't', ' ']).next()?;
     let (sign, body) = if let Some(r) = datepart.strip_prefix('-') {
@@ -392,26 +428,39 @@ fn parse_date_str(s: &str) -> Option<IsoDate> {
     } else {
         (1, datepart)
     };
-    if body.contains('-') {
+    let (y, m, d) = if body.contains('-') {
         let mut p = body.splitn(3, '-');
-        let y: i64 = p.next()?.parse().ok()?;
-        let m: u8 = p.next()?.parse().ok()?;
-        let d: u8 = p.next()?.parse().ok()?;
-        Some(IsoDate { year: sign * y, month: m, day: d })
+        let ys = p.next()?;
+        let ms = p.next()?;
+        let ds = p.next()?;
+        // Components must be all-digits with the expected widths.
+        if ms.len() != 2 || ds.len() != 2 || ys.len() < 4 || !ys.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        (ys.parse::<i64>().ok()?, ms.parse::<u8>().ok()?, ds.parse::<u8>().ok()?)
     } else {
         // Basic format YYYYMMDD (year = all but the last four digits).
         if body.len() < 8 || !body.bytes().all(|c| c.is_ascii_digit()) {
             return None;
         }
         let cut = body.len() - 4;
-        let y: i64 = body[..cut].parse().ok()?;
-        let m: u8 = body[cut..cut + 2].parse().ok()?;
-        let d: u8 = body[cut + 2..].parse().ok()?;
-        Some(IsoDate { year: sign * y, month: m, day: d })
+        (
+            body[..cut].parse::<i64>().ok()?,
+            body[cut..cut + 2].parse::<u8>().ok()?,
+            body[cut + 2..].parse::<u8>().ok()?,
+        )
+    };
+    let date = IsoDate { year: sign * y, month: m, day: d };
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(date.year, m) {
+        return None; // out-of-range date components are a RangeError
     }
+    Some(date)
 }
 fn parse_time_str(s: &str) -> Option<IsoTime> {
     let s = s.trim();
+    if s.is_empty() || s.contains('\u{2212}') || !valid_annotations(s) {
+        return None;
+    }
     let s = s.split('[').next().unwrap_or(s);
     let mut tpart = if let Some(idx) = s.find(['T', 't']) { &s[idx + 1..] } else { s };
     // Strip a trailing UTC offset / Z designator (time itself never contains '+'/'Z'/'-').
@@ -439,18 +488,25 @@ fn parse_time_str(s: &str) -> Option<IsoTime> {
         let g = |a: usize, b: usize| hms.get(a..b).unwrap_or("0").parse::<u8>().unwrap_or(0);
         (hms.get(0..2)?.parse().ok()?, g(2, 4), g(4, 6))
     };
+    // Fractional parts only attach to seconds, and must be all digits.
     let (ms, us, ns) = match frac {
         Some(frac) => {
-            let mut f: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if frac.is_empty() || !frac.bytes().all(|c| c.is_ascii_digit()) || frac.len() > 9 {
+                return None;
+            }
+            let mut f = frac.to_string();
             while f.len() < 9 {
                 f.push('0');
             }
-            f.truncate(9);
             let n: u32 = f.parse().ok()?;
             ((n / 1_000_000) as u16, ((n / 1000) % 1000) as u16, (n % 1000) as u16)
         }
         None => (0, 0, 0),
     };
+    if h > 23 || mi > 59 || sec > 60 {
+        return None; // out-of-range time component
+    }
+    let sec = if sec == 60 { 59 } else { sec }; // leap second constrained
     Some(IsoTime { hour: h, minute: mi, second: sec, ms, us, ns })
 }
 
@@ -1087,15 +1143,38 @@ fn to_time(i: &mut Interp, v: &Value) -> Result<IsoTime, Value> {
         _ => {}
     }
     match v {
-        Value::Str(s) => parse_time_str(s).ok_or_else(|| i.make_error("RangeError", "invalid time string")),
+        Value::Str(s) => {
+            // A PlainTime string may not carry a UTC designator or time-zone annotation.
+            if s.contains(['Z', 'z']) || s.contains('[') {
+                return Err(i.make_error("RangeError", "invalid PlainTime string"));
+            }
+            parse_time_str(s).ok_or_else(|| i.make_error("RangeError", "invalid time string"))
+        }
         Value::Obj(_) => {
-            let hour = field_int(i, v, "hour", 0)? as u8;
-            let minute = field_int(i, v, "minute", 0)? as u8;
-            let second = field_int(i, v, "second", 0)? as u8;
-            let ms = field_int(i, v, "millisecond", 0)? as u16;
-            let us = field_int(i, v, "microsecond", 0)? as u16;
-            let ns = field_int(i, v, "nanosecond", 0)? as u16;
-            check_time(i, IsoTime { hour, minute, second, ms, us, ns })
+            // from() constrains out-of-range fields (overflow: 'constrain'); at least one time
+            // field must be present.
+            let fields =
+                ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
+            let mut any = false;
+            let mut vals = [0i64; 6];
+            for (k, slot) in fields.iter().zip(vals.iter_mut()) {
+                let fv = getm(i, v, k)?;
+                if !matches!(fv, Value::Undefined) {
+                    any = true;
+                    *slot = to_int(i, &fv)?;
+                }
+            }
+            if !any {
+                return Err(i.make_error("TypeError", "object has no time fields"));
+            }
+            Ok(IsoTime {
+                hour: vals[0].clamp(0, 23) as u8,
+                minute: vals[1].clamp(0, 59) as u8,
+                second: vals[2].clamp(0, 59) as u8,
+                ms: vals[3].clamp(0, 999) as u16,
+                us: vals[4].clamp(0, 999) as u16,
+                ns: vals[5].clamp(0, 999) as u16,
+            })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainTime")),
     }
@@ -1933,8 +2012,16 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
     }
     match v {
         Value::BigInt(n) => Ok(*n),
+        Value::Str(s) => parse_instant(s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string")),
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.Instant")),
     }
+}
+/// Parse an ISO instant string (must carry a `Z` or `±HH:MM` offset).
+fn parse_instant(s: &str) -> Option<i128> {
+    let date = parse_date_str(s)?;
+    let time = parse_time_str(s).unwrap_or(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+    let offset = parse_offset_from(s)?; // required: an instant needs an absolute reference
+    Some(dt_ns(date, time) - offset as i128)
 }
 
 // ===== ZonedDateTime ==========================================================================
