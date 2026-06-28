@@ -86,6 +86,14 @@ impl Interp {
                     self.declare_import_binding(local, dep_ns.clone(), env);
                 }
                 ImportSpec::Named { imported, local } => {
+                    // Resolution error: the dependency must actually export this name.
+                    let exists = matches!(dep_ns, Value::Obj(o) if o.borrow().props.contains(imported.as_str()));
+                    if !exists {
+                        return Err(self.throw(
+                            "SyntaxError",
+                            format!("the requested module does not provide an export named '{imported}'"),
+                        ));
+                    }
                     let v = self.get_member(dep_ns, imported)?;
                     self.declare_import_binding(local, v, env);
                 }
