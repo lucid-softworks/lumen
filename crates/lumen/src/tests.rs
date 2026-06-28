@@ -1441,3 +1441,9 @@ fn float16_array() {
     assert_eq!(run("new Float16Array([65504])[0]"), "65504"); // max f16
     assert_eq!(run("new Float16Array([NaN])[0]"), "NaN");
 }
+#[test]
+fn dataview_float16() {
+    assert_eq!(run("var d=new DataView(new ArrayBuffer(2)); d.setFloat16(0,1.5); d.getFloat16(0)"), "1.5");
+    assert_eq!(run("typeof DataView.prototype.getFloat16"), "function");
+    assert_eq!(run("var d=new DataView(new ArrayBuffer(2)); d.setFloat16(0,1.337); d.getFloat16(0)"), "1.3369140625");
+}

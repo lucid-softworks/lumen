@@ -484,6 +484,7 @@ fn install_dataview(it: &mut Interp) {
     dvm!("getUint16", "setUint16", TaKind::U16);
     dvm!("getInt32", "setInt32", TaKind::I32);
     dvm!("getUint32", "setUint32", TaKind::U32);
+    dvm!("getFloat16", "setFloat16", TaKind::F16);
     dvm!("getFloat32", "setFloat32", TaKind::F32);
     dvm!("getFloat64", "setFloat64", TaKind::F64);
     it.def_method(&proto, "getBigInt64", 1, |i, this, a| dv_get_big(i, &this, a, true));
