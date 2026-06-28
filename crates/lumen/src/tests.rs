@@ -611,3 +611,18 @@ fn temporal_named_timezones() {
     assert_eq!(run("Temporal.ZonedDateTime.from('2021-01-01T12:00-05:00[America/New_York]').offset"), "-05:00");
     assert_eq!(run("new Temporal.ZonedDateTime(0n,'Africa/Abidjan').offset"), "+00:00");
 }
+
+
+#[test]
+fn atomics_basic() {
+    assert_eq!(run("typeof Atomics"), "object");
+    assert_eq!(run("var a=new Int32Array(new SharedArrayBuffer(16)); Atomics.store(a,0,5); Atomics.load(a,0)"), "5");
+    assert_eq!(run("var a=new Int32Array(4); Atomics.add(a,0,3); Atomics.add(a,0,4)"), "3"); // returns old
+    assert_eq!(run("var a=new Int32Array(4); Atomics.add(a,0,3); Atomics.add(a,0,4); a[0]"), "7");
+    assert_eq!(run("var a=new Int32Array(4); a[0]=8; Atomics.and(a,0,5); a[0]"), "0");
+    assert_eq!(run("var a=new Int32Array(4); a[0]=1; Atomics.compareExchange(a,0,1,9); a[0]"), "9");
+    assert_eq!(run("Atomics.isLockFree(4)"), "true");
+    assert_eq!(run("var a=new BigInt64Array(2); Atomics.store(a,0,7n); Atomics.load(a,0)"), "7");
+    assert_eq!(throws("Atomics.add(new Float64Array(2),0,1)"), "TypeError");
+    assert_eq!(throws("Atomics.add([],0,1)"), "TypeError");
+}

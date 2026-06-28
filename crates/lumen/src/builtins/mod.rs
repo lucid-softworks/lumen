@@ -60,7 +60,108 @@ pub fn install(it: &mut Interp) {
     install_globals(it);
     install_console(it);
     install_host(it);
+    install_atomics(it);
     crate::temporal::install(it);
+}
+
+/// `Atomics` over integer TypedArrays. lumen is single-threaded, so the read-modify-write ops are
+/// plain operations; `wait`/`notify` are no-ops.
+fn install_atomics(it: &mut Interp) {
+    let atomics = Object::new(Some(it.object_proto.clone()));
+
+    fn target(i: &mut Interp, args: &[Value]) -> Result<(TaInfo, usize), Value> {
+        let ptr = map_ptr(&arg(args, 0))
+            .ok_or_else(|| i.make_error("TypeError", "Atomics: not an integer TypedArray"))?;
+        let info = *i
+            .typed_arrays
+            .get(&ptr)
+            .ok_or_else(|| i.make_error("TypeError", "Atomics: not an integer TypedArray"))?;
+        if matches!(info.kind, TaKind::F32 | TaKind::F64 | TaKind::U8Clamped) {
+            return Err(i.make_error("TypeError", "Atomics requires an integer TypedArray"));
+        }
+        let idx = ab(i.to_number(&arg(args, 1)))?;
+        if !idx.is_finite() || idx.fract() != 0.0 || idx < 0.0 || idx as usize >= info.len {
+            return Err(i.make_error("RangeError", "Atomics: index out of range"));
+        }
+        Ok((info, idx as usize))
+    }
+    fn operand(i: &mut Interp, info: &TaInfo, v: &Value) -> Result<i128, Value> {
+        if info.kind.is_bigint() {
+            ab(i.to_bigint(v))
+        } else {
+            let n = ab(i.to_number(v))?;
+            Ok(if n.is_finite() { n.trunc() as i128 } else { 0 })
+        }
+    }
+    fn read_i128(i: &Interp, info: &TaInfo, idx: usize) -> i128 {
+        match i.ta_read(info, idx) {
+            Value::Num(n) => n as i128,
+            Value::BigInt(n) => n,
+            _ => 0,
+        }
+    }
+    fn write_i128(i: &mut Interp, info: &TaInfo, idx: usize, n: i128) {
+        if info.kind.is_bigint() {
+            i.ta_write_bigint(info, idx, n);
+        } else {
+            i.ta_write(info, idx, n as f64);
+        }
+    }
+    fn wrap(i: &mut Interp, info: &TaInfo, idx: usize, n: i128) -> Value {
+        // Read back so the value reflects the element type's wrapping.
+        write_i128(i, info, idx, n);
+        i.ta_read(info, idx)
+    }
+    fn rmw(i: &mut Interp, args: &[Value], f: fn(i128, i128) -> i128) -> Result<Value, Value> {
+        let (info, idx) = target(i, args)?;
+        let val = operand(i, &info, &arg(args, 2))?;
+        let old = read_i128(i, &info, idx);
+        let old_val = i.ta_read(&info, idx);
+        write_i128(i, &info, idx, f(old, val));
+        Ok(old_val)
+    }
+
+    it.def_method(&atomics, "add", 3, |i, _t, a| rmw(i, a, |o, v| o + v));
+    it.def_method(&atomics, "sub", 3, |i, _t, a| rmw(i, a, |o, v| o - v));
+    it.def_method(&atomics, "and", 3, |i, _t, a| rmw(i, a, |o, v| o & v));
+    it.def_method(&atomics, "or", 3, |i, _t, a| rmw(i, a, |o, v| o | v));
+    it.def_method(&atomics, "xor", 3, |i, _t, a| rmw(i, a, |o, v| o ^ v));
+    it.def_method(&atomics, "exchange", 3, |i, _t, a| rmw(i, a, |_o, v| v));
+    it.def_method(&atomics, "load", 2, |i, _t, a| {
+        let (info, idx) = target(i, a)?;
+        Ok(i.ta_read(&info, idx))
+    });
+    it.def_method(&atomics, "store", 3, |i, _t, a| {
+        let (info, idx) = target(i, a)?;
+        let val = operand(i, &info, &arg(a, 2))?;
+        Ok(wrap(i, &info, idx, val))
+    });
+    it.def_method(&atomics, "compareExchange", 4, |i, _t, a| {
+        let (info, idx) = target(i, a)?;
+        let expected = operand(i, &info, &arg(a, 2))?;
+        let replacement = operand(i, &info, &arg(a, 3))?;
+        let old = read_i128(i, &info, idx);
+        let old_val = i.ta_read(&info, idx);
+        if old == expected {
+            write_i128(i, &info, idx, replacement);
+        }
+        Ok(old_val)
+    });
+    it.def_method(&atomics, "isLockFree", 1, |i, _t, a| {
+        let n = ab(i.to_number(&arg(a, 0)))?;
+        Ok(Value::Bool(matches!(n as i64, 1 | 2 | 4 | 8)))
+    });
+    it.def_method(&atomics, "wait", 4, |i, _t, a| {
+        let (info, idx) = target(i, a)?;
+        let expected = operand(i, &info, &arg(a, 2))?;
+        // Single-threaded: never blocks; report whether the value already differs.
+        Ok(Value::str(if read_i128(i, &info, idx) == expected { "timed-out" } else { "not-equal" }))
+    });
+    it.def_method(&atomics, "notify", 3, |i, _t, a| {
+        target(i, a)?;
+        Ok(Value::Num(0.0)) // no agents are waiting
+    });
+    set_builtin(&it.global, "Atomics", Value::Obj(atomics));
 }
 
 /// The test262 `$262` host object. Only the portions lumen can support are provided (`global`,
