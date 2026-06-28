@@ -682,3 +682,17 @@ fn object_literal_methods() {
     assert_eq!(run("({async(){return 1}}).async()"), "1"); // method named async
     assert_eq!(run("({async:7}).async"), "7"); // property named async
 }
+
+#[test]
+fn early_errors() {
+    // These must be parse-phase SyntaxErrors (Err).
+    for src in ["const x", "return 5", "break", "continue", "{break}", "while(0){} break"] {
+        assert!(Engine::new().eval(src, false).is_err(), "should reject: {src}");
+    }
+    // These must still work.
+    assert_eq!(run("function f(){return 7} f()"), "7");
+    assert_eq!(run("var s=0; for(var i=0;i<3;i++){ if(i==1) continue; s+=i; } s"), "2");
+    assert_eq!(run("switch(1){case 1: break; default:} 'ok'"), "ok");
+    assert_eq!(run("outer: for(;;){ break outer; } 'ok'"), "ok");
+    assert_eq!(run("const y=5; y"), "5");
+}

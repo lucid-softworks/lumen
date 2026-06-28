@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0 };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -35,6 +35,11 @@ struct Parser {
     /// `yield` / `await` are keywords here.
     in_generator: bool,
     in_async: bool,
+    /// Context depths for early-error checks: `return` requires a function, `continue` an iteration,
+    /// `break` an iteration or switch.
+    fn_depth: u32,
+    iter_depth: u32,
+    switch_depth: u32,
 }
 
 impl Parser {
@@ -148,6 +153,9 @@ impl Parser {
             Tok::Keyword("for") => self.parse_for(),
             Tok::Keyword("return") => {
                 self.advance();
+                if self.fn_depth == 0 {
+                    return self.err("'return' outside of a function");
+                }
                 let arg = if self.can_end_stmt() { None } else { Some(self.parse_expr()?) };
                 self.consume_semicolon()?;
                 Ok(Stmt::Return(arg))
@@ -155,12 +163,18 @@ impl Parser {
             Tok::Keyword("break") => {
                 self.advance();
                 let label = self.parse_opt_label();
+                if label.is_none() && self.iter_depth == 0 && self.switch_depth == 0 {
+                    return self.err("illegal 'break' statement");
+                }
                 self.consume_semicolon()?;
                 Ok(Stmt::Break(label))
             }
             Tok::Keyword("continue") => {
                 self.advance();
                 let label = self.parse_opt_label();
+                if label.is_none() && self.iter_depth == 0 {
+                    return self.err("illegal 'continue' statement");
+                }
                 self.consume_semicolon()?;
                 Ok(Stmt::Continue(label))
             }
@@ -217,6 +231,10 @@ impl Parser {
     fn parse_var_decl(&mut self, kind: DeclKind) -> Result<Stmt, ParseError> {
         self.advance(); // var/let/const keyword (or `let` ident)
         let decls = self.parse_var_declarators()?;
+        // A `const` declaration must have an initializer for each binding.
+        if kind == DeclKind::Const && decls.iter().any(|(_, init)| init.is_none()) {
+            return self.err("missing initializer in const declaration");
+        }
         self.consume_semicolon()?;
         Ok(Stmt::VarDecl { kind, decls })
     }
@@ -324,12 +342,20 @@ impl Parser {
         Ok(Stmt::If { test, cons, alt })
     }
 
+    /// Parse a loop body inside an iteration context (so `break`/`continue` are legal).
+    fn parse_loop_body(&mut self) -> Result<Stmt, ParseError> {
+        self.iter_depth += 1;
+        let r = self.parse_stmt();
+        self.iter_depth -= 1;
+        r
+    }
+
     fn parse_while(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         self.expect_punct("(")?;
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_stmt()?);
+        let body = Box::new(self.parse_loop_body()?);
         Ok(Stmt::While { test, body })
     }
 
@@ -347,7 +373,7 @@ impl Parser {
 
     fn parse_do_while(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
-        let body = Box::new(self.parse_stmt()?);
+        let body = Box::new(self.parse_loop_body()?);
         if !self.eat_kw("while") {
             return self.err("expected 'while' after do-body");
         }
@@ -384,7 +410,7 @@ impl Parser {
                 self.advance();
                 let right = self.parse_assign()?;
                 self.expect_punct(")")?;
-                let body = Box::new(self.parse_stmt()?);
+                let body = Box::new(self.parse_loop_body()?);
                 return Ok(Stmt::ForInOf { decl: Some(kind), left: first, right, of, body });
             }
             // Plain C-style for with a declaration init (possibly multiple declarators).
@@ -409,7 +435,7 @@ impl Parser {
             self.advance();
             let right = self.parse_assign()?;
             self.expect_punct(")")?;
-            let body = Box::new(self.parse_stmt()?);
+            let body = Box::new(self.parse_loop_body()?);
             let left = expr_to_pattern(&init_expr)
                 .ok_or_else(|| ParseError { message: "invalid for-in/of target".into(), line: self.line() })?;
             return Ok(Stmt::ForInOf { decl: None, left, right, of, body });
@@ -423,7 +449,7 @@ impl Parser {
         self.expect_punct(";")?;
         let update = if self.is_punct(")") { None } else { Some(self.parse_expr()?) };
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_stmt()?);
+        let body = Box::new(self.parse_loop_body()?);
         Ok(Stmt::For { init, test, update, body })
     }
 
@@ -463,6 +489,7 @@ impl Parser {
         let disc = self.parse_expr()?;
         self.expect_punct(")")?;
         self.expect_punct("{")?;
+        self.switch_depth += 1; // `break` is legal directly inside a switch
         let mut cases = Vec::new();
         while !self.is_punct("}") && !self.at_eof() {
             let test = if self.eat_kw("case") {
@@ -471,6 +498,7 @@ impl Parser {
             } else if self.eat_kw("default") {
                 None
             } else {
+                self.switch_depth -= 1;
                 return self.err("expected 'case' or 'default'");
             };
             self.expect_punct(":")?;
@@ -481,6 +509,7 @@ impl Parser {
             }
             cases.push(SwitchCase { test, body });
         }
+        self.switch_depth -= 1;
         self.expect_punct("}")?;
         Ok(Stmt::Switch { disc, cases })
     }
@@ -863,7 +892,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth };
                     sub.parse_expr()?
                 }
             };
@@ -1182,7 +1211,15 @@ impl Parser {
         if inner_strict {
             self.strict = true;
         }
+        // A function body is a fresh context for return/break/continue.
+        let (siter, sswitch) = (self.iter_depth, self.switch_depth);
+        self.fn_depth += 1;
+        self.iter_depth = 0;
+        self.switch_depth = 0;
         let body = self.parse_block_body()?;
+        self.fn_depth -= 1;
+        self.iter_depth = siter;
+        self.switch_depth = sswitch;
         let result_strict = self.strict;
         self.strict = saved_strict;
         Ok((body, result_strict))
