@@ -27,7 +27,128 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
     let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
-    p.parse_stmts_until_eof()
+    let body = p.parse_stmts_until_eof()?;
+    validate_module(&body)?;
+    Ok(body)
+}
+
+/// Module-level early errors: ExportedNames must be unique, top-level lexical+import bindings must be
+/// unique (and disjoint from var names), and every `export { local }` must name a declared binding.
+fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
+    let mut exported: Vec<String> = Vec::new(); // ExportedNames
+    let mut lexical: Vec<String> = Vec::new(); // let/const/class/function + imports
+    let mut vars: Vec<String> = Vec::new();
+    let mut export_locals: Vec<String> = Vec::new(); // `export { local }` (no source) must be bound
+
+    for stmt in body {
+        match stmt {
+            Stmt::Import(decl) => {
+                for spec in &decl.specs {
+                    let name = match spec {
+                        ImportSpec::Default(n) | ImportSpec::Namespace(n) => n,
+                        ImportSpec::Named { local, .. } => local,
+                    };
+                    lexical.push(name.clone());
+                }
+            }
+            Stmt::ExportDefault(inner) => {
+                exported.push("default".to_string());
+                // `export default function f(){}` / `class C{}` also binds the name lexically.
+                if matches!(&**inner, Stmt::FuncDecl(_) | Stmt::ClassDecl(_)) {
+                    collect_top_decl(inner, &mut lexical, &mut vars);
+                }
+            }
+            Stmt::ExportAll { exported: Some(n), .. } => exported.push(n.clone()),
+            Stmt::ExportNamed { specs, source } => {
+                for s in specs {
+                    exported.push(s.exported.clone());
+                    if source.is_none() {
+                        export_locals.push(s.local.clone());
+                    }
+                }
+            }
+            Stmt::ExportDecl(inner) => {
+                let mut names = Vec::new();
+                decl_bound_names(inner, &mut names);
+                for n in &names {
+                    exported.push(n.clone());
+                }
+                collect_top_decl(inner, &mut lexical, &mut vars);
+            }
+            other => collect_top_decl(other, &mut lexical, &mut vars),
+        }
+    }
+
+    if let Some(dup) = first_duplicate(&exported) {
+        return Err(ParseError { message: format!("duplicate export name '{dup}'"), line: 0 });
+    }
+    if let Some(dup) = first_duplicate(&lexical) {
+        return Err(ParseError {
+            message: format!("Identifier '{dup}' has already been declared"),
+            line: 0,
+        });
+    }
+    for v in &vars {
+        if lexical.iter().any(|l| l == v) {
+            return Err(ParseError {
+                message: format!("Identifier '{v}' has already been declared"),
+                line: 0,
+            });
+        }
+    }
+    for local in &export_locals {
+        if !lexical.iter().any(|l| l == local) && !vars.iter().any(|v| v == local) {
+            return Err(ParseError {
+                message: format!("export '{local}' is not declared in the module"),
+                line: 0,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn first_duplicate(names: &[String]) -> Option<String> {
+    let mut seen = Vec::new();
+    for n in names {
+        if seen.contains(n) {
+            return Some(n.clone());
+        }
+        seen.push(n.clone());
+    }
+    None
+}
+
+/// Names bound by a top-level declaration statement (for ExportedNames of `export <decl>`).
+fn decl_bound_names(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::VarDecl { decls, .. } => {
+            for (pat, _) in decls {
+                pattern_names(pat, out);
+            }
+        }
+        Stmt::FuncDecl(f) => out.extend(f.name.clone()),
+        Stmt::ClassDecl(c) => out.extend(c.name.clone()),
+        _ => {}
+    }
+}
+
+/// Partition a top-level declaration's bound names into lexical (let/const/class/function) vs var.
+fn collect_top_decl(stmt: &Stmt, lexical: &mut Vec<String>, vars: &mut Vec<String>) {
+    match stmt {
+        Stmt::VarDecl { kind: DeclKind::Var, decls } => {
+            for (pat, _) in decls {
+                pattern_names(pat, vars);
+            }
+        }
+        Stmt::VarDecl { decls, .. } => {
+            for (pat, _) in decls {
+                pattern_names(pat, lexical);
+            }
+        }
+        Stmt::FuncDecl(f) => lexical.extend(f.name.clone()),
+        Stmt::ClassDecl(c) => lexical.extend(c.name.clone()),
+        _ => {}
+    }
 }
 
 /// Recursion-depth ceiling for the parser. Beyond this we bail with a SyntaxError rather than
