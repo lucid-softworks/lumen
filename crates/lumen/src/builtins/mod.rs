@@ -2176,7 +2176,7 @@ fn json_str(
                 }
                 join_json("[", "]", items, gap, &new_indent, indent)
             } else {
-                let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
+                let keys: Vec<Rc<str>> = ordered_enum_keys(o);
                 let mut parts = Vec::new();
                 for k in keys {
                     let v = ab(i.get_member(&value, &k))?;

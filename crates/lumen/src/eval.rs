@@ -1691,50 +1691,58 @@ impl Interp {
     // ----- operators --------------------------------------------------------------------------
 
     fn binary(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
-        // BigInt arithmetic/bitwise. Mixing a BigInt with a non-BigInt (other than `+` with a
-        // string) is a TypeError; comparisons and equality (below) accept mixed operands.
-        if (matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)))
-            && matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>")
-        {
-            match (&l, &r) {
-                (Value::BigInt(x), Value::BigInt(y)) => return self.bigint_binop(op, *x, *y),
-                _ if op == "+" && (matches!(l, Value::Str(_)) || matches!(r, Value::Str(_))) => {
-                    let ls = self.to_string(&l)?;
-                    let rs = self.to_string(&r)?;
-                    return Ok(Value::from_string(format!("{ls}{rs}")));
+        // Arithmetic, bitwise, and `+` convert both operands to primitives first (left then right),
+        // then dispatch on BigInt / string (for `+`) / number. ToPrimitive runs before the BigInt
+        // mixing check so a wrapped BigInt object coerces correctly.
+        if matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>") {
+            let hint = if op == "+" { Hint::Default } else { Hint::Number };
+            let lp = self.to_primitive(&l, hint)?;
+            let rp = self.to_primitive(&r, hint)?;
+            if op == "+" && (matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_))) {
+                let ls = self.to_string(&lp)?;
+                let rs = self.to_string(&rp)?;
+                if ls.len() + rs.len() > MAX_STR_LEN {
+                    return Err(self.throw("RangeError", "Invalid string length"));
                 }
-                _ => {
-                    return Err(self.throw(
-                        "TypeError",
-                        "Cannot mix BigInt and other types, use explicit conversions",
-                    ))
-                }
+                return Ok(Value::from_string(format!("{ls}{rs}")));
             }
+            if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                if let (Value::BigInt(x), Value::BigInt(y)) = (&lp, &rp) {
+                    return self.bigint_binop(op, *x, *y);
+                }
+                return Err(self.throw(
+                    "TypeError",
+                    "Cannot mix BigInt and other types, use explicit conversions",
+                ));
+            }
+            return match op {
+                "+" => Ok(Value::Num(self.to_number(&lp)? + self.to_number(&rp)?)),
+                "-" => Ok(Value::Num(self.to_number(&lp)? - self.to_number(&rp)?)),
+                "*" => Ok(Value::Num(self.to_number(&lp)? * self.to_number(&rp)?)),
+                "/" => Ok(Value::Num(self.to_number(&lp)? / self.to_number(&rp)?)),
+                "%" => {
+                    let a = self.to_number(&lp)?;
+                    let b = self.to_number(&rp)?;
+                    Ok(Value::Num(js_mod(a, b)))
+                }
+                "**" => Ok(Value::Num(self.to_number(&lp)?.powf(self.to_number(&rp)?))),
+                "&" => Ok(Value::Num((self.to_int32(&lp)? & self.to_int32(&rp)?) as f64)),
+                "|" => Ok(Value::Num((self.to_int32(&lp)? | self.to_int32(&rp)?) as f64)),
+                "^" => Ok(Value::Num((self.to_int32(&lp)? ^ self.to_int32(&rp)?) as f64)),
+                "<<" => {
+                    let a = self.to_int32(&lp)?;
+                    let b = (self.to_uint32(&rp)?) & 31;
+                    Ok(Value::Num((a.wrapping_shl(b)) as f64))
+                }
+                ">>" => {
+                    let a = self.to_int32(&lp)?;
+                    let b = (self.to_uint32(&rp)?) & 31;
+                    Ok(Value::Num((a >> b) as f64))
+                }
+                _ => unreachable!(),
+            };
         }
         match op {
-            "+" => {
-                let lp = self.to_primitive(&l, Hint::Default)?;
-                let rp = self.to_primitive(&r, Hint::Default)?;
-                if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
-                    let ls = self.to_string(&lp)?;
-                    let rs = self.to_string(&rp)?;
-                    if ls.len() + rs.len() > MAX_STR_LEN {
-                        return Err(self.throw("RangeError", "Invalid string length"));
-                    }
-                    Ok(Value::from_string(format!("{ls}{rs}")))
-                } else {
-                    Ok(Value::Num(self.to_number(&lp)? + self.to_number(&rp)?))
-                }
-            }
-            "-" => Ok(Value::Num(self.to_number(&l)? - self.to_number(&r)?)),
-            "*" => Ok(Value::Num(self.to_number(&l)? * self.to_number(&r)?)),
-            "/" => Ok(Value::Num(self.to_number(&l)? / self.to_number(&r)?)),
-            "%" => {
-                let a = self.to_number(&l)?;
-                let b = self.to_number(&r)?;
-                Ok(Value::Num(js_mod(a, b)))
-            }
-            "**" => Ok(Value::Num(self.to_number(&l)?.powf(self.to_number(&r)?))),
             "==" => Ok(Value::Bool(self.loose_equals(&l, &r)?)),
             "!=" => Ok(Value::Bool(!self.loose_equals(&l, &r)?)),
             "===" => Ok(Value::Bool(self.strict_equals(&l, &r))),
@@ -1982,11 +1990,40 @@ impl Interp {
         Ok(self.to_string(v)?.to_string())
     }
 
+    /// The internal property key for a well-known symbol (e.g. `Symbol.toPrimitive`).
+    fn well_known_sym_key(&self, name: &str) -> Option<String> {
+        let sym = self.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+        if let Value::Obj(o) = sym {
+            if let Some(p) = o.borrow().props.get(name) {
+                if let Value::Sym(d) = &p.value {
+                    return Some(Interp::sym_key(d));
+                }
+            }
+        }
+        None
+    }
+
     pub fn to_primitive(&mut self, v: &Value, hint: Hint) -> Result<Value, Abrupt> {
         let obj = match v {
             Value::Obj(o) => o.clone(),
             _ => return Ok(v.clone()),
         };
+        // A `@@toPrimitive` method takes precedence over valueOf/toString.
+        if let Some(key) = self.well_known_sym_key("toPrimitive") {
+            let f = self.get_member(&Value::Obj(obj.clone()), &key)?;
+            if f.is_callable() {
+                let hint_str = match hint {
+                    Hint::String => "string",
+                    Hint::Number => "number",
+                    Hint::Default => "default",
+                };
+                let r = self.call(f, v.clone(), &[Value::str(hint_str)])?;
+                if matches!(r, Value::Obj(_)) {
+                    return Err(self.throw("TypeError", "Cannot convert object to a primitive value"));
+                }
+                return Ok(r);
+            }
+        }
         let order: [&str; 2] = match hint {
             Hint::String => ["toString", "valueOf"],
             _ => ["valueOf", "toString"],
@@ -2082,6 +2119,7 @@ impl Interp {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Hint {
     Default,
     Number,

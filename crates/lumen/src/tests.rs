@@ -824,3 +824,13 @@ fn property_order() {
     assert_eq!(run("Object.keys({...{b:1,1:2,a:3}}).join(',')"), "1,b,a");
     assert_eq!(run("var o=Object.assign({},{c:1,1:2,a:3}); Object.keys(o).join(',')"), "1,c,a");
 }
+#[test]
+fn to_primitive_symbol() {
+    assert_eq!(run("var o={[Symbol.toPrimitive](h){return h}}; o + ''"), "default");
+    assert_eq!(run("var o={[Symbol.toPrimitive](h){return h}}; String(o)"), "string");
+    assert_eq!(run("var o={[Symbol.toPrimitive](){return 5}}; o + 1"), "6");
+    assert_eq!(run("var o={[Symbol.toPrimitive](){return 5n}}; o + 1n"), "6");
+    assert_eq!(run("var o={[Symbol.toPrimitive](){return 42}}; Number(o)"), "42");
+    assert_eq!(run("var o={valueOf(){return 9}}; o + 1"), "10");
+    assert_eq!(throws("var o={[Symbol.toPrimitive](){return {}}}; o+1"), "TypeError");
+}
