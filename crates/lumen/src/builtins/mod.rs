@@ -4854,6 +4854,17 @@ fn install_string(it: &mut Interp) {
         if s.len() > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "string too large to split in this engine"));
         }
+        // `limit` (ToUint32) caps the number of pieces; 0 → empty result.
+        let limit = match arg(args, 1) {
+            Value::Undefined => u32::MAX as usize,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                (if n.is_finite() { n as i64 as u32 } else { 0 }) as usize
+            }
+        };
+        if limit == 0 {
+            return Ok(i.make_array(Vec::new()));
+        }
         // Regex separator: split on each match (group captures are inserted between pieces).
         if let Value::Obj(o) = &arg(args, 0) {
             if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
@@ -4861,21 +4872,31 @@ fn install_string(it: &mut Interp) {
                 let chars: Vec<char> = s.chars().collect();
                 let mut parts = Vec::new();
                 let mut last = 0;
-                for caps in regex_find_all(&re, &chars) {
+                'outer: for caps in regex_find_all(&re, &chars) {
                     let (a, b) = caps[0].unwrap();
-                    if b == 0 {
-                        continue; // skip a zero-width match at the start
+                    // Skip a zero-width match at the very start or end of the string.
+                    if a == b && (b == 0 || a >= chars.len()) {
+                        continue;
                     }
                     parts.push(Value::from_string(chars[last..a].iter().collect::<String>()));
+                    if parts.len() >= limit {
+                        break;
+                    }
                     for g in 1..=re.ngroups {
                         parts.push(match caps[g] {
                             Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
                             None => Value::Undefined,
                         });
+                        if parts.len() >= limit {
+                            break 'outer;
+                        }
                     }
                     last = b;
                 }
-                parts.push(Value::from_string(chars[last..].iter().collect::<String>()));
+                if parts.len() < limit {
+                    parts.push(Value::from_string(chars[last..].iter().collect::<String>()));
+                }
+                parts.truncate(limit);
                 return Ok(i.make_array(parts));
             }
         }
@@ -4883,11 +4904,12 @@ fn install_string(it: &mut Interp) {
             Value::Undefined => Ok(i.make_array(vec![Value::Str(s)])),
             sep => {
                 let sep = ab(i.to_string(&sep))?;
-                let parts: Vec<Value> = if sep.is_empty() {
+                let mut parts: Vec<Value> = if sep.is_empty() {
                     s.chars().map(|c| Value::from_string(c.to_string())).collect()
                 } else {
                     s.split(sep.as_ref()).map(|p| Value::from_string(p.to_string())).collect()
                 };
+                parts.truncate(limit);
                 Ok(i.make_array(parts))
             }
         }
@@ -5191,8 +5213,18 @@ fn install_number(it: &mut Interp) {
         let n = this_number(i, &this)?;
         let radix = match arg(args, 0) {
             Value::Undefined => 10.0,
-            v => ab(i.to_number(&v))?,
+            v => {
+                let r = ab(i.to_number(&v))?;
+                if r.is_nan() {
+                    0.0
+                } else {
+                    r.trunc()
+                }
+            }
         };
+        if !(2.0..=36.0).contains(&radix) {
+            return Err(i.make_error("RangeError", "toString() radix must be between 2 and 36"));
+        }
         if radix == 10.0 {
             Ok(Value::from_string(i.num_to_str(n)))
         } else {
@@ -5270,28 +5302,48 @@ fn install_number(it: &mut Interp) {
 }
 
 fn to_radix_string(n: f64, radix: u32) -> String {
-    if !(2..=36).contains(&radix) {
+    if n.is_nan() {
         return "NaN".to_string();
+    }
+    if n.is_infinite() {
+        return if n < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
     }
     if n == 0.0 {
         return "0".to_string();
     }
-    let neg = n < 0.0;
-    let mut int = n.abs().trunc() as u64;
     let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::new();
+    let neg = n < 0.0;
+    let x = n.abs();
+    let mut int = x.trunc() as u64;
+    // Integer part (most-significant digit first after reversal).
+    let mut ipart = Vec::new();
     if int == 0 {
-        out.push(b'0');
+        ipart.push(b'0');
     }
     while int > 0 {
-        out.push(digits[(int % radix as u64) as usize]);
+        ipart.push(digits[(int % radix as u64) as usize]);
         int /= radix as u64;
     }
+    ipart.reverse();
+    let mut out = String::new();
     if neg {
-        out.push(b'-');
+        out.push('-');
     }
-    out.reverse();
-    String::from_utf8(out).unwrap()
+    out.push_str(std::str::from_utf8(&ipart).unwrap());
+    // Fractional part: repeatedly multiply by the radix, emitting the integer digit each step.
+    let mut frac = x.fract();
+    if frac > 0.0 {
+        out.push('.');
+        let mut count = 0;
+        while frac > 0.0 && count < 52 {
+            frac *= radix as f64;
+            let d = frac.trunc() as usize;
+            out.push(digits[d] as char);
+            frac -= d as f64;
+            count += 1;
+        }
+    }
+    out
 }
 
 fn install_boolean(it: &mut Interp) {

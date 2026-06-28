@@ -1286,3 +1286,19 @@ fn private_in() {
     assert_eq!(throws("class C{#x=1; static has(o){return #x in o}} C.has(5)"), "TypeError");
     assert_eq!(run("class C{#x=1; t(){return this.#x}} new C().t()"), "1");
 }
+#[test]
+fn split_limit_and_radix() {
+    assert_eq!(run("'a,b,c'.split(',',2).join('|')"), "a|b");
+    assert_eq!(run("'a,b,c'.split(',',0).length"), "0");
+    assert_eq!(run("'a,b,c,d'.split(',',2).join('|')"), "a|b");
+    assert_eq!(run("'abc'.split('',2).join('|')"), "a|b");
+    assert_eq!(run("'abc'.split(/(?:)/).length"), "3");
+    assert_eq!(run("'a,b,c'.split(',').length"), "3");
+    assert_eq!(run("(255).toString(16)"), "ff");
+    assert_eq!(run("(3.5).toString(2)"), "11.1");
+    assert_eq!(run("(0.5).toString(2)"), "0.1");
+    assert_eq!(run("(NaN).toString()"), "NaN");
+    assert_eq!(throws("(10).toString(37)"), "RangeError");
+    assert_eq!(throws("(10).toString(1)"), "RangeError");
+    assert_eq!(run("(255).toString(2)"), "11111111");
+}
