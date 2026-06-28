@@ -201,6 +201,34 @@ fn template_with_comments_in_substitution() {
 }
 
 #[test]
+fn array_methods() {
+    assert_eq!(run("[1,2,3,4].find(x=>x>2)"), "3");
+    assert_eq!(run("[1,2,3,4].findIndex(x=>x>2)"), "2");
+    assert_eq!(run("[1,2,3].some(x=>x>2)"), "true");
+    assert_eq!(run("[1,2,3].every(x=>x>0)"), "true");
+    assert_eq!(run("[3,1,2].sort().join(',')"), "1,2,3");
+    assert_eq!(run("[3,1,2,10].sort((a,b)=>a-b).join(',')"), "1,2,3,10");
+    assert_eq!(run("[1,2,3].at(-1)"), "3");
+    assert_eq!(run("[1,[2,[3]]].flat(2).join(',')"), "1,2,3");
+    assert_eq!(run("[1,2,3].flatMap(x=>[x,x]).join(',')"), "1,1,2,2,3,3");
+    assert_eq!(run("var a=[1,2,3,4]; a.splice(1,2,'x'); a.join(',')"), "1,x,4");
+    assert_eq!(run("[1,2,3].fill(0,1).join(',')"), "1,0,0");
+    assert_eq!(run("Array.from('abc').join(',')"), "a,b,c");
+    assert_eq!(run("Array.from([1,2,3], x=>x*2).join(',')"), "2,4,6");
+    assert_eq!(run("Array.from({length:3, 0:'a',1:'b',2:'c'}).join(',')"), "a,b,c");
+}
+
+#[test]
+fn iterator_protocol() {
+    assert_eq!(run("[...[1,2,3].keys()].join(',')"), "0,1,2");
+    assert_eq!(run("[...[10,20].entries()].map(e=>e.join(':')).join(',')"), "0:10,1:20");
+    assert_eq!(run("typeof [][Symbol.iterator]"), "function");
+    let custom = "let obj = { [Symbol.iterator]() { let n=0; return { next(){ return n<3 ? {value:n++,done:false} : {value:undefined,done:true}; } }; } };";
+    assert_eq!(run(&format!("{custom} let s=0; for (const x of obj) s+=x; s")), "3");
+    assert_eq!(run(&format!("{custom} [...obj].join(',')")), "0,1,2");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }

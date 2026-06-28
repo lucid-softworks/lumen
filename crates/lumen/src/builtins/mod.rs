@@ -4,6 +4,7 @@
 
 use crate::interpreter::{Abrupt, Interp, MAX_ARRAY_OP_LEN, MAX_STR_LEN};
 use crate::value::*;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 /// `args[i]` or `undefined`.
@@ -36,11 +37,12 @@ pub fn install(it: &mut Interp) {
 
     install_function_proto(it);
     install_object(it);
+    // Symbol before Array/String so `Symbol.iterator` exists when they define `@@iterator`.
+    install_symbol(it);
     install_array(it);
     install_string(it);
     install_number(it);
     install_boolean(it);
-    install_symbol(it);
     install_math(it);
     install_errors(it);
     install_globals(it);
@@ -322,6 +324,98 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "is", 2, |_i, _this, args| {
         Ok(Value::Bool(same_value(&arg(args, 0), &arg(args, 1))))
+    });
+    it.def_method(&ctor, "values", 1, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Object.values called on non-object")),
+        };
+        let keys: Vec<Rc<str>> = o
+            .borrow()
+            .props
+            .iter()
+            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            out.push(ab(i.get_member(&arg(args, 0), &k))?);
+        }
+        Ok(i.make_array(out))
+    });
+    it.def_method(&ctor, "entries", 1, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Object.entries called on non-object")),
+        };
+        let keys: Vec<Rc<str>> = o
+            .borrow()
+            .props
+            .iter()
+            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let v = ab(i.get_member(&arg(args, 0), &k))?;
+            out.push(i.make_array(vec![Value::Str(k), v]));
+        }
+        Ok(i.make_array(out))
+    });
+    it.def_method(&ctor, "fromEntries", 1, |i, _this, args| {
+        let pairs = ab(i.iterate(&arg(args, 0)))?;
+        let obj = i.new_object();
+        for pair in pairs {
+            let k = ab(i.get_member(&pair, "0"))?;
+            let v = ab(i.get_member(&pair, "1"))?;
+            let key = ab(i.to_property_key(&k))?;
+            ab(i.set_member(&Value::Obj(obj.clone()), &key, v))?;
+        }
+        Ok(Value::Obj(obj))
+    });
+    it.def_method(&ctor, "defineProperties", 2, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Object.defineProperties on non-object")),
+        };
+        if let Value::Obj(descs) = arg(args, 1) {
+            for k in descs.borrow().props.keys() {
+                let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
+                let prop = ab(build_descriptor(i, &d))?;
+                o.borrow_mut().props.insert(k, prop);
+            }
+        }
+        Ok(Value::Obj(o))
+    });
+    it.def_method(&ctor, "seal", 1, |_i, _this, args| {
+        if let Value::Obj(o) = arg(args, 0) {
+            o.borrow_mut().extensible = false;
+            for k in o.borrow().props.keys() {
+                if let Some(p) = o.borrow_mut().props.get_mut(&k) {
+                    p.configurable = false;
+                }
+            }
+        }
+        Ok(arg(args, 0))
+    });
+    it.def_method(&ctor, "isSealed", 1, |_i, _this, args| {
+        let sealed = match arg(args, 0) {
+            Value::Obj(o) => {
+                !o.borrow().extensible && o.borrow().props.iter().all(|(_, p)| !p.configurable)
+            }
+            _ => true,
+        };
+        Ok(Value::Bool(sealed))
+    });
+    it.def_method(&ctor, "isFrozen", 1, |_i, _this, args| {
+        let frozen = match arg(args, 0) {
+            Value::Obj(o) => {
+                !o.borrow().extensible
+                    && o.borrow().props.iter().all(|(_, p)| !p.configurable && (p.accessor || !p.writable))
+            }
+            _ => true,
+        };
+        Ok(Value::Bool(frozen))
     });
 
     set_builtin(&it.global, "Object", Value::Obj(ctor));
@@ -609,6 +703,97 @@ fn install_array(it: &mut Interp) {
             Ok(Value::str("[object Array]"))
         }
     });
+    it.def_method(&ap, "at", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "at on non-object"))?;
+        let len = ab(i.checked_array_len(&o))? as i64;
+        let mut idx = ab(i.to_number(&arg(args, 0)))? as i64;
+        if idx < 0 {
+            idx += len;
+        }
+        if idx < 0 || idx >= len {
+            return Ok(Value::Undefined);
+        }
+        ab(i.get_member(&this, &idx.to_string()))
+    });
+    it.def_method(&ap, "find", 1, |i, this, args| array_find(i, this, args, true, false));
+    it.def_method(&ap, "findIndex", 1, |i, this, args| array_find(i, this, args, false, false));
+    it.def_method(&ap, "findLast", 1, |i, this, args| array_find(i, this, args, true, true));
+    it.def_method(&ap, "findLastIndex", 1, |i, this, args| array_find(i, this, args, false, true));
+    it.def_method(&ap, "some", 1, |i, this, args| array_some_every(i, this, args, false));
+    it.def_method(&ap, "every", 1, |i, this, args| array_some_every(i, this, args, true));
+    it.def_method(&ap, "fill", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "fill on non-object"))?;
+        let len = ab(i.checked_array_len(&o))? as i64;
+        let v = arg(args, 0);
+        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
+        let end = match arg(args, 2) {
+            Value::Undefined => len,
+            x => norm_index(ab(i.to_number(&x))?, len, len),
+        };
+        for k in start..end {
+            ab(i.set_member(&this, &k.to_string(), v.clone()))?;
+        }
+        Ok(this)
+    });
+    it.def_method(&ap, "lastIndexOf", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "lastIndexOf"))?;
+        let len = ab(i.checked_array_len(&o))?;
+        let target = arg(args, 0);
+        for k in (0..len).rev() {
+            let v = ab(i.get_member(&this, &k.to_string()))?;
+            if i.strict_equals(&v, &target) {
+                return Ok(Value::Num(k as f64));
+            }
+        }
+        Ok(Value::Num(-1.0))
+    });
+    it.def_method(&ap, "flat", 0, |i, this, args| {
+        let depth = match arg(args, 0) {
+            Value::Undefined => 1.0,
+            v => ab(i.to_number(&v))?,
+        };
+        let mut out = Vec::new();
+        array_flatten(i, &this, depth as i64, &mut out)?;
+        Ok(i.make_array(out))
+    });
+    it.def_method(&ap, "flatMap", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "flatMap"))?;
+        let len = ab(i.checked_array_len(&o))?;
+        let cb = arg(args, 0);
+        let cb_this = arg(args, 1);
+        let mut mapped = Vec::with_capacity(len);
+        for k in 0..len {
+            let v = ab(i.get_member(&this, &k.to_string()))?;
+            mapped.push(ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?);
+        }
+        let arr = i.make_array(mapped);
+        let mut out = Vec::new();
+        array_flatten(i, &arr, 1, &mut out)?;
+        Ok(i.make_array(out))
+    });
+    it.def_method(&ap, "splice", 2, |i, this, args| array_splice(i, this, args));
+    it.def_method(&ap, "sort", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "sort on non-object"))?;
+        let len = ab(i.checked_array_len(&o))?;
+        let mut items = Vec::with_capacity(len);
+        for k in 0..len {
+            items.push(ab(i.get_member(&this, &k.to_string()))?);
+        }
+        let cmp = arg(args, 0);
+        merge_sort(i, &mut items, &cmp)?;
+        for (k, v) in items.into_iter().enumerate() {
+            ab(i.set_member(&this, &k.to_string(), v))?;
+        }
+        Ok(this)
+    });
+    it.def_method(&ap, "values", 0, |i, this, _| Ok(make_array_iterator(i, this, 0)));
+    it.def_method(&ap, "keys", 0, |i, this, _| Ok(make_array_iterator(i, this, 1)));
+    it.def_method(&ap, "entries", 0, |i, this, _| Ok(make_array_iterator(i, this, 2)));
+    // `arr[Symbol.iterator]` is `Array.prototype.values`.
+    if let Some(sym) = it.iterator_sym.clone() {
+        let values_fn = ap.borrow().props.get("values").map(|p| p.value.clone()).unwrap();
+        ap.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(values_fn));
+    }
 
     let ctor = it.make_native("Array", 1, |i, _this, args| {
         if args.len() == 1 {
@@ -628,7 +813,233 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array))))
     });
     it.def_method(&ctor, "of", 0, |i, _this, args| Ok(i.make_array(args.to_vec())));
+    it.def_method(&ctor, "from", 1, |i, _this, args| {
+        let source = arg(args, 0);
+        let mapfn = arg(args, 1);
+        let items = match &source {
+            Value::Str(_) => ab(i.iterate(&source))?,
+            Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => ab(i.iterate(&source))?,
+            Value::Obj(_) if i.has_iterator(&source) => ab(i.iterate(&source))?,
+            Value::Obj(_) => {
+                // Array-like: read `length` then indexed elements.
+                let lenv = ab(i.get_member(&source, "length"))?;
+                let len = ab(i.to_number(&lenv))?.max(0.0) as usize;
+                if len > MAX_ARRAY_OP_LEN {
+                    return Err(i.make_error("RangeError", "array length exceeds engine limit"));
+                }
+                let mut v = Vec::with_capacity(len);
+                for k in 0..len {
+                    v.push(ab(i.get_member(&source, &k.to_string()))?);
+                }
+                v
+            }
+            _ => return Err(i.make_error("TypeError", "Array.from requires an iterable or array-like")),
+        };
+        if mapfn.is_callable() {
+            let mut out = Vec::with_capacity(items.len());
+            for (k, v) in items.into_iter().enumerate() {
+                out.push(ab(i.call(mapfn.clone(), Value::Undefined, &[v, Value::Num(k as f64)]))?);
+            }
+            Ok(i.make_array(out))
+        } else {
+            Ok(i.make_array(items))
+        }
+    });
     set_builtin(&it.global, "Array", Value::Obj(ctor));
+}
+
+fn array_find(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+    want_value: bool,
+    from_last: bool,
+) -> Result<Value, Value> {
+    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "find on non-object"))?;
+    let len = ab(i.checked_array_len(&o))?;
+    let cb = arg(args, 0);
+    let cb_this = arg(args, 1);
+    let order: Vec<usize> = if from_last { (0..len).rev().collect() } else { (0..len).collect() };
+    for k in order {
+        let v = ab(i.get_member(&this, &k.to_string()))?;
+        let r = ab(i.call(cb.clone(), cb_this.clone(), &[v.clone(), Value::Num(k as f64), this.clone()]))?;
+        if i.to_boolean(&r) {
+            return Ok(if want_value { v } else { Value::Num(k as f64) });
+        }
+    }
+    Ok(if want_value { Value::Undefined } else { Value::Num(-1.0) })
+}
+
+fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) -> Result<Value, Value> {
+    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "some/every on non-object"))?;
+    let len = ab(i.checked_array_len(&o))?;
+    let cb = arg(args, 0);
+    let cb_this = arg(args, 1);
+    for k in 0..len {
+        let v = ab(i.get_member(&this, &k.to_string()))?;
+        let r = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
+        let b = i.to_boolean(&r);
+        if every && !b {
+            return Ok(Value::Bool(false));
+        }
+        if !every && b {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(every))
+}
+
+fn array_flatten(i: &mut Interp, arr: &Value, depth: i64, out: &mut Vec<Value>) -> Result<(), Value> {
+    let o = match arr {
+        Value::Obj(o) => o.clone(),
+        _ => return Ok(()),
+    };
+    let len = ab(i.checked_array_len(&o))?;
+    for k in 0..len {
+        let v = ab(i.get_member(arr, &k.to_string()))?;
+        let is_arr = matches!(&v, Value::Obj(vo) if matches!(vo.borrow().exotic, Exotic::Array));
+        if depth > 0 && is_arr {
+            array_flatten(i, &v, depth - 1, out)?;
+        } else {
+            out.push(v);
+        }
+    }
+    Ok(())
+}
+
+fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "splice on non-object"))?;
+    let len = ab(i.checked_array_len(&o))? as i64;
+    let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+    let delete_count = if args.len() < 2 {
+        len - start
+    } else {
+        (ab(i.to_number(&arg(args, 1)))? as i64).clamp(0, len - start)
+    };
+    let items: Vec<Value> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
+    let mut removed = Vec::with_capacity(delete_count.max(0) as usize);
+    for k in 0..delete_count {
+        removed.push(ab(i.get_member(&this, &(start + k).to_string()))?);
+    }
+    let mut tail = Vec::new();
+    for k in (start + delete_count)..len {
+        tail.push(ab(i.get_member(&this, &k.to_string()))?);
+    }
+    let mut idx = start;
+    for v in items.iter().chain(tail.iter()) {
+        ab(i.set_member(&this, &idx.to_string(), v.clone()))?;
+        idx += 1;
+    }
+    ab(i.set_member(&this, "length", Value::Num(idx as f64)))?;
+    Ok(i.make_array(removed))
+}
+
+fn merge_sort(i: &mut Interp, items: &mut [Value], cmp: &Value) -> Result<(), Value> {
+    let n = items.len();
+    if n <= 1 {
+        return Ok(());
+    }
+    let mid = n / 2;
+    let mut left = items[..mid].to_vec();
+    let mut right = items[mid..].to_vec();
+    merge_sort(i, &mut left, cmp)?;
+    merge_sort(i, &mut right, cmp)?;
+    let (mut a, mut b, mut k) = (0, 0, 0);
+    while a < left.len() && b < right.len() {
+        if compare_values(i, cmp, &left[a], &right[b])? != Ordering::Greater {
+            items[k] = left[a].clone();
+            a += 1;
+        } else {
+            items[k] = right[b].clone();
+            b += 1;
+        }
+        k += 1;
+    }
+    while a < left.len() {
+        items[k] = left[a].clone();
+        a += 1;
+        k += 1;
+    }
+    while b < right.len() {
+        items[k] = right[b].clone();
+        b += 1;
+        k += 1;
+    }
+    Ok(())
+}
+
+fn compare_values(i: &mut Interp, cmp: &Value, a: &Value, b: &Value) -> Result<Ordering, Value> {
+    // `undefined` always sorts to the end.
+    match (matches!(a, Value::Undefined), matches!(b, Value::Undefined)) {
+        (true, true) => return Ok(Ordering::Equal),
+        (true, false) => return Ok(Ordering::Greater),
+        (false, true) => return Ok(Ordering::Less),
+        _ => {}
+    }
+    if cmp.is_callable() {
+        let r = ab(i.call(cmp.clone(), Value::Undefined, &[a.clone(), b.clone()]))?;
+        let n = ab(i.to_number(&r))?;
+        Ok(if n < 0.0 {
+            Ordering::Less
+        } else if n > 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        })
+    } else {
+        let sa = ab(i.to_string(a))?;
+        let sb = ab(i.to_string(b))?;
+        Ok(sa.as_ref().cmp(sb.as_ref()))
+    }
+}
+
+/// A native that returns its `this` — the `@@iterator` of an iterator object is itself.
+fn return_this(_i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(this)
+}
+
+/// Build an Array Iterator over `target`. `kind`: 0 = values, 1 = keys, 2 = [key, value] entries.
+/// State lives in non-enumerable internal slots so `next` can advance it.
+fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
+    let obj = i.new_object();
+    set_builtin(&obj, "__ai_target", target);
+    set_builtin(&obj, "__ai_index", Value::Num(0.0));
+    set_builtin(&obj, "__ai_kind", Value::Num(kind as f64));
+    i.def_method(&obj, "next", 0, array_iter_next);
+    if let Some(sym) = i.iterator_sym.clone() {
+        let f = i.make_native("[Symbol.iterator]", 0, return_this);
+        obj.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+    }
+    Value::Obj(obj)
+}
+
+fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let target = ab(i.get_member(&this, "__ai_target"))?;
+    let idx_v = ab(i.get_member(&this, "__ai_index"))?;
+    let idx = ab(i.to_number(&idx_v))? as usize;
+    let kind_v = ab(i.get_member(&this, "__ai_kind"))?;
+    let kind = ab(i.to_number(&kind_v))? as u8;
+    let len = match &target {
+        Value::Obj(o) => i.array_length(o),
+        Value::Str(s) => s.chars().count(),
+        _ => 0,
+    };
+    let result = i.new_object();
+    if idx >= len {
+        set_data(&result, "value", Value::Undefined);
+        set_data(&result, "done", Value::Bool(true));
+        return Ok(Value::Obj(result));
+    }
+    ab(i.set_member(&this, "__ai_index", Value::Num((idx + 1) as f64)))?;
+    let elem = ab(i.get_member(&target, &idx.to_string()))?;
+    let value = match kind {
+        1 => Value::Num(idx as f64),
+        2 => i.make_array(vec![Value::Num(idx as f64), elem]),
+        _ => elem,
+    };
+    set_data(&result, "value", value);
+    set_data(&result, "done", Value::Bool(false));
+    Ok(Value::Obj(result))
 }
 
 fn norm_index(n: f64, len: i64, default: i64) -> i64 {
@@ -792,6 +1203,70 @@ fn install_string(it: &mut Interp) {
             }
         }
     });
+    it.def_method(&sp, "at", 1, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        let mut idx = ab(i.to_number(&arg(args, 0)))? as i64;
+        if idx < 0 {
+            idx += len;
+        }
+        Ok(if idx < 0 || idx >= len {
+            Value::Undefined
+        } else {
+            Value::from_string(chars[idx as usize].to_string())
+        })
+    });
+    it.def_method(&sp, "codePointAt", 1, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let idx = ab(i.to_number(&arg(args, 0)))? as usize;
+        Ok(match s.chars().nth(idx) {
+            Some(c) => Value::Num(c as u32 as f64),
+            None => Value::Undefined,
+        })
+    });
+    it.def_method(&sp, "trimStart", 0, |i, this, _| {
+        Ok(Value::from_string(this_string(i, &this)?.trim_start().to_string()))
+    });
+    it.def_method(&sp, "trimEnd", 0, |i, this, _| {
+        Ok(Value::from_string(this_string(i, &this)?.trim_end().to_string()))
+    });
+    it.def_method(&sp, "padStart", 1, |i, this, args| string_pad(i, this, args, true));
+    it.def_method(&sp, "padEnd", 1, |i, this, args| string_pad(i, this, args, false));
+    it.def_method(&sp, "replace", 2, |i, this, args| {
+        // String-pattern replace only (first occurrence); regex patterns are not yet supported.
+        let s = this_string(i, &this)?.to_string();
+        let pat = ab(i.to_string(&arg(args, 0)))?;
+        let repl = arg(args, 1);
+        match s.find(pat.as_ref()) {
+            None => Ok(Value::from_string(s)),
+            Some(pos) => {
+                let matched = &s[pos..pos + pat.len()];
+                let rep = string_replacement(i, &repl, matched, &s, pos)?;
+                Ok(Value::from_string(format!("{}{}{}", &s[..pos], rep, &s[pos + pat.len()..])))
+            }
+        }
+    });
+    it.def_method(&sp, "replaceAll", 2, |i, this, args| {
+        let s = this_string(i, &this)?.to_string();
+        let pat = ab(i.to_string(&arg(args, 0)))?;
+        let repl = arg(args, 1);
+        if pat.is_empty() {
+            return Ok(Value::from_string(s));
+        }
+        let mut out = String::new();
+        let mut rest = s.as_str();
+        let mut base = 0usize;
+        while let Some(pos) = rest.find(pat.as_ref()) {
+            out.push_str(&rest[..pos]);
+            let rep = string_replacement(i, &repl, pat.as_ref(), &s, base + pos)?;
+            out.push_str(&rep);
+            rest = &rest[pos + pat.len()..];
+            base += pos + pat.len();
+        }
+        out.push_str(rest);
+        Ok(Value::from_string(out))
+    });
 
     let ctor = it.make_native("String", 1, |i, _this, args| {
         match args.first() {
@@ -815,6 +1290,55 @@ fn install_string(it: &mut Interp) {
         Ok(Value::from_string(s))
     });
     set_builtin(&it.global, "String", Value::Obj(ctor));
+}
+
+fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Result<Value, Value> {
+    let s = this_string(i, &this)?.to_string();
+    let target = ab(i.to_number(&arg(args, 0)))? as usize;
+    let cur = s.chars().count();
+    if cur >= target {
+        return Ok(Value::from_string(s));
+    }
+    let pad = match arg(args, 1) {
+        Value::Undefined => " ".to_string(),
+        v => ab(i.to_string(&v))?.to_string(),
+    };
+    if pad.is_empty() {
+        return Ok(Value::from_string(s));
+    }
+    let need = target - cur;
+    let mut fill = String::new();
+    for c in pad.chars().cycle() {
+        if fill.chars().count() >= need {
+            break;
+        }
+        fill.push(c);
+    }
+    let fill: String = fill.chars().take(need).collect();
+    Ok(Value::from_string(if at_start { format!("{fill}{s}") } else { format!("{s}{fill}") }))
+}
+
+/// Compute the replacement text for String.prototype.replace/replaceAll. A function replacer is
+/// called with (match, position, whole-string); otherwise `$&` etc. patterns are honored minimally.
+fn string_replacement(
+    i: &mut Interp,
+    repl: &Value,
+    matched: &str,
+    whole: &str,
+    pos: usize,
+) -> Result<String, Value> {
+    if repl.is_callable() {
+        let r = ab(i.call(
+            repl.clone(),
+            Value::Undefined,
+            &[Value::from_string(matched.to_string()), Value::Num(pos as f64), Value::from_string(whole.to_string())],
+        ))?;
+        Ok(ab(i.to_string(&r))?.to_string())
+    } else {
+        let template = ab(i.to_string(repl))?;
+        // Support the common `$&` (matched substring) and `$$` (literal $) patterns.
+        Ok(template.replace("$&", matched).replace("$$", "$"))
+    }
 }
 
 fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
@@ -958,6 +1482,11 @@ fn install_symbol(it: &mut Interp) {
         "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables",
     ] {
         let sym = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
+        if name == "iterator" {
+            if let Value::Sym(d) = &sym {
+                it.iterator_sym = Some(d.clone());
+            }
+        }
         ctor.borrow_mut().props.insert(name, Property::data(sym, false, false, false));
     }
 

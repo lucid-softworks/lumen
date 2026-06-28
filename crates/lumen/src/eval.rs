@@ -27,7 +27,7 @@ impl Interp {
                 Ok(())
             }
             Pattern::Array(elems) => {
-                let items = self.iterate_values(&value)?;
+                let items = self.iterate(&value)?;
                 for (i, el) in elems.iter().enumerate() {
                     match el {
                         ArrayPatElem::Hole => {}
@@ -360,7 +360,7 @@ impl Interp {
     ) -> Completion {
         let rhs = self.eval(right, env)?;
         let items: Vec<Value> = if of {
-            self.iterate_values(&rhs)?
+            self.iterate(&rhs)?
         } else {
             // for-in: enumerable string keys along the prototype chain (own first, deduped).
             self.enum_keys(&rhs).into_iter().map(Value::from_string).collect()
@@ -384,23 +384,64 @@ impl Interp {
         })
     }
 
-    fn iterate_values(&mut self, v: &Value) -> Result<Vec<Value>, Abrupt> {
+    /// Collect every value an iterable yields. Strings and plain arrays use a fast path; everything
+    /// else goes through the `Symbol.iterator` protocol (call `@@iterator`, then drain `.next()`).
+    pub(crate) fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Abrupt> {
         match v {
-            Value::Str(s) => Ok(s.chars().map(|c| Value::from_string(c.to_string())).collect()),
-            Value::Obj(o) => {
-                if matches!(o.borrow().exotic, Exotic::Array) {
-                    let len = self.checked_array_len(o)?;
-                    let mut out = Vec::with_capacity(len.min(1024));
-                    for i in 0..len {
-                        out.push(self.get_member(v, &i.to_string())?);
-                    }
-                    Ok(out)
-                } else {
-                    Err(self.throw("TypeError", "value is not iterable"))
-                }
+            Value::Str(s) => {
+                return Ok(s.chars().map(|c| Value::from_string(c.to_string())).collect())
             }
-            _ => Err(self.throw("TypeError", "value is not iterable")),
+            Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => {
+                let len = self.checked_array_len(o)?;
+                let mut out = Vec::with_capacity(len.min(1024));
+                for i in 0..len {
+                    out.push(self.get_member(v, &i.to_string())?);
+                }
+                return Ok(out);
+            }
+            _ => {}
         }
+        // General iterator protocol.
+        if let Some(sym) = self.iterator_sym.clone() {
+            let key = Interp::sym_key(&sym);
+            let itfn = self.get_member(v, &key)?;
+            if itfn.is_callable() {
+                let iter = self.call(itfn, v.clone(), &[])?;
+                let next = self.get_member(&iter, "next")?;
+                if !next.is_callable() {
+                    return Err(self.throw("TypeError", "iterator.next is not a function"));
+                }
+                let mut out = Vec::new();
+                loop {
+                    let res = self.call(next.clone(), iter.clone(), &[])?;
+                    if !matches!(res, Value::Obj(_)) {
+                        return Err(self.throw("TypeError", "iterator result is not an object"));
+                    }
+                    let done = self.get_member(&res, "done")?;
+                    if self.to_boolean(&done) {
+                        break;
+                    }
+                    out.push(self.get_member(&res, "value")?);
+                    if out.len() > crate::interpreter::MAX_ARRAY_OP_LEN {
+                        return Err(self.throw("RangeError", "iterator produced too many values"));
+                    }
+                }
+                return Ok(out);
+            }
+        }
+        Err(self.throw("TypeError", "value is not iterable"))
+    }
+
+    /// Whether `v` is iterable (has a callable `@@iterator`). Used by `Array.from` to choose between
+    /// the iterator protocol and the array-like fallback.
+    pub(crate) fn has_iterator(&mut self, v: &Value) -> bool {
+        if let Some(sym) = self.iterator_sym.clone() {
+            let key = Interp::sym_key(&sym);
+            if let Ok(f) = self.get_member(v, &key) {
+                return f.is_callable();
+            }
+        }
+        false
     }
 
     fn enum_keys(&self, v: &Value) -> Vec<String> {
@@ -673,7 +714,7 @@ impl Interp {
                 ArrayElem::Hole => items.push(Value::Undefined),
                 ArrayElem::Spread(e) => {
                     let v = self.eval(e, env)?;
-                    items.extend(self.iterate_values(&v)?);
+                    items.extend(self.iterate(&v)?);
                 }
             }
         }
@@ -759,7 +800,7 @@ impl Interp {
                 ArrayElem::Item(e) => out.push(self.eval(e, env)?),
                 ArrayElem::Spread(e) => {
                     let v = self.eval(e, env)?;
-                    out.extend(self.iterate_values(&v)?);
+                    out.extend(self.iterate(&v)?);
                 }
                 ArrayElem::Hole => out.push(Value::Undefined),
             }

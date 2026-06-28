@@ -100,6 +100,8 @@ pub struct Interp {
     /// The global `eval` function object, so a *direct* eval call (`eval(src)` by that name) can be
     /// distinguished from an indirect one and run in the caller's scope.
     pub eval_fn: Option<Gc>,
+    /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
+    pub iterator_sym: Option<Rc<SymbolData>>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -154,6 +156,7 @@ impl Interp {
             depth: 0,
             class_info: HashMap::new(),
             eval_fn: None,
+            iterator_sym: None,
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
