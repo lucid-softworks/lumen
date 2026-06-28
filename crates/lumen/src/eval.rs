@@ -167,6 +167,11 @@ impl Interp {
                             // `var x;` (no init) keeps the hoisted binding untouched.
                             if let Some(e) = init {
                                 let value = self.eval(e, env)?;
+                                if let Pattern::Ident(n) = pat {
+                                    if is_anonymous_fn(e) {
+                                        self.set_fn_name(&value, n);
+                                    }
+                                }
                                 self.bind_pattern(pat, value, env, BindMode::Var)?;
                             }
                         }
@@ -175,6 +180,11 @@ impl Interp {
                                 Some(e) => self.eval(e, env)?,
                                 None => Value::Undefined,
                             };
+                            if let (Pattern::Ident(n), Some(e)) = (pat, init) {
+                                if is_anonymous_fn(e) {
+                                    self.set_fn_name(&value, n);
+                                }
+                            }
                             self.bind_pattern(pat, value, env, BindMode::Lexical(*kind == DeclKind::Const))?;
                         }
                     }
@@ -781,6 +791,28 @@ impl Interp {
         Ok(self.make_array(items))
     }
 
+    /// NamedEvaluation: give an anonymous function/class the binding/property name it's assigned to,
+    /// unless it already has a non-empty name.
+    fn set_fn_name(&mut self, v: &Value, name: &str) {
+        if !v.is_callable() {
+            return;
+        }
+        if let Value::Obj(o) = v {
+            let empty = o
+                .borrow()
+                .props
+                .get("name")
+                .map(|p| matches!(&p.value, Value::Str(s) if s.is_empty()))
+                .unwrap_or(true);
+            if empty {
+                o.borrow_mut().props.insert(
+                    "name".to_string(),
+                    Property::data(Value::from_string(name.to_string()), false, false, true),
+                );
+            }
+        }
+    }
+
     fn eval_object(&mut self, props: &[PropDef], env: &Env) -> Result<Value, Abrupt> {
         let obj = self.new_object();
         for prop in props {
@@ -788,16 +820,21 @@ impl Interp {
                 PropDef::KeyValue { key, value } => {
                     let k = self.eval_prop_key(key, env)?;
                     let v = self.eval(value, env)?;
+                    if is_anonymous_fn(value) {
+                        self.set_fn_name(&v, &k);
+                    }
                     obj.borrow_mut().props.insert(k, Property::plain(v));
                 }
                 PropDef::Getter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
                     let f = self.make_function(func.clone(), env.clone());
+                    self.set_fn_name(&f, &format!("get {k}"));
                     self.define_accessor(&obj, &k, Some(f), None);
                 }
                 PropDef::Setter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
                     let f = self.make_function(func.clone(), env.clone());
+                    self.set_fn_name(&f, &format!("set {k}"));
                     self.define_accessor(&obj, &k, None, Some(f));
                 }
                 PropDef::Spread(e) => {
@@ -1469,6 +1506,12 @@ impl Interp {
     fn eval_assign(&mut self, op: &str, target: &Expr, value: &Expr, env: &Env) -> Result<Value, Abrupt> {
         if op == "=" {
             let v = self.eval(value, env)?;
+            // `f = function(){}` names the anonymous function after the target identifier.
+            if let Expr::Ident(n) = target {
+                if is_anonymous_fn(value) {
+                    self.set_fn_name(&v, n);
+                }
+            }
             self.assign_to_target(target, v.clone(), env)?;
             return Ok(v);
         }
@@ -2056,6 +2099,15 @@ fn describe_callee(callee: &Expr) -> String {
         Expr::Ident(n) => n.clone(),
         Expr::Member { prop, .. } => format!("(intermediate value).{prop}"),
         _ => "expression".to_string(),
+    }
+}
+
+/// Whether an expression is an anonymous function/arrow/class (eligible for NamedEvaluation).
+fn is_anonymous_fn(e: &Expr) -> bool {
+    match e {
+        Expr::Func(f) => f.name.is_none(),
+        Expr::Class(c) => c.name.is_none(),
+        _ => false,
     }
 }
 

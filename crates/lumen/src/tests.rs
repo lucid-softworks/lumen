@@ -729,3 +729,16 @@ fn subclass_state() {
     assert_eq!(throws("Map()"), "TypeError");
     assert_eq!(throws("Int8Array(3)"), "TypeError");
 }
+
+#[test]
+fn named_evaluation() {
+    assert_eq!(run("var f=function(){}; f.name"), "f");
+    assert_eq!(run("let g=()=>{}; g.name"), "g");
+    assert_eq!(run("var h; h=function(){}; h.name"), "h");
+    assert_eq!(run("({m(){}}).m.name"), "m");
+    assert_eq!(run("({foo:function(){}}).foo.name"), "foo");
+    assert_eq!(run("var C=class{}; C.name"), "C");
+    assert_eq!(run("Object.getOwnPropertyDescriptor({get x(){}},'x').get.name"), "get x");
+    assert_eq!(run("function named(){}; var x=named; x.name"), "named"); // keeps original
+    assert_eq!(run("(function foo(){}).name"), "foo"); // named expr unchanged
+}
