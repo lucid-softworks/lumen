@@ -275,7 +275,26 @@ fn dates() {
 }
 
 #[test]
+fn typed_arrays() {
+    assert_eq!(run("var a = new Int8Array(3); a.length"), "3");
+    assert_eq!(run("var a = new Int8Array(3); a[0]=5; a[1]=10; a[0]+a[1]"), "15");
+    assert_eq!(run("var a = new Uint8Array([1,2,3]); a.join(',')"), "1,2,3");
+    assert_eq!(run("var a = new Int8Array([100]); a[0]=200; a[0]"), "-56"); // wraps i8
+    assert_eq!(run("var a = new Uint8ClampedArray([1]); a[0]=300; a[0]"), "255"); // clamps
+    assert_eq!(run("new Float64Array([1.5,2.5])[1]"), "2.5");
+    assert_eq!(run("Int32Array.BYTES_PER_ELEMENT"), "4");
+    assert_eq!(run("var b = new ArrayBuffer(8); b.byteLength"), "8");
+    assert_eq!(run("var b = new ArrayBuffer(8); var a = new Int32Array(b); a.length"), "2");
+    assert_eq!(run("var a = new Uint8Array([1,2,3,4]); a.subarray(1,3).join(',')"), "2,3");
+    assert_eq!(run("var a = new Int16Array(3); a.set([7,8],1); a.join(',')"), "0,7,8");
+    assert_eq!(run("new Uint8Array([3,1,2]).map(x=>x*2).join(',')"), "6,2,4");
+    assert_eq!(run("ArrayBuffer.isView(new Int8Array(1))"), "true");
+    assert_eq!(run("var s=0; new Uint8Array([1,2,3]).forEach(x=>s+=x); s"), "6");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
+
 

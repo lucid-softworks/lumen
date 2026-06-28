@@ -117,6 +117,87 @@ impl Object {
     }
 }
 
+/// The element type of a TypedArray.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TaKind {
+    I8,
+    U8,
+    U8Clamped,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    F64,
+}
+
+impl TaKind {
+    pub fn elsize(self) -> usize {
+        match self {
+            TaKind::I8 | TaKind::U8 | TaKind::U8Clamped => 1,
+            TaKind::I16 | TaKind::U16 => 2,
+            TaKind::I32 | TaKind::U32 | TaKind::F32 => 4,
+            TaKind::F64 => 8,
+        }
+    }
+    /// Constructor / prototype name, e.g. "Int8Array".
+    pub fn name(self) -> &'static str {
+        match self {
+            TaKind::I8 => "Int8Array",
+            TaKind::U8 => "Uint8Array",
+            TaKind::U8Clamped => "Uint8ClampedArray",
+            TaKind::I16 => "Int16Array",
+            TaKind::U16 => "Uint16Array",
+            TaKind::I32 => "Int32Array",
+            TaKind::U32 => "Uint32Array",
+            TaKind::F32 => "Float32Array",
+            TaKind::F64 => "Float64Array",
+        }
+    }
+    /// Read one element (little-endian) from `b` (which must be `elsize()` bytes) as a Number.
+    pub fn read(self, b: &[u8]) -> f64 {
+        match self {
+            TaKind::I8 => b[0] as i8 as f64,
+            TaKind::U8 | TaKind::U8Clamped => b[0] as f64,
+            TaKind::I16 => i16::from_le_bytes([b[0], b[1]]) as f64,
+            TaKind::U16 => u16::from_le_bytes([b[0], b[1]]) as f64,
+            TaKind::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TaKind::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TaKind::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TaKind::F64 => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+        }
+    }
+    /// Convert a Number to this element type's little-endian bytes (JS integer-conversion rules).
+    pub fn write(self, n: f64) -> Vec<u8> {
+        let int = |n: f64| if n.is_finite() { n.trunc() as i64 } else { 0 };
+        match self {
+            TaKind::I8 => vec![int(n) as i8 as u8],
+            TaKind::U8 => vec![int(n) as u8],
+            TaKind::U8Clamped => {
+                let c = if n.is_nan() { 0.0 } else { n.round().clamp(0.0, 255.0) };
+                vec![c as u8]
+            }
+            TaKind::I16 => (int(n) as i16).to_le_bytes().to_vec(),
+            TaKind::U16 => (int(n) as u16).to_le_bytes().to_vec(),
+            TaKind::I32 => (int(n) as i32).to_le_bytes().to_vec(),
+            TaKind::U32 => (int(n) as u32).to_le_bytes().to_vec(),
+            TaKind::F32 => (n as f32).to_le_bytes().to_vec(),
+            TaKind::F64 => n.to_le_bytes().to_vec(),
+        }
+    }
+}
+
+/// A TypedArray view's internal state (the engine's `[[ViewedArrayBuffer]]`/`[[ByteOffset]]`/
+/// `[[ArrayLength]]`/`[[TypedArrayName]]`). Stored in an `Interp` side table keyed by object ptr.
+#[derive(Clone, Copy)]
+pub struct TaInfo {
+    /// Pointer of the backing ArrayBuffer object (key into `Interp::array_buffers`).
+    pub buffer: usize,
+    pub offset: usize,
+    pub len: usize,
+    pub kind: TaKind,
+}
+
 /// A property descriptor. A data property uses `value`/`writable`; an accessor uses `get`/`set`.
 #[derive(Clone)]
 pub struct Property {

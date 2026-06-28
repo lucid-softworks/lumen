@@ -108,6 +108,10 @@ pub struct Interp {
     /// Prototypes for builtins created after `new()` (Map/Set/Date/...), looked up by name so their
     /// native constructors can stamp the right `[[Prototype]]`.
     pub extra_protos: HashMap<&'static str, Gc>,
+    /// ArrayBuffer byte storage, keyed by the ArrayBuffer object's pointer.
+    pub array_buffers: HashMap<usize, Vec<u8>>,
+    /// TypedArray view state, keyed by the typed-array object's pointer.
+    pub typed_arrays: HashMap<usize, TaInfo>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -165,6 +169,8 @@ impl Interp {
             iterator_sym: None,
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
+            array_buffers: HashMap::new(),
+            typed_arrays: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -198,6 +204,36 @@ impl Interp {
     #[allow(dead_code)]
     pub fn type_err<T>(&self, message: impl Into<String>) -> Result<T, Abrupt> {
         Err(self.throw("TypeError", message))
+    }
+
+    // ----- typed arrays -----------------------------------------------------------------------
+
+    /// Read element `idx` of a TypedArray as a Number (or undefined if out of range / detached).
+    pub fn ta_read(&self, info: &TaInfo, idx: usize) -> Value {
+        if idx >= info.len {
+            return Value::Undefined;
+        }
+        let es = info.kind.elsize();
+        let start = info.offset + idx * es;
+        match self.array_buffers.get(&info.buffer) {
+            Some(buf) if start + es <= buf.len() => Value::Num(info.kind.read(&buf[start..start + es])),
+            _ => Value::Undefined,
+        }
+    }
+
+    /// Write Number `n` into element `idx` of a TypedArray (out-of-range writes are ignored).
+    pub fn ta_write(&mut self, info: &TaInfo, idx: usize, n: f64) {
+        if idx >= info.len {
+            return;
+        }
+        let es = info.kind.elsize();
+        let start = info.offset + idx * es;
+        let bytes = info.kind.write(n);
+        if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
+            if start + es <= buf.len() {
+                buf[start..start + es].copy_from_slice(&bytes);
+            }
+        }
     }
 
     // ----- symbols ----------------------------------------------------------------------------
@@ -328,6 +364,13 @@ impl Interp {
             }
             Value::Obj(o) => {
                 let o = o.clone();
+                // TypedArray integer-index reads come from the backing buffer, not the property map.
+                let ptr = Rc::as_ptr(&o) as usize;
+                if let Some(info) = self.typed_arrays.get(&ptr).copied() {
+                    if let Ok(idx) = key.parse::<usize>() {
+                        return Ok(self.ta_read(&info, idx));
+                    }
+                }
                 self.get_from_chain(&o, key, base)
             }
         }
@@ -363,6 +406,16 @@ impl Interp {
             // which we approximate as a no-op for now).
             _ => return Ok(()),
         };
+
+        // TypedArray integer-index writes go straight to the backing buffer.
+        let ptr = Rc::as_ptr(&obj) as usize;
+        if let Some(info) = self.typed_arrays.get(&ptr).copied() {
+            if let Ok(idx) = key.parse::<usize>() {
+                let n = self.to_number(&value)?;
+                self.ta_write(&info, idx, n);
+                return Ok(());
+            }
+        }
 
         // Walk the chain for an accessor or read-only data property.
         let mut cur = Some(obj.clone());

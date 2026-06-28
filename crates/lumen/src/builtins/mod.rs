@@ -49,8 +49,245 @@ pub fn install(it: &mut Interp) {
     install_json(it);
     install_collections(it);
     install_date(it);
+    install_typed_arrays(it);
     install_globals(it);
     install_console(it);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ArrayBuffer + TypedArrays. Backing bytes live in `Interp::array_buffers`; each view's state in
+// `Interp::typed_arrays`. Integer-index get/set is wired in `get_member`/`set_member`; the named
+// metadata (length/byteLength/byteOffset/buffer/BYTES_PER_ELEMENT) is stored as real own props.
+// ---------------------------------------------------------------------------------------------
+
+fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
+    let obj = Object::new(i.extra_protos.get("ArrayBuffer").cloned());
+    let p = Rc::as_ptr(&obj) as usize;
+    i.array_buffers.insert(p, vec![0u8; byte_len]);
+    set_internal(&obj, "byteLength", Value::Num(byte_len as f64));
+    (Value::Obj(obj), p)
+}
+
+fn install_array_buffer(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("ArrayBuffer", proto.clone());
+    it.def_method(&proto, "slice", 2, |i, this, a| {
+        let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
+        let bytes = ptr.and_then(|p| i.array_buffers.get(&p)).cloned().unwrap_or_default();
+        let len = bytes.len() as i64;
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        let end = match arg(a, 1) {
+            Value::Undefined => len,
+            v => norm_index(ab(i.to_number(&v))?, len, len),
+        };
+        let slice = if begin < end { bytes[begin as usize..end as usize].to_vec() } else { Vec::new() };
+        let (bv, bp) = make_array_buffer(i, slice.len());
+        if let Some(buf) = i.array_buffers.get_mut(&bp) {
+            buf.copy_from_slice(&slice);
+        }
+        Ok(bv)
+    });
+    let ctor = it.make_native("ArrayBuffer", 1, |i, _t, a| {
+        let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
+        if len > MAX_ARRAY_OP_LEN {
+            return Err(i.make_error("RangeError", "Invalid ArrayBuffer length"));
+        }
+        Ok(make_array_buffer(i, len).0)
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.def_method(&ctor, "isView", 1, |i, _t, a| {
+        let is_view = match arg(a, 0) {
+            Value::Obj(o) => i.typed_arrays.contains_key(&(Rc::as_ptr(&o) as usize)),
+            _ => false,
+        };
+        Ok(Value::Bool(is_view))
+    });
+    set_builtin(&it.global, "ArrayBuffer", Value::Obj(ctor));
+}
+
+fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
+    let es = kind.elsize();
+    let (buf_val, buf_ptr, offset, len) = match args.first() {
+        None => {
+            let (bv, bp) = make_array_buffer(i, 0);
+            (bv, bp, 0, 0)
+        }
+        Some(Value::Num(n)) => {
+            let len = n.max(0.0) as usize;
+            if len > MAX_ARRAY_OP_LEN {
+                return Err(i.make_error("RangeError", "Invalid typed array length"));
+            }
+            let (bv, bp) = make_array_buffer(i, len * es);
+            (bv, bp, 0, len)
+        }
+        Some(Value::Obj(o)) if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)) => {
+            let bp = Rc::as_ptr(o) as usize;
+            let bv = Value::Obj(o.clone());
+            let offset = match args.get(1) {
+                Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))? as usize,
+                _ => 0,
+            };
+            let buflen = i.array_buffers[&bp].len();
+            let len = match args.get(2) {
+                Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))? as usize,
+                _ => buflen.saturating_sub(offset) / es,
+            };
+            (bv, bp, offset, len)
+        }
+        Some(other) => {
+            // TypedArray / array-like / iterable: copy element values into a fresh buffer.
+            let items = if matches!(other, Value::Str(_)) || i.has_iterator(other) {
+                ab(i.iterate(other))?
+            } else if matches!(other, Value::Obj(_)) {
+                let lenv = ab(i.get_member(other, "length"))?;
+                let n = ab(i.to_number(&lenv))?.max(0.0) as usize;
+                if n > MAX_ARRAY_OP_LEN {
+                    return Err(i.make_error("RangeError", "Invalid typed array length"));
+                }
+                let mut v = Vec::with_capacity(n.min(1024));
+                for k in 0..n {
+                    v.push(ab(i.get_member(other, &k.to_string()))?);
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            let len = items.len();
+            let (bv, bp) = make_array_buffer(i, len * es);
+            let info = TaInfo { buffer: bp, offset: 0, len, kind };
+            for (idx, item) in items.iter().enumerate() {
+                let n = ab(i.to_number(item))?;
+                i.ta_write(&info, idx, n);
+            }
+            (bv, bp, 0, len)
+        }
+    };
+    let obj = Object::new(i.extra_protos.get(kind.name()).cloned());
+    let p = Rc::as_ptr(&obj) as usize;
+    i.typed_arrays.insert(p, TaInfo { buffer: buf_ptr, offset, len, kind });
+    set_internal(&obj, "length", Value::Num(len as f64));
+    set_internal(&obj, "byteLength", Value::Num((len * es) as f64));
+    set_internal(&obj, "byteOffset", Value::Num(offset as f64));
+    set_internal(&obj, "buffer", buf_val);
+    set_internal(&obj, "BYTES_PER_ELEMENT", Value::Num(es as f64));
+    Ok(Value::Obj(obj))
+}
+
+fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
+    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
+    let offset = match arg(args, 1) {
+        Value::Undefined => 0,
+        v => ab(i.to_number(&v))? as usize,
+    };
+    let source = arg(args, 0);
+    let items = if matches!(source, Value::Str(_)) || i.has_iterator(&source) {
+        ab(i.iterate(&source))?
+    } else if matches!(source, Value::Obj(_)) {
+        let lenv = ab(i.get_member(&source, "length"))?;
+        let n = ab(i.to_number(&lenv))?.max(0.0) as usize;
+        let mut v = Vec::with_capacity(n.min(1024));
+        for k in 0..n {
+            v.push(ab(i.get_member(&source, &k.to_string()))?);
+        }
+        v
+    } else {
+        Vec::new()
+    };
+    for (k, item) in items.iter().enumerate() {
+        let n = ab(i.to_number(item))?;
+        i.ta_write(&info, offset + k, n);
+    }
+    Ok(Value::Undefined)
+}
+
+fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
+    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
+    let es = info.kind.elsize();
+    let len = info.len as i64;
+    let begin = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+    let end = match arg(args, 1) {
+        Value::Undefined => len,
+        v => norm_index(ab(i.to_number(&v))?, len, len),
+    };
+    let new_len = (end - begin).max(0) as usize;
+    let new_offset = info.offset + begin as usize * es;
+    let buf_val = ab(i.get_member(&this, "buffer"))?;
+    let obj = Object::new(i.extra_protos.get(info.kind.name()).cloned());
+    let p = Rc::as_ptr(&obj) as usize;
+    i.typed_arrays.insert(p, TaInfo { buffer: info.buffer, offset: new_offset, len: new_len, kind: info.kind });
+    set_internal(&obj, "length", Value::Num(new_len as f64));
+    set_internal(&obj, "byteLength", Value::Num((new_len * es) as f64));
+    set_internal(&obj, "byteOffset", Value::Num(new_offset as f64));
+    set_internal(&obj, "buffer", buf_val);
+    set_internal(&obj, "BYTES_PER_ELEMENT", Value::Num(es as f64));
+    Ok(Value::Obj(obj))
+}
+
+macro_rules! ta_ctor {
+    ($name:ident, $kind:expr) => {
+        fn $name(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+            ta_construct(i, a, $kind)
+        }
+    };
+}
+ta_ctor!(ta_ctor_i8, TaKind::I8);
+ta_ctor!(ta_ctor_u8, TaKind::U8);
+ta_ctor!(ta_ctor_u8c, TaKind::U8Clamped);
+ta_ctor!(ta_ctor_i16, TaKind::I16);
+ta_ctor!(ta_ctor_u16, TaKind::U16);
+ta_ctor!(ta_ctor_i32, TaKind::I32);
+ta_ctor!(ta_ctor_u32, TaKind::U32);
+ta_ctor!(ta_ctor_f32, TaKind::F32);
+ta_ctor!(ta_ctor_f64, TaKind::F64);
+
+fn install_typed_arrays(it: &mut Interp) {
+    install_array_buffer(it);
+
+    // Shared %TypedArray% prototype — reuse the generic Array methods (they operate through
+    // get_member/array_length/set_member, which all work on typed arrays).
+    let ta_proto = Object::new(Some(it.object_proto.clone()));
+    for name in [
+        "forEach", "map", "filter", "reduce", "some", "every", "find", "findIndex", "indexOf",
+        "includes", "join", "fill", "reverse", "sort", "slice", "at", "keys", "values", "entries",
+        "lastIndexOf", "toString",
+    ] {
+        if let Some(p) = it.array_proto.borrow().props.get(name).cloned() {
+            ta_proto.borrow_mut().props.insert(name, p);
+        }
+    }
+    if let Some(sym) = it.iterator_sym.clone() {
+        let k = Interp::sym_key(&sym);
+        if let Some(p) = it.array_proto.borrow().props.get(&k).cloned() {
+            ta_proto.borrow_mut().props.insert(k, p);
+        }
+    }
+    it.def_method(&ta_proto, "set", 1, ta_set);
+    it.def_method(&ta_proto, "subarray", 2, ta_subarray);
+
+    let kinds: [(TaKind, NativeFn); 9] = [
+        (TaKind::I8, ta_ctor_i8),
+        (TaKind::U8, ta_ctor_u8),
+        (TaKind::U8Clamped, ta_ctor_u8c),
+        (TaKind::I16, ta_ctor_i16),
+        (TaKind::U16, ta_ctor_u16),
+        (TaKind::I32, ta_ctor_i32),
+        (TaKind::U32, ta_ctor_u32),
+        (TaKind::F32, ta_ctor_f32),
+        (TaKind::F64, ta_ctor_f64),
+    ];
+    for (kind, ctor_fn) in kinds {
+        let proto = Object::new(Some(ta_proto.clone()));
+        it.extra_protos.insert(kind.name(), proto.clone());
+        set_builtin(&proto, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
+        let ctor = it.make_native(kind.name(), 3, ctor_fn);
+        ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+        proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+        set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
+        set_builtin(&it.global, kind.name(), Value::Obj(ctor));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
