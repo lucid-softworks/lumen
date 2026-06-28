@@ -1171,3 +1171,12 @@ fn array_species() {
     assert_eq!(throws("[1,2,3].map(5)"), "TypeError");
     assert_eq!(run("[1,2,3].map(x=>x).constructor.name"), "Array");
 }
+#[test]
+fn arraylike_string_length() {
+    assert_eq!(run("var r=0; Array.prototype.forEach.call({1:11,2:9,length:'2'},v=>{if(v>10)r=1}); r"), "1");
+    assert_eq!(run("Array.prototype.indexOf.call({0:'a',1:'b',length:'2'},'b')"), "1");
+    assert_eq!(run("Array.prototype.map.call({0:1,1:2,length:2},x=>x*2).join(',')"), "2,4");
+    assert_eq!(run("Array.prototype.join.call({0:'a',1:'b',length:{valueOf(){return 2}}},'-')"), "a-b");
+    assert_eq!(run("[1,2,3].forEach(()=>{}); 'ok'"), "ok");
+    assert_eq!(run("Array.prototype.some.call({0:5,length:'1'},x=>x===5)"), "true");
+}

@@ -712,12 +712,24 @@ impl Interp {
 
     /// Array length for an operation that will iterate/allocate proportional to it. Errors with a
     /// RangeError past [`MAX_ARRAY_OP_LEN`] so a huge `.length` cannot exhaust memory.
-    pub fn checked_array_len(&self, obj: &Gc) -> Result<usize, Abrupt> {
-        let len = self.array_length(obj);
+    pub fn checked_array_len(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
+        let len = self.to_length(obj)?;
         if len > MAX_ARRAY_OP_LEN {
             return Err(self.throw("RangeError", "array length exceeds engine limit"));
         }
         Ok(len)
+    }
+
+    /// ToLength of an array-like's `length` property (coercing string/object lengths), clamped to
+    /// the 2^53-1 spec maximum.
+    pub fn to_length(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
+        let v = self.get_member(&Value::Obj(obj.clone()), "length")?;
+        let n = self.to_number(&v)?;
+        Ok(if n.is_nan() || n <= 0.0 {
+            0
+        } else {
+            n.trunc().min(9007199254740991.0) as usize
+        })
     }
 
     // ----- garbage collection -----------------------------------------------------------------

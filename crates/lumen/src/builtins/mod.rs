@@ -3726,7 +3726,7 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "indexOf", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "indexOf on non-object"))?;
-        let len = i.array_length(&o);
+        let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         for k in 0..len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
@@ -3738,7 +3738,7 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "includes", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "includes on non-object"))?;
-        let len = i.array_length(&o);
+        let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         for k in 0..len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
@@ -3907,7 +3907,7 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "lastIndexOf", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "lastIndexOf"))?;
-        let len = i.array_length(&o);
+        let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         for k in (0..len).rev() {
             let v = ab(i.get_member(&this, &k.to_string()))?;
@@ -4147,7 +4147,7 @@ fn array_find(
     from_last: bool,
 ) -> Result<Value, Value> {
     let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "find on non-object"))?;
-    let len = i.array_length(&o);
+    let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
     let cb_this = arg(args, 1);
     for step in 0..len {
@@ -4163,7 +4163,7 @@ fn array_find(
 
 fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) -> Result<Value, Value> {
     let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "some/every on non-object"))?;
-    let len = i.array_length(&o);
+    let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
     let cb_this = arg(args, 1);
     for k in 0..len {
