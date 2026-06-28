@@ -876,3 +876,15 @@ fn species_getters() {
     assert_eq!(run("RegExp[Symbol.species]===RegExp"), "true");
     assert_eq!(run("typeof Object.getOwnPropertyDescriptor(Array,Symbol.species).get"), "function");
 }
+#[test]
+fn array_from_fixes() {
+    assert_eq!(run("Array.from([1,2,3]).join(',')"), "1,2,3");
+    assert_eq!(run("Array.from('abc').join(',')"), "a,b,c");
+    assert_eq!(run("Array.from([1,2],x=>x*2).join(',')"), "2,4");
+    assert_eq!(run("Array.from([1],function(){return this.v},{v:9})[0]"), "9");
+    assert_eq!(throws("Array.from([], null)"), "TypeError");
+    assert_eq!(throws("Array.from([], 5)"), "TypeError");
+    assert_eq!(run("Array.from({length:2,0:'a',1:'b'}).join(',')"), "a,b");
+    assert_eq!(run("Array.from.call(Object,[1,2]).length"), "2");
+    assert_eq!(run("Array.from.call(Object,[1,2]).constructor===Object"), "true");
+}

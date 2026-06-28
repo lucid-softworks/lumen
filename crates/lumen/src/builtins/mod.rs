@@ -3369,14 +3369,20 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array))))
     });
     it.def_method(&ctor, "of", 0, |i, _this, args| Ok(i.make_array(args.to_vec())));
-    it.def_method(&ctor, "from", 1, |i, _this, args| {
+    it.def_method(&ctor, "from", 1, |i, this, args| {
         let source = arg(args, 0);
         let mapfn = arg(args, 1);
+        let this_arg = arg(args, 2);
+        if !matches!(mapfn, Value::Undefined) && !mapfn.is_callable() {
+            return Err(i.make_error("TypeError", "Array.from: mapFn is not callable"));
+        }
+        let mut from_iterable = true;
         let items = match &source {
             Value::Str(_) => ab(i.iterate(&source))?,
             Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => ab(i.iterate(&source))?,
             Value::Obj(_) if i.has_iterator(&source) => ab(i.iterate(&source))?,
             Value::Obj(_) => {
+                from_iterable = false;
                 // Array-like: read `length` then indexed elements.
                 let lenv = ab(i.get_member(&source, "length"))?;
                 let len = ab(i.to_number(&lenv))?.max(0.0) as usize;
@@ -3391,14 +3397,31 @@ fn install_array(it: &mut Interp) {
             }
             _ => return Err(i.make_error("TypeError", "Array.from requires an iterable or array-like")),
         };
-        if mapfn.is_callable() {
-            let mut out = Vec::with_capacity(items.len());
-            for (k, v) in items.into_iter().enumerate() {
-                out.push(ab(i.call(mapfn.clone(), Value::Undefined, &[v, Value::Num(k as f64)]))?);
+        let mut out = Vec::with_capacity(items.len());
+        for (k, v) in items.into_iter().enumerate() {
+            let mv = if mapfn.is_callable() {
+                ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?
+            } else {
+                v
+            };
+            out.push(mv);
+        }
+        // `Array.from.call(C, …)` builds the result via the constructor `C`; the plain Array
+        // constructor (or a non-callable receiver) makes an ordinary array.
+        let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value.clone());
+        let is_array_ctor = matches!((&this, &array_ctor), (Value::Obj(a), Some(Value::Obj(b))) if Rc::ptr_eq(a, b));
+        if this.is_callable() && !is_array_ctor {
+            let len = out.len();
+            // Iterable source constructs with no args; array-like forwards the length.
+            let ctor_args: &[Value] = if from_iterable { &[] } else { &[Value::Num(len as f64)] };
+            let res = ab(i.construct(this, ctor_args))?;
+            for (k, v) in out.into_iter().enumerate() {
+                ab(i.set_member(&res, &k.to_string(), v))?;
             }
-            Ok(i.make_array(out))
+            ab(i.set_member(&res, "length", Value::Num(len as f64)))?;
+            Ok(res)
         } else {
-            Ok(i.make_array(items))
+            Ok(i.make_array(out))
         }
     });
     install_species(it, &ctor);
