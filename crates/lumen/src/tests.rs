@@ -1066,3 +1066,12 @@ fn iterator_helpers() {
     assert_eq!(run("typeof Iterator.prototype.map"), "function");
     assert_eq!(run("[1,2,3,4,5].values().filter(x=>x>1).take(2).toArray().join(',')"), "2,3");
 }
+#[test]
+fn temporal_round_string() {
+    assert_eq!(run("Temporal.Duration.from({hours:2,minutes:30}).round('hour').toString()"), "PT3H");
+    assert_eq!(run("Temporal.Duration.from({hours:2,minutes:30}).total('minute')"), "150");
+    assert_eq!(run("new Temporal.PlainTime(3,30,0).round('hour').toString()"), "04:00:00");
+    assert_eq!(run("Temporal.Duration.from({minutes:90}).round('hours').toString()"), "PT2H");
+    // object form still works
+    assert_eq!(run("new Temporal.PlainTime(3,30).round({smallestUnit:'hour'}).toString()"), "04:00:00");
+}

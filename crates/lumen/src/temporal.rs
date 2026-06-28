@@ -718,6 +718,16 @@ fn epoch_days(d: IsoDate) -> i64 {
 
 /// Read a string option (e.g. `largestUnit`) from an options argument, defaulting if absent. A bare
 /// string options arg (the `smallestUnit` shorthand) is returned directly.
+/// round()/total() accept a bare string as the `smallestUnit`/`unit` shorthand; otherwise the
+/// argument is an options object. Returns (options-object-or-undefined, shorthand-unit).
+fn round_opts(arg0: &Value) -> (Value, Option<String>) {
+    if let Value::Str(s) = arg0 {
+        (Value::Undefined, Some(s.to_string()))
+    } else {
+        (arg0.clone(), None)
+    }
+}
+
 fn opt_str(i: &mut Interp, opts: &Value, key: &str, default: &str) -> Result<String, Value> {
     match opts {
         Value::Undefined => Ok(default.to_string()),
@@ -1076,8 +1086,8 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_time(i, &t)?;
-        let o = arg(a, 0);
-        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let (o, shorthand) = round_opts(&arg(a, 0));
+        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
@@ -1331,8 +1341,8 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let o = arg(a, 0);
-        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let (o, shorthand) = round_opts(&arg(a, 0));
+        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
         let unit = if smallest == "day" {
             86_400_000_000_000
         } else {
@@ -1686,8 +1696,11 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
-        let o = arg(a, 0);
-        let smallest = opt_str(i, &o, "smallestUnit", "nanosecond")?;
+        let (o, shorthand) = round_opts(&arg(a, 0));
+        let smallest = match shorthand {
+            Some(s) => s,
+            None => opt_str(i, &o, "smallestUnit", "nanosecond")?,
+        };
         let mut largest = opt_str(i, &o, "largestUnit", "auto")?;
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
@@ -1754,8 +1767,8 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "total", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
-        let o = arg(a, 0);
-        let unit = opt_str(i, &o, "unit", "")?;
+        let (o, shorthand) = round_opts(&arg(a, 0));
+        let unit = match shorthand { Some(s) => s, None => opt_str(i, &o, "unit", "")? };
         if unit.is_empty() {
             return Err(i.make_error("RangeError", "unit is required"));
         }
@@ -2015,8 +2028,8 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
-        let o = arg(a, 0);
-        let smallest = opt_str(i, &o, "smallestUnit", "")?;
+        let (o, shorthand) = round_opts(&arg(a, 0));
+        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
