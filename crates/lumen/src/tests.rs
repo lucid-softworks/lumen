@@ -857,3 +857,22 @@ fn not_a_constructor() {
     assert_eq!(run("function F(){this.x=1}; new F().x"), "1");
     assert_eq!(run("new Error('m').message"), "m");
 }
+#[test]
+fn array_length_index() {
+    assert_eq!(run("var a=[]; a[4294967295]=1; a.length"), "0");
+    assert_eq!(run("var a=[]; a[4294967294]=1; a.length"), "4294967295");
+    assert_eq!(run("var a=[]; a[5]=1; a.length"), "6");
+    assert_eq!(throws("var a=[]; a.length=4294967296"), "RangeError");
+    assert_eq!(run("var a=[]; a['foo']=1; a.length"), "0");
+    assert_eq!(run("[1,2,3].length"), "3");
+    assert_eq!(run("var a=[]; a[4294967295]=1; a[4294967295]"), "1"); // still stored as prop
+}
+#[test]
+fn species_getters() {
+    assert_eq!(run("Array[Symbol.species]===Array"), "true");
+    assert_eq!(run("Map[Symbol.species]===Map"), "true");
+    assert_eq!(run("Set[Symbol.species]===Set"), "true");
+    assert_eq!(run("Promise[Symbol.species]===Promise"), "true");
+    assert_eq!(run("RegExp[Symbol.species]===RegExp"), "true");
+    assert_eq!(run("typeof Object.getOwnPropertyDescriptor(Array,Symbol.species).get"), "function");
+}

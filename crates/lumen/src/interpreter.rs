@@ -667,7 +667,10 @@ impl Interp {
             return Ok(());
         }
         obj.borrow_mut().props.insert(key, Property::plain(value));
-        if let Ok(i) = key.parse::<usize>() {
+        // Only a canonical array index (< 2^32 - 1) updates `length`; larger numeric keys are
+        // ordinary properties.
+        if let Some(i) = key.parse::<u64>().ok().filter(|&i| i < 4294967295) {
+            let i = i as usize;
             let len = self.array_length(obj);
             if i >= len {
                 obj.borrow_mut().props.insert(

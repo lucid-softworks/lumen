@@ -427,6 +427,7 @@ fn install_regexp(it: &mut Interp) {
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    install_species(it, &ctor);
     set_builtin(&it.global, "RegExp", Value::Obj(ctor));
 }
 
@@ -1445,6 +1446,25 @@ fn install_date(it: &mut Interp) {
     set_builtin(&it.global, "Date", Value::Obj(ctor));
 }
 
+/// Install the `get [Symbol.species]` accessor (returns the receiver `this`) on a constructor.
+fn install_species(it: &Interp, ctor: &Gc) {
+    if let Some(key) = well_known_key(it, "species") {
+        let getter = it.make_native("get [Symbol.species]", 0, |_i, this, _| Ok(this));
+        ctor.borrow_mut().props.insert(
+            key,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(getter)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+}
+
 /// The internal property key for a well-known `Symbol.<name>`.
 fn well_known_key(it: &Interp, name: &str) -> Option<String> {
     let sym = it.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
@@ -1737,6 +1757,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
             Ok(Value::Obj(m))
         });
     }
+    install_species(it, &ctor); // Map/Set carry @@species
     set_builtin(&it.global, name, Value::Obj(ctor));
 }
 
@@ -2047,6 +2068,7 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
+    install_species(it, &ctor);
     set_builtin(&it.global, "Promise", Value::Obj(ctor));
 }
 
@@ -3379,6 +3401,7 @@ fn install_array(it: &mut Interp) {
             Ok(i.make_array(items))
         }
     });
+    install_species(it, &ctor);
     set_builtin(&it.global, "Array", Value::Obj(ctor));
 }
 
