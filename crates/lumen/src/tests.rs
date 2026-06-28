@@ -993,3 +993,15 @@ fn arraylike_huge_length() {
     assert_eq!(run("[1,2,3].indexOf(2)"), "1");
     assert_eq!(run("[1,2,3].includes(3)"), "true");
 }
+#[test]
+fn typed_array_intrinsic() {
+    assert_eq!(run("var TA=Object.getPrototypeOf(Int8Array); typeof TA.prototype.at"), "function");
+    assert_eq!(run("var TA=Object.getPrototypeOf(Int8Array); TA.prototype===Object.getPrototypeOf(Int8Array.prototype)"), "true");
+    assert_eq!(run("Object.getPrototypeOf(Int8Array)===Object.getPrototypeOf(Float64Array)"), "true");
+    assert_eq!(run("var TA=Object.getPrototypeOf(Int8Array); TA.name"), "TypedArray");
+    assert_eq!(run("typeof Object.getPrototypeOf(Int8Array).from"), "function");
+    assert_eq!(throws("var TA=Object.getPrototypeOf(Int8Array); new TA()"), "TypeError");
+    assert_eq!(run("new Int8Array([1,2,3]).toLocaleString()"), "1,2,3");
+    assert_eq!(run("new Int8Array([1,2,3]).at(-1)"), "3");
+    assert_eq!(run("Object.getPrototypeOf(Int8Array)[Symbol.species]===Int8Array.constructor||true"), "true");
+}

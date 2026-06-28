@@ -1033,6 +1033,24 @@ fn install_typed_arrays(it: &mut Interp) {
     }
     it.def_method(&ta_proto, "set", 1, ta_set);
     it.def_method(&ta_proto, "subarray", 2, ta_subarray);
+    it.def_method(&ta_proto, "toLocaleString", 0, |i, this, a| {
+        ta_delegate(i, &this, "join", a)
+    });
+
+    // The abstract %TypedArray% intrinsic: each concrete TypedArray constructor inherits from it,
+    // and its `.prototype` is the shared `ta_proto`. Tests reach it via Object.getPrototypeOf(Int8Array).
+    let ta_ctor = it.make_native("TypedArray", 0, |i, _t, _a| {
+        Err(i.make_error("TypeError", "Abstract class TypedArray not directly constructable"))
+    });
+    ta_ctor.borrow_mut().is_constructor = true;
+    ta_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(ta_proto.clone()), false, false, false),
+    );
+    ta_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ta_ctor.clone())));
+    it.def_method(&ta_ctor, "of", 0, ta_of);
+    it.def_method(&ta_ctor, "from", 1, ta_from);
+    install_species(it, &ta_ctor);
 
     let kinds: [(TaKind, NativeFn); 11] = [
         (TaKind::I8, ta_ctor_i8),
@@ -1052,6 +1070,7 @@ fn install_typed_arrays(it: &mut Interp) {
         it.extra_protos.insert(kind.name(), proto.clone());
         set_builtin(&proto, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
         let ctor = it.make_native(kind.name(), 3, ctor_fn);
+        ctor.borrow_mut().proto = Some(ta_ctor.clone()); // [[Prototype]] is %TypedArray%
         ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
         proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
