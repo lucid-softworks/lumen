@@ -460,3 +460,12 @@ fn gc_keeps_reachable_cycles() {
 
 
 
+
+
+#[test]
+fn unicode_ident_escapes() {
+    assert_eq!(run("var \\u0061 = 5; a"), "5");
+    assert_eq!(run("var a\\u0062c = 7; abc"), "7");
+    assert_eq!(run("var \\u{61}\\u{62} = 9; ab"), "9");
+    assert_eq!(run("var obj = {}; obj.\\u0078 = 3; obj.x"), "3");
+}

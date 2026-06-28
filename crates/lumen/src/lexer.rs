@@ -95,7 +95,7 @@ impl<'a> Lexer<'a> {
             } else if c.is_ascii_digit() || (c == '.' && self.peek2().is_some_and(|d| d.is_ascii_digit()))
             {
                 self.read_number()?;
-            } else if is_ident_start(c) || c == '#' {
+            } else if is_ident_start(c) || c == '#' || (c == '\\' && self.peek2() == Some('u')) {
                 self.read_ident();
             } else {
                 self.read_punct()?;
@@ -137,19 +137,67 @@ impl<'a> Lexer<'a> {
             s.push('#');
             self.bump();
         }
-        while let Some(c) = self.peek() {
-            if is_ident_part(c) {
-                s.push(c);
-                self.bump();
-            } else {
-                break;
+        // `\uXXXX` / `\u{...}` escapes may appear in an identifier; track that so an escaped reserved
+        // word stays an Identifier (a keyword written with an escape is not the keyword).
+        let mut had_escape = false;
+        loop {
+            match self.peek() {
+                Some('\\') if self.peek2() == Some('u') => {
+                    self.bump();
+                    self.bump();
+                    match self.read_unicode_escape_char() {
+                        Some(ch) => {
+                            had_escape = true;
+                            s.push(ch);
+                        }
+                        None => break,
+                    }
+                }
+                Some(c) if is_ident_part(c) => {
+                    s.push(c);
+                    self.bump();
+                }
+                _ => break,
             }
         }
-        if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
-            self.push(Tok::Keyword(kw));
-        } else {
-            self.push(Tok::Ident(s));
+        if !had_escape {
+            if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
+                self.push(Tok::Keyword(kw));
+                return;
+            }
         }
+        self.push(Tok::Ident(s));
+    }
+
+    /// Read the body of a `\u` identifier/string escape (already consumed `\u`): either `{HEX+}` or
+    /// exactly four hex digits, yielding the code point as a `char`.
+    fn read_unicode_escape_char(&mut self) -> Option<char> {
+        let mut hex = String::new();
+        if self.peek() == Some('{') {
+            self.bump();
+            while let Some(c) = self.peek() {
+                if c == '}' {
+                    self.bump();
+                    break;
+                } else if c.is_ascii_hexdigit() {
+                    hex.push(c);
+                    self.bump();
+                } else {
+                    return None;
+                }
+            }
+        } else {
+            for _ in 0..4 {
+                match self.peek() {
+                    Some(c) if c.is_ascii_hexdigit() => {
+                        hex.push(c);
+                        self.bump();
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
     }
 
     fn read_string(&mut self, quote: char) -> Result<(), LexError> {
