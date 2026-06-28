@@ -112,6 +112,8 @@ pub struct Interp {
     pub array_buffers: HashMap<usize, Vec<u8>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
     pub typed_arrays: HashMap<usize, TaInfo>,
+    /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
+    pub data_views: HashMap<usize, (usize, usize, usize)>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -171,6 +173,7 @@ impl Interp {
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
             typed_arrays: HashMap::new(),
+            data_views: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).

@@ -39,6 +39,7 @@ pub fn install(it: &mut Interp) {
     install_object(it);
     // Symbol before Array/String so `Symbol.iterator` exists when they define `@@iterator`.
     install_symbol(it);
+    install_iterator(it);
     install_array(it);
     install_string(it);
     install_number(it);
@@ -50,8 +51,171 @@ pub fn install(it: &mut Interp) {
     install_collections(it);
     install_date(it);
     install_typed_arrays(it);
+    install_dataview(it);
+    install_shared_array_buffer(it);
     install_globals(it);
     install_console(it);
+}
+
+fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let little = i.to_boolean(&arg(args, 1));
+    let es = kind.elsize();
+    if byte_off + es > len {
+        return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
+    }
+    let start = off + byte_off;
+    let mut b = match i.array_buffers.get(&buf) {
+        Some(buf) if start + es <= buf.len() => buf[start..start + es].to_vec(),
+        _ => return Err(i.make_error("TypeError", "detached buffer")),
+    };
+    // `kind.read` is little-endian; DataView defaults to big-endian, so reverse unless little.
+    if !little {
+        b.reverse();
+    }
+    Ok(Value::Num(kind.read(&b)))
+}
+
+fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let value = ab(i.to_number(&arg(args, 1)))?;
+    let little = i.to_boolean(&arg(args, 2));
+    let es = kind.elsize();
+    if byte_off + es > len {
+        return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
+    }
+    let mut bytes = kind.write(value);
+    if !little {
+        bytes.reverse();
+    }
+    let start = off + byte_off;
+    if let Some(b) = i.array_buffers.get_mut(&buf) {
+        if start + es <= b.len() {
+            b[start..start + es].copy_from_slice(&bytes);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn install_dataview(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("DataView", proto.clone());
+    macro_rules! dvm {
+        ($getname:expr, $setname:expr, $kind:expr) => {
+            it.def_method(&proto, $getname, 1, |i, this, a| dv_get(i, &this, a, $kind));
+            it.def_method(&proto, $setname, 2, |i, this, a| dv_set(i, &this, a, $kind));
+        };
+    }
+    dvm!("getInt8", "setInt8", TaKind::I8);
+    dvm!("getUint8", "setUint8", TaKind::U8);
+    dvm!("getInt16", "setInt16", TaKind::I16);
+    dvm!("getUint16", "setUint16", TaKind::U16);
+    dvm!("getInt32", "setInt32", TaKind::I32);
+    dvm!("getUint32", "setUint32", TaKind::U32);
+    dvm!("getFloat32", "setFloat32", TaKind::F32);
+    dvm!("getFloat64", "setFloat64", TaKind::F64);
+
+    let ctor = it.make_native("DataView", 1, |i, _t, a| {
+        let bp = match arg(a, 0) {
+            Value::Obj(o) if i.array_buffers.contains_key(&(Rc::as_ptr(&o) as usize)) => {
+                Rc::as_ptr(&o) as usize
+            }
+            _ => return Err(i.make_error("TypeError", "DataView requires an ArrayBuffer")),
+        };
+        let buflen = i.array_buffers[&bp].len();
+        let offset = match arg(a, 1) {
+            Value::Undefined => 0,
+            v => ab(i.to_number(&v))? as usize,
+        };
+        let len = match arg(a, 2) {
+            Value::Undefined => buflen.saturating_sub(offset),
+            v => ab(i.to_number(&v))? as usize,
+        };
+        let obj = Object::new(i.extra_protos.get("DataView").cloned());
+        let p = Rc::as_ptr(&obj) as usize;
+        i.data_views.insert(p, (bp, offset, len));
+        set_internal(&obj, "buffer", arg(a, 0));
+        set_internal(&obj, "byteOffset", Value::Num(offset as f64));
+        set_internal(&obj, "byteLength", Value::Num(len as f64));
+        Ok(Value::Obj(obj))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "DataView", Value::Obj(ctor));
+}
+
+fn install_shared_array_buffer(it: &mut Interp) {
+    // Modeled as a plain ArrayBuffer (no real sharing) — enough for tests that just need the type.
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("SharedArrayBuffer", proto.clone());
+    it.def_method(&proto, "slice", 2, |i, this, a| {
+        let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
+        let bytes = ptr.and_then(|p| i.array_buffers.get(&p)).cloned().unwrap_or_default();
+        let len = bytes.len() as i64;
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        let end = match arg(a, 1) {
+            Value::Undefined => len,
+            v => norm_index(ab(i.to_number(&v))?, len, len),
+        };
+        let slice = if begin < end { bytes[begin as usize..end as usize].to_vec() } else { Vec::new() };
+        let (bv, bp) = make_array_buffer(i, slice.len());
+        if let Some(buf) = i.array_buffers.get_mut(&bp) {
+            buf.copy_from_slice(&slice);
+        }
+        Ok(bv)
+    });
+    let ctor = it.make_native("SharedArrayBuffer", 1, |i, _t, a| {
+        let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
+        if len > MAX_ARRAY_OP_LEN {
+            return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
+        }
+        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's.
+        let (bv, _) = make_array_buffer(i, len);
+        if let Value::Obj(o) = &bv {
+            o.borrow_mut().proto = i.extra_protos.get("SharedArrayBuffer").cloned();
+        }
+        Ok(bv)
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "SharedArrayBuffer", Value::Obj(ctor));
+}
+
+fn uri_encode(s: &str, keep: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        let c = b as char;
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || keep.contains(c) {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn uri_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1980,6 +2144,54 @@ fn install_array(it: &mut Interp) {
         }
         Ok(this)
     });
+    it.def_method(&ap, "reduceRight", 1, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduceRight"))?;
+        let len = ab(i.checked_array_len(&o))?;
+        let cb = arg(args, 0);
+        let mut acc;
+        let mut k = len as i64 - 1;
+        if args.len() >= 2 {
+            acc = arg(args, 1);
+        } else {
+            if len == 0 {
+                return Err(i.make_error("TypeError", "reduce of empty array with no initial value"));
+            }
+            acc = ab(i.get_member(&this, &k.to_string()))?;
+            k -= 1;
+        }
+        while k >= 0 {
+            let v = ab(i.get_member(&this, &k.to_string()))?;
+            acc = ab(i.call(cb.clone(), Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()]))?;
+            k -= 1;
+        }
+        Ok(acc)
+    });
+    it.def_method(&ap, "copyWithin", 2, |i, this, args| {
+        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "copyWithin"))?;
+        let len = ab(i.checked_array_len(&o))? as i64;
+        let target = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
+        let end = match arg(args, 2) {
+            Value::Undefined => len,
+            v => norm_index(ab(i.to_number(&v))?, len, len),
+        };
+        let snapshot: Vec<Value> = {
+            let mut s = Vec::new();
+            let mut k = start;
+            while k < end {
+                s.push(ab(i.get_member(&this, &k.to_string()))?);
+                k += 1;
+            }
+            s
+        };
+        for (off, v) in snapshot.into_iter().enumerate() {
+            if target + off as i64 >= len {
+                break;
+            }
+            ab(i.set_member(&this, &(target + off as i64).to_string(), v))?;
+        }
+        Ok(this)
+    });
     it.def_method(&ap, "values", 0, |i, this, _| Ok(make_array_iterator(i, this, 0)));
     it.def_method(&ap, "keys", 0, |i, this, _| Ok(make_array_iterator(i, this, 1)));
     it.def_method(&ap, "entries", 0, |i, this, _| Ok(make_array_iterator(i, this, 2)));
@@ -2192,10 +2404,28 @@ fn return_this(_i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, V
     Ok(this)
 }
 
+fn install_iterator(it: &mut Interp) {
+    // %IteratorPrototype%: the common prototype of all built-in iterators; `[@@iterator]()` is the
+    // identity function so an iterator is itself iterable.
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("%IteratorPrototype%", proto.clone());
+    if let Some(sym) = it.iterator_sym.clone() {
+        let f = it.make_native("[Symbol.iterator]", 0, return_this);
+        proto.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+    }
+    let ctor = it.make_native("Iterator", 0, |i, _t, _a| {
+        Err(i.make_error("TypeError", "Abstract class Iterator not directly constructable"))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "Iterator", Value::Obj(ctor));
+}
+
 /// Build an Array Iterator over `target`. `kind`: 0 = values, 1 = keys, 2 = [key, value] entries.
 /// State lives in non-enumerable internal slots so `next` can advance it.
 fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
-    let obj = i.new_object();
+    let proto = i.extra_protos.get("%IteratorPrototype%").cloned().or_else(|| Some(i.object_proto.clone()));
+    let obj = Object::new(proto);
     set_builtin(&obj, "__ai_target", target);
     set_builtin(&obj, "__ai_index", Value::Num(0.0));
     set_builtin(&obj, "__ai_kind", Value::Num(kind as f64));
@@ -2535,6 +2765,26 @@ fn string_replacement(
     }
 }
 
+fn to_uint32(n: f64) -> u32 {
+    if !n.is_finite() || n == 0.0 {
+        return 0;
+    }
+    n.trunc().rem_euclid(4294967296.0) as u32
+}
+
+/// A small deterministic PRNG for `Math.random` (lumen has no entropy source; tests only check the
+/// `[0, 1)` range, not distribution).
+fn next_random() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x2545_F491_4F6C_DD1D);
+    let mut x = STATE.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    STATE.store(x, Ordering::Relaxed);
+    (x >> 11) as f64 / (1u64 << 53) as f64
+}
+
 fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
     match this {
         Value::Num(n) => Ok(*n),
@@ -2561,6 +2811,28 @@ fn install_number(it: &mut Interp) {
         }
     });
     it.def_method(&np, "valueOf", 0, |i, this, _| Ok(Value::Num(this_number(i, &this)?)));
+    it.def_method(&np, "toExponential", 1, |i, this, args| {
+        let n = this_number(i, &this)?;
+        let s = match arg(args, 0) {
+            Value::Undefined => format!("{n:e}"),
+            v => {
+                let d = ab(i.to_number(&v))? as usize;
+                format!("{n:.d$e}")
+            }
+        };
+        // Rust prints `1e2`; JS wants `1e+2`.
+        Ok(Value::from_string(s.replace('e', "e+").replace("e+-", "e-")))
+    });
+    it.def_method(&np, "toPrecision", 1, |i, this, args| {
+        let n = this_number(i, &this)?;
+        match arg(args, 0) {
+            Value::Undefined => Ok(Value::from_string(i.num_to_str(n))),
+            v => {
+                let p = ab(i.to_number(&v))? as usize;
+                Ok(Value::from_string(format!("{n:.*}", p.saturating_sub(1).min(100))))
+            }
+        }
+    });
     it.def_method(&np, "toFixed", 1, |i, this, args| {
         let n = this_number(i, &this)?;
         let d = ab(i.to_number(&arg(args, 0)))?;
@@ -2593,6 +2865,11 @@ fn install_number(it: &mut Interp) {
     });
     it.def_method(&ctor, "isFinite", 1, |_i, _this, args| {
         Ok(Value::Bool(matches!(arg(args, 0), Value::Num(n) if n.is_finite())))
+    });
+    it.def_method(&ctor, "isSafeInteger", 1, |_i, _this, args| {
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Num(n) if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9007199254740991.0),
+        ))
     });
     it.def_method(&ctor, "isInteger", 1, |_i, _this, args| {
         Ok(Value::Bool(matches!(arg(args, 0), Value::Num(n) if n.is_finite() && n.fract() == 0.0)))
@@ -2730,7 +3007,31 @@ fn install_math(it: &mut Interp) {
     unary!("trunc", f64::trunc);
     unary!("sqrt", f64::sqrt);
     unary!("cbrt", f64::cbrt);
-    unary!("sign", f64::signum);
+    unary!("sign", |x: f64| if x.is_nan() || x == 0.0 { x } else { x.signum() });
+    unary!("expm1", f64::exp_m1);
+    unary!("log1p", f64::ln_1p);
+    unary!("sinh", f64::sinh);
+    unary!("cosh", f64::cosh);
+    unary!("tanh", f64::tanh);
+    unary!("asinh", f64::asinh);
+    unary!("acosh", f64::acosh);
+    unary!("atanh", f64::atanh);
+    unary!("fround", |x: f64| x as f32 as f64);
+    unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
+    it.def_method(&math, "hypot", 2, |i, _t, a| {
+        let mut sum = 0.0;
+        for v in a {
+            let n = ab(i.to_number(v))?;
+            sum += n * n;
+        }
+        Ok(Value::Num(sum.sqrt()))
+    });
+    it.def_method(&math, "imul", 2, |i, _t, a| {
+        let x = to_uint32(ab(i.to_number(&arg(a, 0)))?) as i32;
+        let y = to_uint32(ab(i.to_number(&arg(a, 1)))?) as i32;
+        Ok(Value::Num(x.wrapping_mul(y) as f64))
+    });
+    it.def_method(&math, "random", 0, |_i, _t, _a| Ok(Value::Num(next_random())));
     unary!("log", f64::ln);
     unary!("log2", f64::log2);
     unary!("log10", f64::log10);
@@ -2860,6 +3161,24 @@ fn install_globals(it: &mut Interp) {
     });
     global_fn(it, "isFinite", 1, |i, _t, a| {
         Ok(Value::Bool(ab(i.to_number(&arg(a, 0)))?.is_finite()))
+    });
+    global_fn(it, "encodeURIComponent", 1, |i, _t, a| {
+        Ok(Value::from_string(uri_encode(&ab(i.to_string(&arg(a, 0)))?, "")))
+    });
+    global_fn(it, "encodeURI", 1, |i, _t, a| {
+        Ok(Value::from_string(uri_encode(&ab(i.to_string(&arg(a, 0)))?, ";,/?:@&=+$#")))
+    });
+    global_fn(it, "decodeURIComponent", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        uri_decode(&s)
+            .map(Value::from_string)
+            .ok_or_else(|| i.make_error("URIError", "URI malformed"))
+    });
+    global_fn(it, "decodeURI", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        uri_decode(&s)
+            .map(Value::from_string)
+            .ok_or_else(|| i.make_error("URIError", "URI malformed"))
     });
 
     // Indirect eval: runs in the global scope. (A *direct* `eval(...)` call is intercepted in
