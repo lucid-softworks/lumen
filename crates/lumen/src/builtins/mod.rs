@@ -738,6 +738,38 @@ fn install_array_buffer(it: &mut Interp) {
     set_builtin(&it.global, "ArrayBuffer", Value::Obj(ctor));
 }
 
+/// A %TypedArray%.prototype method: brand-check the receiver, then delegate to the like-named
+/// Array.prototype method.
+fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Result<Value, Value> {
+    let ok = map_ptr(this).map(|p| i.typed_arrays.contains_key(&p)).unwrap_or(false);
+    if !ok {
+        return Err(i.make_error("TypeError", "method called on a non-TypedArray receiver"));
+    }
+    let f = it_array_method(i, method);
+    ab(i.call(f, this.clone(), args))
+}
+fn it_array_method(i: &Interp, method: &str) -> Value {
+    i.array_proto.borrow().props.get(method).map(|p| p.value.clone()).unwrap_or(Value::Undefined)
+}
+macro_rules! ta_methods {
+    ($($name:literal => $fname:ident),* $(,)?) => {
+        $(fn $fname(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+            ta_delegate(i, &this, $name, a)
+        })*
+        const TA_METHODS: &[(&str, NativeFn)] = &[$(($name, $fname)),*];
+    };
+}
+ta_methods! {
+    "forEach" => tad_foreach, "map" => tad_map, "filter" => tad_filter, "reduce" => tad_reduce,
+    "reduceRight" => tad_reduceright, "some" => tad_some, "every" => tad_every, "find" => tad_find,
+    "findIndex" => tad_findindex, "findLast" => tad_findlast, "findLastIndex" => tad_findlastindex,
+    "indexOf" => tad_indexof, "lastIndexOf" => tad_lastindexof, "includes" => tad_includes,
+    "join" => tad_join, "fill" => tad_fill, "reverse" => tad_reverse, "sort" => tad_sort,
+    "slice" => tad_slice, "at" => tad_at, "keys" => tad_keys, "values" => tad_values,
+    "entries" => tad_entries, "toString" => tad_tostring, "copyWithin" => tad_copywithin,
+    "toReversed" => tad_toreversed, "toSorted" => tad_tosorted, "with" => tad_with,
+}
+
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let es = kind.elsize();
     let (buf_val, buf_ptr, offset, len) = match args.first() {
@@ -878,17 +910,11 @@ ta_ctor!(ta_ctor_u64, TaKind::U64);
 fn install_typed_arrays(it: &mut Interp) {
     install_array_buffer(it);
 
-    // Shared %TypedArray% prototype — reuse the generic Array methods (they operate through
-    // get_member/array_length/set_member, which all work on typed arrays).
+    // Shared %TypedArray% prototype. Each method brand-checks the receiver is a TypedArray, then
+    // delegates to the generic Array method (which works through get_member/array_length/set_member).
     let ta_proto = Object::new(Some(it.object_proto.clone()));
-    for name in [
-        "forEach", "map", "filter", "reduce", "some", "every", "find", "findIndex", "indexOf",
-        "includes", "join", "fill", "reverse", "sort", "slice", "at", "keys", "values", "entries",
-        "lastIndexOf", "toString",
-    ] {
-        if let Some(p) = it.array_proto.borrow().props.get(name).cloned() {
-            ta_proto.borrow_mut().props.insert(name, p);
-        }
+    for (name, f) in TA_METHODS {
+        it.def_method(&ta_proto, name, 1, *f);
     }
     if let Some(sym) = it.iterator_sym.clone() {
         let k = Interp::sym_key(&sym);
