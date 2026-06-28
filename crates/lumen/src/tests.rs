@@ -673,3 +673,12 @@ fn destructuring_assignment() {
     assert_eq!(run("var a,b; [a,,b]=[1,2,3]; a+','+b"), "1,3");
     assert_eq!(run("var a,b; [[a],{x:b}]=[[7],{x:8}]; a+','+b"), "7,8");
 }
+
+#[test]
+fn object_literal_methods() {
+    assert_eq!(run("({*g(){yield 1; yield 2}}).g().next().value"), "1");
+    assert_eq!(run("[...({*g(){yield 1;yield 2}}).g()].join(',')"), "1,2");
+    assert_eq!(run("({async m(){return 5}}).m() instanceof Promise"), "true");
+    assert_eq!(run("({async(){return 1}}).async()"), "1"); // method named async
+    assert_eq!(run("({async:7}).async"), "7"); // property named async
+}

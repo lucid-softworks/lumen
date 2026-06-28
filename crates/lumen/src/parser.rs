@@ -928,10 +928,24 @@ impl Parser {
                 }
                 continue;
             }
+            // `async` / generator `*` method prefixes (async only when followed by a key start).
+            let is_async = self.is_ident_word("async")
+                && !matches!(
+                    self.peek_kind(1),
+                    Tok::Punct(":") | Tok::Punct(",") | Tok::Punct("}") | Tok::Punct("(") | Tok::Punct("=")
+                );
+            if is_async {
+                self.advance();
+            }
+            let is_generator = self.eat_punct("*");
             let key = self.parse_prop_key()?;
             if self.is_punct("(") {
                 // Method shorthand.
-                let func = self.parse_method_function()?;
+                let func = if is_async || is_generator {
+                    self.parse_method_function_kind(is_generator, is_async)?
+                } else {
+                    self.parse_method_function()?
+                };
                 props.push(PropDef::KeyValue { key, value: Expr::Func(Rc::new(func)) });
             } else if self.eat_punct(":") {
                 let value = self.parse_assign()?;
