@@ -1082,12 +1082,20 @@ impl Parser {
         let (body, is_strict) = self.parse_function_body()?;
         self.in_generator = sg;
         self.in_async = sa;
+        let strict = is_strict || self.strict;
+        // Duplicate parameters are an error in strict mode, or whenever the list is non-simple
+        // (defaults / rest / destructuring).
+        if strict || params_complex(&params) {
+            if let Some(dup) = duplicate_name(&param_names(&params)) {
+                return self.err(format!("duplicate parameter name '{dup}'"));
+            }
+        }
         Ok(Function {
             name,
             params,
             body,
             is_arrow: false,
-            is_strict: is_strict || self.strict,
+            is_strict: strict,
             expr_body: false,
             is_generator,
             is_async,
@@ -1376,6 +1384,47 @@ fn key_is(key: &PropKey, name: &str) -> bool {
         PropKey::Str(s) => &**s == name,
         _ => false,
     }
+}
+
+fn pattern_names(pat: &Pattern, out: &mut Vec<String>) {
+    match pat {
+        Pattern::Ident(n) => out.push(n.clone()),
+        Pattern::Array(elems) => {
+            for e in elems {
+                match e {
+                    ArrayPatElem::Elem { pattern, .. } => pattern_names(pattern, out),
+                    ArrayPatElem::Rest(p) => pattern_names(p, out),
+                    ArrayPatElem::Hole => {}
+                }
+            }
+        }
+        Pattern::Object(o) => {
+            for p in &o.props {
+                pattern_names(&p.value, out);
+            }
+            if let Some(r) = &o.rest {
+                out.push(r.clone());
+            }
+        }
+    }
+}
+fn param_names(params: &[Param]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in params {
+        pattern_names(&p.pattern, &mut out);
+    }
+    out
+}
+fn params_complex(params: &[Param]) -> bool {
+    params.iter().any(|p| p.default.is_some() || p.rest || !matches!(p.pattern, Pattern::Ident(_)))
+}
+fn duplicate_name(names: &[String]) -> Option<String> {
+    for (idx, n) in names.iter().enumerate() {
+        if names[..idx].contains(n) {
+            return Some(n.clone());
+        }
+    }
+    None
 }
 
 /// Identifiers that may not be bound (or assigned) in strict mode.
