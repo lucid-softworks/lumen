@@ -1575,7 +1575,7 @@ fn coll_ptr(i: &Interp, this: &Value) -> Result<usize, Value> {
 
 /// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
 fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
-    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Map or Set"))?;
+    let ptr = coll_ptr(i, this)?;
     let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
     let mut arr = Vec::with_capacity(snap.len());
     for (k, v) in snap {
@@ -1695,10 +1695,9 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         Ok(Value::Bool(removed))
     });
     it.def_method(&proto, "clear", 0, |i, this, _| {
-        if let Some(ptr) = map_ptr(&this) {
-            if let Some(e) = i.map_data.get_mut(&ptr) {
-                e.clear();
-            }
+        let ptr = coll_ptr(i, &this)?;
+        if let Some(e) = i.map_data.get_mut(&ptr) {
+            e.clear();
         }
         Ok(Value::Undefined)
     });
@@ -2711,7 +2710,7 @@ fn install_object(it: &mut Interp) {
         };
         let obj = Object::new(proto);
         if let Value::Obj(descs) = arg(args, 1) {
-            for k in descs.borrow().props.keys() {
+            for k in ordered_enum_keys(&descs) {
                 let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
                 if !ab(define_own_property(i, &obj, &k, &d))? {
                     return Err(i.make_error("TypeError", "Cannot define property"));
@@ -2855,7 +2854,7 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Object.defineProperties on non-object")),
         };
         if let Value::Obj(descs) = arg(args, 1) {
-            for k in descs.borrow().props.keys() {
+            for k in ordered_enum_keys(&descs) {
                 let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
                 if !ab(define_own_property(i, &o, &k, &d))? {
                     return Err(i.make_error("TypeError", "Cannot define property"));

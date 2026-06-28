@@ -963,3 +963,12 @@ fn define_property_semantics() {
     assert_eq!(run("var o={}; Object.defineProperty(o,'x',{get(){return 7}}); o.x"), "7");
     assert_eq!(run("var o={}; Object.defineProperty(o,'x',{value:1,configurable:true}); Object.defineProperty(o,'x',{value:2}); o.x"), "2");
 }
+#[test]
+fn coll_brand_checks() {
+    for src in ["Set.prototype.clear.call({})","Set.prototype.values.call({})","Set.prototype.keys.call({})","Map.prototype.entries.call({})","Map.prototype.keys.call(5)"] {
+        assert_eq!(throws(src), "TypeError", "should reject: {src}");
+    }
+    assert_eq!(run("var s=new Set([1,2]); s.clear(); s.size"), "0");
+    assert_eq!(run("[...new Map([[1,2]]).entries()][0].join(',')"), "1,2");
+    assert_eq!(run("[...new Set([3,4]).values()].join(',')"), "3,4");
+}
