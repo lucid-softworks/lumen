@@ -1036,10 +1036,21 @@ impl Parser {
                 let value = self.parse_assign()?;
                 props.push(PropDef::KeyValue { key, value });
             } else {
-                // Shorthand { x } — only valid when key is a plain identifier.
+                // Shorthand `{ x }`, or CoverInitializedName `{ x = default }` (only meaningful in
+                // a destructuring assignment target). Only valid when key is a plain identifier.
                 match &key {
                     PropKey::Ident(name) => {
-                        let value = Expr::Ident(name.clone());
+                        let ident = Expr::Ident(name.clone());
+                        let value = if self.eat_punct("=") {
+                            let default = self.parse_assign()?;
+                            Expr::Assign {
+                                op: "=",
+                                target: Box::new(ident),
+                                value: Box::new(default),
+                            }
+                        } else {
+                            ident
+                        };
                         props.push(PropDef::KeyValue { key, value });
                     }
                     _ => return self.err("expected ':' after property key"),
