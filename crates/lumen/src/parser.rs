@@ -1221,6 +1221,11 @@ impl Parser {
                 self.advance();
                 Ok(PropKey::Num(n))
             }
+            // A BigInt literal property key (`{1n: x}`) uses its integer string as the key.
+            Tok::BigInt(n) => {
+                self.advance();
+                Ok(PropKey::Str(Rc::from(n.to_string().as_str())))
+            }
             Tok::Punct("[") => {
                 self.advance();
                 let e = self.parse_assign()?;

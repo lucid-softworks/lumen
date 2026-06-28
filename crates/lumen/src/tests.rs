@@ -1254,3 +1254,11 @@ fn tagged_templates() {
     assert_eq!(run("String.raw`a\\nb`"), "a\\nb");
     assert_eq!(run("String.raw`${1}+${2}`"), "1+2");
 }
+#[test]
+fn bigint_prop_names() {
+    assert_eq!(run("({1n:5})[1]"), "5");
+    assert_eq!(run("({1n:5})['1']"), "5");
+    assert_eq!(run("({100n:'x'})[100]"), "x");
+    assert_eq!(run("var o={2n:'a',3n:'b'}; o[2]+o[3]"), "ab");
+    assert_eq!(run("class C{1n=9}; new C()[1]"), "9");
+}
