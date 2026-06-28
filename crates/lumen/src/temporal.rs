@@ -787,20 +787,36 @@ fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
     if inc <= 1 {
         return value;
     }
-    let q = value.div_euclid(inc);
-    let r = value.rem_euclid(inc);
+    let q = value.div_euclid(inc); // floor
+    let r = value.rem_euclid(inc); // always >= 0
     if r == 0 {
         return value;
     }
-    let up = match mode {
-        "ceil" | "expand" => true,
-        "floor" | "trunc" => false,
-        "halfFloor" | "halfTrunc" => r * 2 > inc,
-        "halfCeil" | "halfExpand" => r * 2 >= inc,
-        "halfEven" => r * 2 > inc || (r * 2 == inc && q % 2 != 0),
-        _ => r * 2 >= inc,
+    let floor = q * inc; // toward -inf
+    let ceil = floor + inc; // toward +inf
+    // `ceil`/`expand` and `floor`/`trunc` differ for negative values; half-modes break ties.
+    let to_ceil = match mode {
+        "ceil" => true,
+        "floor" => false,
+        "trunc" => value < 0,
+        "expand" => value >= 0,
+        _ => match (r * 2).cmp(&inc) {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => match mode {
+                "halfCeil" => true,
+                "halfFloor" => false,
+                "halfTrunc" => value < 0,
+                "halfEven" => q.rem_euclid(2) != 0,
+                _ => value >= 0, // halfExpand (default)
+            },
+        },
     };
-    (q + if up { 1 } else { 0 }) * inc
+    if to_ceil {
+        ceil
+    } else {
+        floor
+    }
 }
 
 /// Difference between two ISO dates as a calendar duration honoring `largest`
