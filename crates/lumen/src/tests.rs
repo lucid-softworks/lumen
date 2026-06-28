@@ -648,3 +648,15 @@ fn resizable_arraybuffer() {
     assert_eq!(throws("new ArrayBuffer(4,{maxByteLength:8}).resize(16)"), "RangeError");
     assert_eq!(run("var b=new ArrayBuffer(4); var c=b.transfer(); b.detached+','+c.byteLength"), "true,4");
 }
+
+#[test]
+fn misc_globals() {
+    assert_eq!(run("Object.hasOwn({a:1},'a')"), "true");
+    assert_eq!(run("Object.hasOwn({a:1},'b')"), "false");
+    assert_eq!(run("Number.parseInt('42px')"), "42");
+    assert_eq!(run("Number.parseInt === parseInt"), "true");
+    assert_eq!(run("'abc'.isWellFormed()"), "true");
+    assert_eq!(run("var o={}; new WeakRef(o).deref()===o"), "true");
+    assert_eq!(run("typeof new FinalizationRegistry(()=>{})"), "object");
+    assert_eq!(throws("new WeakRef(5)"), "TypeError");
+}

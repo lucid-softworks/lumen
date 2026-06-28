@@ -61,7 +61,53 @@ pub fn install(it: &mut Interp) {
     install_console(it);
     install_host(it);
     install_atomics(it);
+    install_weak_refs(it);
     crate::temporal::install(it);
+}
+
+/// WeakRef / FinalizationRegistry. lumen's collector never observably reclaims during a test, so
+/// WeakRef holds its target (deref always returns it) and FinalizationRegistry callbacks never fire.
+fn install_weak_refs(it: &mut Interp) {
+    let wr_proto = Object::new(Some(it.object_proto.clone()));
+    it.def_method(&wr_proto, "deref", 0, |i, this, _| ab(i.get_member(&this, "__target")));
+    let wr_ctor = it.make_native("WeakRef", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "WeakRef requires 'new'"));
+        }
+        let target = arg(a, 0);
+        if !matches!(target, Value::Obj(_) | Value::Sym(_)) {
+            return Err(i.make_error("TypeError", "WeakRef target must be an object or symbol"));
+        }
+        let obj = Object::new(i.extra_protos.get("WeakRef").cloned());
+        set_internal(&obj, "__target", target);
+        Ok(Value::Obj(obj))
+    });
+    it.extra_protos.insert("WeakRef", wr_proto.clone());
+    wr_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(wr_proto.clone()), false, false, false));
+    wr_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(wr_ctor.clone())));
+    set_builtin(&it.global, "WeakRef", Value::Obj(wr_ctor));
+
+    let fr_proto = Object::new(Some(it.object_proto.clone()));
+    it.def_method(&fr_proto, "register", 2, |i, _this, a| {
+        if matches!(arg(a, 0), Value::Undefined) {
+            return Err(i.make_error("TypeError", "target must be an object"));
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&fr_proto, "unregister", 1, |_i, _this, _a| Ok(Value::Bool(false)));
+    let fr_ctor = it.make_native("FinalizationRegistry", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "FinalizationRegistry requires 'new'"));
+        }
+        if !arg(a, 0).is_callable() {
+            return Err(i.make_error("TypeError", "cleanup callback must be callable"));
+        }
+        Ok(Value::Obj(Object::new(i.extra_protos.get("FinalizationRegistry").cloned())))
+    });
+    it.extra_protos.insert("FinalizationRegistry", fr_proto.clone());
+    fr_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(fr_proto.clone()), false, false, false));
+    fr_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(fr_ctor.clone())));
+    set_builtin(&it.global, "FinalizationRegistry", Value::Obj(fr_ctor));
 }
 
 /// `Atomics` over integer TypedArrays. lumen is single-threaded, so the read-modify-write ops are
@@ -2211,6 +2257,15 @@ fn install_object(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(op.clone()), false, false, false));
     op.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
 
+    it.def_method(&ctor, "hasOwn", 2, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "Object.hasOwn called on non-object")),
+        };
+        let key = ab(i.to_property_key(&arg(args, 1)))?;
+        let has = o.borrow().props.contains(&key);
+        Ok(Value::Bool(has))
+    });
     it.def_method(&ctor, "groupBy", 2, |i, _this, args| {
         let cb = arg(args, 1);
         if !cb.is_callable() {
@@ -3387,6 +3442,12 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "toLowerCase", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.to_lowercase()))
     });
+    // lumen strings are valid UTF-8, so they're always well-formed.
+    it.def_method(&sp, "isWellFormed", 0, |i, this, _| {
+        this_string(i, &this)?;
+        Ok(Value::Bool(true))
+    });
+    it.def_method(&sp, "toWellFormed", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
     it.def_method(&sp, "trim", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.trim().to_string()))
     });
@@ -4201,6 +4262,15 @@ fn install_globals(it: &mut Interp) {
         let s = ab(i.to_string(&arg(a, 0)))?;
         Ok(Value::Num(parse_float(&s)))
     });
+    // Number.parseInt / Number.parseFloat are the same functions as the globals.
+    if let Some(num) = it.global.borrow().props.get("Number").map(|p| p.value.clone()) {
+        let pi = it.global.borrow().props.get("parseInt").map(|p| p.value.clone());
+        let pf = it.global.borrow().props.get("parseFloat").map(|p| p.value.clone());
+        if let (Value::Obj(n), Some(pi), Some(pf)) = (num, pi, pf) {
+            n.borrow_mut().props.insert("parseInt", Property::builtin(pi));
+            n.borrow_mut().props.insert("parseFloat", Property::builtin(pf));
+        }
+    }
     global_fn(it, "isNaN", 1, |i, _t, a| {
         Ok(Value::Bool(ab(i.to_number(&arg(a, 0)))?.is_nan()))
     });
