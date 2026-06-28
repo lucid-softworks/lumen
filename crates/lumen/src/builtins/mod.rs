@@ -3772,12 +3772,221 @@ fn install_iterator(it: &mut Interp) {
         let f = it.make_native("[Symbol.iterator]", 0, return_this);
         proto.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
     }
+    // Iterator-helper methods on %IteratorPrototype%.
+    it.def_method(&proto, "map", 1, |i, t, a| make_iter_helper(i, t, "map", arg(a, 0)));
+    it.def_method(&proto, "filter", 1, |i, t, a| make_iter_helper(i, t, "filter", arg(a, 0)));
+    it.def_method(&proto, "take", 1, |i, t, a| make_iter_helper(i, t, "take", arg(a, 0)));
+    it.def_method(&proto, "drop", 1, |i, t, a| make_iter_helper(i, t, "drop", arg(a, 0)));
+    it.def_method(&proto, "toArray", 0, |i, this, _| {
+        let mut out = Vec::new();
+        while let Some(v) = step_iter(i, &this)? {
+            out.push(v);
+        }
+        Ok(i.make_array(out))
+    });
+    it.def_method(&proto, "forEach", 1, |i, this, a| {
+        let f = arg(a, 0);
+        if !f.is_callable() {
+            return Err(i.make_error("TypeError", "Iterator.prototype.forEach argument is not callable"));
+        }
+        let mut k = 0.0;
+        while let Some(v) = step_iter(i, &this)? {
+            ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]))?;
+            k += 1.0;
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&proto, "reduce", 1, |i, this, a| {
+        let f = arg(a, 0);
+        if !f.is_callable() {
+            return Err(i.make_error("TypeError", "reducer is not callable"));
+        }
+        let mut acc;
+        let mut k = 0.0;
+        if a.len() >= 2 {
+            acc = arg(a, 1);
+        } else {
+            acc = match step_iter(i, &this)? {
+                Some(v) => v,
+                None => return Err(i.make_error("TypeError", "Reduce of empty iterator with no initial value")),
+            };
+            k = 1.0;
+        }
+        while let Some(v) = step_iter(i, &this)? {
+            acc = ab(i.call(f.clone(), Value::Undefined, &[acc, v, Value::Num(k)]))?;
+            k += 1.0;
+        }
+        Ok(acc)
+    });
+    it.def_method(&proto, "some", 1, |i, t, a| iter_some_every(i, t, a, true));
+    it.def_method(&proto, "every", 1, |i, t, a| iter_some_every(i, t, a, false));
+    it.def_method(&proto, "find", 1, |i, this, a| {
+        let f = arg(a, 0);
+        if !f.is_callable() {
+            return Err(i.make_error("TypeError", "predicate is not callable"));
+        }
+        let mut k = 0.0;
+        while let Some(v) = step_iter(i, &this)? {
+            let r = ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
+            if i.to_boolean(&r) {
+                i.iterator_close(&this);
+                return Ok(v);
+            }
+            k += 1.0;
+        }
+        Ok(Value::Undefined)
+    });
+
     let ctor = it.make_native("Iterator", 0, |i, _t, _a| {
         Err(i.make_error("TypeError", "Abstract class Iterator not directly constructable"))
+    });
+    ctor.borrow_mut().is_constructor = true;
+    it.def_method(&ctor, "from", 1, |i, _t, a| {
+        let v = arg(a, 0);
+        // Already an iterator (has a `next`)? wrap so it inherits the helpers; else get its iterator.
+        let (iter, _next) = ab(i.get_iterator(&v))?;
+        Ok(iter)
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Iterator", Value::Obj(ctor));
+}
+
+fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Result<Value, Value> {
+    let f = arg(a, 0);
+    if !f.is_callable() {
+        return Err(i.make_error("TypeError", "predicate is not callable"));
+    }
+    let mut k = 0.0;
+    while let Some(v) = step_iter(i, &this)? {
+        let r = ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]))?;
+        if i.to_boolean(&r) == want {
+            i.iterator_close(&this);
+            return Ok(Value::Bool(want));
+        }
+        k += 1.0;
+    }
+    Ok(Value::Bool(!want))
+}
+
+/// Step an iterator object (`this`) once: `Some(value)` or `None` when done.
+fn step_iter(i: &mut Interp, src: &Value) -> Result<Option<Value>, Value> {
+    let next = ab(i.get_member(src, "next"))?;
+    if !next.is_callable() {
+        return Err(i.make_error("TypeError", "iterator.next is not a function"));
+    }
+    let res = ab(i.call(next, src.clone(), &[]))?;
+    if !matches!(res, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "iterator result is not an object"));
+    }
+    let done = ab(i.get_member(&res, "done"))?;
+    if i.to_boolean(&done) {
+        Ok(None)
+    } else {
+        Ok(Some(ab(i.get_member(&res, "value"))?))
+    }
+}
+
+/// Build a lazy iterator-helper (map/filter/take/drop/flatMap) wrapping `source`.
+fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Result<Value, Value> {
+    if matches!(kind, "map" | "filter" | "flatMap") && !f.is_callable() {
+        return Err(i.make_error("TypeError", "Iterator helper argument is not callable"));
+    }
+    let proto = i.extra_protos.get("%IteratorPrototype%").cloned();
+    let obj = Object::new(proto);
+    set_builtin(&obj, "__ih_src", source);
+    set_builtin(&obj, "__ih_kind", Value::str(kind));
+    set_builtin(&obj, "__ih_fn", f.clone());
+    if matches!(kind, "take" | "drop") {
+        let n = ab(i.to_number(&f))?;
+        if !n.is_finite() && n < 0.0 || n < 0.0 {
+            return Err(i.make_error("RangeError", "limit must be a non-negative number"));
+        }
+        let n = if n.is_nan() { 0.0 } else { n };
+        set_builtin(&obj, "__ih_n", Value::Num(n));
+        set_builtin(&obj, "__ih_started", Value::Bool(false));
+    }
+    set_builtin(&obj, "__ih_count", Value::Num(0.0));
+    i.def_method(&obj, "next", 0, iter_helper_next);
+    if let Some(sym) = i.iterator_sym.clone() {
+        let itf = i.make_native("[Symbol.iterator]", 0, return_this);
+        obj.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
+    }
+    Ok(Value::Obj(obj))
+}
+
+fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
+    let o = i.new_object();
+    set_data(&o, "value", value);
+    set_data(&o, "done", Value::Bool(done));
+    Value::Obj(o)
+}
+
+fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let src = ab(i.get_member(&this, "__ih_src"))?;
+    let kind_v = ab(i.get_member(&this, "__ih_kind"))?;
+    let kind = ab(i.to_string(&kind_v))?;
+    let f = ab(i.get_member(&this, "__ih_fn"))?;
+    let count_v = ab(i.get_member(&this, "__ih_count"))?;
+    let count = ab(i.to_number(&count_v))?;
+    match &*kind {
+        "map" => match step_iter(i, &src)? {
+            None => Ok(iter_result(i, Value::Undefined, true)),
+            Some(v) => {
+                let mv = ab(i.call(f, Value::Undefined, &[v, Value::Num(count)]))?;
+                set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(count + 1.0));
+                Ok(iter_result(i, mv, false))
+            }
+        },
+        "filter" => {
+            let mut k = count;
+            loop {
+                match step_iter(i, &src)? {
+                    None => return Ok(iter_result(i, Value::Undefined, true)),
+                    Some(v) => {
+                        let r = ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
+                        k += 1.0;
+                        if i.to_boolean(&r) {
+                            set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(k));
+                            return Ok(iter_result(i, v, false));
+                        }
+                    }
+                }
+            }
+        }
+        "take" => {
+            let nv = ab(i.get_member(&this, "__ih_n"))?;
+            let n = ab(i.to_number(&nv))?;
+            if count >= n {
+                i.iterator_close(&src);
+                return Ok(iter_result(i, Value::Undefined, true));
+            }
+            set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(count + 1.0));
+            match step_iter(i, &src)? {
+                None => Ok(iter_result(i, Value::Undefined, true)),
+                Some(v) => Ok(iter_result(i, v, false)),
+            }
+        }
+        "drop" => {
+            let started_v = ab(i.get_member(&this, "__ih_started"))?;
+            let started = i.to_boolean(&started_v);
+            if !started {
+                let nv = ab(i.get_member(&this, "__ih_n"))?;
+                let n = ab(i.to_number(&nv))? as usize;
+                for _ in 0..n {
+                    if step_iter(i, &src)?.is_none() {
+                        break;
+                    }
+                }
+                set_internal(this.as_obj().unwrap(), "__ih_started", Value::Bool(true));
+            }
+            match step_iter(i, &src)? {
+                None => Ok(iter_result(i, Value::Undefined, true)),
+                Some(v) => Ok(iter_result(i, v, false)),
+            }
+        }
+        _ => Ok(iter_result(i, Value::Undefined, true)),
+    }
 }
 
 /// Build an Array Iterator over `target`. `kind`: 0 = values, 1 = keys, 2 = [key, value] entries.

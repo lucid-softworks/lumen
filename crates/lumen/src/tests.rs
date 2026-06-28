@@ -1051,3 +1051,18 @@ fn string_iterator() {
     assert_eq!(run("var it='hi'[Symbol.iterator](); it.next().value+it.next().value"), "hi");
     assert_eq!(run("var r=''; for(var c of 'xyz') r+=c; r"), "xyz");
 }
+#[test]
+fn iterator_helpers() {
+    assert_eq!(run("[...[1,2,3].values().map(x=>x*2)].join(',')"), "2,4,6");
+    assert_eq!(run("[1,2,3,4].values().filter(x=>x%2===0).toArray().join(',')"), "2,4");
+    assert_eq!(run("[1,2,3,4,5].values().take(2).toArray().join(',')"), "1,2");
+    assert_eq!(run("[1,2,3,4,5].values().drop(2).toArray().join(',')"), "3,4,5");
+    assert_eq!(run("[1,2,3].values().reduce((a,b)=>a+b,0)"), "6");
+    assert_eq!(run("[1,2,3].values().reduce((a,b)=>a+b)"), "6");
+    assert_eq!(run("var s=0; [1,2,3].values().forEach(x=>s+=x); s"), "6");
+    assert_eq!(run("[1,2,3].values().some(x=>x===2)"), "true");
+    assert_eq!(run("[1,2,3].values().every(x=>x>0)"), "true");
+    assert_eq!(run("[1,2,3].values().find(x=>x>1)"), "2");
+    assert_eq!(run("typeof Iterator.prototype.map"), "function");
+    assert_eq!(run("[1,2,3,4,5].values().filter(x=>x>1).take(2).toArray().join(',')"), "2,3");
+}
