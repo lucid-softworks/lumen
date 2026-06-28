@@ -709,3 +709,20 @@ fn missing_methods_batch2() {
     assert_eq!(run("'a'.localeCompare('b')"), "-1");
     assert_eq!(run("(255).toLocaleString()"), "255");
 }
+#[test]
+fn ctor_requires_new() {
+    for src in ["Map()","Set()","WeakMap()","WeakSet()","Promise(()=>{})","ArrayBuffer(8)","SharedArrayBuffer(8)","Int8Array(4)","Float64Array(2)","DataView(new ArrayBuffer(8))","Proxy({},{})"] {
+        assert_eq!(throws(src), "TypeError", "should require new: {src}");
+    }
+    // With new, all still work.
+    assert_eq!(run("new Map([[1,2]]).get(1)"), "2");
+    assert_eq!(run("new Int8Array(3).length"), "3");
+    assert_eq!(run("new DataView(new ArrayBuffer(8)).byteLength"), "8");
+    assert_eq!(run("typeof new Promise(()=>{})"), "object");
+}
+#[test]
+fn probe13_tmp() {
+    for src in ["Object.prototype.toString.call(Math)","Object.prototype.toString.call(JSON)","typeof AggregateError","typeof Promise.any","typeof Promise.allSettled","typeof globalThis[Symbol.toStringTag]","Object.prototype.toString.call(new Int8Array(1))","Object.prototype.toString.call(Reflect)","Object.prototype.toString.call(Atomics)","typeof Array.prototype[Symbol.iterator]","Math[Symbol.toStringTag]","typeof Symbol.for","Symbol.keyFor(Symbol.for('x'))","new Int8Array(1)[Symbol.toStringTag]"] {
+        eprintln!("PD {src:?} => {}", match crate::Engine::new().eval(src,false){Ok(crate::Completion::Value(v))=>v,Ok(crate::Completion::Throw{name,..})=>format!("T:{name}"),Err(e)=>format!("PARSE {}",e.message)});
+    }
+}

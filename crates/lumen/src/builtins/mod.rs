@@ -351,6 +351,9 @@ fn install_dataview(it: &mut Interp) {
     it.def_method(&proto, "setBigUint64", 2, |i, this, a| dv_set_big(i, &this, a));
 
     let ctor = it.make_native("DataView", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "DataView constructor requires 'new'"));
+        }
         let bp = match arg(a, 0) {
             Value::Obj(o) if i.array_buffers.contains_key(&(Rc::as_ptr(&o) as usize)) => {
                 Rc::as_ptr(&o) as usize
@@ -628,6 +631,9 @@ fn install_shared_array_buffer(it: &mut Interp) {
         Ok(bv)
     });
     let ctor = it.make_native("SharedArrayBuffer", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "SharedArrayBuffer constructor requires 'new'"));
+        }
         let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
         if len > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
@@ -751,6 +757,9 @@ fn install_array_buffer(it: &mut Interp) {
         Ok(bv)
     });
     let ctor = it.make_native("ArrayBuffer", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "ArrayBuffer constructor requires 'new'"));
+        }
         let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
         if len > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "Invalid ArrayBuffer length"));
@@ -817,6 +826,9 @@ ta_methods! {
 }
 
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
+    if !i.constructing {
+        return Err(i.make_error("TypeError", "TypedArray constructor requires 'new'"));
+    }
     let es = kind.elsize();
     let (buf_val, buf_ptr, offset, len) = match args.first() {
         None => {
@@ -1480,6 +1492,9 @@ fn weakset_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> 
 }
 
 fn collection_ctor(i: &mut Interp, args: &[Value], name: &str, is_set: bool) -> Result<Value, Value> {
+    if !i.constructing {
+        return Err(i.make_error("TypeError", "Constructor requires 'new'"));
+    }
     let proto = i.extra_protos.get(name).cloned();
     let obj = Object::new(proto);
     let ptr = Rc::as_ptr(&obj) as usize;
@@ -1864,6 +1879,9 @@ fn install_promise(it: &mut Interp) {
     });
 
     let ctor = it.make_native("Promise", 1, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "Promise constructor requires 'new'"));
+        }
         let executor = arg(a, 0);
         if !executor.is_callable() {
             return Err(i.make_error("TypeError", "Promise resolver is not a function"));
@@ -1981,7 +1999,12 @@ fn revoke_proxy(i: &mut Interp, _this: Value, a: &[Value]) -> Result<Value, Valu
 }
 
 fn install_proxy(it: &mut Interp) {
-    let ctor = it.make_native("Proxy", 2, |i, _t, a| make_proxy(i, arg(a, 0), arg(a, 1)));
+    let ctor = it.make_native("Proxy", 2, |i, _t, a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "Constructor Proxy requires 'new'"));
+        }
+        make_proxy(i, arg(a, 0), arg(a, 1))
+    });
     it.def_method(&ctor, "revocable", 2, |i, _t, a| {
         let proxy = make_proxy(i, arg(a, 0), arg(a, 1))?;
         let revoke = make_bound(i, revoke_proxy, vec![proxy.clone()]);

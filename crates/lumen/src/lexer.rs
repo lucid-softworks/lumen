@@ -587,6 +587,13 @@ impl<'a> Lexer<'a> {
 
     fn read_punct(&mut self) -> Result<(), LexError> {
         let rest: String = self.chars[self.pos..(self.pos + 4).min(self.chars.len())].iter().collect();
+        // `?.` followed by a digit is `?` then `.` (a conditional like `x ? .5 : .3`), not optional
+        // chaining.
+        if rest.starts_with("?.") && self.chars.get(self.pos + 2).is_some_and(|c| c.is_ascii_digit()) {
+            self.bump();
+            self.push(Tok::Punct("?"));
+            return Ok(());
+        }
         for p in PUNCTUATORS {
             if rest.starts_with(p) {
                 for _ in 0..p.chars().count() {
