@@ -76,6 +76,15 @@ impl<'a> Lexer<'a> {
     }
 
     fn run(&mut self) -> Result<(), LexError> {
+        // Hashbang comment: `#!...` only at the very start of the source.
+        if self.peek() == Some('#') && self.peek2() == Some('!') {
+            while let Some(c) = self.peek() {
+                if is_line_terminator(c) {
+                    break;
+                }
+                self.bump();
+            }
+        }
         while let Some(c) = self.peek() {
             if is_line_terminator(c) {
                 self.nl_pending = true;
@@ -608,5 +617,6 @@ fn is_ident_start(c: char) -> bool {
     c == '_' || c == '$' || c.is_alphabetic()
 }
 fn is_ident_part(c: char) -> bool {
-    c == '_' || c == '$' || c.is_alphanumeric()
+    // ZWNJ / ZWJ are valid IdentifierPart characters.
+    c == '_' || c == '$' || c == '\u{200C}' || c == '\u{200D}' || c.is_alphanumeric()
 }
