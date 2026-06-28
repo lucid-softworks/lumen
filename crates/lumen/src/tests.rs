@@ -1202,3 +1202,14 @@ fn reduce_indexof_holes() {
     assert_eq!(throws("[1,2,3].reduce(5)"), "TypeError");
     assert_eq!(run("['a','b','c'].indexOf('c',-1)"), "2");
 }
+#[test]
+fn accessor_arity() {
+    for src in ["({get x(a){return 1}})","({set x(){}})","({set x(a,b){}})","({set x(...r){}})","class C{get x(a){}}","class C{set x(){}}","class C{set x(a,b){}}"] {
+        assert!(Engine::new().eval(src, false).is_err(), "should reject: {src}");
+    }
+    // valid
+    assert_eq!(run("({get x(){return 5}}).x"), "5");
+    assert_eq!(run("var v; var o={set x(n){v=n}}; o.x=7; v"), "7");
+    assert_eq!(run("class C{get y(){return 3}}; new C().y"), "3");
+    assert_eq!(run("({set x(v=1){}}); 'ok'"), "ok"); // default param allowed on setter
+}

@@ -1306,6 +1306,10 @@ impl Parser {
 
         if self.is_punct("(") {
             let func = self.parse_method_function_kind(is_generator, is_async)?;
+            if matches!(kind, MemberKind::Get | MemberKind::Set) {
+                check_accessor_arity(&func, kind == MemberKind::Get)
+                    .map_err(|m| ParseError { message: m, line: self.line() })?;
+            }
             let kind = if kind == MemberKind::Method && !is_static && key_is(&key, "constructor") {
                 MemberKind::Constructor
             } else {
@@ -1348,8 +1352,10 @@ impl Parser {
         })
     }
 
-    fn parse_accessor_function(&mut self, _is_get: bool) -> Result<Function, ParseError> {
-        self.parse_method_function()
+    fn parse_accessor_function(&mut self, is_get: bool) -> Result<Function, ParseError> {
+        let f = self.parse_method_function()?;
+        check_accessor_arity(&f, is_get).map_err(|m| ParseError { message: m, line: self.line() })?;
+        Ok(f)
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
@@ -1505,6 +1511,18 @@ fn key_is(key: &PropKey, name: &str) -> bool {
         PropKey::Str(s) => &**s == name,
         _ => false,
     }
+}
+
+/// A getter takes no parameters; a setter takes exactly one (non-rest) parameter.
+fn check_accessor_arity(f: &Function, is_get: bool) -> Result<(), String> {
+    if is_get {
+        if !f.params.is_empty() {
+            return Err("getter functions must have no arguments".into());
+        }
+    } else if f.params.len() != 1 || f.params[0].rest {
+        return Err("setter functions must have exactly one argument".into());
+    }
+    Ok(())
 }
 
 fn pattern_names(pat: &Pattern, out: &mut Vec<String>) {
