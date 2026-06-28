@@ -814,3 +814,13 @@ fn tdz_fn_toplevel() {
     assert_eq!(run("var g=10; g"), "10");
     assert_eq!(run("let a=1; { let a=2; } a"), "1");
 }
+#[test]
+fn property_order() {
+    assert_eq!(run("Object.keys({2:'a',1:'b',x:'c',0:'d'}).join(',')"), "0,1,2,x");
+    assert_eq!(run("var o={b:1}; o.a=2; o[5]=3; o[1]=4; Object.keys(o).join(',')"), "1,5,b,a");
+    assert_eq!(run("var r=[]; for(var k in {x:1,2:2,1:3}) r.push(k); r.join(',')"), "1,2,x");
+    assert_eq!(run("JSON.stringify({2:'a',1:'b',x:'c'})"), "{\"1\":\"b\",\"2\":\"a\",\"x\":\"c\"}");
+    assert_eq!(run("Object.values({2:'a',10:'b',1:'c'}).join(',')"), "c,a,b");
+    assert_eq!(run("Object.keys({...{b:1,1:2,a:3}}).join(',')"), "1,b,a");
+    assert_eq!(run("var o=Object.assign({},{c:1,1:2,a:3}); Object.keys(o).join(',')"), "1,c,a");
+}

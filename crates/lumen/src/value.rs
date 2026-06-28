@@ -363,9 +363,38 @@ impl Props {
     pub fn keys(&self) -> Vec<Rc<str>> {
         self.entries.iter().map(|(k, _)| k.clone()).collect()
     }
+    /// Keys in spec [[OwnPropertyKeys]] order: array-index keys ascending, then other string keys
+    /// in insertion order, then symbol keys in insertion order.
+    pub fn ordered_keys(&self) -> Vec<Rc<str>> {
+        let mut ints: Vec<(u32, Rc<str>)> = Vec::new();
+        let mut strs: Vec<Rc<str>> = Vec::new();
+        let mut syms: Vec<Rc<str>> = Vec::new();
+        for (k, _) in &self.entries {
+            if k.starts_with('\u{0}') {
+                syms.push(k.clone());
+            } else if let Some(n) = canonical_index(k) {
+                ints.push((n, k.clone()));
+            } else {
+                strs.push(k.clone());
+            }
+        }
+        ints.sort_by_key(|(n, _)| *n);
+        ints.into_iter().map(|(_, k)| k).chain(strs).chain(syms).collect()
+    }
     pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Property)> {
         self.entries.iter().map(|(k, p)| (k, p))
     }
+}
+
+/// A canonical array-index property key (`"0"`, `"42"` — decimal, no leading zeros, fits u32).
+fn canonical_index(k: &str) -> Option<u32> {
+    if k == "0" {
+        return Some(0);
+    }
+    if k.is_empty() || k.starts_with('0') || !k.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    k.parse::<u32>().ok().filter(|&n| n != u32::MAX)
 }
 
 /// Convenience: define a plain own data property by key/value.

@@ -1432,6 +1432,16 @@ fn map_ptr(this: &Value) -> Option<usize> {
     this.as_obj().map(|o| Rc::as_ptr(o) as usize)
 }
 
+/// Own enumerable string keys in spec [[OwnPropertyKeys]] order (array-index ascending first).
+fn ordered_enum_keys(o: &Gc) -> Vec<Rc<str>> {
+    let b = o.borrow();
+    b.props
+        .ordered_keys()
+        .into_iter()
+        .filter(|k| !Interp::is_sym_key(k) && b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+        .collect()
+}
+
 /// The property key for `@@toStringTag` (`Symbol.toStringTag`), if Symbol is installed.
 pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
     let sym = i.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
@@ -2166,13 +2176,7 @@ fn json_str(
                 }
                 join_json("[", "]", items, gap, &new_indent, indent)
             } else {
-                let keys: Vec<Rc<str>> = o
-                    .borrow()
-                    .props
-                    .iter()
-                    .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
-                    .map(|(k, _)| k.clone())
-                    .collect();
+                let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
                 let mut parts = Vec::new();
                 for k in keys {
                     let v = ab(i.get_member(&value, &k))?;
@@ -2569,13 +2573,7 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Object.keys called on non-object")),
         };
-        let keys: Vec<Value> = o
-            .borrow()
-            .props
-            .iter()
-            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
-            .map(|(k, _)| Value::Str(k.clone()))
-            .collect();
+        let keys: Vec<Value> = ordered_enum_keys(&o).into_iter().map(Value::Str).collect();
         Ok(i.make_array(keys))
     });
     it.def_method(&ctor, "getOwnPropertyNames", 1, |i, _this, args| {
@@ -2711,7 +2709,15 @@ fn install_object(it: &mut Interp) {
         let target = arg(args, 0);
         for src in &args[1.min(args.len())..] {
             if let Value::Obj(o) = src {
-                for k in o.borrow().props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()).collect::<Vec<_>>() {
+                let keys: Vec<Rc<str>> = {
+                    let b = o.borrow();
+                    b.props
+                        .ordered_keys()
+                        .into_iter()
+                        .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+                        .collect()
+                };
+                for k in keys {
                     let v = ab(i.get_member(src, &k))?;
                     ab(i.set_member(&target, &k, v))?;
                 }
@@ -2727,13 +2733,7 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Object.values called on non-object")),
         };
-        let keys: Vec<Rc<str>> = o
-            .borrow()
-            .props
-            .iter()
-            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
-            .map(|(k, _)| k.clone())
-            .collect();
+        let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             out.push(ab(i.get_member(&arg(args, 0), &k))?);
@@ -2745,13 +2745,7 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Object.entries called on non-object")),
         };
-        let keys: Vec<Rc<str>> = o
-            .borrow()
-            .props
-            .iter()
-            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
-            .map(|(k, _)| k.clone())
-            .collect();
+        let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             let v = ab(i.get_member(&arg(args, 0), &k))?;

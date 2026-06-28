@@ -481,13 +481,20 @@ impl Interp {
             _ => None,
         };
         while let Some(o) = cur {
-            for (k, p) in o.borrow().props.iter() {
-                // for-in visits enumerable string keys only — never symbol keys.
-                if p.enumerable && !Interp::is_sym_key(k) && seen.insert(k.to_string()) {
+            // for-in visits own enumerable string keys in spec order, then up the prototype chain.
+            let b = o.borrow();
+            for k in b.props.ordered_keys() {
+                if Interp::is_sym_key(&k) {
+                    continue;
+                }
+                let enumerable = b.props.get(&k).map(|p| p.enumerable).unwrap_or(false);
+                if enumerable && seen.insert(k.to_string()) {
                     out.push(k.to_string());
                 }
             }
-            cur = o.borrow().proto.clone();
+            let parent = b.proto.clone();
+            drop(b);
+            cur = parent;
         }
         out
     }
@@ -859,7 +866,15 @@ impl Interp {
                 PropDef::Spread(e) => {
                     let v = self.eval(e, env)?;
                     if let Value::Obj(src) = &v {
-                        for k in src.borrow().props.keys() {
+                        let keys: Vec<Rc<str>> = {
+                            let b = src.borrow();
+                            b.props
+                                .ordered_keys()
+                                .into_iter()
+                                .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+                                .collect()
+                        };
+                        for k in keys {
                             let pv = self.get_member(&v, &k)?;
                             obj.borrow_mut().props.insert(k, Property::plain(pv));
                         }
