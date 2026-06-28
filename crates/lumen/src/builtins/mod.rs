@@ -470,9 +470,25 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                 });
             }
             let result = i.make_array(items);
+            // `groups`: a null-prototype object of named captures, or undefined if there are none.
+            let groups = if re.names.is_empty() {
+                Value::Undefined
+            } else {
+                let g = i.new_object();
+                g.borrow_mut().proto = None;
+                for (name, idx) in &re.names {
+                    let v = match caps.get(*idx).copied().flatten() {
+                        Some((a, b)) => Value::from_string(chars[a..b].iter().collect::<String>()),
+                        None => Value::Undefined,
+                    };
+                    set_data(&g, name, v);
+                }
+                Value::Obj(g)
+            };
             if let Value::Obj(o) = &result {
                 set_data(o, "index", Value::Num(start as f64));
                 set_data(o, "input", Value::Str(input));
+                set_data(o, "groups", groups);
             }
             Ok(result)
         }
@@ -481,7 +497,12 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
 
 /// Coerce `v` to a RegExp object (returning it unchanged if already one).
 /// `$&` / `$$` / `$1`..`$99` / `` $` `` / `$'` substitution in a string replacement template.
-fn expand_dollar(template: &str, caps: &[Option<(usize, usize)>], chars: &[char]) -> String {
+fn expand_dollar(
+    template: &str,
+    caps: &[Option<(usize, usize)>],
+    chars: &[char],
+    names: &[(String, usize)],
+) -> String {
     let (ms, me) = caps[0].unwrap();
     let group = |g: usize| -> String {
         caps.get(g).and_then(|c| *c).map(|(a, b)| chars[a..b].iter().collect()).unwrap_or_default()
@@ -495,6 +516,24 @@ fn expand_dollar(template: &str, caps: &[Option<(usize, usize)>], chars: &[char]
                 '$' => {
                     out.push('$');
                     i += 2;
+                }
+                // `$<name>` — a named-group reference.
+                '<' if !names.is_empty() => {
+                    let mut j = i + 2;
+                    let mut name = String::new();
+                    while j < t.len() && t[j] != '>' {
+                        name.push(t[j]);
+                        j += 1;
+                    }
+                    if j < t.len() {
+                        if let Some((_, idx)) = names.iter().find(|(n, _)| *n == name) {
+                            out.push_str(&group(*idx));
+                        }
+                        i = j + 1;
+                    } else {
+                        out.push('$');
+                        i += 1;
+                    }
                 }
                 '&' => {
                     out.extend(chars[ms..me].iter());
@@ -571,7 +610,7 @@ fn regex_replace(i: &mut Interp, s: &str, re_obj: &Value, repl: &Value) -> Resul
             out.push_str(&ab(i.to_string(&r))?);
         } else {
             let template = ab(i.to_string(repl))?;
-            out.push_str(&expand_dollar(&template, caps, &chars));
+            out.push_str(&expand_dollar(&template, caps, &chars, &re.names));
         }
         last = b;
     }

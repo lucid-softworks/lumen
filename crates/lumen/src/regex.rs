@@ -24,6 +24,8 @@ pub struct Regex {
     pub dotall: bool,
     pub sticky: bool,
     pub unicode: bool,
+    /// `(?<name>…)` group names paired with their capture index.
+    pub names: Vec<(String, usize)>,
 }
 
 #[derive(Clone)]
@@ -119,6 +121,7 @@ struct Parser {
     chars: Vec<char>,
     pos: usize,
     ngroups: usize,
+    names: Vec<(String, usize)>,
 }
 
 impl Regex {
@@ -136,7 +139,7 @@ impl Regex {
         if flags.contains('u') && flags.contains('v') {
             return Err("the u and v regular expression flags are mutually exclusive".into());
         }
-        let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0 };
+        let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0, names: Vec::new() };
         let ast = p.parse_alt()?;
         if p.pos != p.chars.len() {
             return Err("unexpected character in pattern".into());
@@ -159,6 +162,7 @@ impl Regex {
             dotall: flags.contains('s'),
             sticky: flags.contains('y'),
             unicode: flags.contains('u'),
+            names: p.names,
         })
     }
 
@@ -363,14 +367,20 @@ impl Parser {
                             Ok(Node::Group(None, Box::new(inner)))
                         }
                         _ => {
+                            let mut name = String::new();
                             while let Some(c) = self.peek() {
                                 self.bump();
                                 if c == '>' {
                                     break;
                                 }
+                                name.push(c);
                             }
                             self.ngroups += 1;
                             let idx = self.ngroups;
+                            if self.names.iter().any(|(n, _)| *n == name) {
+                                return Err(format!("duplicate group name {name}"));
+                            }
+                            self.names.push((name, idx));
                             let inner = self.parse_alt()?;
                             self.expect(')')?;
                             Ok(Node::Group(Some(idx), Box::new(inner)))
