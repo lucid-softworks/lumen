@@ -892,6 +892,123 @@ impl Interp {
         self.call(func, this, &argv)
     }
 
+    // ----- promises ---------------------------------------------------------------------------
+
+    pub(crate) fn new_promise(&mut self) -> Value {
+        let obj = Object::new(self.extra_protos.get("Promise").cloned());
+        let p = Rc::as_ptr(&obj) as usize;
+        self.promises.insert(p, PromiseState::default());
+        Value::Obj(obj)
+    }
+
+    /// A bound function that settles `promise` (fulfilling or rejecting) when called.
+    pub(crate) fn make_resolver(&mut self, promise: &Value, fulfilling: bool) -> Value {
+        let target = self.make_native(
+            if fulfilling { "resolve" } else { "reject" },
+            1,
+            if fulfilling { promise_resolve_native } else { promise_reject_native },
+        );
+        let bound = Object::new(Some(self.function_proto.clone()));
+        bound.borrow_mut().call =
+            Callable::Bound { target, this: promise.clone(), args: Vec::new() };
+        Value::Obj(bound)
+    }
+
+    pub(crate) fn resolve_promise(&mut self, promise: &Value, value: Value) {
+        let ptr = match promise {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => return,
+        };
+        if self.promises.get(&ptr).map(|s| s.status).unwrap_or(1) != 0 {
+            return;
+        }
+        // Adopt a thenable's eventual state.
+        if matches!(value, Value::Obj(_)) {
+            if let Ok(then) = self.get_member(&value, "then") {
+                if then.is_callable() {
+                    let res = self.make_resolver(promise, true);
+                    let rej = self.make_resolver(promise, false);
+                    if let Err(Abrupt::Throw(e)) = self.call(then, value.clone(), &[res, rej]) {
+                        self.reject_promise(promise, e);
+                    }
+                    return;
+                }
+            }
+        }
+        self.settle(promise, value, true);
+    }
+
+    pub(crate) fn reject_promise(&mut self, promise: &Value, reason: Value) {
+        self.settle(promise, reason, false);
+    }
+
+    fn settle(&mut self, promise: &Value, value: Value, fulfilled: bool) {
+        let ptr = match promise {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => return,
+        };
+        let reactions = match self.promises.get_mut(&ptr) {
+            Some(s) if s.status == 0 => {
+                s.status = if fulfilled { 1 } else { 2 };
+                s.value = value.clone();
+                std::mem::take(&mut s.reactions)
+            }
+            _ => return,
+        };
+        for (on_f, on_r, result) in reactions {
+            let handler = if fulfilled { on_f } else { on_r };
+            self.microtasks.push_back(Job { handler, result, value: value.clone(), fulfilled });
+        }
+    }
+
+    /// The `then` operation: register reactions, returning a new dependent promise.
+    pub(crate) fn promise_then(&mut self, promise: &Value, on_f: Value, on_r: Value) -> Value {
+        let result = self.new_promise();
+        let ptr = match promise {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => return result,
+        };
+        let status = self.promises.get(&ptr).map(|s| s.status).unwrap_or(0);
+        match status {
+            0 => {
+                if let Some(s) = self.promises.get_mut(&ptr) {
+                    s.reactions.push((on_f, on_r, result.clone()));
+                }
+            }
+            1 => {
+                let v = self.promises[&ptr].value.clone();
+                self.microtasks.push_back(Job { handler: on_f, result: result.clone(), value: v, fulfilled: true });
+            }
+            _ => {
+                let v = self.promises[&ptr].value.clone();
+                self.microtasks.push_back(Job { handler: on_r, result: result.clone(), value: v, fulfilled: false });
+            }
+        }
+        result
+    }
+
+    /// Drain the microtask queue (called after the main script). Bounded to avoid an unbounded loop.
+    pub(crate) fn drain_microtasks(&mut self) {
+        let mut budget = 1_000_000u32;
+        while let Some(job) = self.microtasks.pop_front() {
+            budget -= 1;
+            if budget == 0 {
+                break;
+            }
+            if job.handler.is_callable() {
+                match self.call(job.handler.clone(), Value::Undefined, std::slice::from_ref(&job.value)) {
+                    Ok(r) => self.resolve_promise(&job.result, r),
+                    Err(Abrupt::Throw(e)) => self.reject_promise(&job.result, e),
+                    Err(_) => {}
+                }
+            } else if job.fulfilled {
+                self.resolve_promise(&job.result, job.value);
+            } else {
+                self.reject_promise(&job.result, job.value);
+            }
+        }
+    }
+
     /// Compile a regular expression and build a RegExp object (its metadata stored as own props,
     /// the compiled program in the `regexps` side table). A bad pattern throws a SyntaxError.
     pub(crate) fn make_regexp(&mut self, source: &str, flags: &str) -> Result<Value, Abrupt> {
@@ -1353,6 +1470,17 @@ impl Interp {
             "in" => {
                 if let Value::Obj(o) = &r {
                     let key = self.to_property_key(&l)?;
+                    let ptr = Rc::as_ptr(o) as usize;
+                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                        let trap = self.get_member(&handler, "has")?;
+                        if trap.is_callable() {
+                            let res = self.call(trap, handler, &[target, Value::str(key.as_str())])?;
+                            return Ok(Value::Bool(self.to_boolean(&res)));
+                        }
+                        if let Value::Obj(to) = &target {
+                            return Ok(Value::Bool(self.has_property(to, &key)));
+                        }
+                    }
                     Ok(Value::Bool(self.has_property(o, &key)))
                 } else {
                     Err(self.throw("TypeError", "'in' requires an object on the right"))
@@ -1677,6 +1805,16 @@ fn default_constructor(derived: bool) -> Function {
         Vec::new()
     };
     Function { name: None, params, body, is_arrow: false, is_strict: true, expr_body: false }
+}
+
+fn promise_resolve_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    i.resolve_promise(&this, args.first().cloned().unwrap_or(Value::Undefined));
+    Ok(Value::Undefined)
+}
+
+fn promise_reject_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    i.reject_promise(&this, args.first().cloned().unwrap_or(Value::Undefined));
+    Ok(Value::Undefined)
 }
 
 fn describe_callee(callee: &Expr) -> String {

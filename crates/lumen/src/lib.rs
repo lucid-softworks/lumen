@@ -79,7 +79,10 @@ impl Engine {
             Some(ast::Stmt::Expr(ast::Expr::Str(s))) if &**s == "use strict"
         );
         self.interp.strict = strict || directive_strict;
-        match self.interp.run_program(&body) {
+        let result = self.interp.run_program(&body);
+        // Run queued promise reactions (the microtask checkpoint after the script).
+        self.interp.drain_microtasks();
+        match result {
             Ok(v) => Ok(Completion::Value(self.render(&v))),
             Err(thrown) => Ok(self.describe_throw(thrown)),
         }

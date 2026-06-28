@@ -116,7 +116,31 @@ pub struct Interp {
     pub data_views: HashMap<usize, (usize, usize, usize)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
     pub regexps: HashMap<usize, Rc<crate::regex::Regex>>,
+    /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
+    pub proxies: HashMap<usize, (Value, Value)>,
+    /// Promise state keyed by the promise object's pointer.
+    pub promises: HashMap<usize, PromiseState>,
+    /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
+    pub microtasks: std::collections::VecDeque<Job>,
 }
+
+/// A queued microtask: running one promise reaction.
+pub struct Job {
+    pub handler: Value,
+    pub result: Value,
+    pub value: Value,
+    pub fulfilled: bool,
+}
+
+#[derive(Default)]
+pub struct PromiseState {
+    /// 0 = pending, 1 = fulfilled, 2 = rejected.
+    pub status: u8,
+    pub value: Value,
+    /// Pending reactions: `(onFulfilled, onRejected, resultPromise)`.
+    pub reactions: Vec<(Value, Value, Value)>,
+}
+
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
 pub struct ClassInfo {
@@ -177,6 +201,9 @@ impl Interp {
             typed_arrays: HashMap::new(),
             data_views: HashMap::new(),
             regexps: HashMap::new(),
+            proxies: HashMap::new(),
+            promises: HashMap::new(),
+            microtasks: std::collections::VecDeque::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -374,8 +401,18 @@ impl Interp {
             },
             Value::Obj(o) => {
                 let o = o.clone();
-                // TypedArray integer-index reads come from the backing buffer, not the property map.
                 let ptr = Rc::as_ptr(&o) as usize;
+                // Proxy: invoke the `get` trap, or forward to the target.
+                if !self.proxies.is_empty() {
+                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                        let trap = self.get_member(&handler, "get")?;
+                        if trap.is_callable() {
+                            return self.call(trap, handler, &[target, Value::str(key), base.clone()]);
+                        }
+                        return self.get_member(&target, key);
+                    }
+                }
+                // TypedArray integer-index reads come from the backing buffer, not the property map.
                 if let Some(info) = self.typed_arrays.get(&ptr).copied() {
                     if let Ok(idx) = key.parse::<usize>() {
                         return Ok(self.ta_read(&info, idx));
@@ -417,8 +454,19 @@ impl Interp {
             _ => return Ok(()),
         };
 
-        // TypedArray integer-index writes go straight to the backing buffer.
         let ptr = Rc::as_ptr(&obj) as usize;
+        // Proxy: invoke the `set` trap, or forward to the target.
+        if !self.proxies.is_empty() {
+            if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                let trap = self.get_member(&handler, "set")?;
+                if trap.is_callable() {
+                    self.call(trap, handler, &[target, Value::str(key), value, base.clone()])?;
+                    return Ok(());
+                }
+                return self.set_member(&target, key, value);
+            }
+        }
+        // TypedArray integer-index writes go straight to the backing buffer.
         if let Some(info) = self.typed_arrays.get(&ptr).copied() {
             if let Ok(idx) = key.parse::<usize>() {
                 let n = self.to_number(&value)?;
@@ -569,6 +617,17 @@ impl Interp {
             Value::Obj(o) => o.clone(),
             _ => return Err(self.throw("TypeError", format!("{} is not a function", type_name(&callee)))),
         };
+        // Proxy with an `apply` trap (or forward to the target).
+        if !self.proxies.is_empty() {
+            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned() {
+                let trap = self.get_member(&handler, "apply")?;
+                let arr = self.make_array(args.to_vec());
+                if trap.is_callable() {
+                    return self.call(trap, handler, &[target, this, arr]);
+                }
+                return self.call(target, this, args);
+            }
+        }
         let call = obj.borrow().call.clone();
         match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
@@ -685,6 +744,17 @@ impl Interp {
             Value::Obj(o) => o.clone(),
             _ => return Err(self.throw("TypeError", "value is not a constructor")),
         };
+        // Proxy with a `construct` trap (or forward to the target).
+        if !self.proxies.is_empty() {
+            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned() {
+                let trap = self.get_member(&handler, "construct")?;
+                let arr = self.make_array(args.to_vec());
+                if trap.is_callable() {
+                    return self.call(trap, handler, &[target, arr, callee.clone()]);
+                }
+                return self.construct(target, args);
+            }
+        }
         let call = obj.borrow().call.clone();
         match call {
             Callable::Native(f) => {

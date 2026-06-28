@@ -335,6 +335,44 @@ fn bigint() {
 }
 
 #[test]
+fn proxy() {
+    assert_eq!(run("var p = new Proxy({a:1}, {}); p.a"), "1"); // forward get
+    assert_eq!(run("var p = new Proxy({}, { get(t,k){ return 'X'+k; } }); p.foo"), "Xfoo");
+    assert_eq!(run("var t={}; var p = new Proxy(t, { set(o,k,v){ o[k]=v*2; return true; } }); p.x=5; t.x"), "10");
+    assert_eq!(run("var p = new Proxy({}, { has(){ return true; } }); 'anything' in p"), "true");
+    assert_eq!(run("var p = new Proxy(function(a,b){return a+b;}, {}); p(2,3)"), "5"); // forward apply
+    assert_eq!(run("var p = new Proxy(()=>0, { apply(t,th,args){ return args[0]*10; } }); p(7)"), "70");
+    assert_eq!(run("var p = new Proxy(function(){ this.v=1; }, {}); new p().v"), "1"); // forward construct
+}
+
+#[test]
+fn promises() {
+    // Microtasks drain at the end of each eval, so a follow-up eval observes the settled state.
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    assert_eq!(after("var r=0; Promise.resolve(5).then(v=>v*2).then(v=>{r=v;});", "r"), "10");
+    assert_eq!(after("var r; Promise.reject('e').catch(e=>{r='caught:'+e;});", "r"), "caught:e");
+    assert_eq!(after("var r; new Promise(res=>res(7)).then(v=>{r=v;});", "r"), "7");
+    assert_eq!(
+        after("var r; Promise.all([Promise.resolve(1), Promise.resolve(2), 3]).then(a=>{r=a.join(',');});", "r"),
+        "1,2,3"
+    );
+    assert_eq!(
+        after("var r; Promise.race([Promise.resolve('fast'), new Promise(()=>{})]).then(v=>{r=v;});", "r"),
+        "fast"
+    );
+    // ordering: synchronous code runs before queued reactions
+    assert_eq!(after("var log=[]; Promise.resolve(1).then(v=>log.push(v)); log.push(0);", "log.join(',')"), "0,1");
+    assert_eq!(run("typeof Promise.resolve().then"), "function");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }

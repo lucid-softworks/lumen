@@ -14,8 +14,9 @@ pub type Gc = Rc<RefCell<Object>>;
 /// so a plain `Result<Value, Value>` (Err = the thrown value) is the whole contract.
 pub type NativeFn = fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Value {
+    #[default]
     Undefined,
     Null,
     Bool(bool),

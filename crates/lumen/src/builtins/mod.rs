@@ -48,6 +48,8 @@ pub fn install(it: &mut Interp) {
     install_math(it);
     install_errors(it);
     install_reflect(it);
+    install_proxy(it);
+    install_promise(it);
     install_json(it);
     install_collections(it);
     install_date(it);
@@ -1369,6 +1371,159 @@ fn install_reflect(it: &mut Interp) {
         Ok(Value::Bool(true))
     });
     set_builtin(&it.global, "Reflect", Value::Obj(r));
+}
+
+/// Sentinel call slot for a function-targeted proxy, so `is_callable()` is true; the actual
+/// dispatch happens in `call_inner`/`construct_inner` via the proxies table (this never runs).
+fn proxy_uncallable(i: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Err(i.make_error("TypeError", "proxy call dispatch error"))
+}
+
+/// A bound handler `(target, this=Undefined, [bound...])` used to thread per-element state into a
+/// `Promise.all` reaction without closures.
+fn make_bound(i: &Interp, target: NativeFn, bound_args: Vec<Value>) -> Value {
+    let t = i.make_native("", 1, target);
+    let obj = Object::new(Some(i.function_proto.clone()));
+    obj.borrow_mut().call = Callable::Bound { target: t, this: Value::Undefined, args: bound_args };
+    Value::Obj(obj)
+}
+
+/// `Promise.all` per-element fulfill reaction. `args = [resultPromise, index, value]`.
+fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let result = arg(args, 0);
+    let idx = ab(i.to_number(&arg(args, 1)))? as usize;
+    let value = arg(args, 2);
+    let results = ab(i.get_member(&result, "__results"))?;
+    ab(i.set_member(&results, &idx.to_string(), value))?;
+    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))? - 1.0;
+    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    if rem == 0.0 {
+        i.resolve_promise(&result, results);
+    }
+    Ok(Value::Undefined)
+}
+
+fn install_promise(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("Promise", proto.clone());
+    it.def_method(&proto, "then", 2, |i, this, a| Ok(i.promise_then(&this, arg(a, 0), arg(a, 1))));
+    it.def_method(&proto, "catch", 1, |i, this, a| {
+        Ok(i.promise_then(&this, Value::Undefined, arg(a, 0)))
+    });
+    it.def_method(&proto, "finally", 1, |i, this, a| {
+        // Approximation: run the callback on both settlement paths (does not perfectly pass the
+        // original value/reason through, but covers the common case).
+        let cb = arg(a, 0);
+        Ok(i.promise_then(&this, cb.clone(), cb))
+    });
+
+    let ctor = it.make_native("Promise", 1, |i, _t, a| {
+        let executor = arg(a, 0);
+        if !executor.is_callable() {
+            return Err(i.make_error("TypeError", "Promise resolver is not a function"));
+        }
+        let promise = i.new_promise();
+        let res = i.make_resolver(&promise, true);
+        let rej = i.make_resolver(&promise, false);
+        if let Err(Abrupt::Throw(e)) = i.call(executor, Value::Undefined, &[res, rej]) {
+            i.reject_promise(&promise, e);
+        }
+        Ok(promise)
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.def_method(&ctor, "resolve", 1, |i, _t, a| {
+        let v = arg(a, 0);
+        if let Value::Obj(o) = &v {
+            if i.promises.contains_key(&(Rc::as_ptr(o) as usize)) {
+                return Ok(v);
+            }
+        }
+        let p = i.new_promise();
+        i.resolve_promise(&p, v);
+        Ok(p)
+    });
+    it.def_method(&ctor, "reject", 1, |i, _t, a| {
+        let p = i.new_promise();
+        i.reject_promise(&p, arg(a, 0));
+        Ok(p)
+    });
+    it.def_method(&ctor, "all", 1, |i, _t, a| {
+        let items = ab(i.iterate(&arg(a, 0)))?;
+        let result = i.new_promise();
+        let n = items.len();
+        let results = i.make_array(vec![Value::Undefined; n]);
+        set_internal_obj(&result, "__results", results.clone());
+        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        if n == 0 {
+            i.resolve_promise(&result, results);
+            return Ok(result);
+        }
+        for (idx, item) in items.into_iter().enumerate() {
+            let p = promise_resolve_value(i, item);
+            let on_f = make_bound(i, promise_all_element, vec![result.clone(), Value::Num(idx as f64)]);
+            let on_r = i.make_resolver(&result, false);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "race", 1, |i, _t, a| {
+        let items = ab(i.iterate(&arg(a, 0)))?;
+        let result = i.new_promise();
+        for item in items {
+            let p = promise_resolve_value(i, item);
+            let on_f = i.make_resolver(&result, true);
+            let on_r = i.make_resolver(&result, false);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    set_builtin(&it.global, "Promise", Value::Obj(ctor));
+}
+
+/// `Promise.resolve(x)` as a value helper (returns existing promises unchanged).
+fn promise_resolve_value(i: &mut Interp, v: Value) -> Value {
+    if let Value::Obj(o) = &v {
+        if i.promises.contains_key(&(Rc::as_ptr(o) as usize)) {
+            return v;
+        }
+    }
+    let p = i.new_promise();
+    i.resolve_promise(&p, v);
+    p
+}
+
+fn set_internal_obj(target: &Value, key: &str, v: Value) {
+    if let Value::Obj(o) = target {
+        o.borrow_mut().props.insert(key, Property::data(v, true, false, false));
+    }
+}
+
+fn install_proxy(it: &mut Interp) {
+    let ctor = it.make_native("Proxy", 2, |i, _t, a| {
+        let target = arg(a, 0);
+        let handler = arg(a, 1);
+        if !matches!(target, Value::Obj(_)) || !matches!(handler, Value::Obj(_)) {
+            return Err(i.make_error(
+                "TypeError",
+                "Cannot create proxy with a non-object as target or handler",
+            ));
+        }
+        let proto = match &target {
+            Value::Obj(o) => o.borrow().proto.clone(),
+            _ => None,
+        };
+        let obj = Object::new(proto);
+        if target.is_callable() {
+            obj.borrow_mut().call = Callable::Native(proxy_uncallable);
+            obj.borrow_mut().is_constructor = true;
+        }
+        let p = Rc::as_ptr(&obj) as usize;
+        i.proxies.insert(p, (target, handler));
+        Ok(Value::Obj(obj))
+    });
+    set_builtin(&it.global, "Proxy", Value::Obj(ctor));
 }
 
 fn install_json(it: &mut Interp) {
