@@ -1692,6 +1692,67 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (d, tm) = zoned_local(e, o);
         Ok(Value::str(format!("{}T{}{}[{}]", fmt_date(d), fmt_time(tm), offset_string(o), tz)))
     });
+    it.def_method(&proto, "add", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let (d, tm) = zoned_local(e, o);
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
+        let epoch = dt_ns(nd, ntm) - o as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+    });
+    it.def_method(&proto, "subtract", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let (d, tm) = zoned_local(e, o);
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
+        let epoch = dt_ns(nd, ntm) - o as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+    });
+    it.def_method(&proto, "with", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, tm) = zoned_local(e, o);
+        let f = arg(a, 0);
+        let year = field_int(i, &f, "year", d.year)?;
+        let month = field_int(i, &f, "month", d.month as i64)? as u8;
+        let day = field_int(i, &f, "day", d.day as i64)? as u8;
+        let hour = field_int(i, &f, "hour", tm.hour as i64)? as u8;
+        let minute = field_int(i, &f, "minute", tm.minute as i64)? as u8;
+        let second = field_int(i, &f, "second", tm.second as i64)? as u8;
+        let ms = field_int(i, &f, "millisecond", tm.ms as i64)? as u16;
+        let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
+        let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
+        let nd = check_date(i, IsoDate { year, month, day })?;
+        let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns: nsf })?;
+        let epoch = dt_ns(nd, nt) - o as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+    });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let (e, _, _) = as_zoned(i, &t)?;
+        let o = to_instant(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(o - e, &largest))))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let (e, _, _) = as_zoned(i, &t)?;
+        let o = to_instant(i, &arg(a, 0))?;
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(e - o, &largest))))
+    });
+    it.def_method(&proto, "round", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let opts = arg(a, 0);
+        let smallest = opt_str(i, &opts, "smallestUnit", "")?;
+        let unit = if smallest == "day" {
+            86_400_000_000_000
+        } else {
+            unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
+        };
+        let incr = opt_num(i, &opts, "roundingIncrement", 1)?.max(1) as i128;
+        let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
+        let local = e + o as i128;
+        let rounded = round_ns(local, unit * incr, &mode);
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz }))
+    });
 
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
         require_new(i)?;
