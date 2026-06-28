@@ -946,8 +946,43 @@ fn install_typed_arrays(it: &mut Interp) {
         ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
         proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
+        // Static from/of construct through `this` (the constructor), so they work for every kind.
+        it.def_method(&ctor, "of", 0, ta_of);
+        it.def_method(&ctor, "from", 1, ta_from);
         set_builtin(&it.global, kind.name(), Value::Obj(ctor));
     }
+}
+
+fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    if !this.is_callable() {
+        return Err(i.make_error("TypeError", "TypedArray.of requires a constructor receiver"));
+    }
+    let ta = ab(i.construct(this, &[Value::Num(args.len() as f64)]))?;
+    for (k, v) in args.iter().enumerate() {
+        ab(i.set_member(&ta, &k.to_string(), v.clone()))?;
+    }
+    Ok(ta)
+}
+fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    if !this.is_callable() {
+        return Err(i.make_error("TypeError", "TypedArray.from requires a constructor receiver"));
+    }
+    let mapfn = arg(args, 1);
+    if !matches!(mapfn, Value::Undefined) && !mapfn.is_callable() {
+        return Err(i.make_error("TypeError", "mapfn is not callable"));
+    }
+    let this_arg = arg(args, 2);
+    let items = ab(i.iterate(&arg(args, 0)))?;
+    let ta = ab(i.construct(this, &[Value::Num(items.len() as f64)]))?;
+    for (k, v) in items.into_iter().enumerate() {
+        let val = if mapfn.is_callable() {
+            ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?
+        } else {
+            v
+        };
+        ab(i.set_member(&ta, &k.to_string(), val))?;
+    }
+    Ok(ta)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3501,6 +3536,16 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "trim", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.trim().to_string()))
     });
+    it.def_method(&sp, "localeCompare", 1, |i, this, args| {
+        let a = this_string(i, &this)?;
+        let b = ab(i.to_string(&arg(args, 0)))?;
+        Ok(Value::Num(match (*a).cmp(&*b) {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        }))
+    });
+    it.def_method(&sp, "toLocaleString", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
     it.def_method(&sp, "concat", 1, |i, this, args| {
         let mut s = this_string(i, &this)?.to_string();
         for a in args {
@@ -3840,6 +3885,10 @@ fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
 
 fn install_number(it: &mut Interp) {
     let np = it.number_proto.clone();
+    it.def_method(&np, "toLocaleString", 0, |i, this, _| {
+        let n = this_number(i, &this)?;
+        Ok(Value::from_string(i.num_to_str(n)))
+    });
     it.def_method(&np, "toString", 1, |i, this, args| {
         let n = this_number(i, &this)?;
         let radix = match arg(args, 0) {
@@ -3986,6 +4035,25 @@ fn install_symbol(it: &mut Interp) {
         Value::Sym(_) => Ok(this),
         _ => Err(i.make_error("TypeError", "Symbol.prototype.valueOf requires a symbol")),
     });
+
+    let desc_getter = it.make_native("get description", 0, |i, this, _| match &this {
+        Value::Sym(s) => {
+            Ok(s.description.as_deref().map(|d| Value::from_string(d.to_string())).unwrap_or(Value::Undefined))
+        }
+        _ => Err(i.make_error("TypeError", "Symbol.prototype.description requires a symbol")),
+    });
+    sp.borrow_mut().props.insert(
+        "description",
+        Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(desc_getter)),
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
 
     let ctor = it.make_native("Symbol", 0, |i, _this, args| {
         if i.constructing {
@@ -4326,6 +4394,50 @@ fn install_globals(it: &mut Interp) {
     });
     global_fn(it, "isFinite", 1, |i, _t, a| {
         Ok(Value::Bool(ab(i.to_number(&arg(a, 0)))?.is_finite()))
+    });
+    // Annex B escape/unescape.
+    global_fn(it, "escape", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        let mut out = String::new();
+        for c in s.encode_utf16() {
+            let ch = c as u32;
+            let keep = c < 128 && {
+                let a = ch as u8 as char;
+                a.is_ascii_alphanumeric() || "@*_+-./".contains(a)
+            };
+            if keep {
+                out.push(ch as u8 as char);
+            } else if ch < 256 {
+                out.push_str(&format!("%{ch:02X}"));
+            } else {
+                out.push_str(&format!("%u{ch:04X}"));
+            }
+        }
+        Ok(Value::from_string(out))
+    });
+    global_fn(it, "unescape", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        let chars: Vec<char> = s.chars().collect();
+        let mut units: Vec<u16> = Vec::new();
+        let mut k = 0;
+        while k < chars.len() {
+            if chars[k] == '%' {
+                if k + 5 < chars.len() + 1 && chars.get(k + 1) == Some(&'u') {
+                    if let Some(h) = chars.get(k + 2..k + 6).and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok()) {
+                        units.push(h);
+                        k += 6;
+                        continue;
+                    }
+                } else if let Some(h) = chars.get(k + 1..k + 3).and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok()) {
+                    units.push(h);
+                    k += 3;
+                    continue;
+                }
+            }
+            units.push(chars[k] as u16);
+            k += 1;
+        }
+        Ok(Value::from_string(String::from_utf16_lossy(&units)))
     });
     global_fn(it, "encodeURIComponent", 1, |i, _t, a| {
         Ok(Value::from_string(uri_encode(&ab(i.to_string(&arg(a, 0)))?, "")))

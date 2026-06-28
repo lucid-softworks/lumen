@@ -696,3 +696,16 @@ fn early_errors() {
     assert_eq!(run("outer: for(;;){ break outer; } 'ok'"), "ok");
     assert_eq!(run("const y=5; y"), "5");
 }
+
+#[test]
+fn missing_methods_batch2() {
+    assert_eq!(run("Symbol('x').description"), "x");
+    assert_eq!(run("typeof Symbol().description"), "undefined");
+    assert_eq!(run("Int8Array.of(1,2,3).join(',')"), "1,2,3");
+    assert_eq!(run("Int8Array.from([4,5,6],x=>x*2).join(',')"), "8,10,12");
+    assert_eq!(run("Uint8Array.from('123').join(',')"), "1,2,3");
+    assert_eq!(run("escape('a b+')"), "a%20b+");
+    assert_eq!(run("unescape('a%20b%75')"), "a bu");
+    assert_eq!(run("'a'.localeCompare('b')"), "-1");
+    assert_eq!(run("(255).toLocaleString()"), "255");
+}
