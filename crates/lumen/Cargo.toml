@@ -1,0 +1,15 @@
+[package]
+name = "lumen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A from-scratch JavaScript engine. No dependencies — std only — so it builds in ~1s and links no
+# native code (the opposite of V8). It is the eventual replacement for the `v8` backend in the `js`
+# crate; today it covers the language core and is driven by the test262 conformance loop. See the
+# `js` crate's `backend-lumen` feature for how it slots in.
+
+[dependencies]
+
+[lints]
+workspace = true

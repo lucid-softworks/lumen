@@ -1,0 +1,19 @@
+[package]
+name = "test262-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Drives the tc39/test262 conformance suite against the `lumen` engine. Depends only on lumen
+# (std-only) so the whole conformance loop builds in ~1s and links no V8. Mirrors the project's
+# existing WPT loop (clone-on-demand checkout + a score report), but for the JS language itself.
+
+[[bin]]
+name = "test262-runner"
+path = "src/main.rs"
+
+[dependencies]
+lumen = { path = "../lumen" }
+
+[lints]
+workspace = true
