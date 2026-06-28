@@ -673,9 +673,32 @@ fn is_line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 fn is_ident_start(c: char) -> bool {
-    c == '_' || c == '$' || c.is_alphabetic()
+    // ID_Start ≈ alphabetic + a few Other_ID_Start characters.
+    c == '_'
+        || c == '$'
+        || c.is_alphabetic()
+        || matches!(c, '\u{1885}' | '\u{1886}' | '\u{2118}' | '\u{212E}' | '\u{309B}' | '\u{309C}')
 }
 fn is_ident_part(c: char) -> bool {
     // ZWNJ / ZWJ are valid IdentifierPart characters.
-    c == '_' || c == '$' || c == '\u{200C}' || c == '\u{200D}' || c.is_alphanumeric()
+    // ID_Continue ≈ ID_Start + combining marks (Mn/Mc) + connector punctuation + a few extras.
+    c == '_'
+        || c == '$'
+        || c == '\u{200C}'
+        || c == '\u{200D}'
+        || c.is_alphanumeric()
+        || is_ident_start(c)
+        || matches!(c,
+            '\u{00B7}' | '\u{0387}' | '\u{19DA}'
+            | '\u{0300}'..='\u{036F}'  // combining diacritical marks (Mn)
+            | '\u{0483}'..='\u{0489}'
+            | '\u{0591}'..='\u{05BD}'
+            | '\u{0610}'..='\u{061A}'
+            | '\u{064B}'..='\u{065F}'
+            | '\u{0670}'
+            | '\u{06D6}'..='\u{06DC}'
+            | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}'
+            | '\u{203F}' | '\u{2040}' | '\u{2054}'  // connector punctuation (Pc)
+            | '\u{FE33}' | '\u{FE34}' | '\u{FE4D}'..='\u{FE4F}' | '\u{FF3F}'
+        )
 }
