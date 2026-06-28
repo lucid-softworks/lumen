@@ -27,30 +27,59 @@ impl Interp {
                 Ok(())
             }
             Pattern::Array(elems) => {
-                let items = self.iterate(&value)?;
-                for (i, el) in elems.iter().enumerate() {
-                    match el {
-                        ArrayPatElem::Hole => {}
-                        ArrayPatElem::Elem { pattern, default } => {
-                            let mut v = items.get(i).cloned().unwrap_or(Value::Undefined);
-                            if matches!(v, Value::Undefined) {
-                                if let Some(d) = default {
-                                    v = self.eval(d, env)?;
-                                    if let (Pattern::Ident(n), true) = (pattern, is_anonymous_fn(d)) {
-                                        self.set_fn_name(&v, n);
-                                    }
+                // Iterate lazily, pulling only what the pattern needs and closing the iterator when
+                // we stop early (or on an abrupt completion).
+                let (iter, next) = self.get_iterator(&value)?;
+                let mut done = false;
+                let result = (|me: &mut Self| -> Result<(), Abrupt> {
+                    for el in elems {
+                        match el {
+                            ArrayPatElem::Hole => {
+                                if !done && me.iterator_step(&iter, &next)?.is_none() {
+                                    done = true;
                                 }
                             }
-                            self.bind_pattern(pattern, v, env, mode)?;
-                        }
-                        ArrayPatElem::Rest(pattern) => {
-                            let rest: Vec<Value> = items.iter().skip(i).cloned().collect();
-                            let arr = self.make_array(rest);
-                            self.bind_pattern(pattern, arr, env, mode)?;
-                            break;
+                            ArrayPatElem::Elem { pattern, default } => {
+                                let mut v = if done {
+                                    Value::Undefined
+                                } else {
+                                    match me.iterator_step(&iter, &next)? {
+                                        Some(x) => x,
+                                        None => {
+                                            done = true;
+                                            Value::Undefined
+                                        }
+                                    }
+                                };
+                                if matches!(v, Value::Undefined) {
+                                    if let Some(d) = default {
+                                        v = me.eval(d, env)?;
+                                        if let (Pattern::Ident(n), true) = (pattern, is_anonymous_fn(d)) {
+                                            me.set_fn_name(&v, n);
+                                        }
+                                    }
+                                }
+                                me.bind_pattern(pattern, v, env, mode)?;
+                            }
+                            ArrayPatElem::Rest(pattern) => {
+                                let mut rest = Vec::new();
+                                while !done {
+                                    match me.iterator_step(&iter, &next)? {
+                                        Some(x) => rest.push(x),
+                                        None => done = true,
+                                    }
+                                }
+                                let arr = me.make_array(rest);
+                                me.bind_pattern(pattern, arr, env, mode)?;
+                            }
                         }
                     }
+                    Ok(())
+                })(self);
+                if !done {
+                    self.iterator_close(&iter);
                 }
+                result?;
                 Ok(())
             }
             Pattern::Object(objpat) => {
@@ -411,6 +440,45 @@ impl Interp {
             me.exec_stmt(body, &iter_env)?;
             Ok(LoopStep::Continue)
         })
+    }
+
+    /// GetIterator: returns (iterator, next-method).
+    pub(crate) fn get_iterator(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
+        let key = match &self.iterator_sym {
+            Some(s) => Interp::sym_key(s),
+            None => return Err(self.throw("TypeError", "no iterator symbol")),
+        };
+        let itfn = self.get_member(v, &key)?;
+        if !itfn.is_callable() {
+            return Err(self.throw("TypeError", "value is not iterable"));
+        }
+        let iter = self.call(itfn, v.clone(), &[])?;
+        let next = self.get_member(&iter, "next")?;
+        if !next.is_callable() {
+            return Err(self.throw("TypeError", "iterator.next is not a function"));
+        }
+        Ok((iter, next))
+    }
+    /// IteratorStep: `Some(value)` or `None` when done.
+    pub(crate) fn iterator_step(&mut self, iter: &Value, next: &Value) -> Result<Option<Value>, Abrupt> {
+        let res = self.call(next.clone(), iter.clone(), &[])?;
+        if !matches!(res, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "iterator result is not an object"));
+        }
+        let done = self.get_member(&res, "done")?;
+        if self.to_boolean(&done) {
+            Ok(None)
+        } else {
+            Ok(Some(self.get_member(&res, "value")?))
+        }
+    }
+    /// IteratorClose: call `return()` if present (swallowing its result/most errors).
+    pub(crate) fn iterator_close(&mut self, iter: &Value) {
+        if let Ok(ret) = self.get_member(iter, "return") {
+            if ret.is_callable() {
+                let _ = self.call(ret, iter.clone(), &[]);
+            }
+        }
     }
 
     /// Collect every value an iterable yields. Strings and plain arrays use a fast path; everything

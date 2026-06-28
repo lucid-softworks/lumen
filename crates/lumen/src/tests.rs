@@ -1015,3 +1015,15 @@ fn ta_returns_ta() {
     assert_eq!(run("new Float64Array([1.5,2.5]).map(x=>x).join(',')"), "1.5,2.5");
     assert_eq!(run("new Int8Array([3,1,2]).toSorted().constructor.name"), "Int8Array");
 }
+#[test]
+fn iterator_close_destructure() {
+    // Lazy: only pulls 2, closes the rest (would be infinite otherwise).
+    assert_eq!(run("var n=0; var iter={[Symbol.iterator](){return {next(){return {value:n++,done:false}},return(){this.closed=true;return {}}}}}; var [a,b]=iter; a+','+b"), "0,1");
+    assert_eq!(run("var closed=false; var iter={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){closed=true;return {}}}}}; var [a]=iter; closed"), "true");
+    // rest consumes all (finite)
+    assert_eq!(run("var [a,...r]=[1,2,3,4]; a+'/'+r.join(',')"), "1/2,3,4");
+    assert_eq!(run("var [a,b,c]=[1,2]; a+','+b+','+c"), "1,2,undefined");
+    assert_eq!(run("var [x=9]=[]; x"), "9");
+    assert_eq!(run("for(var [k,v] of [[1,2],[3,4]]){} k+','+v"), "3,4");
+    assert_eq!(run("var [,b]=[1,2]; b"), "2");
+}
