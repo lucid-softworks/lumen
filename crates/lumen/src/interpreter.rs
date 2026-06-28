@@ -368,6 +368,10 @@ impl Interp {
                 let proto = self.symbol_proto.clone();
                 self.get_from_chain(&proto, key, base)
             }
+            Value::BigInt(_) => match self.extra_protos.get("BigInt").cloned() {
+                Some(proto) => self.get_from_chain(&proto, key, base),
+                None => Ok(Value::Undefined),
+            },
             Value::Obj(o) => {
                 let o = o.clone();
                 // TypedArray integer-index reads come from the backing buffer, not the property map.
@@ -850,6 +854,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
         Value::Num(_) => "number",
+        Value::BigInt(_) => "bigint",
         Value::Str(_) => "string",
         Value::Sym(_) => "symbol",
         Value::Obj(_) => "object",

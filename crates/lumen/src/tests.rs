@@ -315,6 +315,26 @@ fn regex() {
 }
 
 #[test]
+fn bigint() {
+    assert_eq!(run("typeof 10n"), "bigint");
+    assert_eq!(run("(10n + 20n).toString()"), "30");
+    assert_eq!(run("(2n ** 10n).toString()"), "1024");
+    assert_eq!(run("10n === 10n"), "true");
+    assert_eq!(run("10n == 10"), "true");
+    assert_eq!(run("10n < 20"), "true");
+    assert_eq!(run("BigInt(42).toString()"), "42");
+    assert_eq!(run("BigInt('100') + 1n === 101n"), "true");
+    assert_eq!(run("(-5n).toString()"), "-5");
+    assert_eq!(run("(255n).toString(16)"), "ff");
+    assert_eq!(run("0xffn.toString()"), "255");
+    assert_eq!(run("let x = 5n; x++; x.toString()"), "6");
+    assert_eq!(throws("1n + 1"), "TypeError"); // mixing
+    assert_eq!(throws("+1n"), "TypeError"); // unary plus on BigInt
+    assert_eq!(run("Number(123n)"), "123"); // explicit conversion ok
+    assert_eq!(run("String(99n)"), "99");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }

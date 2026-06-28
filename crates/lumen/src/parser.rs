@@ -734,6 +734,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Num(n))
             }
+            Tok::BigInt(n) => {
+                self.advance();
+                Ok(Expr::BigInt(n))
+            }
             Tok::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(Rc::from(s.as_str())))

@@ -20,6 +20,9 @@ pub enum Value {
     Null,
     Bool(bool),
     Num(f64),
+    /// BigInt, approximated with `i128` (exact within ±2^127; tests beyond that range fail rather
+    /// than implementing arbitrary precision).
+    BigInt(i128),
     Str(Rc<str>),
     Sym(Rc<SymbolData>),
     Obj(Gc),
@@ -54,6 +57,7 @@ impl Value {
             Value::Null => "object",
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
+            Value::BigInt(_) => "bigint",
             Value::Str(_) => "string",
             Value::Sym(_) => "symbol",
             Value::Obj(o) => {

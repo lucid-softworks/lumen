@@ -59,7 +59,9 @@ impl<'a> Lexer<'a> {
     fn regex_allowed(&self) -> bool {
         match self.out.last().map(|t| &t.kind) {
             None => true,
-            Some(Tok::Num(_) | Tok::Str(_) | Tok::Template(_) | Tok::Regex { .. }) => false,
+            Some(
+                Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Template(_) | Tok::Regex { .. },
+            ) => false,
             Some(Tok::Ident(_)) => false,
             Some(Tok::Keyword(k)) => !matches!(*k, "this" | "super" | "true" | "false" | "null"),
             Some(Tok::Punct(p)) => !matches!(*p, ")" | "]" | "}"),
@@ -440,6 +442,13 @@ impl<'a> Lexer<'a> {
             }
             let digits: String =
                 self.chars[digits_start..self.pos].iter().filter(|c| **c != '_').collect();
+            if self.peek() == Some('n') {
+                self.bump();
+                let n = i128::from_str_radix(&digits, radix)
+                    .map_err(|_| self.err("invalid BigInt literal"))?;
+                self.push(Tok::BigInt(n));
+                return Ok(());
+            }
             let n = u64::from_str_radix(&digits, radix)
                 .map_err(|_| self.err("invalid numeric literal"))?;
             self.push(Tok::Num(n as f64));
@@ -448,6 +457,14 @@ impl<'a> Lexer<'a> {
         // Decimal: integer . fraction e exponent
         while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
             self.bump();
+        }
+        // A BigInt literal is an integer immediately followed by `n` (no fraction/exponent).
+        if self.peek() == Some('n') {
+            let text: String = self.chars[start..self.pos].iter().filter(|c| **c != '_').collect();
+            self.bump(); // n
+            let n: i128 = text.parse().map_err(|_| self.err("invalid BigInt literal"))?;
+            self.push(Tok::BigInt(n));
+            return Ok(());
         }
         if self.peek() == Some('.') {
             self.bump();

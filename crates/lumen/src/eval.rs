@@ -609,6 +609,7 @@ impl Interp {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
+            Expr::BigInt(n) => Ok(Value::BigInt(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
@@ -1165,6 +1166,16 @@ impl Interp {
             return self.eval_delete(arg, env);
         }
         let v = self.eval(arg, env)?;
+        if let Value::BigInt(n) = v {
+            return match op {
+                "!" => Ok(Value::Bool(n == 0)),
+                "-" => Ok(Value::BigInt(n.wrapping_neg())),
+                "~" => Ok(Value::BigInt(!n)),
+                "void" => Ok(Value::Undefined),
+                "+" => Err(self.throw("TypeError", "Cannot convert a BigInt value to a number")),
+                _ => unreachable!("unary {op}"),
+            };
+        }
         match op {
             "!" => Ok(Value::Bool(!self.to_boolean(&v))),
             "-" => Ok(Value::Num(-self.to_number(&v)?)),
@@ -1209,6 +1220,11 @@ impl Interp {
 
     fn eval_update(&mut self, op: &str, prefix: bool, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         let old = self.eval(arg, env)?;
+        if let Value::BigInt(n) = old {
+            let new = if op == "++" { n.wrapping_add(1) } else { n.wrapping_sub(1) };
+            self.assign_to_target(arg, Value::BigInt(new), env)?;
+            return Ok(Value::BigInt(if prefix { new } else { n }));
+        }
         let n = self.to_number(&old)?;
         let new = if op == "++" { n + 1.0 } else { n - 1.0 };
         self.assign_to_target(arg, Value::Num(new), env)?;
@@ -1266,6 +1282,26 @@ impl Interp {
     // ----- operators --------------------------------------------------------------------------
 
     fn binary(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
+        // BigInt arithmetic/bitwise. Mixing a BigInt with a non-BigInt (other than `+` with a
+        // string) is a TypeError; comparisons and equality (below) accept mixed operands.
+        if (matches!(l, Value::BigInt(_)) || matches!(r, Value::BigInt(_)))
+            && matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>")
+        {
+            match (&l, &r) {
+                (Value::BigInt(x), Value::BigInt(y)) => return self.bigint_binop(op, *x, *y),
+                _ if op == "+" && (matches!(l, Value::Str(_)) || matches!(r, Value::Str(_))) => {
+                    let ls = self.to_string(&l)?;
+                    let rs = self.to_string(&r)?;
+                    return Ok(Value::from_string(format!("{ls}{rs}")));
+                }
+                _ => {
+                    return Err(self.throw(
+                        "TypeError",
+                        "Cannot mix BigInt and other types, use explicit conversions",
+                    ))
+                }
+            }
+        }
         match op {
             "+" => {
                 let lp = self.to_primitive(&l, Hint::Default)?;
@@ -1326,6 +1362,39 @@ impl Interp {
         }
     }
 
+    fn bigint_binop(&self, op: &str, x: i128, y: i128) -> Result<Value, Abrupt> {
+        let v = match op {
+            "+" => x.wrapping_add(y),
+            "-" => x.wrapping_sub(y),
+            "*" => x.wrapping_mul(y),
+            "/" => {
+                if y == 0 {
+                    return Err(self.throw("RangeError", "Division by zero"));
+                }
+                x.wrapping_div(y)
+            }
+            "%" => {
+                if y == 0 {
+                    return Err(self.throw("RangeError", "Division by zero"));
+                }
+                x.wrapping_rem(y)
+            }
+            "**" => {
+                if y < 0 {
+                    return Err(self.throw("RangeError", "Exponent must be non-negative"));
+                }
+                x.wrapping_pow(y.min(u32::MAX as i128) as u32)
+            }
+            "&" => x & y,
+            "|" => x | y,
+            "^" => x ^ y,
+            "<<" => x.wrapping_shl(y.clamp(0, 127) as u32),
+            ">>" => x.wrapping_shr(y.clamp(0, 127) as u32),
+            _ => return Err(self.throw("TypeError", "unsupported BigInt operator")),
+        };
+        Ok(Value::BigInt(v))
+    }
+
     fn compare(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
         let lp = self.to_primitive(&l, Hint::Number)?;
         let rp = self.to_primitive(&r, Hint::Number)?;
@@ -1339,8 +1408,21 @@ impl Interp {
             };
             return Ok(Value::Bool(res));
         }
-        let a = self.to_number(&lp)?;
-        let b = self.to_number(&rp)?;
+        // Comparisons accept mixed BigInt/Number operands (compared as real numbers).
+        let bigint_f64 = |v: &Value| -> Option<f64> {
+            match v {
+                Value::BigInt(n) => Some(*n as f64),
+                _ => None,
+            }
+        };
+        let a = match bigint_f64(&lp) {
+            Some(n) => n,
+            None => self.to_number(&lp)?,
+        };
+        let b = match bigint_f64(&rp) {
+            Some(n) => n,
+            None => self.to_number(&rp)?,
+        };
         if a.is_nan() || b.is_nan() {
             return Ok(Value::Bool(false));
         }
@@ -1383,6 +1465,7 @@ impl Interp {
             Value::Undefined | Value::Null => false,
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
+            Value::BigInt(n) => *n != 0,
             Value::Str(s) => !s.is_empty(),
             Value::Sym(_) | Value::Obj(_) => true,
         }
@@ -1400,6 +1483,9 @@ impl Interp {
                 }
             }
             Value::Num(n) => *n,
+            Value::BigInt(_) => {
+                return Err(self.throw("TypeError", "Cannot convert a BigInt value to a number"))
+            }
             Value::Str(s) => parse_number(s),
             Value::Sym(_) => {
                 return Err(self.throw("TypeError", "Cannot convert a Symbol value to a number"))
@@ -1426,6 +1512,7 @@ impl Interp {
             Value::Null => Rc::from("null"),
             Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
             Value::Num(n) => Rc::from(self.num_to_str(*n).as_str()),
+            Value::BigInt(n) => Rc::from(n.to_string().as_str()),
             Value::Str(s) => s.clone(),
             Value::Sym(_) => {
                 return Err(self.throw("TypeError", "Cannot convert a Symbol value to a string"))
@@ -1488,6 +1575,7 @@ impl Interp {
             (Value::Null, Value::Null) => true,
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Num(x), Value::Num(y)) => x == y,
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
             (Value::Sym(x), Value::Sym(y)) => x.id == y.id,
             (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y),
@@ -1498,6 +1586,21 @@ impl Interp {
     pub fn loose_equals(&mut self, a: &Value, b: &Value) -> Result<bool, Abrupt> {
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
+            (Value::BigInt(x), Value::Num(y)) | (Value::Num(y), Value::BigInt(x)) => {
+                y.is_finite() && y.fract() == 0.0 && (*x as f64) == *y
+            }
+            (Value::BigInt(x), Value::Str(s)) | (Value::Str(s), Value::BigInt(x)) => {
+                s.trim().parse::<i128>().map(|n| n == *x).unwrap_or(false)
+            }
+            (Value::BigInt(_), Value::Obj(_)) => {
+                let bp = self.to_primitive(b, Hint::Default)?;
+                self.loose_equals(a, &bp)?
+            }
+            (Value::Obj(_), Value::BigInt(_)) => {
+                let ap = self.to_primitive(a, Hint::Default)?;
+                self.loose_equals(&ap, b)?
+            }
             (Value::Num(_), Value::Num(_))
             | (Value::Str(_), Value::Str(_))
             | (Value::Bool(_), Value::Bool(_))

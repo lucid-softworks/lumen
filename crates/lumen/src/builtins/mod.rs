@@ -44,6 +44,7 @@ pub fn install(it: &mut Interp) {
     install_string(it);
     install_number(it);
     install_boolean(it);
+    install_bigint(it);
     install_math(it);
     install_errors(it);
     install_reflect(it);
@@ -1441,6 +1442,8 @@ fn json_str(
         Value::Null => Ok(Some("null".to_string())),
         Value::Bool(b) => Ok(Some(if *b { "true" } else { "false" }.to_string())),
         Value::Num(n) => Ok(Some(if n.is_finite() { i.num_to_str(*n) } else { "null".to_string() })),
+        // JSON.stringify of a BigInt throws (matches the spec).
+        Value::BigInt(_) => Err(i.make_error("TypeError", "Do not know how to serialize a BigInt")),
         Value::Str(s) => Ok(Some(json_quote(s))),
         Value::Obj(o) => {
             if !matches!(o.borrow().call, Callable::None) {
@@ -3165,6 +3168,8 @@ fn install_number(it: &mut Interp) {
     let ctor = it.make_native("Number", 1, |i, _this, args| {
         match args.first() {
             None => Ok(Value::Num(0.0)),
+            // Number(bigint) explicitly converts (only *implicit* ToNumber of a BigInt throws).
+            Some(Value::BigInt(n)) => Ok(Value::Num(*n as f64)),
             Some(v) => Ok(Value::Num(ab(i.to_number(v))?)),
         }
     });
@@ -3301,6 +3306,104 @@ fn install_symbol(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     set_builtin(&it.global, "Symbol", Value::Obj(ctor));
+}
+
+fn bigint_to_radix(mut n: i128, radix: u32) -> String {
+    if radix == 10 || !(2..=36).contains(&radix) {
+        return n.to_string();
+    }
+    if n == 0 {
+        return "0".to_string();
+    }
+    let neg = n < 0;
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    let r = radix as i128;
+    n = n.abs();
+    while n > 0 {
+        out.push(digits[(n % r) as usize]);
+        n /= r;
+    }
+    if neg {
+        out.push(b'-');
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+fn install_bigint(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("BigInt", proto.clone());
+    it.def_method(&proto, "toString", 1, |i, this, a| {
+        let n = match this {
+            Value::BigInt(n) => n,
+            _ => return Err(i.make_error("TypeError", "BigInt.prototype.toString requires a BigInt")),
+        };
+        let radix = match arg(a, 0) {
+            Value::Undefined => 10,
+            v => ab(i.to_number(&v))? as u32,
+        };
+        Ok(Value::from_string(bigint_to_radix(n, radix)))
+    });
+    it.def_method(&proto, "valueOf", 0, |i, this, _| match this {
+        Value::BigInt(_) => Ok(this),
+        _ => Err(i.make_error("TypeError", "BigInt.prototype.valueOf requires a BigInt")),
+    });
+    let ctor = it.make_native("BigInt", 1, |i, _t, a| match arg(a, 0) {
+        Value::BigInt(n) => Ok(Value::BigInt(n)),
+        Value::Num(n) => {
+            if n.is_finite() && n.fract() == 0.0 {
+                Ok(Value::BigInt(n as i128))
+            } else {
+                Err(i.make_error("RangeError", "The number is not a safe integer"))
+            }
+        }
+        Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
+        Value::Str(s) => {
+            let t = s.trim();
+            let t = if t.is_empty() { "0" } else { t };
+            t.parse::<i128>()
+                .map(Value::BigInt)
+                .map_err(|_| i.make_error("SyntaxError", "Cannot convert string to a BigInt"))
+        }
+        _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.def_method(&ctor, "asIntN", 2, |i, _t, a| {
+        let bits = ab(i.to_number(&arg(a, 0)))? as u32;
+        let n = match arg(a, 1) {
+            Value::BigInt(n) => n,
+            _ => return Err(i.make_error("TypeError", "asIntN requires a BigInt")),
+        };
+        if bits == 0 {
+            return Ok(Value::BigInt(0));
+        }
+        if bits >= 128 {
+            return Ok(Value::BigInt(n));
+        }
+        let m = 1i128 << bits;
+        let mut r = n.rem_euclid(m);
+        if r >= m / 2 {
+            r -= m;
+        }
+        Ok(Value::BigInt(r))
+    });
+    it.def_method(&ctor, "asUintN", 2, |i, _t, a| {
+        let bits = ab(i.to_number(&arg(a, 0)))? as u32;
+        let n = match arg(a, 1) {
+            Value::BigInt(n) => n,
+            _ => return Err(i.make_error("TypeError", "asUintN requires a BigInt")),
+        };
+        if bits == 0 {
+            return Ok(Value::BigInt(0));
+        }
+        if bits >= 127 {
+            return Ok(Value::BigInt(n));
+        }
+        Ok(Value::BigInt(n.rem_euclid(1i128 << bits)))
+    });
+    set_builtin(&it.global, "BigInt", Value::Obj(ctor));
 }
 
 fn install_math(it: &mut Interp) {
