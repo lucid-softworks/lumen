@@ -637,6 +637,9 @@ impl Parser {
     fn parse_for_inner(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         let is_await = self.eat_ident_word("await");
+        if is_await && !self.in_async {
+            return self.err("'for await' is only valid in an async context");
+        }
         self.expect_punct("(")?;
 
         // Determine the head form. Parse an optional declaration kind or init expression, then look
