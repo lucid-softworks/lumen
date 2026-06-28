@@ -2208,8 +2208,15 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     date_get!("daysInWeek", |_d: IsoDate| Value::Num(7.0));
     date_get!("monthsInYear", |_d: IsoDate| Value::Num(12.0));
     def_getter(it, &proto, "hoursInDay", |i, t, _| {
-        as_zoned(i, &t)?;
-        Ok(Value::Num(24.0))
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, _) = zoned_local(e, o);
+        let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
+        let today_local = dt_ns(d, midnight);
+        let today = today_local - offset_for_local(&tz, today_local) as i128;
+        let (ty, tm, td) = civil_from_days(epoch_days(d) + 1);
+        let tomorrow_local = dt_ns(IsoDate { year: ty, month: tm, day: td }, midnight);
+        let tomorrow = tomorrow_local - offset_for_local(&tz, tomorrow_local) as i128;
+        Ok(Value::Num((tomorrow - today) as f64 / 3_600_000_000_000.0))
     });
     def_getter(it, &proto, "epochSeconds", |i, t, _| {
         Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000_000) as f64))
