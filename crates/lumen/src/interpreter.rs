@@ -450,7 +450,7 @@ impl Interp {
 
     /// Build a generator object (an iterator) over an eagerly-collected `buffer`, ending with the
     /// `return` value, or throwing `thrown` once the buffer is exhausted.
-    fn make_generator(&mut self, buffer: Vec<Value>, ret: Value, thrown: Option<Value>) -> Value {
+    fn make_generator(&mut self, buffer: Vec<Value>, ret: Value, thrown: Option<Value>, is_async: bool) -> Value {
         let arr = self.make_array(buffer);
         let proto = self
             .extra_protos
@@ -466,8 +466,22 @@ impl Interp {
             b.props.insert("__gen_ret", ro(ret));
             b.props.insert("__gen_haserr", ro(Value::Bool(thrown.is_some())));
             b.props.insert("__gen_err", ro(thrown.unwrap_or(Value::Undefined)));
+            b.props.insert("__gen_async", ro(Value::Bool(is_async)));
         }
-        self.def_method(&obj, "next", 0, crate::builtins::generator_next);
+        if is_async {
+            // Async generator: next/return/throw return promises, and it's an async-iterable.
+            self.def_method(&obj, "next", 0, crate::builtins::async_generator_next);
+            self.def_method(&obj, "return", 1, crate::builtins::async_generator_return);
+            self.def_method(&obj, "throw", 1, crate::builtins::async_generator_throw);
+            if let Some(key) = crate::builtins::async_iterator_key(self) {
+                let f = self.make_native("[Symbol.asyncIterator]", 0, crate::builtins::return_this_pub);
+                obj.borrow_mut().props.insert(key.as_str(), Property::builtin(Value::Obj(f)));
+            }
+        } else {
+            self.def_method(&obj, "next", 0, crate::builtins::generator_next);
+            self.def_method(&obj, "return", 1, crate::builtins::generator_return);
+            self.def_method(&obj, "throw", 1, crate::builtins::generator_throw);
+        }
         Value::Obj(obj)
     }
 
@@ -1105,7 +1119,7 @@ impl Interp {
         }
         let buffer = self.yield_buffer.take().unwrap_or_default();
         self.yield_buffer = saved;
-        Ok(self.make_generator(buffer, ret, thrown))
+        Ok(self.make_generator(buffer, ret, thrown, func.is_async))
     }
 
     fn bind_params(&mut self, params: &[Param], args: &[Value], scope: &Env) -> Result<(), Abrupt> {

@@ -5674,6 +5674,59 @@ pub(crate) fn generator_next(i: &mut Interp, this: Value, _args: &[Value]) -> Re
     Ok(Value::Obj(result))
 }
 
+/// `gen.return(v)`: finish the generator and yield `{ value: v, done: true }`.
+pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let arr = ab(i.get_member(&this, "__gen_arr"))?;
+    let len = match &arr {
+        Value::Obj(o) => i.array_length(o),
+        _ => 0,
+    };
+    ab(i.set_member(&this, "__gen_idx", Value::Num(len as f64)))?;
+    ab(i.set_member(&this, "__gen_haserr", Value::Bool(false)))?;
+    ab(i.set_member(&this, "__gen_ret", Value::Undefined))?;
+    let result = i.new_object();
+    set_data(&result, "value", arg(args, 0));
+    set_data(&result, "done", Value::Bool(true));
+    Ok(Value::Obj(result))
+}
+/// `gen.throw(e)`: a completed eager generator simply propagates the thrown value.
+pub(crate) fn generator_throw(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let arr = ab(i.get_member(&this, "__gen_arr"))?;
+    let len = match &arr {
+        Value::Obj(o) => i.array_length(o),
+        _ => 0,
+    };
+    ab(i.set_member(&this, "__gen_idx", Value::Num(len as f64)))?;
+    Err(arg(args, 0))
+}
+pub(crate) fn async_generator_next(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let r = generator_next(i, this, a);
+    Ok(settle_into_promise(i, r))
+}
+pub(crate) fn async_generator_return(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let r = generator_return(i, this, a);
+    Ok(settle_into_promise(i, r))
+}
+pub(crate) fn async_generator_throw(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let r = generator_throw(i, this, a);
+    Ok(settle_into_promise(i, r))
+}
+/// Wrap a synchronous generator step result into a settled promise (async-generator semantics).
+fn settle_into_promise(i: &mut Interp, r: Result<Value, Value>) -> Value {
+    let p = i.new_promise();
+    match r {
+        Ok(v) => i.resolve_promise(&p, v),
+        Err(e) => i.reject_promise(&p, e),
+    }
+    p
+}
+pub(crate) fn return_this_pub(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    return_this(i, this, a)
+}
+pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
+    well_known_key(i, "asyncIterator")
+}
+
 fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
     let target = ab(i.get_member(&this, "__ai_target"))?;
     let idx_v = ab(i.get_member(&this, "__ai_index"))?;

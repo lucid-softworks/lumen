@@ -1563,3 +1563,12 @@ fn promise_keyed() {
     e3.eval("var r3; Promise.allKeyed(5).catch(e=>r3=e.constructor.name)", false).unwrap();
     assert_eq!(match e3.eval("r3",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "TypeError");
 }
+#[test]
+fn async_generators() {
+    assert_eq!(run("async function* g(){yield 1} typeof g().next().then"), "function");
+    assert_eq!(run("async function* g(){yield 1} typeof g()[Symbol.asyncIterator]"), "function");
+    assert_eq!(run("async function* g(){yield 1} typeof g().return"), "function");
+    assert_eq!(run("var s=''; async function* g(){yield 'a';yield 'b'} var it=g(); it.next().then(r=>s=r.value); 'ok'"), "ok");
+    assert_eq!(run("function* g(){yield 1} var it=g(); it.next().value+','+it.next().done"), "1,true");
+    assert_eq!(run("function* g(){yield 1;yield 2} var it=g(); it.next(); it.return(9).value+','+it.next().done"), "9,true");
+}
