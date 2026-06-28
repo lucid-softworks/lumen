@@ -125,6 +125,8 @@ pub struct Interp {
     /// When a generator body is being run eagerly, `yield`ed values are collected here instead of
     /// suspending (lumen has no coroutine support — see `run_generator`).
     pub yield_buffer: Option<Vec<Value>>,
+    /// Live-object count above which the next allocation safe point runs the cycle collector.
+    pub gc_next: i64,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -159,9 +161,13 @@ pub struct ClassInfo {
 /// uses; beyond this we raise "Maximum call stack size exceeded" (a RangeError).
 pub const MAX_EVAL_DEPTH: u32 = 1500;
 
-/// Per-test object-allocation ceiling (≈ a few hundred MB; lumen has no GC). Beyond this, `call`
-/// throws a RangeError so a runaway allocation loop fails instead of exhausting RAM.
-pub const MAX_ALLOCS: u64 = 3_000_000;
+/// Live-object ceiling (≈ a few hundred MB). When a safe point sees this many *live* objects, the
+/// cycle collector runs; if it can't get back under, a RangeError is thrown rather than exhausting
+/// RAM. This bounds genuine retention; transient cyclic garbage is reclaimed and doesn't count.
+pub const MAX_LIVE: i64 = 3_000_000;
+
+/// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
+pub const GC_TRIGGER: i64 = 200_000;
 
 /// Memory safety valves. lumen has no garbage collector and several built-ins iterate/allocate in
 /// proportion to a user-controlled `length`, so without these a single adversarial test (e.g.
@@ -212,8 +218,8 @@ impl Interp {
             promises: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
             yield_buffer: None,
+            gc_next: GC_TRIGGER,
         };
-        crate::value::reset_alloc_count();
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
         let g = Value::Obj(interp.global.clone());
@@ -631,6 +637,122 @@ impl Interp {
         Ok(len)
     }
 
+    // ----- garbage collection -----------------------------------------------------------------
+
+    /// Allocation safe point. When live objects pass the floating threshold, run the cycle
+    /// collector; if genuine retention still exceeds `MAX_LIVE`, throw rather than exhaust RAM.
+    pub(crate) fn gc_check(&mut self) -> Result<(), Abrupt> {
+        if crate::value::live_objects() <= self.gc_next {
+            return Ok(());
+        }
+        self.gc_collect();
+        let live = crate::value::live_objects();
+        if live > MAX_LIVE {
+            return Err(self.throw("RangeError", "allocation limit exceeded"));
+        }
+        // Re-arm: collect again once live doubles, clamped to [GC_TRIGGER, MAX_LIVE].
+        self.gc_next = (live.saturating_mul(2)).clamp(GC_TRIGGER, MAX_LIVE);
+        Ok(())
+    }
+
+    /// The object references *to other heap objects* held directly by `o` (proto, property
+    /// values/getters/setters, and bound-function target/this/args). Collected into a Vec so `o`'s
+    /// borrow is released before callers re-borrow — important for self-referential objects.
+    fn obj_refs(o: &Gc) -> Vec<Gc> {
+        let b = o.borrow();
+        let mut refs = Vec::new();
+        if let Some(p) = &b.proto {
+            refs.push(p.clone());
+        }
+        for (_, prop) in b.props.iter() {
+            if let Value::Obj(p) = &prop.value {
+                refs.push(p.clone());
+            }
+            if let Some(Value::Obj(p)) = &prop.get {
+                refs.push(p.clone());
+            }
+            if let Some(Value::Obj(p)) = &prop.set {
+                refs.push(p.clone());
+            }
+        }
+        if let Callable::Bound { target, this, args } = &b.call {
+            refs.push(target.clone());
+            if let Value::Obj(p) = this {
+                refs.push(p.clone());
+            }
+            for a in args {
+                if let Value::Obj(p) = a {
+                    refs.push(p.clone());
+                }
+            }
+        }
+        refs
+    }
+
+    /// Refcount-based cycle collector. An object whose `Rc::strong_count` exceeds the references it
+    /// receives from other heap objects has an *external* holder — the Rust stack, a scope, the
+    /// global, or a side table — so it (and everything it reaches) is live. Everything else is
+    /// referenced only from within unreachable cycles and is reclaimed by breaking its references.
+    /// This needs no root enumeration, so it is safe to run in the middle of evaluation.
+    pub(crate) fn gc_collect(&mut self) {
+        let live = crate::value::gc_snapshot();
+
+        // Reset scratch, then count references between heap objects.
+        for o in &live {
+            let b = o.borrow();
+            b.gc_mark.set(false);
+            b.gc_internal.set(0);
+        }
+        for o in &live {
+            for p in Self::obj_refs(o) {
+                let pb = p.borrow();
+                pb.gc_internal.set(pb.gc_internal.get() + 1);
+            }
+        }
+
+        // Roots: objects with a reference from outside the heap-object graph. `strong_count` here
+        // includes exactly one clone held by `live`, so external refs == strong - internal - 1.
+        let mut stack: Vec<Gc> = Vec::new();
+        for o in &live {
+            let internal = o.borrow().gc_internal.get() as usize;
+            if Rc::strong_count(o) > internal + 1 {
+                o.borrow().gc_mark.set(true);
+                stack.push(o.clone());
+            }
+        }
+        // Mark everything reachable from the roots.
+        while let Some(o) = stack.pop() {
+            for p in Self::obj_refs(&o) {
+                if !p.borrow().gc_mark.get() {
+                    p.borrow().gc_mark.set(true);
+                    stack.push(p);
+                }
+            }
+        }
+
+        // Sweep: clear unmarked (garbage) objects to break their cycles; once `live` drops, their
+        // refcounts hit zero and they are freed. Also evict them from pointer-keyed side tables so a
+        // future object reusing the address can't inherit stale metadata.
+        for o in &live {
+            if !o.borrow().gc_mark.get() {
+                let ptr = Rc::as_ptr(o) as usize;
+                self.class_info.remove(&ptr);
+                self.map_data.remove(&ptr);
+                self.typed_arrays.remove(&ptr);
+                self.data_views.remove(&ptr);
+                self.regexps.remove(&ptr);
+                self.proxies.remove(&ptr);
+                self.promises.remove(&ptr);
+                self.array_buffers.remove(&ptr);
+                let mut b = o.borrow_mut();
+                b.props.clear();
+                b.proto = None;
+                b.call = Callable::None;
+                b.exotic = Exotic::None;
+            }
+        }
+    }
+
     // ----- calling ----------------------------------------------------------------------------
 
     pub fn call(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
@@ -639,9 +761,9 @@ impl Interp {
             self.depth -= 1;
             return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
         }
-        if crate::value::alloc_count() > MAX_ALLOCS {
+        if let Err(e) = self.gc_check() {
             self.depth -= 1;
-            return Err(self.throw("RangeError", "allocation limit exceeded"));
+            return Err(e);
         }
         let r = self.call_inner(callee, this, args);
         self.depth -= 1;

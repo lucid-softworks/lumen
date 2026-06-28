@@ -4,9 +4,9 @@
 
 use crate::ast::Function;
 use crate::interpreter::{Env, Interp};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 pub type Gc = Rc<RefCell<Object>>;
 
@@ -107,31 +107,63 @@ pub struct Object {
     pub exotic: Exotic,
     /// The construct-time prototype handed to instances (`F.prototype`), cached for `new`.
     pub is_constructor: bool,
+    /// GC scratch: mark bit (reachability) and a count of references from other heap objects.
+    pub gc_mark: Cell<bool>,
+    pub gc_internal: Cell<u32>,
 }
 
 impl Object {
     pub fn new(proto: Option<Gc>) -> Gc {
-        ALLOC_COUNT.with(|c| c.set(c.get() + 1));
-        Rc::new(RefCell::new(Object {
+        LIVE_OBJECTS.with(|c| c.set(c.get() + 1));
+        let obj = Rc::new(RefCell::new(Object {
             proto,
             props: Props::new(),
             extensible: true,
             call: Callable::None,
             exotic: Exotic::None,
             is_constructor: false,
-        }))
+            gc_mark: Cell::new(false),
+            gc_internal: Cell::new(0),
+        }));
+        GC_REGISTRY.with(|r| r.borrow_mut().push(Rc::downgrade(&obj)));
+        obj
     }
 }
 
-// Per-test object-allocation counter (lumen has no GC, so a runaway allocation loop would exhaust
-// memory). `Interp::new` resets it; `Interp::call` throws once it exceeds `MAX_ALLOCS`.
-thread_local!(static ALLOC_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
-
-pub fn reset_alloc_count() {
-    ALLOC_COUNT.with(|c| c.set(0));
+impl Drop for Object {
+    fn drop(&mut self) {
+        // `try_with` so a drop during thread-local teardown at process exit can't panic.
+        let _ = LIVE_OBJECTS.try_with(|c| c.set(c.get() - 1));
+    }
 }
-pub fn alloc_count() -> u64 {
-    ALLOC_COUNT.with(|c| c.get())
+
+// The GC is a refcount-based cycle collector (lumen has no tracing GC). Every heap object is
+// registered (as a Weak) and the live count is maintained via Object::new / Drop. `Interp::gc_collect`
+// reclaims objects referenced only by other (also-unreachable) objects — see interpreter.rs.
+thread_local! {
+    static GC_REGISTRY: RefCell<Vec<Weak<RefCell<Object>>>> = const { RefCell::new(Vec::new()) };
+    static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
+}
+
+/// Number of live heap objects right now.
+pub fn live_objects() -> i64 {
+    LIVE_OBJECTS.with(|c| c.get())
+}
+
+/// Strong handles to every currently-live heap object, pruning dead registry entries in passing.
+pub fn gc_snapshot() -> Vec<Gc> {
+    GC_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let mut live = Vec::with_capacity(reg.len());
+        reg.retain(|w| match w.upgrade() {
+            Some(o) => {
+                live.push(o);
+                true
+            }
+            None => false,
+        });
+        live
+    })
 }
 
 /// The element type of a TypedArray.
@@ -278,6 +310,11 @@ impl Props {
     }
     pub fn contains(&self, key: &str) -> bool {
         self.index.contains_key(key)
+    }
+    /// Drop every property (used by the GC to break a garbage object's reference cycles).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.index.clear();
     }
     pub fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();

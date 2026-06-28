@@ -405,6 +405,32 @@ fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
 
+#[test]
+fn gc_reclaims_cycles() {
+    // Each iteration creates an unreachable reference cycle (o <-> a). Reference counting alone
+    // never frees these; the cycle collector must, or live objects would climb without bound.
+    let mut e = Engine::new();
+    match e
+        .eval("var k=0; for (var i=0;i<300000;i++){ var o={}; var a=[o]; o.self=o; o.a=a; k++; } k", false)
+        .expect("parse")
+    {
+        Completion::Value(v) => assert_eq!(v, "300000"),
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+    // ~600k cyclic objects were created; after collection only a handful are still reachable.
+    let live = crate::value::live_objects();
+    assert!(live < 500_000, "live objects after GC loop too high: {live}");
+}
+
+#[test]
+fn gc_keeps_reachable_cycles() {
+    // A cycle still reachable from a live binding must survive collection unscathed.
+    assert_eq!(
+        run("var o={}; o.self=o; var a=[o]; o.a=a; for(var i=0;i<250000;i++){var t={};t.t=t;} o.a[0].self===o"),
+        "true"
+    );
+}
+
 
 
 

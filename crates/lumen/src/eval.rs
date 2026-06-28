@@ -273,11 +273,9 @@ impl Interp {
         mut step: impl FnMut(&mut Interp, &Env) -> Result<LoopStep, Abrupt>,
     ) -> Completion {
         loop {
-            // Bound runaway allocation in tight loops (`for(;;){ x = {}; }`) — `call` alone misses
-            // loops that never call a function.
-            if crate::value::alloc_count() > crate::interpreter::MAX_ALLOCS {
-                return Err(self.throw("RangeError", "allocation limit exceeded"));
-            }
+            // Safe point: run the cycle collector / enforce the live-object ceiling. Catches tight
+            // loops (`for(;;){ x = {}; }`) that never call a function.
+            self.gc_check()?;
             match step(self, env) {
                 Ok(LoopStep::Continue) => {}
                 Ok(LoopStep::Done) => return Ok(Value::Undefined),
