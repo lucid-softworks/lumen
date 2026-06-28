@@ -1071,6 +1071,52 @@ fn map_ptr(this: &Value) -> Option<usize> {
     this.as_obj().map(|o| Rc::as_ptr(o) as usize)
 }
 
+/// The property key for `@@toStringTag` (`Symbol.toStringTag`), if Symbol is installed.
+pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
+    let sym = i.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+    if let Value::Obj(o) = sym {
+        if let Some(p) = o.borrow().props.get("toStringTag") {
+            if let Value::Sym(d) = &p.value {
+                return Some(Interp::sym_key(d));
+            }
+        }
+    }
+    None
+}
+
+/// The Object.prototype.toString builtin tag for `this` (the `[object <tag>]` body without an
+/// overriding `@@toStringTag`).
+fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
+    match this {
+        Value::Num(_) => "Number",
+        Value::Str(_) => "String",
+        Value::Bool(_) => "Boolean",
+        Value::Obj(o) => {
+            let b = o.borrow();
+            if matches!(b.exotic, Exotic::Array) {
+                "Array"
+            } else if !matches!(b.call, Callable::None) {
+                "Function"
+            } else if matches!(b.exotic, Exotic::Error) {
+                "Error"
+            } else if matches!(b.exotic, Exotic::BoolWrap(_)) {
+                "Boolean"
+            } else if matches!(b.exotic, Exotic::NumWrap(_)) {
+                "Number"
+            } else if matches!(b.exotic, Exotic::StrWrap(_)) {
+                "String"
+            } else if b.props.contains("__date_ms") {
+                "Date"
+            } else if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
+                "RegExp"
+            } else {
+                "Object"
+            }
+        }
+        _ => "Object",
+    }
+}
+
 /// Brand-check a Map/Set receiver: it must be an object carrying a collection data slot (every
 /// Map/Set/WeakMap/WeakSet gets one at construction), else TypeError.
 fn coll_ptr(i: &Interp, this: &Value) -> Result<usize, Value> {
@@ -1969,7 +2015,23 @@ fn install_object(it: &mut Interp) {
             .unwrap_or(false);
         Ok(Value::Bool(e))
     });
-    it.def_method(&op, "toString", 0, |_i, _this, _args| Ok(Value::str("[object Object]")));
+    it.def_method(&op, "toString", 0, |i, this, _args| {
+        if matches!(this, Value::Undefined) {
+            return Ok(Value::str("[object Undefined]"));
+        }
+        if matches!(this, Value::Null) {
+            return Ok(Value::str("[object Null]"));
+        }
+        let builtin = builtin_tag(i, &this);
+        let tag = match to_string_tag_key(i) {
+            Some(key) => match ab(i.get_member(&this, &key))? {
+                Value::Str(s) => s.to_string(),
+                _ => builtin.to_string(),
+            },
+            None => builtin.to_string(),
+        };
+        Ok(Value::str(format!("[object {tag}]")))
+    });
     it.def_method(&op, "valueOf", 0, |_i, this, _args| Ok(this));
 
     let ctor = it.make_native("Object", 1, |i, _this, args| {

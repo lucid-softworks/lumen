@@ -569,3 +569,16 @@ fn collection_brand_check() {
     assert_eq!(throws("Set.prototype.add.call([], 1)"), "TypeError");
     assert_eq!(throws("Map.prototype.has.call(5, 1)"), "TypeError");
 }
+
+#[test]
+fn to_string_tag() {
+    assert_eq!(run("Object.prototype.toString.call([])"), "[object Array]");
+    assert_eq!(run("Object.prototype.toString.call(null)"), "[object Null]");
+    assert_eq!(run("Object.prototype.toString.call(undefined)"), "[object Undefined]");
+    assert_eq!(run("Object.prototype.toString.call(function(){})"), "[object Function]");
+    assert_eq!(run("Object.prototype.toString.call(new Date())"), "[object Date]");
+    assert_eq!(run("Object.prototype.toString.call(/x/)"), "[object RegExp]");
+    assert_eq!(run("Object.prototype.toString.call(5)"), "[object Number]");
+    assert_eq!(run("Object.prototype.toString.call(new Temporal.PlainDate(2021,1,1))"), "[object Temporal.PlainDate]");
+    assert_eq!(run("Object.prototype.toString.call({[Symbol.toStringTag]:'Foo'})"), "[object Foo]");
+}

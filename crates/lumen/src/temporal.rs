@@ -392,6 +392,12 @@ fn add_ctor(it: &mut Interp, ns: &Gc, name: &'static str, len: usize, proto: Gc,
         Property::data(Value::Obj(proto.clone()), false, false, false),
     );
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    if let Some(key) = crate::builtins::to_string_tag_key(it) {
+        proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str(format!("Temporal.{name}")), false, false, true),
+        );
+    }
     ns.borrow_mut().props.insert(name, Property::builtin(Value::Obj(ctor.clone())));
     ctor
 }
