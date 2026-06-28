@@ -1109,6 +1109,67 @@ impl Interp {
                 }
             }
         }
+        // Annex B.3.3: in sloppy mode, a function declared inside a block is also bound in the
+        // enclosing function/global scope.
+        if !self.strict {
+            for stmt in stmts {
+                self.hoist_block_funcs(stmt, scope, false);
+            }
+        }
+    }
+
+    fn hoist_block_funcs(&mut self, stmt: &Stmt, scope: &Env, in_block: bool) {
+        match stmt {
+            Stmt::FuncDecl(func) if in_block => {
+                if let Some(name) = &func.name {
+                    let f = self.make_function(func.clone(), scope.clone());
+                    scope.borrow_mut().vars.insert(
+                        name.clone(),
+                        Binding { value: f, mutable: true, initialized: true },
+                    );
+                }
+            }
+            Stmt::Block(body) => {
+                for s in body {
+                    self.hoist_block_funcs(s, scope, true);
+                }
+            }
+            Stmt::If { cons, alt, .. } => {
+                self.hoist_block_funcs(cons, scope, true);
+                if let Some(a) = alt {
+                    self.hoist_block_funcs(a, scope, true);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::ForInOf { body, .. }
+            | Stmt::Labeled { body, .. }
+            | Stmt::With { body, .. } => self.hoist_block_funcs(body, scope, true),
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    for s in &c.body {
+                        self.hoist_block_funcs(s, scope, true);
+                    }
+                }
+            }
+            Stmt::Try { block, handler, finalizer } => {
+                for s in block {
+                    self.hoist_block_funcs(s, scope, true);
+                }
+                if let Some((_, h)) = handler {
+                    for s in h {
+                        self.hoist_block_funcs(s, scope, true);
+                    }
+                }
+                if let Some(f) = finalizer {
+                    for s in f {
+                        self.hoist_block_funcs(s, scope, true);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn hoist_stmt(&mut self, stmt: &Stmt, scope: &Env) {
