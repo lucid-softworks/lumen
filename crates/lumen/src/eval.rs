@@ -36,6 +36,9 @@ impl Interp {
                             if matches!(v, Value::Undefined) {
                                 if let Some(d) = default {
                                     v = self.eval(d, env)?;
+                                    if let (Pattern::Ident(n), true) = (pattern, is_anonymous_fn(d)) {
+                                        self.set_fn_name(&v, n);
+                                    }
                                 }
                             }
                             self.bind_pattern(pattern, v, env, mode)?;
@@ -62,6 +65,9 @@ impl Interp {
                     if matches!(v, Value::Undefined) {
                         if let Some(d) = &prop.default {
                             v = self.eval(d, env)?;
+                            if let (Pattern::Ident(n), true) = (&prop.value, is_anonymous_fn(d)) {
+                                self.set_fn_name(&v, n);
+                            }
                         }
                     }
                     self.bind_pattern(&prop.value, v, env, mode)?;
@@ -793,7 +799,7 @@ impl Interp {
 
     /// NamedEvaluation: give an anonymous function/class the binding/property name it's assigned to,
     /// unless it already has a non-empty name.
-    fn set_fn_name(&mut self, v: &Value, name: &str) {
+    pub(crate) fn set_fn_name(&mut self, v: &Value, name: &str) {
         if !v.is_callable() {
             return;
         }
@@ -1414,7 +1420,13 @@ impl Interp {
             let scope = new_scope(Some(field_env.clone()));
             bind(&scope, "this", this.clone());
             let v = match init {
-                Some(e) => self.eval(&e, &scope)?,
+                Some(e) => {
+                    let v = self.eval(&e, &scope)?;
+                    if is_anonymous_fn(&e) {
+                        self.set_fn_name(&v, &key);
+                    }
+                    v
+                }
                 None => Value::Undefined,
             };
             self.set_member(this, &key, v)?;
@@ -1618,7 +1630,15 @@ impl Interp {
     /// Assign one destructured element, honoring a `target = default` cover.
     fn assign_destructure_elem(&mut self, t: &Expr, v: Value, env: &Env) -> Result<(), Abrupt> {
         if let Expr::Assign { op: "=", target, value: dflt } = t {
-            let v = if matches!(v, Value::Undefined) { self.eval(dflt, env)? } else { v };
+            let v = if matches!(v, Value::Undefined) {
+                let dv = self.eval(dflt, env)?;
+                if let (Expr::Ident(n), true) = (&**target, is_anonymous_fn(dflt)) {
+                    self.set_fn_name(&dv, n);
+                }
+                dv
+            } else {
+                v
+            };
             self.assign_to_target(target, v, env)
         } else {
             self.assign_to_target(t, v, env)
@@ -2103,7 +2123,7 @@ fn describe_callee(callee: &Expr) -> String {
 }
 
 /// Whether an expression is an anonymous function/arrow/class (eligible for NamedEvaluation).
-fn is_anonymous_fn(e: &Expr) -> bool {
+pub(crate) fn is_anonymous_fn(e: &Expr) -> bool {
     match e {
         Expr::Func(f) => f.name.is_none(),
         Expr::Class(c) => c.name.is_none(),

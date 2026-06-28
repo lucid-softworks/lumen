@@ -752,3 +752,13 @@ fn label_validation() {
     assert_eq!(run("function f(){ l: for(;;) break l; return 1 } f()"), "1");
     assert_eq!(run("x: 1; x: 2; 'ok'"), "ok"); // sequential same label is fine
 }
+#[test]
+fn named_eval_defaults() {
+    assert_eq!(run("var {a=function(){}}={}; a.name"), "a");
+    assert_eq!(run("var [b=()=>{}]=[]; b.name"), "b");
+    assert_eq!(run("function f(c=function(){}){return c.name}; f()"), "c");
+    assert_eq!(run("class C{ m=function(){} }; new C().m.name"), "m");
+    assert_eq!(run("var d; ({d=class{}}={}); d.name"), "d");
+    assert_eq!(run("var e; [e=function(){}]=[]; e.name"), "e");
+    assert_eq!(run("var {x=1}={}; x"), "1"); // non-fn default still works
+}

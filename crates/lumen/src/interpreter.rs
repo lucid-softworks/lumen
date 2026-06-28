@@ -989,6 +989,11 @@ impl Interp {
                 if matches!(v, Value::Undefined) {
                     if let Some(d) = &p.default {
                         v = self.eval(d, scope)?;
+                        if let (crate::ast::Pattern::Ident(n), true) =
+                            (&p.pattern, crate::eval::is_anonymous_fn(d))
+                        {
+                            self.set_fn_name(&v, n);
+                        }
                     }
                 }
                 v
