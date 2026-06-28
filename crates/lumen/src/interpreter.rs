@@ -15,6 +15,8 @@ pub type Env = Rc<RefCell<Scope>>;
 pub struct Scope {
     pub vars: HashMap<String, Binding>,
     pub parent: Option<Env>,
+    /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
+    pub with_obj: Option<Value>,
 }
 
 pub struct Binding {
@@ -25,7 +27,12 @@ pub struct Binding {
 }
 
 pub fn new_scope(parent: Option<Env>) -> Env {
-    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent }))
+    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent, with_obj: None }))
+}
+
+/// A `with (obj)` environment: identifier lookups consult `obj` before the enclosing scope.
+pub fn new_with_scope(parent: Env, obj: Value) -> Env {
+    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent: Some(parent), with_obj: Some(obj) }))
 }
 
 /// A non-local completion. Expressions only raise `Throw`; the rest flow out of statements.
@@ -1101,9 +1108,10 @@ impl Interp {
                     self.hoist_var_only(s, scope);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
-                self.hoist_stmt(body, scope)
-            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Labeled { body, .. }
+            | Stmt::With { body, .. } => self.hoist_stmt(body, scope),
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
                     if let ForInit::VarDecl { kind: DeclKind::Var, decls } = init.as_ref() {

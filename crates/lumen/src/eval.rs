@@ -238,6 +238,16 @@ impl Interp {
             Stmt::Try { block, handler, finalizer } => self.exec_try(block, handler, finalizer, env),
             Stmt::Switch { disc, cases } => self.exec_switch(disc, cases, env),
             Stmt::Labeled { label, body } => self.exec_labeled(label, body, env),
+            Stmt::With { obj, body } => {
+                let o = self.eval(obj, env)?;
+                if matches!(o, Value::Undefined | Value::Null) {
+                    return Err(
+                        self.throw("TypeError", "Cannot convert undefined or null to object")
+                    );
+                }
+                let with_env = crate::interpreter::new_with_scope(env.clone(), o);
+                self.exec_stmt(body, &with_env)
+            }
             Stmt::ClassDecl(class) => {
                 let value = self.eval_class(class, env)?;
                 if let Some(name) = &class.name {
@@ -554,17 +564,26 @@ impl Interp {
     pub fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
-            let b = s.borrow();
-            if let Some(binding) = b.vars.get(name) {
-                if !binding.initialized {
-                    return Err(self.throw(
-                        "ReferenceError",
-                        format!("cannot access '{name}' before initialization"),
-                    ));
+            let (with_obj, parent) = {
+                let b = s.borrow();
+                if let Some(binding) = b.vars.get(name) {
+                    if !binding.initialized {
+                        return Err(self.throw(
+                            "ReferenceError",
+                            format!("cannot access '{name}' before initialization"),
+                        ));
+                    }
+                    return Ok(binding.value.clone());
                 }
-                return Ok(binding.value.clone());
+                (b.with_obj.clone(), b.parent.clone())
+            };
+            // `with (obj)`: resolve against the object's properties if it has the name.
+            if let Some(obj @ Value::Obj(o)) = &with_obj {
+                if self.has_property(o, name) {
+                    return self.get_member(obj, name);
+                }
             }
-            cur = b.parent.clone();
+            cur = parent;
         }
         // Fall back to a property of the global object (where builtins live).
         let g = Value::Obj(self.global.clone());
@@ -577,16 +596,26 @@ impl Interp {
     pub fn assign_var(&mut self, name: &str, value: Value, env: &Env) -> Result<(), Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
-            let mut b = s.borrow_mut();
-            if let Some(binding) = b.vars.get_mut(name) {
-                if !binding.mutable && binding.initialized {
-                    return Err(self.throw("TypeError", format!("assignment to constant '{name}'")));
+            let (with_obj, parent) = {
+                let mut b = s.borrow_mut();
+                if let Some(binding) = b.vars.get_mut(name) {
+                    if !binding.mutable && binding.initialized {
+                        return Err(
+                            self.throw("TypeError", format!("assignment to constant '{name}'"))
+                        );
+                    }
+                    binding.value = value;
+                    binding.initialized = true;
+                    return Ok(());
                 }
-                binding.value = value;
-                binding.initialized = true;
-                return Ok(());
+                (b.with_obj.clone(), b.parent.clone())
+            };
+            if let Some(obj @ Value::Obj(o)) = &with_obj {
+                if self.has_property(o, name) {
+                    return self.set_member(obj, name, value);
+                }
             }
-            cur = b.parent.clone();
+            cur = parent;
         }
         // Undeclared: strict → ReferenceError; sloppy → create a global property.
         if self.strict {

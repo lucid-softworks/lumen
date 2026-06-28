@@ -479,3 +479,14 @@ fn bigint_typed_arrays() {
     assert_eq!(run("var a = new BigUint64Array(1); a[0] = -1n; a[0]"), "18446744073709551615");
     assert_eq!(run("new BigInt64Array(2).BYTES_PER_ELEMENT"), "8");
 }
+
+#[test]
+fn with_statement() {
+    assert_eq!(run("var o={a:10}; with(o){ a; }"), "10");
+    assert_eq!(run("function f(){ var o={a:1}; with(o){ return a; } } f()"), "1");
+    assert_eq!(run("var o={x:1}; with(o){ x = 5; } o.x"), "5");
+    assert_eq!(run("var a=99; var o={a:1}; with(o){ a; }"), "1");      // object shadows outer
+    assert_eq!(run("var a=99; var o={b:1}; with(o){ a; }"), "99");     // falls through to outer
+    // `with` in strict mode is a parse-phase SyntaxError.
+    assert!(Engine::new().eval("'use strict'; with({}){}", false).is_err());
+}

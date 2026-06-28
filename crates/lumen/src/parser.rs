@@ -143,6 +143,7 @@ impl Parser {
             }
             Tok::Keyword("if") => self.parse_if(),
             Tok::Keyword("while") => self.parse_while(),
+            Tok::Keyword("with") => self.parse_with(),
             Tok::Keyword("do") => self.parse_do_while(),
             Tok::Keyword("for") => self.parse_for(),
             Tok::Keyword("return") => {
@@ -330,6 +331,18 @@ impl Parser {
         self.expect_punct(")")?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::While { test, body })
+    }
+
+    fn parse_with(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        if self.strict {
+            return self.err("'with' statements are not allowed in strict mode");
+        }
+        self.expect_punct("(")?;
+        let obj = self.parse_expr()?;
+        self.expect_punct(")")?;
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt::With { obj, body })
     }
 
     fn parse_do_while(&mut self) -> Result<Stmt, ParseError> {

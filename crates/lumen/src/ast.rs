@@ -26,6 +26,8 @@ pub enum Stmt {
     Try { block: Vec<Stmt>, handler: Option<(Option<Pattern>, Vec<Stmt>)>, finalizer: Option<Vec<Stmt>> },
     Switch { disc: Expr, cases: Vec<SwitchCase> },
     Labeled { label: String, body: P<Stmt> },
+    /// `with (obj) body` — resolves identifiers against `obj` first (forbidden in strict mode).
+    With { obj: Expr, body: P<Stmt> },
     ClassDecl(Rc<Class>),
     Empty,
     Debugger,
