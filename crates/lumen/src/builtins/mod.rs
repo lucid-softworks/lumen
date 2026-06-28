@@ -2154,6 +2154,31 @@ fn install_object(it: &mut Interp) {
             }
         }
     });
+    it.def_method(&ctor, "getOwnPropertyDescriptors", 1, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "called on non-object")),
+        };
+        let result = i.new_object();
+        let keys = o.borrow().props.keys();
+        for key in keys {
+            let prop = o.borrow().props.get(&key).cloned();
+            if let Some(p) = prop {
+                let d = i.new_object();
+                if p.accessor {
+                    set_data(&d, "get", p.get.unwrap_or(Value::Undefined));
+                    set_data(&d, "set", p.set.unwrap_or(Value::Undefined));
+                } else {
+                    set_data(&d, "value", p.value);
+                    set_data(&d, "writable", Value::Bool(p.writable));
+                }
+                set_data(&d, "enumerable", Value::Bool(p.enumerable));
+                set_data(&d, "configurable", Value::Bool(p.configurable));
+                result.borrow_mut().props.insert(key, Property::plain(Value::Obj(d)));
+            }
+        }
+        Ok(Value::Obj(result))
+    });
     it.def_method(&ctor, "freeze", 1, |_i, _this, args| {
         if let Value::Obj(o) = arg(args, 0) {
             o.borrow_mut().extensible = false;

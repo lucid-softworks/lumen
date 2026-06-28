@@ -1843,6 +1843,65 @@ fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
         _ => Err(i.make_error("TypeError", "receiver is not a Temporal.ZonedDateTime")),
     }
 }
+/// Parse the UTC-offset designator from the time portion of an ISO string (`Z` → 0, `±HH:MM`).
+fn parse_offset_from(s: &str) -> Option<i64> {
+    let tpart = s.split(['T', 't']).nth(1)?;
+    if tpart.contains('Z') || tpart.contains('z') {
+        return Some(0);
+    }
+    if let Some(pos) = tpart.find('+') {
+        return Some(tz_offset_ns(&tpart[pos..]));
+    }
+    if let Some(pos) = tpart.rfind('-') {
+        return Some(tz_offset_ns(&tpart[pos..]));
+    }
+    None
+}
+/// ToTemporalZonedDateTime: a ZonedDateTime, an ISO string with `[timeZone]`, or a fields object
+/// carrying `timeZone`.
+fn to_zoned(i: &mut Interp, v: &Value) -> Result<(i128, i64, Rc<str>), Value> {
+    if let Some(Temporal::Zoned { epoch_ns, offset_ns, tz }) = get(i, v) {
+        return Ok((epoch_ns, offset_ns, tz));
+    }
+    match v {
+        Value::Str(s) => {
+            let tz_str = s
+                .find('[')
+                .and_then(|a| s[a + 1..].find(']').map(|b| s[a + 1..a + 1 + b].to_string()));
+            let main = s.split('[').next().unwrap_or(s);
+            let date = parse_date_str(main).ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
+            let time = parse_time_str(main)
+                .unwrap_or(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+            let tz: Rc<str> = match tz_str {
+                Some(t) => Rc::from(t.as_str()),
+                None => return Err(i.make_error("RangeError", "missing time zone")),
+            };
+            let off = parse_offset_from(main).unwrap_or_else(|| tz_offset_ns(&tz));
+            Ok((dt_ns(date, time) - off as i128, off, tz))
+        }
+        Value::Obj(_) => {
+            let tzv = getm(i, v, "timeZone")?;
+            if matches!(tzv, Value::Undefined) {
+                return Err(i.make_error("TypeError", "missing timeZone"));
+            }
+            let tz: Rc<str> = match &tzv {
+                Value::Str(s) => s.clone(),
+                _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+            };
+            let off = tz_offset_ns(&tz);
+            let date = to_date(i, v)?;
+            let hour = field_int(i, v, "hour", 0)? as u8;
+            let minute = field_int(i, v, "minute", 0)? as u8;
+            let second = field_int(i, v, "second", 0)? as u8;
+            let ms = field_int(i, v, "millisecond", 0)? as u16;
+            let us = field_int(i, v, "microsecond", 0)? as u16;
+            let ns = field_int(i, v, "nanosecond", 0)? as u16;
+            let time = IsoTime { hour, minute, second, ms, us, ns };
+            Ok((dt_ns(date, time) - off as i128, off, tz))
+        }
+        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
+    }
+}
 
 fn install_zoned(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
@@ -2034,9 +2093,13 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let offset_ns = tz_offset_ns(&tz);
         Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns, offset_ns, tz }))
     });
+    it.def_method(&ctor, "from", 1, |i, _t, a| {
+        let (epoch_ns, offset_ns, tz) = to_zoned(i, &arg(a, 0))?;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns, offset_ns, tz }))
+    });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
-        let x = to_instant(i, &arg(a, 0))?;
-        let y = to_instant(i, &arg(a, 1))?;
+        let x = to_zoned(i, &arg(a, 0))?.0;
+        let y = to_zoned(i, &arg(a, 1))?.0;
         Ok(Value::Num(x.cmp(&y) as i64 as f64))
     });
 }
