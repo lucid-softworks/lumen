@@ -1131,3 +1131,32 @@ fn regexp_proto_getters() {
     assert_eq!(throws("Object.getOwnPropertyDescriptor(RegExp.prototype,'global').get.call({})"), "TypeError");
     assert_eq!(run("/abc/d.hasIndices"), "true");
 }
+#[test]
+fn date_format_methods() {
+    assert_eq!(run("new Date(0).toDateString()"), "Thu Jan 01 1970");
+    assert_eq!(run("new Date(0).toUTCString()"), "Thu, 01 Jan 1970 00:00:00 GMT");
+    assert_eq!(run("new Date(Date.UTC(2020,0,15,10,30,0)).toDateString()"), "Wed Jan 15 2020");
+    assert_eq!(run("new Date(0).toTimeString().slice(0,8)"), "00:00:00");
+    assert_eq!(run("typeof new Date(0).toLocaleString()"), "string");
+    assert_eq!(run("new Date(NaN).toDateString()"), "Invalid Date");
+    assert_eq!(run("new Date(0).toGMTString()"), "Thu, 01 Jan 1970 00:00:00 GMT");
+}
+#[test]
+fn promise_combinators() {
+    assert_eq!(run("typeof Promise.allSettled"), "function");
+    assert_eq!(run("typeof Promise.any"), "function");
+    assert_eq!(run("typeof AggregateError"), "function");
+    assert_eq!(run("new AggregateError([1,2,3]).errors.length"), "3");
+    assert_eq!(run("new AggregateError([],'msg').message"), "msg");
+    assert_eq!(run("new AggregateError([1]) instanceof Error"), "true");
+    assert_eq!(run("new AggregateError([1]).name"), "AggregateError");
+}
+#[test]
+fn promise_combinators_async() {
+    let mut e = Engine::new();
+    e.eval("var r; Promise.allSettled([Promise.resolve(1),Promise.reject(2)]).then(v=>r=v.map(x=>x.status).join(','))", false).unwrap();
+    assert_eq!(match e.eval("r", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "fulfilled,rejected");
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Promise.any([Promise.reject(1),Promise.resolve(9)]).then(v=>r2=v)", false).unwrap();
+    assert_eq!(match e2.eval("r2", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "9");
+}

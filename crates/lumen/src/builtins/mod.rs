@@ -1485,6 +1485,35 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// (year, month0, day, hour, minute, second, millisecond, weekday[0=Sun]).
+const WDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS: [&str; 12] =
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+fn date_str_part(t: f64) -> Option<String> {
+    if !t.is_finite() {
+        return None;
+    }
+    let (y, mo, d, _, _, _, _, wd) = ms_to_parts(t);
+    Some(format!("{} {} {:02} {:04}", WDAYS[wd as usize], MONTHS[mo as usize], d, y))
+}
+fn time_str_part(t: f64) -> Option<String> {
+    if !t.is_finite() {
+        return None;
+    }
+    let (_, _, _, h, mi, s, _, _) = ms_to_parts(t);
+    Some(format!("{h:02}:{mi:02}:{s:02} GMT+0000 (Coordinated Universal Time)"))
+}
+fn utc_string(t: f64) -> Option<String> {
+    if !t.is_finite() {
+        return None;
+    }
+    let (y, mo, d, h, mi, s, _, wd) = ms_to_parts(t);
+    Some(format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        WDAYS[wd as usize], d, MONTHS[mo as usize], y, h, mi, s
+    ))
+}
+
 fn ms_to_parts(t: f64) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
     let ms = t as i64;
     let days = ms.div_euclid(86_400_000);
@@ -1768,6 +1797,35 @@ fn install_date(it: &mut Interp) {
     it.def_method(&proto, "toString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
         Ok(Value::from_string(iso_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toDateString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toTimeString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toUTCString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(utc_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toGMTString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(utc_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    // No Intl: toLocale* return a stable implementation-defined string.
+    it.def_method(&proto, "toLocaleString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(iso_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toLocaleDateString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+    });
+    it.def_method(&proto, "toLocaleTimeString", 0, |i, this, _| {
+        let t = date_ms(i, &this)?;
+        Ok(Value::from_string(time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
     });
 
     let ctor = it.make_native("Date", 7, date_ctor);
@@ -2355,6 +2413,49 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Value, Value> {
+    let result = arg(args, 0);
+    let idx = ab(i.to_number(&arg(args, 1)))? as usize;
+    let value = arg(args, 2);
+    let status = i.new_object();
+    set_data(&status, "status", Value::str(if fulfilled { "fulfilled" } else { "rejected" }));
+    set_data(&status, if fulfilled { "value" } else { "reason" }, value);
+    let results = ab(i.get_member(&result, "__results"))?;
+    ab(i.set_member(&results, &idx.to_string(), Value::Obj(status)))?;
+    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))? - 1.0;
+    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    if rem == 0.0 {
+        i.resolve_promise(&result, results);
+    }
+    Ok(Value::Undefined)
+}
+fn promise_settled_fulfill(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    promise_settled(i, a, true)
+}
+fn promise_settled_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    promise_settled(i, a, false)
+}
+fn promise_any_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let result = arg(a, 0);
+    let idx = ab(i.to_number(&arg(a, 1)))? as usize;
+    let reason = arg(a, 2);
+    let errors = ab(i.get_member(&result, "__errors"))?;
+    ab(i.set_member(&errors, &idx.to_string(), reason))?;
+    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))? - 1.0;
+    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    if rem == 0.0 {
+        let agg = make_aggregate_error(i, errors)?;
+        i.reject_promise(&result, agg);
+    }
+    Ok(Value::Undefined)
+}
+fn make_aggregate_error(i: &mut Interp, errors: Value) -> Result<Value, Value> {
+    let ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "AggregateError"))?;
+    ab(i.construct(ctor, &[errors]))
+}
+
 fn install_promise(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Promise", proto.clone());
@@ -2444,6 +2545,45 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
             let on_r = i.make_resolver(&result, false);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "allSettled", 1, |i, _t, a| {
+        let items = ab(i.iterate(&arg(a, 0)))?;
+        let result = i.new_promise();
+        let n = items.len();
+        let results = i.make_array(vec![Value::Undefined; n]);
+        set_internal_obj(&result, "__results", results.clone());
+        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        if n == 0 {
+            i.resolve_promise(&result, results);
+            return Ok(result);
+        }
+        for (idx, item) in items.into_iter().enumerate() {
+            let p = promise_resolve_value(i, item);
+            let on_f = make_bound(i, promise_settled_fulfill, vec![result.clone(), Value::Num(idx as f64)]);
+            let on_r = make_bound(i, promise_settled_reject, vec![result.clone(), Value::Num(idx as f64)]);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "any", 1, |i, _t, a| {
+        let items = ab(i.iterate(&arg(a, 0)))?;
+        let result = i.new_promise();
+        let n = items.len();
+        let errors = i.make_array(vec![Value::Undefined; n]);
+        set_internal_obj(&result, "__errors", errors.clone());
+        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        if n == 0 {
+            let agg = make_aggregate_error(i, errors)?;
+            i.reject_promise(&result, agg);
+            return Ok(result);
+        }
+        for (idx, item) in items.into_iter().enumerate() {
+            let p = promise_resolve_value(i, item);
+            let on_f = i.make_resolver(&result, true);
+            let on_r = make_bound(i, promise_any_reject, vec![result.clone(), Value::Num(idx as f64)]);
             i.promise_then(&p, on_f, on_r);
         }
         Ok(result)
@@ -5403,6 +5543,29 @@ fn install_errors(it: &mut Interp) {
         proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&it.global, name, Value::Obj(ctor));
     }
+
+    // AggregateError(errors, message): an Error subclass carrying an `errors` array.
+    let agg_proto = Object::new(Some(error_proto.clone()));
+    set_builtin(&agg_proto, "name", Value::str("AggregateError"));
+    set_builtin(&agg_proto, "message", Value::str(""));
+    it.error_protos.insert("AggregateError", agg_proto.clone());
+    let agg_ctor = it.make_native("AggregateError", 2, |i, _t, a| {
+        let err = i.make_error("AggregateError", "");
+        if let Some(o) = err.as_obj() {
+            o.borrow_mut().proto = i.error_protos.get("AggregateError").cloned();
+        }
+        let errors = ab(i.iterate(&arg(a, 0)))?;
+        let arr = i.make_array(errors);
+        ab(i.set_member(&err, "errors", arr))?;
+        if !matches!(arg(a, 1), Value::Undefined) {
+            let s = ab(i.to_string(&arg(a, 1)))?;
+            ab(i.set_member(&err, "message", Value::Str(s)))?;
+        }
+        Ok(err)
+    });
+    agg_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(agg_proto.clone()), false, false, false));
+    agg_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(agg_ctor.clone())));
+    set_builtin(&it.global, "AggregateError", Value::Obj(agg_ctor));
 }
 
 fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
