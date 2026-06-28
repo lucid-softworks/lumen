@@ -1691,25 +1691,50 @@ impl Interp {
             }
             // Destructuring assignment: an array/object literal reinterpreted as a target.
             Expr::Array(elems) => {
-                let items = self.iterate(&value)?;
-                let mut idx = 0usize;
-                for el in elems {
-                    match el {
-                        ArrayElem::Hole => idx += 1,
-                        ArrayElem::Spread(t) => {
-                            let rest: Vec<Value> = items.get(idx..).map(|s| s.to_vec()).unwrap_or_default();
-                            let arr = self.make_array(rest);
-                            self.assign_to_target(t, arr, env)?;
-                            break;
-                        }
-                        ArrayElem::Item(t) => {
-                            let v = items.get(idx).cloned().unwrap_or(Value::Undefined);
-                            idx += 1;
-                            self.assign_destructure_elem(t, v, env)?;
+                let (iter, next) = self.get_iterator(&value)?;
+                let iter_close = iter.clone();
+                let mut done = false;
+                let result = (|me: &mut Self| -> Result<(), Abrupt> {
+                    for el in elems {
+                        match el {
+                            ArrayElem::Hole => {
+                                if !done && me.iterator_step(&iter, &next)?.is_none() {
+                                    done = true;
+                                }
+                            }
+                            ArrayElem::Spread(t) => {
+                                let mut rest = Vec::new();
+                                while !done {
+                                    match me.iterator_step(&iter, &next)? {
+                                        Some(x) => rest.push(x),
+                                        None => done = true,
+                                    }
+                                }
+                                let arr = me.make_array(rest);
+                                me.assign_to_target(t, arr, env)?;
+                            }
+                            ArrayElem::Item(t) => {
+                                let v = if done {
+                                    Value::Undefined
+                                } else {
+                                    match me.iterator_step(&iter, &next)? {
+                                        Some(x) => x,
+                                        None => {
+                                            done = true;
+                                            Value::Undefined
+                                        }
+                                    }
+                                };
+                                me.assign_destructure_elem(t, v, env)?;
+                            }
                         }
                     }
+                    Ok(())
+                })(self);
+                if !done {
+                    self.iterator_close(&iter_close);
                 }
-                Ok(())
+                result
             }
             Expr::Object(props) => {
                 if matches!(value, Value::Undefined | Value::Null) {

@@ -3899,6 +3899,18 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
 
 fn install_string(it: &mut Interp) {
     let sp = it.string_proto.clone();
+    // String.prototype[@@iterator]: iterate by code point (via an array iterator over the chars).
+    if let Some(sym) = it.iterator_sym.clone() {
+        let f = it.make_native("[Symbol.iterator]", 0, |i, this, _| {
+            let s = this_string(i, &this)?;
+            let chars: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+            let arr = i.make_array(chars);
+            let key = Interp::sym_key(i.iterator_sym.as_ref().unwrap());
+            let itfn = ab(i.get_member(&arr, &key))?;
+            ab(i.call(itfn, arr, &[]))
+        });
+        sp.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+    }
     it.def_method(&sp, "toString", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
     it.def_method(&sp, "valueOf", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
     it.def_method(&sp, "charAt", 1, |i, this, args| {

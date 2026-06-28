@@ -1036,3 +1036,18 @@ fn forof_lazy_close() {
     assert_eq!(run("var n=0; var it={[Symbol.iterator](){return {next(){return {value:n++,done:n>1000000000}}}}}; var c=0; for(var x of it){c++; if(c>=3)break;} c"), "3");
     assert_eq!(run("var r=''; for(var k of 'abc'){r+=k} r"), "abc");
 }
+#[test]
+fn assign_destructure_close() {
+    assert_eq!(run("var a,b; [a,b]=[1,2]; a+','+b"), "1,2");
+    assert_eq!(run("var a,r; [a,...r]=[1,2,3]; a+'/'+r.join(',')"), "1/2,3");
+    assert_eq!(run("var closed=false,a; var it={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){closed=true;return {}}}}}; [a]=it; closed"), "true");
+    assert_eq!(run("var a,b; [a,,b]=[1,2,3]; a+','+b"), "1,3");
+    assert_eq!(run("var x; [x=5]=[]; x"), "5");
+}
+#[test]
+fn string_iterator() {
+    assert_eq!(run("typeof String.prototype[Symbol.iterator]"), "function");
+    assert_eq!(run("[...'abc'].join(',')"), "a,b,c");
+    assert_eq!(run("var it='hi'[Symbol.iterator](); it.next().value+it.next().value"), "hi");
+    assert_eq!(run("var r=''; for(var c of 'xyz') r+=c; r"), "xyz");
+}
