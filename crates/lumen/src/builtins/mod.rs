@@ -2056,6 +2056,42 @@ fn install_collections(it: &mut Interp) {
     install_weak(it, "WeakMap", false, weakmap_ctor);
     install_weak(it, "WeakSet", true, weakset_ctor);
     install_set_methods(it);
+    install_map_methods(it);
+}
+
+fn install_map_methods(it: &mut Interp) {
+    let mp = it.extra_protos.get("Map").cloned().unwrap();
+    // getOrInsert(key, value): return the existing value, or insert and return `value`.
+    it.def_method(&mp, "getOrInsert", 2, |i, this, a| {
+        let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
+        let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "Map.prototype.getOrInsert called on incompatible receiver"))?;
+        let key = arg(a, 0);
+        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+            return Ok(v.clone());
+        }
+        let value = arg(a, 1);
+        i.map_data.entry(ptr).or_default().push((key, value.clone()));
+        Ok(value)
+    });
+    it.def_method(&mp, "getOrInsertComputed", 2, |i, this, a| {
+        let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
+        let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "Map.prototype.getOrInsertComputed called on incompatible receiver"))?;
+        let key = arg(a, 0);
+        let cb = arg(a, 1);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "callback is not callable"));
+        }
+        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+            return Ok(v.clone());
+        }
+        let value = ab(i.call(cb, Value::Undefined, std::slice::from_ref(&key)))?;
+        // Re-check (the callback may have mutated the map), then insert.
+        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+            return Ok(v.clone());
+        }
+        i.map_data.entry(ptr).or_default().push((key, value.clone()));
+        Ok(value)
+    });
 }
 
 /// The receiver Set's values (deduped insertion order). Errors if `this` isn't a Set.

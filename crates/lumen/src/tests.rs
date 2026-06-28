@@ -1376,3 +1376,12 @@ fn iterator_flatmap() {
     assert_eq!(run("typeof Iterator.prototype.flatMap"), "function");
     assert_eq!(run("var c=0;[1,2].values().flatMap((x,i)=>{c=i;return[x]}).toArray();c"), "1");
 }
+#[test]
+fn map_getorinsert() {
+    assert_eq!(run("var m=new Map(); m.getOrInsert('a',1); m.get('a')"), "1");
+    assert_eq!(run("var m=new Map([['a',5]]); m.getOrInsert('a',9)"), "5");
+    assert_eq!(run("var m=new Map(); m.getOrInsertComputed('k',x=>x+'!'); m.get('k')"), "k!");
+    assert_eq!(run("var m=new Map([['k',2]]); m.getOrInsertComputed('k',()=>99)"), "2");
+    assert_eq!(run("var m=new Map(); m.getOrInsert('a',1); m.getOrInsert('a',2); m.get('a')"), "1");
+    assert_eq!(run("var m=new Map(); m.getOrInsert('x',7); m.size"), "1");
+}
