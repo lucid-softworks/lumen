@@ -1579,10 +1579,25 @@ fn to_monthday(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
     }
     match v {
         Value::Str(s) => {
-            let s = s.trim().trim_start_matches("--");
-            let mut p = s.splitn(2, '-');
-            let m: u8 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| i.make_error("RangeError", "invalid month-day"))?;
-            let d: u8 = p.next().and_then(|x| x.parse().ok()).ok_or_else(|| i.make_error("RangeError", "invalid month-day"))?;
+            // A full date string is accepted (the month/day are taken from it).
+            if let Some(d) = parse_date_str(s) {
+                return Ok(IsoDate { year: 1972, month: d.month, day: d.day });
+            }
+            if !valid_annotations(s) {
+                return Err(i.make_error("RangeError", "invalid month-day"));
+            }
+            let core = s.split('[').next().unwrap_or(s).trim().trim_start_matches("--");
+            let mut p = core.splitn(2, '-');
+            let ms = p.next().unwrap_or("");
+            let ds = p.next().unwrap_or("");
+            if ms.len() != 2 || ds.len() != 2 {
+                return Err(i.make_error("RangeError", "invalid month-day"));
+            }
+            let m: u8 = ms.parse().map_err(|_| i.make_error("RangeError", "invalid month-day"))?;
+            let d: u8 = ds.parse().map_err(|_| i.make_error("RangeError", "invalid month-day"))?;
+            if !(1..=12).contains(&m) || d < 1 || d > days_in_month(1972, m) {
+                return Err(i.make_error("RangeError", "invalid month-day"));
+            }
             Ok(IsoDate { year: 1972, month: m, day: d })
         }
         Value::Obj(_) => {
