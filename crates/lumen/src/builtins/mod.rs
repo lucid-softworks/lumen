@@ -2920,6 +2920,10 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
             Exotic::StrWrap(s) => Ok(s.clone()),
             _ => ab(i.to_string(this)),
         },
+        // String.prototype methods RequireObjectCoercible(this): null/undefined → TypeError.
+        Value::Undefined | Value::Null => {
+            Err(i.make_error("TypeError", "String.prototype method called on null or undefined"))
+        }
         _ => ab(i.to_string(this)),
     }
 }
@@ -3332,13 +3336,14 @@ fn next_random() -> f64 {
 }
 
 fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
+    // thisNumberValue: only a Number primitive or Number wrapper is acceptable.
     match this {
         Value::Num(n) => Ok(*n),
-        Value::Obj(o) => match &o.borrow().exotic {
-            Exotic::NumWrap(n) => Ok(*n),
-            _ => ab(i.to_number(this)),
+        Value::Obj(o) => match o.borrow().exotic {
+            Exotic::NumWrap(n) => Ok(n),
+            _ => Err(i.make_error("TypeError", "Number method called on incompatible receiver")),
         },
-        _ => ab(i.to_number(this)),
+        _ => Err(i.make_error("TypeError", "Number method called on incompatible receiver")),
     }
 }
 
