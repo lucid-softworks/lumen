@@ -551,6 +551,10 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// Run a `module`-flagged test: evaluate the harness as a script (for the global helpers), then
 /// load the test as an ES module with a filesystem loader resolving relative specifiers.
 fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Outcome {
+    // Async module tests signal completion via $DONE, which this runner doesn't observe.
+    if fm.has_flag("async") {
+        return Outcome::Skip("async".into());
+    }
     let mut engine = Engine::new();
     let mut preamble = harness.base.clone();
     for inc in &fm.includes {
