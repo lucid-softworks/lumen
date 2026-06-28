@@ -888,3 +888,12 @@ fn array_from_fixes() {
     assert_eq!(run("Array.from.call(Object,[1,2]).length"), "2");
     assert_eq!(run("Array.from.call(Object,[1,2]).constructor===Object"), "true");
 }
+#[test]
+fn dataview_index_validation() {
+    assert_eq!(throws("new DataView(new ArrayBuffer(8)).getInt32(-1)"), "RangeError");
+    assert_eq!(throws("new DataView(new ArrayBuffer(8)).getInt32(100)"), "RangeError");
+    assert_eq!(throws("new DataView(new ArrayBuffer(8)).getFloat64(1)"), "RangeError");
+    assert_eq!(throws("new DataView(new ArrayBuffer(8)).getBigInt64(-5)"), "RangeError");
+    assert_eq!(run("var d=new DataView(new ArrayBuffer(8)); d.setInt32(0,42); d.getInt32(0)"), "42");
+    assert_eq!(run("var a=[1,2]; Object.freeze(a); Object.isFrozen(a)"), "true");
+}

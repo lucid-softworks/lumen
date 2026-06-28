@@ -246,10 +246,10 @@ fn install_host(it: &mut Interp) {
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
     let es = kind.elsize();
-    if byte_off + es > len {
+    if byte_off.checked_add(es).map_or(true, |e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -267,11 +267,11 @@ fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
 fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
     let es = kind.elsize();
-    if byte_off + es > len {
+    if byte_off.checked_add(es).map_or(true, |e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = kind.write(value);
@@ -287,12 +287,22 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
     Ok(Value::Undefined)
 }
 
+/// ToIndex: a non-negative integer in [0, 2^53-1]; anything else is a RangeError.
+fn to_index(i: &mut Interp, v: &Value) -> Result<usize, Value> {
+    let n = ab(i.to_number(v))?;
+    let n = if n.is_nan() { 0.0 } else { n.trunc() };
+    if n < 0.0 || n > 9007199254740991.0 {
+        return Err(i.make_error("RangeError", "index out of range"));
+    }
+    Ok(n as usize)
+}
+
 fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
-    if byte_off + 8 > len {
+    if byte_off.checked_add(8).map_or(true, |e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -310,10 +320,10 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
 fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let byte_off = ab(i.to_number(&arg(args, 0)))? as usize;
+    let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
-    if byte_off + 8 > len {
+    if byte_off.checked_add(8).map_or(true, |e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = (value as u64).to_le_bytes().to_vec();
@@ -2740,7 +2750,8 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "freeze", 1, |_i, _this, args| {
         if let Value::Obj(o) = arg(args, 0) {
             o.borrow_mut().extensible = false;
-            for k in o.borrow().props.keys() {
+            let keys = o.borrow().props.keys();
+            for k in keys {
                 if let Some(p) = o.borrow_mut().props.get_mut(&k) {
                     p.writable = false;
                     p.configurable = false;
@@ -2834,7 +2845,8 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "seal", 1, |_i, _this, args| {
         if let Value::Obj(o) = arg(args, 0) {
             o.borrow_mut().extensible = false;
-            for k in o.borrow().props.keys() {
+            let keys = o.borrow().props.keys();
+            for k in keys {
                 if let Some(p) = o.borrow_mut().props.get_mut(&k) {
                     p.configurable = false;
                 }
