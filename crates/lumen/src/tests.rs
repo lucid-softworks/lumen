@@ -1550,3 +1550,16 @@ fn array_from_async() {
     e4.eval("async function* g(){yield 1; yield 2;} var r4; Array.fromAsync(g()).then(a=>r4=a.join(','))", false).unwrap();
     assert_eq!(match e4.eval("r4",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2");
 }
+#[test]
+fn promise_keyed() {
+    assert_eq!(run("typeof Promise.allKeyed"), "function");
+    let mut e = Engine::new();
+    e.eval("var r; Promise.allKeyed({a:Promise.resolve(1),b:2}).then(o=>r=o.a+','+o.b+','+(Object.getPrototypeOf(o)===null))", false).unwrap();
+    assert_eq!(match e.eval("r",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2,true");
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Promise.allSettledKeyed({a:Promise.resolve(1),b:Promise.reject(9)}).then(o=>r2=o.a.status+','+o.a.value+','+o.b.status+','+o.b.reason)", false).unwrap();
+    assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "fulfilled,1,rejected,9");
+    let mut e3 = Engine::new();
+    e3.eval("var r3; Promise.allKeyed(5).catch(e=>r3=e.constructor.name)", false).unwrap();
+    assert_eq!(match e3.eval("r3",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "TypeError");
+}

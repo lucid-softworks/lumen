@@ -3020,6 +3020,49 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// Element handler for Promise.allKeyed: store `value` under its key in the result object.
+fn promise_keyed_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let result = arg(args, 0);
+    let key = ab(i.to_string(&arg(args, 1)))?;
+    let value = arg(args, 2);
+    let results = ab(i.get_member(&result, "__results"))?;
+    if let Value::Obj(o) = &results {
+        o.borrow_mut().props.insert(&*key, Property::data(value, true, true, true));
+    }
+    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))? - 1.0;
+    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    if rem == 0.0 {
+        i.resolve_promise(&result, results);
+    }
+    Ok(Value::Undefined)
+}
+fn promise_keyed_settle(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Value, Value> {
+    let result = arg(args, 0);
+    let key = ab(i.to_string(&arg(args, 1)))?;
+    let value = arg(args, 2);
+    let status = i.new_object();
+    set_data(&status, "status", Value::str(if fulfilled { "fulfilled" } else { "rejected" }));
+    set_data(&status, if fulfilled { "value" } else { "reason" }, value);
+    let results = ab(i.get_member(&result, "__results"))?;
+    if let Value::Obj(o) = &results {
+        o.borrow_mut().props.insert(&*key, Property::data(Value::Obj(status), true, true, true));
+    }
+    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))? - 1.0;
+    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    if rem == 0.0 {
+        i.resolve_promise(&result, results);
+    }
+    Ok(Value::Undefined)
+}
+fn promise_keyed_settle_f(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    promise_keyed_settle(i, a, true)
+}
+fn promise_keyed_settle_r(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    promise_keyed_settle(i, a, false)
+}
+
 fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Value, Value> {
     let result = arg(args, 0);
     let idx = ab(i.to_number(&arg(args, 1)))? as usize;
@@ -3191,6 +3234,62 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
             let on_r = make_bound(i, promise_any_reject, vec![result.clone(), Value::Num(idx as f64)]);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "allKeyed", 1, |i, _t, a| {
+        let result = i.new_promise();
+        let dict = match arg(a, 0) {
+            Value::Obj(o) => o,
+            _ => {
+                let e = i.make_error("TypeError", "Promise.allKeyed argument must be an object");
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
+        let keys: Vec<Rc<str>> = dict.borrow().props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()).collect();
+        let results = i.new_object();
+        results.borrow_mut().proto = None;
+        set_internal(&result.as_obj().unwrap().clone(), "__results", Value::Obj(results.clone()));
+        set_internal(&result.as_obj().unwrap().clone(), "__remaining", Value::Num(keys.len() as f64));
+        if keys.is_empty() {
+            i.resolve_promise(&result, Value::Obj(results));
+            return Ok(result);
+        }
+        for k in keys {
+            let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
+            let p = promise_resolve_value(i, item);
+            let on_f = make_bound(i, promise_keyed_element, vec![result.clone(), Value::str(&*k)]);
+            let on_r = i.make_resolver(&result, false);
+            i.promise_then(&p, on_f, on_r);
+        }
+        Ok(result)
+    });
+    it.def_method(&ctor, "allSettledKeyed", 1, |i, _t, a| {
+        let result = i.new_promise();
+        let dict = match arg(a, 0) {
+            Value::Obj(o) => o,
+            _ => {
+                let e = i.make_error("TypeError", "Promise.allSettledKeyed argument must be an object");
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
+        let keys: Vec<Rc<str>> = dict.borrow().props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()).collect();
+        let results = i.new_object();
+        results.borrow_mut().proto = None;
+        set_internal(&result.as_obj().unwrap().clone(), "__results", Value::Obj(results.clone()));
+        set_internal(&result.as_obj().unwrap().clone(), "__remaining", Value::Num(keys.len() as f64));
+        if keys.is_empty() {
+            i.resolve_promise(&result, Value::Obj(results));
+            return Ok(result);
+        }
+        for k in keys {
+            let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
+            let p = promise_resolve_value(i, item);
+            let on_f = make_bound(i, promise_keyed_settle_f, vec![result.clone(), Value::str(&*k)]);
+            let on_r = make_bound(i, promise_keyed_settle_r, vec![result.clone(), Value::str(&*k)]);
             i.promise_then(&p, on_f, on_r);
         }
         Ok(result)
