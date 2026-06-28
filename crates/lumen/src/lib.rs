@@ -27,6 +27,7 @@ mod builtins;
 mod eval;
 mod interpreter;
 mod lexer;
+mod modules;
 mod parser;
 mod regex;
 mod temporal;
@@ -87,6 +88,23 @@ impl Engine {
             Ok(v) => Ok(Completion::Value(self.render(&v))),
             Err(thrown) => Ok(self.describe_throw(thrown)),
         }
+    }
+
+    /// Evaluate `src` as an ES module identified by `key`. `loader(specifier, referrer)` resolves an
+    /// imported specifier to its `(canonical_key, source)`; it is consulted for every dependency.
+    pub fn eval_module(
+        &mut self,
+        src: &str,
+        key: &str,
+        loader: impl Fn(&str, &str) -> Option<(String, String)> + 'static,
+    ) -> Result<Completion, ParseError> {
+        self.interp.module_loader = Some(std::rc::Rc::new(loader));
+        let result = self.interp.load_module(key, src);
+        self.interp.drain_microtasks();
+        Ok(match result {
+            Ok(_) => Completion::Value(String::new()),
+            Err(a) => self.describe_throw(interpreter::abrupt_value(a)),
+        })
     }
 
     /// Drain anything written to `console.*` since the last call.

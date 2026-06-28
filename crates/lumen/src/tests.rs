@@ -1492,3 +1492,23 @@ fn annexb_block_func_conflict() {
     // Conflict with const too.
     assert_eq!(throws("{ const c = 1; { function c(){} } } c()"), "ReferenceError");
 }
+#[test]
+fn modules_basic() {
+    use std::collections::HashMap;
+    let mut files: HashMap<String, String> = HashMap::new();
+    files.insert("/mod.js".into(), "export const x = 5; export function add(a,b){return a+b} export default 42;".into());
+    files.insert("/main.js".into(), "import def, {x, add} from '/mod.js'; globalThis.__r = def + x + add(1,2);".into());
+    files.insert("/ns.js".into(), "import * as ns from '/mod.js'; globalThis.__r2 = ns.x + ns.add(2,3) + (typeof ns.default);".into());
+    let f1 = files.clone();
+    let mut e = Engine::new();
+    e.eval_module(&f1["/main.js"].clone(), "/main.js", move |spec, _ref| {
+        f1.get(spec).map(|s| (spec.to_string(), s.clone()))
+    }).unwrap();
+    assert_eq!(match e.eval("globalThis.__r", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "50"); // 42+5+3
+    let f2 = files.clone();
+    let mut e2 = Engine::new();
+    e2.eval_module(&f2["/ns.js"].clone(), "/ns.js", move |spec, _ref| {
+        f2.get(spec).map(|s| (spec.to_string(), s.clone()))
+    }).unwrap();
+    assert_eq!(match e2.eval("globalThis.__r2", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "10number"); // 5+5+number
+}

@@ -45,6 +45,14 @@ pub enum Abrupt {
 
 pub type Completion = Result<Value, Abrupt>;
 
+/// Extract the thrown value from an abrupt completion (non-throw completions surface as undefined).
+pub fn abrupt_value(a: Abrupt) -> Value {
+    match a {
+        Abrupt::Throw(v) => v,
+        _ => Value::Undefined,
+    }
+}
+
 /// How [`Interp::bind_pattern`] should bind the identifiers it reaches.
 #[derive(Clone, Copy)]
 pub enum BindMode {
@@ -74,6 +82,15 @@ fn block_lexical_names(stmts: &[Stmt]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Unwrap an `export <decl>` / `export default <decl>` to the declaration it wraps (so the hoisting
+/// and lexical-declaration passes treat them like ordinary declarations).
+pub fn unwrap_export(stmt: &Stmt) -> &Stmt {
+    match stmt {
+        Stmt::ExportDecl(inner) | Stmt::ExportDefault(inner) => inner,
+        other => other,
+    }
 }
 
 /// Collect every identifier bound by a pattern (for `var` hoisting and TDZ pre-declaration).
@@ -135,6 +152,13 @@ pub struct Interp {
     /// Set while a `?.` link in the current optional chain saw a nullish base, so the rest of the
     /// chain short-circuits to `undefined`. Reset at each `OptionalChain` boundary.
     pub short_circuit: bool,
+    /// The `import.meta` object for the module currently executing (None in script code).
+    pub import_meta: Option<Value>,
+    /// Loaded module namespace objects, keyed by canonical specifier (for `import()` + caching).
+    pub modules: std::collections::HashMap<String, Value>,
+    /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
+    #[allow(clippy::type_complexity)]
+    pub module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
     pub map_data: HashMap<usize, Vec<(Value, Value)>>,
@@ -252,6 +276,9 @@ impl Interp {
             eval_fn: None,
             iterator_sym: None,
             short_circuit: false,
+            import_meta: None,
+            modules: std::collections::HashMap::new(),
+            module_loader: None,
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
@@ -1194,7 +1221,7 @@ impl Interp {
         }
         // Function declarations are also initialised eagerly (in source order, after var names).
         for stmt in stmts {
-            if let Stmt::FuncDecl(func) = stmt {
+            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
                 if let Some(name) = &func.name {
                     let f = self.make_function(func.clone(), scope.clone());
                     scope
@@ -1284,6 +1311,7 @@ impl Interp {
 
     fn hoist_stmt(&mut self, stmt: &Stmt, scope: &Env) {
         match stmt {
+            Stmt::ExportDecl(inner) | Stmt::ExportDefault(inner) => self.hoist_stmt(inner, scope),
             Stmt::VarDecl { kind: DeclKind::Var, decls } => {
                 for (pat, _) in decls {
                     let mut names = Vec::new();

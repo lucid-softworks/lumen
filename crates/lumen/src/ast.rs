@@ -31,6 +31,36 @@ pub enum Stmt {
     ClassDecl(Rc<Class>),
     Empty,
     Debugger,
+    /// `import …from "spec"` (or a bare `import "spec"`).
+    Import(ImportDecl),
+    /// `export { a, b as c }` or `export { a } from "spec"`.
+    ExportNamed { specs: Vec<ExportSpec>, source: Option<Rc<str>> },
+    /// `export const/let/var/function/class …` — the inner declaration plus its exported names.
+    ExportDecl(P<Stmt>),
+    /// `export default …` (expression, function, or class).
+    ExportDefault(P<Stmt>),
+    /// `export * from "spec"` or `export * as ns from "spec"`.
+    ExportAll { source: Rc<str>, exported: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub source: Rc<str>,
+    pub specs: Vec<ImportSpec>,
+}
+#[derive(Debug, Clone)]
+pub enum ImportSpec {
+    /// `import x from "…"`
+    Default(String),
+    /// `import * as ns from "…"`
+    Namespace(String),
+    /// `import { imported as local } from "…"`
+    Named { imported: String, local: String },
+}
+#[derive(Debug, Clone)]
+pub struct ExportSpec {
+    pub local: String,
+    pub exported: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +185,10 @@ pub enum Expr {
     OptionalChain(P<Expr>),
     /// Ergonomic brand check `#field in obj`: whether `obj` carries the private field.
     PrivateIn { name: String, obj: P<Expr> },
+    /// Dynamic `import(specifier)` — returns a promise of the module namespace.
+    ImportCall(P<Expr>),
+    /// `import.meta`.
+    ImportMeta,
 }
 
 /// An array element or call argument: a value, a spread (`...x`), or a hole (`[1,,3]`).

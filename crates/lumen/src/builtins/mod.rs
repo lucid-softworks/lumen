@@ -2362,7 +2362,7 @@ pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
 }
 
 /// Install a non-enumerable, configurable `@@toStringTag` data property.
-fn set_to_string_tag(i: &Interp, obj: &Gc, tag: &str) {
+pub(crate) fn set_to_string_tag(i: &Interp, obj: &Gc, tag: &str) {
     if let Some(key) = to_string_tag_key(i) {
         obj.borrow_mut()
             .props

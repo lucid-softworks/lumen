@@ -15,11 +15,18 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, module: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
     Ok(body)
+}
+
+/// Parse a module (always strict; `import`/`export` are allowed only here).
+pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
+    let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
+    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: false, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    p.parse_stmts_until_eof()
 }
 
 /// Recursion-depth ceiling for the parser. Beyond this we bail with a SyntaxError rather than
@@ -38,6 +45,8 @@ struct Parser {
     /// Suppress `in` as a binary operator (the `[NoIn]` grammar productions in a `for` head, before
     /// `in`/`of` is reached). Reset inside any bracketed/parenthesized sub-expression.
     no_in: bool,
+    /// Whether the top-level goal is a Module (so `import`/`export` declarations are allowed).
+    module: bool,
     /// Context depths for early-error checks: `return` requires a function, `continue` an iteration,
     /// `break` an iteration or switch.
     fn_depth: u32,
@@ -106,6 +115,14 @@ impl Parser {
     }
     fn eat_kw(&mut self, k: &str) -> bool {
         if self.is_kw(k) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+    fn eat_ident_word(&mut self, w: &str) -> bool {
+        if self.is_ident_word(w) {
             self.advance();
             true
         } else {
@@ -244,6 +261,14 @@ impl Parser {
                 Ok(Stmt::Throw(arg))
             }
             Tok::Keyword("try") => self.parse_try(),
+            // `import …` declaration (but `import(` / `import.meta` are expressions).
+            Tok::Keyword("import")
+                if self.module && !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
+            {
+                self.parse_import()
+            }
+            Tok::Keyword("export") if self.module => self.parse_export(),
+            Tok::Keyword("export") => self.err("'export' is only valid in a module"),
             Tok::Keyword("switch") => self.parse_switch(),
             Tok::Keyword("debugger") => {
                 self.advance();
@@ -556,6 +581,132 @@ impl Parser {
         Ok(Stmt::For { init, test, update, body })
     }
 
+    /// A ModuleExportName: an identifier/keyword, or a string literal (`export { x as "y" }`).
+    fn parse_module_export_name(&mut self) -> Result<String, ParseError> {
+        match self.cur().clone() {
+            Tok::Str(s) => {
+                self.advance();
+                Ok(s)
+            }
+            _ => self.parse_property_name_ident(),
+        }
+    }
+    fn expect_keyword_word(&mut self, w: &str) -> Result<(), ParseError> {
+        if self.is_ident_word(w) {
+            self.advance();
+            Ok(())
+        } else {
+            self.err(format!("expected '{w}'"))
+        }
+    }
+    fn parse_module_specifier(&mut self) -> Result<Rc<str>, ParseError> {
+        match self.cur().clone() {
+            Tok::Str(s) => {
+                self.advance();
+                Ok(Rc::from(s.as_str()))
+            }
+            _ => self.err("expected a module specifier string"),
+        }
+    }
+
+    fn parse_import(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // 'import'
+        // Bare import: `import "spec";`
+        if let Tok::Str(s) = self.cur().clone() {
+            self.advance();
+            let source = Rc::from(s.as_str());
+            self.consume_semicolon()?;
+            return Ok(Stmt::Import(ImportDecl { source, specs: Vec::new() }));
+        }
+        let mut specs = Vec::new();
+        let mut need_from = true;
+        // Default binding.
+        if matches!(self.cur(), Tok::Ident(_)) {
+            specs.push(ImportSpec::Default(self.parse_binding_ident_name()?));
+            if !self.eat_punct(",") {
+                need_from = true;
+            }
+        }
+        if self.eat_punct("*") {
+            self.expect_keyword_word("as")?;
+            specs.push(ImportSpec::Namespace(self.parse_binding_ident_name()?));
+        } else if self.is_punct("{") {
+            self.advance();
+            while !self.is_punct("}") {
+                let imported = self.parse_module_export_name()?;
+                let local =
+                    if self.is_ident_word("as") { self.advance(); self.parse_binding_ident_name()? } else { imported.clone() };
+                specs.push(ImportSpec::Named { imported, local });
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct("}")?;
+        }
+        let _ = need_from;
+        self.expect_keyword_word("from")?;
+        let source = self.parse_module_specifier()?;
+        self.consume_semicolon()?;
+        Ok(Stmt::Import(ImportDecl { source, specs }))
+    }
+
+    fn parse_export(&mut self) -> Result<Stmt, ParseError> {
+        self.advance(); // 'export'
+        // export default …
+        if self.eat_kw("default") {
+            let stmt = if self.is_kw("function") || (self.is_ident_word("async") && matches!(self.peek_kind(1), Tok::Keyword("function"))) {
+                let is_async = self.eat_ident_word("async");
+                Stmt::FuncDecl(Rc::new(self.parse_function(is_async)?))
+            } else if self.is_kw("class") {
+                Stmt::ClassDecl(Rc::new(self.parse_class()?))
+            } else {
+                let e = self.parse_assign()?;
+                self.consume_semicolon()?;
+                Stmt::Expr(e)
+            };
+            return Ok(Stmt::ExportDefault(Box::new(stmt)));
+        }
+        // export * [as ns] from "spec"
+        if self.eat_punct("*") {
+            let exported = if self.is_ident_word("as") {
+                self.advance();
+                Some(self.parse_module_export_name()?)
+            } else {
+                None
+            };
+            self.expect_keyword_word("from")?;
+            let source = self.parse_module_specifier()?;
+            self.consume_semicolon()?;
+            return Ok(Stmt::ExportAll { source, exported });
+        }
+        // export { a, b as c } [from "spec"]
+        if self.is_punct("{") {
+            self.advance();
+            let mut specs = Vec::new();
+            while !self.is_punct("}") {
+                let local = self.parse_module_export_name()?;
+                let exported =
+                    if self.is_ident_word("as") { self.advance(); self.parse_module_export_name()? } else { local.clone() };
+                specs.push(ExportSpec { local, exported });
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct("}")?;
+            let source = if self.is_ident_word("from") {
+                self.advance();
+                Some(self.parse_module_specifier()?)
+            } else {
+                None
+            };
+            self.consume_semicolon()?;
+            return Ok(Stmt::ExportNamed { specs, source });
+        }
+        // export const/let/var/function/class …
+        let decl = self.parse_stmt()?;
+        Ok(Stmt::ExportDecl(Box::new(decl)))
+    }
+
     fn parse_try(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         self.expect_punct("{")?;
@@ -673,6 +824,14 @@ impl Parser {
         let saved = self.no_in;
         self.no_in = false;
         let e = self.parse_expr();
+        self.no_in = saved;
+        e
+    }
+
+    fn parse_assign_allow_in(&mut self) -> Result<Expr, ParseError> {
+        let saved = self.no_in;
+        self.no_in = false;
+        let e = self.parse_assign();
         self.no_in = saved;
         e
     }
@@ -1036,6 +1195,24 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Super)
             }
+            // `import(specifier)` (dynamic import) or `import.meta`.
+            Tok::Keyword("import") => {
+                self.advance();
+                if self.eat_punct(".") {
+                    self.expect_keyword_word("meta")?;
+                    Ok(Expr::ImportMeta)
+                } else {
+                    self.expect_punct("(")?;
+                    let spec = self.parse_assign_allow_in()?;
+                    // An optional second `import(spec, options)` argument is accepted and ignored.
+                    if self.eat_punct(",") && !self.is_punct(")") {
+                        let _ = self.parse_assign_allow_in()?;
+                        self.eat_punct(",");
+                    }
+                    self.expect_punct(")")?;
+                    Ok(Expr::ImportCall(Box::new(spec)))
+                }
+            }
             Tok::Ident(name) if name == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
@@ -1072,7 +1249,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
                     sub.parse_expr()?
                 }
             };
@@ -1095,7 +1272,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
                     subs.push(sub.parse_expr()?);
                 }
             }

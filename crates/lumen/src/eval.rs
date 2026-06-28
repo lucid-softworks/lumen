@@ -156,7 +156,7 @@ impl Interp {
     /// function declarations (initialised) for the statements directly in a block.
     pub fn declare_block_lexicals(&mut self, stmts: &[Stmt], scope: &Env, with_functions: bool) {
         for s in stmts {
-            match s {
+            match crate::interpreter::unwrap_export(s) {
                 Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, decls } => {
                     for (pat, _) in decls {
                         let mut names = Vec::new();
@@ -302,6 +302,18 @@ impl Interp {
                 }
                 Ok(Value::Undefined)
             }
+            // Module declarations: imports are resolved at link time (runtime no-op); exports run
+            // their inner declaration (the export itself is link-time metadata).
+            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => Ok(Value::Undefined),
+            Stmt::ExportDecl(inner) => self.exec_stmt(inner, env),
+            Stmt::ExportDefault(inner) => match &**inner {
+                Stmt::Expr(e) => {
+                    let v = self.eval(e, env)?;
+                    self.init_lexical("*default*", v, false, env);
+                    Ok(Value::Undefined)
+                }
+                other => self.exec_stmt(other, env),
+            },
         }
     }
 
@@ -868,6 +880,12 @@ impl Interp {
                 self.binary(op, l, r)
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
+            Expr::ImportMeta => Ok(self.import_meta.clone().unwrap_or(Value::Undefined)),
+            Expr::ImportCall(spec) => {
+                let specifier = self.eval(spec, env)?;
+                let s = self.to_string(&specifier)?;
+                Ok(self.dynamic_import(&s))
+            }
             Expr::PrivateIn { name, obj } => {
                 let o = self.eval(obj, env)?;
                 match o {
