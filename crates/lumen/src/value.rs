@@ -178,6 +178,8 @@ pub enum TaKind {
     U32,
     F32,
     F64,
+    I64,
+    U64,
 }
 
 impl TaKind {
@@ -186,8 +188,12 @@ impl TaKind {
             TaKind::I8 | TaKind::U8 | TaKind::U8Clamped => 1,
             TaKind::I16 | TaKind::U16 => 2,
             TaKind::I32 | TaKind::U32 | TaKind::F32 => 4,
-            TaKind::F64 => 8,
+            TaKind::F64 | TaKind::I64 | TaKind::U64 => 8,
         }
+    }
+    /// Whether elements are BigInt (BigInt64Array / BigUint64Array) rather than Number.
+    pub fn is_bigint(self) -> bool {
+        matches!(self, TaKind::I64 | TaKind::U64)
     }
     /// Constructor / prototype name, e.g. "Int8Array".
     pub fn name(self) -> &'static str {
@@ -201,7 +207,21 @@ impl TaKind {
             TaKind::U32 => "Uint32Array",
             TaKind::F32 => "Float32Array",
             TaKind::F64 => "Float64Array",
+            TaKind::I64 => "BigInt64Array",
+            TaKind::U64 => "BigUint64Array",
         }
+    }
+    /// Read a BigInt element (little-endian) from `b` (8 bytes) as an i128.
+    pub fn read_bigint(self, b: &[u8]) -> i128 {
+        let arr = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
+        match self {
+            TaKind::U64 => u64::from_le_bytes(arr) as i128,
+            _ => i64::from_le_bytes(arr) as i128,
+        }
+    }
+    /// Convert a BigInt (i128) to this element's 8 little-endian bytes, wrapping mod 2^64.
+    pub fn write_bigint(self, n: i128) -> Vec<u8> {
+        (n as u64).to_le_bytes().to_vec()
     }
     /// Read one element (little-endian) from `b` (which must be `elsize()` bytes) as a Number.
     pub fn read(self, b: &[u8]) -> f64 {
@@ -214,6 +234,7 @@ impl TaKind {
             TaKind::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             TaKind::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             TaKind::F64 => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            TaKind::I64 | TaKind::U64 => self.read_bigint(b) as f64,
         }
     }
     /// Convert a Number to this element type's little-endian bytes (JS integer-conversion rules).
@@ -232,6 +253,7 @@ impl TaKind {
             TaKind::U32 => (int(n) as u32).to_le_bytes().to_vec(),
             TaKind::F32 => (n as f32).to_le_bytes().to_vec(),
             TaKind::F64 => n.to_le_bytes().to_vec(),
+            TaKind::I64 | TaKind::U64 => self.write_bigint(int(n) as i128),
         }
     }
 }

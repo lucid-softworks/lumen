@@ -264,8 +264,43 @@ impl Interp {
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
         match self.array_buffers.get(&info.buffer) {
-            Some(buf) if start + es <= buf.len() => Value::Num(info.kind.read(&buf[start..start + es])),
+            Some(buf) if start + es <= buf.len() => {
+                let bytes = &buf[start..start + es];
+                if info.kind.is_bigint() {
+                    Value::BigInt(info.kind.read_bigint(bytes))
+                } else {
+                    Value::Num(info.kind.read(bytes))
+                }
+            }
             _ => Value::Undefined,
+        }
+    }
+
+    /// Store a JS value into a TypedArray element, coercing per the element type. BigInt arrays
+    /// require a BigInt (TypeError otherwise); numeric arrays coerce with ToNumber.
+    pub fn ta_store(&mut self, info: &TaInfo, idx: usize, v: &Value) -> Result<(), Abrupt> {
+        if info.kind.is_bigint() {
+            let n = self.to_bigint(v)?;
+            self.ta_write_bigint(info, idx, n);
+        } else {
+            let n = self.to_number(v)?;
+            self.ta_write(info, idx, n);
+        }
+        Ok(())
+    }
+
+    /// Write a BigInt (i128) into element `idx` (out-of-range writes are ignored).
+    pub fn ta_write_bigint(&mut self, info: &TaInfo, idx: usize, n: i128) {
+        if idx >= info.len {
+            return;
+        }
+        let es = info.kind.elsize();
+        let start = info.offset + idx * es;
+        let bytes = info.kind.write_bigint(n);
+        if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
+            if start + es <= buf.len() {
+                buf[start..start + es].copy_from_slice(&bytes);
+            }
         }
     }
 
@@ -507,8 +542,7 @@ impl Interp {
         // TypedArray integer-index writes go straight to the backing buffer.
         if let Some(info) = self.typed_arrays.get(&ptr).copied() {
             if let Ok(idx) = key.parse::<usize>() {
-                let n = self.to_number(&value)?;
-                self.ta_write(&info, idx, n);
+                self.ta_store(&info, idx, &value)?;
                 return Ok(());
             }
         }

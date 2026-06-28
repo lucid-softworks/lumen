@@ -553,8 +553,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             let (bv, bp) = make_array_buffer(i, len * es);
             let info = TaInfo { buffer: bp, offset: 0, len, kind };
             for (idx, item) in items.iter().enumerate() {
-                let n = ab(i.to_number(item))?;
-                i.ta_write(&info, idx, n);
+                ab(i.ta_store(&info, idx, item))?;
             }
             (bv, bp, 0, len)
         }
@@ -592,8 +591,7 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         Vec::new()
     };
     for (k, item) in items.iter().enumerate() {
-        let n = ab(i.to_number(item))?;
-        i.ta_write(&info, offset + k, n);
+        ab(i.ta_store(&info, offset + k, item))?;
     }
     Ok(Value::Undefined)
 }
@@ -638,6 +636,8 @@ ta_ctor!(ta_ctor_i32, TaKind::I32);
 ta_ctor!(ta_ctor_u32, TaKind::U32);
 ta_ctor!(ta_ctor_f32, TaKind::F32);
 ta_ctor!(ta_ctor_f64, TaKind::F64);
+ta_ctor!(ta_ctor_i64, TaKind::I64);
+ta_ctor!(ta_ctor_u64, TaKind::U64);
 
 fn install_typed_arrays(it: &mut Interp) {
     install_array_buffer(it);
@@ -663,7 +663,7 @@ fn install_typed_arrays(it: &mut Interp) {
     it.def_method(&ta_proto, "set", 1, ta_set);
     it.def_method(&ta_proto, "subarray", 2, ta_subarray);
 
-    let kinds: [(TaKind, NativeFn); 9] = [
+    let kinds: [(TaKind, NativeFn); 11] = [
         (TaKind::I8, ta_ctor_i8),
         (TaKind::U8, ta_ctor_u8),
         (TaKind::U8Clamped, ta_ctor_u8c),
@@ -673,6 +673,8 @@ fn install_typed_arrays(it: &mut Interp) {
         (TaKind::U32, ta_ctor_u32),
         (TaKind::F32, ta_ctor_f32),
         (TaKind::F64, ta_ctor_f64),
+        (TaKind::I64, ta_ctor_i64),
+        (TaKind::U64, ta_ctor_u64),
     ];
     for (kind, ctor_fn) in kinds {
         let proto = Object::new(Some(ta_proto.clone()));

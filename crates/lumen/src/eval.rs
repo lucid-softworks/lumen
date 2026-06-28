@@ -1572,6 +1572,33 @@ impl Interp {
         Ok(Value::BigInt(v))
     }
 
+    /// ToBigInt: BigInt stays; Boolean → 0n/1n; String parses (SyntaxError if malformed); Number /
+    /// undefined / null / Symbol throw TypeError.
+    pub(crate) fn to_bigint(&mut self, v: &Value) -> Result<i128, Abrupt> {
+        let p = self.to_primitive(v, Hint::Number)?;
+        match p {
+            Value::BigInt(n) => Ok(n),
+            Value::Bool(b) => Ok(b as i128),
+            Value::Str(s) => {
+                let t = s.trim();
+                let parsed = if t.is_empty() {
+                    Some(0)
+                } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    i128::from_str_radix(h, 16).ok()
+                } else if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+                    i128::from_str_radix(o, 8).ok()
+                } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+                    i128::from_str_radix(b, 2).ok()
+                } else {
+                    t.parse::<i128>().ok()
+                };
+                parsed.ok_or_else(|| self.throw("SyntaxError", "Cannot convert string to a BigInt"))
+            }
+            Value::Num(_) => Err(self.throw("TypeError", "Cannot convert a Number to a BigInt")),
+            _ => Err(self.throw("TypeError", "Cannot convert value to a BigInt")),
+        }
+    }
+
     fn compare(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
         let lp = self.to_primitive(&l, Hint::Number)?;
         let rp = self.to_primitive(&r, Hint::Number)?;

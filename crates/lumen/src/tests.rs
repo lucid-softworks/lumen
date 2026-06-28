@@ -469,3 +469,13 @@ fn unicode_ident_escapes() {
     assert_eq!(run("var \\u{61}\\u{62} = 9; ab"), "9");
     assert_eq!(run("var obj = {}; obj.\\u0078 = 3; obj.x"), "3");
 }
+
+#[test]
+fn bigint_typed_arrays() {
+    assert_eq!(run("var a = new BigInt64Array(3); a[0] = 5n; a[1] = -2n; a[0] + a[1]"), "3");
+    assert_eq!(run("typeof BigInt64Array"), "function");
+    assert_eq!(run("var a = new BigUint64Array([1n, 2n, 3n]); a.length"), "3");
+    assert_eq!(run("var a = new BigInt64Array([10n]); typeof a[0]"), "bigint");
+    assert_eq!(run("var a = new BigUint64Array(1); a[0] = -1n; a[0]"), "18446744073709551615");
+    assert_eq!(run("new BigInt64Array(2).BYTES_PER_ELEMENT"), "8");
+}
