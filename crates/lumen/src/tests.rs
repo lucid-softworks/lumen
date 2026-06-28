@@ -1005,3 +1005,13 @@ fn typed_array_intrinsic() {
     assert_eq!(run("new Int8Array([1,2,3]).at(-1)"), "3");
     assert_eq!(run("Object.getPrototypeOf(Int8Array)[Symbol.species]===Int8Array.constructor||true"), "true");
 }
+#[test]
+fn ta_returns_ta() {
+    assert_eq!(run("new Int8Array([1,2,3]).map(x=>x*2).constructor.name"), "Int8Array");
+    assert_eq!(run("new Int8Array([1,2,3]).map(x=>x*2).join(',')"), "2,4,6");
+    assert_eq!(run("new Uint8Array([1,2,3,4]).filter(x=>x%2===0).join(',')"), "2,4");
+    assert_eq!(run("new Int16Array([1,2,3]).slice(1).constructor.name"), "Int16Array");
+    assert_eq!(run("new Int8Array([1,2,3]).slice(1).join(',')"), "2,3");
+    assert_eq!(run("new Float64Array([1.5,2.5]).map(x=>x).join(',')"), "1.5,2.5");
+    assert_eq!(run("new Int8Array([3,1,2]).toSorted().constructor.name"), "Int8Array");
+}

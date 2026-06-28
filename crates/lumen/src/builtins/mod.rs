@@ -852,7 +852,16 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         return Err(i.make_error("TypeError", "method called on a non-TypedArray receiver"));
     }
     let f = it_array_method(i, method);
-    ab(i.call(f, this.clone(), args))
+    let result = ab(i.call(f, this.clone(), args))?;
+    // Methods that produce a new collection return a TypedArray of the receiver's kind, not a plain
+    // Array: build it via the receiver's constructor from the delegated result.
+    if matches!(method, "map" | "filter" | "slice" | "toReversed" | "toSorted" | "with") {
+        let ctor = ab(i.get_member(this, "constructor"))?;
+        if ctor.is_callable() {
+            return ab(i.construct(ctor, &[result]));
+        }
+    }
+    Ok(result)
 }
 fn it_array_method(i: &Interp, method: &str) -> Value {
     i.array_proto.borrow().props.get(method).map(|p| p.value.clone()).unwrap_or(Value::Undefined)
