@@ -591,3 +591,11 @@ fn temporal_tostring_options() {
     assert_eq!(run("new Temporal.PlainDate(2021,7,15).toString({calendarName:'always'})"), "2021-07-15[u-ca=iso8601]");
     assert_eq!(run("new Temporal.PlainDate(2021,7,15).toString()"), "2021-07-15");
 }
+
+#[test]
+fn temporal_duration_round_relative() {
+    // P1Y rounded to months relative to 2021-01-01 = 12 months.
+    assert_eq!(run("Temporal.Duration.from({years:1}).round({largestUnit:'month', relativeTo:'2021-01-01'}).months"), "12");
+    assert_eq!(run("Temporal.Duration.from({months:13}).round({largestUnit:'year', relativeTo:'2021-01-01'}).years"), "1");
+    assert_eq!(run("Temporal.Duration.from({days:40}).round({largestUnit:'month', relativeTo:'2021-01-01'}).months"), "1");
+}

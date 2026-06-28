@@ -839,6 +839,44 @@ fn add_to_date(i: &mut Interp, d: IsoDate, dur: IsoDuration, sign: i64) -> Resul
     check_date(i, IsoDate { year: ny, month: nm, day: nd })
 }
 
+/// Add a duration's date part (years/months/weeks/days) to a date, clamping the day.
+fn add_date_dur(start: IsoDate, d: IsoDuration) -> IsoDate {
+    let total_months = start.year * 12 + (start.month as i64 - 1) + d.years * 12 + d.months;
+    let (y, m) = balance_year_month(total_months / 12, total_months % 12 + 1);
+    let day = start.day.min(days_in_month(y, m));
+    let z = days_from_civil(y, m as i64, day as i64) + d.weeks * 7 + d.days;
+    let (ny, nm, nd) = civil_from_days(z);
+    IsoDate { year: ny, month: nm, day: nd }
+}
+/// Add a full duration (date + time) to a midnight-anchored start date.
+fn add_full_duration(start: IsoDate, d: IsoDuration) -> (IsoDate, IsoTime) {
+    let nd = add_date_dur(start, d);
+    let tns = duration_time_ns(d);
+    let carry = tns.div_euclid(86_400_000_000_000);
+    let rem = tns.rem_euclid(86_400_000_000_000);
+    let z = epoch_days(nd) as i128 + carry;
+    let (y, m, da) = civil_from_days(z as i64);
+    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+}
+/// Read the `relativeTo` option as an anchor date, if present.
+fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Value> {
+    if matches!(opts, Value::Undefined | Value::Str(_)) {
+        return Ok(None);
+    }
+    let v = getm(i, opts, "relativeTo")?;
+    match get(i, &v) {
+        Some(Temporal::Date(d)) | Some(Temporal::DateTime(d, _)) => return Ok(Some(d)),
+        Some(Temporal::Zoned { epoch_ns, offset_ns, .. }) => {
+            return Ok(Some(zoned_local(epoch_ns, offset_ns).0))
+        }
+        _ => {}
+    }
+    match v {
+        Value::Undefined => Ok(None),
+        _ => Ok(Some(to_date(i, &v)?)),
+    }
+}
+
 /// Add a duration to a date+time, carrying the time overflow into the date.
 fn dt_add(i: &mut Interp, d: IsoDate, t: IsoTime, dur: IsoDuration, sign: i64) -> Result<(IsoDate, IsoTime), Value> {
     let nd = add_to_date(i, d, dur, sign)?;
@@ -1471,43 +1509,95 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
-        if d.years != 0 || d.months != 0 || d.weeks != 0 {
-            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
-        }
         let o = arg(a, 0);
         let smallest = opt_str(i, &o, "smallestUnit", "nanosecond")?;
-        if unit_ns(&smallest).is_none() && smallest != "day" {
-            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
-        }
         let mut largest = opt_str(i, &o, "largestUnit", "auto")?;
-        if largest == "auto" {
-            largest = if d.days != 0 { "day".into() } else { "hour".into() };
-        }
-        if unit_ns(&largest).is_none() && largest != "day" {
-            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
-        }
         let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
-        let unit = if smallest == "day" { 86_400_000_000_000 } else { unit_ns(&smallest).unwrap() };
+        let has_cal = d.years != 0 || d.months != 0 || d.weeks != 0;
+        let cal_unit = |u: &str| matches!(u.strip_suffix('s').unwrap_or(u), "year" | "month" | "week");
+
+        if has_cal || cal_unit(&smallest) || cal_unit(&largest) {
+            // Calendar rounding needs a reference point. With one, balance via the resulting date.
+            let start = read_relative_to(i, &o)?
+                .ok_or_else(|| i.make_error("RangeError", "rounding a calendar duration requires relativeTo"))?;
+            if largest == "auto" {
+                largest = if d.years != 0 {
+                    "year".into()
+                } else if d.months != 0 {
+                    "month".into()
+                } else if d.weeks != 0 {
+                    "week".into()
+                } else if d.days != 0 {
+                    "day".into()
+                } else {
+                    "hour".into()
+                };
+            }
+            let (end_date, end_time) = add_full_duration(start, d);
+            let mut result = diff_date(start, end_date, &largest);
+            result.hours = end_time.hour as i64;
+            result.minutes = end_time.minute as i64;
+            result.seconds = end_time.second as i64;
+            result.ms = end_time.ms as i64;
+            result.us = end_time.us as i64;
+            result.ns = end_time.ns as i64;
+            // Round the time portion when the smallest unit is sub-day.
+            if let Some(u) = unit_ns(smallest.strip_suffix('s').unwrap_or(&smallest)) {
+                let tns = duration_time_ns(result);
+                let rounded = round_ns(tns, u * incr, &mode);
+                let balanced = balance_ns(rounded, "hour");
+                result.hours = balanced.hours;
+                result.minutes = balanced.minutes;
+                result.seconds = balanced.seconds;
+                result.ms = balanced.ms;
+                result.us = balanced.us;
+                result.ns = balanced.ns;
+            }
+            return Ok(make(i, "Temporal.Duration", Temporal::Duration(result)));
+        }
+
+        if unit_ns(smallest.strip_suffix('s').unwrap_or(&smallest)).is_none() && smallest != "day" {
+            return Err(i.make_error("RangeError", "invalid smallestUnit"));
+        }
+        if largest == "auto" {
+            largest = if d.days != 0 { "day".into() } else { "hour".into() };
+        }
+        let unit = if smallest == "day" {
+            86_400_000_000_000
+        } else {
+            unit_ns(smallest.strip_suffix('s').unwrap_or(&smallest)).unwrap()
+        };
         let total = d.days as i128 * 86_400_000_000_000 + duration_time_ns(d);
         let rounded = round_ns(total, unit * incr, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(rounded, &largest))))
     });
     it.def_method(&proto, "total", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
-        let unit = opt_str(i, &arg(a, 0), "unit", "")?;
+        let o = arg(a, 0);
+        let unit = opt_str(i, &o, "unit", "")?;
         if unit.is_empty() {
             return Err(i.make_error("RangeError", "unit is required"));
         }
-        if d.years != 0 || d.months != 0 || d.weeks != 0 {
-            return Err(i.make_error("RangeError", "total of a calendar duration requires relativeTo"));
-        }
-        let total_ns = d.days as i128 * 86_400_000_000_000 + duration_time_ns(d);
-        let u = if unit == "day" {
-            86_400_000_000_000i128
+        let unit_s = unit.strip_suffix('s').unwrap_or(&unit);
+        let has_cal = d.years != 0 || d.months != 0 || d.weeks != 0;
+        // Calendar units in the duration or unit need a reference point to total against.
+        let total_ns = if has_cal || matches!(unit_s, "year" | "month" | "week") {
+            let start = read_relative_to(i, &o)?
+                .ok_or_else(|| i.make_error("RangeError", "total of a calendar duration requires relativeTo"))?;
+            if matches!(unit_s, "year" | "month") {
+                return Err(i.make_error("RangeError", "year/month totals are not supported"));
+            }
+            let (ed, et) = add_full_duration(start, d);
+            dt_ns(ed, et) - dt_ns(start, IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 })
         } else {
-            unit_ns(&unit).ok_or_else(|| i.make_error("RangeError", "invalid unit"))?
+            d.days as i128 * 86_400_000_000_000 + duration_time_ns(d)
+        };
+        let u = match unit_s {
+            "day" => 86_400_000_000_000i128,
+            "week" => 7 * 86_400_000_000_000i128,
+            _ => unit_ns(unit_s).ok_or_else(|| i.make_error("RangeError", "invalid unit"))?,
         };
         Ok(Value::Num(total_ns as f64 / u as f64))
     });
@@ -1536,11 +1626,19 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_duration(i, &arg(a, 0))?;
         let y = to_duration(i, &arg(a, 1))?;
-        if x.years != 0 || x.months != 0 || x.weeks != 0 || y.years != 0 || y.months != 0 || y.weeks != 0 {
-            return Err(i.make_error("RangeError", "comparing calendar durations requires relativeTo"));
-        }
-        let xn = x.days as i128 * 86_400_000_000_000 + duration_time_ns(x);
-        let yn = y.days as i128 * 86_400_000_000_000 + duration_time_ns(y);
+        let has_cal = x.years != 0 || x.months != 0 || x.weeks != 0 || y.years != 0 || y.months != 0 || y.weeks != 0;
+        let (xn, yn) = if has_cal {
+            let start = read_relative_to(i, &arg(a, 2))?
+                .ok_or_else(|| i.make_error("RangeError", "comparing calendar durations requires relativeTo"))?;
+            let (xd, xt) = add_full_duration(start, x);
+            let (yd, yt) = add_full_duration(start, y);
+            (dt_ns(xd, xt), dt_ns(yd, yt))
+        } else {
+            (
+                x.days as i128 * 86_400_000_000_000 + duration_time_ns(x),
+                y.days as i128 * 86_400_000_000_000 + duration_time_ns(y),
+            )
+        };
         Ok(Value::Num(xn.cmp(&yn) as i64 as f64))
     });
 }
