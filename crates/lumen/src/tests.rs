@@ -407,3 +407,16 @@ fn strict_mode_assignment() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+

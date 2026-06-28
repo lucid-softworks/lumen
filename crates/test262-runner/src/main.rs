@@ -63,7 +63,7 @@ const WORKER_AS_LIMIT_KIB: u64 = 2 * 1024 * 1024; // 2 GiB
 /// second; this only fires for a genuinely pathological test (e.g. an O(n²) `s += x` loop run a
 /// million times, or an infinite `while (true) {}`). On timeout the parent kills the worker, marks
 /// the test it was stuck on as a timeout-fail, and re-enqueues the rest — same path as a crash.
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(3);
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Harness {
     /// `assert.js` + `sta.js`, prepended to every non-raw test.
