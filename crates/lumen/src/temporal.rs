@@ -718,23 +718,24 @@ fn epoch_days(d: IsoDate) -> i64 {
 fn opt_str(i: &mut Interp, opts: &Value, key: &str, default: &str) -> Result<String, Value> {
     match opts {
         Value::Undefined => Ok(default.to_string()),
-        Value::Str(s) => Ok(s.to_string()),
-        _ => {
+        Value::Obj(_) => {
             let v = getm(i, opts, key)?;
             match v {
                 Value::Undefined => Ok(default.to_string()),
                 _ => Ok(i.to_string(&v).map_err(unab)?.to_string()),
             }
         }
+        _ => Err(i.make_error("TypeError", "options must be an object")),
     }
 }
 fn opt_num(i: &mut Interp, opts: &Value, key: &str, default: i64) -> Result<i64, Value> {
     match opts {
-        Value::Undefined | Value::Str(_) => Ok(default),
-        _ => {
+        Value::Undefined => Ok(default),
+        Value::Obj(_) => {
             let v = getm(i, opts, key)?;
             to_int_default(i, &v, default)
         }
+        _ => Err(i.make_error("TypeError", "options must be an object")),
     }
 }
 /// Nanoseconds per time unit, or None for calendar units.
