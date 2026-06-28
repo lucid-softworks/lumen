@@ -1223,3 +1223,21 @@ fn template_octal_escape() {
     assert_eq!(run("`hi ${1+1}`"), "hi 2");
     assert_eq!(run("`\\t`.length"), "1");
 }
+#[test]
+fn for_of_member_target() {
+    assert_eq!(run("var o={}; for (o.p of [1,2,3]); o.p"), "3");
+    assert_eq!(run("var o={}; for (o['k'] of [9]); o.k"), "9");
+    assert_eq!(run("var a=[]; for ([a[0]] of [[5]]); a[0]"), "5");
+    assert_eq!(run("var o={}; for (o.x in {a:1,b:2}); o.x"), "b");
+    assert_eq!(run("var x; var s=''; for (x in {a:1,b:2}) s+=x; s"), "ab");
+    assert_eq!(run("var o={}; [o.p]=[7]; o.p"), "7");
+}
+#[test]
+fn for_head_no_in() {
+    assert_eq!(run("var x; for (x in {a:1}); x"), "a");
+    assert_eq!(run("for (var i=('x' in {x:1})?0:5; i<1; i++); i"), "1"); // `in` allowed in parens
+    assert_eq!(run("var a={b:1}; for (var k=[('b' in a)]; false;); k[0]"), "true"); // in inside []
+    assert_eq!(run("var r=0; for (var i of [1,2,3]) r+=i; r"), "6");
+    assert_eq!(run("var c=0; for (var k in {a:1,b:2,c:3}) c++; c"), "3");
+    assert_eq!(run("'q' in {q:1}"), "true");
+}

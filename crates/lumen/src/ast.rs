@@ -89,6 +89,9 @@ pub enum Pattern {
     Array(Vec<ArrayPatElem>),
     /// `{ a, b: x = 1, ...rest }`.
     Object(ObjectPat),
+    /// A member-expression assignment target (`o.p`, `o[k]`) — only valid in assignment-style
+    /// destructuring / `for (o.p of …)`, never in a declaration.
+    Member(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]

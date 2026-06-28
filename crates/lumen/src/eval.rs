@@ -122,6 +122,8 @@ impl Interp {
                 }
                 Ok(())
             }
+            // A member target (`o.p`/`o[k]`): assign to it (never a declaration).
+            Pattern::Member(target) => self.assign_to_target(target, value, env),
         }
     }
 

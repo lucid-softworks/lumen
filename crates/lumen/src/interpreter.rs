@@ -75,6 +75,7 @@ pub fn pattern_idents(pat: &Pattern, out: &mut Vec<String>) {
                 out.push(r.clone());
             }
         }
+        Pattern::Member(_) => {}
     }
 }
 

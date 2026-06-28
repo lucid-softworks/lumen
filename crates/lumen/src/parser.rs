@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -35,6 +35,9 @@ struct Parser {
     /// `yield` / `await` are keywords here.
     in_generator: bool,
     in_async: bool,
+    /// Suppress `in` as a binary operator (the `[NoIn]` grammar productions in a `for` head, before
+    /// `in`/`of` is reached). Reset inside any bracketed/parenthesized sub-expression.
+    no_in: bool,
     /// Context depths for early-error checks: `return` requires a function, `continue` an iteration,
     /// `break` an iteration or switch.
     fn_depth: u32,
@@ -664,10 +667,24 @@ impl Parser {
         }
     }
 
+    /// Parse a sub-expression with `in` re-enabled (inside brackets/parens/args, where the for-head
+    /// `[NoIn]` restriction no longer applies).
+    fn parse_expr_allow_in(&mut self) -> Result<Expr, ParseError> {
+        let saved = self.no_in;
+        self.no_in = false;
+        let e = self.parse_expr();
+        self.no_in = saved;
+        e
+    }
+
     fn parse_expr_no_in(&mut self) -> Result<Expr, ParseError> {
-        // `in` only matters inside the relational level; for the for-head we just parse a single
-        // assignment expression, which is enough to detect `in`/`of` at the top.
-        self.parse_assign()
+        // Parse the for-head initializer with `in` suppressed at the top level, so a bare
+        // `for (x in obj)` detects the `in` keyword instead of consuming it as an operator.
+        let saved = self.no_in;
+        self.no_in = true;
+        let e = self.parse_expr();
+        self.no_in = saved;
+        e
     }
 
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
@@ -753,6 +770,8 @@ impl Parser {
         let op = match self.cur() {
             Tok::Punct(p) => *p,
             Tok::Keyword("instanceof") => "instanceof",
+            // `in` is not an operator in a `[NoIn]` context (the head of a `for` statement).
+            Tok::Keyword("in") if self.no_in => return None,
             Tok::Keyword("in") => "in",
             _ => return None,
         };
@@ -852,7 +871,7 @@ impl Parser {
                 let name = self.parse_property_name_ident()?;
                 expr = Expr::Member { obj: Box::new(expr), prop: name, optional: false };
             } else if self.eat_punct("[") {
-                let index = self.parse_expr()?;
+                let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
                 expr = Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: false };
             } else if self.eat_punct("?.") {
@@ -860,7 +879,7 @@ impl Parser {
                     let args = self.parse_args()?;
                     expr = Expr::Call { callee: Box::new(expr), args };
                 } else if self.eat_punct("[") {
-                    let index = self.parse_expr()?;
+                    let index = self.parse_expr_allow_in()?;
                     self.expect_punct("]")?;
                     expr =
                         Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: true };
@@ -896,7 +915,7 @@ impl Parser {
                 let name = self.parse_property_name_ident()?;
                 base = Expr::Member { obj: Box::new(base), prop: name, optional: false };
             } else if self.eat_punct("[") {
-                let index = self.parse_expr()?;
+                let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
                 base = Expr::Index { obj: Box::new(base), index: Box::new(index), optional: false };
             } else {
@@ -908,6 +927,8 @@ impl Parser {
 
     fn parse_args(&mut self) -> Result<Vec<ArrayElem>, ParseError> {
         self.expect_punct("(")?;
+        let saved = self.no_in;
+        self.no_in = false; // arguments are a fresh expression context
         let mut args = Vec::new();
         while !self.is_punct(")") {
             if self.eat_punct("...") {
@@ -919,6 +940,7 @@ impl Parser {
                 break;
             }
         }
+        self.no_in = saved;
         self.expect_punct(")")?;
         Ok(args)
     }
@@ -1007,7 +1029,7 @@ impl Parser {
             }
             Tok::Punct("(") => {
                 self.advance();
-                let e = self.parse_expr()?;
+                let e = self.parse_expr_allow_in()?;
                 self.expect_punct(")")?;
                 Ok(e)
             }
@@ -1028,7 +1050,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
                     sub.parse_expr()?
                 }
             };
@@ -1044,6 +1066,8 @@ impl Parser {
 
     fn parse_array(&mut self) -> Result<Expr, ParseError> {
         self.expect_punct("[")?;
+        let saved = self.no_in;
+        self.no_in = false;
         let mut elems = Vec::new();
         while !self.is_punct("]") {
             if self.is_punct(",") {
@@ -1060,12 +1084,15 @@ impl Parser {
                 break;
             }
         }
+        self.no_in = saved;
         self.expect_punct("]")?;
         Ok(Expr::Array(elems))
     }
 
     fn parse_object(&mut self) -> Result<Expr, ParseError> {
         self.expect_punct("{")?;
+        let saved = self.no_in;
+        self.no_in = false;
         let mut props = Vec::new();
         let mut proto_seen = false;
         while !self.is_punct("}") {
@@ -1150,6 +1177,7 @@ impl Parser {
                 break;
             }
         }
+        self.no_in = saved;
         self.expect_punct("}")?;
         Ok(Expr::Object(props))
     }
@@ -1545,6 +1573,7 @@ fn pattern_names(pat: &Pattern, out: &mut Vec<String>) {
                 out.push(r.clone());
             }
         }
+        Pattern::Member(_) => {} // an assignment target binds no new names
     }
 }
 fn param_names(params: &[Param]) -> Vec<String> {
@@ -1624,6 +1653,10 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                 }
             }
             Some(Pattern::Object(pat))
+        }
+        // A member expression (`o.p` / `o[k]`) is a valid assignment target.
+        Expr::Member { optional: false, .. } | Expr::Index { optional: false, .. } => {
+            Some(Pattern::Member(Box::new(e.clone())))
         }
         _ => None,
     }
