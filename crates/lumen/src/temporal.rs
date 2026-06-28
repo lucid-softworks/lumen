@@ -467,6 +467,15 @@ pub fn install(it: &mut Interp) {
     install_instant(it, &ns);
     install_zoned(it, &ns);
     install_now(it, &ns);
+    // toLocaleString aliases toString (lumen has no Intl).
+    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Duration", "Instant", "ZonedDateTime"] {
+        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
+            let ts = proto.borrow().props.get("toString").cloned();
+            if let Some(p) = ts {
+                proto.borrow_mut().props.insert("toLocaleString", p);
+            }
+        }
+    }
     it.global.borrow_mut().props.insert("Temporal", Property::builtin(Value::Obj(ns)));
 }
 
@@ -779,9 +788,9 @@ fn to_date(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
         Value::Str(s) => parse_date_str(s).ok_or_else(|| i.make_error("RangeError", "invalid date string")),
         Value::Obj(_) => {
             let year = field_req(i, v, "year")?;
-            let month = field_month(i, v)?;
-            let day = field_req(i, v, "day")?;
-            check_date(i, IsoDate { year, month: month as u8, day: day as u8 })
+            let month = field_month(i, v)?.clamp(1, 12) as u8;
+            let day = field_req(i, v, "day")?.clamp(1, days_in_month(year, month) as i64) as u8;
+            Ok(IsoDate { year, month, day })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDate")),
     }
@@ -1336,8 +1345,8 @@ fn to_yearmonth(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
         }
         Value::Obj(_) => {
             let year = field_req(i, v, "year")?;
-            let month = field_month(i, v)?;
-            Ok(IsoDate { year, month: month as u8, day: 1 })
+            let month = field_month(i, v)?.clamp(1, 12) as u8;
+            Ok(IsoDate { year, month, day: 1 })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainYearMonth")),
     }
@@ -1390,9 +1399,9 @@ fn to_monthday(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
             Ok(IsoDate { year: 1972, month: m, day: d })
         }
         Value::Obj(_) => {
-            let month = field_month(i, v)?;
-            let day = field_req(i, v, "day")?;
-            Ok(IsoDate { year: 1972, month: month as u8, day: day as u8 })
+            let month = field_month(i, v)?.clamp(1, 12) as u8;
+            let day = field_req(i, v, "day")?.clamp(1, days_in_month(1972, month) as i64) as u8;
+            Ok(IsoDate { year: 1972, month, day })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainMonthDay")),
     }
