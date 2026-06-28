@@ -1512,3 +1512,14 @@ fn modules_basic() {
     }).unwrap();
     assert_eq!(match e2.eval("globalThis.__r2", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "10number"); // 5+5+number
 }
+#[test]
+fn modules_live_bindings() {
+    use std::collections::HashMap;
+    let mut files: HashMap<String, String> = HashMap::new();
+    files.insert("/counter.js".into(), "export let count = 0; export function inc(){ count++; }".into());
+    files.insert("/main.js".into(), "import {count, inc} from '/counter.js'; import * as ns from '/counter.js'; inc(); inc(); globalThis.__r = count + ':' + ns.count;".into());
+    let f = files.clone();
+    let mut e = Engine::new();
+    e.eval_module(&f["/main.js"].clone(), "/main.js", move |spec,_r| f.get(spec).map(|s|(spec.to_string(),s.clone()))).unwrap();
+    assert_eq!(match e.eval("globalThis.__r", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "2:2");
+}

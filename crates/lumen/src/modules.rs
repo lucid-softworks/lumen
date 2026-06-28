@@ -6,8 +6,9 @@
 //! (`Interp::module_loader`) so the engine stays filesystem-agnostic.
 
 use crate::ast::*;
-use crate::interpreter::{new_scope, Abrupt, Env, Interp};
+use crate::interpreter::{new_scope, Abrupt, Binding, Env, Interp};
 use crate::value::{Object, Property, Value};
+use std::rc::Rc;
 
 impl Interp {
     /// Parse + evaluate a module identified by canonical `key`, returning its namespace object.
@@ -76,9 +77,16 @@ impl Interp {
 
     /// Bind a module's import specifiers into its scope (snapshotting the dependency's exports).
     fn bind_imports(&mut self, specs: &[ImportSpec], dep_ns: &Value, env: &Env) -> Result<(), Abrupt> {
+        let dep_ptr = match dep_ns {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => 0,
+        };
         for spec in specs {
             match spec {
                 ImportSpec::Default(local) => {
+                    if self.bind_live(local, dep_ptr, "default", env) {
+                        continue;
+                    }
                     let v = self.get_member(dep_ns, "default")?;
                     self.declare_import_binding(local, v, env);
                 }
@@ -94,6 +102,9 @@ impl Interp {
                             format!("the requested module does not provide an export named '{imported}'"),
                         ));
                     }
+                    if self.bind_live(local, dep_ptr, imported, env) {
+                        continue;
+                    }
                     let v = self.get_member(dep_ns, imported)?;
                     self.declare_import_binding(local, v, env);
                 }
@@ -102,11 +113,26 @@ impl Interp {
         Ok(())
     }
 
+    /// Bind `local` as a live alias of the dependency's `exported` name, if that name is a direct
+    /// export (so reassignments in the exporter are observed). Returns whether it was bound live.
+    fn bind_live(&self, local: &str, dep_ptr: usize, exported: &str, env: &Env) -> bool {
+        if let Some((dep_env, map)) = self.module_ns.get(&dep_ptr) {
+            if let Some(src_local) = map.get(exported) {
+                let binding = Binding {
+                    value: Value::Undefined,
+                    mutable: false,
+                    initialized: true,
+                    import_ref: Some((dep_env.clone(), src_local.clone())),
+                };
+                env.borrow_mut().vars.insert(local.to_string(), binding);
+                return true;
+            }
+        }
+        false
+    }
+
     fn declare_import_binding(&self, name: &str, value: Value, env: &Env) {
-        env.borrow_mut().vars.insert(
-            name.to_string(),
-            crate::interpreter::Binding { value, mutable: false, initialized: true },
-        );
+        env.borrow_mut().vars.insert(name.to_string(), Binding::data(value, false, true));
     }
 
     /// Build the module namespace: one data property per export name, in sorted order.
@@ -118,21 +144,26 @@ impl Interp {
         ns: &crate::value::Gc,
     ) -> Result<(), Abrupt> {
         let mut entries: Vec<(String, Value)> = Vec::new();
+        // Direct exports map `export name → local name` for live namespace reads.
+        let mut export_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for stmt in body {
             match stmt {
                 Stmt::ExportDecl(inner) => {
                     for name in exported_decl_names(inner) {
                         let v = self.get_var(&name, env).unwrap_or(Value::Undefined);
+                        export_map.insert(name.clone(), name.clone());
                         entries.push((name, v));
                     }
                 }
                 Stmt::ExportDefault(inner) => {
-                    let v = match &**inner {
-                        Stmt::FuncDecl(f) => f.name.as_ref().and_then(|n| self.get_var(n, env).ok()),
-                        Stmt::ClassDecl(c) => c.name.as_ref().and_then(|n| self.get_var(n, env).ok()),
-                        _ => self.get_var("*default*", env).ok(),
+                    let local = match &**inner {
+                        Stmt::FuncDecl(f) if f.name.is_some() => f.name.clone().unwrap(),
+                        Stmt::ClassDecl(c) if c.name.is_some() => c.name.clone().unwrap(),
+                        _ => "*default*".to_string(),
                     };
-                    entries.push(("default".to_string(), v.unwrap_or(Value::Undefined)));
+                    let v = self.get_var(&local, env).unwrap_or(Value::Undefined);
+                    export_map.insert("default".to_string(), local);
+                    entries.push(("default".to_string(), v));
                 }
                 Stmt::ExportNamed { specs, source } => {
                     for spec in specs {
@@ -141,7 +172,10 @@ impl Interp {
                                 let dep = self.resolve_and_load(src, key)?;
                                 self.get_member(&dep, &spec.local)?
                             }
-                            None => self.get_var(&spec.local, env).unwrap_or(Value::Undefined),
+                            None => {
+                                export_map.insert(spec.exported.clone(), spec.local.clone());
+                                self.get_var(&spec.local, env).unwrap_or(Value::Undefined)
+                            }
                         };
                         entries.push((spec.exported.clone(), v));
                     }
@@ -174,6 +208,8 @@ impl Interp {
             ns.borrow_mut().props.insert(name.as_str(), Property::data(value, false, true, false));
         }
         ns.borrow_mut().extensible = false;
+        // Register the live state so namespace reads of direct exports stay current.
+        self.module_ns.insert(Rc::as_ptr(ns) as usize, (env.clone(), export_map));
         Ok(())
     }
 

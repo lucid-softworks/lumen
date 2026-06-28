@@ -24,6 +24,14 @@ pub struct Binding {
     pub mutable: bool,
     /// `false` while a `let`/`const` is in its temporal dead zone.
     pub initialized: bool,
+    /// A live module import: reads/writes redirect to `(exporter scope, local name)`.
+    pub import_ref: Option<(Env, String)>,
+}
+
+impl Binding {
+    pub fn data(value: Value, mutable: bool, initialized: bool) -> Binding {
+        Binding { value, mutable, initialized, import_ref: None }
+    }
 }
 
 pub fn new_scope(parent: Option<Env>) -> Env {
@@ -159,6 +167,9 @@ pub struct Interp {
     /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
     #[allow(clippy::type_complexity)]
     pub module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
+    /// Live module-namespace state keyed by the namespace object's pointer: the module's scope plus
+    /// its `export name → local name` map (for direct exports), so namespace reads stay live.
+    pub module_ns: HashMap<usize, (Env, HashMap<String, String>)>,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
     pub map_data: HashMap<usize, Vec<(Value, Value)>>,
@@ -279,6 +290,7 @@ impl Interp {
             import_meta: None,
             modules: std::collections::HashMap::new(),
             module_loader: None,
+            module_ns: HashMap::new(),
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
@@ -298,7 +310,7 @@ impl Interp {
         let g = Value::Obj(interp.global.clone());
         interp.global_env.borrow_mut().vars.insert(
             "this".to_string(),
-            Binding { value: g, mutable: false, initialized: true },
+            Binding { value: g, mutable: false, initialized: true, import_ref: None },
         );
         interp
     }
@@ -556,6 +568,15 @@ impl Interp {
                     if let Ok(i) = key.parse::<usize>() {
                         if let Some(c) = s.chars().nth(i) {
                             return Ok(Value::from_string(c.to_string()));
+                        }
+                    }
+                }
+                // Module namespace: direct exports read live from the module's scope.
+                if !self.module_ns.is_empty() {
+                    if let Some((mod_env, map)) = self.module_ns.get(&ptr) {
+                        if let Some(local) = map.get(key) {
+                            let (mod_env, local) = (mod_env.clone(), local.clone());
+                            return self.get_var(&local, &mod_env);
                         }
                     }
                 }
@@ -994,20 +1015,20 @@ impl Interp {
             };
             scope.borrow_mut().vars.insert(
                 "this".to_string(),
-                Binding { value: this_val, mutable: false, initialized: true },
+                Binding { value: this_val, mutable: false, initialized: true, import_ref: None },
             );
             // A minimal `arguments` array (not the live mapped object).
             let args_arr = self.make_array(args.to_vec());
             scope.borrow_mut().vars.insert(
                 "arguments".to_string(),
-                Binding { value: args_arr, mutable: true, initialized: true },
+                Binding { value: args_arr, mutable: true, initialized: true, import_ref: None },
             );
             // Expose the callee for named function expressions / recursion via `name`.
             if let Some(name) = &func.name {
                 if !scope.borrow().vars.contains_key(name) {
                     scope.borrow_mut().vars.insert(
                         name.clone(),
-                        Binding { value: Value::Obj(fn_obj.clone()), mutable: false, initialized: true },
+                        Binding { value: Value::Obj(fn_obj.clone()), mutable: false, initialized: true, import_ref: None },
                     );
                 }
             }
@@ -1227,7 +1248,7 @@ impl Interp {
                     scope
                         .borrow_mut()
                         .vars
-                        .insert(name.clone(), Binding { value: f, mutable: true, initialized: true });
+                        .insert(name.clone(), Binding { value: f, mutable: true, initialized: true, import_ref: None });
                 }
             }
         }
@@ -1253,7 +1274,7 @@ impl Interp {
                     let f = self.make_function(func.clone(), scope.clone());
                     scope.borrow_mut().vars.insert(
                         name.clone(),
-                        Binding { value: f, mutable: true, initialized: true },
+                        Binding { value: f, mutable: true, initialized: true, import_ref: None },
                     );
                 }
             }
@@ -1320,7 +1341,7 @@ impl Interp {
                         if !scope.borrow().vars.contains_key(&name) {
                             scope.borrow_mut().vars.insert(
                                 name,
-                                Binding { value: Value::Undefined, mutable: true, initialized: true },
+                                Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
                             );
                         }
                     }
@@ -1350,7 +1371,7 @@ impl Interp {
                             for name in names {
                                 scope.borrow_mut().vars.insert(
                                     name,
-                                    Binding { value: Value::Undefined, mutable: true, initialized: true },
+                                    Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
                                 );
                             }
                         }
@@ -1364,7 +1385,7 @@ impl Interp {
                 for name in names {
                     scope.borrow_mut().vars.insert(
                         name,
-                        Binding { value: Value::Undefined, mutable: true, initialized: true },
+                        Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
                     );
                 }
                 self.hoist_stmt(body, scope);

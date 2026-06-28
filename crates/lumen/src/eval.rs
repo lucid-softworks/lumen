@@ -164,7 +164,7 @@ impl Interp {
                         for name in names {
                             scope.borrow_mut().vars.insert(
                                 name,
-                                Binding { value: Value::Undefined, mutable: true, initialized: false },
+                                Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
                             );
                         }
                     }
@@ -174,7 +174,7 @@ impl Interp {
                         let f = self.make_function(func.clone(), scope.clone());
                         scope.borrow_mut().vars.insert(
                             name.clone(),
-                            Binding { value: f, mutable: true, initialized: true },
+                            Binding { value: f, mutable: true, initialized: true, import_ref: None },
                         );
                     }
                 }
@@ -183,7 +183,7 @@ impl Interp {
                         // Classes are lexically scoped with a TDZ until the declaration executes.
                         scope.borrow_mut().vars.insert(
                             name.clone(),
-                            Binding { value: Value::Undefined, mutable: true, initialized: false },
+                            Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
                         );
                     }
                 }
@@ -382,7 +382,7 @@ impl Interp {
                             for name in names {
                                 loop_env.borrow_mut().vars.insert(
                                     name,
-                                    Binding { value: Value::Undefined, mutable: true, initialized: false },
+                                    Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
                                 );
                             }
                         }
@@ -687,7 +687,7 @@ impl Interp {
     fn init_lexical(&mut self, name: &str, value: Value, is_const: bool, env: &Env) {
         env.borrow_mut().vars.insert(
             name.to_string(),
-            Binding { value, mutable: !is_const, initialized: true },
+            Binding { value, mutable: !is_const, initialized: true, import_ref: None },
         );
     }
 
@@ -715,6 +715,12 @@ impl Interp {
                             "ReferenceError",
                             format!("cannot access '{name}' before initialization"),
                         ));
+                    }
+                    // A live module import reads through to the exporter's binding.
+                    if let Some((src_env, local)) = &binding.import_ref {
+                        let (src_env, local) = (src_env.clone(), local.clone());
+                        drop(b);
+                        return self.get_var(&local, &src_env);
                     }
                     return Ok(binding.value.clone());
                 }
@@ -2424,7 +2430,7 @@ enum LoopStep {
 fn bind(env: &Env, name: &str, value: Value) {
     env.borrow_mut()
         .vars
-        .insert(name.to_string(), Binding { value, mutable: true, initialized: true });
+        .insert(name.to_string(), Binding { value, mutable: true, initialized: true, import_ref: None });
 }
 
 fn opt_obj(o: &Option<Gc>) -> Value {
