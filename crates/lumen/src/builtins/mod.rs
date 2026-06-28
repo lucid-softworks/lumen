@@ -1383,6 +1383,7 @@ ta_ctor!(ta_ctor_i16, TaKind::I16);
 ta_ctor!(ta_ctor_u16, TaKind::U16);
 ta_ctor!(ta_ctor_i32, TaKind::I32);
 ta_ctor!(ta_ctor_u32, TaKind::U32);
+ta_ctor!(ta_ctor_f16, TaKind::F16);
 ta_ctor!(ta_ctor_f32, TaKind::F32);
 ta_ctor!(ta_ctor_f64, TaKind::F64);
 ta_ctor!(ta_ctor_i64, TaKind::I64);
@@ -1428,7 +1429,7 @@ fn install_typed_arrays(it: &mut Interp) {
     it.def_method(&ta_ctor, "from", 1, ta_from);
     install_species(it, &ta_ctor);
 
-    let kinds: [(TaKind, NativeFn); 11] = [
+    let kinds: [(TaKind, NativeFn); 12] = [
         (TaKind::I8, ta_ctor_i8),
         (TaKind::U8, ta_ctor_u8),
         (TaKind::U8Clamped, ta_ctor_u8c),
@@ -1436,6 +1437,7 @@ fn install_typed_arrays(it: &mut Interp) {
         (TaKind::U16, ta_ctor_u16),
         (TaKind::I32, ta_ctor_i32),
         (TaKind::U32, ta_ctor_u32),
+        (TaKind::F16, ta_ctor_f16),
         (TaKind::F32, ta_ctor_f32),
         (TaKind::F64, ta_ctor_f64),
         (TaKind::I64, ta_ctor_i64),
@@ -6277,6 +6279,7 @@ fn install_math(it: &mut Interp) {
     unary!("acosh", f64::acosh);
     unary!("atanh", f64::atanh);
     unary!("fround", |x: f64| x as f32 as f64);
+    unary!("f16round", |x: f64| crate::value::f16_to_f32(crate::value::f32_to_f16(x as f32)) as f64);
     unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
     it.def_method(&math, "hypot", 2, |i, _t, a| {
         let mut sum = 0.0;

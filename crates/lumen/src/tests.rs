@@ -1422,3 +1422,22 @@ fn uint8_setfrom() {
     assert_eq!(run("var a=new Uint8Array(2); a.setFromHex('414243'); a.join(',')"), "65,66");
     assert_eq!(run("var a=new Uint8Array(3); a.setFromBase64('SGk='); a.join(',')"), "72,105,0");
 }
+#[test]
+fn float16_array() {
+    // f16 round-trip correctness against known values.
+    assert_eq!(run("Math.f16round(1)"), "1");
+    assert_eq!(run("Math.f16round(0.5)"), "0.5");
+    assert_eq!(run("Math.f16round(2)"), "2");
+    assert_eq!(run("Math.f16round(1.337)"), "1.3369140625");
+    assert_eq!(run("Math.f16round(1e10)"), "Infinity");
+    assert_eq!(run("Math.f16round(-0)"), "0"); // -0 prints as 0
+    assert_eq!(run("Object.is(Math.f16round(-0),-0)"), "true");
+    assert_eq!(run("typeof Float16Array"), "function");
+    assert_eq!(run("Float16Array.BYTES_PER_ELEMENT"), "2");
+    assert_eq!(run("new Float16Array([1,2,3]).length"), "3");
+    assert_eq!(run("new Float16Array([1.5,2.5])[1]"), "2.5");
+    assert_eq!(run("var a=new Float16Array(2); a[0]=1.337; a[0]"), "1.3369140625");
+    assert_eq!(run("new Float16Array([0.1])[0]"), "0.0999755859375");
+    assert_eq!(run("new Float16Array([65504])[0]"), "65504"); // max f16
+    assert_eq!(run("new Float16Array([NaN])[0]"), "NaN");
+}

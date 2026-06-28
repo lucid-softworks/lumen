@@ -176,6 +176,7 @@ pub enum TaKind {
     U16,
     I32,
     U32,
+    F16,
     F32,
     F64,
     I64,
@@ -186,7 +187,7 @@ impl TaKind {
     pub fn elsize(self) -> usize {
         match self {
             TaKind::I8 | TaKind::U8 | TaKind::U8Clamped => 1,
-            TaKind::I16 | TaKind::U16 => 2,
+            TaKind::I16 | TaKind::U16 | TaKind::F16 => 2,
             TaKind::I32 | TaKind::U32 | TaKind::F32 => 4,
             TaKind::F64 | TaKind::I64 | TaKind::U64 => 8,
         }
@@ -205,6 +206,7 @@ impl TaKind {
             TaKind::U16 => "Uint16Array",
             TaKind::I32 => "Int32Array",
             TaKind::U32 => "Uint32Array",
+            TaKind::F16 => "Float16Array",
             TaKind::F32 => "Float32Array",
             TaKind::F64 => "Float64Array",
             TaKind::I64 => "BigInt64Array",
@@ -232,6 +234,7 @@ impl TaKind {
             TaKind::U16 => u16::from_le_bytes([b[0], b[1]]) as f64,
             TaKind::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             TaKind::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            TaKind::F16 => f16_to_f32(u16::from_le_bytes([b[0], b[1]])) as f64,
             TaKind::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             TaKind::F64 => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
             TaKind::I64 | TaKind::U64 => self.read_bigint(b) as f64,
@@ -251,6 +254,7 @@ impl TaKind {
             TaKind::U16 => (int(n) as u16).to_le_bytes().to_vec(),
             TaKind::I32 => (int(n) as i32).to_le_bytes().to_vec(),
             TaKind::U32 => (int(n) as u32).to_le_bytes().to_vec(),
+            TaKind::F16 => f32_to_f16(n as f32).to_le_bytes().to_vec(),
             TaKind::F32 => (n as f32).to_le_bytes().to_vec(),
             TaKind::F64 => n.to_le_bytes().to_vec(),
             TaKind::I64 | TaKind::U64 => self.write_bigint(int(n) as i128),
@@ -405,4 +409,71 @@ pub fn set_data(obj: &Gc, key: &str, value: Value) {
 /// Convenience: define a non-enumerable builtin property by key/value.
 pub fn set_builtin(obj: &Gc, key: &str, value: Value) {
     obj.borrow_mut().props.insert(key, Property::builtin(value));
+}
+
+/// IEEE-754 half-precision (binary16) to single-precision conversion.
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = (h as u32 & 0x8000) << 16;
+    let exp = (h >> 10) & 0x1f;
+    let mant = (h & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign
+        } else {
+            // Subnormal: normalize into a single-precision normal number.
+            let mut e: i32 = -1;
+            let mut m = mant;
+            loop {
+                e += 1;
+                m <<= 1;
+                if m & 0x400 != 0 {
+                    break;
+                }
+            }
+            let m = m & 0x3ff;
+            sign | (((127 - 15 - e) as u32) << 23) | (m << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (mant << 13)
+    } else {
+        sign | (((exp as u32) + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
+/// IEEE-754 single-precision to half-precision (binary16), round-to-nearest-even.
+pub fn f32_to_f16(value: f32) -> u16 {
+    let x = value.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let mant = (x & 0x7f_ffff) as i32;
+    let exp = ((x >> 23) & 0xff) as i32;
+    if exp == 0xff {
+        return if mant != 0 { sign | 0x7e00 } else { sign | 0x7c00 };
+    }
+    let half_exp = exp - 127 + 15;
+    if half_exp >= 0x1f {
+        return sign | 0x7c00; // overflow → infinity
+    }
+    if half_exp <= 0 {
+        if half_exp < -10 {
+            return sign; // underflow → zero
+        }
+        // Subnormal: shift the implicit-1 mantissa, rounding to nearest even.
+        let m = mant | 0x80_0000;
+        let shift = 14 - half_exp;
+        let mut h = (m >> shift) as u16;
+        let round_bit = (m >> (shift - 1)) & 1;
+        let sticky = (m & ((1 << (shift - 1)) - 1)) != 0;
+        if round_bit != 0 && (sticky || (h & 1) != 0) {
+            h += 1;
+        }
+        return sign | h;
+    }
+    let mut h = (((half_exp as u32) << 10) | ((mant >> 13) as u32)) as u16;
+    let round_bit = (mant >> 12) & 1;
+    let sticky = (mant & 0xfff) != 0;
+    if round_bit != 0 && (sticky || (h & 1) != 0) {
+        h = h.wrapping_add(1); // carry into exponent is intentional
+    }
+    sign | h
 }
