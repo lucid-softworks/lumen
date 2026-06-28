@@ -1917,7 +1917,12 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
 fn install_promise(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Promise", proto.clone());
-    it.def_method(&proto, "then", 2, |i, this, a| Ok(i.promise_then(&this, arg(a, 0), arg(a, 1))));
+    it.def_method(&proto, "then", 2, |i, this, a| {
+        if map_ptr(&this).map(|p| i.promises.contains_key(&p)) != Some(true) {
+            return Err(i.make_error("TypeError", "Promise.prototype.then called on a non-Promise"));
+        }
+        Ok(i.promise_then(&this, arg(a, 0), arg(a, 1)))
+    });
     it.def_method(&proto, "catch", 1, |i, this, a| {
         Ok(i.promise_then(&this, Value::Undefined, arg(a, 0)))
     });
