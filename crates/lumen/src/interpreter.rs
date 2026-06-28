@@ -644,6 +644,15 @@ impl Interp {
             if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
                 return Err(self.throw("RangeError", "Invalid array length"));
             }
+            // A non-writable `length` (frozen/sealed array) rejects the change.
+            let len_writable =
+                obj.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+            if !len_writable {
+                if self.strict {
+                    return Err(self.throw("TypeError", "cannot assign to read-only property 'length'"));
+                }
+                return Ok(());
+            }
             let new_len = n as usize;
             let old_len = self.array_length(obj);
             if new_len < old_len {
@@ -664,6 +673,13 @@ impl Interp {
             obj.borrow_mut()
                 .props
                 .insert("length", Property::data(Value::Num(new_len as f64), true, false, false));
+            return Ok(());
+        }
+        // Adding a new index to a non-extensible (sealed/frozen) array is rejected.
+        if !obj.borrow().props.contains(key) && !obj.borrow().extensible {
+            if self.strict {
+                return Err(self.throw("TypeError", "cannot add property, object is not extensible"));
+            }
             return Ok(());
         }
         obj.borrow_mut().props.insert(key, Property::plain(value));

@@ -897,3 +897,12 @@ fn dataview_index_validation() {
     assert_eq!(run("var d=new DataView(new ArrayBuffer(8)); d.setInt32(0,42); d.getInt32(0)"), "42");
     assert_eq!(run("var a=[1,2]; Object.freeze(a); Object.isFrozen(a)"), "true");
 }
+#[test]
+fn frozen_array_throws() {
+    assert_eq!(throws("'use strict'; var a=Object.freeze([1,2]); a.push(3)"), "TypeError");
+    assert_eq!(throws("'use strict'; var a=Object.freeze([1,2]); a.length=0"), "TypeError");
+    assert_eq!(throws("'use strict'; var a=Object.freeze([1,2]); a.pop()"), "TypeError");
+    assert_eq!(run("var a=Object.freeze([1,2]); try{a.push(3)}catch(e){} a.length"), "2"); // sloppy: unchanged
+    assert_eq!(run("var a=[1,2]; a.push(3); a.join(',')"), "1,2,3"); // normal still works
+    assert_eq!(run("var a=[1,2,3]; a.length=1; a.join(',')"), "1");
+}
