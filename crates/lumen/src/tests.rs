@@ -1367,3 +1367,12 @@ fn set_methods() {
     assert_eq!(run("new Set([1,2,3]).union(new Set([3,4])) instanceof Set"), "true");
     assert_eq!(throws("new Set([1]).union(5)"), "TypeError");
 }
+#[test]
+fn iterator_flatmap() {
+    assert_eq!(run("[1,2,3].values().flatMap(x=>[x,x*10]).toArray().join(',')"), "1,10,2,20,3,30");
+    assert_eq!(run("[1,2].values().flatMap(x=>[x]).toArray().join(',')"), "1,2");
+    assert_eq!(run("['a','b'].values().flatMap(s=>s).toArray().join(',')"), "a,b");
+    assert_eq!(run("[1,2,3].values().flatMap(x=>[]).toArray().length"), "0");
+    assert_eq!(run("typeof Iterator.prototype.flatMap"), "function");
+    assert_eq!(run("var c=0;[1,2].values().flatMap((x,i)=>{c=i;return[x]}).toArray();c"), "1");
+}

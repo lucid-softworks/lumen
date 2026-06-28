@@ -4721,6 +4721,7 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&proto, "filter", 1, |i, t, a| make_iter_helper(i, t, "filter", arg(a, 0)));
     it.def_method(&proto, "take", 1, |i, t, a| make_iter_helper(i, t, "take", arg(a, 0)));
     it.def_method(&proto, "drop", 1, |i, t, a| make_iter_helper(i, t, "drop", arg(a, 0)));
+    it.def_method(&proto, "flatMap", 1, |i, t, a| make_iter_helper(i, t, "flatMap", arg(a, 0)));
     it.def_method(&proto, "toArray", 0, |i, this, _| {
         let mut out = Vec::new();
         while let Some(v) = step_iter(i, &this)? {
@@ -4932,6 +4933,37 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
             match step_iter(i, &src)? {
                 None => Ok(iter_result(i, Value::Undefined, true)),
                 Some(v) => Ok(iter_result(i, v, false)),
+            }
+        }
+        "flatMap" => {
+            let mut c = count;
+            loop {
+                // Drain the current inner buffer first.
+                let buf = ab(i.get_member(&this, "__ih_buf"))?;
+                if matches!(buf, Value::Obj(_)) {
+                    let bi_v = ab(i.get_member(&this, "__ih_bi"))?;
+                    let bi = ab(i.to_number(&bi_v))? as usize;
+                    let len_v = ab(i.get_member(&buf, "length"))?;
+                    let len = ab(i.to_number(&len_v))? as usize;
+                    if bi < len {
+                        let v = ab(i.get_member(&buf, &bi.to_string()))?;
+                        set_internal(this.as_obj().unwrap(), "__ih_bi", Value::Num((bi + 1) as f64));
+                        return Ok(iter_result(i, v, false));
+                    }
+                }
+                // Refill from the source: map a value to an iterable and flatten it.
+                match step_iter(i, &src)? {
+                    None => return Ok(iter_result(i, Value::Undefined, true)),
+                    Some(v) => {
+                        let mapped = ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)]))?;
+                        c += 1.0;
+                        set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(c));
+                        let inner = ab(i.iterate(&mapped))?;
+                        let arr = i.make_array(inner);
+                        set_internal(this.as_obj().unwrap(), "__ih_buf", arr);
+                        set_internal(this.as_obj().unwrap(), "__ih_bi", Value::Num(0.0));
+                    }
+                }
             }
         }
         _ => Ok(iter_result(i, Value::Undefined, true)),
