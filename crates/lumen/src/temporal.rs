@@ -319,43 +319,66 @@ fn duration_sign(d: IsoDuration) -> i64 {
 // ----- string parsing (basic ISO) -------------------------------------------------------------
 
 fn parse_date_str(s: &str) -> Option<IsoDate> {
-    // YYYY-MM-DD (optionally with time/zone suffix we ignore).
     let s = s.trim();
-    let datepart = s.split(['T', ' ']).next()?;
-    let mut it = datepart.splitn(3, '-');
-    // Allow a leading sign for the (expanded) year.
-    let (sign, rest) = if let Some(r) = datepart.strip_prefix('-') {
+    let s = s.split('[').next().unwrap_or(s); // drop [..] annotations
+    let datepart = s.split(['T', 't', ' ']).next()?;
+    let (sign, body) = if let Some(r) = datepart.strip_prefix('-') {
         (-1i64, r)
     } else if let Some(r) = datepart.strip_prefix('+') {
         (1, r)
     } else {
         (1, datepart)
     };
-    if sign != 1 || datepart.starts_with('+') {
-        let mut p = rest.splitn(3, '-');
+    if body.contains('-') {
+        let mut p = body.splitn(3, '-');
         let y: i64 = p.next()?.parse().ok()?;
         let m: u8 = p.next()?.parse().ok()?;
         let d: u8 = p.next()?.parse().ok()?;
-        return Some(IsoDate { year: sign * y, month: m, day: d });
+        Some(IsoDate { year: sign * y, month: m, day: d })
+    } else {
+        // Basic format YYYYMMDD (year = all but the last four digits).
+        if body.len() < 8 || !body.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let cut = body.len() - 4;
+        let y: i64 = body[..cut].parse().ok()?;
+        let m: u8 = body[cut..cut + 2].parse().ok()?;
+        let d: u8 = body[cut + 2..].parse().ok()?;
+        Some(IsoDate { year: sign * y, month: m, day: d })
     }
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: u8 = it.next()?.parse().ok()?;
-    let d: u8 = it.next()?.parse().ok()?;
-    Some(IsoDate { year: y, month: m, day: d })
 }
 fn parse_time_str(s: &str) -> Option<IsoTime> {
     let s = s.trim();
-    let tpart = if let Some(idx) = s.find('T') { &s[idx + 1..] } else { s };
-    let tpart = tpart.split(['Z', '+']).next().unwrap_or(tpart);
-    let mut hms = tpart.splitn(3, ':');
-    let h: u8 = hms.next()?.parse().ok()?;
-    let mi: u8 = hms.next().unwrap_or("0").parse().ok()?;
-    let secpart = hms.next().unwrap_or("0");
-    let mut sf = secpart.splitn(2, '.');
-    let sec: u8 = sf.next()?.parse().ok()?;
-    let (ms, us, ns) = match sf.next() {
+    let s = s.split('[').next().unwrap_or(s);
+    let mut tpart = if let Some(idx) = s.find(['T', 't']) { &s[idx + 1..] } else { s };
+    // Strip a trailing UTC offset / Z designator (time itself never contains '+'/'Z'/'-').
+    tpart = tpart.trim_end_matches('Z');
+    tpart = tpart.split('+').next().unwrap_or(tpart);
+    if let Some(pos) = tpart.rfind('-') {
+        tpart = &tpart[..pos];
+    }
+    let (hms, frac) = match tpart.split_once('.') {
+        Some((a, b)) => (a, Some(b)),
+        None => (tpart, None),
+    };
+    let (h, mi, sec) = if hms.contains(':') {
+        let mut p = hms.splitn(3, ':');
+        (
+            p.next()?.parse().ok()?,
+            p.next().unwrap_or("0").parse().ok()?,
+            p.next().unwrap_or("0").parse().ok()?,
+        )
+    } else {
+        // Basic format HHMMSS / HHMM / HH.
+        if hms.is_empty() || !hms.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let g = |a: usize, b: usize| hms.get(a..b).unwrap_or("0").parse::<u8>().unwrap_or(0);
+        (hms.get(0..2)?.parse().ok()?, g(2, 4), g(4, 6))
+    };
+    let (ms, us, ns) = match frac {
         Some(frac) => {
-            let mut f = frac.to_string();
+            let mut f: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
             while f.len() < 9 {
                 f.push('0');
             }
@@ -657,7 +680,7 @@ fn to_date(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
         Value::Str(s) => parse_date_str(s).ok_or_else(|| i.make_error("RangeError", "invalid date string")),
         Value::Obj(_) => {
             let year = field_req(i, v, "year")?;
-            let month = field_req(i, v, "month")?;
+            let month = field_month(i, v)?;
             let day = field_req(i, v, "day")?;
             check_date(i, IsoDate { year, month: month as u8, day: day as u8 })
         }
@@ -674,6 +697,24 @@ fn field_req(i: &mut Interp, o: &Value, k: &str) -> Result<i64, Value> {
 fn field_int(i: &mut Interp, o: &Value, k: &str, default: i64) -> Result<i64, Value> {
     let v = getm(i, o, k)?;
     to_int_default(i, &v, default)
+}
+/// Read a month from either `month` or `monthCode` ("M01".."M12", optional leap suffix).
+fn field_month(i: &mut Interp, o: &Value) -> Result<i64, Value> {
+    let m = getm(i, o, "month")?;
+    if !matches!(m, Value::Undefined) {
+        return to_int(i, &m);
+    }
+    let mc = getm(i, o, "monthCode")?;
+    if let Value::Str(s) = &mc {
+        if let Some(num) = s.strip_prefix('M') {
+            let num = num.trim_end_matches('L');
+            if let Ok(n) = num.parse::<i64>() {
+                return Ok(n);
+            }
+        }
+        return Err(i.make_error("RangeError", "invalid monthCode"));
+    }
+    Err(i.make_error("TypeError", "missing 'month' or 'monthCode'"))
 }
 
 fn add_to_date(i: &mut Interp, d: IsoDate, dur: IsoDuration, sign: i64) -> Result<IsoDate, Value> {
@@ -1164,7 +1205,7 @@ fn to_yearmonth(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
         }
         Value::Obj(_) => {
             let year = field_req(i, v, "year")?;
-            let month = field_req(i, v, "month")?;
+            let month = field_month(i, v)?;
             Ok(IsoDate { year, month: month as u8, day: 1 })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainYearMonth")),
@@ -1218,7 +1259,7 @@ fn to_monthday(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
             Ok(IsoDate { year: 1972, month: m, day: d })
         }
         Value::Obj(_) => {
-            let month = field_req(i, v, "month")?;
+            let month = field_month(i, v)?;
             let day = field_req(i, v, "day")?;
             Ok(IsoDate { year: 1972, month: month as u8, day: day as u8 })
         }
@@ -1285,6 +1326,30 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         let o = to_duration(i, &arg(a, 0))?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(add_duration(d, o, -1))))
     });
+    it.def_method(&proto, "round", 1, |i, t, a| {
+        let d = as_duration(i, &t)?;
+        if d.years != 0 || d.months != 0 || d.weeks != 0 {
+            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
+        }
+        let o = arg(a, 0);
+        let smallest = opt_str(i, &o, "smallestUnit", "nanosecond")?;
+        if unit_ns(&smallest).is_none() && smallest != "day" {
+            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
+        }
+        let mut largest = opt_str(i, &o, "largestUnit", "auto")?;
+        if largest == "auto" {
+            largest = if d.days != 0 { "day".into() } else { "hour".into() };
+        }
+        if unit_ns(&largest).is_none() && largest != "day" {
+            return Err(i.make_error("RangeError", "rounding a calendar duration requires relativeTo"));
+        }
+        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
+        let unit = if smallest == "day" { 86_400_000_000_000 } else { unit_ns(&smallest).unwrap() };
+        let total = d.days as i128 * 86_400_000_000_000 + duration_time_ns(d);
+        let rounded = round_ns(total, unit * incr, &mode);
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(rounded, &largest))))
+    });
     it.def_method(&proto, "total", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let unit = opt_str(i, &arg(a, 0), "unit", "")?;
@@ -1323,6 +1388,16 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let d = to_duration(i, &arg(a, 0))?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(d)))
+    });
+    it.def_method(&ctor, "compare", 2, |i, _t, a| {
+        let x = to_duration(i, &arg(a, 0))?;
+        let y = to_duration(i, &arg(a, 1))?;
+        if x.years != 0 || x.months != 0 || x.weeks != 0 || y.years != 0 || y.months != 0 || y.weeks != 0 {
+            return Err(i.make_error("RangeError", "comparing calendar durations requires relativeTo"));
+        }
+        let xn = x.days as i128 * 86_400_000_000_000 + duration_time_ns(x);
+        let yn = y.days as i128 * 86_400_000_000_000 + duration_time_ns(y);
+        Ok(Value::Num(xn.cmp(&yn) as i64 as f64))
     });
 }
 fn neg_duration(d: IsoDuration) -> IsoDuration {
