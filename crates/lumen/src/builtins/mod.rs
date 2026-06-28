@@ -2100,6 +2100,7 @@ fn install_proxy(it: &mut Interp) {
         }
         make_proxy(i, arg(a, 0), arg(a, 1))
     });
+    ctor.borrow_mut().is_constructor = true; // Proxy is a constructor but has no `.prototype`
     it.def_method(&ctor, "revocable", 2, |i, _t, a| {
         let proxy = make_proxy(i, arg(a, 0), arg(a, 1))?;
         let revoke = make_bound(i, revoke_proxy, vec![proxy.clone()]);

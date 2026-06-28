@@ -1038,6 +1038,13 @@ impl Interp {
         let call = obj.borrow().call.clone();
         match call {
             Callable::Native(f) => {
+                // A native non-constructor (a method, global function, Math fn) has no own
+                // `prototype` property; only real built-in constructors do. Reject `new` on the rest.
+                let constructable =
+                    obj.borrow().is_constructor || obj.borrow().props.contains("prototype");
+                if !constructable {
+                    return Err(self.throw("TypeError", "function is not a constructor"));
+                }
                 // Built-in constructors build and return their own object. The `constructing` flag
                 // lets wrapper constructors (Number/String/...) distinguish `new X()` from `X()`.
                 let saved = self.constructing;

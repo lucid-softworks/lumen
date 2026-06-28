@@ -841,3 +841,19 @@ fn date_toprimitive() {
     assert_eq!(run("typeof (new Date(0))[Symbol.toPrimitive]('string')"), "string");
     assert_eq!(run("var d=new Date(0); (d - 0)"), "0"); // number hint via subtraction
 }
+#[test]
+fn not_a_constructor() {
+    for src in ["new (Math.max)()","new (parseInt)()","new (Object.keys)()","new (Array.prototype.map)()","new (Array.from)()","new ([].forEach)()","new (JSON.stringify)()","new (String.prototype.slice)()"] {
+        assert_eq!(throws(src), "TypeError", "should reject: {src}");
+    }
+    // real constructors still work
+    assert_eq!(run("new Array(3).length"), "3");
+    assert_eq!(run("new Map([[1,2]]).get(1)"), "2");
+    assert_eq!(run("typeof new Date(0)"), "object");
+    assert_eq!(run("new Number(5).valueOf()"), "5");
+    assert_eq!(run("new RegExp('a').source"), "a");
+    assert_eq!(run("new Int8Array(2).length"), "2");
+    assert_eq!(run("class C{}; typeof new C()"), "object");
+    assert_eq!(run("function F(){this.x=1}; new F().x"), "1");
+    assert_eq!(run("new Error('m').message"), "m");
+}
