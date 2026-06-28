@@ -1455,6 +1455,170 @@ fn install_typed_arrays(it: &mut Interp) {
         it.def_method(&ctor, "from", 1, ta_from);
         set_builtin(&it.global, kind.name(), Value::Obj(ctor));
     }
+    install_uint8_base64(it);
+}
+
+// --- Uint8Array base64 / hex (the Stage-3 proposal) -------------------------------------------
+
+const B64_STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn b64_encode(bytes: &[u8], url: bool, pad: bool) -> String {
+    let alpha = if url { B64_URL } else { B64_STD };
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alpha[(n >> 18 & 63) as usize] as char);
+        out.push(alpha[(n >> 12 & 63) as usize] as char);
+        match chunk.len() {
+            1 => {
+                if pad {
+                    out.push_str("==");
+                }
+            }
+            2 => {
+                out.push(alpha[(n >> 6 & 63) as usize] as char);
+                if pad {
+                    out.push('=');
+                }
+            }
+            _ => {
+                out.push(alpha[(n >> 6 & 63) as usize] as char);
+                out.push(alpha[(n & 63) as usize] as char);
+            }
+        }
+    }
+    out
+}
+fn b64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
+    let alpha = if url { B64_URL } else { B64_STD };
+    let mut vals: Vec<u32> = Vec::new();
+    for c in s.chars() {
+        if c == '=' {
+            break;
+        }
+        if c.is_whitespace() {
+            continue;
+        }
+        let pos = alpha.iter().position(|&a| a as char == c)?;
+        vals.push(pos as u32);
+    }
+    let mut out = Vec::new();
+    for grp in vals.chunks(4) {
+        if grp.len() == 1 {
+            return None; // a lone 6-bit group is not decodable
+        }
+        let mut n = 0u32;
+        for (idx, &v) in grp.iter().enumerate() {
+            n |= v << (18 - 6 * idx);
+        }
+        out.push((n >> 16) as u8);
+        if grp.len() >= 3 {
+            out.push((n >> 8) as u8);
+        }
+        if grp.len() >= 4 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    for pair in chars.chunks(2) {
+        let hi = pair[0].to_digit(16)?;
+        let lo = pair[1].to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
+/// Read a Uint8Array receiver's bytes; errors if `this` isn't a (non-detached) Uint8Array.
+fn u8_bytes(i: &mut Interp, this: &Value) -> Result<Vec<u8>, Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    if !matches!(info.kind, TaKind::U8) {
+        return Err(i.make_error("TypeError", "method requires a Uint8Array"));
+    }
+    let buf = i.array_buffers.get(&info.buffer).ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
+    Ok(buf[info.offset..info.offset + info.len].to_vec())
+}
+fn make_u8array(i: &mut Interp, bytes: Vec<u8>) -> Result<Value, Value> {
+    let ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "Uint8Array"))?;
+    let ta = ab(i.construct(ctor, &[Value::Num(bytes.len() as f64)]))?;
+    if let Some(ptr) = map_ptr(&ta) {
+        if let Some(info) = i.typed_arrays.get(&ptr).copied() {
+            if let Some(buf) = i.array_buffers.get_mut(&info.buffer) {
+                buf[info.offset..info.offset + bytes.len()].copy_from_slice(&bytes);
+            }
+        }
+    }
+    Ok(ta)
+}
+fn b64_option_url(i: &mut Interp, opts: &Value) -> Result<bool, Value> {
+    if let Value::Obj(_) = opts {
+        let a = ab(i.get_member(opts, "alphabet"))?;
+        match a {
+            Value::Undefined => Ok(false),
+            Value::Str(s) if &*s == "base64" => Ok(false),
+            Value::Str(s) if &*s == "base64url" => Ok(true),
+            _ => Err(i.make_error("TypeError", "alphabet must be 'base64' or 'base64url'")),
+        }
+    } else if matches!(opts, Value::Undefined) {
+        Ok(false)
+    } else {
+        Err(i.make_error("TypeError", "options must be an object"))
+    }
+}
+
+fn install_uint8_base64(it: &mut Interp) {
+    let proto = it.extra_protos.get("Uint8Array").cloned().unwrap();
+    let ctor = match it.global.borrow().props.get("Uint8Array").map(|p| p.value.clone()) {
+        Some(Value::Obj(c)) => c,
+        _ => return,
+    };
+    it.def_method(&proto, "toHex", 0, |i, this, _| {
+        let bytes = u8_bytes(i, &this)?;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            s.push_str(&format!("{b:02x}"));
+        }
+        Ok(Value::from_string(s))
+    });
+    it.def_method(&proto, "toBase64", 0, |i, this, a| {
+        let bytes = u8_bytes(i, &this)?;
+        let url = b64_option_url(i, &arg(a, 0))?;
+        let omit_padding = if let Value::Obj(_) = arg(a, 0) {
+            let op = ab(i.get_member(&arg(a, 0), "omitPadding"))?;
+            i.to_boolean(&op)
+        } else {
+            false
+        };
+        Ok(Value::from_string(b64_encode(&bytes, url, !omit_padding)))
+    });
+    it.def_method(&ctor, "fromHex", 1, |i, _t, a| {
+        let s = match arg(a, 0) {
+            Value::Str(s) => s,
+            _ => return Err(i.make_error("TypeError", "fromHex requires a string")),
+        };
+        let bytes = hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
+        make_u8array(i, bytes)
+    });
+    it.def_method(&ctor, "fromBase64", 1, |i, _t, a| {
+        let s = match arg(a, 0) {
+            Value::Str(s) => s,
+            _ => return Err(i.make_error("TypeError", "fromBase64 requires a string")),
+        };
+        let url = b64_option_url(i, &arg(a, 1))?;
+        let bytes = b64_decode(&s, url).ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
+        make_u8array(i, bytes)
+    });
 }
 
 fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
@@ -5908,7 +6072,7 @@ fn install_symbol(it: &mut Interp) {
     for name in [
         "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll",
         "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables",
-        "dispose", "asyncDispose",
+        "dispose", "asyncDispose", "metadata",
     ] {
         let sym = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
         if name == "iterator" {

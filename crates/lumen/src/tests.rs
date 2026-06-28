@@ -1401,3 +1401,18 @@ fn promise_try_regexp_escape() {
     assert_eq!(run("new RegExp(RegExp.escape('a.b')).test('axb')"), "false");
     assert_eq!(throws("RegExp.escape(5)"), "TypeError");
 }
+#[test]
+fn uint8_base64_hex() {
+    assert_eq!(run("new Uint8Array([72,105]).toHex()"), "4869");
+    assert_eq!(run("new Uint8Array([255,0,16]).toHex()"), "ff0010");
+    assert_eq!(run("Uint8Array.fromHex('4869').join(',')"), "72,105");
+    assert_eq!(run("new Uint8Array([72,105]).toBase64()"), "SGk=");
+    assert_eq!(run("Uint8Array.fromBase64('SGk=').join(',')"), "72,105");
+    assert_eq!(run("new Uint8Array([255,255]).toBase64()"), "//8=");
+    assert_eq!(run("new Uint8Array([255,255]).toBase64({alphabet:'base64url'})"), "__8=");
+    assert_eq!(run("new Uint8Array([72,105]).toBase64({omitPadding:true})"), "SGk");
+    assert_eq!(run("Uint8Array.fromBase64('SGVsbG8=').length"), "5");
+    assert_eq!(run("typeof Uint8Array.prototype.toBase64"), "function");
+    assert_eq!(run("var r=Uint8Array.fromHex('48656c6c6f'); String.fromCharCode(...r)"), "Hello");
+    assert_eq!(run("typeof Symbol.metadata"), "symbol");
+}
