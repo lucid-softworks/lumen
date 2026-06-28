@@ -762,3 +762,25 @@ fn named_eval_defaults() {
     assert_eq!(run("var e; [e=function(){}]=[]; e.name"), "e");
     assert_eq!(run("var {x=1}={}; x"), "1"); // non-fn default still works
 }
+#[test]
+fn probe21_tmp() {
+    // These should be SyntaxErrors.
+    for src in ["let x; let x","{ let y; let y }","let a; const a=1","let b; var b","{ let c; function c(){} }","if(true) let z = 1","while(false) const w = 1","for(;;) let q","label: let p = 1","const d=1; let d","function f(){ let e; let e }","try{}catch(e){ let e }"] {
+        eprintln!("RD {src:?} => {}", if crate::Engine::new().eval(src,false).is_err(){"SyntaxErr"}else{"ACCEPTED"});
+    }
+    // These are fine.
+    for src in ["let x; { let x }","{let a}{let a}","let m=1; m=2","var n; var n"] {
+        eprintln!("RDok {src:?} => {}", match crate::Engine::new().eval(src,false){Ok(_)=>"ok",Err(_)=>"WRONGLY-REJECTED"});
+    }
+}
+#[test]
+fn lexical_substatement() {
+    for src in ["if(true) let z = 1","while(false) const w = 1","for(;;) let q","label: let p = 1","if(x) class C{}","do let r=1; while(0)"] {
+        assert!(Engine::new().eval(src, false).is_err(), "should reject: {src}");
+    }
+    // allowed
+    assert_eq!(run("if(true) var v = 5; v"), "5");
+    assert_eq!(run("if(true) function f(){return 1}; f()"), "1");
+    assert_eq!(run("if(true){ let b=2; } 'ok'"), "ok");
+    assert_eq!(run("for(let i=0;i<2;i++){} 'ok'"), "ok");
+}

@@ -211,7 +211,7 @@ impl Parser {
                     return self.err(format!("label '{name}' has already been declared"));
                 }
                 self.labels.push(name.clone());
-                let body = self.parse_stmt();
+                let body = self.parse_substatement();
                 self.labels.pop();
                 Ok(Stmt::Labeled { label: name, body: Box::new(body?) })
             }
@@ -354,15 +354,29 @@ impl Parser {
         self.expect_punct("(")?;
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
-        let cons = Box::new(self.parse_stmt()?);
-        let alt = if self.eat_kw("else") { Some(Box::new(self.parse_stmt()?)) } else { None };
+        let cons = Box::new(self.parse_substatement()?);
+        let alt =
+            if self.eat_kw("else") { Some(Box::new(self.parse_substatement()?)) } else { None };
         Ok(Stmt::If { test, cons, alt })
+    }
+
+    /// Parse a statement that is the body of `if`/loop/`with`/label — a lexical (`let`/`const`) or
+    /// `class` declaration is not allowed in that position.
+    fn parse_substatement(&mut self) -> Result<Stmt, ParseError> {
+        let s = self.parse_stmt()?;
+        if matches!(
+            s,
+            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, .. } | Stmt::ClassDecl(_)
+        ) {
+            return self.err("lexical declaration cannot appear in a single-statement context");
+        }
+        Ok(s)
     }
 
     /// Parse a loop body inside an iteration context (so `break`/`continue` are legal).
     fn parse_loop_body(&mut self) -> Result<Stmt, ParseError> {
         self.iter_depth += 1;
-        let r = self.parse_stmt();
+        let r = self.parse_substatement();
         self.iter_depth -= 1;
         r
     }
@@ -384,7 +398,7 @@ impl Parser {
         self.expect_punct("(")?;
         let obj = self.parse_expr()?;
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_stmt()?);
+        let body = Box::new(self.parse_substatement()?);
         Ok(Stmt::With { obj, body })
     }
 
