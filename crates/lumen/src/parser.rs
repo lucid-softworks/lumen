@@ -688,6 +688,10 @@ impl Parser {
         if let Some(op) = op {
             self.advance();
             let arg = self.parse_unary()?;
+            // Deleting a bare variable reference is a SyntaxError in strict mode.
+            if op == "delete" && self.strict && matches!(arg, Expr::Ident(_)) {
+                return self.err("delete of an unqualified identifier in strict mode");
+            }
             return Ok(Expr::Unary { op, arg: Box::new(arg) });
         }
         // Prefix ++/--
@@ -931,6 +935,7 @@ impl Parser {
     fn parse_object(&mut self) -> Result<Expr, ParseError> {
         self.expect_punct("{")?;
         let mut props = Vec::new();
+        let mut proto_seen = false;
         while !self.is_punct("}") {
             if self.eat_punct("...") {
                 props.push(PropDef::Spread(self.parse_assign()?));
@@ -977,6 +982,15 @@ impl Parser {
                 };
                 props.push(PropDef::KeyValue { key, value: Expr::Func(Rc::new(func)) });
             } else if self.eat_punct(":") {
+                // Two `__proto__: value` data properties in one literal are a SyntaxError.
+                let is_proto = matches!(&key, PropKey::Ident(n) if n == "__proto__")
+                    || matches!(&key, PropKey::Str(s) if &**s == "__proto__");
+                if is_proto {
+                    if proto_seen {
+                        return self.err("duplicate __proto__ property in object literal");
+                    }
+                    proto_seen = true;
+                }
                 let value = self.parse_assign()?;
                 props.push(PropDef::KeyValue { key, value });
             } else {
