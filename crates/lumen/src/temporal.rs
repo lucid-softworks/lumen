@@ -527,6 +527,29 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
     });
+    it.def_method(&proto, "withCalendar", 1, |i, t, _| {
+        let d = as_date(i, &t)?;
+        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+    });
+    it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
+        let d = as_date(i, &t)?;
+        let item = arg(a, 0);
+        let (tzv, timev) = match &item {
+            Value::Obj(_) => (getm(i, &item, "timeZone")?, getm(i, &item, "plainTime")?),
+            other => (other.clone(), Value::Undefined),
+        };
+        let tz: Rc<str> = match &tzv {
+            Value::Str(s) => s.clone(),
+            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+        };
+        let time = match timev {
+            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            v => to_time(i, &v)?,
+        };
+        let offset = tz_offset_ns(&tz);
+        let epoch = dt_ns(d, time) - offset as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz }))
+    });
 
     let ctor = add_ctor(it, ns, "PlainDate", 3, proto, |i, _t, a| {
         require_new(i)?;
@@ -966,6 +989,34 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toPlainTime", 0, |i, t, _| {
         let (_, tm) = as_datetime(i, &t)?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(tm)))
+    });
+    it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
+        let (d, _) = as_datetime(i, &t)?;
+        let nt = match arg(a, 0) {
+            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            v => to_time(i, &v)?,
+        };
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, nt)))
+    });
+    it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
+        let (_, tm) = as_datetime(i, &t)?;
+        let nd = to_date(i, &arg(a, 0))?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, tm)))
+    });
+    it.def_method(&proto, "withCalendar", 1, |i, t, _| {
+        let (d, tm) = as_datetime(i, &t)?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+    });
+    it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let tzv = arg(a, 0);
+        let tz: Rc<str> = match &tzv {
+            Value::Str(s) => s.clone(),
+            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+        };
+        let offset = tz_offset_ns(&tz);
+        let epoch = dt_ns(d, tm) - offset as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -1553,6 +1604,16 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
         Ok(Value::Bool(x == y))
+    });
+    it.def_method(&proto, "toZonedDateTimeISO", 1, |i, t, a| {
+        let e = as_instant(i, &t)?;
+        let tzv = arg(a, 0);
+        let tz: Rc<str> = match &tzv {
+            Value::Str(s) => s.clone(),
+            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+        };
+        let offset = tz_offset_ns(&tz);
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: offset, tz }))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
