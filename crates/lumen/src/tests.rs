@@ -1027,3 +1027,12 @@ fn iterator_close_destructure() {
     assert_eq!(run("for(var [k,v] of [[1,2],[3,4]]){} k+','+v"), "3,4");
     assert_eq!(run("var [,b]=[1,2]; b"), "2");
 }
+#[test]
+fn forof_lazy_close() {
+    // break closes the iterator (infinite otherwise)
+    assert_eq!(run("var closed=false; var it={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){closed=true;return {}}}}}; for(var x of it){break;} closed"), "true");
+    assert_eq!(run("var s=0; for(var x of [1,2,3]){s+=x} s"), "6");
+    assert_eq!(run("var s=0; for(var x of [1,2,3,4,5]){ if(x>3)break; s+=x } s"), "6");
+    assert_eq!(run("var n=0; var it={[Symbol.iterator](){return {next(){return {value:n++,done:n>1000000000}}}}}; var c=0; for(var x of it){c++; if(c>=3)break;} c"), "3");
+    assert_eq!(run("var r=''; for(var k of 'abc'){r+=k} r"), "abc");
+}

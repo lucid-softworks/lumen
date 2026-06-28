@@ -417,17 +417,36 @@ impl Interp {
         label: Option<&str>,
     ) -> Completion {
         let rhs = self.eval(right, env)?;
-        let items: Vec<Value> = if of {
-            self.iterate(&rhs)?
-        } else {
-            // for-in: enumerable string keys along the prototype chain (own first, deduped).
-            self.enum_keys(&rhs).into_iter().map(Value::from_string).collect()
-        };
         // No-decl form assigns to an existing binding; a declaration creates a fresh one per round.
         let mode = match decl {
             Some(DeclKind::Var) | None => BindMode::Var,
             Some(k) => BindMode::Lexical(k == DeclKind::Const),
         };
+        if of {
+            // Step the iterator lazily; close it if the loop exits early (break/return/throw).
+            let (iter, next) = self.get_iterator(&rhs)?;
+            let iter_close = iter.clone();
+            let mut exhausted = false;
+            let result = self.run_loop(label, env, |me, env| {
+                let v = match me.iterator_step(&iter, &next)? {
+                    Some(x) => x,
+                    None => {
+                        exhausted = true;
+                        return Ok(LoopStep::Done);
+                    }
+                };
+                let iter_env = new_scope(Some(env.clone()));
+                me.bind_pattern(left, v, &iter_env, mode)?;
+                me.exec_stmt(body, &iter_env)?;
+                Ok(LoopStep::Continue)
+            });
+            if !exhausted {
+                self.iterator_close(&iter_close);
+            }
+            return result;
+        }
+        // for-in: enumerable string keys along the prototype chain (own first, deduped).
+        let items: Vec<Value> = self.enum_keys(&rhs).into_iter().map(Value::from_string).collect();
         let mut idx = 0;
         self.run_loop(label, env, |me, env| {
             if idx >= items.len() {
@@ -444,6 +463,12 @@ impl Interp {
 
     /// GetIterator: returns (iterator, next-method).
     pub(crate) fn get_iterator(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
+        // A primitive string iterates by code point (it has no own @@iterator method here).
+        if let Value::Str(s) = v {
+            let chars: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+            let arr = self.make_array(chars);
+            return self.get_iterator(&arr);
+        }
         let key = match &self.iterator_sym {
             Some(s) => Interp::sym_key(s),
             None => return Err(self.throw("TypeError", "no iterator symbol")),
