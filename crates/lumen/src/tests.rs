@@ -1302,3 +1302,15 @@ fn split_limit_and_radix() {
     assert_eq!(throws("(10).toString(1)"), "RangeError");
     assert_eq!(run("(255).toString(2)"), "11111111");
 }
+#[test]
+fn proxy_traps() {
+    assert_eq!(run("var log=''; var p=new Proxy({},{getPrototypeOf(t){log+='gp';return Array.prototype}}); Object.getPrototypeOf(p)===Array.prototype && log==='gp'"), "true");
+    assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['a','b']}}); Object.getOwnPropertyNames(p).join(',')"), "a,b");
+    assert_eq!(run("var p=new Proxy({},{ownKeys(){return ['a','b']}}); Reflect.ownKeys(p).join(',')"), "a,b");
+    assert_eq!(run("var p=new Proxy({},{getPrototypeOf(){return null}}); Object.getPrototypeOf(p)"), "null");
+    assert_eq!(throws("var p=new Proxy({},{getPrototypeOf(){return 5}}); Object.getPrototypeOf(p)"), "TypeError");
+    assert_eq!(throws("var p=new Proxy({},{ownKeys(){return [1,2]}}); Object.getOwnPropertyNames(p)"), "TypeError");
+    assert_eq!(run("var p=new Proxy({a:1,b:2},{}); Object.getOwnPropertyNames(p).join(',')"), "a,b"); // no trap forwards
+    assert_eq!(run("var p=new Proxy([1,2],{}); Object.getPrototypeOf(p)===Array.prototype"), "true");
+    assert_eq!(run("Object.getPrototypeOf('x')===String.prototype"), "true");
+}

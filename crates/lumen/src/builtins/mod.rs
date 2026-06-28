@@ -2344,6 +2344,10 @@ fn install_reflect(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Reflect.ownKeys called on non-object")),
         };
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            let keys = proxy_own_keys(i, &target, &handler)?;
+            return Ok(i.make_array(keys));
+        }
         // String keys first, then symbols (per spec ordering, simplified).
         let mut out: Vec<Value> = o
             .borrow()
@@ -2365,7 +2369,12 @@ fn install_reflect(it: &mut Interp) {
         Ok(i.make_array(out))
     });
     it.def_method(&r, "getPrototypeOf", 1, |i, _t, a| match arg(a, 0) {
-        Value::Obj(o) => Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null)),
+        Value::Obj(o) => {
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                return proxy_get_prototype(i, &target, &handler);
+            }
+            Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+        }
         _ => Err(i.make_error("TypeError", "Reflect.getPrototypeOf called on non-object")),
     });
     it.def_method(&r, "setPrototypeOf", 2, |_i, _t, a| {
@@ -3062,6 +3071,52 @@ fn install_function_proto(it: &mut Interp) {
 // Object
 // ---------------------------------------------------------------------------------------------
 
+/// If `v` is a Proxy, its (target, handler) pair.
+fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
+    if let Value::Obj(o) = v {
+        i.proxies.get(&(Rc::as_ptr(o) as usize)).cloned()
+    } else {
+        None
+    }
+}
+/// Proxy `[[GetPrototypeOf]]`: call the trap or forward to the target.
+fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Result<Value, Value> {
+    let trap = ab(i.get_member(handler, "getPrototypeOf"))?;
+    if trap.is_callable() {
+        let res = ab(i.call(trap, handler.clone(), &[target.clone()]))?;
+        if !matches!(res, Value::Obj(_) | Value::Null) {
+            return Err(i.make_error("TypeError", "getPrototypeOf trap must return an object or null"));
+        }
+        Ok(res)
+    } else if let Value::Obj(t) = target {
+        Ok(t.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+    } else {
+        Ok(Value::Null)
+    }
+}
+/// Proxy `[[OwnPropertyKeys]]`: the trap result (must be a list of strings/symbols) or the target's
+/// own keys.
+fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec<Value>, Value> {
+    let trap = ab(i.get_member(handler, "ownKeys"))?;
+    if trap.is_callable() {
+        let res = ab(i.call(trap, handler.clone(), &[target.clone()]))?;
+        if !matches!(res, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "ownKeys trap must return an array-like object"));
+        }
+        let keys = ab(i.iterate(&res))?;
+        for k in &keys {
+            if !matches!(k, Value::Str(_) | Value::Sym(_)) {
+                return Err(i.make_error("TypeError", "ownKeys trap result must contain only strings and symbols"));
+            }
+        }
+        Ok(keys)
+    } else if let Value::Obj(t) = target {
+        Ok(t.borrow().props.keys().into_iter().map(Value::Str).collect())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn install_object(it: &mut Interp) {
     let op = it.object_proto.clone();
     it.def_method(&op, "hasOwnProperty", 1, |i, this, args| {
@@ -3213,6 +3268,11 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "called on non-object")),
         };
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            let keys = proxy_own_keys(i, &target, &handler)?;
+            let strs: Vec<Value> = keys.into_iter().filter(|k| matches!(k, Value::Str(_))).collect();
+            return Ok(i.make_array(strs));
+        }
         let keys: Vec<Value> = o
             .borrow()
             .props
@@ -3240,8 +3300,24 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "getPrototypeOf", 1, |i, _this, args| {
         match arg(args, 0) {
-            Value::Obj(o) => Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null)),
-            _ => Err(i.make_error("TypeError", "called on non-object")),
+            Value::Obj(o) => {
+                if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                    return proxy_get_prototype(i, &target, &handler);
+                }
+                Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+            }
+            // ToObject coerces a primitive (Object.getPrototypeOf('') → String.prototype).
+            Value::Undefined | Value::Null => Err(i.make_error("TypeError", "called on null or undefined")),
+            Value::Str(_) => Ok(Value::Obj(i.string_proto.clone())),
+            Value::Num(_) => Ok(Value::Obj(i.number_proto.clone())),
+            Value::Bool(_) => Ok(Value::Obj(i.boolean_proto.clone())),
+            other => {
+                let boxed = maybe_box(i, other);
+                match boxed {
+                    Value::Obj(o) => Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null)),
+                    _ => Ok(Value::Null),
+                }
+            }
         }
     });
     it.def_method(&ctor, "setPrototypeOf", 2, |_i, _this, args| {
