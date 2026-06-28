@@ -1075,3 +1075,12 @@ fn temporal_round_string() {
     // object form still works
     assert_eq!(run("new Temporal.PlainTime(3,30).round({smallestUnit:'hour'}).toString()"), "04:00:00");
 }
+#[test]
+fn temporal_from_coercion() {
+    assert_eq!(throws("Temporal.PlainDate.from(null)"), "RangeError");
+    assert_eq!(throws("Temporal.PlainDate.from(true)"), "RangeError");
+    assert_eq!(throws("Temporal.PlainDate.from(123)"), "RangeError");
+    assert_eq!(throws("Temporal.PlainDate.from(undefined)"), "TypeError");
+    assert_eq!(run("Temporal.PlainDate.from('2020-01-01').toString()"), "2020-01-01");
+    assert_eq!(run("Temporal.PlainDate.from({year:2020,month:1,day:1}).toString()"), "2020-01-01");
+}

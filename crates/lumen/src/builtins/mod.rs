@@ -3898,11 +3898,11 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     set_builtin(&obj, "__ih_kind", Value::str(kind));
     set_builtin(&obj, "__ih_fn", f.clone());
     if matches!(kind, "take" | "drop") {
-        let n = ab(i.to_number(&f))?;
-        if !n.is_finite() && n < 0.0 || n < 0.0 {
+        let raw = ab(i.to_number(&f))?;
+        let n = if raw.is_nan() { 0.0 } else { raw.trunc() };
+        if n < 0.0 {
             return Err(i.make_error("RangeError", "limit must be a non-negative number"));
         }
-        let n = if n.is_nan() { 0.0 } else { n };
         set_builtin(&obj, "__ih_n", Value::Num(n));
         set_builtin(&obj, "__ih_started", Value::Bool(false));
     }

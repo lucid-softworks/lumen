@@ -929,7 +929,12 @@ fn to_date(i: &mut Interp, v: &Value) -> Result<IsoDate, Value> {
             let day = field_req(i, v, "day")?.clamp(1, days_in_month(year, month) as i64) as u8;
             Ok(IsoDate { year, month, day })
         }
-        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDate")),
+        Value::Undefined => Err(i.make_error("TypeError", "cannot convert undefined to Temporal.PlainDate")),
+        // Other primitives are coerced to a string and parsed (so they fail with a RangeError).
+        _ => {
+            let s = i.to_string(v).map_err(unab)?;
+            parse_date_str(&s).ok_or_else(|| i.make_error("RangeError", "invalid date string"))
+        }
     }
 }
 fn field_req(i: &mut Interp, o: &Value, k: &str) -> Result<i64, Value> {
@@ -1225,7 +1230,14 @@ fn to_time(i: &mut Interp, v: &Value) -> Result<IsoTime, Value> {
                 ns: vals[5].clamp(0, 999) as u16,
             })
         }
-        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainTime")),
+        Value::Undefined => Err(i.make_error("TypeError", "cannot convert undefined to Temporal.PlainTime")),
+        _ => {
+            let s = i.to_string(v).map_err(unab)?;
+            if s.contains(['Z', 'z']) || s.contains('[') {
+                return Err(i.make_error("RangeError", "invalid PlainTime string"));
+            }
+            parse_time_str(&s).ok_or_else(|| i.make_error("RangeError", "invalid time string"))
+        }
     }
 }
 
@@ -1437,7 +1449,13 @@ fn to_datetime(i: &mut Interp, v: &Value) -> Result<(IsoDate, IsoTime), Value> {
             };
             Ok((d, t))
         }
-        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDateTime")),
+        Value::Undefined => Err(i.make_error("TypeError", "cannot convert undefined to Temporal.PlainDateTime")),
+        _ => {
+            let s = i.to_string(v).map_err(unab)?;
+            let d = parse_date_str(&s).ok_or_else(|| i.make_error("RangeError", "invalid datetime"))?;
+            let t = parse_time_str(&s).unwrap_or(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+            Ok((d, t))
+        }
     }
 }
 
