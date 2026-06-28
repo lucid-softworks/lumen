@@ -454,6 +454,9 @@ fn parse_date_str(s: &str) -> Option<IsoDate> {
     if !(1..=12).contains(&m) || d < 1 || d > days_in_month(date.year, m) {
         return None; // out-of-range date components are a RangeError
     }
+    if sign < 0 && y == 0 {
+        return None; // negative-zero extended year is invalid
+    }
     Some(date)
 }
 fn parse_time_str(s: &str) -> Option<IsoTime> {
