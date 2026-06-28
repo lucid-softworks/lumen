@@ -853,6 +853,9 @@ impl Interp {
             return gen;
         }
 
+        // Hoist `var`/function declarations into the function scope before executing the body.
+        self.hoist(&func.body, &scope, true);
+
         // Async functions: run synchronously (await unwraps settled promises), then wrap the result
         // in a fulfilled/rejected promise.
         let mut result = Ok(Value::Undefined);

@@ -17,6 +17,7 @@ fn throws(src: &str) -> String {
     }
 }
 
+
 #[test]
 fn arithmetic() {
     assert_eq!(run("1 + 2 * 3"), "7");
@@ -406,6 +407,16 @@ fn strict_mode_assignment() {
 }
 
 #[test]
+fn strict_var_hoisting_in_functions() {
+    // `var` inside a function must be hoisted into the function scope, including strict mode (where
+    // assignment to an undeclared name would otherwise throw). Regression: hoist was once skipped.
+    assert_eq!(run("'use strict'; function f(){ var y = 5; return y; } f()"), "5");
+    assert_eq!(run("'use strict'; function f(o){ var label = o && o.x || 'd'; return label; } f()"), "d");
+    assert_eq!(run("function f(){ if (true) { var z = 7; } return z; } f()"), "7");
+    assert_eq!(run("'use strict'; (function(){ var a; a = 3; return a; })()"), "3");
+}
+
+#[test]
 fn gc_reclaims_cycles() {
     // Each iteration creates an unreachable reference cycle (o <-> a). Reference counting alone
     // never frees these; the cycle collector must, or live objects would climb without bound.
@@ -430,6 +441,9 @@ fn gc_keeps_reachable_cycles() {
         "true"
     );
 }
+
+
+
 
 
 
