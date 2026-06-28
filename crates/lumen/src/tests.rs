@@ -509,3 +509,11 @@ fn primitive_wrappers() {
     assert_eq!(throws("new Symbol()"), "TypeError");
     assert_eq!(throws("new BigInt(1)"), "TypeError");
 }
+
+#[test]
+fn host_262() {
+    assert_eq!(run("typeof $262"), "object");
+    assert_eq!(run("$262.global === globalThis"), "true");
+    assert_eq!(run("$262.evalScript('1+2')"), "3");
+    assert_eq!(run("typeof $262.gc"), "function");
+}

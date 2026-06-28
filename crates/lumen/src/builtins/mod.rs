@@ -59,6 +59,39 @@ pub fn install(it: &mut Interp) {
     install_regexp(it);
     install_globals(it);
     install_console(it);
+    install_host(it);
+}
+
+/// The test262 `$262` host object. Only the portions lumen can support are provided (`global`,
+/// `gc`, `evalScript`, best-effort `detachArrayBuffer`); `agent`/`createRealm` are omitted.
+fn install_host(it: &mut Interp) {
+    let host = Object::new(Some(it.object_proto.clone()));
+    set_builtin(&host, "global", Value::Obj(it.global.clone()));
+    it.def_method(&host, "gc", 0, |i, _t, _a| {
+        i.gc_collect();
+        Ok(Value::Undefined)
+    });
+    it.def_method(&host, "evalScript", 1, |i, _t, args| {
+        let code = match arg(args, 0) {
+            Value::Str(s) => s,
+            other => return Ok(other),
+        };
+        let body = crate::parser::parse_script(&code, false)
+            .map_err(|e| i.make_error("SyntaxError", e.message))?;
+        let env = i.global_env.clone();
+        ab(i.eval_in_scope(&body, &env))
+    });
+    it.def_method(&host, "detachArrayBuffer", 1, |i, _t, args| {
+        if let Value::Obj(o) = arg(args, 0) {
+            let p = Rc::as_ptr(&o) as usize;
+            if let Some(buf) = i.array_buffers.get_mut(&p) {
+                buf.clear();
+            }
+            set_internal(&o, "byteLength", Value::Num(0.0));
+        }
+        Ok(Value::Undefined)
+    });
+    set_builtin(&it.global, "$262", Value::Obj(host));
 }
 
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
@@ -3458,10 +3491,10 @@ fn to_radix_string(n: f64, radix: u32) -> String {
 
 fn install_boolean(it: &mut Interp) {
     let bp = it.boolean_proto.clone();
-    it.def_method(&bp, "toString", 0, |_i, this, _| {
-        Ok(Value::str(if truthy_bool(&this) { "true" } else { "false" }))
+    it.def_method(&bp, "toString", 0, |i, this, _| {
+        Ok(Value::str(if this_boolean(i, &this)? { "true" } else { "false" }))
     });
-    it.def_method(&bp, "valueOf", 0, |_i, this, _| Ok(Value::Bool(truthy_bool(&this))));
+    it.def_method(&bp, "valueOf", 0, |i, this, _| Ok(Value::Bool(this_boolean(i, &this)?)));
     let ctor = it.make_native("Boolean", 1, |i, _this, args| {
         let b = Value::Bool(i.to_boolean(&arg(args, 0)));
         Ok(maybe_box(i, b))
@@ -3471,11 +3504,15 @@ fn install_boolean(it: &mut Interp) {
     set_builtin(&it.global, "Boolean", Value::Obj(ctor));
 }
 
-fn truthy_bool(this: &Value) -> bool {
+/// thisBooleanValue: a Boolean primitive or Boolean wrapper, else TypeError.
+fn this_boolean(i: &mut Interp, this: &Value) -> Result<bool, Value> {
     match this {
-        Value::Bool(b) => *b,
-        Value::Obj(o) => matches!(o.borrow().exotic, Exotic::BoolWrap(true)),
-        _ => false,
+        Value::Bool(b) => Ok(*b),
+        Value::Obj(o) => match o.borrow().exotic {
+            Exotic::BoolWrap(b) => Ok(b),
+            _ => Err(i.make_error("TypeError", "Boolean method called on incompatible receiver")),
+        },
+        _ => Err(i.make_error("TypeError", "Boolean method called on incompatible receiver")),
     }
 }
 
