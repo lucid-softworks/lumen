@@ -1484,6 +1484,15 @@ fn install_date(it: &mut Interp) {
     set_builtin(&it.global, "Date", Value::Obj(ctor));
 }
 
+/// Whether a value is a constructor: a callable with an own `prototype` (built-in ctors / user
+/// non-arrow functions, which also set is_constructor) — matching the `new` constructability rule.
+fn is_constructor_value(v: &Value) -> bool {
+    matches!(v, Value::Obj(o) if {
+        let b = o.borrow();
+        !matches!(b.call, Callable::None) && (b.is_constructor || b.props.contains("prototype"))
+    })
+}
+
 /// Install the `get [Symbol.species]` accessor (returns the receiver `this`) on a constructor.
 fn install_species(it: &Interp, ctor: &Gc) {
     if let Some(key) = well_known_key(it, "species") {
@@ -1961,11 +1970,19 @@ fn install_reflect(it: &mut Interp) {
         ab(i.call(arg(a, 0), arg(a, 1), &args))
     });
     it.def_method(&r, "construct", 2, |i, _t, a| {
+        let target = arg(a, 0);
+        if !is_constructor_value(&target) {
+            return Err(i.make_error("TypeError", "Reflect.construct target is not a constructor"));
+        }
+        // The optional newTarget (3rd arg) must also be a constructor.
+        if a.len() >= 3 && !is_constructor_value(&arg(a, 2)) {
+            return Err(i.make_error("TypeError", "Reflect.construct newTarget is not a constructor"));
+        }
         let args = match arg(a, 1) {
             Value::Undefined | Value::Null => Vec::new(),
             list => ab(i.iterate(&list))?,
         };
-        ab(i.construct(arg(a, 0), &args))
+        ab(i.construct(target, &args))
     });
     it.def_method(&r, "isExtensible", 1, |_i, _t, a| {
         Ok(Value::Bool(matches!(arg(a, 0), Value::Obj(o) if o.borrow().extensible)))

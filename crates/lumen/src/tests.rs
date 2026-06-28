@@ -1075,3 +1075,12 @@ fn temporal_round_string() {
     // object form still works
     assert_eq!(run("new Temporal.PlainTime(3,30).round({smallestUnit:'hour'}).toString()"), "04:00:00");
 }
+#[test]
+fn reflect_construct_newtarget() {
+    assert_eq!(run("function isC(f){try{Reflect.construct(function(){},[],f);return true}catch(e){return false}} isC(function(){})+','+isC(Math.max)+','+isC(Array)+','+isC(()=>{})"), "true,false,true,false");
+    assert_eq!(run("Reflect.construct(Array,[1,2,3]).length"), "3");
+    assert_eq!(throws("Reflect.construct(Math.max,[])"), "TypeError");
+    assert_eq!(throws("Reflect.construct(function(){},[],Math.max)"), "TypeError");
+    assert_eq!(run("typeof Reflect.construct(function(){this.x=1},[])"), "object");
+    assert_eq!(run("class C{}; Reflect.construct(C,[]) instanceof C"), "true");
+}
