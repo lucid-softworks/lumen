@@ -127,6 +127,8 @@ pub struct Interp {
     pub proxies: HashMap<usize, (Value, Value)>,
     /// Promise state keyed by the promise object's pointer.
     pub promises: HashMap<usize, PromiseState>,
+    /// Temporal object internal slots, keyed by the object's pointer.
+    pub temporal: HashMap<usize, crate::temporal::Temporal>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
     pub microtasks: std::collections::VecDeque<Job>,
     /// When a generator body is being run eagerly, `yield`ed values are collected here instead of
@@ -226,6 +228,7 @@ impl Interp {
             regexps: HashMap::new(),
             proxies: HashMap::new(),
             promises: HashMap::new(),
+            temporal: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
             yield_buffer: None,
             gc_next: GC_TRIGGER,
@@ -799,6 +802,7 @@ impl Interp {
                 self.regexps.remove(&ptr);
                 self.proxies.remove(&ptr);
                 self.promises.remove(&ptr);
+                self.temporal.remove(&ptr);
                 self.array_buffers.remove(&ptr);
                 let mut b = o.borrow_mut();
                 b.props.clear();

@@ -517,3 +517,24 @@ fn host_262() {
     assert_eq!(run("$262.evalScript('1+2')"), "3");
     assert_eq!(run("typeof $262.gc"), "function");
 }
+
+#[test]
+fn temporal_basics() {
+    assert_eq!(run("typeof Temporal"), "object");
+    assert_eq!(run("new Temporal.PlainDate(2024,2,29).toString()"), "2024-02-29");
+    assert_eq!(run("Temporal.PlainDate.from('2021-07-15').month"), "7");
+    assert_eq!(run("new Temporal.PlainDate(2024,1,1).dayOfWeek"), "1"); // Mon
+    assert_eq!(run("new Temporal.PlainDate(2024,2,1).daysInMonth"), "29");
+    assert_eq!(run("new Temporal.PlainDate(2023,2,1).inLeapYear"), "false");
+    assert_eq!(run("new Temporal.PlainDate(2021,1,1).add({days:40}).toString()"), "2021-02-10");
+    assert_eq!(run("new Temporal.PlainDate(2021,3,31).add({months:1}).toString()"), "2021-04-30");
+    assert_eq!(run("Temporal.PlainDate.compare('2020-01-01','2021-01-01')"), "-1");
+    assert_eq!(run("new Temporal.PlainTime(13,5).toString()"), "13:05:00");
+    assert_eq!(run("Temporal.Duration.from('P1Y2M3DT4H5M6S').toString()"), "P1Y2M3DT4H5M6S");
+    assert_eq!(run("Temporal.Duration.from({hours:1}).negated().hours"), "-1");
+    assert_eq!(run("new Temporal.PlainDateTime(2021,7,15,10,30).toString()"), "2021-07-15T10:30:00");
+    assert_eq!(run("Temporal.PlainYearMonth.from('2021-07').toString()"), "2021-07");
+    assert_eq!(run("Temporal.Instant.fromEpochMilliseconds(0).epochNanoseconds"), "0");
+    assert_eq!(throws("Temporal.PlainDate(2020,1,1)"), "TypeError"); // requires new
+    assert_eq!(throws("new Temporal.PlainDate(2020,13,1)"), "RangeError");
+}

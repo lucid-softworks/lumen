@@ -60,6 +60,7 @@ pub fn install(it: &mut Interp) {
     install_globals(it);
     install_console(it);
     install_host(it);
+    crate::temporal::install(it);
 }
 
 /// The test262 `$262` host object. Only the portions lumen can support are provided (`global`,
