@@ -773,6 +773,37 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     }
     out
 }
+/// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
+/// date part and balancing the remaining time-of-day, with a borrow when the end time is earlier.
+fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &str) -> IsoDuration {
+    let a = dt_ns(d1, t1);
+    let b = dt_ns(d2, t2);
+    if a == b {
+        return IsoDuration::default();
+    }
+    let sign = if a < b { 1 } else { -1 };
+    let (sd, st, ed, et) = if a < b { (d1, t1, d2, t2) } else { (d2, t2, d1, t1) };
+    let mut tdiff = time_to_ns(et) - time_to_ns(st);
+    let mut end_date = ed;
+    if tdiff < 0 {
+        tdiff += 86_400_000_000_000;
+        let (y, m, da) = civil_from_days(epoch_days(ed) - 1);
+        end_date = IsoDate { year: y, month: m, day: da };
+    }
+    let mut out = diff_date(sd, end_date, largest); // years/months/weeks/days (positive)
+    let time = balance_ns(tdiff as i128, "hour");
+    out.hours = time.hours;
+    out.minutes = time.minutes;
+    out.seconds = time.seconds;
+    out.ms = time.ms;
+    out.us = time.us;
+    out.ns = time.ns;
+    if sign < 0 {
+        out = neg_duration(out);
+    }
+    out
+}
+
 /// Add `months` months to a date, clamping the day to the resulting month's length.
 fn constrain_add_ym(d: IsoDate, months: i64) -> IsoDate {
     let total = d.year * 12 + (d.month as i64 - 1) + months;
@@ -1203,15 +1234,23 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let diff = dt_ns(od, otm) - dt_ns(d, tm);
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+        let dur = if matches!(largest.strip_suffix('s').unwrap_or(&largest), "year" | "month" | "week") {
+            diff_datetime(d, tm, od, otm, &largest)
+        } else {
+            balance_ns(dt_ns(od, otm) - dt_ns(d, tm), &largest)
+        };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let diff = dt_ns(d, tm) - dt_ns(od, otm);
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+        let dur = if matches!(largest.strip_suffix('s').unwrap_or(&largest), "year" | "month" | "week") {
+            diff_datetime(od, otm, d, tm, &largest)
+        } else {
+            balance_ns(dt_ns(d, tm) - dt_ns(od, otm), &largest)
+        };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
 
     let ctor = add_ctor(it, ns, "PlainDateTime", 3, proto, |i, _t, a| {
