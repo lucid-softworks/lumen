@@ -1190,3 +1190,15 @@ fn sparse_array_holes() {
     assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
     assert_eq!(throws("[1,2,3].forEach(5)"), "TypeError");
 }
+#[test]
+fn reduce_indexof_holes() {
+    assert_eq!(run("[1,,3].reduce((a,b)=>a+b)"), "4");
+    assert_eq!(run("[1,,3].reduce((a,b)=>a+b,0)"), "4");
+    assert_eq!(run("[,,5].reduce((a,b)=>a+b)"), "5");
+    assert_eq!(run("[1,2,3,2].indexOf(2)"), "1");
+    assert_eq!(run("[1,2,3,2].indexOf(2,2)"), "3");
+    assert_eq!(run("[1,2,3].indexOf(9)"), "-1");
+    assert_eq!(throws("[].reduce((a,b)=>a+b)"), "TypeError");
+    assert_eq!(throws("[1,2,3].reduce(5)"), "TypeError");
+    assert_eq!(run("['a','b','c'].indexOf('c',-1)"), "2");
+}

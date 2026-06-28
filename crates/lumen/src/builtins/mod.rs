@@ -3738,7 +3738,17 @@ fn install_array(it: &mut Interp) {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "indexOf on non-object"))?;
         let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
-        for k in 0..len {
+        let from = match arg(args, 1) {
+            Value::Undefined => 0usize,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                if n >= 0.0 { n as usize } else { (len as f64 + n).max(0.0) as usize }
+            }
+        };
+        for k in from..len {
+            if !i.has_property(&o, &k.to_string()) {
+                continue; // indexOf skips holes
+            }
             let v = ab(i.get_member(&this, &k.to_string()))?;
             if i.strict_equals(&v, &target) {
                 return Ok(Value::Num(k as f64));
@@ -3859,20 +3869,33 @@ fn install_array(it: &mut Interp) {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduce on non-object"))?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "Array.prototype.reduce callback is not callable"));
+        }
+        let mut k = 0;
         let mut acc;
-        let mut start = 0;
         if args.len() >= 2 {
             acc = arg(args, 1);
         } else {
-            if len == 0 {
-                return Err(i.make_error("TypeError", "reduce of empty array with no initial value"));
+            // Seed with the first present element (holes are skipped).
+            loop {
+                if k >= len {
+                    return Err(i.make_error("TypeError", "Reduce of empty array with no initial value"));
+                }
+                if i.has_property(&o, &k.to_string()) {
+                    acc = ab(i.get_member(&this, &k.to_string()))?;
+                    k += 1;
+                    break;
+                }
+                k += 1;
             }
-            acc = ab(i.get_member(&this, "0"))?;
-            start = 1;
         }
-        for k in start..len {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            acc = ab(i.call(cb.clone(), Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()]))?;
+        while k < len {
+            if i.has_property(&o, &k.to_string()) {
+                let v = ab(i.get_member(&this, &k.to_string()))?;
+                acc = ab(i.call(cb.clone(), Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()]))?;
+            }
+            k += 1;
         }
         Ok(acc)
     });
