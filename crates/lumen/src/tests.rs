@@ -1116,3 +1116,18 @@ fn regexp_symbol_methods() {
     assert_eq!(run("[.../\\d/g[Symbol.matchAll]('a1b2')].length"), "2");
     assert_eq!(throws("RegExp.prototype[Symbol.match].call({}, 'x')"), "TypeError");
 }
+#[test]
+fn regexp_proto_getters() {
+    assert_eq!(run("/abc/gi.source"), "abc");
+    assert_eq!(run("/abc/gi.flags"), "gi");
+    assert_eq!(run("/abc/g.global"), "true");
+    assert_eq!(run("/abc/.global"), "false");
+    assert_eq!(run("RegExp.prototype.source"), "(?:)");
+    assert_eq!(run("RegExp.prototype.flags"), "");
+    assert_eq!(run("typeof Object.getOwnPropertyDescriptor(RegExp.prototype,'flags').get"), "function");
+    assert_eq!(run("typeof Object.getOwnPropertyDescriptor(RegExp.prototype,'source').get"), "function");
+    assert_eq!(run("/x/.hasOwnProperty('source')"), "false");
+    assert_eq!(run("/x/g.lastIndex"), "0");
+    assert_eq!(throws("Object.getOwnPropertyDescriptor(RegExp.prototype,'global').get.call({})"), "TypeError");
+    assert_eq!(run("/abc/d.hasIndices"), "true");
+}

@@ -523,9 +523,66 @@ fn install_dataview(it: &mut Interp) {
     set_builtin(&it.global, "DataView", Value::Obj(ctor));
 }
 
+/// A RegExp prototype getter: a flag boolean (`Some(char)`), or the special source/flags string.
+fn re_flag_get(i: &Interp, this: &Value, flag: Option<char>) -> Result<Value, Value> {
+    if let Some(ptr) = map_ptr(this) {
+        if let Some(re) = i.regexps.get(&ptr) {
+            return Ok(match flag {
+                Some(c) => Value::Bool(re.flags.contains(c)),
+                None => Value::from_string(re.flags.clone()),
+            });
+        }
+        // The %RegExp.prototype% object itself has default values rather than throwing.
+        if i.extra_protos.get("RegExp").map(|p| Rc::as_ptr(p) as usize) == Some(ptr) {
+            return Ok(match flag {
+                Some(_) => Value::Undefined,
+                None => Value::str(""),
+            });
+        }
+    }
+    Err(i.make_error("TypeError", "RegExp.prototype getter called on a non-RegExp"))
+}
+fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    if let Some(ptr) = map_ptr(&this) {
+        if let Some(re) = i.regexps.get(&ptr) {
+            return Ok(Value::from_string(re.source.clone()));
+        }
+        if i.extra_protos.get("RegExp").map(|p| Rc::as_ptr(p) as usize) == Some(ptr) {
+            return Ok(Value::str("(?:)"));
+        }
+    }
+    Err(i.make_error("TypeError", "RegExp.prototype.source called on a non-RegExp"))
+}
+
 fn install_regexp(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("RegExp", proto.clone());
+    // source/flags/global/... accessor getters (computed from the matcher).
+    let add_getter = |it: &mut Interp, proto: &Gc, name: &str, f: NativeFn| {
+        let g = it.make_native(&format!("get {name}"), 0, f);
+        proto.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    };
+    add_getter(it, &proto, "source", re_source_get);
+    add_getter(it, &proto, "flags", |i, t, _| re_flag_get(i, &t, None));
+    add_getter(it, &proto, "global", |i, t, _| re_flag_get(i, &t, Some('g')));
+    add_getter(it, &proto, "ignoreCase", |i, t, _| re_flag_get(i, &t, Some('i')));
+    add_getter(it, &proto, "multiline", |i, t, _| re_flag_get(i, &t, Some('m')));
+    add_getter(it, &proto, "dotAll", |i, t, _| re_flag_get(i, &t, Some('s')));
+    add_getter(it, &proto, "sticky", |i, t, _| re_flag_get(i, &t, Some('y')));
+    add_getter(it, &proto, "unicode", |i, t, _| re_flag_get(i, &t, Some('u')));
+    add_getter(it, &proto, "hasIndices", |i, t, _| re_flag_get(i, &t, Some('d')));
+    add_getter(it, &proto, "unicodeSets", |i, t, _| re_flag_get(i, &t, Some('v')));
     it.def_method(&proto, "exec", 1, regexp_exec);
     it.def_method(&proto, "test", 1, |i, this, a| {
         Ok(Value::Bool(!matches!(regexp_exec(i, this, a)?, Value::Null)))

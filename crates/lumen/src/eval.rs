@@ -1257,21 +1257,11 @@ impl Interp {
         let re = crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
         let obj = Object::new(self.extra_protos.get("RegExp").cloned());
         let ptr = Rc::as_ptr(&obj) as usize;
-        let ro = |v: Value| Property::data(v, false, false, false);
-        {
-            let mut b = obj.borrow_mut();
-            b.props.insert("source", ro(Value::from_string(re.source.clone())));
-            b.props.insert("flags", ro(Value::from_string(re.flags.clone())));
-            b.props.insert("global", ro(Value::Bool(re.global)));
-            b.props.insert("ignoreCase", ro(Value::Bool(re.ignore_case)));
-            b.props.insert("multiline", ro(Value::Bool(re.multiline)));
-            b.props.insert("dotAll", ro(Value::Bool(re.dotall)));
-            b.props.insert("sticky", ro(Value::Bool(re.sticky)));
-            b.props.insert("unicode", ro(Value::Bool(re.unicode)));
-            b.props.insert("hasIndices", ro(Value::Bool(re.flags.contains('d'))));
-            b.props.insert("unicodeSets", ro(Value::Bool(re.flags.contains('v'))));
-            b.props.insert("lastIndex", Property::data(Value::Num(0.0), true, false, false));
-        }
+        // source/flags/global/... are accessor getters on RegExp.prototype (computed from the
+        // matcher); only `lastIndex` is an own writable data property.
+        obj.borrow_mut()
+            .props
+            .insert("lastIndex", Property::data(Value::Num(0.0), true, false, false));
         self.regexps.insert(ptr, Rc::new(re));
         Ok(Value::Obj(obj))
     }

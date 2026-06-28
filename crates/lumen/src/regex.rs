@@ -23,7 +23,6 @@ pub struct Regex {
     pub multiline: bool,
     pub dotall: bool,
     pub sticky: bool,
-    pub unicode: bool,
     /// `(?<name>…)` group names paired with their capture index.
     pub names: Vec<(String, usize)>,
 }
@@ -161,7 +160,6 @@ impl Regex {
             multiline: flags.contains('m'),
             dotall: flags.contains('s'),
             sticky: flags.contains('y'),
-            unicode: flags.contains('u'),
             names: p.names,
         })
     }
