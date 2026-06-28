@@ -1502,6 +1502,30 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     let ctor = it.make_native(name, 0, ctor_fn);
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    if !is_set {
+        // Map.groupBy(items, cb) -> a Map of key -> [items...].
+        it.def_method(&ctor, "groupBy", 2, |i, _t, a| {
+            let cb = arg(a, 1);
+            if !cb.is_callable() {
+                return Err(i.make_error("TypeError", "Map.groupBy callback is not callable"));
+            }
+            let elems = ab(i.iterate(&arg(a, 0)))?;
+            let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+            for (idx, el) in elems.into_iter().enumerate() {
+                let key = ab(i.call(cb.clone(), Value::Undefined, &[el.clone(), Value::Num(idx as f64)]))?;
+                match groups.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
+                    Some(g) => g.1.push(el),
+                    None => groups.push((key, vec![el])),
+                }
+            }
+            let m = Object::new(i.extra_protos.get("Map").cloned());
+            let ptr = Rc::as_ptr(&m) as usize;
+            let entries: Vec<(Value, Value)> =
+                groups.into_iter().map(|(k, v)| (k, i.make_array(v))).collect();
+            i.map_data.insert(ptr, entries);
+            Ok(Value::Obj(m))
+        });
+    }
     set_builtin(&it.global, name, Value::Obj(ctor));
 }
 
