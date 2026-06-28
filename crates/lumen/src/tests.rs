@@ -1470,3 +1470,14 @@ fn detached_typedarray() {
     assert_eq!(run("var a=new Int32Array(4); a.byteLength"), "16");
     assert_eq!(run("var a=new Int8Array([1,2,3]); a.fill(9); a.join(',')"), "9,9,9");
 }
+#[test]
+fn ta_index_properties() {
+    assert_eq!(run("var a=new Int8Array(3); Object.defineProperty(a,'0',{value:7,writable:true,enumerable:true,configurable:true}); a[0]"), "7");
+    assert_eq!(run("var a=new Int8Array(3); var d=Object.getOwnPropertyDescriptor(a,'0'); d.value+','+d.writable+','+d.enumerable+','+d.configurable"), "0,true,true,true");
+    assert_eq!(run("new Int8Array(3).hasOwnProperty('0')"), "true");
+    assert_eq!(run("new Int8Array([1,2,3]).hasOwnProperty('5')"), "false");
+    assert_eq!(run("Object.getOwnPropertyNames(new Int8Array(3)).join(',')"), "0,1,2");
+    assert_eq!(run("Object.getOwnPropertyDescriptor(new Int8Array(3),'5')"), "undefined");
+    assert_eq!(throws("Object.defineProperty(new Int8Array(3),'5',{value:1})"), "TypeError");
+    assert_eq!(run("var a=new Int8Array([1,2,3]); a.length+','+a.byteLength"), "3,3");
+}

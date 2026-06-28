@@ -3641,6 +3641,12 @@ fn install_function_proto(it: &mut Interp) {
 // Object
 // ---------------------------------------------------------------------------------------------
 
+/// TypedArray info for `o`, if it is one.
+fn ta_info(i: &Interp, o: &Gc) -> Option<crate::value::TaInfo> {
+    i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied()
+}
+const TA_META_KEYS: [&str; 5] = ["length", "byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"];
+
 /// If `v` is a Proxy, its (target, handler) pair.
 fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
     if let Value::Obj(o) = v {
@@ -3743,7 +3749,18 @@ fn install_object(it: &mut Interp) {
     let op = it.object_proto.clone();
     it.def_method(&op, "hasOwnProperty", 1, |i, this, args| {
         let key = ab(i.to_property_key(&arg(args, 0)))?;
-        let has = this_obj(&this).map(|o| o.borrow().props.contains(&key)).unwrap_or(false);
+        let o = match this_obj(&this) {
+            Some(o) => o,
+            None => return Ok(Value::Bool(false)),
+        };
+        // A TypedArray index in range is an own property even though it isn't in the property map.
+        if let Some(info) = ta_info(i, &o) {
+            if let Ok(idx) = key.parse::<usize>() {
+                let detached = !i.array_buffers.contains_key(&info.buffer);
+                return Ok(Value::Bool(!detached && idx < info.len));
+            }
+        }
+        let has = o.borrow().props.contains(&key);
         Ok(Value::Bool(has))
     });
     // Annex B __defineGetter__/__defineSetter__/__lookupGetter__/__lookupSetter__.
@@ -3899,6 +3916,18 @@ fn install_object(it: &mut Interp) {
             let strs: Vec<Value> = keys.into_iter().filter(|k| matches!(k, Value::Str(_))).collect();
             return Ok(i.make_array(strs));
         }
+        // A TypedArray's own keys are its integer indices, then any string expandos (the
+        // length/buffer/... metadata are inherited, not own).
+        if let Some(info) = ta_info(i, &o) {
+            let n = if i.array_buffers.contains_key(&info.buffer) { info.len } else { 0 };
+            let mut keys: Vec<Value> = (0..n).map(|k| Value::from_string(k.to_string())).collect();
+            for k in o.borrow().props.keys() {
+                if !Interp::is_sym_key(&k) && k.parse::<usize>().is_err() && !TA_META_KEYS.contains(&&*k) {
+                    keys.push(Value::Str(k));
+                }
+            }
+            return Ok(i.make_array(keys));
+        }
         let keys: Vec<Value> = o
             .borrow()
             .props
@@ -4002,6 +4031,23 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Object.defineProperty called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        // Defining a TypedArray integer index writes through to the buffer (in range) or fails.
+        if let Some(info) = ta_info(i, &o) {
+            if let Ok(idx) = key.parse::<usize>() {
+                let detached = !i.array_buffers.contains_key(&info.buffer);
+                if detached || idx >= info.len {
+                    return Err(i.make_error("TypeError", "cannot define an out-of-bounds TypedArray index"));
+                }
+                let pd = ab(build_partial(i, &arg(args, 2)))?;
+                if pd.is_accessor() || pd.configurable == Some(false) || pd.enumerable == Some(false) || pd.writable == Some(false) {
+                    return Err(i.make_error("TypeError", "invalid TypedArray index descriptor"));
+                }
+                if let Some(v) = pd.value {
+                    ab(i.ta_store(&info, idx, &v))?;
+                }
+                return Ok(Value::Obj(o));
+            }
+        }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             if !ab(proxy_define_property(i, &target, &handler, &key, &arg(args, 2)))? {
                 return Err(i.make_error("TypeError", "proxy defineProperty returned a falsish value"));
@@ -4019,6 +4065,17 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        // A TypedArray integer index is an own data property reading from the buffer.
+        if let Some(info) = ta_info(i, &o) {
+            if let Ok(idx) = key.parse::<usize>() {
+                let detached = !i.array_buffers.contains_key(&info.buffer);
+                if detached || idx >= info.len {
+                    return Ok(Value::Undefined);
+                }
+                let val = i.ta_read(&info, idx);
+                return Ok(descriptor_from_prop(i, Property::data(val, true, true, true)));
+            }
+        }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let trap = ab(i.get_member(&handler, "getOwnPropertyDescriptor"))?;
             if trap.is_callable() {
