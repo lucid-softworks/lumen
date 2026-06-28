@@ -40,6 +40,7 @@ pub fn install(it: &mut Interp) {
     install_string(it);
     install_number(it);
     install_boolean(it);
+    install_symbol(it);
     install_math(it);
     install_errors(it);
     install_globals(it);
@@ -95,6 +96,37 @@ fn install_function_proto(it: &mut Interp) {
     it.def_method(&fp, "toString", 0, |_i, _this, _args| {
         Ok(Value::str("function () { [native code] }"))
     });
+
+    // The `Function` constructor: `Function(p1, p2, ..., body)` compiles a new function in the
+    // global scope. We synthesize source and reuse the in-crate parser (no eval engine needed).
+    let ctor = it.make_native("Function", 1, |i, _this, args| {
+        let (params, body) = if args.is_empty() {
+            (String::new(), String::new())
+        } else {
+            let body = ab(i.to_string(args.last().unwrap()))?.to_string();
+            let mut ps = Vec::new();
+            for a in &args[..args.len() - 1] {
+                ps.push(ab(i.to_string(a))?.to_string());
+            }
+            (ps.join(","), body)
+        };
+        let src = format!("function anonymous({params}\n) {{\n{body}\n}}");
+        let program = crate::parser::parse_script(&src, false)
+            .map_err(|e| i.make_error("SyntaxError", e.message))?;
+        match program.into_iter().next() {
+            Some(crate::ast::Stmt::FuncDecl(f)) => {
+                let env = i.global_env.clone();
+                Ok(i.make_function(f, env))
+            }
+            _ => Err(i.make_error("SyntaxError", "Function constructor: invalid body")),
+        }
+    });
+    // `Function.prototype` is the shared function prototype, so `f instanceof Function` holds for
+    // every function (their [[Prototype]] is `function_proto`).
+    ctor.borrow_mut().proto = Some(fp.clone());
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(fp.clone()), false, false, false));
+    fp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_builtin(&it.global, "Function", Value::Obj(ctor));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -155,7 +187,7 @@ fn install_object(it: &mut Interp) {
             .borrow()
             .props
             .iter()
-            .filter(|(_, p)| p.enumerable)
+            .filter(|(k, p)| p.enumerable && !Interp::is_sym_key(k))
             .map(|(k, _)| Value::Str(k.clone()))
             .collect();
         Ok(i.make_array(keys))
@@ -165,8 +197,30 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "called on non-object")),
         };
-        let keys: Vec<Value> = o.borrow().props.keys().into_iter().map(Value::Str).collect();
+        let keys: Vec<Value> = o
+            .borrow()
+            .props
+            .keys()
+            .into_iter()
+            .filter(|k| !Interp::is_sym_key(k))
+            .map(Value::Str)
+            .collect();
         Ok(i.make_array(keys))
+    });
+    it.def_method(&ctor, "getOwnPropertySymbols", 1, |i, _this, args| {
+        let o = match arg(args, 0) {
+            Value::Obj(o) => o,
+            _ => return Err(i.make_error("TypeError", "called on non-object")),
+        };
+        let syms: Vec<Value> = o
+            .borrow()
+            .props
+            .keys()
+            .into_iter()
+            .filter(|k| Interp::is_sym_key(k))
+            .filter_map(|k| i.sym_from_key(&k))
+            .collect();
+        Ok(i.make_array(syms))
     });
     it.def_method(&ctor, "getPrototypeOf", 1, |i, _this, args| {
         match arg(args, 0) {
@@ -742,6 +796,11 @@ fn install_string(it: &mut Interp) {
     let ctor = it.make_native("String", 1, |i, _this, args| {
         match args.first() {
             None => Ok(Value::str("")),
+            // `String(sym)` is the one place a symbol stringifies (to its descriptive string)
+            // rather than throwing.
+            Some(Value::Sym(s)) => {
+                Ok(Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or(""))))
+            }
             Some(v) => Ok(Value::Str(ab(i.to_string(v))?)),
         }
     });
@@ -868,6 +927,62 @@ fn truthy_bool(this: &Value) -> bool {
         Value::Obj(o) => matches!(o.borrow().exotic, Exotic::BoolWrap(true)),
         _ => false,
     }
+}
+
+fn install_symbol(it: &mut Interp) {
+    let sp = it.symbol_proto.clone();
+    it.def_method(&sp, "toString", 0, |i, this, _| match &this {
+        Value::Sym(s) => {
+            Ok(Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or(""))))
+        }
+        _ => Err(i.make_error("TypeError", "Symbol.prototype.toString requires a symbol")),
+    });
+    it.def_method(&sp, "valueOf", 0, |i, this, _| match this {
+        Value::Sym(_) => Ok(this),
+        _ => Err(i.make_error("TypeError", "Symbol.prototype.valueOf requires a symbol")),
+    });
+
+    let ctor = it.make_native("Symbol", 0, |i, _this, args| {
+        let desc = match arg(args, 0) {
+            Value::Undefined => None,
+            v => Some(ab(i.to_string(&v))?),
+        };
+        Ok(i.new_symbol(desc))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(sp.clone()), false, false, false));
+    sp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+
+    // Well-known symbols (each a unique, frozen instance on the constructor).
+    for name in [
+        "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll",
+        "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables",
+    ] {
+        let sym = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
+        ctor.borrow_mut().props.insert(name, Property::data(sym, false, false, false));
+    }
+
+    it.def_method(&ctor, "for", 1, |i, _this, args| {
+        let key = ab(i.to_string(&arg(args, 0)))?.to_string();
+        if let Some(d) = i.sym_for.get(&key).cloned() {
+            return Ok(Value::Sym(d));
+        }
+        let sym = i.new_symbol(Some(Rc::from(key.as_str())));
+        if let Value::Sym(d) = &sym {
+            i.sym_for.insert(key, d.clone());
+        }
+        Ok(sym)
+    });
+    it.def_method(&ctor, "keyFor", 1, |i, _this, args| {
+        if let Value::Sym(s) = arg(args, 0) {
+            for (k, d) in &i.sym_for {
+                if d.id == s.id {
+                    return Ok(Value::from_string(k.clone()));
+                }
+            }
+        }
+        Ok(Value::Undefined)
+    });
+    set_builtin(&it.global, "Symbol", Value::Obj(ctor));
 }
 
 fn install_math(it: &mut Interp) {
@@ -1023,6 +1138,21 @@ fn install_globals(it: &mut Interp) {
     global_fn(it, "isFinite", 1, |i, _t, a| {
         Ok(Value::Bool(ab(i.to_number(&arg(a, 0)))?.is_finite()))
     });
+
+    // Indirect eval: runs in the global scope. (A *direct* `eval(...)` call is intercepted in
+    // `eval_call` and run in the caller's scope; both share this same function object.)
+    let eval_fn = it.make_native("eval", 1, |i, _this, args| {
+        let code = match arg(args, 0) {
+            Value::Str(s) => s,
+            other => return Ok(other),
+        };
+        let body = crate::parser::parse_script(&code, false)
+            .map_err(|e| i.make_error("SyntaxError", e.message))?;
+        let env = i.global_env.clone();
+        ab(i.eval_in_scope(&body, &env))
+    });
+    set_builtin(&it.global, "eval", Value::Obj(eval_fn.clone()));
+    it.eval_fn = Some(eval_fn);
 }
 
 fn install_console(it: &mut Interp) {

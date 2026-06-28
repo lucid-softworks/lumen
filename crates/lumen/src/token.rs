@@ -14,8 +14,10 @@ pub struct Token {
 pub enum Tok {
     Num(f64),
     Str(String),
-    /// A template literal with no `${}` substitutions (the only template form v1 supports).
-    Template(String),
+    /// A template literal, split into cooked string chunks and raw `${...}` substitution sources.
+    /// `` `a${x}b` `` lexes to `[Str("a"), Sub("x"), Str("b")]`. The parser desugars it to a string
+    /// concatenation, sub-parsing each `Sub` source.
+    Template(Vec<TplPart>),
     Ident(String),
     /// A reserved word. The text is interned to a `&'static str` so the parser can match by value.
     Keyword(&'static str),
@@ -24,6 +26,13 @@ pub enum Tok {
     /// A regular-expression literal: `/body/flags`.
     Regex { body: String, flags: String },
     Eof,
+}
+
+/// One piece of a template literal: a cooked literal chunk or the raw source of a `${...}` hole.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TplPart {
+    Str(String),
+    Sub(String),
 }
 
 /// The *always-reserved* words. The lexer hands these back as `Keyword` tokens so `var`/`function`/

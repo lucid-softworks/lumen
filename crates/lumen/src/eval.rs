@@ -90,6 +90,21 @@ impl Interp {
         }
     }
 
+    /// Run a parsed script body in `env` (used by `eval`): hoist, declare lexicals, execute, and
+    /// return the completion value (the value of the last value-producing statement).
+    pub(crate) fn eval_in_scope(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
+        self.hoist(body, env, true);
+        self.declare_block_lexicals(body, env, false);
+        let mut last = Value::Undefined;
+        for stmt in body {
+            let v = self.exec_stmt(stmt, env)?;
+            if !matches!(v, Value::Undefined) {
+                last = v;
+            }
+        }
+        Ok(last)
+    }
+
     pub fn exec_block(&mut self, stmts: &[Stmt], parent: &Env) -> Completion {
         let scope = new_scope(Some(parent.clone()));
         self.declare_block_lexicals(stmts, &scope, true);
@@ -397,7 +412,8 @@ impl Interp {
         };
         while let Some(o) = cur {
             for (k, p) in o.borrow().props.iter() {
-                if p.enumerable && seen.insert(k.to_string()) {
+                // for-in visits enumerable string keys only — never symbol keys.
+                if p.enumerable && !Interp::is_sym_key(k) && seen.insert(k.to_string()) {
                     out.push(k.to_string());
                 }
             }
@@ -553,7 +569,6 @@ impl Interp {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
-            Expr::Template(s) => Ok(Value::Str(s.clone())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
             Expr::Undefined => Ok(Value::Undefined),
@@ -753,6 +768,20 @@ impl Interp {
     }
 
     fn eval_call(&mut self, callee: &Expr, args: &[ArrayElem], env: &Env) -> Result<Value, Abrupt> {
+        // Direct eval: `eval(src)` called by that exact name runs the code in the *caller's* scope
+        // (so it can see/define local bindings). Any other way of reaching eval is indirect and runs
+        // in the global scope (handled by the global `eval` native).
+        if let Expr::Ident(name) = callee {
+            if name == "eval" {
+                if let (Ok(Value::Obj(f)), Some(ef)) = (self.get_var("eval", env), self.eval_fn.clone())
+                {
+                    if Rc::ptr_eq(&f, &ef) {
+                        let argv = self.eval_args(args, env)?;
+                        return self.direct_eval(argv.first(), env);
+                    }
+                }
+            }
+        }
         // `super(...)`: invoke the parent constructor on the current `this`, then run this class's
         // instance-field initializers.
         if matches!(callee, Expr::Super) {
@@ -819,6 +848,33 @@ impl Interp {
             return Err(self.throw("TypeError", format!("{desc} is not a function")));
         }
         self.call(func, this, &argv)
+    }
+
+    /// Direct eval: a non-string argument is returned unchanged; a string is parsed and executed.
+    /// Strict eval (inherited or via its own `"use strict"`) gets a fresh scope; sloppy eval shares
+    /// the caller's scope so `var`/function declarations leak into it (per spec for sloppy code).
+    fn direct_eval(&mut self, arg: Option<&Value>, env: &Env) -> Result<Value, Abrupt> {
+        let code = match arg {
+            Some(Value::Str(s)) => s.clone(),
+            Some(other) => return Ok(other.clone()),
+            None => return Ok(Value::Undefined),
+        };
+        let body = crate::parser::parse_script(&code, self.strict)
+            .map_err(|e| self.throw("SyntaxError", e.message))?;
+        let directive_strict = matches!(
+            body.first(),
+            Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict"
+        );
+        let run_env = if self.strict || directive_strict {
+            new_scope(Some(env.clone()))
+        } else {
+            env.clone()
+        };
+        let saved = self.strict;
+        self.strict = self.strict || directive_strict;
+        let result = self.eval_in_scope(&body, &run_env);
+        self.strict = saved;
+        result
     }
 
     // ----- classes ----------------------------------------------------------------------------
@@ -1264,7 +1320,7 @@ impl Interp {
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
-            Value::Obj(_) => true,
+            Value::Sym(_) | Value::Obj(_) => true,
         }
     }
 
@@ -1281,6 +1337,9 @@ impl Interp {
             }
             Value::Num(n) => *n,
             Value::Str(s) => parse_number(s),
+            Value::Sym(_) => {
+                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a number"))
+            }
             Value::Obj(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
                 self.to_number(&p)?
@@ -1304,6 +1363,9 @@ impl Interp {
             Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
             Value::Num(n) => Rc::from(self.num_to_str(*n).as_str()),
             Value::Str(s) => s.clone(),
+            Value::Sym(_) => {
+                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a string"))
+            }
             Value::Obj(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 match p {
@@ -1315,6 +1377,10 @@ impl Interp {
     }
 
     pub fn to_property_key(&mut self, v: &Value) -> Result<String, Abrupt> {
+        // A symbol key maps to its internal NUL-prefixed key; everything else is its string form.
+        if let Value::Sym(s) = v {
+            return Ok(Interp::sym_key(s));
+        }
         Ok(self.to_string(v)?.to_string())
     }
 
@@ -1359,6 +1425,7 @@ impl Interp {
             (Value::Bool(x), Value::Bool(y)) => x == y,
             (Value::Num(x), Value::Num(y)) => x == y,
             (Value::Str(x), Value::Str(y)) => x == y,
+            (Value::Sym(x), Value::Sym(y)) => x.id == y.id,
             (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y),
             _ => false,
         }
@@ -1370,6 +1437,7 @@ impl Interp {
             (Value::Num(_), Value::Num(_))
             | (Value::Str(_), Value::Str(_))
             | (Value::Bool(_), Value::Bool(_))
+            | (Value::Sym(_), Value::Sym(_))
             | (Value::Obj(_), Value::Obj(_)) => self.strict_equals(a, b),
             (Value::Num(_), Value::Str(_)) => {
                 let bn = self.to_number(b)?;

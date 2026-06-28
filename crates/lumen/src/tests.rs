@@ -147,6 +147,61 @@ fn memory_caps_convert_blowups_to_rangeerror() {
 }
 
 #[test]
+fn function_constructor() {
+    assert_eq!(run("var f = new Function('a','b','return a+b'); f(2,3)"), "5");
+    assert_eq!(run("var f = Function('return 42'); f()"), "42");
+    assert_eq!(run("typeof Function"), "function");
+    assert_eq!(run("(function(){}) instanceof Function"), "true");
+    assert_eq!(run("Function.prototype.call ? 'yes' : 'no'"), "yes");
+}
+
+#[test]
+fn template_literals() {
+    assert_eq!(run("`hello`"), "hello");
+    assert_eq!(run("let x = 5; `x is ${x}`"), "x is 5");
+    assert_eq!(run("let a=2,b=3; `${a}+${b}=${a+b}`"), "2+3=5");
+    assert_eq!(run("`${1}${2}${3}`"), "123");
+    assert_eq!(run("let o={n:'q'}; `name: ${o.n}, up: ${o.n.toUpperCase()}`"), "name: q, up: Q");
+    assert_eq!(run("`nested ${`a${1}b`} end`"), "nested a1b end");
+    assert_eq!(run("`${[1,2,3].map(x=>x*2).join(',')}`"), "2,4,6");
+}
+
+#[test]
+fn eval_direct_and_indirect() {
+    assert_eq!(run("eval('1 + 2 * 3')"), "7");
+    assert_eq!(run("eval('var q = 41; q + 1')"), "42");
+    assert_eq!(run("var x = 10; eval('x + 5')"), "15"); // direct: sees caller scope
+    assert_eq!(run("function f(){ var local = 7; return eval('local * 2'); } f()"), "14");
+    assert_eq!(run("eval(42)"), "42"); // non-string returns unchanged
+    assert_eq!(run("var e = eval; e('100')"), "100"); // indirect
+    assert_eq!(throws("eval('var = =')"), "SyntaxError");
+}
+
+#[test]
+fn symbols() {
+    assert_eq!(run("typeof Symbol()"), "symbol");
+    assert_eq!(run("typeof Symbol.iterator"), "symbol");
+    assert_eq!(run("Symbol('x') === Symbol('x')"), "false"); // unique
+    assert_eq!(run("var s = Symbol('d'); s.description"), "d");
+    assert_eq!(run("var s = Symbol(); var o = {}; o[s] = 7; o[s]"), "7");
+    assert_eq!(run("var s = Symbol(); var o = {[s]:1, a:2}; Object.keys(o).join(',')"), "a"); // symbol skipped
+    assert_eq!(run("var s = Symbol(); var o = {[s]:1}; Object.getOwnPropertySymbols(o).length"), "1");
+    assert_eq!(run("Symbol.for('k') === Symbol.for('k')"), "true"); // registry
+    assert_eq!(run("String(Symbol('hi'))"), "Symbol(hi)");
+    assert_eq!(run("Symbol('z').toString()"), "Symbol(z)");
+    assert_eq!(throws("Symbol() + ''"), "TypeError"); // no implicit string coercion
+    assert_eq!(throws("+Symbol()"), "TypeError"); // no number coercion
+}
+
+#[test]
+fn template_with_comments_in_substitution() {
+    // Comments inside `${...}` (esp. with apostrophes) must lex cleanly.
+    assert_eq!(run("`${ 1 /* a's */ + 2 }`"), "3");
+    assert_eq!(run("let x=5; `${ x // it's x\n}`"), "5");
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
+

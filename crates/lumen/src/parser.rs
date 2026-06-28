@@ -3,7 +3,7 @@
 
 use crate::ast::*;
 use crate::lexer::tokenize;
-use crate::token::{Tok, Token};
+use crate::token::{Tok, Token, TplPart};
 use std::rc::Rc;
 
 pub struct ParseError {
@@ -738,9 +738,9 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Str(Rc::from(s.as_str())))
             }
-            Tok::Template(s) => {
+            Tok::Template(parts) => {
                 self.advance();
-                Ok(Expr::Template(Rc::from(s.as_str())))
+                self.build_template(parts)
             }
             Tok::Regex { body, flags } => {
                 self.advance();
@@ -797,6 +797,31 @@ impl Parser {
             Tok::Punct("{") => self.parse_object(),
             other => self.err(format!("unexpected token {other:?}")),
         }
+    }
+
+    /// Desugar a template literal into a string concatenation: cooked chunks become string
+    /// literals, `${...}` holes are sub-parsed as expressions. Starting from a string literal makes
+    /// every `+` a string concatenation (which ToString-coerces each substitution).
+    fn build_template(&mut self, parts: Vec<TplPart>) -> Result<Expr, ParseError> {
+        let mut expr: Option<Expr> = None;
+        for part in parts {
+            let piece = match part {
+                TplPart::Str(s) => Expr::Str(Rc::from(s.as_str())),
+                TplPart::Sub(src) => {
+                    let tokens = tokenize(&src)
+                        .map_err(|e| ParseError { message: e.message, line: e.line })?;
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth };
+                    sub.parse_expr()?
+                }
+            };
+            expr = Some(match expr {
+                None => piece,
+                Some(left) => {
+                    Expr::Binary { op: "+", left: Box::new(left), right: Box::new(piece) }
+                }
+            });
+        }
+        Ok(expr.unwrap_or(Expr::Str(Rc::from(""))))
     }
 
     fn parse_array(&mut self) -> Result<Expr, ParseError> {

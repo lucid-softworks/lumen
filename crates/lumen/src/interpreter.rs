@@ -80,7 +80,13 @@ pub struct Interp {
     pub string_proto: Gc,
     pub number_proto: Gc,
     pub boolean_proto: Gc,
+    pub symbol_proto: Gc,
     pub error_protos: HashMap<&'static str, Gc>,
+    /// Monotonic id source + registry for live symbols (so a symbol used as a property key can be
+    /// recovered for `Object.getOwnPropertySymbols`). `sym_for` backs the `Symbol.for` registry.
+    pub sym_counter: u64,
+    pub sym_registry: HashMap<u64, Rc<SymbolData>>,
+    pub sym_for: HashMap<String, Rc<SymbolData>>,
     pub console: Vec<String>,
     /// Current strict-mode flag (pushed/popped around function bodies).
     pub strict: bool,
@@ -91,6 +97,9 @@ pub struct Interp {
     /// constructor object's pointer (`Rc::as_ptr(..) as usize`). Lets `construct`/`super` run field
     /// initializers without attaching engine data to the `Object` itself.
     pub class_info: HashMap<usize, ClassInfo>,
+    /// The global `eval` function object, so a *direct* eval call (`eval(src)` by that name) can be
+    /// distinguished from an indirect one and run in the caller's scope.
+    pub eval_fn: Option<Gc>,
 }
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
@@ -123,6 +132,7 @@ impl Interp {
         let string_proto = Object::new(Some(object_proto.clone()));
         let number_proto = Object::new(Some(object_proto.clone()));
         let boolean_proto = Object::new(Some(object_proto.clone()));
+        let symbol_proto = Object::new(Some(object_proto.clone()));
         let global = Object::new(Some(object_proto.clone()));
         let global_env = new_scope(None);
         let mut interp = Interp {
@@ -134,11 +144,16 @@ impl Interp {
             string_proto,
             number_proto,
             boolean_proto,
+            symbol_proto,
             error_protos: HashMap::new(),
+            sym_counter: 0,
+            sym_registry: HashMap::new(),
+            sym_for: HashMap::new(),
             console: Vec::new(),
             strict: false,
             depth: 0,
             class_info: HashMap::new(),
+            eval_fn: None,
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -172,6 +187,30 @@ impl Interp {
     #[allow(dead_code)]
     pub fn type_err<T>(&self, message: impl Into<String>) -> Result<T, Abrupt> {
         Err(self.throw("TypeError", message))
+    }
+
+    // ----- symbols ----------------------------------------------------------------------------
+
+    /// Mint a fresh symbol and register it (so it can be recovered from a property key later).
+    pub fn new_symbol(&mut self, description: Option<Rc<str>>) -> Value {
+        self.sym_counter += 1;
+        let data = Rc::new(SymbolData { id: self.sym_counter, description });
+        self.sym_registry.insert(data.id, data.clone());
+        Value::Sym(data)
+    }
+
+    /// The internal property-map key a symbol maps to. A leading NUL never appears in a real
+    /// JS-authored property name in the suite, so it cleanly separates symbol keys from string keys.
+    pub fn sym_key(data: &SymbolData) -> String {
+        format!("\u{0}{}", data.id)
+    }
+    pub fn is_sym_key(key: &str) -> bool {
+        key.starts_with('\u{0}')
+    }
+    /// Recover the symbol `Value` behind an internal symbol key (for `getOwnPropertySymbols`).
+    pub fn sym_from_key(&self, key: &str) -> Option<Value> {
+        let id: u64 = key.strip_prefix('\u{0}')?.parse().ok()?;
+        self.sym_registry.get(&id).map(|d| Value::Sym(d.clone()))
     }
 
     // ----- object construction ----------------------------------------------------------------
@@ -267,6 +306,13 @@ impl Interp {
             }
             Value::Bool(_) => {
                 let proto = self.boolean_proto.clone();
+                self.get_from_chain(&proto, key, base)
+            }
+            Value::Sym(s) => {
+                if key == "description" {
+                    return Ok(s.description.clone().map(Value::Str).unwrap_or(Value::Undefined));
+                }
+                let proto = self.symbol_proto.clone();
                 self.get_from_chain(&proto, key, base)
             }
             Value::Obj(o) => {
@@ -625,7 +671,7 @@ impl Interp {
 
     /// Hoist `var` and function declarations into `scope`. `let`/`const` get TDZ bindings created
     /// at block entry instead (see [`Self::exec_block`]).
-    fn hoist(&mut self, stmts: &[Stmt], scope: &Env, _fn_level: bool) {
+    pub(crate) fn hoist(&mut self, stmts: &[Stmt], scope: &Env, _fn_level: bool) {
         for stmt in stmts {
             self.hoist_stmt(stmt, scope);
         }
@@ -735,6 +781,7 @@ fn type_name(v: &Value) -> &'static str {
         Value::Bool(_) => "boolean",
         Value::Num(_) => "number",
         Value::Str(_) => "string",
+        Value::Sym(_) => "symbol",
         Value::Obj(_) => "object",
     }
 }

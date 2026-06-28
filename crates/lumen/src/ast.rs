@@ -113,7 +113,6 @@ pub struct ObjPatProp {
 pub enum Expr {
     Num(f64),
     Str(Rc<str>),
-    Template(Rc<str>),
     Bool(bool),
     Null,
     Undefined,

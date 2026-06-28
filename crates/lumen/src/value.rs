@@ -21,7 +21,15 @@ pub enum Value {
     Bool(bool),
     Num(f64),
     Str(Rc<str>),
+    Sym(Rc<SymbolData>),
     Obj(Gc),
+}
+
+/// A unique Symbol. Identity is the `id` (every `Symbol()` call gets a fresh one); `description` is
+/// the optional label. Well-known symbols (`Symbol.iterator`, …) are just pre-allocated instances.
+pub struct SymbolData {
+    pub id: u64,
+    pub description: Option<Rc<str>>,
 }
 
 impl Value {
@@ -47,6 +55,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
             Value::Str(_) => "string",
+            Value::Sym(_) => "symbol",
             Value::Obj(o) => {
                 if matches!(o.borrow().call, Callable::None) {
                     "object"

@@ -2,7 +2,7 @@
 //! streaming buys nothing) and resolves the classic `/`-is-it-a-regex-or-division ambiguity by
 //! tracking whether the previously emitted token can end an expression.
 
-use crate::token::{Tok, Token, KEYWORDS, PUNCTUATORS};
+use crate::token::{Tok, Token, TplPart, KEYWORDS, PUNCTUATORS};
 
 pub struct LexError {
     pub message: String,
@@ -169,20 +169,178 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_template(&mut self) -> Result<(), LexError> {
-        self.bump();
-        let mut s = String::new();
+        self.bump(); // opening backtick
+        let mut parts: Vec<TplPart> = Vec::new();
+        let mut cooked = String::new();
         loop {
             match self.bump() {
                 None => return Err(self.err("unterminated template literal")),
                 Some('`') => break,
+                Some('\\') => self.read_escape(&mut cooked)?,
                 Some('$') if self.peek() == Some('{') => {
-                    return Err(self.err("template substitutions ${...} are not supported yet"))
+                    self.bump(); // consume '{'
+                    parts.push(TplPart::Str(std::mem::take(&mut cooked)));
+                    parts.push(TplPart::Sub(self.read_template_sub()?));
                 }
-                Some('\\') => self.read_escape(&mut s)?,
-                Some(c) => s.push(c),
+                Some(c) => cooked.push(c),
             }
         }
-        self.push(Tok::Template(s));
+        parts.push(TplPart::Str(cooked));
+        self.push(Tok::Template(parts));
+        Ok(())
+    }
+
+    /// Read the raw source inside a `${ ... }` hole, returning it verbatim for the parser to
+    /// sub-parse. Tracks `{}` nesting and skips over string/template literals so their braces and
+    /// backticks don't confuse the matching.
+    fn read_template_sub(&mut self) -> Result<String, LexError> {
+        let mut src = String::new();
+        let mut depth = 0i32;
+        // Last non-whitespace char emitted, to disambiguate `/` (regex vs division) the same way the
+        // main lexer does — so quotes/braces inside a regex literal don't confuse the brace scan.
+        let mut last_sig: Option<char> = None;
+        loop {
+            // Comments: copy verbatim (their `'"{}` are inert).
+            if self.peek() == Some('/') && self.peek2() == Some('/') {
+                while let Some(c) = self.peek() {
+                    if is_line_terminator(c) {
+                        break;
+                    }
+                    src.push(c);
+                    self.bump();
+                }
+                continue;
+            }
+            if self.peek() == Some('/') && self.peek2() == Some('*') {
+                src.push_str("/*");
+                self.bump();
+                self.bump();
+                loop {
+                    match self.bump() {
+                        None => return Err(self.err("unterminated comment in template")),
+                        Some('*') if self.peek() == Some('/') => {
+                            src.push_str("*/");
+                            self.bump();
+                            break;
+                        }
+                        Some(c) => src.push(c),
+                    }
+                }
+                continue;
+            }
+            // Regex literal: copy verbatim (its `'"{}` are inert).
+            if self.peek() == Some('/') && regex_allowed_after(last_sig) {
+                self.copy_regex(&mut src)?;
+                last_sig = Some(')'); // a regex is a value: a following `/` is division
+                continue;
+            }
+            match self.bump() {
+                None => return Err(self.err("unterminated template substitution")),
+                Some('}') if depth == 0 => return Ok(src),
+                Some('}') => {
+                    depth -= 1;
+                    src.push('}');
+                    last_sig = Some('}');
+                }
+                Some('{') => {
+                    depth += 1;
+                    src.push('{');
+                    last_sig = Some('{');
+                }
+                Some(q @ ('"' | '\'')) => {
+                    self.copy_quoted(q, &mut src)?;
+                    last_sig = Some(')'); // string is a value
+                }
+                Some('`') => {
+                    src.push('`');
+                    // Nested template: copy verbatim to its closing backtick (one level).
+                    loop {
+                        match self.bump() {
+                            None => return Err(self.err("unterminated nested template")),
+                            Some('\\') => {
+                                src.push('\\');
+                                if let Some(c) = self.bump() {
+                                    src.push(c);
+                                }
+                            }
+                            Some('`') => {
+                                src.push('`');
+                                break;
+                            }
+                            Some(c) => src.push(c),
+                        }
+                    }
+                    last_sig = Some(')');
+                }
+                Some(c) => {
+                    src.push(c);
+                    if !c.is_whitespace() {
+                        last_sig = Some(c);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copy a string literal (already past the opening `quote` is NOT consumed — we push it) into
+    /// `out`, respecting escapes, up to and including the matching quote.
+    fn copy_quoted(&mut self, quote: char, out: &mut String) -> Result<(), LexError> {
+        out.push(quote);
+        loop {
+            match self.bump() {
+                None => return Err(self.err("unterminated string in template")),
+                Some('\\') => {
+                    out.push('\\');
+                    if let Some(c) = self.bump() {
+                        out.push(c);
+                    }
+                }
+                Some(c) if c == quote => {
+                    out.push(c);
+                    return Ok(());
+                }
+                Some(c) => out.push(c),
+            }
+        }
+    }
+
+    /// Copy a regex literal `/body/flags` verbatim into `out` (the leading `/` is at the cursor).
+    fn copy_regex(&mut self, out: &mut String) -> Result<(), LexError> {
+        out.push('/');
+        self.bump(); // opening /
+        let mut in_class = false;
+        loop {
+            match self.bump() {
+                None => return Err(self.err("unterminated regex in template")),
+                Some('\\') => {
+                    out.push('\\');
+                    if let Some(c) = self.bump() {
+                        out.push(c);
+                    }
+                }
+                Some('[') => {
+                    in_class = true;
+                    out.push('[');
+                }
+                Some(']') => {
+                    in_class = false;
+                    out.push(']');
+                }
+                Some('/') if !in_class => {
+                    out.push('/');
+                    break;
+                }
+                Some(c) => out.push(c),
+            }
+        }
+        while let Some(c) = self.peek() {
+            if is_ident_part(c) {
+                out.push(c);
+                self.bump();
+            } else {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -366,6 +524,15 @@ impl<'a> Lexer<'a> {
         }
         let _ = self.src; // keep field used; byte view reserved for future fast paths
         Err(self.err(format!("unexpected character {:?}", self.peek().unwrap_or('\0'))))
+    }
+}
+
+/// Whether a `/` following `last` (the previous significant char) starts a regex rather than being
+/// a division operator. A value-terminator (identifier char, `)`, `]`, `}`) means division.
+fn regex_allowed_after(last: Option<char>) -> bool {
+    match last {
+        None => true,
+        Some(c) => !(c.is_alphanumeric() || matches!(c, '_' | '$' | ')' | ']' | '}')),
     }
 }
 
