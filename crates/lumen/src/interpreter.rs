@@ -134,6 +134,9 @@ pub struct Interp {
     pub yield_buffer: Option<Vec<Value>>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub gc_next: i64,
+    /// True while a native constructor is being invoked via `new` (lets e.g. `Number`/`String`
+    /// build a wrapper object instead of returning a primitive).
+    pub constructing: bool,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -226,6 +229,7 @@ impl Interp {
             microtasks: std::collections::VecDeque::new(),
             yield_buffer: None,
             gc_next: GC_TRIGGER,
+            constructing: false,
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -482,6 +486,17 @@ impl Interp {
             Value::Obj(o) => {
                 let o = o.clone();
                 let ptr = Rc::as_ptr(&o) as usize;
+                // String wrapper (`new String(...)`/`Object("...")`): own indexed chars + `length`.
+                if let Exotic::StrWrap(s) = o.borrow().exotic.clone() {
+                    if key == "length" {
+                        return Ok(Value::Num(s.chars().count() as f64));
+                    }
+                    if let Ok(i) = key.parse::<usize>() {
+                        if let Some(c) = s.chars().nth(i) {
+                            return Ok(Value::from_string(c.to_string()));
+                        }
+                    }
+                }
                 // Proxy: invoke the `get` trap, or forward to the target.
                 if !self.proxies.is_empty() {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
@@ -828,7 +843,11 @@ impl Interp {
             }
         }
         let call = obj.borrow().call.clone();
-        match call {
+        // A plain call is never constructing (only `new` sets the flag). Clearing it here keeps a
+        // wrapper constructor invoked as a function — `Number(x)` — from boxing.
+        let saved_ctor = self.constructing;
+        self.constructing = false;
+        let r = match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
             Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),
             Callable::User(func, env) => self.call_user(&func, env, this, args, false, &obj),
@@ -837,7 +856,9 @@ impl Interp {
                 all.extend_from_slice(args);
                 self.call(Value::Obj(target), bthis, &all)
             }
-        }
+        };
+        self.constructing = saved_ctor;
+        r
     }
 
     pub(crate) fn call_user(
@@ -1006,8 +1027,13 @@ impl Interp {
         let call = obj.borrow().call.clone();
         match call {
             Callable::Native(f) => {
-                // Built-in constructors build and return their own object.
-                f(self, Value::Undefined, args).map_err(Abrupt::Throw)
+                // Built-in constructors build and return their own object. The `constructing` flag
+                // lets wrapper constructors (Number/String/...) distinguish `new X()` from `X()`.
+                let saved = self.constructing;
+                self.constructing = true;
+                let r = f(self, Value::Undefined, args).map_err(Abrupt::Throw);
+                self.constructing = saved;
+                r
             }
             Callable::User(func, env) => {
                 if func.is_arrow {

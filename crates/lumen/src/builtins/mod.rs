@@ -1921,7 +1921,8 @@ fn install_object(it: &mut Interp) {
         Ok(match arg(args, 0) {
             Value::Undefined | Value::Null => Value::Obj(i.new_object()),
             Value::Obj(o) => Value::Obj(o),
-            other => other, // primitive wrappers are a TODO; returning the primitive is harmless here
+            // ToObject of a primitive yields its wrapper object.
+            other => box_primitive(i, other),
         })
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(op.clone()), false, false, false));
@@ -3200,15 +3201,16 @@ fn install_string(it: &mut Interp) {
     });
 
     let ctor = it.make_native("String", 1, |i, _this, args| {
-        match args.first() {
-            None => Ok(Value::str("")),
-            // `String(sym)` is the one place a symbol stringifies (to its descriptive string)
-            // rather than throwing.
-            Some(Value::Sym(s)) => {
-                Ok(Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or(""))))
+        let s = match args.first() {
+            None => Value::str(""),
+            // `String(sym)` stringifies a symbol to its descriptive string; `new String(sym)`
+            // instead throws (via ToString below).
+            Some(Value::Sym(s)) if !i.constructing => {
+                Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or("")))
             }
-            Some(v) => Ok(Value::Str(ab(i.to_string(v))?)),
-        }
+            Some(v) => Value::Str(ab(i.to_string(v))?),
+        };
+        Ok(maybe_box(i, s))
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(sp.clone()), false, false, false));
     sp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
@@ -3220,7 +3222,44 @@ fn install_string(it: &mut Interp) {
         }
         Ok(Value::from_string(s))
     });
+    it.def_method(&ctor, "fromCodePoint", 1, |i, _this, args| {
+        let mut s = String::new();
+        for a in args {
+            let n = ab(i.to_number(a))?;
+            // Each argument must be an integer code point in [0, 0x10FFFF].
+            if !n.is_finite() || n.fract() != 0.0 || n < 0.0 || n > 0x10FFFF as f64 {
+                return Err(i.make_error("RangeError", "Invalid code point"));
+            }
+            // Lone surrogates are valid arguments but can't be a Rust char; substitute U+FFFD.
+            s.push(char::from_u32(n as u32).unwrap_or('\u{FFFD}'));
+        }
+        Ok(Value::from_string(s))
+    });
     set_builtin(&it.global, "String", Value::Obj(ctor));
+}
+
+/// Box a Number/String/Boolean primitive into a wrapper object (right prototype + exotic). Other
+/// values pass through unchanged (Symbol/BigInt wrappers are not modeled yet).
+fn box_primitive(i: &mut Interp, v: Value) -> Value {
+    let (proto, exotic) = match &v {
+        Value::Num(n) => (i.number_proto.clone(), Exotic::NumWrap(*n)),
+        Value::Bool(b) => (i.boolean_proto.clone(), Exotic::BoolWrap(*b)),
+        Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone())),
+        _ => return v,
+    };
+    let obj = Object::new(Some(proto));
+    obj.borrow_mut().exotic = exotic;
+    Value::Obj(obj)
+}
+
+/// Box only when a wrapper constructor is invoked via `new` (`new Number(x)` boxes, `Number(x)` does
+/// not).
+fn maybe_box(i: &mut Interp, v: Value) -> Value {
+    if i.constructing {
+        box_primitive(i, v)
+    } else {
+        v
+    }
 }
 
 fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Result<Value, Value> {
@@ -3352,12 +3391,13 @@ fn install_number(it: &mut Interp) {
     });
 
     let ctor = it.make_native("Number", 1, |i, _this, args| {
-        match args.first() {
-            None => Ok(Value::Num(0.0)),
+        let n = match args.first() {
+            None => 0.0,
             // Number(bigint) explicitly converts (only *implicit* ToNumber of a BigInt throws).
-            Some(Value::BigInt(n)) => Ok(Value::Num(*n as f64)),
-            Some(v) => Ok(Value::Num(ab(i.to_number(v))?)),
-        }
+            Some(Value::BigInt(n)) => *n as f64,
+            Some(v) => ab(i.to_number(v))?,
+        };
+        Ok(maybe_box(i, Value::Num(n)))
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(np.clone()), false, false, false));
     np.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
@@ -3418,7 +3458,8 @@ fn install_boolean(it: &mut Interp) {
     });
     it.def_method(&bp, "valueOf", 0, |_i, this, _| Ok(Value::Bool(truthy_bool(&this))));
     let ctor = it.make_native("Boolean", 1, |i, _this, args| {
-        Ok(Value::Bool(i.to_boolean(&arg(args, 0))))
+        let b = Value::Bool(i.to_boolean(&arg(args, 0)));
+        Ok(maybe_box(i, b))
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(bp.clone()), false, false, false));
     bp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
@@ -3447,6 +3488,9 @@ fn install_symbol(it: &mut Interp) {
     });
 
     let ctor = it.make_native("Symbol", 0, |i, _this, args| {
+        if i.constructing {
+            return Err(i.make_error("TypeError", "Symbol is not a constructor"));
+        }
         let desc = match arg(args, 0) {
             Value::Undefined => None,
             v => Some(ab(i.to_string(&v))?),
@@ -3535,7 +3579,11 @@ fn install_bigint(it: &mut Interp) {
         Value::BigInt(_) => Ok(this),
         _ => Err(i.make_error("TypeError", "BigInt.prototype.valueOf requires a BigInt")),
     });
-    let ctor = it.make_native("BigInt", 1, |i, _t, a| match arg(a, 0) {
+    let ctor = it.make_native("BigInt", 1, |i, _t, a| {
+        if i.constructing {
+            return Err(i.make_error("TypeError", "BigInt is not a constructor"));
+        }
+        match arg(a, 0) {
         Value::BigInt(n) => Ok(Value::BigInt(n)),
         Value::Num(n) => {
             if n.is_finite() && n.fract() == 0.0 {
@@ -3553,6 +3601,7 @@ fn install_bigint(it: &mut Interp) {
                 .map_err(|_| i.make_error("SyntaxError", "Cannot convert string to a BigInt"))
         }
         _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
+        }
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));

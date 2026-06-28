@@ -490,3 +490,22 @@ fn with_statement() {
     // `with` in strict mode is a parse-phase SyntaxError.
     assert!(Engine::new().eval("'use strict'; with({}){}", false).is_err());
 }
+
+
+#[test]
+fn primitive_wrappers() {
+    assert_eq!(run("typeof new Number(5)"), "object");
+    assert_eq!(run("typeof Object(5)"), "object");
+    assert_eq!(run("typeof new Boolean(true)"), "object");
+    assert_eq!(run("typeof new String('x')"), "object");
+    assert_eq!(run("typeof Object('s')"), "object");
+    assert_eq!(run("new Number(5) + 1"), "6");        // valueOf via this_number
+    assert_eq!(run("new String('abc').length"), "3");
+    assert_eq!(run("new String('abc')[1]"), "b");
+    assert_eq!(run("new String('hi').toUpperCase()"), "HI");
+    assert_eq!(run("new Boolean(false).valueOf()"), "false");
+    assert_eq!(run("var o=new Number(7); o instanceof Number"), "true");
+    assert_eq!(run("typeof Number(5)"), "number");    // call (no new) stays primitive
+    assert_eq!(throws("new Symbol()"), "TypeError");
+    assert_eq!(throws("new BigInt(1)"), "TypeError");
+}
