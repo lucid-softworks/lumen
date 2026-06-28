@@ -784,3 +784,14 @@ fn lexical_substatement() {
     assert_eq!(run("if(true){ let b=2; } 'ok'"), "ok");
     assert_eq!(run("for(let i=0;i<2;i++){} 'ok'"), "ok");
 }
+#[test]
+fn dup_lexical() {
+    // errors
+    for src in ["let x; let x","{ let y; let y }","let a; const a=1","let b; var b","var bb; let bb","let c; function c(){}","const d=1; let d","class E{}; let E","switch(1){case 1: let s; default: let s}","function z(){ let e; let e }"] {
+        assert!(Engine::new().eval(src, false).is_err(), "should reject: {src}");
+    }
+    // allowed (no false positives)
+    for src in ["let x; { let x }","{let a}{let a}","var n; var n","let m=1; m=2","function f(){} function f(){}","for(let i=0;i<2;i++){} for(let i=0;i<2;i++){}","if(1){let p}else{let p}","let q; function g(){ let q }","switch(1){case 1:{let s} case 2:{let s}}","try{}catch(x){let y}"] {
+        assert!(Engine::new().eval(src, false).is_ok(), "should accept: {src}");
+    }
+}

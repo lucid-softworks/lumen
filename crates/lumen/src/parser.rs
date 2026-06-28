@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new() };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -42,6 +42,14 @@ struct Parser {
     switch_depth: u32,
     /// Active labels in scope (reset at function boundaries).
     labels: Vec<String>,
+    /// Per-scope declared names, for detecting lexical redeclaration.
+    decl_scopes: Vec<DeclScope>,
+}
+
+#[derive(Default)]
+struct DeclScope {
+    lexical: Vec<String>,
+    var: Vec<String>,
 }
 
 impl Parser {
@@ -102,6 +110,34 @@ impl Parser {
         }
     }
 
+    fn push_decl_scope(&mut self) {
+        self.decl_scopes.push(DeclScope::default());
+    }
+    fn pop_decl_scope(&mut self) {
+        self.decl_scopes.pop();
+    }
+    /// Record a lexical (`let`/`const`/`class`) binding; error on redeclaration in this scope.
+    fn declare_lexical(&mut self, name: &str) -> Result<(), ParseError> {
+        let conflict = {
+            let s = self.decl_scopes.last().unwrap();
+            s.lexical.iter().any(|n| n == name) || s.var.iter().any(|n| n == name)
+        };
+        if conflict {
+            return self.err(format!("Identifier '{name}' has already been declared"));
+        }
+        self.decl_scopes.last_mut().unwrap().lexical.push(name.to_string());
+        Ok(())
+    }
+    /// Record a `var`/function binding; only conflicts with a lexical binding in the same scope.
+    fn declare_var(&mut self, name: &str) -> Result<(), ParseError> {
+        let conflict = self.decl_scopes.last().unwrap().lexical.iter().any(|n| n == name);
+        if conflict {
+            return self.err(format!("Identifier '{name}' has already been declared"));
+        }
+        self.decl_scopes.last_mut().unwrap().var.push(name.to_string());
+        Ok(())
+    }
+
     fn has_use_strict_prologue(&self) -> bool {
         // Only a leading run of string-literal expression statements counts as the directive
         // prologue. The first one being exactly "use strict" enables strict mode.
@@ -136,16 +172,25 @@ impl Parser {
             }
             Tok::Keyword("function") => {
                 let f = self.parse_function(false)?;
+                if let Some(n) = &f.name {
+                    self.declare_var(n)?;
+                }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
             // `async function f(){}` declaration (async is a contextual keyword).
             Tok::Ident(w) if w == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) => {
                 self.advance();
                 let f = self.parse_function(true)?;
+                if let Some(n) = &f.name {
+                    self.declare_var(n)?;
+                }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
             Tok::Keyword("class") => {
                 let c = self.parse_class()?;
+                if let Some(n) = &c.name {
+                    self.declare_lexical(n)?;
+                }
                 Ok(Stmt::ClassDecl(Rc::new(c)))
             }
             Tok::Keyword("if") => self.parse_if(),
@@ -233,11 +278,16 @@ impl Parser {
     }
 
     fn parse_block_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.push_decl_scope();
         let mut out = Vec::new();
-        while !self.is_punct("}") && !self.at_eof() {
-            out.push(self.parse_stmt()?);
-        }
-        self.expect_punct("}")?;
+        let r = (|| {
+            while !self.is_punct("}") && !self.at_eof() {
+                out.push(self.parse_stmt()?);
+            }
+            self.expect_punct("}")
+        })();
+        self.pop_decl_scope();
+        r?;
         Ok(out)
     }
 
@@ -247,6 +297,17 @@ impl Parser {
         // A `const` declaration must have an initializer for each binding.
         if kind == DeclKind::Const && decls.iter().any(|(_, init)| init.is_none()) {
             return self.err("missing initializer in const declaration");
+        }
+        // Track declared names to catch lexical redeclaration.
+        let mut names = Vec::new();
+        for (pat, _) in &decls {
+            pattern_names(pat, &mut names);
+        }
+        for n in &names {
+            match kind {
+                DeclKind::Var => self.declare_var(n)?,
+                _ => self.declare_lexical(n)?,
+            }
         }
         self.consume_semicolon()?;
         Ok(Stmt::VarDecl { kind, decls })
@@ -416,6 +477,14 @@ impl Parser {
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
+        // A `for (let … )` head shares one lexical scope with the body.
+        self.push_decl_scope();
+        let r = self.parse_for_inner();
+        self.pop_decl_scope();
+        r
+    }
+
+    fn parse_for_inner(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         self.expect_punct("(")?;
 
@@ -515,6 +584,13 @@ impl Parser {
     }
 
     fn parse_switch(&mut self) -> Result<Stmt, ParseError> {
+        self.push_decl_scope(); // a switch body is one lexical scope shared by all cases
+        let r = self.parse_switch_inner();
+        self.pop_decl_scope();
+        r
+    }
+
+    fn parse_switch_inner(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         self.expect_punct("(")?;
         let disc = self.parse_expr()?;
@@ -952,7 +1028,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new() };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
                     sub.parse_expr()?
                 }
             };
