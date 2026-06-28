@@ -621,9 +621,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
             v => to_time(i, &v)?,
         };
-        let offset = tz_offset_ns(&tz);
-        let epoch = dt_ns(d, time) - offset as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz }))
+        let local = dt_ns(d, time);
+        let offset = offset_for_local(&tz, local);
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz }))
     });
 
     let ctor = add_ctor(it, ns, "PlainDate", 3, proto, |i, _t, a| {
@@ -1174,9 +1174,9 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             Value::Str(s) => s.clone(),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
-        let offset = tz_offset_ns(&tz);
-        let epoch = dt_ns(d, tm) - offset as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz }))
+        let local = dt_ns(d, tm);
+        let offset = offset_for_local(&tz, local);
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -1854,7 +1854,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             Value::Str(s) => s.clone(),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
-        let offset = tz_offset_ns(&tz);
+        let offset = zone_offset(&tz, e);
         Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: offset, tz }))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -1939,6 +1939,118 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
 
 // ===== ZonedDateTime ==========================================================================
 
+/// A named-zone rule: standard offset, optional DST offset + transition rules. Transition rules are
+/// `(month, week, weekday, hour)` where week 5 = "last"; weekday 0 = Sunday. `utc_rule` means the
+/// transition hour is in UTC (EU style) rather than local wall time (US style).
+struct ZoneRule {
+    std: i64,
+    dst: Option<(i64, (u8, u8, u8, u8), (u8, u8, u8, u8), bool)>,
+}
+const SEC: i64 = 1_000_000_000;
+const US_START: (u8, u8, u8, u8) = (3, 2, 0, 2); // 2nd Sunday March, 02:00 local
+const US_END: (u8, u8, u8, u8) = (11, 1, 0, 2); // 1st Sunday Nov, 02:00 local
+const EU_START: (u8, u8, u8, u8) = (3, 5, 0, 1); // last Sunday March, 01:00 UTC
+const EU_END: (u8, u8, u8, u8) = (10, 5, 0, 1); // last Sunday Oct, 01:00 UTC
+
+fn zone_rule(tz: &str) -> Option<ZoneRule> {
+    let h = |n: i64| n * 3600 * SEC;
+    let hm = |hh: i64, mm: i64| (hh * 3600 + mm * 60) * SEC;
+    let fixed = |o: i64| Some(ZoneRule { std: o, dst: None });
+    let us = |std: i64, dst: i64| Some(ZoneRule { std, dst: Some((dst, US_START, US_END, false)) });
+    let eu = |std: i64, dst: i64| Some(ZoneRule { std, dst: Some((dst, EU_START, EU_END, true)) });
+    match tz {
+        "UTC" | "Z" | "Etc/UTC" | "Etc/GMT" | "GMT" => fixed(0),
+        "Africa/Abidjan" | "Africa/Accra" | "Atlantic/Reykjavik" | "Africa/Monrovia" => fixed(0),
+        "Africa/Lagos" | "Africa/Algiers" | "Africa/Tunis" => fixed(h(1)),
+        "Africa/Cairo" | "Africa/Johannesburg" => fixed(h(2)),
+        "Asia/Kolkata" | "Asia/Calcutta" => fixed(hm(5, 30)),
+        "Asia/Katmandu" | "Asia/Kathmandu" => fixed(hm(5, 45)),
+        "Asia/Tokyo" | "Asia/Seoul" => fixed(h(9)),
+        "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Singapore" | "Asia/Manila" => fixed(h(8)),
+        "Asia/Dubai" => fixed(h(4)),
+        "America/Sao_Paulo" | "America/Argentina/Buenos_Aires" => fixed(h(-3)),
+        "America/New_York" | "US/Eastern" => us(h(-5), h(-4)),
+        "America/Chicago" | "US/Central" => us(h(-6), h(-5)),
+        "America/Denver" | "US/Mountain" => us(h(-7), h(-6)),
+        "America/Los_Angeles" | "America/Vancouver" | "US/Pacific" => us(h(-8), h(-7)),
+        "America/Halifax" => us(h(-4), h(-3)),
+        "America/St_Johns" => us(hm(-3, -30), hm(-2, -30)),
+        "Europe/London" | "Europe/Lisbon" | "Europe/Dublin" => eu(0, h(1)),
+        "Europe/Vienna" | "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam"
+        | "Europe/Madrid" | "Europe/Rome" | "Europe/Brussels" | "Europe/Zurich"
+        | "Europe/Stockholm" | "Europe/Prague" | "Europe/Warsaw" => eu(h(1), h(2)),
+        "Europe/Athens" | "Europe/Helsinki" | "Europe/Bucharest" | "Europe/Kiev" => eu(h(2), h(3)),
+        _ => None,
+    }
+}
+
+/// Day-of-month of the `week`-th `weekday` (0=Sun) of `month` (week 5 = last).
+fn nth_weekday(year: i64, month: u8, week: u8, dow: u8) -> u8 {
+    let dow_of = |day: u8| (days_from_civil(year, month as i64, day as i64).rem_euclid(7) + 4) % 7; // 0=Sun
+    if week >= 5 {
+        let dim = days_in_month(year, month);
+        let mut d = dim;
+        while dow_of(d) as u8 != dow {
+            d -= 1;
+        }
+        d
+    } else {
+        let first = dow_of(1) as u8;
+        let offset = (dow + 7 - first) % 7;
+        1 + offset + (week - 1) * 7
+    }
+}
+/// The UTC nanosecond instant of a DST transition in `year`, given `offset_before` (the offset in
+/// effect just before the transition) and whether the rule hour is UTC.
+fn transition_ns(year: i64, rule: (u8, u8, u8, u8), offset_before: i64, utc_rule: bool) -> i128 {
+    let (month, week, dow, hour) = rule;
+    let day = nth_weekday(year, month, week, dow);
+    let local = days_from_civil(year, month as i64, day as i64) as i128 * 86_400 * SEC as i128
+        + hour as i128 * 3600 * SEC as i128;
+    if utc_rule {
+        local
+    } else {
+        local - offset_before as i128
+    }
+}
+/// The UTC offset (ns) of zone `tz` at instant `epoch_ns`.
+fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
+    if let Some(off) = parse_fixed_offset(tz) {
+        return off;
+    }
+    match zone_rule(tz) {
+        Some(ZoneRule { std, dst: None }) => std,
+        Some(ZoneRule { std, dst: Some((dst, start, end, utc_rule)) }) => {
+            let year = civil_from_days((epoch_ns.div_euclid(86_400 * SEC as i128)) as i64).0;
+            let s = transition_ns(year, start, std, utc_rule);
+            let e = transition_ns(year, end, dst, utc_rule);
+            if epoch_ns >= s && epoch_ns < e {
+                dst
+            } else {
+                std
+            }
+        }
+        None => 0,
+    }
+}
+/// The offset to use when interpreting a *local* wall-clock instant in `tz` (one refinement step).
+fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
+    let g = zone_offset(tz, local_ns); // first guess: treat local as UTC
+    zone_offset(tz, local_ns - g as i128)
+}
+
+/// Parse a fixed-offset id (`UTC`/`Z`/`±HH:MM[:SS]`) to ns, or None for a named zone.
+fn parse_fixed_offset(tz: &str) -> Option<i64> {
+    let t = tz.trim();
+    if t.eq_ignore_ascii_case("utc") || t == "Z" {
+        return Some(0);
+    }
+    if t.starts_with('+') || t.starts_with('-') {
+        return Some(tz_offset_ns(t));
+    }
+    None
+}
+
 /// Parse a time-zone id to a fixed offset in nanoseconds. "UTC"/"Z" and `±HH:MM[:SS]` are exact;
 /// any other (named) zone is treated as UTC (no DST database).
 fn tz_offset_ns(tz: &str) -> i64 {
@@ -1990,7 +2102,11 @@ fn zoned_local(epoch_ns: i128, offset_ns: i64) -> (IsoDate, IsoTime) {
 }
 fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
     match get(i, this) {
-        Some(Temporal::Zoned { epoch_ns, offset_ns, tz }) => Ok((epoch_ns, offset_ns, tz)),
+        // The offset is recomputed from the instant + zone so DST is reflected.
+        Some(Temporal::Zoned { epoch_ns, tz, .. }) => {
+            let offset = zone_offset(&tz, epoch_ns);
+            Ok((epoch_ns, offset, tz))
+        }
         _ => Err(i.make_error("TypeError", "receiver is not a Temporal.ZonedDateTime")),
     }
 }
@@ -2027,8 +2143,9 @@ fn to_zoned(i: &mut Interp, v: &Value) -> Result<(i128, i64, Rc<str>), Value> {
                 Some(t) => Rc::from(t.as_str()),
                 None => return Err(i.make_error("RangeError", "missing time zone")),
             };
-            let off = parse_offset_from(main).unwrap_or_else(|| tz_offset_ns(&tz));
-            Ok((dt_ns(date, time) - off as i128, off, tz))
+            let local = dt_ns(date, time);
+            let off = parse_offset_from(main).unwrap_or_else(|| offset_for_local(&tz, local));
+            Ok((local - off as i128, off, tz))
         }
         Value::Obj(_) => {
             let tzv = getm(i, v, "timeZone")?;
@@ -2039,7 +2156,6 @@ fn to_zoned(i: &mut Interp, v: &Value) -> Result<(i128, i64, Rc<str>), Value> {
                 Value::Str(s) => s.clone(),
                 _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
             };
-            let off = tz_offset_ns(&tz);
             let date = to_date(i, v)?;
             let hour = field_int(i, v, "hour", 0)? as u8;
             let minute = field_int(i, v, "minute", 0)? as u8;
@@ -2048,7 +2164,9 @@ fn to_zoned(i: &mut Interp, v: &Value) -> Result<(i128, i64, Rc<str>), Value> {
             let us = field_int(i, v, "microsecond", 0)? as u16;
             let ns = field_int(i, v, "nanosecond", 0)? as u16;
             let time = IsoTime { hour, minute, second, ms, us, ns };
-            Ok((dt_ns(date, time) - off as i128, off, tz))
+            let local = dt_ns(date, time);
+            let off = offset_for_local(&tz, local);
+            Ok((local - off as i128, off, tz))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
     }
@@ -2145,8 +2263,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
         let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
-        let epoch = dt_ns(d, midnight) - o as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+        let local = dt_ns(d, midnight); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (e, _, tz) = as_zoned(i, &t)?;
@@ -2176,16 +2294,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
-        let epoch = dt_ns(nd, ntm) - o as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+        let local = dt_ns(nd, ntm); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
-        let epoch = dt_ns(nd, ntm) - o as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+        let local = dt_ns(nd, ntm); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -2202,8 +2320,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
         let nd = check_date(i, IsoDate { year, month, day })?;
         let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns: nsf })?;
-        let epoch = dt_ns(nd, nt) - o as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: o, tz }))
+        let local = dt_ns(nd, nt); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
+        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;

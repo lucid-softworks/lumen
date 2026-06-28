@@ -599,3 +599,15 @@ fn temporal_duration_round_relative() {
     assert_eq!(run("Temporal.Duration.from({months:13}).round({largestUnit:'year', relativeTo:'2021-01-01'}).years"), "1");
     assert_eq!(run("Temporal.Duration.from({days:40}).round({largestUnit:'month', relativeTo:'2021-01-01'}).months"), "1");
 }
+
+#[test]
+fn temporal_named_timezones() {
+    // Fixed-offset named zones.
+    assert_eq!(run("new Temporal.ZonedDateTime(0n,'Asia/Kolkata').toPlainTime().toString()"), "05:30:00");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n,'Asia/Tokyo').hour"), "9");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n,'Asia/Katmandu').minute"), "45");
+    // DST: 2021-07-01 is summer -> America/New_York is EDT (-4); winter -> EST (-5).
+    assert_eq!(run("Temporal.ZonedDateTime.from('2021-07-01T12:00-04:00[America/New_York]').offset"), "-04:00");
+    assert_eq!(run("Temporal.ZonedDateTime.from('2021-01-01T12:00-05:00[America/New_York]').offset"), "-05:00");
+    assert_eq!(run("new Temporal.ZonedDateTime(0n,'Africa/Abidjan').offset"), "+00:00");
+}
