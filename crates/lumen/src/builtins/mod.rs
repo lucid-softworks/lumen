@@ -249,7 +249,7 @@ fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
     let es = kind.elsize();
-    if byte_off.checked_add(es).map_or(true, |e| e > len) {
+    if byte_off.checked_add(es).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -271,7 +271,7 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
     let es = kind.elsize();
-    if byte_off.checked_add(es).map_or(true, |e| e > len) {
+    if byte_off.checked_add(es).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = kind.write(value);
@@ -291,7 +291,7 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
 fn to_index(i: &mut Interp, v: &Value) -> Result<usize, Value> {
     let n = ab(i.to_number(v))?;
     let n = if n.is_nan() { 0.0 } else { n.trunc() };
-    if n < 0.0 || n > 9007199254740991.0 {
+    if !(0.0..=9007199254740991.0).contains(&n) {
         return Err(i.make_error("RangeError", "index out of range"));
     }
     Ok(n as usize)
@@ -302,7 +302,7 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
     let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
-    if byte_off.checked_add(8).map_or(true, |e| e > len) {
+    if byte_off.checked_add(8).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -323,7 +323,7 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
-    if byte_off.checked_add(8).map_or(true, |e| e > len) {
+    if byte_off.checked_add(8).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = (value as u64).to_le_bytes().to_vec();
