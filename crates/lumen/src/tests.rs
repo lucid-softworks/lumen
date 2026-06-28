@@ -1314,3 +1314,11 @@ fn proxy_traps() {
     assert_eq!(run("var p=new Proxy([1,2],{}); Object.getPrototypeOf(p)===Array.prototype"), "true");
     assert_eq!(run("Object.getPrototypeOf('x')===String.prototype"), "true");
 }
+#[test]
+fn proxy_gopd_trap() {
+    assert_eq!(run("var p=new Proxy({},{getOwnPropertyDescriptor(t,k){return {value:42,configurable:true}}}); Object.getOwnPropertyDescriptor(p,'x').value"), "42");
+    assert_eq!(run("var p=new Proxy({},{getOwnPropertyDescriptor(){return undefined}}); Object.getOwnPropertyDescriptor(p,'x')"), "undefined");
+    assert_eq!(run("var p=new Proxy({a:5},{}); Object.getOwnPropertyDescriptor(p,'a').value"), "5");
+    assert_eq!(run("var log=''; var p=new Proxy({},{getOwnPropertyDescriptor(t,k){log+=k;return {value:1,configurable:true}}}); Object.getOwnPropertyDescriptor(p,'foo'); log"), "foo");
+    assert_eq!(run("var p=new Proxy({},{getOwnPropertyDescriptor(){return {value:9,configurable:true}}}); Object.getOwnPropertyDescriptor(p,'x').writable"), "false");
+}

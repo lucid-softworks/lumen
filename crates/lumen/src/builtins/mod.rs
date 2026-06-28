@@ -3363,6 +3363,25 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            let trap = ab(i.get_member(&handler, "getOwnPropertyDescriptor"))?;
+            if trap.is_callable() {
+                let key_val = i.sym_from_key(&key).unwrap_or_else(|| Value::from_string(key.clone()));
+                let res = ab(i.call(trap, handler, &[target, key_val]))?;
+                if matches!(res, Value::Undefined) {
+                    return Ok(Value::Undefined);
+                }
+                if !matches!(res, Value::Obj(_)) {
+                    return Err(i.make_error("TypeError", "getOwnPropertyDescriptor trap must return an object or undefined"));
+                }
+                let pd = ab(build_partial(i, &res))?;
+                return Ok(descriptor_from_prop(i, complete_descriptor(pd)));
+            }
+            if let Value::Obj(t) = &target {
+                let prop = t.borrow().props.get(&key).cloned();
+                return Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined));
+            }
+        }
         let prop = o.borrow().props.get(&key).cloned();
         match prop {
             None => Ok(Value::Undefined),
@@ -3550,6 +3569,30 @@ struct PartialDesc {
     writable: Option<bool>,
     enumerable: Option<bool>,
     configurable: Option<bool>,
+}
+/// CompletePropertyDescriptor: fill in default attributes for a partial descriptor.
+fn complete_descriptor(pd: PartialDesc) -> Property {
+    if pd.is_accessor() {
+        Property {
+            value: Value::Undefined,
+            get: Some(pd.get.unwrap_or(Value::Undefined)),
+            set: Some(pd.set.unwrap_or(Value::Undefined)),
+            accessor: true,
+            writable: false,
+            enumerable: pd.enumerable.unwrap_or(false),
+            configurable: pd.configurable.unwrap_or(false),
+        }
+    } else {
+        Property {
+            value: pd.value.unwrap_or(Value::Undefined),
+            get: None,
+            set: None,
+            accessor: false,
+            writable: pd.writable.unwrap_or(false),
+            enumerable: pd.enumerable.unwrap_or(false),
+            configurable: pd.configurable.unwrap_or(false),
+        }
+    }
 }
 impl PartialDesc {
     fn is_accessor(&self) -> bool {
