@@ -487,6 +487,10 @@ impl Parser {
                 if self.strict && is_strict_reserved_binding(&name) {
                     return self.err(format!("'{name}' cannot be used as a binding in strict mode"));
                 }
+                // `await`/`yield` are reserved as bindings inside async/generator bodies.
+                if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+                    return self.err(format!("'{name}' cannot be used as a binding here"));
+                }
                 self.advance();
                 Ok(name)
             }
