@@ -1213,3 +1213,13 @@ fn accessor_arity() {
     assert_eq!(run("class C{get y(){return 3}}; new C().y"), "3");
     assert_eq!(run("({set x(v=1){}}); 'ok'"), "ok"); // default param allowed on setter
 }
+#[test]
+fn template_octal_escape() {
+    for src in ["`\\1`","`\\01`","`\\07`","`a\\8b`","`x\\9`","`${1}\\1`"] {
+        assert!(Engine::new().eval(src, false).is_err(), "should reject: {src}");
+    }
+    assert_eq!(run("`\\0`==='\\0'"), "true"); // lone NUL escape is fine
+    assert_eq!(run("`a\\u0041b`"), "aAb");
+    assert_eq!(run("`hi ${1+1}`"), "hi 2");
+    assert_eq!(run("`\\t`.length"), "1");
+}
