@@ -750,6 +750,23 @@ fn unit_ns(u: &str) -> Option<i128> {
         _ => return None,
     })
 }
+/// Validate a `roundingIncrement` for a (singular) time/day unit: it must be a positive integer that
+/// evenly divides the next-larger unit and is smaller than it (day allows only 1).
+fn check_increment(i: &Interp, unit: &str, incr: i64) -> Result<(), Value> {
+    if incr < 1 {
+        return Err(i.make_error("RangeError", "roundingIncrement out of range"));
+    }
+    let max = match unit {
+        "hour" => 24,
+        "minute" | "second" => 60,
+        "millisecond" | "microsecond" | "nanosecond" => 1000,
+        _ => return if incr == 1 { Ok(()) } else { Err(i.make_error("RangeError", "roundingIncrement out of range")) },
+    };
+    if incr >= max || max % incr != 0 {
+        return Err(i.make_error("RangeError", "roundingIncrement out of range"));
+    }
+    Ok(())
+}
 /// Validate a `roundingMode` option, else RangeError.
 fn check_mode(i: &Interp, m: &str) -> Result<(), Value> {
     const MODES: [&str; 9] = [
@@ -1044,9 +1061,11 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let smallest = opt_str(i, &o, "smallestUnit", "")?;
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
-        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
+        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        let incr = incr_raw as i128;
         let r = round_ns(time_to_ns(x) as i128, unit * incr, &mode).rem_euclid(86_400_000_000_000);
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(r))))
     });
@@ -1300,9 +1319,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         } else {
             unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
         };
-        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
+        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        let incr = incr_raw as i128;
         let rounded = round_ns(dt_ns(d, tm), unit * incr, &mode);
         let z = rounded.div_euclid(86_400_000_000_000) as i64;
         let rem = rounded.rem_euclid(86_400_000_000_000);
@@ -1376,13 +1397,16 @@ fn to_datetime(i: &mut Interp, v: &Value) -> Result<(IsoDate, IsoTime), Value> {
         }
         Value::Obj(_) => {
             let d = to_date(i, v)?;
-            let hour = field_int(i, v, "hour", 0)? as u8;
-            let minute = field_int(i, v, "minute", 0)? as u8;
-            let second = field_int(i, v, "second", 0)? as u8;
-            let ms = field_int(i, v, "millisecond", 0)? as u16;
-            let us = field_int(i, v, "microsecond", 0)? as u16;
-            let ns = field_int(i, v, "nanosecond", 0)? as u16;
-            Ok((d, check_time(i, IsoTime { hour, minute, second, ms, us, ns })?))
+            // Time fields constrain (overflow: 'constrain'); absent fields default to 0.
+            let t = IsoTime {
+                hour: field_int(i, v, "hour", 0)?.clamp(0, 23) as u8,
+                minute: field_int(i, v, "minute", 0)?.clamp(0, 59) as u8,
+                second: field_int(i, v, "second", 0)?.clamp(0, 59) as u8,
+                ms: field_int(i, v, "millisecond", 0)?.clamp(0, 999) as u16,
+                us: field_int(i, v, "microsecond", 0)?.clamp(0, 999) as u16,
+                ns: field_int(i, v, "nanosecond", 0)?.clamp(0, 999) as u16,
+            };
+            Ok((d, t))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDateTime")),
     }
@@ -1631,9 +1655,11 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         let o = arg(a, 0);
         let smallest = opt_str(i, &o, "smallestUnit", "nanosecond")?;
         let mut largest = opt_str(i, &o, "largestUnit", "auto")?;
-        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
+        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        let incr = incr_raw as i128;
         let has_cal = d.years != 0 || d.months != 0 || d.weeks != 0;
         let cal_unit = |u: &str| matches!(u.strip_suffix('s').unwrap_or(u), "year" | "month" | "week");
 
@@ -1959,9 +1985,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let smallest = opt_str(i, &o, "smallestUnit", "")?;
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
-        let incr = opt_num(i, &o, "roundingIncrement", 1)?.max(1) as i128;
+        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
+        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        let incr = incr_raw as i128;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(round_ns(x, unit * incr, &mode))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
@@ -2439,9 +2467,11 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         } else {
             unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
         };
-        let incr = opt_num(i, &opts, "roundingIncrement", 1)?.max(1) as i128;
+        let incr_raw = opt_num(i, &opts, "roundingIncrement", 1)?;
         let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
+        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        let incr = incr_raw as i128;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
         Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz }))
