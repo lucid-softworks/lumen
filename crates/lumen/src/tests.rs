@@ -1277,3 +1277,12 @@ fn optional_chaining() {
     assert_eq!(throws("var a=null; (a?.b).c"), "TypeError"); // parens end the chain → .c on undefined throws
     assert_eq!(run("var a={b:1}; a?.b"), "1");
 }
+#[test]
+fn private_in() {
+    assert_eq!(run("class C{#x=1; static has(o){return #x in o}} C.has(new C())"), "true");
+    assert_eq!(run("class C{#x=1; static has(o){return #x in o}} C.has({})"), "false");
+    assert_eq!(run("class C{#m(){} static has(o){return #m in o}} C.has(new C())"), "true");
+    assert_eq!(run("class C{#x; static check(o){return #x in o}} C.check(new C())+','+C.check([])"), "true,false");
+    assert_eq!(throws("class C{#x=1; static has(o){return #x in o}} C.has(5)"), "TypeError");
+    assert_eq!(run("class C{#x=1; t(){return this.#x}} new C().t()"), "1");
+}

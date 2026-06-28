@@ -868,6 +868,14 @@ impl Interp {
                 self.binary(op, l, r)
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
+            Expr::PrivateIn { name, obj } => {
+                let o = self.eval(obj, env)?;
+                match o {
+                    // Private fields are own props; private methods live on the prototype.
+                    Value::Obj(obj) => Ok(Value::Bool(self.has_property(&obj, name))),
+                    _ => Err(self.throw("TypeError", "the right-hand side of 'in' must be an object")),
+                }
+            }
             Expr::OptionalChain(inner) => {
                 let saved = self.short_circuit;
                 self.short_circuit = false;

@@ -758,6 +758,15 @@ impl Parser {
             let right = self.parse_binary(next_min)?;
             left = if logical {
                 Expr::Logical { op, left: Box::new(left), right: Box::new(right) }
+            } else if op == "in" {
+                // `#field in obj` is the ergonomic brand check, not a normal `in`.
+                if let Expr::Ident(n) = &left {
+                    if n.starts_with('#') {
+                        left = Expr::PrivateIn { name: n.clone(), obj: Box::new(right) };
+                        continue;
+                    }
+                }
+                Expr::Binary { op, left: Box::new(left), right: Box::new(right) }
             } else {
                 Expr::Binary { op, left: Box::new(left), right: Box::new(right) }
             };

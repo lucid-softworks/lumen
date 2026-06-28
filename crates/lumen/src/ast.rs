@@ -153,6 +153,8 @@ pub enum Expr {
     /// An optional chain (`a?.b.c`): evaluates the inner LHS, short-circuiting to `undefined` if any
     /// `?.` link sees a nullish base.
     OptionalChain(P<Expr>),
+    /// Ergonomic brand check `#field in obj`: whether `obj` carries the private field.
+    PrivateIn { name: String, obj: P<Expr> },
 }
 
 /// An array element or call argument: a value, a spread (`...x`), or a hole (`[1,,3]`).
