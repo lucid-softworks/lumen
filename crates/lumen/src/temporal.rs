@@ -586,9 +586,12 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let largest = if largest == "auto" { "day".to_string() } else { largest };
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(diff_date(d, o, &largest)))))
     });
-    it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
+    it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
-        let time = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
+        let time = match arg(a, 0) {
+            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            v => to_time(i, &v)?,
+        };
         Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, time)))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
@@ -1691,6 +1694,17 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.Instant has no valueOf; use compare"))
     });
+    it.def_method(&proto, "toJSON", 0, |i, t, _| {
+        let ns = as_instant(i, &t)?;
+        let z = ns.div_euclid(86_400_000_000_000) as i64;
+        let rem = ns.rem_euclid(86_400_000_000_000);
+        let (y, mo, da) = civil_from_days(z);
+        Ok(Value::str(format!(
+            "{}T{}Z",
+            fmt_date(IsoDate { year: y, month: mo, day: da }),
+            fmt_time(ns_to_time(rem))
+        )))
+    });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
@@ -2008,6 +2022,11 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.ZonedDateTime has no valueOf; use compare"))
+    });
+    it.def_method(&proto, "toJSON", 0, |i, t, _| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, tm) = zoned_local(e, o);
+        Ok(Value::str(format!("{}T{}{}[{}]", fmt_date(d), fmt_time(tm), offset_string(o), tz)))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
