@@ -568,7 +568,143 @@ fn install_regexp(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     install_species(it, &ctor);
+
+    // The @@match/@@replace/@@search/@@split/@@matchAll methods on RegExp.prototype (what
+    // String.prototype.{match,replace,...} dispatch to).
+    let methods: [(&str, NativeFn); 5] = [
+        ("match", re_sym_match),
+        ("replace", re_sym_replace),
+        ("search", re_sym_search),
+        ("split", re_sym_split),
+        ("matchAll", re_sym_matchall),
+    ];
+    for (sym, f) in methods {
+        if let Some(key) = well_known_key(it, sym) {
+            let m = it.make_native(&format!("[Symbol.{sym}]"), 1, f);
+            proto.borrow_mut().props.insert(key, Property::builtin(Value::Obj(m)));
+        }
+    }
     set_builtin(&it.global, "RegExp", Value::Obj(ctor));
+}
+
+fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
+    if ptr.is_none() {
+        return Err(i.make_error("TypeError", "[Symbol.match] called on non-RegExp"));
+    }
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let re = i.regexps[&ptr.unwrap()].clone();
+    let chars: Vec<char> = s.chars().collect();
+    if re.global {
+        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+        let all = regex_find_all(&re, &chars);
+        if all.is_empty() {
+            return Ok(Value::Null);
+        }
+        let items: Vec<Value> = all
+            .iter()
+            .map(|c| {
+                let (x, y) = c[0].unwrap();
+                Value::from_string(chars[x..y].iter().collect::<String>())
+            })
+            .collect();
+        Ok(i.make_array(items))
+    } else {
+        regexp_exec(i, this, &[Value::Str(s)])
+    }
+}
+fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    if map_ptr(&this).map(|p| i.regexps.contains_key(&p)) != Some(true) {
+        return Err(i.make_error("TypeError", "[Symbol.replace] called on non-RegExp"));
+    }
+    let s = ab(i.to_string(&arg(a, 0)))?.to_string();
+    regex_replace(i, &s, &this, &arg(a, 1))
+}
+fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
+    if ptr.is_none() {
+        return Err(i.make_error("TypeError", "[Symbol.search] called on non-RegExp"));
+    }
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let re = i.regexps[&ptr.unwrap()].clone();
+    let chars: Vec<char> = s.chars().collect();
+    Ok(match re.exec_at(&chars, 0) {
+        Some(c) => Value::Num(c[0].unwrap().0 as f64),
+        None => Value::Num(-1.0),
+    })
+}
+fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
+    if ptr.is_none() {
+        return Err(i.make_error("TypeError", "[Symbol.matchAll] called on non-RegExp"));
+    }
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let re = i.regexps[&ptr.unwrap()].clone();
+    let chars: Vec<char> = s.chars().collect();
+    let all = regex_find_all(&re, &chars);
+    let mut results = Vec::new();
+    for caps in all {
+        let (x, y) = caps[0].unwrap();
+        let mut items = vec![Value::from_string(chars[x..y].iter().collect::<String>())];
+        for g in 1..=re.ngroups {
+            items.push(match caps[g] {
+                Some((aa, bb)) => Value::from_string(chars[aa..bb].iter().collect::<String>()),
+                None => Value::Undefined,
+            });
+        }
+        let m = i.make_array(items);
+        if let Value::Obj(o) = &m {
+            set_data(o, "index", Value::Num(x as f64));
+            set_data(o, "input", Value::Str(s.clone()));
+        }
+        results.push(m);
+    }
+    let arr = i.make_array(results);
+    Ok(make_array_iterator(i, arr, 0))
+}
+fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
+    if ptr.is_none() {
+        return Err(i.make_error("TypeError", "[Symbol.split] called on non-RegExp"));
+    }
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let re = i.regexps[&ptr.unwrap()].clone();
+    let chars: Vec<char> = s.chars().collect();
+    let limit = match arg(a, 1) {
+        Value::Undefined => usize::MAX,
+        v => ab(i.to_number(&v))? as usize,
+    };
+    let mut out = Vec::new();
+    let mut last = 0;
+    let mut pos = 0;
+    while pos <= chars.len() && out.len() < limit {
+        match re.exec_at(&chars, pos) {
+            Some(caps) => {
+                let (mstart, mend) = caps[0].unwrap();
+                if mend == last && mstart == last {
+                    pos += 1;
+                    continue;
+                }
+                if mstart >= chars.len() {
+                    break;
+                }
+                out.push(Value::from_string(chars[last..mstart].iter().collect::<String>()));
+                for g in 1..=re.ngroups {
+                    out.push(match caps[g] {
+                        Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
+                        None => Value::Undefined,
+                    });
+                }
+                last = mend;
+                pos = if mend > mstart { mend } else { mend + 1 };
+            }
+            None => break,
+        }
+    }
+    if out.len() < limit {
+        out.push(Value::from_string(chars[last..].iter().collect::<String>()));
+    }
+    Ok(i.make_array(out))
 }
 
 /// `RegExp.prototype.exec`: returns the match array (with `index`/`input`) or `null`, advancing

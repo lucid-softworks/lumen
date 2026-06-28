@@ -1105,3 +1105,14 @@ fn disposable_stack() {
     assert_eq!(run("var s=new DisposableStack(); s.use({[Symbol.dispose](){}}); var s2=s.move(); s.disposed+','+s2.disposed"), "true,false");
     assert_eq!(run("typeof Symbol.dispose"), "symbol");
 }
+#[test]
+fn regexp_symbol_methods() {
+    assert_eq!(run("typeof RegExp.prototype[Symbol.replace]"), "function");
+    assert_eq!(run("typeof RegExp.prototype[Symbol.match]"), "function");
+    assert_eq!(run("/b/[Symbol.replace]('abc','X')"), "aXc");
+    assert_eq!(run("/\\d/g[Symbol.match]('a1b2').join(',')"), "1,2");
+    assert_eq!(run("/b/[Symbol.search]('abc')"), "1");
+    assert_eq!(run("/,/[Symbol.split]('a,b,c').join('|')"), "a|b|c");
+    assert_eq!(run("[.../\\d/g[Symbol.matchAll]('a1b2')].length"), "2");
+    assert_eq!(throws("RegExp.prototype[Symbol.match].call({}, 'x')"), "TypeError");
+}
