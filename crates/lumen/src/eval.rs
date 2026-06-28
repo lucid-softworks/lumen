@@ -1485,6 +1485,12 @@ impl Interp {
                             let p = src.borrow().props.get(&k).cloned().unwrap();
                             dst.borrow_mut().props.insert(k, p);
                         }
+                        // A subclass instance inherits the built-in's exotic behavior (e.g. an Array
+                        // subclass is itself an Array exotic).
+                        let src_exotic = src.borrow().exotic.clone();
+                        if !matches!(src_exotic, crate::value::Exotic::None) {
+                            dst.borrow_mut().exotic = src_exotic;
+                        }
                         // Move the native object's internal slots (Map/Set/TypedArray/buffer/etc.)
                         // onto `this`, so a subclass instance carries the built-in's state.
                         let (sp, dp) = (Rc::as_ptr(src) as usize, Rc::as_ptr(dst) as usize);

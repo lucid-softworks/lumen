@@ -1160,3 +1160,14 @@ fn promise_combinators_async() {
     e2.eval("var r2; Promise.any([Promise.reject(1),Promise.resolve(9)]).then(v=>r2=v)", false).unwrap();
     assert_eq!(match e2.eval("r2", false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "9");
 }
+#[test]
+fn array_species() {
+    assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
+    assert_eq!(run("[1,2,3,4].filter(x=>x%2===0).join(',')"), "2,4");
+    assert_eq!(run("[1,2,3,4,5].slice(1,3).join(',')"), "2,3");
+    assert_eq!(run("class A extends Array {}; new A(1,2,3).map(x=>x).constructor.name"), "A");
+    assert_eq!(run("class A extends Array {}; new A(1,2,3).filter(()=>true) instanceof A"), "true");
+    assert_eq!(run("var a=[1,2]; a.constructor={[Symbol.species]:function(n){this.tag='X';return new Array(n)}}; var r=a.map(x=>x); typeof r"), "object");
+    assert_eq!(throws("[1,2,3].map(5)"), "TypeError");
+    assert_eq!(run("[1,2,3].map(x=>x).constructor.name"), "Array");
+}

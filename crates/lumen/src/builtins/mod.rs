@@ -1914,6 +1914,35 @@ fn map_ptr(this: &Value) -> Option<usize> {
     this.as_obj().map(|o| Rc::as_ptr(o) as usize)
 }
 
+/// ArraySpeciesCreate(originalArray, length): build the result array for a method like map/filter,
+/// honoring `this.constructor[@@species]`; for an ordinary array (or no species) it's a plain array.
+fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<Value, Value> {
+    let is_array = matches!(original, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array));
+    if !is_array {
+        return Ok(i.make_array(vec![Value::Undefined; len]));
+    }
+    let ctor = ab(i.get_member(original, "constructor"))?;
+    let mut species = Value::Undefined;
+    if matches!(&ctor, Value::Obj(_)) {
+        if let Some(key) = well_known_key(i, "species") {
+            species = ab(i.get_member(&ctor, &key))?;
+        }
+    }
+    if matches!(species, Value::Undefined | Value::Null) {
+        return Ok(i.make_array(vec![Value::Undefined; len]));
+    }
+    let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value.clone());
+    if let (Value::Obj(s), Some(Value::Obj(ac))) = (&species, &array_ctor) {
+        if Rc::ptr_eq(s, ac) {
+            return Ok(i.make_array(vec![Value::Undefined; len]));
+        }
+    }
+    if !species.is_callable() {
+        return Err(i.make_error("TypeError", "Array @@species is not a constructor"));
+    }
+    ab(i.construct(species, &[Value::Num(len as f64)]))
+}
+
 /// Own enumerable string keys in spec [[OwnPropertyKeys]] order (array-index ascending first).
 fn ordered_enum_keys(o: &Gc) -> Vec<Rc<str>> {
     let b = o.borrow();
@@ -3683,13 +3712,17 @@ fn install_array(it: &mut Interp) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        let mut out = Vec::new();
+        let count = (end - start).max(0) as usize;
+        let result = array_species_create(i, &this, count)?;
         let mut k = start;
+        let mut to = 0usize;
         while k < end {
-            out.push(ab(i.get_member(&this, &k.to_string()))?);
+            let v = ab(i.get_member(&this, &k.to_string()))?;
+            ab(i.set_member(&result, &to.to_string(), v))?;
             k += 1;
+            to += 1;
         }
-        Ok(i.make_array(out))
+        Ok(result)
     });
     it.def_method(&ap, "indexOf", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "indexOf on non-object"))?;
@@ -3768,28 +3801,37 @@ fn install_array(it: &mut Interp) {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "map on non-object"))?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "Array.prototype.map callback is not callable"));
+        }
         let cb_this = arg(args, 1);
-        let mut out = Vec::with_capacity(len);
+        let result = array_species_create(i, &this, len)?;
         for k in 0..len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            out.push(ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?);
+            let mapped = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
+            ab(i.set_member(&result, &k.to_string(), mapped))?;
         }
-        Ok(i.make_array(out))
+        Ok(result)
     });
     it.def_method(&ap, "filter", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "filter on non-object"))?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "Array.prototype.filter callback is not callable"));
+        }
         let cb_this = arg(args, 1);
-        let mut out = Vec::new();
+        let result = array_species_create(i, &this, 0)?;
+        let mut to = 0usize;
         for k in 0..len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
             let keep = ab(i.call(cb.clone(), cb_this.clone(), &[v.clone(), Value::Num(k as f64), this.clone()]))?;
             if i.to_boolean(&keep) {
-                out.push(v);
+                ab(i.set_member(&result, &to.to_string(), v))?;
+                to += 1;
             }
         }
-        Ok(i.make_array(out))
+        Ok(result)
     });
     it.def_method(&ap, "reduce", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduce on non-object"))?;
