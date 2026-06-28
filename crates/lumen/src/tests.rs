@@ -261,6 +261,20 @@ fn map_and_set() {
 }
 
 #[test]
+fn dates() {
+    assert_eq!(run("new Date(0).toISOString()"), "1970-01-01T00:00:00.000Z");
+    assert_eq!(run("new Date(Date.UTC(2020, 0, 15)).getUTCFullYear()"), "2020");
+    assert_eq!(run("new Date(Date.UTC(2020, 5, 15)).getUTCMonth()"), "5");
+    assert_eq!(run("Date.parse('2021-06-15T12:30:00.000Z')"), "1623760200000");
+    assert_eq!(run("new Date('2000-01-01T00:00:00Z').getTime()"), "946684800000");
+    assert_eq!(run("var d = new Date(0); d.setUTCFullYear(1999); d.getUTCFullYear()"), "1999");
+    assert_eq!(run("new Date(NaN).toString()"), "Invalid Date");
+    assert_eq!(run("JSON.stringify({t: new Date(0)})"), "{\"t\":\"1970-01-01T00:00:00.000Z\"}");
+    assert_eq!(run("typeof Date.now()"), "number");
+    assert_eq!(run("new Date(Date.UTC(2023,11,25)).getUTCDay()"), "1"); // Monday
+}
+
+#[test]
 fn strict_mode_assignment() {
     assert_eq!(throws("'use strict'; undeclaredStrict = 1;"), "ReferenceError");
 }
