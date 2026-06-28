@@ -636,6 +636,7 @@ impl Parser {
 
     fn parse_for_inner(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
+        let is_await = self.eat_ident_word("await");
         self.expect_punct("(")?;
 
         // Determine the head form. Parse an optional declaration kind or init expression, then look
@@ -661,7 +662,7 @@ impl Parser {
                 let right = self.parse_assign()?;
                 self.expect_punct(")")?;
                 let body = Box::new(self.parse_loop_body()?);
-                return Ok(Stmt::ForInOf { decl: Some(kind), left: first, right, of, body });
+                return Ok(Stmt::ForInOf { decl: Some(kind), left: first, right, of, is_await, body });
             }
             // Plain C-style for with a declaration init (possibly multiple declarators).
             let init_expr = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
@@ -688,7 +689,7 @@ impl Parser {
             let body = Box::new(self.parse_loop_body()?);
             let left = expr_to_pattern(&init_expr)
                 .ok_or_else(|| ParseError { message: "invalid for-in/of target".into(), line: self.line() })?;
-            return Ok(Stmt::ForInOf { decl: None, left, right, of, body });
+            return Ok(Stmt::ForInOf { decl: None, left, right, of, is_await, body });
         }
         self.expect_punct(";")?;
         self.finish_c_for(Some(Box::new(ForInit::Expr(init_expr))))

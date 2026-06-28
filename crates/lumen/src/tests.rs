@@ -1572,3 +1572,12 @@ fn async_generators() {
     assert_eq!(run("function* g(){yield 1} var it=g(); it.next().value+','+it.next().done"), "1,true");
     assert_eq!(run("function* g(){yield 1;yield 2} var it=g(); it.next(); it.return(9).value+','+it.next().done"), "9,true");
 }
+#[test]
+fn for_await_of() {
+    let mut e = Engine::new();
+    e.eval("async function* g(){yield 1;yield 2;yield 3} (async()=>{ var s=0; for await (const x of g()) s+=x; globalThis.R=s; })()", false).unwrap();
+    assert_eq!(match e.eval("globalThis.R",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "6");
+    let mut e2 = Engine::new();
+    e2.eval("(async()=>{ var s=''; for await (const x of [Promise.resolve('a'),'b']) s+=x; globalThis.R2=s; })()", false).unwrap();
+    assert_eq!(match e2.eval("globalThis.R2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "ab");
+}

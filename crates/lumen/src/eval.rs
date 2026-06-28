@@ -277,8 +277,8 @@ impl Interp {
                 })
             }
             Stmt::For { init, test, update, body } => self.exec_for(init, test, update, body, env, None),
-            Stmt::ForInOf { decl, left, right, of, body } => {
-                self.exec_for_in_of(*decl, left, right, *of, body, env, None)
+            Stmt::ForInOf { decl, left, right, of, is_await, body } => {
+                self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, None)
             }
             Stmt::Break(label) => Err(Abrupt::Break(label.clone())),
             Stmt::Continue(label) => Err(Abrupt::Continue(label.clone())),
@@ -323,8 +323,8 @@ impl Interp {
             Stmt::For { init, test, update, body } => {
                 self.exec_for(init, test, update, body, env, Some(label))
             }
-            Stmt::ForInOf { decl, left, right, of, body } => {
-                self.exec_for_in_of(*decl, left, right, *of, body, env, Some(label))
+            Stmt::ForInOf { decl, left, right, of, is_await, body } => {
+                self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, Some(label))
             }
             Stmt::While { .. } | Stmt::DoWhile { .. } => self.exec_stmt(body, env),
             other => self.exec_stmt(other, env),
@@ -420,12 +420,14 @@ impl Interp {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exec_for_in_of(
         &mut self,
         decl: Option<DeclKind>,
         left: &Pattern,
         right: &Expr,
         of: bool,
+        is_await: bool,
         body: &Stmt,
         env: &Env,
         label: Option<&str>,
@@ -436,6 +438,35 @@ impl Interp {
             Some(DeclKind::Var) | None => BindMode::Var,
             Some(k) => BindMode::Lexical(k == DeclKind::Const),
         };
+        if of && is_await {
+            // `for await (x of asyncIterable)`: drive the @@asyncIterator (or a sync iterator over
+            // promises), awaiting each `next()` result and value.
+            let akey = crate::builtins::async_iterator_key(self);
+            let method = match &akey {
+                Some(k) => self.get_member(&rhs, k)?,
+                None => Value::Undefined,
+            };
+            let iter = if method.is_callable() {
+                self.call(method, rhs.clone(), &[])?
+            } else {
+                self.get_iterator(&rhs)?.0
+            };
+            let next = self.get_member(&iter, "next")?;
+            return self.run_loop(label, env, |me, env| {
+                let res = me.call(next.clone(), iter.clone(), &[])?;
+                let res = me.await_value(res)?;
+                let done = me.get_member(&res, "done")?;
+                if me.to_boolean(&done) {
+                    return Ok(LoopStep::Done);
+                }
+                let raw = me.get_member(&res, "value")?;
+                let v = me.await_value(raw)?;
+                let iter_env = new_scope(Some(env.clone()));
+                me.bind_pattern(left, v, &iter_env, mode)?;
+                me.exec_stmt(body, &iter_env)?;
+                Ok(LoopStep::Continue)
+            });
+        }
         if of {
             // Step the iterator lazily; close it if the loop exits early (break/return/throw).
             let (iter, next) = self.get_iterator(&rhs)?;

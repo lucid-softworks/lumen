@@ -18,8 +18,8 @@ pub enum Stmt {
     DoWhile { body: P<Stmt>, test: Expr },
     /// C-style `for (init; test; update) body`.
     For { init: Option<P<ForInit>>, test: Option<Expr>, update: Option<Expr>, body: P<Stmt> },
-    /// `for (left in right) body` / `for (left of right) body`.
-    ForInOf { decl: Option<DeclKind>, left: Pattern, right: Expr, of: bool, body: P<Stmt> },
+    /// `for (left in right) body` / `for (left of right) body` (`is_await` for `for await … of`).
+    ForInOf { decl: Option<DeclKind>, left: Pattern, right: Expr, of: bool, is_await: bool, body: P<Stmt> },
     Break(Option<String>),
     Continue(Option<String>),
     Throw(Expr),
