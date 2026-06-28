@@ -795,3 +795,22 @@ fn dup_lexical() {
         assert!(Engine::new().eval(src, false).is_ok(), "should accept: {src}");
     }
 }
+#[test]
+fn typeof_tdz() {
+    assert_eq!(throws("{ typeof q; let q; }"), "ReferenceError");
+    assert_eq!(run("typeof undeclaredXYZ"), "undefined");
+    assert_eq!(run("{ let a=1; typeof a }"), "number");
+}
+#[test]
+fn tdz_fn_toplevel() {
+    assert_eq!(throws("typeof w; let w;"), "ReferenceError");
+    assert_eq!(throws("x; let x=1;"), "ReferenceError");
+    assert_eq!(throws("(function(){ typeof r; let r; })()"), "ReferenceError");
+    assert_eq!(throws("(function(){ return a; let a; })()"), "ReferenceError");
+    // valid uses still work
+    assert_eq!(run("let p=1; p"), "1");
+    assert_eq!(run("const q=2; q+1"), "3");
+    assert_eq!(run("function f(){ let m=5; return m; } f()"), "5");
+    assert_eq!(run("var g=10; g"), "10");
+    assert_eq!(run("let a=1; { let a=2; } a"), "1");
+}

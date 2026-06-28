@@ -577,6 +577,19 @@ impl Interp {
         );
     }
 
+    /// Whether `name` resolves to a declared-but-uninitialized (TDZ) lexical binding.
+    fn binding_in_tdz(&self, name: &str, env: &Env) -> bool {
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            let b = s.borrow();
+            if let Some(binding) = b.vars.get(name) {
+                return !binding.initialized;
+            }
+            cur = b.parent.clone();
+        }
+        false
+    }
+
     pub fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
@@ -1440,6 +1453,9 @@ impl Interp {
             if let Expr::Ident(name) = arg {
                 match self.get_var(name, env) {
                     Ok(v) => return Ok(Value::from_string(v.type_of().to_string())),
+                    // A binding in its temporal dead zone still throws; only a truly-unresolved
+                    // name yields "undefined".
+                    Err(e) if self.binding_in_tdz(name, env) => return Err(e),
                     Err(_) => return Ok(Value::str("undefined")),
                 }
             }

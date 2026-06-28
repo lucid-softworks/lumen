@@ -921,6 +921,8 @@ impl Interp {
 
         // Hoist `var`/function declarations into the function scope before executing the body.
         self.hoist(&func.body, &scope, true);
+        // Pre-declare body-level `let`/`const` in their temporal dead zone.
+        self.declare_block_lexicals(&func.body, &scope, false);
 
         // Async functions: run synchronously (await unwraps settled promises), then wrap the result
         // in a fulfilled/rejected promise.
@@ -1080,6 +1082,8 @@ impl Interp {
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
         self.hoist(body, &self.global_env.clone(), true);
+        // Top-level `let`/`const` are pre-declared in their temporal dead zone.
+        self.declare_block_lexicals(body, &self.global_env.clone(), false);
         let env = self.global_env.clone();
         let mut last = Value::Undefined;
         for stmt in body {
