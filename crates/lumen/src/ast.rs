@@ -58,6 +58,8 @@ pub enum MemberKind {
     Get,
     Set,
     Field,
+    /// `static { ... }` — runs once at class definition with `this` = the class.
+    StaticBlock,
 }
 
 #[derive(Debug, Clone)]

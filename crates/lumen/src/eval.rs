@@ -1243,6 +1243,15 @@ impl Interp {
                         inst_fields.push((key, m.value.clone()));
                     }
                 }
+                MemberKind::StaticBlock => {
+                    let scope = new_scope(Some(static_env.clone()));
+                    bind(&scope, "this", ctor_val.clone());
+                    if let Some(func) = &m.func {
+                        for stmt in &func.body {
+                            self.exec_stmt(stmt, &scope)?;
+                        }
+                    }
+                }
                 MemberKind::Constructor => {}
             }
         }

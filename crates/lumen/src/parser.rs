@@ -1074,6 +1074,28 @@ impl Parser {
             self.advance();
             is_static = true;
         }
+        // `static { ... }` initialization block.
+        if is_static && self.is_punct("{") {
+            self.advance();
+            let body = self.parse_block_body()?;
+            let func = Function {
+                name: None,
+                params: Vec::new(),
+                body,
+                is_arrow: false,
+                is_strict: true,
+                expr_body: false,
+                is_generator: false,
+                is_async: false,
+            };
+            return Ok(Some(ClassMember {
+                key: PropKey::Ident(String::new()),
+                kind: MemberKind::StaticBlock,
+                is_static: true,
+                func: Some(Rc::new(func)),
+                value: None,
+            }));
+        }
         let mut kind = MemberKind::Method;
         if (self.is_ident_word("get") || self.is_ident_word("set")) && !self.next_is_member_terminator(1)
         {
