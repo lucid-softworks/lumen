@@ -1637,6 +1637,16 @@ fn install_promise(it: &mut Interp) {
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
     proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.def_method(&ctor, "withResolvers", 0, |i, _t, _a| {
+        let promise = i.new_promise();
+        let resolve = i.make_resolver(&promise, true);
+        let reject = i.make_resolver(&promise, false);
+        let obj = i.new_object();
+        set_data(&obj, "promise", promise);
+        set_data(&obj, "resolve", resolve);
+        set_data(&obj, "reject", reject);
+        Ok(Value::Obj(obj))
+    });
     it.def_method(&ctor, "resolve", 1, |i, _t, a| {
         let v = arg(a, 0);
         if let Value::Obj(o) = &v {
@@ -2146,6 +2156,29 @@ fn install_object(it: &mut Interp) {
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(op.clone()), false, false, false));
     op.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
 
+    it.def_method(&ctor, "groupBy", 2, |i, _this, args| {
+        let cb = arg(args, 1);
+        if !cb.is_callable() {
+            return Err(i.make_error("TypeError", "Object.groupBy callback is not callable"));
+        }
+        let elems = ab(i.iterate(&arg(args, 0)))?;
+        let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+        for (idx, el) in elems.into_iter().enumerate() {
+            let key_v = ab(i.call(cb.clone(), Value::Undefined, &[el.clone(), Value::Num(idx as f64)]))?;
+            let key = ab(i.to_property_key(&key_v))?;
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some(g) => g.1.push(el),
+                None => groups.push((key, vec![el])),
+            }
+        }
+        let result = i.new_object();
+        result.borrow_mut().proto = None; // groupBy returns a null-prototype object
+        for (k, v) in groups {
+            let arr = i.make_array(v);
+            result.borrow_mut().props.insert(k, Property::plain(arr));
+        }
+        Ok(Value::Obj(result))
+    });
     it.def_method(&ctor, "keys", 1, |i, _this, args| {
         let o = match arg(args, 0) {
             Value::Obj(o) => o,
@@ -2776,6 +2809,55 @@ fn install_array(it: &mut Interp) {
             ab(i.set_member(&this, &k.to_string(), v))?;
         }
         Ok(this)
+    });
+    // ----- change-array-by-copy (return a new Array, leave the receiver untouched) -----
+    fn collect_items(i: &mut Interp, this: &Value) -> Result<Vec<Value>, Value> {
+        let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "called on non-object"))?;
+        let len = ab(i.checked_array_len(&o))?;
+        let mut items = Vec::with_capacity(len);
+        for k in 0..len {
+            items.push(ab(i.get_member(this, &k.to_string()))?);
+        }
+        Ok(items)
+    }
+    it.def_method(&ap, "toReversed", 0, |i, this, _| {
+        let mut items = collect_items(i, &this)?;
+        items.reverse();
+        Ok(i.make_array(items))
+    });
+    it.def_method(&ap, "toSorted", 1, |i, this, args| {
+        let mut items = collect_items(i, &this)?;
+        let cmp = arg(args, 0);
+        if !matches!(cmp, Value::Undefined) && !cmp.is_callable() {
+            return Err(i.make_error("TypeError", "comparator is not callable"));
+        }
+        merge_sort(i, &mut items, &cmp)?;
+        Ok(i.make_array(items))
+    });
+    it.def_method(&ap, "with", 2, |i, this, args| {
+        let items = collect_items(i, &this)?;
+        let len = items.len() as i64;
+        let rel = ab(i.to_number(&arg(args, 0)))?;
+        let idx = if rel < 0.0 { len + rel as i64 } else { rel as i64 };
+        if idx < 0 || idx >= len {
+            return Err(i.make_error("RangeError", "invalid index"));
+        }
+        let mut items = items;
+        items[idx as usize] = arg(args, 1);
+        Ok(i.make_array(items))
+    });
+    it.def_method(&ap, "toSpliced", 2, |i, this, args| {
+        let mut items = collect_items(i, &this)?;
+        let len = items.len() as i64;
+        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0) as usize;
+        let del = if args.len() < 2 {
+            items.len() - start
+        } else {
+            (ab(i.to_number(&arg(args, 1)))?.max(0.0) as usize).min(items.len() - start)
+        };
+        let inserts: Vec<Value> = args.iter().skip(2).cloned().collect();
+        items.splice(start..start + del, inserts);
+        Ok(i.make_array(items))
     });
     it.def_method(&ap, "reduceRight", 1, |i, this, args| {
         let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduceRight"))?;

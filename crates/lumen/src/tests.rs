@@ -627,3 +627,13 @@ fn atomics_basic() {
     assert_eq!(throws("Atomics.add([],0,1)"), "TypeError");
 }
 
+
+#[test]
+fn array_bycopy_groupby() {
+    assert_eq!(run("[3,1,2].toReversed().join(',')"), "2,1,3");
+    assert_eq!(run("[3,1,2].toSorted().join(',')"), "1,2,3");
+    assert_eq!(run("var a=[1,2,3]; a.with(1,9).join(',')+'|'+a.join(',')"), "1,9,3|1,2,3");
+    assert_eq!(run("[1,2,3,4].toSpliced(1,2,'a').join(',')"), "1,a,4");
+    assert_eq!(run("var g=Object.groupBy([1,2,3,4],x=>x%2?'odd':'even'); g.odd.join(',')+'|'+g.even.join(',')"), "1,3|2,4");
+    assert_eq!(run("var r=Promise.withResolvers(); typeof r.promise+typeof r.resolve+typeof r.reject"), "objectfunctionfunction");
+}
