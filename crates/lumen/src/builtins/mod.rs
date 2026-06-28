@@ -1425,7 +1425,37 @@ fn install_date(it: &mut Interp) {
         let ml = if a.len() > 6 { ab(i.to_number(&a[6]))? as i64 } else { 0 };
         Ok(Value::Num(parts_to_ms(y, mo, d, h, mi, s, ml)))
     });
+    // Date.prototype[@@toPrimitive]: "number" hint uses valueOf, "string"/"default" use toString.
+    let prim = it.make_native("[Symbol.toPrimitive]", 1, |i, this, a| {
+        if !matches!(this, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Date.prototype[Symbol.toPrimitive] on non-object"));
+        }
+        let hint = ab(i.to_string(&arg(a, 0)))?;
+        let method = match &*hint {
+            "number" => "valueOf",
+            "string" | "default" => "toString",
+            _ => return Err(i.make_error("TypeError", "invalid hint")),
+        };
+        let f = ab(i.get_member(&this, method))?;
+        ab(i.call(f, this.clone(), &[]))
+    });
+    if let Some(key) = well_known_key(it, "toPrimitive") {
+        proto.borrow_mut().props.insert(key, Property::builtin(Value::Obj(prim)));
+    }
     set_builtin(&it.global, "Date", Value::Obj(ctor));
+}
+
+/// The internal property key for a well-known `Symbol.<name>`.
+fn well_known_key(it: &Interp, name: &str) -> Option<String> {
+    let sym = it.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+    if let Value::Obj(o) = sym {
+        if let Some(p) = o.borrow().props.get(name) {
+            if let Value::Sym(d) = &p.value {
+                return Some(Interp::sym_key(d));
+            }
+        }
+    }
+    None
 }
 
 fn map_ptr(this: &Value) -> Option<usize> {

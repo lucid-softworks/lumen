@@ -834,3 +834,10 @@ fn to_primitive_symbol() {
     assert_eq!(run("var o={valueOf(){return 9}}; o + 1"), "10");
     assert_eq!(throws("var o={[Symbol.toPrimitive](){return {}}}; o+1"), "TypeError");
 }
+#[test]
+fn date_toprimitive() {
+    assert_eq!(run("typeof (new Date(0) + new Date(0))"), "string");
+    assert_eq!(run("(new Date(0))[Symbol.toPrimitive]('number')"), "0");
+    assert_eq!(run("typeof (new Date(0))[Symbol.toPrimitive]('string')"), "string");
+    assert_eq!(run("var d=new Date(0); (d - 0)"), "0"); // number hint via subtraction
+}
