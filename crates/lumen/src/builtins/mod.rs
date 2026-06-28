@@ -2392,6 +2392,9 @@ fn install_reflect(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Reflect.defineProperty on non-object")),
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            return Ok(Value::Bool(ab(proxy_define_property(i, &target, &handler, &key, &arg(a, 2)))?));
+        }
         let ok = ab(define_own_property(i, &o, &key, &arg(a, 2)))?;
         Ok(Value::Bool(ok))
     });
@@ -3117,6 +3120,26 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
     }
 }
 
+/// Proxy `[[DefineOwnProperty]]`: call the trap (ToBoolean its result) or forward to the target.
+fn proxy_define_property(
+    i: &mut Interp,
+    target: &Value,
+    handler: &Value,
+    key: &str,
+    desc: &Value,
+) -> Result<bool, Abrupt> {
+    let trap = i.get_member(handler, "defineProperty")?;
+    if trap.is_callable() {
+        let key_val = i.sym_from_key(key).unwrap_or_else(|| Value::from_string(key.to_string()));
+        let res = i.call(trap, handler.clone(), &[target.clone(), key_val, desc.clone()])?;
+        Ok(i.to_boolean(&res))
+    } else if let Value::Obj(t) = target {
+        define_own_property(i, t, key, desc)
+    } else {
+        Ok(false)
+    }
+}
+
 fn install_object(it: &mut Interp) {
     let op = it.object_proto.clone();
     it.def_method(&op, "hasOwnProperty", 1, |i, this, args| {
@@ -3352,6 +3375,12 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Object.defineProperty called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            if !ab(proxy_define_property(i, &target, &handler, &key, &arg(args, 2)))? {
+                return Err(i.make_error("TypeError", "proxy defineProperty returned a falsish value"));
+            }
+            return Ok(Value::Obj(o));
+        }
         if !ab(define_own_property(i, &o, &key, &arg(args, 2)))? {
             return Err(i.make_error("TypeError", "Cannot redefine property"));
         }
