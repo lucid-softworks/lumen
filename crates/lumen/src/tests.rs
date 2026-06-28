@@ -1481,3 +1481,14 @@ fn ta_index_properties() {
     assert_eq!(throws("Object.defineProperty(new Int8Array(3),'5',{value:1})"), "TypeError");
     assert_eq!(run("var a=new Int8Array([1,2,3]); a.length+','+a.byteLength"), "3,3");
 }
+#[test]
+fn annexb_block_func_conflict() {
+    // Conflicting intervening `let` → no function-scope var is synthesized.
+    assert_eq!(throws("{ let f = 1; { function f(){} } } f"), "ReferenceError");
+    assert_eq!(run("{ let f = 1; { function f(){} } } typeof f"), "undefined");
+    // No conflict → the block function IS hoisted to function scope.
+    assert_eq!(run("{ function g(){return 5} } typeof g"), "function");
+    assert_eq!(run("{ { function h(){return 1} } } h()"), "1");
+    // Conflict with const too.
+    assert_eq!(throws("{ const c = 1; { function c(){} } } c()"), "ReferenceError");
+}

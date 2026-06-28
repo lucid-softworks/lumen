@@ -54,6 +54,28 @@ pub enum BindMode {
     Lexical(bool),
 }
 
+/// Top-level lexically-declared names of a block body (`let`/`const`/`class`) — used by Annex B.3.3
+/// to decide whether a synthesized block-function var binding would conflict.
+fn block_lexical_names(stmts: &[Stmt]) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in stmts {
+        match s {
+            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, decls } => {
+                for (pat, _) in decls {
+                    pattern_idents(pat, &mut out);
+                }
+            }
+            Stmt::ClassDecl(class) => {
+                if let Some(n) = &class.name {
+                    out.push(n.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Collect every identifier bound by a pattern (for `var` hoisting and TDZ pre-declaration).
 pub fn pattern_idents(pat: &Pattern, out: &mut Vec<String>) {
     match pat {
@@ -1185,16 +1207,22 @@ impl Interp {
         // Annex B.3.3: in sloppy mode, a function declared inside a block is also bound in the
         // enclosing function/global scope.
         if !self.strict {
+            let mut blocked: Vec<String> = Vec::new();
             for stmt in stmts {
-                self.hoist_block_funcs(stmt, scope, false);
+                self.hoist_block_funcs(stmt, scope, false, &mut blocked);
             }
         }
     }
 
-    fn hoist_block_funcs(&mut self, stmt: &Stmt, scope: &Env, in_block: bool) {
+    fn hoist_block_funcs(&mut self, stmt: &Stmt, scope: &Env, in_block: bool, blocked: &mut Vec<String>) {
         match stmt {
             Stmt::FuncDecl(func) if in_block => {
                 if let Some(name) = &func.name {
+                    // Annex B.3.3: skip the synthesized var binding if an intervening lexical
+                    // declaration with the same name would make it an early error.
+                    if blocked.iter().any(|b| b == name) {
+                        return;
+                    }
                     let f = self.make_function(func.clone(), scope.clone());
                     scope.borrow_mut().vars.insert(
                         name.clone(),
@@ -1203,14 +1231,23 @@ impl Interp {
                 }
             }
             Stmt::Block(body) => {
-                for s in body {
-                    self.hoist_block_funcs(s, scope, true);
+                let added = block_lexical_names(body);
+                let mut pushed = 0;
+                for x in &added {
+                    if !blocked.iter().any(|b| b == x) {
+                        blocked.push(x.clone());
+                        pushed += 1;
+                    }
                 }
+                for s in body {
+                    self.hoist_block_funcs(s, scope, true, blocked);
+                }
+                blocked.truncate(blocked.len() - pushed);
             }
             Stmt::If { cons, alt, .. } => {
-                self.hoist_block_funcs(cons, scope, true);
+                self.hoist_block_funcs(cons, scope, true, blocked);
                 if let Some(a) = alt {
-                    self.hoist_block_funcs(a, scope, true);
+                    self.hoist_block_funcs(a, scope, true, blocked);
                 }
             }
             Stmt::While { body, .. }
@@ -1218,26 +1255,26 @@ impl Interp {
             | Stmt::For { body, .. }
             | Stmt::ForInOf { body, .. }
             | Stmt::Labeled { body, .. }
-            | Stmt::With { body, .. } => self.hoist_block_funcs(body, scope, true),
+            | Stmt::With { body, .. } => self.hoist_block_funcs(body, scope, true, blocked),
             Stmt::Switch { cases, .. } => {
                 for c in cases {
                     for s in &c.body {
-                        self.hoist_block_funcs(s, scope, true);
+                        self.hoist_block_funcs(s, scope, true, blocked);
                     }
                 }
             }
             Stmt::Try { block, handler, finalizer } => {
                 for s in block {
-                    self.hoist_block_funcs(s, scope, true);
+                    self.hoist_block_funcs(s, scope, true, blocked);
                 }
                 if let Some((_, h)) = handler {
                     for s in h {
-                        self.hoist_block_funcs(s, scope, true);
+                        self.hoist_block_funcs(s, scope, true, blocked);
                     }
                 }
                 if let Some(f) = finalizer {
                     for s in f {
-                        self.hoist_block_funcs(s, scope, true);
+                        self.hoist_block_funcs(s, scope, true, blocked);
                     }
                 }
             }
