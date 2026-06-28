@@ -259,6 +259,10 @@ impl Parser {
     fn parse_binding_ident_name(&mut self) -> Result<String, ParseError> {
         match self.cur().clone() {
             Tok::Ident(name) => {
+                // In strict mode `eval`/`arguments` and the strict-reserved words can't be bound.
+                if self.strict && is_strict_reserved_binding(&name) {
+                    return self.err(format!("'{name}' cannot be used as a binding in strict mode"));
+                }
                 self.advance();
                 Ok(name)
             }
@@ -584,6 +588,14 @@ impl Parser {
                 if !is_valid_assign_target(&left) && !destructuring {
                     return self.err("invalid assignment target");
                 }
+                // Assigning to `eval`/`arguments` is a SyntaxError in strict mode.
+                if self.strict {
+                    if let Expr::Ident(n) = &left {
+                        if n == "eval" || n == "arguments" {
+                            return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
+                        }
+                    }
+                }
                 return Ok(Expr::Assign { op, target: Box::new(left), value: Box::new(value) });
             }
         }
@@ -699,9 +711,21 @@ impl Parser {
             let op = if self.is_punct("++") { "++" } else { "--" };
             self.advance();
             let arg = self.parse_unary()?;
+            self.check_strict_update_target(&arg)?;
             return Ok(Expr::Update { op, prefix: true, arg: Box::new(arg) });
         }
         self.parse_postfix()
+    }
+
+    fn check_strict_update_target(&self, arg: &Expr) -> Result<(), ParseError> {
+        if self.strict {
+            if let Expr::Ident(n) = arg {
+                if n == "eval" || n == "arguments" {
+                    return self.err("cannot increment/decrement 'eval' or 'arguments' in strict mode");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
@@ -709,6 +733,7 @@ impl Parser {
         if !self.nl_before() && (self.is_punct("++") || self.is_punct("--")) {
             let op = if self.is_punct("++") { "++" } else { "--" };
             self.advance();
+            self.check_strict_update_target(&expr)?;
             return Ok(Expr::Update { op, prefix: false, arg: Box::new(expr) });
         }
         Ok(expr)
@@ -1351,6 +1376,24 @@ fn key_is(key: &PropKey, name: &str) -> bool {
         PropKey::Str(s) => &**s == name,
         _ => false,
     }
+}
+
+/// Identifiers that may not be bound (or assigned) in strict mode.
+fn is_strict_reserved_binding(name: &str) -> bool {
+    matches!(
+        name,
+        "eval"
+            | "arguments"
+            | "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+            | "yield"
+    )
 }
 
 fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
