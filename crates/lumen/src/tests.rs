@@ -1094,3 +1094,14 @@ fn abstract_subclass() {
 fn var_check() {
     assert_eq!(run("var TA=Object.getPrototypeOf(Int8Array); class T extends Int8Array {}; new T(3).length"), "3");
 }
+#[test]
+fn disposable_stack() {
+    assert_eq!(run("typeof DisposableStack"), "function");
+    assert_eq!(run("var log=''; var s=new DisposableStack(); s.use({[Symbol.dispose](){log+='a'}}); s.use({[Symbol.dispose](){log+='b'}}); s.dispose(); log"), "ba");
+    assert_eq!(run("var s=new DisposableStack(); s.disposed"), "false");
+    assert_eq!(run("var s=new DisposableStack(); s.dispose(); s.disposed"), "true");
+    assert_eq!(run("var log=''; var s=new DisposableStack(); s.defer(()=>log+='d'); s.dispose(); log"), "d");
+    assert_eq!(run("var log=''; var s=new DisposableStack(); s.adopt(5,v=>log+=v); s.dispose(); log"), "5");
+    assert_eq!(run("var s=new DisposableStack(); s.use({[Symbol.dispose](){}}); var s2=s.move(); s.disposed+','+s2.disposed"), "true,false");
+    assert_eq!(run("typeof Symbol.dispose"), "symbol");
+}
