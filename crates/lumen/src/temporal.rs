@@ -636,6 +636,18 @@ fn add_to_date(i: &mut Interp, d: IsoDate, dur: IsoDuration, sign: i64) -> Resul
     check_date(i, IsoDate { year: ny, month: nm, day: nd })
 }
 
+/// Add a duration to a date+time, carrying the time overflow into the date.
+fn dt_add(i: &mut Interp, d: IsoDate, t: IsoTime, dur: IsoDuration, sign: i64) -> Result<(IsoDate, IsoTime), Value> {
+    let nd = add_to_date(i, d, dur, sign)?;
+    let total = time_to_ns(t) as i128 + sign as i128 * duration_time_ns(dur);
+    let carry = total.div_euclid(86_400_000_000_000);
+    let tns = total.rem_euclid(86_400_000_000_000);
+    let z = epoch_days(nd) as i128 + carry;
+    let (ny, nm, nday) = civil_from_days(z as i64);
+    let ndate = check_date(i, IsoDate { year: ny, month: nm, day: nday })?;
+    Ok((ndate, ns_to_time(tns)))
+}
+
 // ===== PlainTime ==============================================================================
 
 fn install_plain_time(it: &mut Interp, ns: &Gc) {
@@ -670,6 +682,18 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let ns = field_int(i, &f, "nanosecond", x.ns as i64)? as u16;
         let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns })?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(nt)))
+    });
+    it.def_method(&proto, "add", 1, |i, t, a| {
+        let x = as_time(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let total = (time_to_ns(x) as i128 + duration_time_ns(dur)).rem_euclid(86_400_000_000_000);
+        Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(total))))
+    });
+    it.def_method(&proto, "subtract", 1, |i, t, a| {
+        let x = as_time(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let total = (time_to_ns(x) as i128 - duration_time_ns(dur)).rem_euclid(86_400_000_000_000);
+        Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(total))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_time(i, &t)?;
@@ -716,6 +740,25 @@ fn time_to_ns(t: IsoTime) -> i64 {
 }
 fn dt_ns(d: IsoDate, t: IsoTime) -> i128 {
     epoch_days(d) as i128 * 86_400_000_000_000 + time_to_ns(t) as i128
+}
+/// The time-only nanosecond span of a duration (hours/minutes/seconds/sub-second).
+fn duration_time_ns(d: IsoDuration) -> i128 {
+    (d.hours as i128 * 3600 + d.minutes as i128 * 60 + d.seconds as i128) * 1_000_000_000
+        + d.ms as i128 * 1_000_000
+        + d.us as i128 * 1000
+        + d.ns as i128
+}
+/// Convert a within-a-day nanosecond count to an IsoTime.
+fn ns_to_time(ns: i128) -> IsoTime {
+    let secs = ns / 1_000_000_000;
+    IsoTime {
+        hour: (secs / 3600) as u8,
+        minute: ((secs / 60) % 60) as u8,
+        second: (secs % 60) as u8,
+        ms: ((ns / 1_000_000) % 1000) as u16,
+        us: ((ns / 1000) % 1000) as u16,
+        ns: (ns % 1000) as u16,
+    }
 }
 /// Balance a nanosecond span into a Duration whose largest unit is `largest`.
 fn balance_ns(total: i128, largest: &str) -> IsoDuration {
@@ -826,6 +869,34 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (od, otm) = to_datetime(i, &arg(a, 0))?;
         Ok(Value::Bool(cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm)))
     });
+    it.def_method(&proto, "add", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+    });
+    it.def_method(&proto, "subtract", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+    });
+    it.def_method(&proto, "with", 1, |i, t, a| {
+        let (d, tm) = as_datetime(i, &t)?;
+        let f = arg(a, 0);
+        let year = field_int(i, &f, "year", d.year)?;
+        let month = field_int(i, &f, "month", d.month as i64)? as u8;
+        let day = field_int(i, &f, "day", d.day as i64)? as u8;
+        let hour = field_int(i, &f, "hour", tm.hour as i64)? as u8;
+        let minute = field_int(i, &f, "minute", tm.minute as i64)? as u8;
+        let second = field_int(i, &f, "second", tm.second as i64)? as u8;
+        let ms = field_int(i, &f, "millisecond", tm.ms as i64)? as u16;
+        let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
+        let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
+        let nd = check_date(i, IsoDate { year, month, day })?;
+        let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns: nsf })?;
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, nt)))
+    });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0))?;
@@ -929,6 +1000,54 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let d = as_yearmonth(i, &t)?;
         let o = to_yearmonth(i, &arg(a, 0))?;
         Ok(Value::Bool(d.year == o.year && d.month == o.month))
+    });
+    it.def_method(&proto, "with", 1, |i, t, a| {
+        let d = as_yearmonth(i, &t)?;
+        let f = arg(a, 0);
+        let year = field_int(i, &f, "year", d.year)?;
+        let month = field_int(i, &f, "month", d.month as i64)?;
+        if !(1..=12).contains(&month) {
+            return Err(i.make_error("RangeError", "invalid month"));
+        }
+        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year, month: month as u8, day: 1 })))
+    });
+    it.def_method(&proto, "add", 1, |i, t, a| {
+        let d = as_yearmonth(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let total = d.year * 12 + (d.month as i64 - 1) + dur.years * 12 + dur.months;
+        let (y, m) = balance_year_month(total / 12, total % 12 + 1);
+        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1 })))
+    });
+    it.def_method(&proto, "subtract", 1, |i, t, a| {
+        let d = as_yearmonth(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        let total = d.year * 12 + (d.month as i64 - 1) - dur.years * 12 - dur.months;
+        let (y, m) = balance_year_month(total / 12, total % 12 + 1);
+        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1 })))
+    });
+    it.def_method(&proto, "until", 1, |i, t, a| {
+        let d = as_yearmonth(i, &t)?;
+        let o = to_yearmonth(i, &arg(a, 0))?;
+        let months = (o.year * 12 + o.month as i64) - (d.year * 12 + d.month as i64);
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
+        let dur = if largest == "month" {
+            IsoDuration { months, ..Default::default() }
+        } else {
+            IsoDuration { years: months / 12, months: months % 12, ..Default::default() }
+        };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
+    });
+    it.def_method(&proto, "since", 1, |i, t, a| {
+        let d = as_yearmonth(i, &t)?;
+        let o = to_yearmonth(i, &arg(a, 0))?;
+        let months = (d.year * 12 + d.month as i64) - (o.year * 12 + o.month as i64);
+        let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
+        let dur = if largest == "month" {
+            IsoDuration { months, ..Default::default() }
+        } else {
+            IsoDuration { years: months / 12, months: months % 12, ..Default::default() }
+        };
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     let ctor = add_ctor(it, ns, "PlainYearMonth", 2, proto, |i, _t, a| {
         require_new(i)?;
@@ -1262,6 +1381,22 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
         Ok(Value::Bool(x == y))
+    });
+    it.def_method(&proto, "add", 1, |i, t, a| {
+        let x = as_instant(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        if dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0 {
+            return Err(i.make_error("RangeError", "Instant.add does not accept calendar units"));
+        }
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(x + duration_time_ns(dur))))
+    });
+    it.def_method(&proto, "subtract", 1, |i, t, a| {
+        let x = as_instant(i, &t)?;
+        let dur = to_duration(i, &arg(a, 0))?;
+        if dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0 {
+            return Err(i.make_error("RangeError", "Instant.subtract does not accept calendar units"));
+        }
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(x - duration_time_ns(dur))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
