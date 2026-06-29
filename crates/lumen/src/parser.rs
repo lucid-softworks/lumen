@@ -2262,6 +2262,10 @@ impl Parser {
         is_async: bool,
     ) -> Result<Function, ParseError> {
         let params = self.parse_params()?;
+        // A method has UniqueFormalParameters: duplicate parameter names are always an error.
+        if let Some(dup) = duplicate_name(&param_names(&params)) {
+            return self.err(format!("duplicate parameter name '{dup}'"));
+        }
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
