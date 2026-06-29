@@ -259,6 +259,18 @@ impl Parser {
         }
     }
 
+    /// Register a function declaration's name. In a *block*, a generator/async-function declaration is
+    /// a lexical binding (so it conflicts on redeclaration); a plain function keeps Annex B var-like
+    /// semantics. At a function/program top level every function declaration is var-like.
+    fn declare_fn_decl(&mut self, name: &str, is_async: bool, is_generator: bool) -> Result<(), ParseError> {
+        let in_block = !self.decl_scopes.last().unwrap().fn_boundary;
+        if in_block && (is_async || is_generator) {
+            self.declare_lexical(name)
+        } else {
+            self.declare_var(name, false)
+        }
+    }
+
     /// A property shorthand (`{ x }` / `{ x = d }`) binds/references `x`, so the name must be a valid
     /// identifier — not a reserved word (even one spelled with a `\u` escape, which lexes as a keyword).
     fn check_shorthand_ident(&self, name: &str) -> Result<(), ParseError> {
@@ -345,7 +357,7 @@ impl Parser {
             Tok::Keyword("function") => {
                 let f = self.parse_function(false)?;
                 if let Some(n) = &f.name {
-                    self.declare_var(n, false)?;
+                    self.declare_fn_decl(n, f.is_async, f.is_generator)?;
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
@@ -354,7 +366,7 @@ impl Parser {
                 self.advance();
                 let f = self.parse_function(true)?;
                 if let Some(n) = &f.name {
-                    self.declare_var(n, false)?;
+                    self.declare_fn_decl(n, f.is_async, f.is_generator)?;
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }

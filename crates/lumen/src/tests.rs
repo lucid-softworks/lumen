@@ -1821,3 +1821,15 @@ fn new_import_error() {
     // normal new still works
     assert_eq!(run("function F(){this.x=1} new F().x"), "1");
 }
+#[test]
+fn block_async_fn_redecl() {
+    assert!(Engine::new().eval("{ async function f(){} async function f(){} }", false).is_err());
+    assert!(Engine::new().eval("{ async function f(){} function f(){} }", false).is_err());
+    assert!(Engine::new().eval("{ function* g(){} function* g(){} }", false).is_err());
+    assert!(Engine::new().eval("{ async function f(){} var f; }", false).is_err());
+    assert!(Engine::new().eval("switch(0){ case 1: async function f(){} default: function f(){} }", false).is_err());
+    // plain function redeclaration in a block is still allowed (Annex B)
+    assert_eq!(run("{ function f(){return 1} function f(){return 2} } 'ok'"), "ok");
+    // async function redeclaration at TOP level is allowed
+    assert_eq!(run("async function f(){} async function f(){} 'ok'"), "ok");
+}
