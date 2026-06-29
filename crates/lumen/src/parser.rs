@@ -2502,6 +2502,27 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 return Err("a class may only have one constructor".into());
             }
         }
+        // A non-constructor method body may not contain a `super(...)` call.
+        if let Some(func) = &m.func {
+            if !matches!(m.kind, MemberKind::Constructor) {
+                if let Some(msg) = crate::eval::method_super_call_error(&func.body) {
+                    return Err(msg.into());
+                }
+            }
+            // The constructor can't be a generator, async, getter, or setter.
+            if !m.is_static && key_is(&m.key, "constructor") {
+                if matches!(m.kind, MemberKind::Get | MemberKind::Set)
+                    || func.is_generator
+                    || func.is_async
+                {
+                    return Err("class constructor can't be a generator, async, or accessor".into());
+                }
+            }
+            // A static method (any kind) may not be named "prototype".
+            if m.is_static && key_is(&m.key, "prototype") {
+                return Err("classes may not have a static method named 'prototype'".into());
+            }
+        }
         // Field name rules: no field may be named "constructor"; a static field can't be "prototype".
         if matches!(m.kind, MemberKind::Field) {
             if key_is(&m.key, "constructor") {

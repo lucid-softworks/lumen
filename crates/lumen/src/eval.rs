@@ -3260,125 +3260,136 @@ fn arr_elems_have_super_call(elems: &[ArrayElem]) -> bool {
 /// field's `arguments`/super context) but stops at ordinary functions and classes. Returns the error
 /// message on the first violation.
 pub(crate) fn field_init_error(e: &Expr) -> Option<&'static str> {
-    fi_expr(e)
+    fi_expr(e, true)
 }
 
-fn fi_expr(e: &Expr) -> Option<&'static str> {
+/// A non-constructor method body may not contain a `super(...)` call (only a derived constructor
+/// can). Descends into arrow functions (which inherit the method's super context).
+pub(crate) fn method_super_call_error(body: &[Stmt]) -> Option<&'static str> {
+    fi_stmts(body, false)
+}
+
+/// `args` also flags `arguments` (a field-initializer rule); methods omit it since they may use it.
+fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
     match e {
-        Expr::Ident(n) if n == "arguments" => {
+        Expr::Ident(n) if args && n == "arguments" => {
             Some("'arguments' is not allowed in a class field initializer")
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { callee, args: a, .. } => {
             if matches!(**callee, Expr::Super) {
-                return Some("super call is not allowed in a class field initializer");
+                return Some("a super call is not allowed here");
             }
-            fi_expr(callee).or_else(|| fi_args(args))
+            fi_expr(callee, args).or_else(|| fi_arr(a, args))
         }
-        Expr::New { callee, args } => fi_expr(callee).or_else(|| fi_args(args)),
-        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => fi_expr(arg),
+        Expr::New { callee, args: a } => fi_expr(callee, args).or_else(|| fi_arr(a, args)),
+        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => fi_expr(arg, args),
         Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
-            fi_expr(left).or_else(|| fi_expr(right))
+            fi_expr(left, args).or_else(|| fi_expr(right, args))
         }
-        Expr::Assign { target, value, .. } => fi_expr(target).or_else(|| fi_expr(value)),
-        Expr::Cond { test, cons, alt } => {
-            fi_expr(test).or_else(|| fi_expr(cons)).or_else(|| fi_expr(alt))
-        }
-        Expr::Member { obj, .. } | Expr::OptionalChain(obj) => fi_expr(obj),
-        Expr::Index { obj, index, .. } => fi_expr(obj).or_else(|| fi_expr(index)),
-        Expr::Seq(v) => v.iter().find_map(fi_expr),
-        Expr::Array(elems) => fi_arr(elems),
-        Expr::Yield { arg, .. } => arg.as_deref().and_then(fi_expr),
-        Expr::ImportCall { spec, .. } => fi_expr(spec),
-        Expr::PrivateIn { obj, .. } => fi_expr(obj),
+        Expr::Assign { target, value, .. } => fi_expr(target, args).or_else(|| fi_expr(value, args)),
+        Expr::Cond { test, cons, alt } => fi_expr(test, args)
+            .or_else(|| fi_expr(cons, args))
+            .or_else(|| fi_expr(alt, args)),
+        Expr::Member { obj, .. } | Expr::OptionalChain(obj) => fi_expr(obj, args),
+        Expr::Index { obj, index, .. } => fi_expr(obj, args).or_else(|| fi_expr(index, args)),
+        Expr::Seq(v) => v.iter().find_map(|e| fi_expr(e, args)),
+        Expr::Array(elems) => fi_arr(elems, args),
+        Expr::Yield { arg, .. } => arg.as_deref().and_then(|e| fi_expr(e, args)),
+        Expr::ImportCall { spec, .. } => fi_expr(spec, args),
+        Expr::PrivateIn { obj, .. } => fi_expr(obj, args),
         Expr::TaggedTemplate { tag, subs, .. } => {
-            fi_expr(tag).or_else(|| subs.iter().find_map(fi_expr))
+            fi_expr(tag, args).or_else(|| subs.iter().find_map(|e| fi_expr(e, args)))
         }
         Expr::Object(props) => props.iter().find_map(|p| match p {
-            PropDef::KeyValue { key, value } => fi_key(key).or_else(|| fi_expr(value)),
-            PropDef::Spread(e) => fi_expr(e),
+            PropDef::KeyValue { key, value } => fi_key(key, args).or_else(|| fi_expr(value, args)),
+            PropDef::Spread(e) => fi_expr(e, args),
             // Methods/getters/setters open their own context (only their computed key inherits).
             PropDef::Method { key, .. } | PropDef::Getter { key, .. } | PropDef::Setter { key, .. } => {
-                fi_key(key)
+                fi_key(key, args)
             }
         }),
-        // Arrow functions inherit the field's context: descend into params and body.
-        Expr::Func(f) if f.is_arrow => fi_params(&f.params).or_else(|| fi_stmts(&f.body)),
+        // Arrow functions inherit the surrounding context: descend into params and body.
+        Expr::Func(f) if f.is_arrow => {
+            fi_params(&f.params, args).or_else(|| fi_stmts(&f.body, args))
+        }
         // Ordinary functions / classes establish their own context.
         _ => None,
     }
 }
 
-fn fi_key(key: &PropKey) -> Option<&'static str> {
+fn fi_key(key: &PropKey, args: bool) -> Option<&'static str> {
     match key {
-        PropKey::Computed(e) => fi_expr(e),
+        PropKey::Computed(e) => fi_expr(e, args),
         _ => None,
     }
 }
 
-fn fi_args(args: &[ArrayElem]) -> Option<&'static str> {
-    fi_arr(args)
-}
-
-fn fi_arr(elems: &[ArrayElem]) -> Option<&'static str> {
+fn fi_arr(elems: &[ArrayElem], args: bool) -> Option<&'static str> {
     elems.iter().find_map(|el| match el {
-        ArrayElem::Item(e) | ArrayElem::Spread(e) => fi_expr(e),
+        ArrayElem::Item(e) | ArrayElem::Spread(e) => fi_expr(e, args),
         ArrayElem::Hole => None,
     })
 }
 
-fn fi_params(params: &[Param]) -> Option<&'static str> {
+fn fi_params(params: &[Param], args: bool) -> Option<&'static str> {
     params
         .iter()
-        .find_map(|p| p.default.as_ref().and_then(fi_expr))
+        .find_map(|p| p.default.as_ref().and_then(|e| fi_expr(e, args)))
 }
 
-fn fi_stmts(stmts: &[Stmt]) -> Option<&'static str> {
-    stmts.iter().find_map(fi_stmt)
+fn fi_stmts(stmts: &[Stmt], args: bool) -> Option<&'static str> {
+    stmts.iter().find_map(|s| fi_stmt(s, args))
 }
 
-fn fi_stmt(s: &Stmt) -> Option<&'static str> {
+fn fi_stmt(s: &Stmt, args: bool) -> Option<&'static str> {
     match s {
-        Stmt::Expr(e) | Stmt::Throw(e) => fi_expr(e),
-        Stmt::Return(e) => e.as_ref().and_then(fi_expr),
-        Stmt::VarDecl { decls, .. } => decls.iter().find_map(|(_, i)| i.as_ref().and_then(fi_expr)),
-        Stmt::If { test, cons, alt } => fi_expr(test)
-            .or_else(|| fi_stmt(cons))
-            .or_else(|| alt.as_deref().and_then(fi_stmt)),
-        Stmt::Block(b) => fi_stmts(b),
+        Stmt::Expr(e) | Stmt::Throw(e) => fi_expr(e, args),
+        Stmt::Return(e) => e.as_ref().and_then(|e| fi_expr(e, args)),
+        Stmt::VarDecl { decls, .. } => decls
+            .iter()
+            .find_map(|(_, i)| i.as_ref().and_then(|e| fi_expr(e, args))),
+        Stmt::If { test, cons, alt } => fi_expr(test, args)
+            .or_else(|| fi_stmt(cons, args))
+            .or_else(|| alt.as_deref().and_then(|s| fi_stmt(s, args))),
+        Stmt::Block(b) => fi_stmts(b, args),
         Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
-            fi_expr(test).or_else(|| fi_stmt(body))
+            fi_expr(test, args).or_else(|| fi_stmt(body, args))
         }
         Stmt::For {
             init,
             test,
             update,
             body,
-        } => {
-            init.as_deref()
-                .and_then(|i| match i {
-                    ForInit::Expr(e) => fi_expr(e),
-                    ForInit::VarDecl { decls, .. } => {
-                        decls.iter().find_map(|(_, x)| x.as_ref().and_then(fi_expr))
-                    }
-                })
-                .or_else(|| test.as_ref().and_then(fi_expr))
-                .or_else(|| update.as_ref().and_then(fi_expr))
-                .or_else(|| fi_stmt(body))
+        } => init
+            .as_deref()
+            .and_then(|i| match i {
+                ForInit::Expr(e) => fi_expr(e, args),
+                ForInit::VarDecl { decls, .. } => decls
+                    .iter()
+                    .find_map(|(_, x)| x.as_ref().and_then(|e| fi_expr(e, args))),
+            })
+            .or_else(|| test.as_ref().and_then(|e| fi_expr(e, args)))
+            .or_else(|| update.as_ref().and_then(|e| fi_expr(e, args)))
+            .or_else(|| fi_stmt(body, args)),
+        Stmt::ForInOf { right, body, .. } => {
+            fi_expr(right, args).or_else(|| fi_stmt(body, args))
         }
-        Stmt::ForInOf { right, body, .. } => fi_expr(right).or_else(|| fi_stmt(body)),
         Stmt::Try {
             block,
             handler,
             finalizer,
-        } => fi_stmts(block)
-            .or_else(|| handler.as_ref().and_then(|(_, b)| fi_stmts(b)))
-            .or_else(|| finalizer.as_ref().and_then(|b| fi_stmts(b))),
-        Stmt::Switch { disc, cases } => fi_expr(disc).or_else(|| {
-            cases
-                .iter()
-                .find_map(|c| c.test.as_ref().and_then(fi_expr).or_else(|| fi_stmts(&c.body)))
+        } => fi_stmts(block, args)
+            .or_else(|| handler.as_ref().and_then(|(_, b)| fi_stmts(b, args)))
+            .or_else(|| finalizer.as_ref().and_then(|b| fi_stmts(b, args))),
+        Stmt::Switch { disc, cases } => fi_expr(disc, args).or_else(|| {
+            cases.iter().find_map(|c| {
+                c.test
+                    .as_ref()
+                    .and_then(|e| fi_expr(e, args))
+                    .or_else(|| fi_stmts(&c.body, args))
+            })
         }),
-        Stmt::Labeled { body, .. } | Stmt::With { body, .. } => fi_stmt(body),
+        Stmt::Labeled { body, .. } | Stmt::With { body, .. } => fi_stmt(body, args),
         _ => None,
     }
 }
