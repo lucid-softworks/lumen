@@ -6599,6 +6599,18 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "replaceAll", 2, |i, this, args| {
         let s = this_string(i, &this)?.to_string();
+        // A RegExp search value must be global, and replaces every match via the regex machinery.
+        let regex_global = match &arg(args, 0) {
+            Value::Obj(o) => i.regexps.get(&(Rc::as_ptr(o) as usize)).map(|re| re.global),
+            _ => None,
+        };
+        match regex_global {
+            Some(true) => return regex_replace(i, &s, &arg(args, 0), &arg(args, 1)),
+            Some(false) => {
+                return Err(i.make_error("TypeError", "replaceAll must be called with a global RegExp"));
+            }
+            None => {}
+        }
         let pat = ab(i.to_string(&arg(args, 0)))?;
         let repl = arg(args, 1);
         if pat.is_empty() {

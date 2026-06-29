@@ -2174,3 +2174,11 @@ fn sort_comparator_validation() {
     assert_eq!(run("[3,1,2].sort((a,b)=>a-b).join(',')"), "1,2,3");
     assert_eq!(run("[3,1,2].sort(undefined).join(',')"), "1,2,3");
 }
+#[test]
+fn string_replace_all_regex() {
+    assert_eq!(run("'aaa'.replaceAll(/a/g,'b')"), "bbb");
+    assert_eq!(run("'a1b2c3'.replaceAll(/\\d/g,'_')"), "a_b_c_");
+    assert!(matches!(Engine::new().eval("'a'.replaceAll(/a/,'b')", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert_eq!(run("'aaa'.replaceAll('a','b')"), "bbb"); // string path still works
+    assert_eq!(run("'a1a2'.replaceAll(/a(\\d)/g,'[$1]')"), "[1][2]");
+}
