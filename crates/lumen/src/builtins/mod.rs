@@ -4988,10 +4988,13 @@ fn install_object(it: &mut Interp) {
             Some(o) => o,
             None => return Ok(Value::Bool(false)),
         };
-        // A TypedArray index in range is an own property even though it isn't in the property map.
+        // A TypedArray index in range is an own property even though it isn't in the property map;
+        // a canonical-numeric non-index is never an own property.
         if let Some(info) = ta_info(i, &o) {
-            if let Ok(idx) = key.parse::<usize>() {
-                return Ok(Value::Bool(idx < i.ta_len(&info).unwrap_or(0)));
+            match i.ta_index_kind(&info, &key) {
+                crate::value::TaIndex::Element(_) => return Ok(Value::Bool(true)),
+                crate::value::TaIndex::Exotic => return Ok(Value::Bool(false)),
+                crate::value::TaIndex::Ordinary => {}
             }
         }
         let has = o.borrow().props.contains(&key);

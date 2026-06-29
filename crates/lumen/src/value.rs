@@ -299,6 +299,17 @@ pub struct TaInfo {
     pub track: bool,
 }
 
+/// How a property key relates to a TypedArray's integer-indexed exotic behavior.
+pub enum TaIndex {
+    /// A valid in-range element index.
+    Element(usize),
+    /// A canonical numeric key that isn't a valid index (inert: get→undefined, set/define→no-op,
+    /// has→false, delete→true; never stored, never reaches the prototype).
+    Exotic,
+    /// An ordinary string/symbol key (handled by the normal property machinery).
+    Ordinary,
+}
+
 /// A property descriptor. A data property uses `value`/`writable`; an accessor uses `get`/`set`.
 #[derive(Clone)]
 pub struct Property {

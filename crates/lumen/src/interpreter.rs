@@ -705,8 +705,11 @@ impl Interp {
                 // TypedArray integer-index reads come from the backing buffer, not the property map.
                 // length/byteLength/byteOffset are computed (and 0 once the buffer is detached).
                 if let Some(info) = self.typed_arrays.get(&ptr).copied() {
-                    if let Ok(idx) = key.parse::<usize>() {
-                        return Ok(self.ta_read(&info, idx));
+                    match self.ta_index_kind(&info, key) {
+                        TaIndex::Element(idx) => return Ok(self.ta_read(&info, idx)),
+                        // A canonical-numeric non-index never reaches the prototype: it reads undefined.
+                        TaIndex::Exotic => return Ok(Value::Undefined),
+                        TaIndex::Ordinary => {}
                     }
                     let cur = self.ta_len(&info);
                     match key {
@@ -787,11 +790,23 @@ impl Interp {
                 return self.set_member(&target, key, value);
             }
         }
-        // TypedArray integer-index writes go straight to the backing buffer.
+        // TypedArray integer-index writes go straight to the backing buffer; a canonical-numeric key
+        // that isn't a valid index is inert (the value coercion still runs, then is discarded).
         if let Some(info) = self.typed_arrays.get(&ptr).copied() {
-            if let Ok(idx) = key.parse::<usize>() {
-                self.ta_store(&info, idx, &value)?;
-                return Ok(());
+            match self.ta_index_kind(&info, key) {
+                TaIndex::Element(idx) => {
+                    self.ta_store(&info, idx, &value)?;
+                    return Ok(());
+                }
+                TaIndex::Exotic => {
+                    if info.kind.is_bigint() {
+                        self.to_bigint(&value)?;
+                    } else {
+                        self.to_number(&value)?;
+                    }
+                    return Ok(());
+                }
+                TaIndex::Ordinary => {}
             }
         }
 
@@ -945,6 +960,45 @@ impl Interp {
             None
         } else {
             Some(info.len)
+        }
+    }
+
+    /// Classify a property key against a TypedArray's integer-index exotic behavior: a valid
+    /// in-range element index, a *canonical numeric* key that isn't one (e.g. "1.5", "-0", "-1",
+    /// out of range — these are inert: never stored, never reach the prototype), or an ordinary key.
+    pub fn ta_index_kind(&self, info: &TaInfo, key: &str) -> TaIndex {
+        let n = match self.canonical_numeric_index(key) {
+            Some(n) => n,
+            None => return TaIndex::Ordinary,
+        };
+        // Valid index: a non-negative integer (not -0) below the current length.
+        if n >= 0.0
+            && n.fract() == 0.0
+            && !(n == 0.0 && n.is_sign_negative())
+            && (n as usize) < self.ta_len(info).unwrap_or(0)
+        {
+            TaIndex::Element(n as usize)
+        } else {
+            TaIndex::Exotic
+        }
+    }
+
+    /// CanonicalNumericIndexString: the numeric value when `key` is the canonical string form of a
+    /// Number ("0", "1.5", "-0", "Infinity", "NaN"…), else None.
+    pub fn canonical_numeric_index(&self, key: &str) -> Option<f64> {
+        if key == "-0" {
+            return Some(-0.0);
+        }
+        let n = match key {
+            "Infinity" => f64::INFINITY,
+            "-Infinity" => f64::NEG_INFINITY,
+            "NaN" => f64::NAN,
+            _ => key.parse::<f64>().ok()?,
+        };
+        if self.num_to_str(n) == key {
+            Some(n)
+        } else {
+            None
         }
     }
 

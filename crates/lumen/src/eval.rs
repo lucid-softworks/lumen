@@ -1104,10 +1104,13 @@ impl Interp {
     }
 
     pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
-        // TypedArray elements live in the backing buffer, not the property map.
-        if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
-            if let Ok(idx) = key.parse::<usize>() {
-                return idx < info.len;
+        // A TypedArray's [[HasProperty]] resolves integer-index slots itself and never consults the
+        // prototype for a canonical-numeric key (valid index → present; otherwise absent).
+        if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)).copied() {
+            match self.ta_index_kind(&info, key) {
+                TaIndex::Element(_) => return true,
+                TaIndex::Exotic => return false,
+                TaIndex::Ordinary => {}
             }
         }
         let mut cur = Some(obj.clone());
