@@ -294,6 +294,9 @@ pub struct TaInfo {
     pub offset: usize,
     pub len: usize,
     pub kind: TaKind,
+    /// Length-tracking view (created on a resizable buffer with no explicit length): its length is
+    /// recomputed from the buffer's current size rather than fixed at `len`.
+    pub track: bool,
 }
 
 /// A property descriptor. A data property uses `value`/`writable`; an accessor uses `get`/`set`.

@@ -411,7 +411,7 @@ impl Interp {
 
     /// Read element `idx` of a TypedArray as a Number (or undefined if out of range / detached).
     pub fn ta_read(&self, info: &TaInfo, idx: usize) -> Value {
-        if idx >= info.len {
+        if idx >= self.ta_len(info).unwrap_or(0) {
             return Value::Undefined;
         }
         let es = info.kind.elsize();
@@ -444,7 +444,7 @@ impl Interp {
 
     /// Write a BigInt (i128) into element `idx` (out-of-range writes are ignored).
     pub fn ta_write_bigint(&mut self, info: &TaInfo, idx: usize, n: i128) {
-        if idx >= info.len {
+        if idx >= self.ta_len(info).unwrap_or(0) {
             return;
         }
         let es = info.kind.elsize();
@@ -459,7 +459,7 @@ impl Interp {
 
     /// Write Number `n` into element `idx` of a TypedArray (out-of-range writes are ignored).
     pub fn ta_write(&mut self, info: &TaInfo, idx: usize, n: f64) {
-        if idx >= info.len {
+        if idx >= self.ta_len(info).unwrap_or(0) {
             return;
         }
         let es = info.kind.elsize();
@@ -708,20 +708,14 @@ impl Interp {
                     if let Ok(idx) = key.parse::<usize>() {
                         return Ok(self.ta_read(&info, idx));
                     }
-                    let detached = !self.array_buffers.contains_key(&info.buffer);
+                    let cur = self.ta_len(&info);
                     match key {
-                        "length" => {
-                            return Ok(Value::Num(if detached { 0.0 } else { info.len as f64 }))
-                        }
+                        "length" => return Ok(Value::Num(cur.unwrap_or(0) as f64)),
                         "byteLength" => {
-                            return Ok(Value::Num(if detached {
-                                0.0
-                            } else {
-                                (info.len * info.kind.elsize()) as f64
-                            }))
+                            return Ok(Value::Num((cur.unwrap_or(0) * info.kind.elsize()) as f64))
                         }
                         "byteOffset" => {
-                            return Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
+                            return Ok(Value::Num(if cur.is_none() { 0.0 } else { info.offset as f64 }))
                         }
                         "BYTES_PER_ELEMENT" => return Ok(Value::Num(info.kind.elsize() as f64)),
                         "buffer" => {
@@ -935,14 +929,29 @@ impl Interp {
         Ok(())
     }
 
+    /// A TypedArray's *current* element length, or `None` if it's out of bounds (a fixed-length view
+    /// whose resizable buffer shrank below its range) or its buffer is detached. A length-tracking
+    /// view recomputes its length from the buffer's current size.
+    pub fn ta_len(&self, info: &TaInfo) -> Option<usize> {
+        let buflen = self.array_buffers.get(&info.buffer)?.len();
+        let es = info.kind.elsize();
+        if info.track {
+            if info.offset > buflen {
+                None
+            } else {
+                Some((buflen - info.offset) / es)
+            }
+        } else if info.offset + info.len * es > buflen {
+            None
+        } else {
+            Some(info.len)
+        }
+    }
+
     pub fn array_length(&self, obj: &Gc) -> usize {
         // A TypedArray's length lives in its info slot, not an own `length` property.
         if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
-            return if self.array_buffers.contains_key(&info.buffer) {
-                info.len
-            } else {
-                0
-            };
+            return self.ta_len(info).unwrap_or(0);
         }
         match obj.borrow().props.get("length").map(|p| p.value.clone()) {
             Some(Value::Num(n)) => n as usize,

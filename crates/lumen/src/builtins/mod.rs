@@ -1551,11 +1551,12 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         Some(info) => info,
         None => return Err(i.make_error("TypeError", "method called on a non-TypedArray receiver")),
     };
-    // ValidateTypedArray: a detached backing buffer makes the operation throw.
-    if !i.array_buffers.contains_key(&info.buffer) {
+    // ValidateTypedArray: a detached (or out-of-bounds, after a resizable buffer shrank) backing
+    // buffer makes the operation throw.
+    if i.ta_len(&info).is_none() {
         return Err(i.make_error(
             "TypeError",
-            "Cannot perform operation on a detached ArrayBuffer",
+            "Cannot perform operation on a detached or out-of-bounds TypedArray",
         ));
     }
     let f = it_array_method(i, method);
@@ -1655,10 +1656,10 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
         return Err(i.make_error("TypeError", "TypedArray constructor requires 'new'"));
     }
     let es = kind.elsize();
-    let (buf_val, buf_ptr, offset, len) = match args.first() {
+    let (buf_val, buf_ptr, offset, len, track) = match args.first() {
         None => {
             let (bv, bp) = make_array_buffer(i, 0);
-            (bv, bp, 0, 0)
+            (bv, bp, 0, 0, false)
         }
         Some(Value::Num(n)) => {
             let len = n.max(0.0) as usize;
@@ -1666,7 +1667,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 return Err(i.make_error("RangeError", "Invalid typed array length"));
             }
             let (bv, bp) = make_array_buffer(i, len * es);
-            (bv, bp, 0, len)
+            (bv, bp, 0, len, false)
         }
         Some(Value::Obj(o)) if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)) => {
             let bp = Rc::as_ptr(o) as usize;
@@ -1676,11 +1677,15 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 _ => 0,
             };
             let buflen = i.array_buffers[&bp].len();
+            // No explicit length on a resizable buffer ⇒ a length-tracking view.
+            let explicit = matches!(args.get(2), Some(v) if !matches!(v, Value::Undefined));
+            let rv = ab(i.get_member(&bv, "resizable"))?;
+            let resizable = i.to_boolean(&rv);
             let len = match args.get(2) {
                 Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))? as usize,
                 _ => buflen.saturating_sub(offset) / es,
             };
-            (bv, bp, offset, len)
+            (bv, bp, offset, len, !explicit && resizable)
         }
         Some(other) => {
             // TypedArray / array-like / iterable: copy element values into a fresh buffer.
@@ -1707,11 +1712,12 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 offset: 0,
                 len,
                 kind,
+                track: false,
             };
             for (idx, item) in items.iter().enumerate() {
                 ab(i.ta_store(&info, idx, item))?;
             }
-            (bv, bp, 0, len)
+            (bv, bp, 0, len, false)
         }
     };
     let obj = Object::new(i.extra_protos.get(kind.name()).cloned());
@@ -1723,6 +1729,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             offset,
             len,
             kind,
+            track,
         },
     );
     // length / byteLength / byteOffset / buffer / BYTES_PER_ELEMENT are inherited accessors+constants,
@@ -1774,7 +1781,7 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         }
         _ => 0,
     };
-    if offset + src_len > info.len {
+    if offset + src_len > i.ta_len(&info).unwrap_or(0) {
         return Err(i.make_error("RangeError", "source is too large for the target at offset"));
     }
     for k in 0..src_len {
@@ -1792,7 +1799,7 @@ fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
     let es = info.kind.elsize();
-    let len = info.len as i64;
+    let len = i.ta_len(&info).unwrap_or(0) as i64;
     let begin = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
     let end = match arg(args, 1) {
         Value::Undefined => len,
@@ -1860,7 +1867,7 @@ fn install_typed_arrays(it: &mut Interp) {
             return Err(i.make_error("TypeError", "detached buffer"));
         }
         let mut out = String::new();
-        for k in 0..info.len {
+        for k in 0..i.ta_len(&info).unwrap_or(0) {
             if k > 0 {
                 out.push(',');
             }
@@ -4813,20 +4820,20 @@ fn ta_receiver(i: &mut Interp, this: &Value) -> Result<(crate::value::TaInfo, bo
     }
 }
 fn ta_length_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let (info, detached) = ta_receiver(i, &this)?;
-    Ok(Value::Num(if detached { 0.0 } else { info.len as f64 }))
+    let (info, _) = ta_receiver(i, &this)?;
+    Ok(Value::Num(i.ta_len(&info).unwrap_or(0) as f64))
 }
 fn ta_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let (info, detached) = ta_receiver(i, &this)?;
-    Ok(Value::Num(if detached {
-        0.0
-    } else {
-        (info.len * info.kind.elsize()) as f64
-    }))
+    let (info, _) = ta_receiver(i, &this)?;
+    Ok(Value::Num((i.ta_len(&info).unwrap_or(0) * info.kind.elsize()) as f64))
 }
 fn ta_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let (info, detached) = ta_receiver(i, &this)?;
-    Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
+    let (info, _) = ta_receiver(i, &this)?;
+    Ok(Value::Num(if i.ta_len(&info).is_none() {
+        0.0
+    } else {
+        info.offset as f64
+    }))
 }
 fn ta_buffer_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let _ = ta_receiver(i, &this)?;
@@ -4984,8 +4991,7 @@ fn install_object(it: &mut Interp) {
         // A TypedArray index in range is an own property even though it isn't in the property map.
         if let Some(info) = ta_info(i, &o) {
             if let Ok(idx) = key.parse::<usize>() {
-                let detached = !i.array_buffers.contains_key(&info.buffer);
-                return Ok(Value::Bool(!detached && idx < info.len));
+                return Ok(Value::Bool(idx < i.ta_len(&info).unwrap_or(0)));
             }
         }
         let has = o.borrow().props.contains(&key);
@@ -5177,11 +5183,7 @@ fn install_object(it: &mut Interp) {
         // A TypedArray's own keys are its integer indices, then any string expandos (the
         // length/buffer/... metadata are inherited, not own).
         if let Some(info) = ta_info(i, &o) {
-            let n = if i.array_buffers.contains_key(&info.buffer) {
-                info.len
-            } else {
-                0
-            };
+            let n = i.ta_len(&info).unwrap_or(0);
             let mut keys: Vec<Value> = (0..n).map(|k| Value::from_string(k.to_string())).collect();
             for k in o.borrow().props.keys() {
                 if !Interp::is_sym_key(&k)
@@ -5323,8 +5325,7 @@ fn install_object(it: &mut Interp) {
         // Defining a TypedArray integer index writes through to the buffer (in range) or fails.
         if let Some(info) = ta_info(i, &o) {
             if let Ok(idx) = key.parse::<usize>() {
-                let detached = !i.array_buffers.contains_key(&info.buffer);
-                if detached || idx >= info.len {
+                if idx >= i.ta_len(&info).unwrap_or(0) {
                     return Err(i.make_error(
                         "TypeError",
                         "cannot define an out-of-bounds TypedArray index",
@@ -5375,8 +5376,7 @@ fn install_object(it: &mut Interp) {
         // A TypedArray integer index is an own data property reading from the buffer.
         if let Some(info) = ta_info(i, &o) {
             if let Ok(idx) = key.parse::<usize>() {
-                let detached = !i.array_buffers.contains_key(&info.buffer);
-                if detached || idx >= info.len {
+                if idx >= i.ta_len(&info).unwrap_or(0) {
                     return Ok(Value::Undefined);
                 }
                 let val = i.ta_read(&info, idx);
