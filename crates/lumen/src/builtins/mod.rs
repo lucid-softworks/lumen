@@ -1780,23 +1780,18 @@ fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     let new_len = (end - begin).max(0) as usize;
     let new_offset = info.offset + begin as usize * es;
     let buf_val = ab(i.get_member(&this, "buffer"))?;
-    let obj = Object::new(i.extra_protos.get(info.kind.name()).cloned());
-    let p = Rc::as_ptr(&obj) as usize;
-    i.typed_arrays.insert(
-        p,
-        TaInfo {
-            buffer: info.buffer,
-            offset: new_offset,
-            len: new_len,
-            kind: info.kind,
-        },
-    );
-    set_internal(&obj, "length", Value::Num(new_len as f64));
-    set_internal(&obj, "byteLength", Value::Num((new_len * es) as f64));
-    set_internal(&obj, "byteOffset", Value::Num(new_offset as f64));
-    set_internal(&obj, "buffer", buf_val);
-    set_internal(&obj, "BYTES_PER_ELEMENT", Value::Num(es as f64));
-    Ok(Value::Obj(obj))
+    // subarray builds the result via TypedArraySpeciesCreate(O, «buffer, byteOffset, length»), so a
+    // subclass `@@species` (or a detaching `constructor` getter) is honored.
+    ta_species_create(
+        i,
+        &this,
+        info.kind,
+        &[
+            buf_val,
+            Value::Num(new_offset as f64),
+            Value::Num(new_len as f64),
+        ],
+    )
 }
 
 macro_rules! ta_ctor {
@@ -1836,8 +1831,27 @@ fn install_typed_arrays(it: &mut Interp) {
     }
     it.def_method(&ta_proto, "set", 1, ta_set);
     it.def_method(&ta_proto, "subarray", 2, ta_subarray);
-    it.def_method(&ta_proto, "toLocaleString", 0, |i, this, a| {
-        ta_delegate(i, &this, "join", a)
+    it.def_method(&ta_proto, "toLocaleString", 0, |i, this, _a| {
+        // Per spec: call `toLocaleString` on each element and join with ",".
+        let info = map_ptr(&this).and_then(|p| i.typed_arrays.get(&p).copied());
+        let info = info.ok_or_else(|| i.make_error("TypeError", "not a TypedArray"))?;
+        if !i.array_buffers.contains_key(&info.buffer) {
+            return Err(i.make_error("TypeError", "detached buffer"));
+        }
+        let mut out = String::new();
+        for k in 0..info.len {
+            if k > 0 {
+                out.push(',');
+            }
+            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let tls = ab(i.get_member(&v, "toLocaleString"))?;
+            if !tls.is_callable() {
+                return Err(i.make_error("TypeError", "toLocaleString is not a function"));
+            }
+            let s = ab(i.call(tls, v, &[]))?;
+            out.push_str(&ab(i.to_string(&s))?);
+        }
+        Ok(Value::from_string(out))
     });
     // length / byteLength / byteOffset / buffer are accessor getters on %TypedArray.prototype% that
     // brand-check the receiver (calling one on a non-TypedArray is a TypeError).
@@ -8418,6 +8432,10 @@ fn install_bigint(it: &mut Interp) {
     it.def_method(&proto, "valueOf", 0, |i, this, _| match this {
         Value::BigInt(_) => Ok(this),
         _ => Err(i.make_error("TypeError", "BigInt.prototype.valueOf requires a BigInt")),
+    });
+    it.def_method(&proto, "toLocaleString", 0, |i, this, _| match this {
+        Value::BigInt(n) => Ok(Value::from_string(bigint_to_radix(n, 10))),
+        _ => Err(i.make_error("TypeError", "BigInt.prototype.toLocaleString requires a BigInt")),
     });
     let ctor = it.make_native("BigInt", 1, |i, _t, a| {
         if i.constructing {
