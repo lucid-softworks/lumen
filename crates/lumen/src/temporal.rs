@@ -2629,12 +2629,14 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::str(format!(
-            "{}-{:02}{}",
-            pad_year(d.year),
-            d.month,
-            cal_suffix(i, &arg(a, 0))?
-        )))
+        let suffix = cal_suffix(i, &arg(a, 0))?;
+        // When the calendar is shown, a PlainYearMonth includes its reference ISO day (`-DD`).
+        let s = if suffix.is_empty() {
+            format!("{}-{:02}", pad_year(d.year), d.month)
+        } else {
+            format!("{}-{:02}-{:02}{}", pad_year(d.year), d.month, d.day, suffix)
+        };
+        Ok(Value::str(s))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_yearmonth(i, &t)?;
@@ -2809,12 +2811,14 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        Ok(Value::str(format!(
-            "{:02}-{:02}{}",
-            d.month,
-            d.day,
-            cal_suffix(i, &arg(a, 0))?
-        )))
+        let suffix = cal_suffix(i, &arg(a, 0))?;
+        // When the calendar is shown, a PlainMonthDay includes its reference ISO year (`YYYY-`).
+        let s = if suffix.is_empty() {
+            format!("{:02}-{:02}", d.month, d.day)
+        } else {
+            format!("{}-{:02}-{:02}{}", pad_year(d.year), d.month, d.day, suffix)
+        };
+        Ok(Value::str(s))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_monthday(i, &t)?;
