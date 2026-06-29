@@ -1592,3 +1592,15 @@ fn promise_combinator_reject_noniterable() {
     e2.eval("var r2; Promise.all([1,2,3]).then(a=>r2=a.join(','))", false).unwrap();
     assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2,3");
 }
+#[test]
+fn promise_all_user_then() {
+    let mut e = Engine::new();
+    e.eval("var p=new Promise(function(){}); var err=new TypeError('x'); Object.defineProperty(p,'then',{value:function(){throw err}}); var r; Promise.all([p]).then(()=>r='F', reason=>r=(reason===err)?'OK':'wrong')", false).unwrap();
+    assert_eq!(match e.eval("r",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "OK");
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Promise.all([Promise.resolve(1),Promise.resolve(2)]).then(a=>r2=a.join(','))", false).unwrap();
+    assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2");
+    let mut e3 = Engine::new();
+    e3.eval("var r3; Promise.race([Promise.resolve('a'),Promise.resolve('b')]).then(v=>r3=v)", false).unwrap();
+    assert_eq!(match e3.eval("r3",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "a");
+}

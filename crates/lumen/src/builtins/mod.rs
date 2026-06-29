@@ -3020,6 +3020,28 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// Subscribe a Promise combinator's element handlers via the resolved item's user-visible `.then`
+/// (per spec). A throwing `.then` getter/call rejects the combinator's result promise. Returns
+/// `false` if the combinator should bail out (already rejected).
+fn combinator_then(i: &mut Interp, result: &Value, next: Value, on_f: Value, on_r: Value) -> bool {
+    let then = match i.get_member(&next, "then") {
+        Ok(t) => t,
+        Err(e) => {
+            let r = crate::interpreter::abrupt_value(e);
+            i.reject_promise(result, r);
+            return false;
+        }
+    };
+    match i.call(then, next, &[on_f, on_r]) {
+        Ok(_) => true,
+        Err(e) => {
+            let r = crate::interpreter::abrupt_value(e);
+            i.reject_promise(result, r);
+            false
+        }
+    }
+}
+
 /// Element handler for Promise.allKeyed: store `value` under its key in the result object.
 fn promise_keyed_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let result = arg(args, 0);
@@ -3192,7 +3214,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = make_bound(i, promise_all_element, vec![result.clone(), Value::Num(idx as f64)]);
             let on_r = i.make_resolver(&result, false);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
@@ -3211,7 +3235,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
             let on_r = i.make_resolver(&result, false);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
@@ -3238,7 +3264,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = make_bound(i, promise_settled_fulfill, vec![result.clone(), Value::Num(idx as f64)]);
             let on_r = make_bound(i, promise_settled_reject, vec![result.clone(), Value::Num(idx as f64)]);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
@@ -3266,7 +3294,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
             let on_r = make_bound(i, promise_any_reject, vec![result.clone(), Value::Num(idx as f64)]);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
@@ -3294,7 +3324,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = make_bound(i, promise_keyed_element, vec![result.clone(), Value::str(&*k)]);
             let on_r = i.make_resolver(&result, false);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
@@ -3322,7 +3354,9 @@ fn install_promise(it: &mut Interp) {
             let p = promise_resolve_value(i, item);
             let on_f = make_bound(i, promise_keyed_settle_f, vec![result.clone(), Value::str(&*k)]);
             let on_r = make_bound(i, promise_keyed_settle_r, vec![result.clone(), Value::str(&*k)]);
-            i.promise_then(&p, on_f, on_r);
+            if !combinator_then(i, &result, p, on_f, on_r) {
+                return Ok(result);
+            }
         }
         Ok(result)
     });
