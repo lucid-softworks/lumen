@@ -879,6 +879,19 @@ impl Parser {
             };
             self.expect_punct("{")?;
             let body = self.parse_block_body()?;
+            // A catch parameter name can't be re-declared by a lexical (`let`/`const`/`class`) in the
+            // catch block (a `var` of the same name is allowed — Annex B.3.4).
+            if let Some(p) = &param {
+                let mut params = Vec::new();
+                pattern_names(p, &mut params);
+                let (mut lexical, mut vars) = (Vec::new(), Vec::new());
+                for s in &body {
+                    collect_top_decl(s, &mut lexical, &mut vars);
+                }
+                if let Some(name) = lexical.iter().find(|n| params.contains(n)) {
+                    return self.err(format!("Identifier '{name}' has already been declared"));
+                }
+            }
             Some((param, body))
         } else {
             None

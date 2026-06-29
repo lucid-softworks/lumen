@@ -1731,3 +1731,14 @@ fn named_backreferences() {
     // non-unicode, no named groups: \k is literal 'k'
     assert_eq!(run(r"/\k/.test('k')"), "true");
 }
+#[test]
+fn catch_param_lexical_redecl() {
+    assert!(Engine::new().eval("try{}catch(e){ let e; }", false).is_err());
+    assert!(Engine::new().eval("try{}catch(e){ const e=1; }", false).is_err());
+    assert!(Engine::new().eval("try{}catch([a,b]){ let b; }", false).is_err());
+    assert!(Engine::new().eval("try{}catch(e){ class e{} }", false).is_err());
+    // var of the same name is allowed (Annex B.3.4)
+    assert_eq!(run("try{throw 1}catch(e){ var e = 2; } 'ok'"), "ok");
+    // a different lexical name is fine
+    assert_eq!(run("try{throw 1}catch(e){ let f = 2; } 'ok'"), "ok");
+}
