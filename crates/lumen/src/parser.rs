@@ -2137,11 +2137,7 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             pn_params(&f.params, st)?;
             pn_stmts(&f.body, st)?;
         }
-        Stmt::Return(o) => {
-            if let Some(e) = o {
-                pn_expr(e, st)?;
-            }
-        }
+        Stmt::Return(Some(e)) => pn_expr(e, st)?,
         Stmt::If { test, cons, alt } => {
             pn_expr(test, st)?;
             pn_stmt(cons, st)?;
@@ -2298,11 +2294,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
                 pn_expr(e, st)?;
             }
         }
-        Expr::Yield { arg, .. } => {
-            if let Some(a) = arg {
-                pn_expr(a, st)?;
-            }
-        }
+        Expr::Yield { arg: Some(a), .. } => pn_expr(a, st)?,
         Expr::TaggedTemplate { tag, subs, .. } => {
             pn_expr(tag, st)?;
             for s in subs {
