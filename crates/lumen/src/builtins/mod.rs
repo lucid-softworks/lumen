@@ -1899,6 +1899,28 @@ fn install_typed_arrays(it: &mut Interp) {
             },
         );
     }
+    // %TypedArray.prototype%[@@toStringTag]: a getter returning the kind name (e.g. "Int8Array")
+    // for a TypedArray receiver, else undefined (no throw, no setter).
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        let g = it.make_native("get [Symbol.toStringTag]", 0, |i, this, _| {
+            Ok(match map_ptr(&this).and_then(|p| i.typed_arrays.get(&p)) {
+                Some(info) => Value::str(info.kind.name()),
+                None => Value::Undefined,
+            })
+        });
+        ta_proto.borrow_mut().props.insert(
+            key,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
 
     // The abstract %TypedArray% intrinsic: each concrete TypedArray constructor inherits from it,
     // and its `.prototype` is the shared `ta_proto`. Tests reach it via Object.getPrototypeOf(Int8Array).
