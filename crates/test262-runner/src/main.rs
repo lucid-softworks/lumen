@@ -233,11 +233,21 @@ fn worker_loop(
         let mut timed_out = false;
         let status = match std::process::Command::new("/bin/sh").arg("-c").arg(&worker_cmd).spawn() {
             Ok(mut child) => {
-                let deadline = Instant::now() + CHUNK_TIMEOUT;
+                // The deadline is per-*test*, not per-chunk: it resets whenever the worker writes a
+                // new result (the out file grows). So a chunk of merely-slow tests keeps running as
+                // long as each finishes within CHUNK_TIMEOUT; only a genuinely stuck (e.g. infinite-
+                // loop) test, which makes no progress for the whole window, is killed.
+                let mut deadline = Instant::now() + CHUNK_TIMEOUT;
+                let mut last_len = 0u64;
                 loop {
                     match child.try_wait() {
                         Ok(Some(st)) => break Ok(st),
                         Ok(None) => {
+                            let len = std::fs::metadata(&out_file).map(|m| m.len()).unwrap_or(0);
+                            if len > last_len {
+                                last_len = len;
+                                deadline = Instant::now() + CHUNK_TIMEOUT;
+                            }
                             if Instant::now() >= deadline {
                                 let _ = child.kill();
                                 let _ = child.wait();
@@ -270,7 +280,7 @@ fn worker_loop(
         let mut finalized = recorded.len();
         if let Some(crashed) = (lo..hi).find(|i| !recorded.contains(i)) {
             let why = if timed_out {
-                "timed out (>20s — pathologically slow test)".to_string()
+                "timed out (no progress — pathologically slow / infinite test)".to_string()
             } else {
                 match status {
                     Ok(s) => format!("worker died ({s}) — likely stack overflow"),
