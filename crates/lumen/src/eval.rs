@@ -343,7 +343,7 @@ impl Interp {
     ) -> Completion {
         // The loop's completion value: the most recent non-empty body completion (UpdateEmpty).
         let mut v = Value::Undefined;
-        let mut keep = |bv: Value, v: &mut Value| {
+        let keep = |bv: Value, v: &mut Value| {
             if !matches!(bv, Value::Undefined) {
                 *v = bv;
             }
