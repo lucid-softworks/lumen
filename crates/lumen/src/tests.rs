@@ -2193,3 +2193,13 @@ fn error_cause() {
     assert_eq!(run("new Error('m', {cause: undefined}).cause"), "undefined");
     assert_eq!(run("new Error('m', {cause: undefined}).hasOwnProperty('cause')"), "true");
 }
+#[test]
+fn sloppy_this_boxing() {
+    assert_eq!(run("function f(){return eval('this')}f.call(42) instanceof Number"), "true");
+    assert_eq!(run("function f(){return this}; typeof f.call('hi')"), "object");
+    assert_eq!(run("function f(){return this.valueOf()}; f.call(5)"), "5");
+    // strict mode: primitive this stays primitive
+    assert_eq!(run("function f(){'use strict';return typeof this}; f.call(5)"), "number");
+    // object this passes through
+    assert_eq!(run("var o={};function f(){return this===o}; f.call(o)"), "true");
+}

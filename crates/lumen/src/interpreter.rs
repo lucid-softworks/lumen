@@ -1085,7 +1085,9 @@ impl Interp {
             } else {
                 match this {
                     Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
-                    other => other,
+                    other @ Value::Obj(_) => other,
+                    // Sloppy mode: a primitive `this` is boxed to its wrapper object (ToObject).
+                    prim => crate::builtins::box_primitive_pub(self, prim),
                 }
             };
             scope.borrow_mut().vars.insert(
