@@ -536,6 +536,10 @@ impl Parser {
                         cc.ranges.push((a, b));
                     }
                     (a, b) => {
+                        // In Unicode mode a class escape (`\d`, `\p{…}`) can't be a range bound.
+                        if self.unicode {
+                            return Err("invalid character class range".into());
+                        }
                         push_class_atom(&mut cc, a);
                         cc.ranges.push(('-', '-'));
                         push_class_atom(&mut cc, b);
@@ -636,7 +640,10 @@ impl Parser {
         loop {
             match self.bump() {
                 Some('}') => break,
-                Some(c) => body.push(c),
+                // The grammar is `[A-Za-z0-9_]` names, optionally `name=value` — no spaces or other
+                // characters (so `\p{ Gc=L }` with spaces is a SyntaxError, not loose-matched).
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '=' => body.push(c),
+                Some(_) => return Err("invalid character in property escape".into()),
                 None => return Err("unterminated property escape".into()),
             }
         }

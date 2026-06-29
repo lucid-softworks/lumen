@@ -1964,3 +1964,19 @@ fn array_exotic_defineprop() {
     // valid length set works
     assert_eq!(run("var a=[1,2]; Object.defineProperty(a,'length',{value:5}); a.length"), "5");
 }
+#[test]
+fn regex_prop_syntax() {
+    // spaces in \p{} are invalid
+    assert!(Engine::new().eval(r"/\p{ General_Category=Letter }/u", false).is_err());
+    assert!(Engine::new().eval(r"/\p{Letter }/u", false).is_err());
+    // class escape as a range bound (unicode) is invalid
+    assert!(Engine::new().eval(r"/[--\p{Hex}]/u", false).is_err());
+    assert!(Engine::new().eval(r"/[\d-a]/u", false).is_err());
+    assert!(Engine::new().eval(r"/[\p{L}-\p{N}]/u", false).is_err());
+    // valid forms still work
+    assert_eq!(run(r"/\p{Letter}/u.test('a')"), "true");
+    assert_eq!(run(r"/\p{General_Category=Letter}/u.test('a')"), "true");
+    assert_eq!(run(r"/[a-z]/u.test('m')"), "true");
+    assert_eq!(run(r"/[\d]/.test('5')"), "true");
+    assert_eq!(run(r"/[\d-a]/.test('-')"), "true"); // non-unicode: lenient
+}
