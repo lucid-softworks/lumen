@@ -2106,3 +2106,14 @@ fn dataview_offset_validation() {
     assert_eq!(run("new DataView(new ArrayBuffer(8),2,4).byteLength"), "4");
     assert_eq!(run("new DataView(new ArrayBuffer(8)).byteLength"), "8");
 }
+#[test]
+fn loop_completion_values() {
+    assert_eq!(run("for(var i=0;i<3;i++){ i }"), "2");
+    assert_eq!(run("2; for(var i=0;i<0;i++){ 3 }"), "2"); // no iteration → empty → keeps 2
+    assert_eq!(run("for(var i=0;i<3;i++){ }"), "undefined");
+    assert_eq!(run("var i=0; while(i<3){ i++; i }"), "3");
+    assert_eq!(run("var i=0; do { i++; i } while(i<3)"), "3");
+    assert_eq!(run("for(var k of [10,20,30]){ k }"), "30");
+    assert_eq!(run("for(var k in {a:1,b:2}){ k }"), "b");
+    assert_eq!(run("for(var i=0;i<3;i++){ continue; 99 }"), "undefined");
+}

@@ -252,10 +252,10 @@ impl Interp {
             Stmt::While { test, body } => self.run_loop(None, env, |me, env| {
                 let t = me.eval(test, env)?;
                 if !me.to_boolean(&t) {
-                    return Ok(LoopStep::Done);
+                    return Ok(LoopStep::Done(Value::Undefined));
                 }
-                me.exec_stmt(body, env)?;
-                Ok(LoopStep::Continue)
+                let bv = me.exec_stmt(body, env)?;
+                Ok(LoopStep::Continue(bv))
             }),
             Stmt::DoWhile { body, test } => {
                 let mut first = true;
@@ -263,16 +263,16 @@ impl Interp {
                     if !first {
                         let t = me.eval(test, env)?;
                         if !me.to_boolean(&t) {
-                            return Ok(LoopStep::Done);
+                            return Ok(LoopStep::Done(Value::Undefined));
                         }
                     }
                     first = false;
-                    me.exec_stmt(body, env)?;
+                    let bv = me.exec_stmt(body, env)?;
                     let t = me.eval(test, env)?;
                     if !me.to_boolean(&t) {
-                        Ok(LoopStep::Done)
+                        Ok(LoopStep::Done(bv))
                     } else {
-                        Ok(LoopStep::Continue)
+                        Ok(LoopStep::Continue(bv))
                     }
                 })
             }
@@ -341,17 +341,25 @@ impl Interp {
         env: &Env,
         mut step: impl FnMut(&mut Interp, &Env) -> Result<LoopStep, Abrupt>,
     ) -> Completion {
+        // The loop's completion value: the most recent non-empty body completion (UpdateEmpty).
+        let mut v = Value::Undefined;
+        let mut keep = |bv: Value, v: &mut Value| {
+            if !matches!(bv, Value::Undefined) {
+                *v = bv;
+            }
+        };
         loop {
             // Safe point: run the cycle collector / enforce the live-object ceiling. Catches tight
             // loops (`for(;;){ x = {}; }`) that never call a function.
             self.gc_check()?;
             match step(self, env) {
-                Ok(LoopStep::Continue) => {}
-                Ok(LoopStep::Done) => return Ok(Value::Undefined),
-                Err(Abrupt::Break(None)) => return Ok(Value::Undefined),
-                Err(Abrupt::Break(Some(l))) if Some(l.as_str()) == label => {
-                    return Ok(Value::Undefined)
+                Ok(LoopStep::Continue(bv)) => keep(bv, &mut v),
+                Ok(LoopStep::Done(bv)) => {
+                    keep(bv, &mut v);
+                    return Ok(v);
                 }
+                Err(Abrupt::Break(None)) => return Ok(v),
+                Err(Abrupt::Break(Some(l))) if Some(l.as_str()) == label => return Ok(v),
                 Err(Abrupt::Continue(None)) => {}
                 Err(Abrupt::Continue(Some(l))) if Some(l.as_str()) == label => {}
                 Err(e) => return Err(e),
@@ -412,11 +420,11 @@ impl Interp {
             if let Some(t) = test {
                 let tv = me.eval(t, env)?;
                 if !me.to_boolean(&tv) {
-                    return Ok(LoopStep::Done);
+                    return Ok(LoopStep::Done(Value::Undefined));
                 }
             }
-            me.exec_stmt(body, env)?;
-            Ok(LoopStep::Continue)
+            let bv = me.exec_stmt(body, env)?;
+            Ok(LoopStep::Continue(bv))
         })
     }
 
@@ -457,14 +465,14 @@ impl Interp {
                 let res = me.await_value(res)?;
                 let done = me.get_member(&res, "done")?;
                 if me.to_boolean(&done) {
-                    return Ok(LoopStep::Done);
+                    return Ok(LoopStep::Done(Value::Undefined));
                 }
                 let raw = me.get_member(&res, "value")?;
                 let v = me.await_value(raw)?;
                 let iter_env = new_scope(Some(env.clone()));
                 me.bind_pattern(left, v, &iter_env, mode)?;
-                me.exec_stmt(body, &iter_env)?;
-                Ok(LoopStep::Continue)
+                let bv = me.exec_stmt(body, &iter_env)?;
+                Ok(LoopStep::Continue(bv))
             });
         }
         if of {
@@ -477,13 +485,13 @@ impl Interp {
                     Some(x) => x,
                     None => {
                         exhausted = true;
-                        return Ok(LoopStep::Done);
+                        return Ok(LoopStep::Done(Value::Undefined));
                     }
                 };
                 let iter_env = new_scope(Some(env.clone()));
                 me.bind_pattern(left, v, &iter_env, mode)?;
-                me.exec_stmt(body, &iter_env)?;
-                Ok(LoopStep::Continue)
+                let bv = me.exec_stmt(body, &iter_env)?;
+                Ok(LoopStep::Continue(bv))
             });
             if !exhausted {
                 self.iterator_close(&iter_close);
@@ -495,14 +503,14 @@ impl Interp {
         let mut idx = 0;
         self.run_loop(label, env, |me, env| {
             if idx >= items.len() {
-                return Ok(LoopStep::Done);
+                return Ok(LoopStep::Done(Value::Undefined));
             }
             let v = items[idx].clone();
             idx += 1;
             let iter_env = new_scope(Some(env.clone()));
             me.bind_pattern(left, v, &iter_env, mode)?;
-            me.exec_stmt(body, &iter_env)?;
-            Ok(LoopStep::Continue)
+            let bv = me.exec_stmt(body, &iter_env)?;
+            Ok(LoopStep::Continue(bv))
         })
     }
 
@@ -2501,8 +2509,11 @@ pub enum Hint {
 }
 
 enum LoopStep {
-    Continue,
-    Done,
+    /// Keep looping; the value is this iteration's body completion value (for the loop's own
+    /// completion value, per UpdateEmpty in ForBodyEvaluation).
+    Continue(Value),
+    /// Stop looping; the value is the final iteration's body completion value (or undefined).
+    Done(Value),
 }
 
 /// Insert an initialized, mutable binding into `env` (used for the hidden `%super*%`/`this` slots).
