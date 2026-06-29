@@ -7340,6 +7340,7 @@ fn install_errors(it: &mut Interp) {
             let s = ab(i.to_string(&arg(a, 1)))?;
             ab(i.set_member(&err, "message", Value::Str(s)))?;
         }
+        install_error_cause(i, &err, a.get(2));
         Ok(err)
     });
     agg_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(agg_proto.clone()), false, false, false));
@@ -7356,7 +7357,22 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
             }
         }
     }
+    install_error_cause(i, &err, args.get(1));
     err
+}
+
+/// InstallErrorCause: when the options bag has a `cause` property, copy it to a non-enumerable own
+/// `cause` data property on the error.
+fn install_error_cause(i: &mut Interp, err: &Value, options: Option<&Value>) {
+    if let Some(opts @ Value::Obj(o)) = options {
+        if i.has_property(o, "cause") {
+            if let Ok(cause) = i.get_member(opts, "cause") {
+                if let Some(e) = err.as_obj() {
+                    e.borrow_mut().props.insert("cause", Property::data(cause, true, false, true));
+                }
+            }
+        }
+    }
 }
 
 fn install_globals(it: &mut Interp) {

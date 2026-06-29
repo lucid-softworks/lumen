@@ -2182,3 +2182,14 @@ fn string_replace_all_regex() {
     assert_eq!(run("'aaa'.replaceAll('a','b')"), "bbb"); // string path still works
     assert_eq!(run("'a1a2'.replaceAll(/a(\\d)/g,'[$1]')"), "[1][2]");
 }
+#[test]
+fn error_cause() {
+    assert_eq!(run("new Error('m',{cause:42}).cause"), "42");
+    assert_eq!(run("'cause' in new Error('m')"), "false");
+    assert_eq!(run("new TypeError('x',{cause:'y'}).cause"), "y");
+    assert_eq!(run("new AggregateError([],'m',{cause:9}).cause"), "9");
+    assert_eq!(run("Object.getOwnPropertyDescriptor(new Error('m',{cause:1}),'cause').enumerable"), "false");
+    assert_eq!(run("new Error('m',{}).hasOwnProperty('cause')"), "false");
+    assert_eq!(run("new Error('m', {cause: undefined}).cause"), "undefined");
+    assert_eq!(run("new Error('m', {cause: undefined}).hasOwnProperty('cause')"), "true");
+}
