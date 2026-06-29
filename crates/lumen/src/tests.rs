@@ -1656,3 +1656,13 @@ fn class_validation() {
     assert_eq!(run("class C{ static #s=5; static g(){return C.#s} }; C.g()"), "5");
     assert_eq!(run("class C{ #x=1; static #x=2; } 'ok'"), "ok"); // static + instance #x are distinct
 }
+#[test]
+fn dstr_target_validation() {
+    assert!(Engine::new().eval("({a:1}=2)", false).is_err());
+    assert!(Engine::new().eval("[1]=2", false).is_err());
+    assert!(Engine::new().eval("[a,1]=[]", false).is_err());
+    assert_eq!(run("var a,b; ({a,b}={a:1,b:2}); a+','+b"), "1,2");
+    assert_eq!(run("var a,b; [a,b]=[3,4]; a+','+b"), "3,4");
+    assert_eq!(run("var o={}; ({a:o.x}={a:5}); o.x"), "5");
+    assert_eq!(run("var a,b; ({a=1,b=2}={a:9}); a+','+b"), "9,2");
+}

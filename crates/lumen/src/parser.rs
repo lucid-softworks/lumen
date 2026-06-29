@@ -1020,9 +1020,13 @@ impl Parser {
                 self.advance();
                 let value = self.parse_assign()?;
                 // Plain `=` also accepts an array/object literal reinterpreted as a destructuring
-                // assignment target.
+                // assignment target — but only if it is a *valid* destructuring pattern.
                 let destructuring = op == "=" && matches!(left, Expr::Array(_) | Expr::Object(_));
-                if !is_valid_assign_target(&left) && !destructuring {
+                if destructuring {
+                    if expr_to_pattern(&left).is_none() {
+                        return self.err("invalid destructuring assignment target");
+                    }
+                } else if !is_valid_assign_target(&left) {
                     return self.err("invalid assignment target");
                 }
                 // Assigning to `eval`/`arguments` is a SyntaxError in strict mode.
