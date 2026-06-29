@@ -112,6 +112,8 @@ pub struct Class {
     pub name: Option<String>,
     pub superclass: Option<P<Expr>>,
     pub members: Vec<ClassMember>,
+    /// `@dec` decorators applied to the whole class (outermost last).
+    pub decorators: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,8 @@ pub struct ClassMember {
     pub func: Option<Rc<Function>>,
     /// For fields (`x = init` / `x`).
     pub value: Option<Expr>,
+    /// `@dec` decorators applied to this element.
+    pub decorators: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

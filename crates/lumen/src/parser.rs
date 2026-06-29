@@ -453,7 +453,7 @@ impl Parser {
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
-            Tok::Keyword("class") => {
+            Tok::Keyword("class") | Tok::Punct("@") => {
                 let c = self.parse_class()?;
                 if let Some(n) = &c.name {
                     self.declare_lexical(n)?;
@@ -1752,7 +1752,7 @@ impl Parser {
                 let f = self.parse_function(false)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
-            Tok::Keyword("class") => {
+            Tok::Keyword("class") | Tok::Punct("@") => {
                 let c = self.parse_class()?;
                 Ok(Expr::Class(Rc::new(c)))
             }
@@ -2119,7 +2119,58 @@ impl Parser {
 
     // ----- classes ----------------------------------------------------------------------------
 
+    /// Parse a run of `@decorator` prefixes (a class or class-element may carry several).
+    fn parse_decorators(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut out = Vec::new();
+        while self.is_punct("@") {
+            self.advance();
+            out.push(self.parse_decorator()?);
+        }
+        Ok(out)
+    }
+
+    /// A single decorator: `@( Expression )`, or a `DecoratorMemberExpression` (an identifier with a
+    /// `.name`/`.#private` chain) optionally ending in one call `(...)`.
+    fn parse_decorator(&mut self) -> Result<Expr, ParseError> {
+        if self.is_punct("(") {
+            self.advance();
+            let e = self.parse_expr()?;
+            self.expect_punct(")")?;
+            return Ok(e);
+        }
+        let name = match self.cur().clone() {
+            Tok::Ident(n) => {
+                self.advance();
+                n
+            }
+            Tok::Keyword(k) => {
+                self.advance();
+                k.to_string()
+            }
+            _ => return self.err("expected a decorator expression after '@'"),
+        };
+        let mut expr = Expr::Ident(name);
+        while self.eat_punct(".") {
+            let prop = self.parse_property_name_ident()?;
+            expr = Expr::Member {
+                obj: Box::new(expr),
+                prop,
+                optional: false,
+            };
+        }
+        if self.is_punct("(") {
+            let args = self.parse_args()?;
+            expr = Expr::Call {
+                callee: Box::new(expr),
+                args,
+                optional: false,
+            };
+        }
+        Ok(expr)
+    }
+
     fn parse_class(&mut self) -> Result<Class, ParseError> {
+        let decorators = self.parse_decorators()?;
         self.eat_kw("class");
         let name = if let Tok::Ident(n) = self.cur().clone() {
             self.advance();
@@ -2152,6 +2203,7 @@ impl Parser {
             name,
             superclass,
             members,
+            decorators,
         })
     }
 
@@ -2168,6 +2220,7 @@ impl Parser {
         if self.eat_punct(";") {
             return Ok(None);
         }
+        let decorators = self.parse_decorators()?;
         let mut is_static = false;
         if self.is_ident_word("static") && !self.next_is_member_terminator(1) {
             self.advance();
@@ -2193,6 +2246,7 @@ impl Parser {
                 is_static: true,
                 func: Some(Rc::new(func)),
                 value: None,
+                decorators,
             }));
         }
         let mut kind = MemberKind::Method;
@@ -2233,6 +2287,7 @@ impl Parser {
                 is_static,
                 func: Some(Rc::new(func)),
                 value: None,
+                decorators,
             }))
         } else {
             // Field declaration.
@@ -2248,6 +2303,7 @@ impl Parser {
                 is_static,
                 func: None,
                 value,
+                decorators,
             }))
         }
     }
