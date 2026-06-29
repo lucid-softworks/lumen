@@ -1980,3 +1980,21 @@ fn regex_prop_syntax() {
     assert_eq!(run(r"/[\d]/.test('5')"), "true");
     assert_eq!(run(r"/[\d-a]/.test('-')"), "true"); // non-unicode: lenient
 }
+#[test]
+fn regex_inline_modifiers() {
+    assert_eq!(run(r"/(?i:a)b/.test('Ab')"), "true");
+    assert_eq!(run(r"/(?i:a)b/.test('AB')"), "false"); // b stays case-sensitive
+    assert_eq!(run(r"/a(?i:b)c/.test('aBc')"), "true");
+    assert_eq!(run(r"/(?-i:a)/i.test('A')"), "false"); // remove i
+    assert_eq!(run(r"/(?-i:a)b/i.test('aB')"), "true");
+    assert_eq!(run(r"/(?m:^b)/.test('a\nb')"), "true");
+    assert_eq!(run(r"/(?s:.)/.test('\n')"), "true");
+    assert_eq!(run(r"/(?i:[a-z])/.test('Q')"), "true");
+    // backtracking across the modifier boundary keeps flags correct
+    assert_eq!(run(r"/(?i:a+)A/.test('AAA')"), "true");
+    assert_eq!(run(r"/(?i:a+)a/.test('AAA')"), "false");
+    // invalid modifiers
+    assert!(Engine::new().eval(r"/(?z:a)/", false).is_err());
+    assert!(Engine::new().eval(r"/(?-:a)/", false).is_err());
+    assert!(Engine::new().eval(r"/(?ii:a)/", false).is_err());
+}

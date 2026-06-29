@@ -44,6 +44,10 @@ enum Inst {
     /// A repeated single-character matcher (`a*`, `\w+`, `.{2,5}`, `\p{L}+`). Consumed iteratively so
     /// a long run doesn't recurse once per character (which overflows the backtracking depth limit).
     Many { rep: Rep, min: usize, max: Option<usize>, greedy: bool },
+    /// `(?ims-ims:…)` inline modifiers: push a new `(icase, multiline, dotall)` flag set for the
+    /// group body (`Some` = add/remove, `None` = inherit), then `PopFlags` restores it.
+    PushFlags(Option<bool>, Option<bool>, Option<bool>),
+    PopFlags,
 }
 
 /// A single-codepoint matcher, for the `Inst::Many` fast path.
@@ -177,6 +181,8 @@ enum Node {
     /// `\k<name>` — resolved to a group index after the whole pattern is parsed.
     NamedBackref(String),
     Look(bool, Box<Node>),
+    /// `(?ims-ims:…)` inline-modifier group: `(add, remove)` flag deltas over `(i, m, s)`.
+    Modifier { add: (bool, bool, bool), remove: (bool, bool, bool), inner: Box<Node> },
 }
 
 struct Parser {
@@ -281,6 +287,7 @@ impl Regex {
                 caps: vec![None; 2 * (self.ngroups + 1)],
                 steps: 0,
                 depth: 0,
+                flags: vec![(self.ignore_case, self.multiline, self.dotall)],
             };
             if m.run(&self.prog, 0, from) {
                 let mut out = Vec::with_capacity(self.ngroups + 1);
@@ -494,6 +501,7 @@ impl Parser {
                         }
                     }
                 }
+                Some(c) if matches!(c, 'i' | 'm' | 's' | '-') => self.parse_modifier_group(),
                 _ => Err("unsupported group".into()),
             }
         } else {
@@ -503,6 +511,46 @@ impl Parser {
             self.expect(')')?;
             Ok(Node::Group(Some(idx), Box::new(inner)))
         }
+    }
+
+    /// Parse `(?ims-ims:body)` after the `(?`. Flags before `-` are added, after `-` removed.
+    fn parse_modifier_group(&mut self) -> Result<Node, String> {
+        let mut add = (false, false, false);
+        let mut remove = (false, false, false);
+        let mut neg = false;
+        let mut seen_any = false;
+        loop {
+            match self.peek() {
+                Some('-') if !neg => {
+                    self.bump();
+                    neg = true;
+                }
+                Some(c @ ('i' | 'm' | 's')) => {
+                    self.bump();
+                    seen_any = true;
+                    let slot = if neg { &mut remove } else { &mut add };
+                    let f = match c {
+                        'i' => &mut slot.0,
+                        'm' => &mut slot.1,
+                        _ => &mut slot.2,
+                    };
+                    if *f {
+                        return Err("duplicate inline modifier flag".into());
+                    }
+                    *f = true;
+                }
+                Some(':') => break,
+                _ => return Err("invalid inline modifier".into()),
+            }
+        }
+        self.bump(); // ':'
+        // At least one flag, and a lone `(?-:` (negation with nothing) is invalid.
+        if !seen_any || (neg && remove == (false, false, false)) {
+            return Err("empty inline modifier".into());
+        }
+        let inner = self.parse_alt()?;
+        self.expect(')')?;
+        Ok(Node::Modifier { add, remove, inner: Box::new(inner) })
     }
 
     fn parse_class(&mut self) -> Result<Node, String> {
@@ -761,6 +809,12 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
         Node::Backref(n) => prog.push(Inst::Backref(*n)),
         // Resolved to `Backref` before compile; treat any stray one as group 0 (never matches).
         Node::NamedBackref(_) => prog.push(Inst::Backref(0)),
+        Node::Modifier { add, remove, inner } => {
+            let opt = |a: bool, r: bool| if a { Some(true) } else if r { Some(false) } else { None };
+            prog.push(Inst::PushFlags(opt(add.0, remove.0), opt(add.1, remove.1), opt(add.2, remove.2)));
+            compile(inner, prog)?;
+            prog.push(Inst::PopFlags);
+        }
         Node::Concat(v) => {
             for n in v {
                 compile(n, prog)?;
@@ -865,7 +919,10 @@ fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
             *node = Node::Backref(idx);
         }
         Node::Concat(v) | Node::Alt(v) => v.iter_mut().for_each(|n| resolve_named_backrefs(n, names)),
-        Node::Group(_, inner) | Node::Repeat(inner, ..) | Node::Look(_, inner) => {
+        Node::Group(_, inner)
+        | Node::Repeat(inner, ..)
+        | Node::Look(_, inner)
+        | Node::Modifier { inner, .. } => {
             resolve_named_backrefs(inner, names)
         }
         _ => {}
@@ -906,14 +963,26 @@ struct Matcher<'a> {
     caps: Vec<Option<usize>>,
     steps: u64,
     depth: u32,
+    /// `(icase, multiline, dotall)` stack — the base flags, plus an entry per active `(?ims-ims:…)`
+    /// inline-modifier group. Reads use the top; the group's Push/Pop instructions undo on backtrack.
+    flags: Vec<(bool, bool, bool)>,
 }
 
 impl Matcher<'_> {
+    fn icase(&self) -> bool {
+        self.flags.last().unwrap().0
+    }
+    fn multiline(&self) -> bool {
+        self.flags.last().unwrap().1
+    }
+    fn dotall(&self) -> bool {
+        self.flags.last().unwrap().2
+    }
     fn eqc(&self, a: char, b: char) -> bool {
         if a == b {
             return true;
         }
-        if self.re.ignore_case {
+        if self.icase() {
             return a.to_lowercase().eq(b.to_lowercase());
         }
         false
@@ -922,8 +991,8 @@ impl Matcher<'_> {
     fn rep_matches(&self, rep: &Rep, c: char) -> bool {
         match rep {
             Rep::Char(ch) => self.eqc(c, *ch),
-            Rep::Any => self.re.dotall || c != '\n',
-            Rep::Class(cc) => cc.matches(c, self.re.ignore_case),
+            Rep::Any => self.dotall() || c != '\n',
+            Rep::Class(cc) => cc.matches(c, self.icase()),
         }
     }
 
@@ -949,14 +1018,14 @@ impl Matcher<'_> {
                 }
             }
             Inst::Any => {
-                if pos < self.input.len() && (self.re.dotall || self.input[pos] != '\n') {
+                if pos < self.input.len() && (self.dotall() || self.input[pos] != '\n') {
                     self.run(prog, pc + 1, pos + 1)
                 } else {
                     false
                 }
             }
             Inst::Class(cc) => {
-                if pos < self.input.len() && cc.matches(self.input[pos], self.re.ignore_case) {
+                if pos < self.input.len() && cc.matches(self.input[pos], self.icase()) {
                     self.run(prog, pc + 1, pos + 1)
                 } else {
                     false
@@ -1017,13 +1086,33 @@ impl Matcher<'_> {
                     }
                 }
             }
+            Inst::PushFlags(i, m, s) => {
+                let cur = *self.flags.last().unwrap();
+                let new = (i.unwrap_or(cur.0), m.unwrap_or(cur.1), s.unwrap_or(cur.2));
+                self.flags.push(new);
+                if self.run(prog, pc + 1, pos) {
+                    true
+                } else {
+                    self.flags.pop(); // undo on backtrack
+                    false
+                }
+            }
+            Inst::PopFlags => {
+                let popped = self.flags.pop().unwrap();
+                if self.run(prog, pc + 1, pos) {
+                    true
+                } else {
+                    self.flags.push(popped); // undo on backtrack
+                    false
+                }
+            }
             Inst::Jmp(t) => self.run(prog, *t, pos),
             Inst::AssertStart => {
-                let ok = pos == 0 || (self.re.multiline && self.input[pos - 1] == '\n');
+                let ok = pos == 0 || (self.multiline() && self.input[pos - 1] == '\n');
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::AssertEnd => {
-                let ok = pos == self.input.len() || (self.re.multiline && self.input[pos] == '\n');
+                let ok = pos == self.input.len() || (self.multiline() && self.input[pos] == '\n');
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::WordBoundary(want) => {
