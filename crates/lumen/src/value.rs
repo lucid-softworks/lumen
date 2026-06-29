@@ -372,9 +372,10 @@ impl Props {
             self.index.insert(k.clone(), i);
         }
     }
-    /// Keys in insertion order.
+    /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
+    /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub fn keys(&self) -> Vec<Rc<str>> {
-        self.entries.iter().map(|(k, _)| k.clone()).collect()
+        self.entries.iter().map(|(k, _)| k.clone()).filter(|k| !k.starts_with('#')).collect()
     }
     /// Keys in spec [[OwnPropertyKeys]] order: array-index keys ascending, then other string keys
     /// in insertion order, then symbol keys in insertion order.
@@ -383,6 +384,9 @@ impl Props {
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
         for (k, _) in &self.entries {
+            if k.starts_with('#') {
+                continue; // private-name slot — not an observable own key
+            }
             if k.starts_with('\u{0}') {
                 syms.push(k.clone());
             } else if let Some(n) = canonical_index(k) {

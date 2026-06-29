@@ -2877,6 +2877,9 @@ fn install_reflect(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "Reflect.getOwnPropertyDescriptor on non-object")),
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
+        if key.starts_with('#') {
+            return Ok(Value::Undefined); // private-name slot is not an own property
+        }
         let prop = o.borrow().props.get(&key).cloned();
         Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined))
     });
@@ -3914,6 +3917,10 @@ fn install_object(it: &mut Interp) {
     let op = it.object_proto.clone();
     it.def_method(&op, "hasOwnProperty", 1, |i, this, args| {
         let key = ab(i.to_property_key(&arg(args, 0)))?;
+        // A private-name slot (`#x`) is never an observable own property.
+        if key.starts_with('#') {
+            return Ok(Value::Bool(false));
+        }
         let o = match this_obj(&this) {
             Some(o) => o,
             None => return Ok(Value::Bool(false)),
@@ -4230,6 +4237,9 @@ fn install_object(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "called on non-object")),
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        if key.starts_with('#') {
+            return Ok(Value::Undefined); // private-name slot is not an own property
+        }
         // A TypedArray integer index is an own data property reading from the buffer.
         if let Some(info) = ta_info(i, &o) {
             if let Ok(idx) = key.parse::<usize>() {

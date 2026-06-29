@@ -1863,3 +1863,17 @@ fn regex_no_line_terminator() {
     assert_eq!(run(r"/\n/.test('\n')"), "true");             // \n escape (valid)
     assert_eq!(run(r"/ab/.test('ab')"), "true");
 }
+#[test]
+fn private_names_not_observable() {
+    assert_eq!(run("class C{ static #x(){return 1} } Object.prototype.hasOwnProperty.call(C,'#x')"), "false");
+    assert_eq!(run("class C{ #f=1 } var c=new C(); c.hasOwnProperty('#f')"), "false");
+    assert_eq!(run("class C{ #f=1; m(){return this.#f} } var c=new C(); Object.getOwnPropertyNames(c).length"), "0");
+    assert_eq!(run("class C{ #f=1 } var c=new C(); Object.keys(c).join(',')"), "");
+    assert_eq!(run("class C{ #f=1 } var c=new C(); Object.getOwnPropertyDescriptor(c,'#f')"), "undefined");
+    assert_eq!(run("class C{ #f=1; m(){var s=''; for(var k in this)s+=k; return s} } new C().m()"), "");
+    // private access still works
+    assert_eq!(run("class C{ #f=5; get(){return this.#f} } new C().get()"), "5");
+    assert_eq!(run("class C{ #m(){return 9}; call(){return this.#m()} } new C().call()"), "9");
+    // normal props still enumerable
+    assert_eq!(run("class C{ a=1 } var c=new C(); Object.keys(c).join(',')"), "a");
+}
