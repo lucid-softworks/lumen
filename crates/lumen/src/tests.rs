@@ -2048,3 +2048,12 @@ fn arraybuffer_length_validation() {
     assert_eq!(run("new ArrayBuffer(8.9).byteLength"), "8");
     assert_eq!(run("new ArrayBuffer(8).byteLength"), "8");
 }
+#[test]
+fn array_methods_coerce_primitive() {
+    assert_eq!(run("Boolean.prototype[0]=true;Boolean.prototype.length=1;Array.prototype.lastIndexOf.call(true,true)"), "0");
+    assert_eq!(run("Array.prototype.indexOf.call('abc','b')"), "1");
+    assert_eq!(run("Array.prototype.join.call('abc','-')"), "a-b-c");
+    assert_eq!(run("var s='';Array.prototype.forEach.call('ab',c=>s+=c);s"), "ab");
+    assert_eq!(run("Array.prototype.map.call('ab',c=>c.toUpperCase()).join('')"), "AB");
+    assert!(matches!(Engine::new().eval("Array.prototype.indexOf.call(null,1)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+}

@@ -3855,6 +3855,12 @@ fn to_object_arg(i: &mut Interp, v: Value, method: &str) -> Result<Gc, Value> {
     }
 }
 
+/// ToObject for a generic `Array.prototype` method receiver: primitives are boxed (so the method
+/// reads the inherited array-like properties), null/undefined throw.
+fn arr_to_object(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
+    to_object_arg(i, this.clone(), "Array.prototype method")
+}
+
 /// RequireObjectCoercible for an `Array.prototype` method receiver (null/undefined → TypeError).
 fn arr_require_coercible(i: &mut Interp, this: &Value) -> Result<(), Value> {
     if matches!(this, Value::Undefined | Value::Null) {
@@ -4930,7 +4936,7 @@ fn install_array(it: &mut Interp) {
     ap.borrow_mut().props.insert("length", Property::data(Value::Num(0.0), true, false, false));
 
     it.def_method(&ap, "push", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "push on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let mut len = ab(i.checked_array_len(&o))?;
         for a in args {
             ab(i.set_member(&this, &len.to_string(), a.clone()))?;
@@ -4939,7 +4945,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Num(len as f64))
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "pop on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         if len == 0 {
             return Ok(Value::Undefined);
@@ -4950,7 +4956,7 @@ fn install_array(it: &mut Interp) {
         Ok(last)
     });
     it.def_method(&ap, "shift", 0, |i, this, _args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "shift on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         if len == 0 {
             return Ok(Value::Undefined);
@@ -4965,7 +4971,7 @@ fn install_array(it: &mut Interp) {
         Ok(first)
     });
     it.def_method(&ap, "unshift", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "unshift on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let n = args.len();
         for k in (0..len).rev() {
@@ -4979,7 +4985,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Num((len + n) as f64))
     });
     it.def_method(&ap, "slice", 2, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "slice on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;
         let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
         let end = match arg(args, 1) {
@@ -4999,7 +5005,7 @@ fn install_array(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ap, "indexOf", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "indexOf on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         let from = match arg(args, 1) {
@@ -5021,7 +5027,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Num(-1.0))
     });
     it.def_method(&ap, "includes", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "includes on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         for k in 0..len {
@@ -5033,7 +5039,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Bool(false))
     });
     it.def_method(&ap, "join", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "join on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let sep = match arg(args, 0) {
             Value::Undefined => ",".to_string(),
@@ -5072,7 +5078,7 @@ fn install_array(it: &mut Interp) {
         Ok(i.make_array(out))
     });
     it.def_method(&ap, "forEach", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "forEach on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
@@ -5089,7 +5095,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     it.def_method(&ap, "map", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "map on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
@@ -5108,7 +5114,7 @@ fn install_array(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ap, "filter", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "filter on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
@@ -5131,7 +5137,7 @@ fn install_array(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ap, "reduce", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduce on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
@@ -5165,7 +5171,7 @@ fn install_array(it: &mut Interp) {
         Ok(acc)
     });
     it.def_method(&ap, "reverse", 0, |i, this, _args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reverse on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         for k in 0..len / 2 {
             let a = ab(i.get_member(&this, &k.to_string()))?;
@@ -5184,7 +5190,7 @@ fn install_array(it: &mut Interp) {
         }
     });
     it.def_method(&ap, "at", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "at on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;
         let mut idx = ab(i.to_number(&arg(args, 0)))? as i64;
         if idx < 0 {
@@ -5202,7 +5208,7 @@ fn install_array(it: &mut Interp) {
     it.def_method(&ap, "some", 1, |i, this, args| array_some_every(i, this, args, false));
     it.def_method(&ap, "every", 1, |i, this, args| array_some_every(i, this, args, true));
     it.def_method(&ap, "fill", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "fill on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;
         let v = arg(args, 0);
         let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
@@ -5216,7 +5222,7 @@ fn install_array(it: &mut Interp) {
         Ok(this)
     });
     it.def_method(&ap, "lastIndexOf", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "lastIndexOf"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.to_length(&o))?;
         let target = arg(args, 0);
         for k in (0..len).rev() {
@@ -5238,7 +5244,7 @@ fn install_array(it: &mut Interp) {
         Ok(i.make_array(out))
     });
     it.def_method(&ap, "flatMap", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "flatMap"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         let cb_this = arg(args, 1);
@@ -5254,7 +5260,7 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "splice", 2, array_splice);
     it.def_method(&ap, "sort", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "sort on non-object"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let mut items = Vec::with_capacity(len);
         for k in 0..len {
@@ -5317,7 +5323,7 @@ fn install_array(it: &mut Interp) {
         Ok(i.make_array(items))
     });
     it.def_method(&ap, "reduceRight", 1, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "reduceRight"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         let mut acc;
@@ -5339,7 +5345,7 @@ fn install_array(it: &mut Interp) {
         Ok(acc)
     });
     it.def_method(&ap, "copyWithin", 2, |i, this, args| {
-        let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "copyWithin"))?;
+        let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;
         let target = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
         let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
@@ -5478,7 +5484,7 @@ fn array_find(
     want_value: bool,
     from_last: bool,
 ) -> Result<Value, Value> {
-    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "find on non-object"))?;
+    let o = arr_to_object(i, &this)?;
     let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
     let cb_this = arg(args, 1);
@@ -5494,7 +5500,7 @@ fn array_find(
 }
 
 fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) -> Result<Value, Value> {
-    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "some/every on non-object"))?;
+    let o = arr_to_object(i, &this)?;
     let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
     if !cb.is_callable() {
@@ -5537,7 +5543,7 @@ fn array_flatten(i: &mut Interp, arr: &Value, depth: i64, out: &mut Vec<Value>) 
 }
 
 fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    let o = this_obj(&this).ok_or_else(|| i.make_error("TypeError", "splice on non-object"))?;
+    let o = arr_to_object(i, &this)?;
     let len = ab(i.checked_array_len(&o))? as i64;
     let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
     let delete_count = if args.len() < 2 {
