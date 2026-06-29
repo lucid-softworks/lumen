@@ -1638,3 +1638,10 @@ fn catch_dup_binding() {
     assert_eq!(run("try{throw [1,2]}catch([a,b]){} 'ok'"), "ok");
     assert_eq!(run("try{throw 5}catch(e){} 'ok'"), "ok");
 }
+#[test]
+fn delete_private_member() {
+    assert!(Engine::new().eval("class C{ #x=1; m(){ delete this.#x } }", false).is_err());
+    assert!(Engine::new().eval("class C{ #x=1; m(){ delete this?.#x } }", false).is_err());
+    assert_eq!(run("class C{ #x=1; m(){ return delete this.foo } }; new C().m()"), "true");
+    assert_eq!(run("var o={a:1}; delete o.a; typeof o.a"), "undefined");
+}

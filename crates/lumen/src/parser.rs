@@ -1152,6 +1152,10 @@ impl Parser {
             if op == "delete" && self.strict && matches!(arg, Expr::Ident(_)) {
                 return self.err("delete of an unqualified identifier in strict mode");
             }
+            // Deleting a private member (`delete obj.#x`) is always a SyntaxError.
+            if op == "delete" && deletes_private_member(&arg) {
+                return self.err("private fields cannot be deleted");
+            }
             return Ok(Expr::Unary { op, arg: Box::new(arg) });
         }
         // Prefix ++/--
@@ -1929,6 +1933,15 @@ fn key_is(key: &PropKey, name: &str) -> bool {
     match key {
         PropKey::Ident(s) => s == name,
         PropKey::Str(s) => &**s == name,
+        _ => false,
+    }
+}
+
+/// Whether `delete <arg>` targets a private member (`obj.#x`), which is a SyntaxError.
+fn deletes_private_member(arg: &Expr) -> bool {
+    match arg {
+        Expr::Member { prop, .. } => prop.starts_with('#'),
+        Expr::OptionalChain(inner) => deletes_private_member(inner),
         _ => false,
     }
 }
