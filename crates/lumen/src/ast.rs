@@ -286,10 +286,23 @@ pub enum Expr {
         name: String,
         obj: P<Expr>,
     },
-    /// Dynamic `import(specifier)` — returns a promise of the module namespace.
-    ImportCall(P<Expr>),
+    /// Dynamic `import(specifier)` / `import.source(...)` / `import.defer(...)` — returns a
+    /// promise. The phase selects the import semantics.
+    ImportCall {
+        spec: P<Expr>,
+        phase: ImportPhase,
+    },
     /// `import.meta`.
     ImportMeta,
+}
+
+/// The phase of a dynamic `import()` call: plain evaluation, `import.source(...)` (source-phase),
+/// or `import.defer(...)` (deferred-evaluation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportPhase {
+    Evaluation,
+    Source,
+    Defer,
 }
 
 /// An array element or call argument: a value, a spread (`...x`), or a hole (`[1,,3]`).
@@ -306,6 +319,12 @@ pub enum PropDef {
     KeyValue {
         key: PropKey,
         value: Expr,
+    },
+    /// Concise method `key() {}` (incl. generator/async). Carries a [[HomeObject]] so `super`
+    /// inside the body resolves against the literal's prototype.
+    Method {
+        key: PropKey,
+        func: Rc<Function>,
     },
     /// `get key() {}` / `set key(v) {}`.
     Getter {

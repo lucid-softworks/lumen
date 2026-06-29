@@ -972,6 +972,19 @@ impl Parser {
         }
     }
 
+    /// Parse the `( specifier [, options] )` of a dynamic-import call (any phase). The optional
+    /// second options argument is accepted and ignored.
+    fn parse_import_call_args(&mut self) -> Result<Expr, ParseError> {
+        self.expect_punct("(")?;
+        let spec = self.parse_assign_allow_in()?;
+        if self.eat_punct(",") && !self.is_punct(")") {
+            let _ = self.parse_assign_allow_in()?;
+            self.eat_punct(",");
+        }
+        self.expect_punct(")")?;
+        Ok(spec)
+    }
+
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // 'import'
                         // Bare import: `import "spec";`
@@ -1313,7 +1326,9 @@ impl Parser {
     fn parse_cond(&mut self) -> Result<Expr, ParseError> {
         let test = self.parse_binary(0)?;
         if self.eat_punct("?") {
-            let cons = self.parse_assign()?;
+            // The consequent is always `AssignmentExpression[+In]`; the alternative keeps the outer
+            // `[?In]`, so a `for (a ? b in c : d ;;)` head allows `in` in the consequent branch.
+            let cons = self.parse_assign_allow_in()?;
             self.expect_punct(":")?;
             let alt = self.parse_assign()?;
             Ok(Expr::Cond {
@@ -1706,25 +1721,35 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Super)
             }
-            // `import(specifier)` (dynamic import) or `import.meta`.
+            // `import(specifier)` (dynamic import), `import.meta`, or the phased forms
+            // `import.source(specifier)` / `import.defer(specifier)`.
             Tok::Keyword("import") => {
                 self.advance();
                 if self.eat_punct(".") {
-                    self.expect_keyword_word("meta")?;
-                    if !self.module {
-                        return self.err("'import.meta' is only valid in a module");
-                    }
-                    Ok(Expr::ImportMeta)
+                    let phase = match self.cur() {
+                        Tok::Ident(w) if w == "source" => ImportPhase::Source,
+                        Tok::Ident(w) if w == "defer" => ImportPhase::Defer,
+                        Tok::Ident(w) if w == "meta" => {
+                            self.advance();
+                            if !self.module {
+                                return self.err("'import.meta' is only valid in a module");
+                            }
+                            return Ok(Expr::ImportMeta);
+                        }
+                        _ => return self.err("expected 'meta', 'source', or 'defer' after 'import.'"),
+                    };
+                    self.advance(); // 'source' / 'defer'
+                    let spec = self.parse_import_call_args()?;
+                    Ok(Expr::ImportCall {
+                        spec: Box::new(spec),
+                        phase,
+                    })
                 } else {
-                    self.expect_punct("(")?;
-                    let spec = self.parse_assign_allow_in()?;
-                    // An optional second `import(spec, options)` argument is accepted and ignored.
-                    if self.eat_punct(",") && !self.is_punct(")") {
-                        let _ = self.parse_assign_allow_in()?;
-                        self.eat_punct(",");
-                    }
-                    self.expect_punct(")")?;
-                    Ok(Expr::ImportCall(Box::new(spec)))
+                    let spec = self.parse_import_call_args()?;
+                    Ok(Expr::ImportCall {
+                        spec: Box::new(spec),
+                        phase: ImportPhase::Evaluation,
+                    })
                 }
             }
             Tok::Ident(name)
@@ -1933,9 +1958,9 @@ impl Parser {
                 } else {
                     self.parse_method_function()?
                 };
-                props.push(PropDef::KeyValue {
+                props.push(PropDef::Method {
                     key,
-                    value: Expr::Func(Rc::new(func)),
+                    func: Rc::new(func),
                 });
             } else if self.eat_punct(":") {
                 // Two `__proto__: value` data properties in one literal are a SyntaxError.
@@ -2005,7 +2030,9 @@ impl Parser {
             }
             Tok::Punct("[") => {
                 self.advance();
-                let e = self.parse_assign()?;
+                // A computed key is `AssignmentExpression[+In]` — `in` is always allowed inside the
+                // brackets, even in a `for` head's `[NoIn]` context.
+                let e = self.parse_assign_allow_in()?;
                 self.expect_punct("]")?;
                 Ok(PropKey::Computed(e))
             }
@@ -2722,7 +2749,9 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
                         }
                         pn_expr(value, st)?;
                     }
-                    PropDef::Getter { key, func } | PropDef::Setter { key, func } => {
+                    PropDef::Method { key, func }
+                    | PropDef::Getter { key, func }
+                    | PropDef::Setter { key, func } => {
                         if let PropKey::Computed(e) = key {
                             pn_expr(e, st)?;
                         }
@@ -2745,7 +2774,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
                 pn_expr(s, st)?;
             }
         }
-        Expr::ImportCall(e) => pn_expr(e, st)?,
+        Expr::ImportCall { spec, .. } => pn_expr(spec, st)?,
         _ => {}
     }
     Ok(())
@@ -2755,7 +2784,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
 /// which makes it a CallExpression and thus an invalid `new` operand.
 fn callee_has_import_call(e: &Expr) -> bool {
     match e {
-        Expr::ImportCall(_) => true,
+        Expr::ImportCall { .. } => true,
         Expr::Member { obj, .. } | Expr::Index { obj, .. } => callee_has_import_call(obj),
         _ => false,
     }

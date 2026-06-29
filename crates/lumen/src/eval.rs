@@ -918,6 +918,33 @@ impl Interp {
         Err(self.throw("ReferenceError", format!("{name} is not defined")))
     }
 
+    /// Walk the scope chain for an initialized binding without the `with`/global fallback or the
+    /// not-defined throw. Used for internal `%...%` markers that only ever live in scopes.
+    fn peek_binding(&self, name: &str, env: &Env) -> Option<Value> {
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            let b = s.borrow();
+            if let Some(binding) = b.vars.get(name) {
+                return Some(binding.value.clone());
+            }
+            cur = b.parent.clone();
+        }
+        None
+    }
+
+    /// The object `super.x` reads/writes through: `GetPrototypeOf([[HomeObject]])` when a home
+    /// object is in scope (object-literal & class methods bound via `%homeobject%`), else the
+    /// statically-resolved `%superproto%` carried by older class-method environments.
+    fn super_base(&mut self, env: &Env) -> Result<Value, Abrupt> {
+        if let Some(Value::Obj(home)) = self.peek_binding("%homeobject%", env) {
+            return Ok(match home.borrow().proto.clone() {
+                Some(p) => Value::Obj(p),
+                None => Value::Null,
+            });
+        }
+        self.get_var("%superproto%", env)
+    }
+
     pub fn assign_var(&mut self, name: &str, value: Value, env: &Env) -> Result<(), Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
@@ -1066,10 +1093,33 @@ impl Interp {
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
             Expr::ImportMeta => Ok(self.import_meta.clone().unwrap_or(Value::Undefined)),
-            Expr::ImportCall(spec) => {
+            Expr::ImportCall { spec, phase } => {
                 let specifier = self.eval(spec, env)?;
-                let s = self.to_string(&specifier)?;
-                Ok(self.dynamic_import(&s))
+                // ToString abruptness rejects the promise (IfAbruptRejectPromise), not a sync throw.
+                let s = match self.to_string(&specifier) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let p = self.new_promise();
+                        let reason = crate::interpreter::abrupt_value(e);
+                        self.reject_promise(&p, reason);
+                        return Ok(p);
+                    }
+                };
+                match phase {
+                    // A Source Text Module Record's GetModuleSource always throws a SyntaxError, so
+                    // `import.source(x)` rejects once the specifier has been coerced.
+                    ImportPhase::Source => {
+                        let p = self.new_promise();
+                        let reason = crate::interpreter::abrupt_value(
+                            self.throw("SyntaxError", "source phase import is not available"),
+                        );
+                        self.reject_promise(&p, reason);
+                        Ok(p)
+                    }
+                    // `import.defer(x)` defers evaluation of the module; for specifier handling it
+                    // behaves like a plain dynamic import.
+                    ImportPhase::Evaluation | ImportPhase::Defer => Ok(self.dynamic_import(&s)),
+                }
             }
             Expr::PrivateIn { name, obj } => {
                 let o = self.eval(obj, env)?;
@@ -1100,7 +1150,7 @@ impl Interp {
                 optional,
             } => {
                 if matches!(**obj, Expr::Super) {
-                    let home = self.get_var("%superproto%", env)?;
+                    let home = self.super_base(env)?;
                     return self.get_member(&home, prop);
                 }
                 let base = self.eval(obj, env)?;
@@ -1119,7 +1169,7 @@ impl Interp {
                 optional,
             } => {
                 if matches!(**obj, Expr::Super) {
-                    let home = self.get_var("%superproto%", env)?;
+                    let home = self.super_base(env)?;
                     let idx = self.eval(index, env)?;
                     let key = self.to_property_key(&idx)?;
                     return self.get_member(&home, &key);
@@ -1201,6 +1251,10 @@ impl Interp {
 
     fn eval_object(&mut self, props: &[PropDef], env: &Env) -> Result<Value, Abrupt> {
         let obj = self.new_object();
+        // Methods/getters/setters carry a [[HomeObject]] (the literal itself) so `super.x` resolves
+        // against the object's *current* prototype, evaluated dynamically at access time.
+        let home_env = new_scope(Some(env.clone()));
+        bind(&home_env, "%homeobject%", Value::Obj(obj.clone()));
         for prop in props {
             match prop {
                 PropDef::KeyValue { key, value } => {
@@ -1211,15 +1265,21 @@ impl Interp {
                     }
                     obj.borrow_mut().props.insert(k, Property::plain(v));
                 }
+                PropDef::Method { key, func } => {
+                    let k = self.eval_prop_key(key, env)?;
+                    let f = self.make_function(func.clone(), home_env.clone());
+                    self.set_fn_name(&f, &k);
+                    obj.borrow_mut().props.insert(k, Property::plain(f));
+                }
                 PropDef::Getter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
-                    let f = self.make_function(func.clone(), env.clone());
+                    let f = self.make_function(func.clone(), home_env.clone());
                     self.set_fn_name(&f, &format!("get {k}"));
                     self.define_accessor(&obj, &k, Some(f), None);
                 }
                 PropDef::Setter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
-                    let f = self.make_function(func.clone(), env.clone());
+                    let f = self.make_function(func.clone(), home_env.clone());
                     self.set_fn_name(&f, &format!("set {k}"));
                     self.define_accessor(&obj, &k, None, Some(f));
                 }
@@ -1403,7 +1463,7 @@ impl Interp {
         // `super.m(...)` / `super[k](...)`: method on the super prototype, called with current `this`.
         if let Expr::Member { obj, prop, .. } = callee {
             if matches!(**obj, Expr::Super) {
-                let home = self.get_var("%superproto%", env)?;
+                let home = self.super_base(env)?;
                 let f = self.get_member(&home, prop)?;
                 let this = self.get_var("this", env)?;
                 let argv = self.eval_args(args, env)?;
@@ -1412,7 +1472,7 @@ impl Interp {
         }
         if let Expr::Index { obj, index, .. } = callee {
             if matches!(**obj, Expr::Super) {
-                let home = self.get_var("%superproto%", env)?;
+                let home = self.super_base(env)?;
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
                 let f = self.get_member(&home, &key)?;
@@ -2175,10 +2235,24 @@ impl Interp {
         match target {
             Expr::Ident(name) => self.assign_var(name, value, env),
             Expr::Member { obj, prop, .. } => {
+                // `super.x = v` resolves the super base for invariant checks but writes through the
+                // `this` receiver (CreateDataProperty on the actual object), per [[Set]] semantics.
+                if matches!(**obj, Expr::Super) {
+                    self.super_base(env)?;
+                    let this = self.get_var("this", env)?;
+                    return self.set_member(&this, prop, value);
+                }
                 let base = self.eval(obj, env)?;
                 self.set_member(&base, prop, value)
             }
             Expr::Index { obj, index, .. } => {
+                if matches!(**obj, Expr::Super) {
+                    self.super_base(env)?;
+                    let idx = self.eval(index, env)?;
+                    let key = self.to_property_key(&idx)?;
+                    let this = self.get_var("this", env)?;
+                    return self.set_member(&this, &key, value);
+                }
                 let base = self.eval(obj, env)?;
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
