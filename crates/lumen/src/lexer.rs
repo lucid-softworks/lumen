@@ -114,7 +114,7 @@ impl<'a> Lexer<'a> {
             {
                 self.read_number()?;
             } else if is_ident_start(c) || c == '#' || (c == '\\' && self.peek2() == Some('u')) {
-                self.read_ident();
+                self.read_ident()?;
             } else {
                 self.read_punct()?;
             }
@@ -148,7 +148,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_ident(&mut self) {
+    fn read_ident(&mut self) -> Result<(), LexError> {
         let mut s = String::new();
         // A leading `#` (private name) is part of the identifier but not an ident-continue char.
         if self.peek() == Some('#') {
@@ -158,6 +158,9 @@ impl<'a> Lexer<'a> {
         // `\uXXXX` / `\u{...}` escapes may appear in an identifier; track that so an escaped reserved
         // word stays an Identifier (a keyword written with an escape is not the keyword).
         let mut had_escape = false;
+        // The first code point must be IdentifierStart; the rest IdentifierPart. This holds for an
+        // escaped code point too — so `#x` (escaped `#`) and a leading combining mark are errors.
+        let mut first = true;
         loop {
             match self.peek() {
                 Some('\\') if self.peek2() == Some('u') => {
@@ -165,15 +168,21 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     match self.read_unicode_escape_char() {
                         Some(ch) => {
+                            let ok = if first { is_ident_start(ch) } else { is_ident_part(ch) };
+                            if !ok {
+                                return Err(self.err("invalid character in escaped identifier"));
+                            }
                             had_escape = true;
                             s.push(ch);
+                            first = false;
                         }
-                        None => break,
+                        None => return Err(self.err("invalid unicode escape in identifier")),
                     }
                 }
-                Some(c) if is_ident_part(c) => {
+                Some(c) if (first && is_ident_start(c)) || (!first && is_ident_part(c)) => {
                     s.push(c);
                     self.bump();
+                    first = false;
                 }
                 _ => break,
             }
@@ -183,10 +192,11 @@ impl<'a> Lexer<'a> {
         // property name (keywords are accepted in those positions).
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
             self.push(Tok::Keyword(kw));
-            return;
+            return Ok(());
         }
         let _ = had_escape;
         self.push(Tok::Ident(s));
+        Ok(())
     }
 
     /// Read the body of a `\u` identifier/string escape (already consumed `\u`): either `{HEX+}` or

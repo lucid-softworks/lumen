@@ -1776,3 +1776,15 @@ fn shorthand_reserved_word() {
     assert_eq!(run("var o={break:1}; o.break"), "1");
     assert_eq!(run("var {break:b} = {break:7}; b"), "7");
 }
+#[test]
+fn private_name_no_escape() {
+    // the '#' of a private name can't be a unicode escape
+    assert!(Engine::new().eval("class C { \\u0023x = 1 }", false).is_err());
+    assert!(Engine::new().eval("class C { #x=1; m(){ return this.\\u0023x } }", false).is_err());
+    // a leading combining mark / ZWJ via escape can't start an identifier
+    assert!(Engine::new().eval("var \\u0300x = 1", false).is_err());
+    assert!(Engine::new().eval("var \\u200Dx = 1", false).is_err());
+    // but escaping the NAME part of a private field (not the #) is fine
+    assert_eq!(run("class C { #x=5; m(){ return this.#\\u0078 } }; new C().m()"), "5");
+    assert_eq!(run("var \\u0041bc = 7; Abc"), "7");
+}
