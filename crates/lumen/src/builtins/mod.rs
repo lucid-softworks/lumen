@@ -1314,10 +1314,13 @@ fn install_array_buffer(it: &mut Interp) {
         if !i.constructing {
             return Err(i.make_error("TypeError", "ArrayBuffer constructor requires 'new'"));
         }
-        let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
-        if len > MAX_ARRAY_OP_LEN {
+        // ToIndex: NaN → 0, truncate, and a negative or too-large length is a RangeError.
+        let n = ab(i.to_number(&arg(a, 0)))?;
+        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+        if n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "Invalid ArrayBuffer length"));
         }
+        let len = n as usize;
         let (bv, _) = make_array_buffer(i, len);
         // The options bag's maxByteLength makes the buffer resizable.
         if let Value::Obj(_) = arg(a, 1) {

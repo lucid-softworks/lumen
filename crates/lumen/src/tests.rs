@@ -2040,3 +2040,11 @@ fn array_isarray_proxy() {
     assert_eq!(run("Array.isArray([])"), "true");
     assert_eq!(run("Array.isArray({})"), "false");
 }
+#[test]
+fn arraybuffer_length_validation() {
+    assert!(matches!(Engine::new().eval("new ArrayBuffer(-1)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError"));
+    assert!(matches!(Engine::new().eval("new ArrayBuffer(Infinity)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError"));
+    assert_eq!(run("new ArrayBuffer(NaN).byteLength"), "0");
+    assert_eq!(run("new ArrayBuffer(8.9).byteLength"), "8");
+    assert_eq!(run("new ArrayBuffer(8).byteLength"), "8");
+}
