@@ -2208,3 +2208,24 @@ fn generator_coroutine() {
     // side-effect ordering
     assert_eq!(run("var log='';function* g(){log+='1';yield;log+='2';yield;log+='3'}var it=g();it.next();it.next();log"), "12");
 }
+#[test]
+fn async_coroutine() {
+    // helper: run setup (drains microtasks), then read an expression
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) {
+            Ok(Completion::Value(v)) => v,
+            Ok(Completion::Throw{name,..}) => format!("T:{name}"),
+            Err(_) => "P".into(),
+        }
+    }
+    assert_eq!(two("globalThis.r=0;(async()=>{globalThis.r=await 5})()", "r"), "5");
+    assert_eq!(two("globalThis.r='';(async()=>{globalThis.r+='a';await 0;globalThis.r+='b'})();globalThis.r+='c'", "r"), "acb"); // await suspends after 'a', 'c' runs sync, then 'b'
+    assert_eq!(two("globalThis.r=0;async function f(){return 7}f().then(v=>globalThis.r=v)", "r"), "7");
+    assert_eq!(two("globalThis.r=0;async function f(){throw 9}f().catch(e=>globalThis.r=e)", "r"), "9");
+    assert_eq!(two("globalThis.r=0;async function f(){var x=await 1;var y=await 2;return x+y}f().then(v=>globalThis.r=v)", "r"), "3");
+    assert_eq!(two("globalThis.r=0;async function f(){try{await Promise.reject(8)}catch(e){return e+1}}f().then(v=>globalThis.r=v)", "r"), "9");
+    assert_eq!(two("globalThis.r='';async function f(){for(var i=0;i<3;i++){await 0;globalThis.r+=i}}f()", "r"), "012");
+    assert_eq!(two("globalThis.r=0;async function f(){return await Promise.resolve(42)}f().then(v=>globalThis.r=v)", "r"), "42");
+}

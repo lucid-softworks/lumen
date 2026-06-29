@@ -6148,6 +6148,22 @@ fn drive_generator(i: &mut Interp, this: &Value, signal: crate::coroutine::Resum
     }
 }
 
+/// Microtask reaction: the awaited promise fulfilled with `args[1]`; resume the async coroutine
+/// (whose result promise is `args[0]`, also the coroutine key).
+pub(crate) fn async_react_fulfil(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    if let Value::Obj(o) = arg(args, 0) {
+        i.drive_async(Rc::as_ptr(&o) as usize, arg(args, 0), crate::coroutine::Resume::Next(arg(args, 1)));
+    }
+    Ok(Value::Undefined)
+}
+/// Microtask reaction: the awaited promise rejected with `args[1]`; throw it at the suspended await.
+pub(crate) fn async_react_reject(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    if let Value::Obj(o) = arg(args, 0) {
+        i.drive_async(Rc::as_ptr(&o) as usize, arg(args, 0), crate::coroutine::Resume::Throw(arg(args, 1)));
+    }
+    Ok(Value::Undefined)
+}
+
 pub(crate) fn generator_next(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     drive_generator(i, &this, crate::coroutine::Resume::Next(arg(args, 0)))
 }

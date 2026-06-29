@@ -924,7 +924,15 @@ impl Interp {
             }
             Expr::Await(e) => {
                 let v = self.eval(e, env)?;
-                self.await_value(v)
+                if crate::coroutine::in_coroutine() {
+                    match crate::coroutine::coroutine_yield(self, v) {
+                        crate::coroutine::Resume::Next(settled) => Ok(settled),
+                        crate::coroutine::Resume::Throw(err) => Err(Abrupt::Throw(err)),
+                        crate::coroutine::Resume::Return(rv) => Err(Abrupt::Return(rv)),
+                    }
+                } else {
+                    self.await_value(v)
+                }
             }
             Expr::Super => Err(self.throw("SyntaxError", "'super' keyword unexpected here")),
             Expr::Seq(items) => {

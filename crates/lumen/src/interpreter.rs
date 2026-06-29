@@ -1105,11 +1105,17 @@ impl Interp {
         let saved_strict = self.strict;
         self.strict = func.is_strict;
 
-        // Generators run eagerly into a yield buffer (lumen has no coroutines); see run_generator.
+        // Generators (sync and async) suspend at each yield on their own coroutine; see run_generator.
         if func.is_generator {
             let gen = self.run_generator(func, &scope);
             self.strict = saved_strict;
             return gen;
+        }
+        // Async functions run on a coroutine too, parking at each `await`; see run_async.
+        if func.is_async {
+            let r = self.run_async(func, &scope);
+            self.strict = saved_strict;
+            return r;
         }
 
         // Hoist `var`/function declarations into the function scope before executing the body.
@@ -1117,8 +1123,6 @@ impl Interp {
         // Pre-declare body-level `let`/`const` in their temporal dead zone.
         self.declare_block_lexicals(&func.body, &scope, false);
 
-        // Async functions: run synchronously (await unwraps settled promises), then wrap the result
-        // in a fulfilled/rejected promise.
         let mut result = Ok(Value::Undefined);
         for stmt in &func.body {
             match self.exec_stmt(stmt, &scope) {
@@ -1134,15 +1138,6 @@ impl Interp {
             }
         }
         self.strict = saved_strict;
-        if func.is_async {
-            let promise = self.new_promise();
-            match result {
-                Ok(v) => self.resolve_promise(&promise, v),
-                Err(Abrupt::Throw(e)) => self.reject_promise(&promise, e),
-                Err(_) => {}
-            }
-            return Ok(promise);
-        }
         result
     }
 
@@ -1182,6 +1177,96 @@ impl Interp {
             self.generators.insert(Rc::as_ptr(o) as usize, coro);
         }
         Ok(obj)
+    }
+
+    /// Start an async function: spawn its coroutine, return a promise that settles when the body
+    /// finishes. Each `await` parks the coroutine; a microtask resumes it once the awaited value
+    /// settles.
+    fn run_async(&mut self, func: &Rc<Function>, scope: &Env) -> Result<Value, Abrupt> {
+        let func = func.clone();
+        let scope = scope.clone();
+        let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
+            let saved_strict = i.strict;
+            i.strict = func.is_strict;
+            i.hoist(&func.body, &scope, true);
+            i.declare_block_lexicals(&func.body, &scope, false);
+            let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
+            for stmt in &func.body {
+                match i.exec_stmt(stmt, &scope) {
+                    Ok(_) => {}
+                    Err(Abrupt::Return(v)) => {
+                        outcome = crate::coroutine::Suspend::Done(v);
+                        break;
+                    }
+                    Err(Abrupt::Throw(e)) => {
+                        outcome = crate::coroutine::Suspend::Throw(e);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            i.strict = saved_strict;
+            outcome
+        });
+        let ptr = self as *mut Interp;
+        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
+        let promise = self.new_promise();
+        if let Value::Obj(o) = &promise {
+            self.generators.insert(Rc::as_ptr(o) as usize, coro);
+        }
+        let key = match &promise {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => unreachable!(),
+        };
+        self.drive_async(key, promise.clone(), crate::coroutine::Resume::Next(Value::Undefined));
+        Ok(promise)
+    }
+
+    /// Resume an async coroutine and react to how it parks: an `await` (Yield) attaches a microtask
+    /// that re-drives it once the awaited value settles; completion settles the result promise.
+    pub(crate) fn drive_async(&mut self, key: usize, promise: Value, signal: crate::coroutine::Resume) {
+        use crate::coroutine::Suspend;
+        let mut coro = match self.generators.remove(&key) {
+            Some(c) => c,
+            None => return,
+        };
+        let suspend = coro.resume(self, signal);
+        match suspend {
+            Suspend::Yield(awaited) => {
+                self.generators.insert(key, coro); // still running
+                let px = self.promise_resolve_value(awaited);
+                let on_f = self.make_async_reaction(&promise, true);
+                let on_r = self.make_async_reaction(&promise, false);
+                self.promise_then(&px, on_f, on_r);
+            }
+            Suspend::Done(v) => self.resolve_promise(&promise, v),
+            Suspend::Throw(e) => self.reject_promise(&promise, e),
+        }
+    }
+
+    /// PromiseResolve: a promise stays itself; any other value is wrapped in a resolved promise.
+    fn promise_resolve_value(&mut self, v: Value) -> Value {
+        if let Value::Obj(o) = &v {
+            if self.promises.contains_key(&(Rc::as_ptr(o) as usize)) {
+                return v;
+            }
+        }
+        let p = self.new_promise();
+        self.resolve_promise(&p, v);
+        p
+    }
+
+    /// A bound reaction that re-drives the async coroutine when the awaited promise settles.
+    fn make_async_reaction(&mut self, promise: &Value, fulfil: bool) -> Value {
+        let target = self.make_native(
+            "",
+            1,
+            if fulfil { crate::builtins::async_react_fulfil } else { crate::builtins::async_react_reject },
+        );
+        let bound = Object::new(Some(self.function_proto.clone()));
+        bound.borrow_mut().call =
+            Callable::Bound { target, this: promise.clone(), args: vec![promise.clone()] };
+        Value::Obj(bound)
     }
 
     fn bind_params(&mut self, params: &[Param], args: &[Value], scope: &Env) -> Result<(), Abrupt> {
