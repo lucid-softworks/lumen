@@ -1674,7 +1674,7 @@ impl Parser {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
-        let (body, is_strict) = self.parse_function_body()?;
+        let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.in_generator = sg;
         self.in_async = sa;
         let strict = is_strict || self.strict;
@@ -1815,7 +1815,7 @@ impl Parser {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
-        let (body, is_strict) = self.parse_function_body()?;
+        let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.in_generator = sg;
         self.in_async = sa;
         Ok(Function {
@@ -1853,10 +1853,15 @@ impl Parser {
         Ok(params)
     }
 
-    fn parse_function_body(&mut self) -> Result<(Vec<Stmt>, bool), ParseError> {
+    fn parse_function_body(&mut self, params_simple: bool) -> Result<(Vec<Stmt>, bool), ParseError> {
         self.expect_punct("{")?;
         let saved_strict = self.strict;
         let inner_strict = matches!(self.cur(), Tok::Str(s) if s == "use strict");
+        // A function with a non-simple parameter list (defaults / rest / destructuring) can't apply a
+        // `"use strict"` directive to its own body.
+        if inner_strict && !params_simple {
+            return self.err("illegal 'use strict' directive in a function with a non-simple parameter list");
+        }
         if inner_strict {
             self.strict = true;
         }
@@ -1926,7 +1931,7 @@ impl Parser {
         let sa = self.in_async;
         self.in_async = is_async;
         let result = if self.is_punct("{") {
-            let (body, is_strict) = self.parse_function_body()?;
+            let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
             Function {
                 name: None,
                 params,

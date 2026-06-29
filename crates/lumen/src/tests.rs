@@ -1801,3 +1801,15 @@ fn undeclared_private_name() {
     assert_eq!(run("class C { #x=1; m(){ return class D { d(o){ return o.#x } } } } typeof new C().m()"), "function");
     assert_eq!(run("class C { #x=3; has(o){ return #x in o } }; var c=new C(); c.has(c)"), "true");
 }
+#[test]
+fn nonsimple_params_use_strict() {
+    let bad = ["function f(a=1){'use strict'}","function f([a]){'use strict'}","function f(...a){'use strict'}",
+        "var f=(a=1)=>{'use strict'}","var o={m(a=1){'use strict'}}","var o={*m([a]){'use strict'}}",
+        "async function f(a=1){'use strict'}","class C{m(...a){'use strict'}}","var o={async *m(a=1){'use strict'}}"];
+    for src in bad { assert!(Engine::new().eval(src, false).is_err(), "{src} should be invalid"); }
+    // simple params + use strict are fine
+    assert_eq!(run("function f(a){'use strict'; return a} f(5)"), "5");
+    assert_eq!(run("var o={m(){'use strict'; return 9}}; o.m()"), "9");
+    // non-simple params WITHOUT a use-strict directive are fine
+    assert_eq!(run("function f(a=3){return a} f()"), "3");
+}
