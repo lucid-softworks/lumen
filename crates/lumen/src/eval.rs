@@ -2370,17 +2370,48 @@ impl Interp {
         Err(self.throw("TypeError", "cannot convert object to primitive value"))
     }
 
+    /// ECMAScript `Number::toString` (base 10): the shortest round-tripping digit string, formatted
+    /// fixed or exponential per the spec's exponent thresholds (≥1e21 or <1e-6 → exponential).
     pub fn num_to_str(&self, n: f64) -> String {
         if n.is_nan() {
             return "NaN".to_string();
         }
-        if n.is_infinite() {
-            return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
-        }
         if n == 0.0 {
             return "0".to_string();
         }
-        format!("{n}")
+        if n.is_infinite() {
+            return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        }
+        let neg = n < 0.0;
+        // Rust's `{:e}` yields the shortest round-tripping mantissa + exponent (`d[.ddd]e±E`).
+        let sci = format!("{:e}", n.abs());
+        let (mantissa, exp_str) = sci.split_once('e').unwrap();
+        let exp: i32 = exp_str.parse().unwrap();
+        let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let digits = digits.trim_end_matches('0');
+        let digits = if digits.is_empty() { "0" } else { digits };
+        let k = digits.len() as i32;
+        let np = exp + 1; // the spec's `n`: value = digits × 10^(n-k)
+        let body = if k <= np && np <= 21 {
+            format!("{}{}", digits, "0".repeat((np - k) as usize))
+        } else if 0 < np && np <= 21 {
+            format!("{}.{}", &digits[..np as usize], &digits[np as usize..])
+        } else if -6 < np && np <= 0 {
+            format!("0.{}{}", "0".repeat((-np) as usize), digits)
+        } else {
+            let exp_part = np - 1;
+            let sign = if exp_part >= 0 { "+" } else { "-" };
+            if k == 1 {
+                format!("{}e{}{}", digits, sign, exp_part.abs())
+            } else {
+                format!("{}.{}e{}{}", &digits[..1], &digits[1..], sign, exp_part.abs())
+            }
+        };
+        if neg {
+            format!("-{body}")
+        } else {
+            body
+        }
     }
 
     pub fn strict_equals(&self, a: &Value, b: &Value) -> bool {
