@@ -2189,9 +2189,7 @@ impl Parser {
         self.strict = true;
         let mut members = Vec::new();
         while !self.is_punct("}") && !self.at_eof() {
-            if let Some(m) = self.parse_class_member()? {
-                members.push(m);
-            }
+            members.extend(self.parse_class_member()?);
         }
         self.strict = saved;
         self.expect_punct("}")?;
@@ -2216,9 +2214,9 @@ impl Parser {
         )
     }
 
-    fn parse_class_member(&mut self) -> Result<Option<ClassMember>, ParseError> {
+    fn parse_class_member(&mut self) -> Result<Vec<ClassMember>, ParseError> {
         if self.eat_punct(";") {
-            return Ok(None);
+            return Ok(vec![]);
         }
         let decorators = self.parse_decorators()?;
         let mut is_static = false;
@@ -2240,14 +2238,55 @@ impl Parser {
                 is_generator: false,
                 is_async: false,
             };
-            return Ok(Some(ClassMember {
+            return Ok(vec![ClassMember {
                 key: PropKey::Ident(String::new()),
                 kind: MemberKind::StaticBlock,
                 is_static: true,
                 func: Some(Rc::new(func)),
                 value: None,
                 decorators,
-            }));
+            }]);
+        }
+        // `accessor x = init;` (auto-accessor): desugar to a private backing field plus a getter and
+        // setter that read/write it, reusing the ordinary class-element machinery.
+        if self.is_ident_word("accessor")
+            && !self.next_is_member_terminator(1)
+            && !self.nl_at(1)
+        {
+            self.advance(); // `accessor`
+            let backing = format!("#\u{0}acc{}", self.pos);
+            let key = self.parse_prop_key()?;
+            let init = if self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
+            self.consume_semicolon()?;
+            let field = ClassMember {
+                key: PropKey::Ident(backing.clone()),
+                kind: MemberKind::Field,
+                is_static,
+                func: None,
+                value: init,
+                decorators: Vec::new(),
+            };
+            let getter = ClassMember {
+                key: key.clone(),
+                kind: MemberKind::Get,
+                is_static,
+                func: Some(Rc::new(synth_accessor_get(&backing))),
+                value: None,
+                decorators,
+            };
+            let setter = ClassMember {
+                key,
+                kind: MemberKind::Set,
+                is_static,
+                func: Some(Rc::new(synth_accessor_set(&backing))),
+                value: None,
+                decorators: Vec::new(),
+            };
+            return Ok(vec![field, getter, setter]);
         }
         let mut kind = MemberKind::Method;
         if (self.is_ident_word("get") || self.is_ident_word("set"))
@@ -2281,14 +2320,14 @@ impl Parser {
             } else {
                 kind
             };
-            Ok(Some(ClassMember {
+            Ok(vec![ClassMember {
                 key,
                 kind,
                 is_static,
                 func: Some(Rc::new(func)),
                 value: None,
                 decorators,
-            }))
+            }])
         } else {
             // Field declaration.
             let value = if self.eat_punct("=") {
@@ -2297,14 +2336,14 @@ impl Parser {
                 None
             };
             self.consume_semicolon()?;
-            Ok(Some(ClassMember {
+            Ok(vec![ClassMember {
                 key,
                 kind: MemberKind::Field,
                 is_static,
                 func: None,
                 value,
                 decorators,
-            }))
+            }])
         }
     }
 
@@ -2551,6 +2590,51 @@ fn key_is(key: &PropKey, name: &str) -> bool {
 
 /// Class early errors: at most one constructor, no `#constructor`, and each private name is declared
 /// once (a get/set accessor pair for the same name being the only exception).
+/// The synthesized getter for an auto-accessor: `get() { return this.<backing>; }`.
+fn synth_accessor_get(backing: &str) -> Function {
+    Function {
+        name: None,
+        params: Vec::new(),
+        body: vec![Stmt::Return(Some(Expr::Member {
+            obj: Box::new(Expr::This),
+            prop: backing.to_string(),
+            optional: false,
+        }))],
+        is_arrow: false,
+        is_strict: true,
+        expr_body: false,
+        is_generator: false,
+        is_async: false,
+    }
+}
+
+/// The synthesized setter for an auto-accessor: `set(v) { this.<backing> = v; }`.
+fn synth_accessor_set(backing: &str) -> Function {
+    let param = "\u{0}v".to_string();
+    Function {
+        name: None,
+        params: vec![Param {
+            pattern: Pattern::Ident(param.clone()),
+            default: None,
+            rest: false,
+        }],
+        body: vec![Stmt::Expr(Expr::Assign {
+            op: "=",
+            target: Box::new(Expr::Member {
+                obj: Box::new(Expr::This),
+                prop: backing.to_string(),
+                optional: false,
+            }),
+            value: Box::new(Expr::Ident(param)),
+        })],
+        is_arrow: false,
+        is_strict: true,
+        expr_body: false,
+        is_generator: false,
+        is_async: false,
+    }
+}
+
 fn validate_class(members: &[ClassMember]) -> Result<(), String> {
     let mut ctor_count = 0;
     // (name, is_static) → the member kinds declared under that private name.
