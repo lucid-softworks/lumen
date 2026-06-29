@@ -3837,6 +3837,21 @@ fn ta_info(i: &Interp, o: &Gc) -> Option<crate::value::TaInfo> {
     i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied()
 }
 
+/// ToObject for an `Object.*` argument: an object is returned as-is, a primitive is boxed to its
+/// wrapper object, and null/undefined throw a TypeError.
+fn to_object_arg(i: &mut Interp, v: Value, method: &str) -> Result<Gc, Value> {
+    match v {
+        Value::Obj(o) => Ok(o),
+        Value::Undefined | Value::Null => {
+            Err(i.make_error("TypeError", format!("{method} called on null or undefined")))
+        }
+        other => match box_primitive(i, other) {
+            Value::Obj(o) => Ok(o),
+            _ => Err(i.make_error("TypeError", "ToObject failed")),
+        },
+    }
+}
+
 /// RequireObjectCoercible for an `Array.prototype` method receiver (null/undefined → TypeError).
 fn arr_require_coercible(i: &mut Interp, this: &Value) -> Result<(), Value> {
     if matches!(this, Value::Undefined | Value::Null) {
@@ -4176,10 +4191,7 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Obj(result))
     });
     it.def_method(&ctor, "keys", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.keys called on non-object")),
-        };
+        let o = to_object_arg(i, arg(args, 0), "Object.keys")?;
         if proxy_pair(i, &Value::Obj(o.clone())).is_some() {
             let keys = proxy_enum_string_keys(i, &Value::Obj(o.clone()))?;
             return Ok(i.make_array(keys));
@@ -4188,10 +4200,7 @@ fn install_object(it: &mut Interp) {
         Ok(i.make_array(keys))
     });
     it.def_method(&ctor, "getOwnPropertyNames", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "called on non-object")),
-        };
+        let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyNames")?;
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let keys = proxy_own_keys(i, &target, &handler)?;
             let strs: Vec<Value> = keys.into_iter().filter(|k| matches!(k, Value::Str(_))).collect();
@@ -4486,26 +4495,20 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Bool(same_value(&arg(args, 0), &arg(args, 1))))
     });
     it.def_method(&ctor, "values", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.values called on non-object")),
-        };
+        let o = to_object_arg(i, arg(args, 0), "Object.values")?;
         let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            out.push(ab(i.get_member(&arg(args, 0), &k))?);
+            out.push(ab(i.get_member(&Value::Obj(o.clone()), &k))?);
         }
         Ok(i.make_array(out))
     });
     it.def_method(&ctor, "entries", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.entries called on non-object")),
-        };
+        let o = to_object_arg(i, arg(args, 0), "Object.entries")?;
         let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            let v = ab(i.get_member(&arg(args, 0), &k))?;
+            let v = ab(i.get_member(&Value::Obj(o.clone()), &k))?;
             out.push(i.make_array(vec![Value::Str(k), v]));
         }
         Ok(i.make_array(out))
@@ -6533,6 +6536,19 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
         _ => return v,
     };
     let obj = Object::new(Some(proto));
+    // A String exotic object exposes each character as an own, enumerable, non-writable,
+    // non-configurable index property, plus a non-enumerable `length`.
+    if let Exotic::StrWrap(s) = &exotic {
+        let chars: Vec<char> = s.chars().collect();
+        let mut b = obj.borrow_mut();
+        for (idx, ch) in chars.iter().enumerate() {
+            b.props.insert(
+                idx.to_string().as_str(),
+                Property::data(Value::from_string(ch.to_string()), false, true, false),
+            );
+        }
+        b.props.insert("length", Property::data(Value::Num(chars.len() as f64), false, false, false));
+    }
     obj.borrow_mut().exotic = exotic;
     Value::Obj(obj)
 }

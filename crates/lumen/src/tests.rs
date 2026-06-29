@@ -2020,3 +2020,15 @@ fn proxy_more_invariants() {
     assert_eq!(run("var t={x:1};var p=new Proxy(t,{has(){return true}});'y' in p"), "true");
     assert_eq!(run("var p=new Proxy({},{isExtensible(){return true}});Object.isExtensible(p)"), "true");
 }
+#[test]
+fn object_methods_coerce() {
+    assert_eq!(run("Object.keys('ab').join(',')"), "0,1");
+    assert_eq!(run("Object.values('ab').join(',')"), "a,b");
+    assert_eq!(run("Object.entries('ab').length"), "2");
+    assert_eq!(run("Object.getOwnPropertyNames('ab').join(',')"), "0,1,length");
+    assert_eq!(run("Object.keys(5).length"), "0");
+    assert!(matches!(Engine::new().eval("Object.keys(null)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert!(matches!(Engine::new().eval("Object.values(undefined)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    // normal objects still work
+    assert_eq!(run("Object.keys({a:1,b:2}).join(',')"), "a,b");
+}
