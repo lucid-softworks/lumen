@@ -769,19 +769,11 @@ impl Interp {
             let new_len = n as usize;
             let old_len = self.array_length(obj);
             if new_len < old_len {
-                // Remove only the index properties that actually exist and are now out of range —
-                // never loop over the (possibly huge) numeric range new_len..old_len.
-                let to_remove: Vec<String> = obj
-                    .borrow()
+                // Drop the index properties now out of range in a single O(n) rebuild — never loop
+                // over the (possibly huge) numeric range, and never remove one-at-a-time (O(n²)).
+                obj.borrow_mut()
                     .props
-                    .keys()
-                    .into_iter()
-                    .filter(|k| k.parse::<usize>().map(|i| i >= new_len).unwrap_or(false))
-                    .map(|k| k.to_string())
-                    .collect();
-                for k in to_remove {
-                    obj.borrow_mut().props.remove(&k);
-                }
+                    .retain(|k| k.parse::<usize>().map(|i| i < new_len).unwrap_or(true));
             }
             obj.borrow_mut()
                 .props

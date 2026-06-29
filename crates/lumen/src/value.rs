@@ -363,6 +363,15 @@ impl Props {
             false
         }
     }
+    /// Drop every entry whose key fails `keep`, rebuilding the index once (O(n) total). Use this for
+    /// bulk removal — repeated [`remove`] is O(n) each, so deleting many keys that way is O(n²).
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.entries.retain(|(k, _)| keep(k));
+        self.index.clear();
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            self.index.insert(k.clone(), i);
+        }
+    }
     /// Keys in insertion order.
     pub fn keys(&self) -> Vec<Rc<str>> {
         self.entries.iter().map(|(k, _)| k.clone()).collect()

@@ -41,6 +41,17 @@ enum Inst {
     WordBoundary(bool),
     Backref(usize),
     Look { negate: bool, prog: Rc<Vec<Inst>> },
+    /// A repeated single-character matcher (`a*`, `\w+`, `.{2,5}`, `\p{L}+`). Consumed iteratively so
+    /// a long run doesn't recurse once per character (which overflows the backtracking depth limit).
+    Many { rep: Rep, min: usize, max: Option<usize>, greedy: bool },
+}
+
+/// A single-codepoint matcher, for the `Inst::Many` fast path.
+#[derive(Clone)]
+enum Rep {
+    Char(char),
+    Any,
+    Class(Rc<CharClass>),
 }
 
 #[derive(Default)]
@@ -80,7 +91,19 @@ impl CharClass {
         }
         let u = c as u32;
         for &(neg, ranges) in &self.props {
-            let in_range = ranges.iter().any(|&(lo, hi)| u >= lo && u <= hi);
+            // Ranges are sorted and disjoint: binary-search for the one that could contain `u`.
+            let in_range = match ranges.binary_search_by(|&(lo, hi)| {
+                if u < lo {
+                    std::cmp::Ordering::Greater
+                } else if u > hi {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            }) {
+                Ok(_) => true,
+                Err(_) => false,
+            };
             if in_range ^ neg {
                 return true;
             }
@@ -673,6 +696,11 @@ fn compile_repeat(
     if min > MAX_REPEAT || max.map(|m| m > MAX_REPEAT).unwrap_or(false) {
         return Err("repetition count too large".into());
     }
+    // Fast path: a repeated single-character atom consumes iteratively (no per-character recursion).
+    if let Some(rep) = single_char_rep(inner) {
+        prog.push(Inst::Many { rep, min, max, greedy });
+        return Ok(());
+    }
     for _ in 0..min {
         compile(inner, prog)?;
     }
@@ -705,6 +733,16 @@ fn compile_repeat(
         }
     }
     Ok(())
+}
+
+/// If `node` matches exactly one code point, return it as a `Rep` (for the `Inst::Many` fast path).
+fn single_char_rep(node: &Node) -> Option<Rep> {
+    match node {
+        Node::Char(c) => Some(Rep::Char(*c)),
+        Node::Any => Some(Rep::Any),
+        Node::Class(cc) => Some(Rep::Class(Rc::new(clone_class(cc)))),
+        _ => None,
+    }
 }
 
 fn clone_class(cc: &CharClass) -> CharClass {
@@ -742,6 +780,14 @@ impl Matcher<'_> {
             return a.to_lowercase().eq(b.to_lowercase());
         }
         false
+    }
+
+    fn rep_matches(&self, rep: &Rep, c: char) -> bool {
+        match rep {
+            Rep::Char(ch) => self.eqc(c, *ch),
+            Rep::Any => self.re.dotall || c != '\n',
+            Rep::Class(cc) => cc.matches(c, self.re.ignore_case),
+        }
     }
 
     fn run(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
@@ -793,6 +839,46 @@ impl Matcher<'_> {
             Inst::Split(a, b) => {
                 let (a, b) = (*a, *b);
                 self.run(prog, a, pos) || self.run(prog, b, pos)
+            }
+            Inst::Many { rep, min, max, greedy } => {
+                let (min, max, greedy) = (*min, *max, *greedy);
+                // Consume as many as the input allows (up to `max`), iteratively.
+                let cap = max.unwrap_or(usize::MAX);
+                let mut avail = 0;
+                while avail < cap
+                    && pos + avail < self.input.len()
+                    && self.rep_matches(rep, self.input[pos + avail])
+                {
+                    avail += 1;
+                }
+                if avail < min {
+                    return false;
+                }
+                // Backtrack the count (greedy: high→min; lazy: min→high), recursing only on the
+                // continuation, so a run of N characters costs O(N) here plus one match per attempt.
+                if greedy {
+                    let mut n = avail;
+                    loop {
+                        if self.run(prog, pc + 1, pos + n) {
+                            return true;
+                        }
+                        if n == min {
+                            return false;
+                        }
+                        n -= 1;
+                    }
+                } else {
+                    let mut n = min;
+                    loop {
+                        if self.run(prog, pc + 1, pos + n) {
+                            return true;
+                        }
+                        if n == avail {
+                            return false;
+                        }
+                        n += 1;
+                    }
+                }
             }
             Inst::Jmp(t) => self.run(prog, *t, pos),
             Inst::AssertStart => {
