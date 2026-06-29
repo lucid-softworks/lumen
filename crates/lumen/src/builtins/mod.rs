@@ -3631,15 +3631,22 @@ fn install_reflect(it: &mut Interp) {
             let keys = proxy_own_keys(i, &target, &handler)?;
             return Ok(i.make_array(keys));
         }
-        // String keys first, then symbols (per spec ordering, simplified).
-        let mut out: Vec<Value> = o
-            .borrow()
-            .props
-            .keys()
-            .into_iter()
-            .filter(|k| !Interp::is_sym_key(k))
-            .map(Value::Str)
-            .collect();
+        // A TypedArray's integer indices come first (ascending), then string keys, then symbols.
+        let mut out: Vec<Value> = if let Some(info) = ta_info(i, &o) {
+            (0..i.ta_len(&info).unwrap_or(0))
+                .map(|k| Value::from_string(k.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        out.extend(
+            o.borrow()
+                .props
+                .keys()
+                .into_iter()
+                .filter(|k| !Interp::is_sym_key(k))
+                .map(Value::Str),
+        );
         let syms: Vec<Value> = o
             .borrow()
             .props
