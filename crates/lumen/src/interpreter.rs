@@ -1273,6 +1273,11 @@ impl Interp {
         // Pre-declare body-level `let`/`const` in their temporal dead zone.
         self.declare_block_lexicals(&func.body, &scope, false);
 
+        // The function body is a disposal boundary for its `using` declarations.
+        let has_using = func.body.iter().any(crate::eval::stmt_declares_using);
+        if has_using {
+            self.using_stack.push(Vec::new());
+        }
         let mut result = Ok(Value::Undefined);
         for stmt in &func.body {
             match self.exec_stmt(stmt, &scope) {
@@ -1286,6 +1291,10 @@ impl Interp {
                     break;
                 }
             }
+        }
+        if has_using {
+            let frame = self.using_stack.pop().unwrap_or_default();
+            result = self.dispose_frame(frame, result);
         }
         self.strict = saved_strict;
         result

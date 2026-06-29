@@ -230,7 +230,7 @@ impl Interp {
 
     /// Dispose a frame's resources in reverse order. An error thrown while disposing either becomes
     /// the completion (if it was previously normal) or is folded into a `SuppressedError` chain.
-    fn dispose_frame(&mut self, mut frame: Vec<Disposable>, result: Completion) -> Completion {
+    pub(crate) fn dispose_frame(&mut self, mut frame: Vec<Disposable>, result: Completion) -> Completion {
         let mut completion = result;
         while let Some(r) = frame.pop() {
             match self.call(r.method.clone(), r.value.clone(), &[]) {
@@ -367,6 +367,11 @@ impl Interp {
                                 Some(e) => self.eval(e, env)?,
                                 None => Value::Undefined,
                             };
+                            if let (Pattern::Ident(n), Some(e)) = (pat, init) {
+                                if is_anonymous_fn(e) {
+                                    self.set_fn_name(&value, n);
+                                }
+                            }
                             // Capture the dispose method now (TypeError if not disposable).
                             self.add_disposable(&value, is_async)?;
                             self.bind_pattern(pat, value, env, BindMode::Lexical(false))?;
@@ -3124,7 +3129,7 @@ fn default_constructor(derived: bool) -> Function {
 /// or class boundary, each of which establishes a fresh super-context.
 /// Whether a statement directly in a block is a `using` / `await using` declaration (so the block
 /// is a disposal boundary). Does not recurse — disposal scopes are per lexical block.
-fn stmt_declares_using(s: &Stmt) -> bool {
+pub(crate) fn stmt_declares_using(s: &Stmt) -> bool {
     matches!(
         crate::interpreter::unwrap_export(s),
         Stmt::VarDecl {
