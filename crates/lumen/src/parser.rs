@@ -1375,6 +1375,9 @@ impl Parser {
                 self.advance();
                 if self.eat_punct(".") {
                     self.expect_keyword_word("meta")?;
+                    if !self.module {
+                        return self.err("'import.meta' is only valid in a module");
+                    }
                     Ok(Expr::ImportMeta)
                 } else {
                     self.expect_punct("(")?;
