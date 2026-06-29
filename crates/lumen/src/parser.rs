@@ -630,10 +630,8 @@ impl Parser {
             Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, .. } | Stmt::ClassDecl(_) => {
                 return self.err("lexical declaration cannot appear in a single-statement context");
             }
-            Stmt::FuncDecl(f) => {
-                if f.is_async || f.is_generator || !annexb_fn || self.strict {
-                    return self.err("function declaration cannot appear in a single-statement context");
-                }
+            Stmt::FuncDecl(f) if f.is_async || f.is_generator || !annexb_fn || self.strict => {
+                return self.err("function declaration cannot appear in a single-statement context");
             }
             _ => {}
         }
