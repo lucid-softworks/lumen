@@ -1813,3 +1813,11 @@ fn nonsimple_params_use_strict() {
     // non-simple params WITHOUT a use-strict directive are fine
     assert_eq!(run("function f(a=3){return a} f()"), "3");
 }
+#[test]
+fn new_import_error() {
+    assert!(Engine::new().eval("new import('x')", false).is_err());
+    assert!(Engine::new().eval("()=>new import('x')", false).is_err());
+    assert!(Engine::new().eval("new import.meta", false).is_err()); // import.meta in script also errors
+    // normal new still works
+    assert_eq!(run("function F(){this.x=1} new F().x"), "1");
+}

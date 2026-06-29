@@ -1304,6 +1304,10 @@ impl Parser {
                 Expr::Undefined
             } else {
                 let callee = self.parse_member_expr()?;
+                // `new import(...)` is a SyntaxError — `import()` is not a constructable callee.
+                if matches!(callee, Expr::ImportCall(_)) {
+                    return self.err("'import(...)' cannot be used with 'new'");
+                }
                 let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() };
                 Expr::New { callee: Box::new(callee), args }
             }
