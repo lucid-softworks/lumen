@@ -1843,3 +1843,15 @@ fn new_import_nested() {
     assert_eq!(run("function mk(){ return function(){this.x=4} } new (mk())().x"), "4");
     assert_eq!(run("function F(){this.y=2} new F().y"), "2");
 }
+#[test]
+fn regex_group_name_validation() {
+    assert!(Engine::new().eval("/(?<>x)/u", false).is_err());        // empty
+    assert!(Engine::new().eval("/(?<1a>x)/u", false).is_err());      // starts with digit
+    assert!(Engine::new().eval("/(?<a b>x)/u", false).is_err());     // space
+    assert!(Engine::new().eval("/(?<a.b>x)/u", false).is_err());     // dot
+    // valid names
+    assert_eq!(run(r"/(?<a>x)/u.test('x')"), "true");
+    assert_eq!(run(r"/(?<$_a1>x)/u.test('x')"), "true");
+    assert_eq!(run("/(?<\\u0061b>x)/u.test('x')"), "true");          // escaped 'a'
+    assert_eq!(run(r"/(?<café>x)/u.test('x')"), "true");             // unicode
+}

@@ -127,6 +127,36 @@ fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+fn uprop_has(name: &str, c: char) -> bool {
+    let u = c as u32;
+    crate::unicode_props::lookup(name, None).is_some_and(|r| {
+        r.binary_search_by(|&(lo, hi)| {
+            if u < lo {
+                std::cmp::Ordering::Greater
+            } else if u > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+    })
+}
+/// IdentifierStart for a RegExp capture-group name (ID_Start ∪ {$, _}).
+fn regex_ident_start(c: char) -> bool {
+    if c.is_ascii() {
+        return c == '$' || c == '_' || c.is_ascii_alphabetic();
+    }
+    uprop_has("ID_Start", c)
+}
+/// IdentifierPart for a capture-group name (ID_Continue ∪ {$, _, ZWNJ, ZWJ}).
+fn regex_ident_part(c: char) -> bool {
+    if c.is_ascii() {
+        return c == '$' || c == '_' || c.is_ascii_alphanumeric();
+    }
+    c == '\u{200C}' || c == '\u{200D}' || uprop_has("ID_Continue", c)
+}
+
 // ---------------------------------------------------------------------------------------------
 // AST
 // ---------------------------------------------------------------------------------------------
@@ -451,14 +481,7 @@ impl Parser {
                             Ok(Node::Group(None, Box::new(inner)))
                         }
                         _ => {
-                            let mut name = String::new();
-                            while let Some(c) = self.peek() {
-                                self.bump();
-                                if c == '>' {
-                                    break;
-                                }
-                                name.push(c);
-                            }
+                            let name = self.parse_group_name()?;
                             self.ngroups += 1;
                             let idx = self.ngroups;
                             if self.names.iter().any(|(n, _)| *n == name) {
@@ -625,6 +648,40 @@ impl Parser {
             Some(ranges) => Ok((negate, ranges)),
             None => Err(format!("invalid unicode property {body}")),
         }
+    }
+
+    /// Read a `(?<name>` capture-group name (the `>` is consumed). A name is a `RegExpIdentifierName`:
+    /// an IdentifierName, optionally using `\u` escapes, validated against ID_Start / ID_Continue.
+    fn parse_group_name(&mut self) -> Result<String, String> {
+        let mut name = String::new();
+        loop {
+            match self.peek() {
+                Some('>') => {
+                    self.bump();
+                    break;
+                }
+                Some('\\') => {
+                    self.bump();
+                    if self.peek() == Some('u') {
+                        self.bump();
+                        name.push(self.unicode_escape());
+                    } else {
+                        return Err("invalid escape in capture group name".into());
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    name.push(c);
+                }
+                None => return Err("unterminated capture group name".into()),
+            }
+        }
+        let mut chars = name.chars();
+        let valid = matches!(chars.next(), Some(c) if regex_ident_start(c)) && chars.all(regex_ident_part);
+        if !valid {
+            return Err(format!("invalid capture group name <{name}>"));
+        }
+        Ok(name)
     }
 
     fn hex(&mut self, n: usize) -> char {
