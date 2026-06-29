@@ -123,9 +123,23 @@ fn park(i: &mut Interp, msg: Suspend) -> Resume {
         let _ = yl.suspend_tx.send(msg);
         yl.resume_rx.recv()
     });
-    i.strict = gen_strict;
-    i.depth = gen_depth;
-    resumed.unwrap_or(Resume::Return(Value::Undefined))
+    match resumed {
+        Ok(r) => {
+            i.strict = gen_strict;
+            i.depth = gen_depth;
+            r
+        }
+        // `recv` errors only when the driver's `resume_tx` was dropped — i.e. the `Coroutine` (and
+        // usually the owning `Engine`) is being torn down. Resuming the body here would run JS
+        // (`finally` blocks, iterator-close) that dereferences the shared `*mut Interp` from this
+        // thread while the main thread tears it down — a data race that surfaced as random
+        // `RefCell already borrowed` panics / SIGSEGV. Instead, never touch the interpreter again:
+        // park forever, holding only the captured `Rc`s. The detached thread is reaped at process
+        // exit (the generator never outlives its `Engine`).
+        Err(_) => loop {
+            std::thread::park();
+        },
+    }
 }
 
 /// `yield value` — park producing a generator value.

@@ -224,6 +224,11 @@ pub struct Interp {
     /// True while a native constructor is being invoked via `new` (lets e.g. `Number`/`String`
     /// build a wrapper object instead of returning a primitive).
     pub constructing: bool,
+    /// True only while a *derived* class constructor body is executing — the one context where a
+    /// `super(...)` call is legal. Field initializers, methods, plain functions and global code all
+    /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
+    /// instead of re-entering instance-field initialization unboundedly.
+    pub super_call_ok: bool,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -330,6 +335,7 @@ impl Interp {
             generators: HashMap::new(),
             gc_next: GC_TRIGGER,
             constructing: false,
+            super_call_ok: false,
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).

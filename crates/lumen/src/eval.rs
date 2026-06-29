@@ -1449,6 +1449,12 @@ impl Interp {
         // `super(...)`: invoke the parent constructor on the current `this`, then run this class's
         // instance-field initializers.
         if matches!(callee, Expr::Super) {
+            // A super-call outside a derived constructor body (a method, a field initializer, or
+            // anything reached via a direct `eval` from those) is illegal — and re-entering field
+            // initialization would recurse without bound.
+            if !self.super_call_ok {
+                return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+            }
             let parent = self.get_var("%superclass%", env)?;
             if matches!(parent, Value::Undefined) {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
@@ -1728,6 +1734,12 @@ impl Interp {
         };
         let body = crate::parser::parse_script(&code, self.strict)
             .map_err(|e| self.throw("SyntaxError", e.message))?;
+        // A direct `eval` inherits the caller's super-call context: a `super(...)` in the eval is an
+        // early SyntaxError unless the eval sits directly inside a derived constructor body. (Caught
+        // here, before any of the eval body runs, so side effects preceding the `super()` don't.)
+        if !self.super_call_ok && stmts_have_super_call(&body) {
+            return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+        }
         let directive_strict = matches!(
             body.first(),
             Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict"
@@ -1961,7 +1973,12 @@ impl Interp {
                 if is_class && !derived {
                     self.init_instance_fields(ctor, this)?;
                 }
-                self.call_user(&func, cenv, this.clone(), args, true, &obj)?;
+                // A `super(...)` call is legal only directly within a *derived* constructor body.
+                let saved_super = self.super_call_ok;
+                self.super_call_ok = is_class && derived;
+                let r = self.call_user(&func, cenv, this.clone(), args, true, &obj);
+                self.super_call_ok = saved_super;
+                r?;
                 Ok(())
             }
             Callable::Native(f) => {
@@ -2026,22 +2043,30 @@ impl Interp {
             Some(i) => (i.fields.clone(), i.field_env.clone()),
             None => return Ok(()),
         };
-        for (key, init) in fields {
-            let scope = new_scope(Some(field_env.clone()));
-            bind(&scope, "this", this.clone());
-            let v = match init {
-                Some(e) => {
-                    let v = self.eval(&e, &scope)?;
-                    if is_anonymous_fn(&e) {
-                        self.set_fn_name(&v, &key);
+        // A field initializer is not a constructor: a `super(...)` reached from here (e.g. through a
+        // direct `eval`) is illegal, so clear the flag for the duration of the initializers.
+        let saved_super = self.super_call_ok;
+        self.super_call_ok = false;
+        let result = (|me: &mut Self| -> Result<(), Abrupt> {
+            for (key, init) in fields {
+                let scope = new_scope(Some(field_env.clone()));
+                bind(&scope, "this", this.clone());
+                let v = match init {
+                    Some(e) => {
+                        let v = me.eval(&e, &scope)?;
+                        if is_anonymous_fn(&e) {
+                            me.set_fn_name(&v, &key);
+                        }
+                        v
                     }
-                    v
-                }
-                None => Value::Undefined,
-            };
-            self.set_member(this, &key, v)?;
-        }
-        Ok(())
+                    None => Value::Undefined,
+                };
+                me.set_member(this, &key, v)?;
+            }
+            Ok(())
+        })(self);
+        self.super_call_ok = saved_super;
+        result
     }
 
     fn eval_unary(&mut self, op: &str, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
@@ -2975,6 +3000,125 @@ fn default_constructor(derived: bool) -> Function {
         is_generator: false,
         is_async: false,
     }
+}
+
+/// Whether any statement contains a `super(...)` call within its own super-context. The walk is
+/// transparent through arrow functions and ordinary control flow but stops at a (non-arrow) function
+/// or class boundary, each of which establishes a fresh super-context.
+fn stmts_have_super_call(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_has_super_call)
+}
+
+fn stmt_has_super_call(s: &Stmt) -> bool {
+    match s {
+        Stmt::Expr(e) | Stmt::Throw(e) => expr_has_super_call(e),
+        Stmt::Return(e) => e.as_ref().is_some_and(expr_has_super_call),
+        Stmt::VarDecl { decls, .. } => decls
+            .iter()
+            .any(|(_, init)| init.as_ref().is_some_and(expr_has_super_call)),
+        Stmt::If { test, cons, alt } => {
+            expr_has_super_call(test)
+                || stmt_has_super_call(cons)
+                || alt.as_deref().is_some_and(stmt_has_super_call)
+        }
+        Stmt::Block(b) => stmts_have_super_call(b),
+        Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
+            expr_has_super_call(test) || stmt_has_super_call(body)
+        }
+        Stmt::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            init.as_deref().is_some_and(|i| match i {
+                ForInit::Expr(e) => expr_has_super_call(e),
+                ForInit::VarDecl { decls, .. } => decls
+                    .iter()
+                    .any(|(_, x)| x.as_ref().is_some_and(expr_has_super_call)),
+            }) || test.as_ref().is_some_and(expr_has_super_call)
+                || update.as_ref().is_some_and(expr_has_super_call)
+                || stmt_has_super_call(body)
+        }
+        Stmt::ForInOf { right, body, .. } => {
+            expr_has_super_call(right) || stmt_has_super_call(body)
+        }
+        Stmt::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            stmts_have_super_call(block)
+                || handler
+                    .as_ref()
+                    .is_some_and(|(_, b)| stmts_have_super_call(b))
+                || finalizer.as_ref().is_some_and(|b| stmts_have_super_call(b))
+        }
+        Stmt::Switch { disc, cases } => {
+            expr_has_super_call(disc)
+                || cases.iter().any(|c| {
+                    c.test.as_ref().is_some_and(expr_has_super_call)
+                        || stmts_have_super_call(&c.body)
+                })
+        }
+        Stmt::Labeled { body, .. } | Stmt::With { body, .. } => stmt_has_super_call(body),
+        // A (non-arrow) function or class declaration opens its own super-context.
+        _ => false,
+    }
+}
+
+fn expr_has_super_call(e: &Expr) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            matches!(**callee, Expr::Super)
+                || expr_has_super_call(callee)
+                || args_have_super_call(args)
+        }
+        Expr::New { callee, args } => expr_has_super_call(callee) || args_have_super_call(args),
+        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => {
+            expr_has_super_call(arg)
+        }
+        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
+            expr_has_super_call(left) || expr_has_super_call(right)
+        }
+        Expr::Assign { target, value, .. } => {
+            expr_has_super_call(target) || expr_has_super_call(value)
+        }
+        Expr::Cond { test, cons, alt } => {
+            expr_has_super_call(test) || expr_has_super_call(cons) || expr_has_super_call(alt)
+        }
+        Expr::Member { obj, .. } | Expr::OptionalChain(obj) => expr_has_super_call(obj),
+        Expr::Index { obj, index, .. } => {
+            expr_has_super_call(obj) || expr_has_super_call(index)
+        }
+        Expr::Seq(v) => v.iter().any(expr_has_super_call),
+        Expr::Array(elems) => arr_elems_have_super_call(elems),
+        Expr::Yield { arg, .. } => arg.as_deref().is_some_and(expr_has_super_call),
+        Expr::ImportCall { spec, .. } => expr_has_super_call(spec),
+        Expr::PrivateIn { obj, .. } => expr_has_super_call(obj),
+        Expr::TaggedTemplate { tag, subs, .. } => {
+            expr_has_super_call(tag) || subs.iter().any(expr_has_super_call)
+        }
+        Expr::Object(props) => props.iter().any(|p| match p {
+            PropDef::KeyValue { value, .. } => expr_has_super_call(value),
+            PropDef::Spread(e) => expr_has_super_call(e),
+            // Methods/getters/setters open their own super-context.
+            _ => false,
+        }),
+        // `Func`/`Class` (incl. arrows) open a fresh super-context; literals/identifiers carry none.
+        _ => false,
+    }
+}
+
+fn args_have_super_call(args: &[ArrayElem]) -> bool {
+    arr_elems_have_super_call(args)
+}
+
+fn arr_elems_have_super_call(elems: &[ArrayElem]) -> bool {
+    elems.iter().any(|el| match el {
+        ArrayElem::Item(e) | ArrayElem::Spread(e) => expr_has_super_call(e),
+        ArrayElem::Hole => false,
+    })
 }
 
 fn promise_resolve_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
