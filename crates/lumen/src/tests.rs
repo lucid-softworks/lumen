@@ -1950,3 +1950,17 @@ fn shadow_realm_wrapped_fn() {
     // returned function from a wrapped call is itself wrapped
     assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('a=>b=>a+b'); typeof f(1)"), "function");
 }
+#[test]
+fn array_exotic_defineprop() {
+    assert!(Engine::new().eval("Object.defineProperty([],'length',{value:-1})", false).map(|c|matches!(c,Completion::Throw{ref name,..} if name=="RangeError")).unwrap_or(false));
+    assert!(Engine::new().eval("Object.defineProperty([],'length',{value:4294967296})", false).map(|c|matches!(c,Completion::Throw{ref name,..} if name=="RangeError")).unwrap_or(false));
+    assert!(Engine::new().eval("Object.defineProperty([],'length',{value:1.5})", false).map(|c|matches!(c,Completion::Throw{ref name,..} if name=="RangeError")).unwrap_or(false));
+    // truncation deletes elements
+    assert_eq!(run("var a=[1,2,3]; Object.defineProperty(a,'length',{value:1}); a.length+','+(1 in a)"), "1,false");
+    // defining an index past length grows length
+    assert_eq!(run("var a=[1]; Object.defineProperty(a,'5',{value:9,writable:true,enumerable:true,configurable:true}); a.length"), "6");
+    // non-writable length blocks index growth
+    assert_eq!(run("var a=[1]; Object.defineProperty(a,'length',{writable:false}); var ok=true; try{Object.defineProperty(a,'5',{value:9})}catch(e){} a.length"), "1");
+    // valid length set works
+    assert_eq!(run("var a=[1,2]; Object.defineProperty(a,'length',{value:5}); a.length"), "5");
+}

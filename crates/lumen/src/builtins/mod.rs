@@ -4699,6 +4699,23 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
     let d = build_partial(i, desc)?;
+    let is_array = matches!(o.borrow().exotic, crate::value::Exotic::Array);
+    // Array exotic [[DefineOwnProperty]]: `length` and array indices have special rules.
+    if is_array && key == "length" {
+        return array_set_length(i, o, &d);
+    }
+    let array_index = if is_array {
+        key.parse::<u32>().ok().filter(|&n| n < 4294967295)
+    } else {
+        None
+    };
+    if let Some(idx) = array_index {
+        // Adding an index at or past a non-writable `length` is rejected.
+        let len = i.array_length(o);
+        if idx as usize >= len && !o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true) {
+            return Ok(false);
+        }
+    }
     let existing = o.borrow().props.get(key).cloned();
 
     let mut cur = match existing {
@@ -4728,6 +4745,7 @@ fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Resul
                 }
             };
             o.borrow_mut().props.insert(key, prop);
+            grow_array_length(i, o, array_index);
             return Ok(true);
         }
         Some(p) => p,
@@ -4800,6 +4818,64 @@ fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Resul
         cur.configurable = c;
     }
     o.borrow_mut().props.insert(key, cur);
+    grow_array_length(i, o, array_index);
+    Ok(true)
+}
+
+/// After defining an array index, grow `length` to `index + 1` if the index reached past the end.
+fn grow_array_length(i: &mut Interp, o: &Gc, array_index: Option<u32>) {
+    if let Some(idx) = array_index {
+        if idx as usize >= i.array_length(o) {
+            let writable = o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+            o.borrow_mut().props.insert(
+                "length",
+                Property::data(Value::Num((idx as f64) + 1.0), writable, false, false),
+            );
+        }
+    }
+}
+
+/// Array exotic `length` define: validate the new length is a valid uint32, honor a non-writable
+/// `length`, and drop the now-out-of-range index properties.
+fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abrupt> {
+    let len_writable = o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+    let new_len = match &d.value {
+        None => {
+            // No value: only a writable change (length is non-configurable, non-enumerable).
+            if d.configurable == Some(true) || d.enumerable == Some(true) {
+                return Ok(false);
+            }
+            if let Some(w) = d.writable {
+                if !len_writable && w {
+                    return Ok(false); // can't make a non-writable length writable again
+                }
+                let cur = i.array_length(o) as f64;
+                o.borrow_mut().props.insert("length", Property::data(Value::Num(cur), w, false, false));
+            }
+            return Ok(true);
+        }
+        Some(v) => {
+            let n = i.to_number(v)?;
+            let u = if n.is_finite() && n >= 0.0 { n as u64 } else { u64::MAX };
+            if u > 4294967295 || (u as f64) != n {
+                return Err(i.throw("RangeError", "Invalid array length"));
+            }
+            u as usize
+        }
+    };
+    let old_len = i.array_length(o);
+    if !len_writable && new_len != old_len {
+        return Ok(false);
+    }
+    if new_len < old_len {
+        o.borrow_mut()
+            .props
+            .retain(|k| k.parse::<usize>().map(|idx| idx < new_len).unwrap_or(true));
+    }
+    let writable = d.writable.unwrap_or(len_writable);
+    o.borrow_mut()
+        .props
+        .insert("length", Property::data(Value::Num(new_len as f64), writable, false, false));
     Ok(true)
 }
 
