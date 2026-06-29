@@ -4448,8 +4448,14 @@ fn install_object(it: &mut Interp) {
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                 let trap = ab(i.get_member(&handler, "isExtensible"))?;
                 if trap.is_callable() {
-                    let res = ab(i.call(trap, handler, &[target]))?;
-                    return Ok(Value::Bool(i.to_boolean(&res)));
+                    let res = ab(i.call(trap, handler, std::slice::from_ref(&target)))?;
+                    let result = i.to_boolean(&res);
+                    // Invariant: the trap result must equal the target's extensibility.
+                    let target_ext = matches!(&target, Value::Obj(t) if t.borrow().extensible);
+                    if result != target_ext {
+                        return Err(i.make_error("TypeError", "proxy 'isExtensible' must match the target"));
+                    }
+                    return Ok(Value::Bool(result));
                 }
                 return Ok(Value::Bool(matches!(&target, Value::Obj(t) if t.borrow().extensible)));
             }

@@ -2104,8 +2104,21 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "has")?;
                         if trap.is_callable() {
-                            let res = self.call(trap, handler, &[target, Value::str(key.as_str())])?;
-                            return Ok(Value::Bool(self.to_boolean(&res)));
+                            let res = self.call(trap, handler, &[target.clone(), Value::str(key.as_str())])?;
+                            let present = self.to_boolean(&res);
+                            // Invariant: can't hide a non-configurable own property, nor any own
+                            // property of a non-extensible target.
+                            if !present {
+                                if let Value::Obj(t) = &target {
+                                    let p = t.borrow().props.get(&key).cloned();
+                                    if let Some(p) = p {
+                                        if !p.configurable || !t.borrow().extensible {
+                                            return Err(self.throw("TypeError", "proxy 'has' trap hid a non-configurable property"));
+                                        }
+                                    }
+                                }
+                            }
+                            return Ok(Value::Bool(present));
                         }
                         if let Value::Obj(to) = &target {
                             return Ok(Value::Bool(self.has_property(to, &key)));

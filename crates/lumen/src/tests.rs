@@ -1341,7 +1341,7 @@ fn proxy_delete_trap() {
 fn proxy_misc_traps() {
     assert_eq!(run("var log=''; var p=new Proxy({},{setPrototypeOf(t,pr){log+='sp';return true}}); Object.setPrototypeOf(p,null); log"), "sp");
     assert_eq!(throws("var p=new Proxy({},{setPrototypeOf(){return false}}); Object.setPrototypeOf(p,{})"), "TypeError");
-    assert_eq!(run("var p=new Proxy({},{isExtensible(){return false}}); Object.isExtensible(p)"), "false");
+    assert_eq!(run("var t={};Object.preventExtensions(t);var p=new Proxy(t,{isExtensible(){return false}}); Object.isExtensible(p)"), "false");
     assert_eq!(run("var log=''; var p=new Proxy({},{preventExtensions(t){log+='pe';return true}}); Object.preventExtensions(p); log"), "pe");
     assert_eq!(throws("var p=new Proxy({},{preventExtensions(){return false}}); Object.preventExtensions(p)"), "TypeError");
     assert_eq!(throws("Object.setPrototypeOf({},5)"), "TypeError");
@@ -2011,4 +2011,12 @@ fn proxy_get_invariant() {
 fn proxy_set_invariant() {
     assert!(matches!(Engine::new().eval("var t={};Object.defineProperty(t,'x',{value:1,writable:false,configurable:false});var p=new Proxy(t,{set(){return true}});p.x=2", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
     assert_eq!(run("var t={x:1};var p=new Proxy(t,{set(o,k,v){o[k]=v;return true}});p.x=5; t.x"), "5");
+}
+#[test]
+fn proxy_more_invariants() {
+    assert!(matches!(Engine::new().eval("var t={};Object.defineProperty(t,'x',{value:1,configurable:false});var p=new Proxy(t,{has(){return false}});'x' in p", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert!(matches!(Engine::new().eval("var t={};Object.preventExtensions(t);var p=new Proxy(t,{isExtensible(){return true}});Object.isExtensible(p)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    // valid cases
+    assert_eq!(run("var t={x:1};var p=new Proxy(t,{has(){return true}});'y' in p"), "true");
+    assert_eq!(run("var p=new Proxy({},{isExtensible(){return true}});Object.isExtensible(p)"), "true");
 }
