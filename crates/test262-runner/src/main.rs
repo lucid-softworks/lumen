@@ -500,7 +500,7 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     let is_async = fm.has_flag("async");
 
     if fm.has_flag("raw") {
-        return if is_async { check_async(&src, false, &fm) } else { check(&src, false, &fm) };
+        return if is_async { check_async(&src, false, &fm, path) } else { check(&src, false, &fm, path) };
     }
 
     let mut preamble = harness.base.clone();
@@ -514,7 +514,7 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
         preamble.push('\n');
     }
     let program = format!("{preamble}\n{src}");
-    let judge = |p: &str, strict: bool| if is_async { check_async(p, strict, &fm) } else { check(p, strict, &fm) };
+    let judge = |p: &str, strict: bool| if is_async { check_async(p, strict, &fm, path) } else { check(p, strict, &fm, path) };
 
     let mut ran = false;
     if !fm.has_flag("onlyStrict") {
@@ -537,9 +537,23 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     }
 }
 
-/// Run an `async`-flagged test, judging by the `$DONE` completion message printed to the console.
-fn check_async(program: &str, strict: bool, _fm: &Frontmatter) -> Outcome {
+/// A fresh engine wired with a filesystem module loader (for dynamic `import()`), resolving
+/// specifiers relative to the importing file (defaulting to `path` for top-level script imports).
+fn engine_for(path: &Path) -> Engine {
     let mut engine = Engine::new();
+    engine.set_module_loader(|spec: &str, referrer: &str| {
+        let base = Path::new(referrer).parent()?;
+        let resolved = normalize_path(&base.join(spec));
+        let text = std::fs::read_to_string(&resolved).ok()?;
+        Some((resolved.to_string_lossy().into_owned(), text))
+    });
+    engine.set_import_base(&path.to_string_lossy());
+    engine
+}
+
+/// Run an `async`-flagged test, judging by the `$DONE` completion message printed to the console.
+fn check_async(program: &str, strict: bool, _fm: &Frontmatter, path: &Path) -> Outcome {
+    let mut engine = engine_for(path);
     match engine.eval(program, strict) {
         Err(e) => return Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
         Ok(Completion::Throw { name, message }) => {
@@ -575,11 +589,10 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// Run a `module`-flagged test: evaluate the harness as a script (for the global helpers), then
 /// load the test as an ES module with a filesystem loader resolving relative specifiers.
 fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Outcome {
-    // Async module tests signal completion via $DONE, which this runner doesn't observe.
     if fm.has_flag("async") {
         return Outcome::Skip("async".into());
     }
-    let mut engine = Engine::new();
+    let mut engine = engine_for(path);
     let mut preamble = harness.base.clone();
     for inc in &fm.includes {
         preamble.push_str(&harness.include(inc));
@@ -631,8 +644,8 @@ fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter)
 }
 
 /// Run one assembled program and judge it against the negative expectation.
-fn check(program: &str, strict: bool, fm: &Frontmatter) -> Outcome {
-    let result = Engine::new().eval(program, strict);
+fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
+    let result = engine_for(path).eval(program, strict);
     match (&fm.negative, result) {
         (None, Ok(Completion::Value(_))) => Outcome::Pass,
         (None, Ok(Completion::Throw { name, message })) => {

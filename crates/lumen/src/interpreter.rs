@@ -162,6 +162,8 @@ pub struct Interp {
     pub short_circuit: bool,
     /// The `import.meta` object for the module currently executing (None in script code).
     pub import_meta: Option<Value>,
+    /// Default referrer for a bare `import()` in script code (so relative specifiers resolve).
+    pub import_base: String,
     /// Loaded module namespace objects, keyed by canonical specifier (for `import()` + caching).
     pub modules: std::collections::HashMap<String, Value>,
     /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
@@ -288,6 +290,7 @@ impl Interp {
             iterator_sym: None,
             short_circuit: false,
             import_meta: None,
+            import_base: String::new(),
             modules: std::collections::HashMap::new(),
             module_loader: None,
             module_ns: HashMap::new(),

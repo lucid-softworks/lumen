@@ -90,6 +90,20 @@ impl Engine {
         }
     }
 
+    /// Install a host module loader used by dynamic `import()` (and `eval_module`). `loader(specifier,
+    /// referrer)` returns the imported module's `(canonical_key, source)`.
+    pub fn set_module_loader(
+        &mut self,
+        loader: impl Fn(&str, &str) -> Option<(String, String)> + 'static,
+    ) {
+        self.interp.module_loader = Some(std::rc::Rc::new(loader));
+    }
+
+    /// The default referrer for a bare `import()` in script code (so relative specifiers resolve).
+    pub fn set_import_base(&mut self, base: &str) {
+        self.interp.import_base = base.to_string();
+    }
+
     /// Evaluate `src` as an ES module identified by `key`. `loader(specifier, referrer)` resolves an
     /// imported specifier to its `(canonical_key, source)`; it is consulted for every dependency.
     pub fn eval_module(

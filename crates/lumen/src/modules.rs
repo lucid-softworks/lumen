@@ -221,9 +221,9 @@ impl Interp {
         let referrer = match meta {
             Some(m) => match self.get_member(&m, "url") {
                 Ok(Value::Str(s)) => s.to_string(),
-                _ => String::new(),
+                _ => self.import_base.clone(),
             },
-            None => String::new(),
+            None => self.import_base.clone(),
         };
         match self.resolve_and_load(specifier, &referrer) {
             Ok(ns) => self.resolve_promise(&promise, ns),
