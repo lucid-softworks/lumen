@@ -1496,6 +1496,29 @@ fn date_largest_unit(i: &mut Interp, opts: &Value) -> Result<String, Value> {
     }
     Ok(rank_unit(lrank).to_string())
 }
+/// Read & validate largestUnit/smallestUnit over the full unit group (year…nanosecond) for a
+/// `until`/`since`; "auto" largestUnit resolves to the larger of `auto_rank` and smallestUnit.
+fn any_largest_unit(
+    i: &mut Interp,
+    opts: &Value,
+    smallest_default: &str,
+    auto_rank: i32,
+) -> Result<String, Value> {
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", smallest_default)?).to_string();
+    let srank =
+        unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
+    let largest_raw = opt_str(i, opts, "largestUnit", "auto")?;
+    let largest = sing(&largest_raw).to_string();
+    let lrank = if largest == "auto" {
+        srank.max(auto_rank)
+    } else {
+        unit_rank(&largest).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
+    };
+    if lrank < srank {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
+    Ok(rank_unit(lrank).to_string())
+}
 /// The unit name for a rank (inverse of [`unit_rank`]).
 fn rank_unit(r: i32) -> &'static str {
     match r {
@@ -2618,11 +2641,8 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let dur = if matches!(
-            largest.strip_suffix('s').unwrap_or(&largest),
-            "year" | "month" | "week"
-        ) {
+        let largest = any_largest_unit(i, &arg(a, 1), "nanosecond", 6)?;
+        let dur = if matches!(largest.as_str(), "year" | "month" | "week") {
             diff_datetime(d, tm, od, otm, &largest)
         } else {
             balance_ns(dt_ns(od, otm) - dt_ns(d, tm), &largest)
@@ -2632,11 +2652,8 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let dur = if matches!(
-            largest.strip_suffix('s').unwrap_or(&largest),
-            "year" | "month" | "week"
-        ) {
+        let largest = any_largest_unit(i, &arg(a, 1), "nanosecond", 6)?;
+        let dur = if matches!(largest.as_str(), "year" | "month" | "week") {
             diff_datetime(od, otm, d, tm, &largest)
         } else {
             balance_ns(dt_ns(d, tm) - dt_ns(od, otm), &largest)
