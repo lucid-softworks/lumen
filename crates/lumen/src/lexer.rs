@@ -178,12 +178,14 @@ impl<'a> Lexer<'a> {
                 _ => break,
             }
         }
-        if !had_escape {
-            if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
-                self.push(Tok::Keyword(kw));
-                return;
-            }
+        // A reserved word is always a keyword — even spelled with a `\u` escape. An escaped reserved
+        // word can't be an Identifier (the parser rejects a keyword there), but it still works as a
+        // property name (keywords are accepted in those positions).
+        if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
+            self.push(Tok::Keyword(kw));
+            return;
         }
+        let _ = had_escape;
         self.push(Tok::Ident(s));
     }
 

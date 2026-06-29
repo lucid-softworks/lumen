@@ -1707,3 +1707,15 @@ fn unicode_identifiers() {
     // ZWNJ/ZWJ valid as ID_Continue
     assert_eq!(run("var a\u{200D}b=6; a\u{200D}b"), "6");
 }
+#[test]
+fn escaped_reserved_words() {
+    // an escaped reserved word as a binding/identifier -> SyntaxError
+    assert!(Engine::new().eval("var \\u0062reak = 1", false).is_err());   // break = break
+    assert!(Engine::new().eval("\\u0062reak;", false).is_err());
+    assert!(Engine::new().eval("var \\u{63}atch = 1", false).is_err());   // catch
+    // but still valid as a property name
+    assert_eq!(run("var o={break:1}; o.\\u0062reak"), "1");
+    assert_eq!(run("var o={x:5}; o.return=9; o.return"), "9");
+    // a normal escaped identifier is fine
+    assert_eq!(run("var \\u0041bc = 7; Abc"), "7");
+}
