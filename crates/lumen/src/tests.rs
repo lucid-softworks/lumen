@@ -3879,3 +3879,4 @@ fn decorators_runtime() {
         "105"
     );
 }
+

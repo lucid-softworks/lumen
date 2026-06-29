@@ -6080,13 +6080,30 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "includes", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.to_length(&o))?;
+        let len = ab(i.to_length(&o))? as i64;
         let target = arg(args, 0);
-        for k in 0..len {
+        let mut k = match arg(args, 1) {
+            Value::Undefined => 0i64,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                if n == f64::INFINITY {
+                    return Ok(Value::Bool(false));
+                }
+                if n == f64::NEG_INFINITY || n.is_nan() {
+                    0
+                } else if n >= 0.0 {
+                    n.trunc() as i64
+                } else {
+                    (len + n.trunc() as i64).max(0)
+                }
+            }
+        };
+        while k < len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
             if same_value_zero(&v, &target) {
                 return Ok(Value::Bool(true));
             }
+            k += 1;
         }
         Ok(Value::Bool(false))
     });
@@ -6343,13 +6360,32 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "lastIndexOf", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.to_length(&o))?;
+        let len = ab(i.to_length(&o))? as i64;
+        if len == 0 {
+            return Ok(Value::Num(-1.0));
+        }
         let target = arg(args, 0);
-        for k in (0..len).rev() {
+        // fromIndex (default len-1): the highest index to search from, going backward.
+        let mut k = if args.len() > 1 {
+            let n = ab(i.to_number(&arg(args, 1)))?;
+            if n == f64::NEG_INFINITY {
+                return Ok(Value::Num(-1.0));
+            }
+            let n = if n.is_nan() { 0 } else { n.trunc() as i64 };
+            if n >= 0 {
+                n.min(len - 1)
+            } else {
+                len + n
+            }
+        } else {
+            len - 1
+        };
+        while k >= 0 {
             let v = ab(i.get_member(&this, &k.to_string()))?;
             if i.strict_equals(&v, &target) {
                 return Ok(Value::Num(k as f64));
             }
+            k -= 1;
         }
         Ok(Value::Num(-1.0))
     });
