@@ -157,6 +157,10 @@ pub enum DeclKind {
     Var,
     Let,
     Const,
+    /// `using x = expr;` — a block-scoped binding disposed (`[Symbol.dispose]()`) at scope exit.
+    Using,
+    /// `await using x = expr;` — disposed via `[Symbol.asyncDispose]()` (awaited) at scope exit.
+    AwaitUsing,
 }
 
 #[derive(Debug, Clone)]

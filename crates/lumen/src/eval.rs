@@ -139,24 +139,132 @@ impl Interp {
     pub(crate) fn eval_in_scope(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
         self.hoist(body, env, true);
         self.declare_block_lexicals(body, env, false);
+        let has_using = body.iter().any(stmt_declares_using);
+        if has_using {
+            self.using_stack.push(Vec::new());
+        }
         let mut last = Value::Undefined;
+        let mut result: Completion = Ok(Value::Undefined);
         for stmt in body {
-            let v = self.exec_stmt(stmt, env)?;
-            if !matches!(v, Value::Undefined) {
-                last = v;
+            match self.exec_stmt(stmt, env) {
+                Ok(v) => {
+                    if !matches!(v, Value::Undefined) {
+                        last = v;
+                    }
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
             }
         }
+        if has_using {
+            let frame = self.using_stack.pop().unwrap_or_default();
+            result = self.dispose_frame(frame, result);
+        }
+        result?;
         Ok(last)
     }
 
     pub fn exec_block(&mut self, stmts: &[Stmt], parent: &Env) -> Completion {
         let scope = new_scope(Some(parent.clone()));
         self.declare_block_lexicals(stmts, &scope, true);
-        let mut last = Value::Undefined;
-        for s in stmts {
-            last = self.exec_stmt(s, &scope)?;
+        // A block is a disposal boundary only when it actually declares a `using` resource.
+        let has_using = stmts.iter().any(stmt_declares_using);
+        if has_using {
+            self.using_stack.push(Vec::new());
         }
-        Ok(last)
+        let mut result = Ok(Value::Undefined);
+        for s in stmts {
+            match self.exec_stmt(s, &scope) {
+                Ok(v) => result = Ok(v),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        if has_using {
+            let frame = self.using_stack.pop().unwrap_or_default();
+            result = self.dispose_frame(frame, result);
+        }
+        result
+    }
+
+    /// Capture a `using` resource's dispose method for disposal at scope exit. `null`/`undefined`
+    /// resources are ignored; a non-callable dispose method is a TypeError.
+    fn add_disposable(&mut self, value: &Value, is_async: bool) -> Result<(), Abrupt> {
+        if matches!(value, Value::Undefined | Value::Null) {
+            return Ok(());
+        }
+        let method = self.dispose_method(value, is_async)?;
+        if self.using_stack.is_empty() {
+            self.using_stack.push(Vec::new());
+        }
+        self.using_stack.last_mut().unwrap().push(Disposable {
+            value: value.clone(),
+            method,
+            is_async,
+        });
+        Ok(())
+    }
+
+    /// GetDisposeMethod: `@@asyncDispose` (falling back to `@@dispose`) for `await using`, else
+    /// `@@dispose`. Throws if the resolved method isn't callable.
+    fn dispose_method(&mut self, value: &Value, is_async: bool) -> Result<Value, Abrupt> {
+        let mut m = Value::Undefined;
+        if is_async {
+            if let Some(k) = crate::builtins::well_known_key(self, "asyncDispose") {
+                m = self.get_member(value, &k)?;
+            }
+        }
+        if matches!(m, Value::Undefined | Value::Null) {
+            if let Some(k) = crate::builtins::well_known_key(self, "dispose") {
+                m = self.get_member(value, &k)?;
+            }
+        }
+        if !m.is_callable() {
+            return Err(self.throw("TypeError", "value is not disposable"));
+        }
+        Ok(m)
+    }
+
+    /// Dispose a frame's resources in reverse order. An error thrown while disposing either becomes
+    /// the completion (if it was previously normal) or is folded into a `SuppressedError` chain.
+    fn dispose_frame(&mut self, mut frame: Vec<Disposable>, result: Completion) -> Completion {
+        let mut completion = result;
+        while let Some(r) = frame.pop() {
+            match self.call(r.method.clone(), r.value.clone(), &[]) {
+                Ok(_) => {}
+                Err(Abrupt::Throw(new_err)) => {
+                    completion = match completion {
+                        Err(Abrupt::Throw(prev)) => {
+                            Err(Abrupt::Throw(self.make_suppressed(new_err, prev)))
+                        }
+                        // Disposal throwing over a normal / return / break completion: the throw wins.
+                        Ok(_) => Err(Abrupt::Throw(new_err)),
+                        Err(other) => Err(other),
+                    };
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        completion
+    }
+
+    /// Build a `SuppressedError(error, suppressed)`.
+    fn make_suppressed(&mut self, error: Value, suppressed: Value) -> Value {
+        let err = self.make_error("SuppressedError", "");
+        if let Some(o) = err.as_obj() {
+            o.borrow_mut().proto = self.error_protos.get("SuppressedError").cloned();
+            o.borrow_mut()
+                .props
+                .insert("error", crate::value::Property::builtin(error));
+            o.borrow_mut()
+                .props
+                .insert("suppressed", crate::value::Property::builtin(suppressed));
+        }
+        err
     }
 
     /// Pre-declare `let`/`const` (uninitialised — TDZ) and, when `with_functions`, block-level
@@ -165,7 +273,7 @@ impl Interp {
         for s in stmts {
             match crate::interpreter::unwrap_export(s) {
                 Stmt::VarDecl {
-                    kind: DeclKind::Let | DeclKind::Const,
+                    kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                     decls,
                 } => {
                     for (pat, _) in decls {
@@ -253,6 +361,16 @@ impl Interp {
                                 env,
                                 BindMode::Lexical(*kind == DeclKind::Const),
                             )?;
+                        }
+                        DeclKind::Using | DeclKind::AwaitUsing => {
+                            let is_async = *kind == DeclKind::AwaitUsing;
+                            let value = match init {
+                                Some(e) => self.eval(e, env)?,
+                                None => Value::Undefined,
+                            };
+                            // Capture the dispose method now (TypeError if not disposable).
+                            self.add_disposable(&value, is_async)?;
+                            self.bind_pattern(pat, value, env, BindMode::Lexical(false))?;
                         }
                     }
                 }
@@ -3005,6 +3123,18 @@ fn default_constructor(derived: bool) -> Function {
 /// Whether any statement contains a `super(...)` call within its own super-context. The walk is
 /// transparent through arrow functions and ordinary control flow but stops at a (non-arrow) function
 /// or class boundary, each of which establishes a fresh super-context.
+/// Whether a statement directly in a block is a `using` / `await using` declaration (so the block
+/// is a disposal boundary). Does not recurse — disposal scopes are per lexical block.
+fn stmt_declares_using(s: &Stmt) -> bool {
+    matches!(
+        crate::interpreter::unwrap_export(s),
+        Stmt::VarDecl {
+            kind: DeclKind::Using | DeclKind::AwaitUsing,
+            ..
+        }
+    )
+}
+
 fn stmts_have_super_call(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_super_call)
 }

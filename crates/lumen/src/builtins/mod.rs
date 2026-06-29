@@ -2761,7 +2761,7 @@ fn install_species(it: &Interp, ctor: &Gc) {
 }
 
 /// The internal property key for a well-known `Symbol.<name>`.
-fn well_known_key(it: &Interp, name: &str) -> Option<String> {
+pub(crate) fn well_known_key(it: &Interp, name: &str) -> Option<String> {
     let sym = it
         .global
         .borrow()

@@ -229,6 +229,16 @@ pub struct Interp {
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
     pub super_call_ok: bool,
+    /// A stack of disposal scopes — one frame per block/function body that can hold `using`
+    /// declarations. Resources are disposed in reverse on scope exit (see `dispose_frame`).
+    pub using_stack: Vec<Vec<Disposable>>,
+}
+
+/// A `using x = v` resource: the value plus its captured dispose method.
+pub struct Disposable {
+    pub value: Value,
+    pub method: Value,
+    pub is_async: bool,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -336,6 +346,7 @@ impl Interp {
             gc_next: GC_TRIGGER,
             constructing: false,
             super_call_ok: false,
+            using_stack: Vec::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).

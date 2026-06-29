@@ -429,6 +429,12 @@ impl Parser {
             Tok::Ident(w) if w == "let" && self.starts_let_decl() => {
                 self.parse_var_decl(DeclKind::Let)
             }
+            Tok::Ident(w) if w == "using" && self.starts_using_decl() => {
+                self.parse_var_decl(DeclKind::Using)
+            }
+            Tok::Ident(w) if w == "await" && self.in_async && self.starts_await_using() => {
+                self.parse_var_decl(DeclKind::AwaitUsing)
+            }
             Tok::Keyword("function") => {
                 let f = self.parse_function(false)?;
                 if let Some(n) = &f.name {
@@ -568,6 +574,25 @@ impl Parser {
             Tok::Ident(_) | Tok::Punct("[") | Tok::Punct("{")
         )
     }
+    /// Whether token `pos + ahead` is preceded by a line terminator.
+    fn nl_at(&self, ahead: usize) -> bool {
+        self.toks
+            .get(self.pos + ahead)
+            .map(|t| t.nl_before)
+            .unwrap_or(false)
+    }
+    /// `using x` is a declaration when an identifier follows on the same line (no `[no LT]` break);
+    /// otherwise `using` is just an identifier reference.
+    fn starts_using_decl(&self) -> bool {
+        matches!(self.peek_kind(1), Tok::Ident(_)) && !self.nl_at(1)
+    }
+    /// `await using x` (async context only): `using` then a binding identifier, all on one line.
+    fn starts_await_using(&self) -> bool {
+        matches!(self.peek_kind(1), Tok::Ident(w) if w == "using")
+            && matches!(self.peek_kind(2), Tok::Ident(_))
+            && !self.nl_at(1)
+            && !self.nl_at(2)
+    }
 
     fn parse_block_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
         self.push_decl_scope();
@@ -584,11 +609,25 @@ impl Parser {
     }
 
     fn parse_var_decl(&mut self, kind: DeclKind) -> Result<Stmt, ParseError> {
-        self.advance(); // var/let/const keyword (or `let` ident)
+        self.advance(); // var/let/const/using keyword (or `let`/`using`/`await` ident)
+        if kind == DeclKind::AwaitUsing {
+            self.advance(); // the `using` after `await`
+        }
         let decls = self.parse_var_declarators()?;
         // A `const` declaration must have an initializer for each binding.
         if kind == DeclKind::Const && decls.iter().any(|(_, init)| init.is_none()) {
             return self.err("missing initializer in const declaration");
+        }
+        // `using`/`await using` bindings must be plain identifiers, each with an initializer.
+        if matches!(kind, DeclKind::Using | DeclKind::AwaitUsing) {
+            for (pat, init) in &decls {
+                if !matches!(pat, Pattern::Ident(_)) {
+                    return self.err("using declaration requires identifier bindings");
+                }
+                if init.is_none() {
+                    return self.err("missing initializer in using declaration");
+                }
+            }
         }
         // Track declared names to catch lexical redeclaration.
         let mut names = Vec::new();
