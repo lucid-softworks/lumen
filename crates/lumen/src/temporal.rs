@@ -242,7 +242,7 @@ fn iso_date_within_limits(d: IsoDate) -> bool {
 }
 /// ISOYearMonthWithinLimits: a (year, month) is representable (month-granularity bounds).
 fn iso_year_month_within_limits(year: i64, month: i64) -> bool {
-    if year < -271_821 || year > 275_760 {
+    if !(-271_821..=275_760).contains(&year) {
         return false;
     }
     if year == -271_821 && month < 4 {
@@ -784,12 +784,12 @@ fn parse_branch(s: &str, date_first: bool) -> Option<Parsed> {
     let (mut date, mut time, mut offset, mut designator) = (None, None, Off::None, false);
     if date_first {
         date = Some(p_date(&mut c)?);
-        if c.eat_any(&[b'T', b't', b' ']) {
+        if c.eat_any(b"Tt ") {
             time = Some(p_time(&mut c)?);
             offset = p_offset(&mut c)?;
         }
     } else {
-        designator = c.eat_any(&[b'T', b't']);
+        designator = c.eat_any(b"Tt");
         time = Some(p_time(&mut c)?);
         offset = p_offset(&mut c)?;
     }
