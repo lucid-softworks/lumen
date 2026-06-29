@@ -1220,12 +1220,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let largest = if largest == "auto" {
-            "day".to_string()
-        } else {
-            largest
-        };
+        let largest = date_largest_unit(i, &arg(a, 1))?;
         Ok(make(
             i,
             "Temporal.Duration",
@@ -1235,12 +1230,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let largest = if largest == "auto" {
-            "day".to_string()
-        } else {
-            largest
-        };
+        let largest = date_largest_unit(i, &arg(a, 1))?;
         Ok(make(
             i,
             "Temporal.Duration",
@@ -1478,6 +1468,33 @@ fn time_unit_rank(u: &str) -> Option<i32> {
         Some(r) if r <= 5 => Some(r),
         _ => None,
     }
+}
+/// Rank of a *date* unit (year=9 … day=6), or None if it isn't one.
+fn date_unit_rank(u: &str) -> Option<i32> {
+    match unit_rank(u) {
+        Some(r) if r >= 6 => Some(r),
+        _ => None,
+    }
+}
+/// Read & validate the largestUnit for a date-only `until`/`since`: a date unit (year/month/week/day)
+/// or "auto" (⇒ the larger of day and smallestUnit). RangeError if a unit isn't a date unit or
+/// largestUnit is narrower than smallestUnit.
+fn date_largest_unit(i: &mut Interp, opts: &Value) -> Result<String, Value> {
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
+    let srank = date_unit_rank(&smallest)
+        .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a date unit"))?;
+    let largest_raw = opt_str(i, opts, "largestUnit", "auto")?;
+    let largest = sing(&largest_raw).to_string();
+    let lrank = if largest == "auto" {
+        srank.max(6)
+    } else {
+        date_unit_rank(&largest)
+            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
+    };
+    if lrank < srank {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
+    Ok(rank_unit(lrank).to_string())
 }
 /// The unit name for a rank (inverse of [`unit_rank`]).
 fn rank_unit(r: i32) -> &'static str {
@@ -1725,21 +1742,18 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
             } else {
                 0
             };
-            let mut mid = constrain_add_ym(lo, years * 12);
+            let mid = constrain_add_ym(lo, years * 12);
             if cmp_date(mid, hi) > 0 {
                 years -= 1;
-                mid = constrain_add_ym(lo, years * 12);
             }
+            // Count whole months by always adding to the *original* `lo` (not the running midpoint):
+            // re-clamping a short month each step would otherwise compound day drift.
+            let base = years * 12;
             let mut months = 0i64;
-            loop {
-                let next = constrain_add_ym(mid, 1);
-                if cmp_date(next, hi) <= 0 {
-                    months += 1;
-                    mid = next;
-                } else {
-                    break;
-                }
+            while cmp_date(constrain_add_ym(lo, base + months + 1), hi) <= 0 {
+                months += 1;
             }
+            let mid = constrain_add_ym(lo, base + months);
             let days = epoch_days(hi) - epoch_days(mid);
             out.years = years;
             out.months = months;
