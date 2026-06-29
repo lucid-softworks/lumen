@@ -2502,6 +2502,26 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 return Err("a class may only have one constructor".into());
             }
         }
+        // Field name rules: no field may be named "constructor"; a static field can't be "prototype".
+        if matches!(m.kind, MemberKind::Field) {
+            if key_is(&m.key, "constructor") {
+                return Err("classes may not have a field named 'constructor'".into());
+            }
+            if m.is_static && key_is(&m.key, "prototype") {
+                return Err("classes may not have a static field named 'prototype'".into());
+            }
+            // A field's computed name and its initializer may not use `arguments` or `super()`.
+            if let PropKey::Computed(e) = &m.key {
+                if let Some(msg) = crate::eval::field_init_error(e) {
+                    return Err(msg.into());
+                }
+            }
+            if let Some(v) = &m.value {
+                if let Some(msg) = crate::eval::field_init_error(v) {
+                    return Err(msg.into());
+                }
+            }
+        }
         if let PropKey::Ident(name) = &m.key {
             if name.starts_with('#') {
                 if name == "#constructor" {
