@@ -1235,8 +1235,14 @@ impl Parser {
         let mut base = if self.is_kw("new") {
             self.advance();
             if self.eat_punct(".") {
-                // new.target — treat as undefined for now.
-                let _ = self.parse_property_name_ident()?;
+                // `new.target` — only valid inside a function. (lumen models its value as undefined.)
+                if !self.is_ident_word("target") {
+                    return self.err("expected 'target' after 'new.'");
+                }
+                self.advance();
+                if self.fn_depth == 0 {
+                    return self.err("new.target is only valid inside a function");
+                }
                 Expr::Undefined
             } else {
                 let callee = self.parse_member_expr()?;

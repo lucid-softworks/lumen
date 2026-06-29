@@ -1624,3 +1624,10 @@ fn update_target_errors() {
     assert_eq!(run("var o={x:1}; o.x++; o.x"), "2");
     assert_eq!(run("var a=[1]; a[0]++; a[0]"), "2");
 }
+#[test]
+fn new_target_context() {
+    assert!(Engine::new().eval("new.target", false).is_err());
+    assert!(Engine::new().eval("new.foo", false).is_err());
+    assert_eq!(run("function f(){ return typeof new.target } f()"), "undefined");
+    assert_eq!(run("var o={m(){return typeof new.target}}; o.m()"), "undefined");
+}
