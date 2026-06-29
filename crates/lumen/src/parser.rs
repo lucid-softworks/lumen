@@ -2254,7 +2254,6 @@ impl Parser {
             && !self.nl_at(1)
         {
             self.advance(); // `accessor`
-            let backing = format!("#\u{0}acc{}", self.pos);
             let key = self.parse_prop_key()?;
             let init = if self.eat_punct("=") {
                 Some(self.parse_assign()?)
@@ -2262,31 +2261,14 @@ impl Parser {
                 None
             };
             self.consume_semicolon()?;
-            let field = ClassMember {
-                key: PropKey::Ident(backing.clone()),
-                kind: MemberKind::Field,
+            return Ok(vec![ClassMember {
+                key,
+                kind: MemberKind::Accessor,
                 is_static,
                 func: None,
                 value: init,
-                decorators: Vec::new(),
-            };
-            let getter = ClassMember {
-                key: key.clone(),
-                kind: MemberKind::Get,
-                is_static,
-                func: Some(Rc::new(synth_accessor_get(&backing))),
-                value: None,
                 decorators,
-            };
-            let setter = ClassMember {
-                key,
-                kind: MemberKind::Set,
-                is_static,
-                func: Some(Rc::new(synth_accessor_set(&backing))),
-                value: None,
-                decorators: Vec::new(),
-            };
-            return Ok(vec![field, getter, setter]);
+            }]);
         }
         let mut kind = MemberKind::Method;
         if (self.is_ident_word("get") || self.is_ident_word("set"))
@@ -2590,55 +2572,10 @@ fn key_is(key: &PropKey, name: &str) -> bool {
 
 /// Class early errors: at most one constructor, no `#constructor`, and each private name is declared
 /// once (a get/set accessor pair for the same name being the only exception).
-/// The synthesized getter for an auto-accessor: `get() { return this.<backing>; }`.
-fn synth_accessor_get(backing: &str) -> Function {
-    Function {
-        name: None,
-        params: Vec::new(),
-        body: vec![Stmt::Return(Some(Expr::Member {
-            obj: Box::new(Expr::This),
-            prop: backing.to_string(),
-            optional: false,
-        }))],
-        is_arrow: false,
-        is_strict: true,
-        expr_body: false,
-        is_generator: false,
-        is_async: false,
-    }
-}
-
-/// The synthesized setter for an auto-accessor: `set(v) { this.<backing> = v; }`.
-fn synth_accessor_set(backing: &str) -> Function {
-    let param = "\u{0}v".to_string();
-    Function {
-        name: None,
-        params: vec![Param {
-            pattern: Pattern::Ident(param.clone()),
-            default: None,
-            rest: false,
-        }],
-        body: vec![Stmt::Expr(Expr::Assign {
-            op: "=",
-            target: Box::new(Expr::Member {
-                obj: Box::new(Expr::This),
-                prop: backing.to_string(),
-                optional: false,
-            }),
-            value: Box::new(Expr::Ident(param)),
-        })],
-        is_arrow: false,
-        is_strict: true,
-        expr_body: false,
-        is_generator: false,
-        is_async: false,
-    }
-}
-
 fn validate_class(members: &[ClassMember]) -> Result<(), String> {
     let mut ctor_count = 0;
-    // (name, is_static) → the member kinds declared under that private name.
-    let mut private: Vec<((String, bool), Vec<MemberKind>)> = Vec::new();
+    // private name → the (kind, is_static) of each declaration under it.
+    let mut private: Vec<(String, Vec<(MemberKind, bool)>)> = Vec::new();
     for m in members {
         if matches!(m.kind, MemberKind::Constructor) {
             ctor_count += 1;
@@ -2692,21 +2629,22 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 if name == "#constructor" {
                     return Err("'#constructor' is a reserved private name".into());
                 }
-                let entry = private
-                    .iter_mut()
-                    .find(|((n, s), _)| n == name && *s == m.is_static);
+                // A private name occupies one slot for the whole class, regardless of static-ness.
+                let entry = private.iter_mut().find(|(n, _)| n == name);
                 match entry {
-                    Some((_, kinds)) => kinds.push(m.kind),
-                    None => private.push(((name.clone(), m.is_static), vec![m.kind])),
+                    Some((_, kinds)) => kinds.push((m.kind, m.is_static)),
+                    None => private.push((name.clone(), vec![(m.kind, m.is_static)])),
                 }
             }
         }
     }
-    for ((name, _), kinds) in &private {
+    for (name, kinds) in &private {
+        // Valid: a single declaration, or a get/set accessor pair with matching static-ness.
         let ok = kinds.len() == 1
             || (kinds.len() == 2
-                && kinds.iter().any(|k| matches!(k, MemberKind::Get))
-                && kinds.iter().any(|k| matches!(k, MemberKind::Set)));
+                && kinds[0].1 == kinds[1].1
+                && kinds.iter().any(|(k, _)| matches!(k, MemberKind::Get))
+                && kinds.iter().any(|(k, _)| matches!(k, MemberKind::Set)));
         if !ok {
             return Err(format!("duplicate private name '{name}'"));
         }

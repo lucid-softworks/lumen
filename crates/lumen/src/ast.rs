@@ -136,6 +136,8 @@ pub enum MemberKind {
     Get,
     Set,
     Field,
+    /// `accessor x = init` — an auto-accessor: a private backing field plus a getter/setter pair.
+    Accessor,
     /// `static { ... }` — runs once at class definition with `this` = the class.
     StaticBlock,
 }

@@ -91,6 +91,11 @@ pub enum Callable {
         realm: usize,
         target: Box<Value>,
     },
+    /// An auto-accessor's synthesized getter: reads the private backing field (brand-checked) off
+    /// the receiver.
+    AccessorGet(Rc<str>),
+    /// An auto-accessor's synthesized setter: writes the private backing field (brand-checked).
+    AccessorSet(Rc<str>),
 }
 
 /// Exotic internal data for built-in object kinds (arrays, primitive wrappers). The wrapper

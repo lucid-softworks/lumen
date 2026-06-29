@@ -2832,7 +2832,10 @@ fn class_validation() {
         run("class C{ static #s=5; static g(){return C.#s} }; C.g()"),
         "5"
     );
-    assert_eq!(run("class C{ #x=1; static #x=2; } 'ok'"), "ok"); // static + instance #x are distinct
+    // A private name occupies one slot for the whole class: instance + static `#x` is a duplicate.
+    assert!(Engine::new()
+        .eval("class C{ #x=1; static #x=2; }", false)
+        .is_err());
 }
 #[test]
 fn dstr_target_validation() {
@@ -3814,3 +3817,4 @@ fn async_generator_coroutine() {
         "D"
     );
 }
+

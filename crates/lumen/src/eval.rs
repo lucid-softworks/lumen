@@ -1978,6 +1978,31 @@ impl Interp {
                 proto.clone()
             };
             match m.kind {
+                MemberKind::Accessor => {
+                    // An auto-accessor: a private backing field plus a brand-checked getter/setter.
+                    // The backing key is globally unique so a subclass accessor never collides with
+                    // a superclass one on the same instance.
+                    self.accessor_seq += 1;
+                    let backing: Rc<str> =
+                        Rc::from(format!("#\u{0}acc{}", self.accessor_seq).as_str());
+                    let getter = self.make_accessor_fn(&key, &backing, true);
+                    let setter = self.make_accessor_fn(&key, &backing, false);
+                    self.define_class_accessor(&target, &key, Some(getter), Some(setter));
+                    if m.is_static {
+                        let scope = new_scope(Some(static_env.clone()));
+                        bind(&scope, "this", ctor_val.clone());
+                        let v = match &m.value {
+                            Some(e) => self.eval(e, &scope)?,
+                            None => Value::Undefined,
+                        };
+                        ctor_obj
+                            .borrow_mut()
+                            .props
+                            .insert(backing.to_string(), Property::plain(v));
+                    } else {
+                        inst_fields.push((backing.to_string(), m.value.clone()));
+                    }
+                }
                 MemberKind::Method => {
                     let f = self.make_function(m.func.clone().unwrap(), menv.clone());
                     if let Value::Obj(fo) = &f {
@@ -2032,6 +2057,35 @@ impl Interp {
             },
         );
         Ok(ctor_val)
+    }
+
+    /// Build an auto-accessor's getter (`is_get`) or setter as a function object backed by the
+    /// private `backing` field, with a spec-shaped `name` (`get x`/`set x`) and `length`.
+    fn make_accessor_fn(&self, name: &str, backing: &Rc<str>, is_get: bool) -> Value {
+        let o = Object::new(Some(self.function_proto.clone()));
+        {
+            let mut b = o.borrow_mut();
+            b.call = if is_get {
+                Callable::AccessorGet(backing.clone())
+            } else {
+                Callable::AccessorSet(backing.clone())
+            };
+            let prefix = if is_get { "get " } else { "set " };
+            b.props.insert(
+                "name",
+                Property::data(
+                    Value::from_string(format!("{prefix}{name}")),
+                    false,
+                    false,
+                    true,
+                ),
+            );
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(if is_get { 0.0 } else { 1.0 }), false, false, true),
+            );
+        }
+        Value::Obj(o)
     }
 
     fn define_class_accessor(

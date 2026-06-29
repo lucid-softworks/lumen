@@ -232,6 +232,9 @@ pub struct Interp {
     /// A stack of disposal scopes — one frame per block/function body that can hold `using`
     /// declarations. Resources are disposed in reverse on scope exit (see `dispose_frame`).
     pub using_stack: Vec<Vec<Disposable>>,
+    /// Monotonic counter minting globally-unique private backing keys for auto-accessors (so a
+    /// subclass's accessor never collides with a superclass's on the same instance).
+    pub accessor_seq: u64,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -346,6 +349,7 @@ impl Interp {
             constructing: false,
             super_call_ok: false,
             using_stack: Vec::new(),
+            accessor_seq: 0,
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1130,9 +1134,44 @@ impl Interp {
             Callable::WrappedShadow { realm, target } => {
                 self.call_wrapped_shadow(realm, *target, args)
             }
+            // Auto-accessor get/set: the receiver must *own* the private backing field (so a static
+            // accessor reached through a subclass, which doesn't carry the slot, throws).
+            Callable::AccessorGet(key) => self.accessor_load(&this, &key),
+            Callable::AccessorSet(key) => {
+                self.accessor_store(&this, &key, args.first().cloned().unwrap_or(Value::Undefined))
+            }
         };
         self.constructing = saved_ctor;
         r
+    }
+
+    /// Read an auto-accessor's backing field off `this`, throwing if `this` lacks the slot.
+    fn accessor_load(&mut self, this: &Value, key: &str) -> Result<Value, Abrupt> {
+        match this {
+            Value::Obj(o) if o.borrow().props.contains(key) => {
+                Ok(o.borrow().props.get(key).map(|p| p.value.clone()).unwrap())
+            }
+            _ => Err(self.throw(
+                "TypeError",
+                "cannot read auto-accessor backing field from an unrelated object",
+            )),
+        }
+    }
+
+    /// Write an auto-accessor's backing field on `this`, throwing if `this` lacks the slot.
+    fn accessor_store(&mut self, this: &Value, key: &str, value: Value) -> Result<Value, Abrupt> {
+        match this {
+            Value::Obj(o) if o.borrow().props.contains(key) => {
+                if let Some(p) = o.borrow_mut().props.get_mut(key) {
+                    p.value = value;
+                }
+                Ok(Value::Undefined)
+            }
+            _ => Err(self.throw(
+                "TypeError",
+                "cannot write auto-accessor backing field on an unrelated object",
+            )),
+        }
     }
 
     /// Make a ShadowRealm wrapped function: a caller-realm callable around `target` in `realm`.
@@ -1637,7 +1676,10 @@ impl Interp {
                 all.extend_from_slice(args);
                 self.construct(Value::Obj(target), &all)
             }
-            Callable::None | Callable::WrappedShadow { .. } => {
+            Callable::None
+            | Callable::WrappedShadow { .. }
+            | Callable::AccessorGet(_)
+            | Callable::AccessorSet(_) => {
                 Err(self.throw("TypeError", "value is not a constructor"))
             }
         }
