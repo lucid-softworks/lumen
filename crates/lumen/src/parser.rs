@@ -1667,6 +1667,7 @@ impl Parser {
         }
         self.strict = saved;
         self.expect_punct("}")?;
+        validate_class(&members).map_err(|m| ParseError { message: m, line: self.line() })?;
         Ok(Class { name, superclass, members })
     }
 
@@ -1935,6 +1936,44 @@ fn key_is(key: &PropKey, name: &str) -> bool {
         PropKey::Str(s) => &**s == name,
         _ => false,
     }
+}
+
+/// Class early errors: at most one constructor, no `#constructor`, and each private name is declared
+/// once (a get/set accessor pair for the same name being the only exception).
+fn validate_class(members: &[ClassMember]) -> Result<(), String> {
+    let mut ctor_count = 0;
+    // (name, is_static) → the member kinds declared under that private name.
+    let mut private: Vec<((String, bool), Vec<MemberKind>)> = Vec::new();
+    for m in members {
+        if matches!(m.kind, MemberKind::Constructor) {
+            ctor_count += 1;
+            if ctor_count > 1 {
+                return Err("a class may only have one constructor".into());
+            }
+        }
+        if let PropKey::Ident(name) = &m.key {
+            if name.starts_with('#') {
+                if name == "#constructor" {
+                    return Err("'#constructor' is a reserved private name".into());
+                }
+                let entry = private.iter_mut().find(|((n, s), _)| n == name && *s == m.is_static);
+                match entry {
+                    Some((_, kinds)) => kinds.push(m.kind.clone()),
+                    None => private.push(((name.clone(), m.is_static), vec![m.kind.clone()])),
+                }
+            }
+        }
+    }
+    for ((name, _), kinds) in &private {
+        let ok = kinds.len() == 1
+            || (kinds.len() == 2
+                && kinds.iter().any(|k| matches!(k, MemberKind::Get))
+                && kinds.iter().any(|k| matches!(k, MemberKind::Set)));
+        if !ok {
+            return Err(format!("duplicate private name '{name}'"));
+        }
+    }
+    Ok(())
 }
 
 /// Whether `delete <arg>` targets a private member (`obj.#x`), which is a SyntaxError.

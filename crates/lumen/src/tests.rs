@@ -1645,3 +1645,14 @@ fn delete_private_member() {
     assert_eq!(run("class C{ #x=1; m(){ return delete this.foo } }; new C().m()"), "true");
     assert_eq!(run("var o={a:1}; delete o.a; typeof o.a"), "undefined");
 }
+#[test]
+fn class_validation() {
+    assert!(Engine::new().eval("class C{ #constructor(){} }", false).is_err());
+    assert!(Engine::new().eval("class C{ #x; #x; }", false).is_err());
+    assert!(Engine::new().eval("class C{ #x(){} #x(){} }", false).is_err());
+    assert!(Engine::new().eval("class C{ constructor(){} constructor(){} }", false).is_err());
+    assert_eq!(run("class C{ get #x(){return 1} set #x(v){} m(){return this.#x} }; new C().m()"), "1"); // get/set pair ok
+    assert_eq!(run("class C{ #x=1; #y=2; s(){return this.#x+this.#y} }; new C().s()"), "3");
+    assert_eq!(run("class C{ static #s=5; static g(){return C.#s} }; C.g()"), "5");
+    assert_eq!(run("class C{ #x=1; static #x=2; } 'ok'"), "ok"); // static + instance #x are distinct
+}
