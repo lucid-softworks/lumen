@@ -662,8 +662,13 @@ impl<'a> Lexer<'a> {
                 }
                 Some('\\') => {
                     body.push('\\');
-                    if let Some(c) = self.bump() {
-                        body.push(c);
+                    // A backslash sequence can't contain a line terminator either.
+                    match self.bump() {
+                        Some(c) if is_line_terminator(c) => {
+                            return Err(self.err("unterminated regular expression"))
+                        }
+                        Some(c) => body.push(c),
+                        None => return Err(self.err("unterminated regular expression")),
                     }
                 }
                 Some('[') => {

@@ -1855,3 +1855,11 @@ fn regex_group_name_validation() {
     assert_eq!(run("/(?<\\u0061b>x)/u.test('x')"), "true");          // escaped 'a'
     assert_eq!(run(r"/(?<café>x)/u.test('x')"), "true");             // unicode
 }
+#[test]
+fn regex_no_line_terminator() {
+    assert!(Engine::new().eval("/\\\n/", false).is_err());   // backslash + LF
+    assert!(Engine::new().eval("/a\nb/", false).is_err());   // raw LF in body
+    assert!(Engine::new().eval("/[\\\n]/", false).is_err()); // backslash+LF in class
+    assert_eq!(run(r"/\n/.test('\n')"), "true");             // \n escape (valid)
+    assert_eq!(run(r"/ab/.test('ab')"), "true");
+}
