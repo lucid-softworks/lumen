@@ -2156,3 +2156,12 @@ fn fn_decl_stmt_position() {
     assert_eq!(run("{ function f(){return 5} } f()"), "5");
     assert_eq!(run("if(true){ function g(){return 7} } g()"), "7");
 }
+#[test]
+fn regex_prop_invalid_special() {
+    for pat in [r"/\p{ANY}/u", r"/\p{any}/u", r"/\p{ASSIGNED}/u", r"/\p{assigned}/u", r"/\p{Ascii}/u", r"/\p{ascii}/u"] {
+        assert!(Engine::new().eval(pat, false).is_err(), "{pat} should be SyntaxError");
+    }
+    // valid ones still work
+    assert_eq!(run(r"/\p{ASCII_Hex_Digit}/u.test('F')"), "true");
+    assert_eq!(run(r"/\p{Lowercase}/u.test('a')"), "true");
+}
