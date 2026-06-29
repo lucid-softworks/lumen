@@ -81,6 +81,9 @@ pub enum Callable {
     User(Rc<Function>, Env),
     /// The result of `Function.prototype.bind`.
     Bound { target: Gc, this: Value, args: Vec<Value> },
+    /// A ShadowRealm wrapped function: `target` is a callable inside the sub-realm identified by
+    /// `realm` (its pointer). Calls marshal primitive args in and the primitive result out.
+    WrappedShadow { realm: usize, target: Box<Value> },
 }
 
 /// Exotic internal data for built-in object kinds (arrays, primitive wrappers). The wrapper

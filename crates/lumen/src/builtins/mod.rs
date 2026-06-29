@@ -3879,7 +3879,7 @@ fn shadow_evaluate(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
         // Primitive values (number/string/bool/null/undefined/bigint/symbol) are self-contained and
         // cross the realm boundary directly.
         Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
-        Ok(v) if v.is_callable() => Err(i.make_error("TypeError", "ShadowRealm cannot yet wrap a returned function")),
+        Ok(v) if v.is_callable() => Ok(i.make_wrapped_shadow(ptr, v)),
         Ok(_) => Err(i.make_error("TypeError", "ShadowRealm.prototype.evaluate result must be a primitive")),
         // An error thrown inside the shadow realm is re-thrown as a TypeError of the calling realm.
         Err(_) => Err(i.make_error("TypeError", "ShadowRealm evaluate: the provided source threw an error")),

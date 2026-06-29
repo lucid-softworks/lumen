@@ -1939,3 +1939,14 @@ fn shadow_realm_basic() {
     assert_eq!(run("var r=new ShadowRealm(); try{r.evaluate('({})')}catch(e){e.constructor.name}"), "TypeError");
     assert_eq!(run("try{ShadowRealm()}catch(e){e.constructor.name}"), "TypeError");
 }
+#[test]
+fn shadow_realm_wrapped_fn() {
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('x=>x+1'); typeof f"), "function");
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('x=>x*2'); f(21)"), "42");
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('(a,b)=>a+b'); f(3,4)"), "7");
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('()=>\"hi\"'); f()"), "hi");
+    // a wrapped function isn't constructable, and passing an object throws
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('x=>x'); try{f({})}catch(e){e.constructor.name}"), "TypeError");
+    // returned function from a wrapped call is itself wrapped
+    assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('a=>b=>a+b'); typeof f(1)"), "function");
+}

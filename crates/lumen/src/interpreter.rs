@@ -1014,9 +1014,51 @@ impl Interp {
                 all.extend_from_slice(args);
                 self.call(Value::Obj(target), bthis, &all)
             }
+            Callable::WrappedShadow { realm, target } => self.call_wrapped_shadow(realm, *target, args),
         };
         self.constructing = saved_ctor;
         r
+    }
+
+    /// Make a ShadowRealm wrapped function: a caller-realm callable around `target` in `realm`.
+    pub fn make_wrapped_shadow(&self, realm: usize, target: Value) -> Value {
+        let f = Object::new(Some(self.function_proto.clone()));
+        {
+            let mut b = f.borrow_mut();
+            b.call = Callable::WrappedShadow { realm, target: Box::new(target) };
+            b.props.insert("length", Property::data(Value::Num(0.0), false, false, true));
+            b.props.insert("name", Property::data(Value::str(""), false, false, true));
+        }
+        Value::Obj(f)
+    }
+
+    /// Call a ShadowRealm wrapped function: marshal primitive args into the sub-realm, call `target`
+    /// there, and marshal the primitive (or further-wrapped callable) result back.
+    fn call_wrapped_shadow(&mut self, realm: usize, target: Value, args: &[Value]) -> Result<Value, Abrupt> {
+        // Only primitive arguments may cross into the shadow realm; callables wrap, objects throw.
+        let mut inner_args = Vec::with_capacity(args.len());
+        for a in args {
+            if matches!(a, Value::Obj(_)) {
+                return Err(self.throw(
+                    "TypeError",
+                    "ShadowRealm wrapped function: only primitive arguments are supported",
+                ));
+            }
+            inner_args.push(a.clone());
+        }
+        let mut sub = match self.shadow_realms.remove(&realm) {
+            Some(s) => s,
+            None => return Err(self.throw("TypeError", "the ShadowRealm is no longer available")),
+        };
+        let result = sub.call(target, Value::Undefined, &inner_args);
+        sub.drain_microtasks();
+        self.shadow_realms.insert(realm, sub);
+        match result {
+            Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
+            Ok(v) if v.is_callable() => Ok(self.make_wrapped_shadow(realm, v)),
+            Ok(_) => Err(self.throw("TypeError", "a wrapped function returned a non-primitive")),
+            Err(_) => Err(self.throw("TypeError", "a wrapped function threw inside the ShadowRealm")),
+        }
     }
 
     pub(crate) fn call_user(
@@ -1235,7 +1277,9 @@ impl Interp {
                 all.extend_from_slice(args);
                 self.construct(Value::Obj(target), &all)
             }
-            Callable::None => Err(self.throw("TypeError", "value is not a constructor")),
+            Callable::None | Callable::WrappedShadow { .. } => {
+                Err(self.throw("TypeError", "value is not a constructor"))
+            }
         }
     }
 
