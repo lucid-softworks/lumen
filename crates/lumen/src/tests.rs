@@ -1765,3 +1765,14 @@ fn var_nested_block_redecl() {
     // unrelated names fine
     assert_eq!(run("{ let a=1; { var b=2; } a }"), "1");
 }
+#[test]
+fn shorthand_reserved_word() {
+    assert!(Engine::new().eval("({ break } = {})", false).is_err());
+    assert!(Engine::new().eval("var {break} = {}", false).is_err());
+    assert!(Engine::new().eval("var x = { bre\\u0061k } = { break: 42 };", false).is_err());
+    assert!(Engine::new().eval("({ null } = {})", false).is_err());
+    // valid shorthand + keyword-named property with value are fine
+    assert_eq!(run("var {x} = {x:5}; x"), "5");
+    assert_eq!(run("var o={break:1}; o.break"), "1");
+    assert_eq!(run("var {break:b} = {break:7}; b"), "7");
+}

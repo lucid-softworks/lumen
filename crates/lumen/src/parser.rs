@@ -3,7 +3,7 @@
 
 use crate::ast::*;
 use crate::lexer::tokenize;
-use crate::token::{Tok, Token, TplPart};
+use crate::token::{Tok, Token, TplPart, KEYWORDS};
 use std::rc::Rc;
 
 pub struct ParseError {
@@ -255,6 +255,21 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    /// A property shorthand (`{ x }` / `{ x = d }`) binds/references `x`, so the name must be a valid
+    /// identifier — not a reserved word (even one spelled with a `\u` escape, which lexes as a keyword).
+    fn check_shorthand_ident(&self, name: &str) -> Result<(), ParseError> {
+        if KEYWORDS.contains(&name) {
+            return self.err(format!("'{name}' is a reserved word and cannot be a shorthand property"));
+        }
+        if self.strict && is_strict_reserved_binding(name) {
+            return self.err(format!("'{name}' cannot be used as a shorthand property in strict mode"));
+        }
+        if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+            return self.err(format!("'{name}' cannot be used as a shorthand property here"));
+        }
+        Ok(())
     }
 
     fn push_decl_scope(&mut self) {
@@ -568,6 +583,7 @@ impl Parser {
                     PropKey::Ident(n) => n.clone(),
                     _ => return self.err("invalid shorthand destructuring target"),
                 };
+                self.check_shorthand_ident(&name)?;
                 let d = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
                 (Pattern::Ident(name), d)
             };
@@ -1582,6 +1598,7 @@ impl Parser {
                 // a destructuring assignment target). Only valid when key is a plain identifier.
                 match &key {
                     PropKey::Ident(name) => {
+                        self.check_shorthand_ident(name)?;
                         let ident = Expr::Ident(name.clone());
                         let value = if self.eat_punct("=") {
                             let default = self.parse_assign()?;
