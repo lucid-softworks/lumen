@@ -19,6 +19,7 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
+    validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
     Ok(body)
 }
 
@@ -29,6 +30,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
+    validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
     Ok(body)
 }
 
@@ -2028,6 +2030,287 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
         if !ok {
             return Err(format!("duplicate private name '{name}'"));
         }
+    }
+    Ok(())
+}
+
+/// Every referenced private name (`obj.#x`, `#x in obj`) must be declared in the class it appears in
+/// or an enclosing one. Walks the AST with a stack of each class's declared private names; entering a
+/// class pushes its names (so forward references within the class resolve) and leaving pops them.
+fn validate_private_names(stmts: &[Stmt]) -> Result<(), String> {
+    let mut st: Vec<Vec<String>> = Vec::new();
+    pn_stmts(stmts, &mut st)
+}
+
+fn pn_declared(st: &[Vec<String>], name: &str) -> bool {
+    st.iter().any(|s| s.iter().any(|n| n == name))
+}
+
+fn pn_class(class: &Class, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    if let Some(s) = &class.superclass {
+        pn_expr(s, st)?;
+    }
+    let names = class
+        .members
+        .iter()
+        .filter_map(|m| match &m.key {
+            PropKey::Ident(n) if n.starts_with('#') => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    st.push(names);
+    for m in &class.members {
+        if let PropKey::Computed(e) = &m.key {
+            pn_expr(e, st)?;
+        }
+        if let Some(f) = &m.func {
+            pn_params(&f.params, st)?;
+            pn_stmts(&f.body, st)?;
+        }
+        if let Some(v) = &m.value {
+            pn_expr(v, st)?;
+        }
+    }
+    st.pop();
+    Ok(())
+}
+
+fn pn_params(params: &[Param], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    for p in params {
+        pn_pattern(&p.pattern, st)?;
+        if let Some(d) = &p.default {
+            pn_expr(d, st)?;
+        }
+    }
+    Ok(())
+}
+
+fn pn_pattern(pat: &Pattern, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    match pat {
+        Pattern::Array(elems) => {
+            for e in elems {
+                match e {
+                    ArrayPatElem::Elem { pattern, default } => {
+                        pn_pattern(pattern, st)?;
+                        if let Some(d) = default {
+                            pn_expr(d, st)?;
+                        }
+                    }
+                    ArrayPatElem::Rest(p) => pn_pattern(p, st)?,
+                    ArrayPatElem::Hole => {}
+                }
+            }
+        }
+        Pattern::Object(o) => {
+            for p in &o.props {
+                pn_pattern(&p.value, st)?;
+                if let Some(d) = &p.default {
+                    pn_expr(d, st)?;
+                }
+            }
+        }
+        Pattern::Member(e) => pn_expr(e, st)?,
+        Pattern::Ident(_) => {}
+    }
+    Ok(())
+}
+
+fn pn_stmts(stmts: &[Stmt], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    for s in stmts {
+        pn_stmt(s, st)?;
+    }
+    Ok(())
+}
+
+fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    match stmt {
+        Stmt::Expr(e) | Stmt::Throw(e) => pn_expr(e, st)?,
+        Stmt::VarDecl { decls, .. } => {
+            for (pat, init) in decls {
+                pn_pattern(pat, st)?;
+                if let Some(e) = init {
+                    pn_expr(e, st)?;
+                }
+            }
+        }
+        Stmt::FuncDecl(f) => {
+            pn_params(&f.params, st)?;
+            pn_stmts(&f.body, st)?;
+        }
+        Stmt::Return(o) => {
+            if let Some(e) = o {
+                pn_expr(e, st)?;
+            }
+        }
+        Stmt::If { test, cons, alt } => {
+            pn_expr(test, st)?;
+            pn_stmt(cons, st)?;
+            if let Some(a) = alt {
+                pn_stmt(a, st)?;
+            }
+        }
+        Stmt::Block(b) => pn_stmts(b, st)?,
+        Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
+            pn_expr(test, st)?;
+            pn_stmt(body, st)?;
+        }
+        Stmt::For { init, test, update, body } => {
+            if let Some(fi) = init {
+                match &**fi {
+                    ForInit::VarDecl { decls, .. } => {
+                        for (pat, e) in decls {
+                            pn_pattern(pat, st)?;
+                            if let Some(x) = e {
+                                pn_expr(x, st)?;
+                            }
+                        }
+                    }
+                    ForInit::Expr(e) => pn_expr(e, st)?,
+                }
+            }
+            if let Some(e) = test {
+                pn_expr(e, st)?;
+            }
+            if let Some(e) = update {
+                pn_expr(e, st)?;
+            }
+            pn_stmt(body, st)?;
+        }
+        Stmt::ForInOf { left, right, body, .. } => {
+            pn_pattern(left, st)?;
+            pn_expr(right, st)?;
+            pn_stmt(body, st)?;
+        }
+        Stmt::Try { block, handler, finalizer } => {
+            pn_stmts(block, st)?;
+            if let Some((param, body)) = handler {
+                if let Some(p) = param {
+                    pn_pattern(p, st)?;
+                }
+                pn_stmts(body, st)?;
+            }
+            if let Some(f) = finalizer {
+                pn_stmts(f, st)?;
+            }
+        }
+        Stmt::Switch { disc, cases } => {
+            pn_expr(disc, st)?;
+            for c in cases {
+                if let Some(t) = &c.test {
+                    pn_expr(t, st)?;
+                }
+                pn_stmts(&c.body, st)?;
+            }
+        }
+        Stmt::Labeled { body, .. } => pn_stmt(body, st)?,
+        Stmt::With { obj, body } => {
+            pn_expr(obj, st)?;
+            pn_stmt(body, st)?;
+        }
+        Stmt::ClassDecl(c) => pn_class(c, st)?,
+        Stmt::ExportDecl(inner) | Stmt::ExportDefault(inner) => pn_stmt(inner, st)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn pn_args(args: &[ArrayElem], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    for a in args {
+        match a {
+            ArrayElem::Item(e) | ArrayElem::Spread(e) => pn_expr(e, st)?,
+            ArrayElem::Hole => {}
+        }
+    }
+    Ok(())
+}
+
+fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+    match expr {
+        Expr::Member { obj, prop, .. } => {
+            if prop.starts_with('#') && !pn_declared(st, prop) {
+                return Err(format!("Private name '{prop}' is not declared in an enclosing class"));
+            }
+            pn_expr(obj, st)?;
+        }
+        Expr::PrivateIn { name, obj } => {
+            if !pn_declared(st, name) {
+                return Err(format!("Private name '{name}' is not declared in an enclosing class"));
+            }
+            pn_expr(obj, st)?;
+        }
+        Expr::Index { obj, index, .. } => {
+            pn_expr(obj, st)?;
+            pn_expr(index, st)?;
+        }
+        Expr::Class(c) => pn_class(c, st)?,
+        Expr::Func(f) => {
+            pn_params(&f.params, st)?;
+            pn_stmts(&f.body, st)?;
+        }
+        Expr::Unary { arg, .. }
+        | Expr::Update { arg, .. }
+        | Expr::Await(arg)
+        | Expr::OptionalChain(arg) => pn_expr(arg, st)?,
+        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
+            pn_expr(left, st)?;
+            pn_expr(right, st)?;
+        }
+        Expr::Assign { target, value, .. } => {
+            pn_expr(target, st)?;
+            pn_expr(value, st)?;
+        }
+        Expr::Cond { test, cons, alt } => {
+            pn_expr(test, st)?;
+            pn_expr(cons, st)?;
+            pn_expr(alt, st)?;
+        }
+        Expr::Call { callee, args, .. } => {
+            pn_expr(callee, st)?;
+            pn_args(args, st)?;
+        }
+        Expr::New { callee, args } => {
+            pn_expr(callee, st)?;
+            pn_args(args, st)?;
+        }
+        Expr::Array(elems) => pn_args(elems, st)?,
+        Expr::Object(props) => {
+            for p in props {
+                match p {
+                    PropDef::KeyValue { key, value } => {
+                        if let PropKey::Computed(e) = key {
+                            pn_expr(e, st)?;
+                        }
+                        pn_expr(value, st)?;
+                    }
+                    PropDef::Getter { key, func } | PropDef::Setter { key, func } => {
+                        if let PropKey::Computed(e) = key {
+                            pn_expr(e, st)?;
+                        }
+                        pn_params(&func.params, st)?;
+                        pn_stmts(&func.body, st)?;
+                    }
+                    PropDef::Spread(e) => pn_expr(e, st)?,
+                }
+            }
+        }
+        Expr::Seq(v) => {
+            for e in v {
+                pn_expr(e, st)?;
+            }
+        }
+        Expr::Yield { arg, .. } => {
+            if let Some(a) = arg {
+                pn_expr(a, st)?;
+            }
+        }
+        Expr::TaggedTemplate { tag, subs, .. } => {
+            pn_expr(tag, st)?;
+            for s in subs {
+                pn_expr(s, st)?;
+            }
+        }
+        Expr::ImportCall(e) => pn_expr(e, st)?,
+        _ => {}
     }
     Ok(())
 }

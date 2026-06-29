@@ -1788,3 +1788,16 @@ fn private_name_no_escape() {
     assert_eq!(run("class C { #x=5; m(){ return this.#\\u0078 } }; new C().m()"), "5");
     assert_eq!(run("var \\u0041bc = 7; Abc"), "7");
 }
+#[test]
+fn undeclared_private_name() {
+    assert!(Engine::new().eval("class C { m() { something.#x } }", false).is_err());
+    assert!(Engine::new().eval("class C { m() { return this.#y } }", false).is_err());
+    assert!(Engine::new().eval("class C { #x=1; m() { return obj.#z } }", false).is_err());
+    assert!(Engine::new().eval("class C { m() { return #w in obj } }", false).is_err());
+    assert!(Engine::new().eval("obj.#top", false).is_err()); // outside any class
+    // valid: declared in the class (incl. forward + nested-class enclosing)
+    assert_eq!(run("class C { #x=5; getX(){return this.#x} }; new C().getX()"), "5");
+    assert_eq!(run("class C { useLater(){return this.#y} #y=7 }; new C().useLater()"), "7");
+    assert_eq!(run("class C { #x=1; m(){ return class D { d(o){ return o.#x } } } } typeof new C().m()"), "function");
+    assert_eq!(run("class C { #x=3; has(o){ return #x in o } }; var c=new C(); c.has(c)"), "true");
+}
