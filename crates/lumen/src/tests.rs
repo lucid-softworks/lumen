@@ -1679,8 +1679,18 @@ fn regex_property_escapes() {
     assert_eq!(run(r"/[\p{L}\p{N}]/u.test('5')"), "true");
     assert_eq!(run(r"/[^\p{L}]/u.test('A')"), "false");
     assert_eq!(run(r"/\p{Alphabetic}/u.test('A')"), "true");
-    // invalid property -> SyntaxError (thrown when the literal is evaluated)
-    assert!(matches!(Engine::new().eval(r"/\p{Bogus}/u", false), Ok(Completion::Throw{ref name,..}) if name=="SyntaxError"));
+    // invalid property -> parse-phase SyntaxError
+    assert!(Engine::new().eval(r"/\p{Bogus}/u", false).is_err());
     // without u flag, \p is identity 'p'
     assert_eq!(run(r"/\p/.test('p')"), "true");
+}
+#[test]
+fn regex_literal_parse_validation() {
+    // invalid regex literals are now parse-phase SyntaxErrors
+    assert!(Engine::new().eval(r"/\p{Bogus}/u", false).is_err());
+    assert!(Engine::new().eval("/(?<a>)(?<a>)/", false).is_err());
+    assert!(Engine::new().eval("/[z-a]/", false).is_err());
+    assert!(Engine::new().eval("/a**/", false).is_err());
+    assert_eq!(run(r"/\p{L}+/u.test('abc')"), "true");
+    assert_eq!(run("/a+/.test('aaa')"), "true");
 }

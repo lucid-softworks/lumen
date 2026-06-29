@@ -1340,6 +1340,11 @@ impl Parser {
             }
             Tok::Regex { body, flags } => {
                 self.advance();
+                // A regex literal is validated when parsed: an invalid pattern/flags is an early
+                // (parse-phase) SyntaxError, not a runtime one.
+                if let Err(msg) = crate::regex::Regex::new(&body, &flags) {
+                    return self.err(msg);
+                }
                 Ok(Expr::Regex { body: Rc::from(body.as_str()), flags: Rc::from(flags.as_str()) })
             }
             Tok::Keyword("true") => {
