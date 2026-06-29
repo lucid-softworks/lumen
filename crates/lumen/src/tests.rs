@@ -2097,3 +2097,12 @@ fn promise_combinator_this_check() {
     assert_eq!(run("typeof Promise.all([])"), "object");
     assert_eq!(run("typeof Promise.race([Promise.resolve(1)])"), "object");
 }
+#[test]
+fn dataview_offset_validation() {
+    assert!(matches!(Engine::new().eval("new DataView(new ArrayBuffer(8),-1)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError"));
+    assert!(matches!(Engine::new().eval("new DataView(new ArrayBuffer(8),10)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError"));
+    assert!(matches!(Engine::new().eval("new DataView(new ArrayBuffer(8),4,8)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError"));
+    assert_eq!(run("new DataView(new ArrayBuffer(8),2).byteLength"), "6");
+    assert_eq!(run("new DataView(new ArrayBuffer(8),2,4).byteLength"), "4");
+    assert_eq!(run("new DataView(new ArrayBuffer(8)).byteLength"), "8");
+}

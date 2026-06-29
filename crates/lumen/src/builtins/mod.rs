@@ -642,13 +642,32 @@ fn install_dataview(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "DataView requires an ArrayBuffer")),
         };
         let buflen = i.array_buffers[&bp].len();
-        let offset = match arg(a, 1) {
-            Value::Undefined => 0,
-            v => ab(i.to_number(&v))? as usize,
+        let off_n = match arg(a, 1) {
+            Value::Undefined => 0.0,
+            v => ab(i.to_number(&v))?,
         };
+        let off_n = if off_n.is_nan() { 0.0 } else { off_n.trunc() };
+        if off_n < 0.0 || !off_n.is_finite() {
+            return Err(i.make_error("RangeError", "invalid DataView byteOffset"));
+        }
+        let offset = off_n as usize;
+        if offset > buflen {
+            return Err(i.make_error("RangeError", "DataView byteOffset is out of bounds"));
+        }
         let len = match arg(a, 2) {
-            Value::Undefined => buflen.saturating_sub(offset),
-            v => ab(i.to_number(&v))? as usize,
+            Value::Undefined => buflen - offset,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                if n < 0.0 || !n.is_finite() {
+                    return Err(i.make_error("RangeError", "invalid DataView byteLength"));
+                }
+                let l = n as usize;
+                if offset + l > buflen {
+                    return Err(i.make_error("RangeError", "DataView byteLength is out of bounds"));
+                }
+                l
+            }
         };
         let obj = Object::new(i.extra_protos.get("DataView").cloned());
         let p = Rc::as_ptr(&obj) as usize;
