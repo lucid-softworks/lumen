@@ -2057,3 +2057,14 @@ fn array_methods_coerce_primitive() {
     assert_eq!(run("Array.prototype.map.call('ab',c=>c.toUpperCase()).join('')"), "AB");
     assert!(matches!(Engine::new().eval("Array.prototype.indexOf.call(null,1)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
 }
+#[test]
+fn array_concat_slice_holes() {
+    assert_eq!(run("[1,,3].concat([4]).hasOwnProperty(1)"), "false");
+    assert_eq!(run("[1,,3].slice().hasOwnProperty(1)"), "false");
+    assert_eq!(run("[1,,3].concat([4]).length"), "4");
+    assert_eq!(run("[1,2].concat(3,[4,5]).join(',')"), "1,2,3,4,5");
+    // isConcatSpreadable
+    assert_eq!(run("var o={length:2,0:'a',1:'b',[Symbol.isConcatSpreadable]:true};[].concat(o).join(',')"), "a,b");
+    assert_eq!(run("var a=[1,2];a[Symbol.isConcatSpreadable]=false;[].concat(a).length"), "1");
+    assert_eq!(run("[1,2,3].slice(1).join(',')"), "2,3");
+}

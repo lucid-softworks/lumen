@@ -4997,8 +4997,12 @@ fn install_array(it: &mut Interp) {
         let mut k = start;
         let mut to = 0usize;
         while k < end {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            ab(i.set_member(&result, &to.to_string(), v))?;
+            let key = k.to_string();
+            // Preserve holes: only copy indices the source actually has (HasProperty).
+            if i.has_property(&o, &key) {
+                let v = ab(i.get_member(&this, &key))?;
+                ab(i.set_member(&result, &to.to_string(), v))?;
+            }
             k += 1;
             to += 1;
         }
@@ -5057,25 +5061,41 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "concat", 1, |i, this, args| {
         arr_require_coercible(i, &this)?;
-        let mut out = Vec::new();
-        let mut push_all = |i: &mut Interp, v: &Value| -> Result<(), Value> {
-            if let Value::Obj(o) = v {
-                if matches!(o.borrow().exotic, Exotic::Array) {
-                    let len = ab(i.checked_array_len(o))?;
-                    for k in 0..len {
-                        out.push(ab(i.get_member(v, &k.to_string()))?);
-                    }
-                    return Ok(());
+        let result = array_species_create(i, &this, 0)?;
+        let mut n = 0usize;
+        let items: Vec<Value> = std::iter::once(this.clone()).chain(args.iter().cloned()).collect();
+        for v in &items {
+            // IsConcatSpreadable: @@isConcatSpreadable if defined, else IsArray.
+            let spreadable = if let Value::Obj(_) = v {
+                let key = well_known_key(i, "isConcatSpreadable");
+                let flag = match &key {
+                    Some(k) => ab(i.get_member(v, k))?,
+                    None => Value::Undefined,
+                };
+                match flag {
+                    Value::Undefined => matches!(v, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)),
+                    other => i.to_boolean(&other),
                 }
+            } else {
+                false
+            };
+            if spreadable {
+                let len = ab(i.checked_array_len(&match v { Value::Obj(o) => o.clone(), _ => unreachable!() }))?;
+                for k in 0..len {
+                    let key = k.to_string();
+                    if i.has_property(&match v { Value::Obj(o) => o.clone(), _ => unreachable!() }, &key) {
+                        let elem = ab(i.get_member(v, &key))?;
+                        ab(i.set_member(&result, &n.to_string(), elem))?;
+                    }
+                    n += 1; // increment for holes too, preserving their position
+                }
+            } else {
+                ab(i.set_member(&result, &n.to_string(), v.clone()))?;
+                n += 1;
             }
-            out.push(v.clone());
-            Ok(())
-        };
-        push_all(i, &this)?;
-        for a in args {
-            push_all(i, a)?;
         }
-        Ok(i.make_array(out))
+        ab(i.set_member(&result, "length", Value::Num(n as f64)))?;
+        Ok(result)
     });
     it.def_method(&ap, "forEach", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
