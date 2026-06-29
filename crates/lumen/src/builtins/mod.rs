@@ -1560,16 +1560,66 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
     }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;
-    // Methods that produce a new collection return a TypedArray of the receiver's kind, not a plain
-    // Array: build it via the receiver's constructor from the delegated result.
+    // Methods that produce a new collection return a TypedArray built via TypedArraySpeciesCreate
+    // (the receiver's `constructor[@@species]`, falling back to the kind's intrinsic constructor).
     if matches!(
         method,
         "map" | "filter" | "slice" | "toReversed" | "toSorted" | "with"
     ) {
-        let ctor = ab(i.get_member(this, "constructor"))?;
-        if ctor.is_callable() {
-            return ab(i.construct(ctor, &[result]));
+        let len = ab(i.get_member(&result, "length"))?;
+        let len = ab(i.to_number(&len))? as usize;
+        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+        // SpeciesConstructor access can run user code that detaches the source — re-validate.
+        if !i.array_buffers.contains_key(&info.buffer) {
+            return Err(i.make_error(
+                "TypeError",
+                "Cannot perform operation on a detached ArrayBuffer",
+            ));
         }
+        for k in 0..len {
+            let v = ab(i.get_member(&result, &k.to_string()))?;
+            ab(i.set_member(&new_ta, &k.to_string(), v))?;
+        }
+        return Ok(new_ta);
+    }
+    Ok(result)
+}
+
+/// TypedArraySpeciesCreate(O, args): construct a new TypedArray using `O.constructor[@@species]`,
+/// falling back to the receiver kind's intrinsic constructor. Validates the result is a TypedArray.
+fn ta_species_create(
+    i: &mut Interp,
+    this: &Value,
+    kind: TaKind,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), kind.name()))?;
+    let ctor = ab(i.get_member(this, "constructor"))?;
+    let chosen = if matches!(ctor, Value::Undefined) {
+        default_ctor
+    } else if matches!(ctor, Value::Obj(_)) {
+        let species_key = well_known_key(i, "species").unwrap_or_default();
+        let species = ab(i.get_member(&ctor, &species_key))?;
+        if matches!(species, Value::Undefined | Value::Null) {
+            default_ctor
+        } else {
+            species
+        }
+    } else {
+        return Err(i.make_error("TypeError", "TypedArray constructor property is not an object"));
+    };
+    if !chosen.is_callable() {
+        return Err(i.make_error("TypeError", "TypedArray species is not a constructor"));
+    }
+    let result = ab(i.construct(chosen, args))?;
+    if map_ptr(&result)
+        .and_then(|p| i.typed_arrays.get(&p))
+        .is_none()
+    {
+        return Err(i.make_error(
+            "TypeError",
+            "TypedArray species constructor did not return a TypedArray",
+        ));
     }
     Ok(result)
 }
