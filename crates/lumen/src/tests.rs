@@ -1666,3 +1666,21 @@ fn dstr_target_validation() {
     assert_eq!(run("var o={}; ({a:o.x}={a:5}); o.x"), "5");
     assert_eq!(run("var a,b; ({a=1,b=2}={a:9}); a+','+b"), "9,2");
 }
+#[test]
+fn regex_property_escapes() {
+    assert_eq!(run(r"/\p{L}/u.test('A')"), "true");
+    assert_eq!(run(r"/\p{L}/u.test('3')"), "false");
+    assert_eq!(run(r"/\P{L}/u.test('3')"), "true");
+    assert_eq!(run(r"/\p{Nd}/u.test('7')"), "true");
+    assert_eq!(run(r"/\p{Script=Greek}/u.test('α')"), "true");
+    assert_eq!(run(r"/\p{Script=Greek}/u.test('a')"), "false");
+    assert_eq!(run(r"/\p{sc=Grek}/u.test('α')"), "true");
+    assert_eq!(run(r"/\p{White_Space}/u.test(' ')"), "true");
+    assert_eq!(run(r"/[\p{L}\p{N}]/u.test('5')"), "true");
+    assert_eq!(run(r"/[^\p{L}]/u.test('A')"), "false");
+    assert_eq!(run(r"/\p{Alphabetic}/u.test('A')"), "true");
+    // invalid property -> SyntaxError (thrown when the literal is evaluated)
+    assert!(matches!(Engine::new().eval(r"/\p{Bogus}/u", false), Ok(Completion::Throw{ref name,..}) if name=="SyntaxError"));
+    // without u flag, \p is identity 'p'
+    assert_eq!(run(r"/\p/.test('p')"), "true");
+}

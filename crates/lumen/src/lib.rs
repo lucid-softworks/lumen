@@ -32,6 +32,7 @@ mod parser;
 mod regex;
 mod temporal;
 mod token;
+mod unicode_props;
 mod value;
 
 use interpreter::Interp;

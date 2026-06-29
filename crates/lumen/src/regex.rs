@@ -49,6 +49,8 @@ struct CharClass {
     ranges: Vec<(char, char)>,
     /// Builtin sub-classes by letter: 'd','w','s' (and uppercase negated forms expanded inline).
     builtins: Vec<char>,
+    /// Unicode property escapes `\p{…}` / `\P{…}`: `(negated, sorted codepoint ranges)`.
+    props: Vec<(bool, &'static [(u32, u32)])>,
 }
 
 impl CharClass {
@@ -73,6 +75,13 @@ impl CharClass {
         }
         for &b in &self.builtins {
             if builtin_matches(b, c) {
+                return true;
+            }
+        }
+        let u = c as u32;
+        for &(neg, ranges) in &self.props {
+            let in_range = ranges.iter().any(|&(lo, hi)| u >= lo && u <= hi);
+            if in_range ^ neg {
                 return true;
             }
         }
@@ -121,6 +130,8 @@ struct Parser {
     pos: usize,
     ngroups: usize,
     names: Vec<(String, usize)>,
+    /// `u` or `v` flag: enables Unicode mode (notably `\p{…}` property escapes).
+    unicode: bool,
 }
 
 impl Regex {
@@ -138,7 +149,8 @@ impl Regex {
         if flags.contains('u') && flags.contains('v') {
             return Err("the u and v regular expression flags are mutually exclusive".into());
         }
-        let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0, names: Vec::new() };
+        let unicode = flags.contains('u') || flags.contains('v');
+        let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0, names: Vec::new(), unicode };
         let ast = p.parse_alt()?;
         if p.pos != p.chars.len() {
             return Err("unexpected character in pattern".into());
@@ -458,6 +470,10 @@ impl Parser {
             Some('\\') => match self.bump() {
                 None => Err("bad escape in class".into()),
                 Some(c @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => Ok(ClassAtom::Builtin(c)),
+                Some(c @ ('p' | 'P')) if self.unicode => {
+                    let prop = self.parse_prop_escape(c == 'P')?;
+                    Ok(ClassAtom::Prop(prop))
+                }
                 Some('n') => Ok(ClassAtom::Char('\n')),
                 Some('t') => Ok(ClassAtom::Char('\t')),
                 Some('r') => Ok(ClassAtom::Char('\r')),
@@ -478,6 +494,10 @@ impl Parser {
             None => Err("trailing backslash".into()),
             Some(c @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => {
                 Ok(Node::Class(CharClass { builtins: vec![c], ..Default::default() }))
+            }
+            Some(c @ ('p' | 'P')) if self.unicode => {
+                let prop = self.parse_prop_escape(c == 'P')?;
+                Ok(Node::Class(CharClass { props: vec![prop], ..Default::default() }))
             }
             Some('b') => Ok(Node::WordB(true)),
             Some('B') => Ok(Node::WordB(false)),
@@ -502,6 +522,30 @@ impl Parser {
                 Ok(Node::Backref(num))
             }
             Some(c) => Ok(Node::Char(c)),
+        }
+    }
+
+    /// Parse a `\p{Name}` / `\p{Name=Value}` body (the `\p`/`\P` already consumed). `negate` is true
+    /// for `\P`. Returns `(negated, ranges)`. Only valid in Unicode mode; an unknown property errors.
+    fn parse_prop_escape(&mut self, negate: bool) -> Result<(bool, &'static [(u32, u32)]), String> {
+        if self.bump() != Some('{') {
+            return Err("invalid property escape: expected '{'".into());
+        }
+        let mut body = String::new();
+        loop {
+            match self.bump() {
+                Some('}') => break,
+                Some(c) => body.push(c),
+                None => return Err("unterminated property escape".into()),
+            }
+        }
+        let (name, value) = match body.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (body.as_str(), None),
+        };
+        match crate::unicode_props::lookup(name, value) {
+            Some(ranges) => Ok((negate, ranges)),
+            None => Err(format!("invalid unicode property {body}")),
         }
     }
 
@@ -548,12 +592,14 @@ impl Parser {
 enum ClassAtom {
     Char(char),
     Builtin(char),
+    Prop((bool, &'static [(u32, u32)])),
 }
 
 fn push_class_atom(cc: &mut CharClass, a: ClassAtom) {
     match a {
         ClassAtom::Char(c) => cc.ranges.push((c, c)),
         ClassAtom::Builtin(b) => cc.builtins.push(b),
+        ClassAtom::Prop(p) => cc.props.push(p),
     }
 }
 
@@ -662,7 +708,12 @@ fn compile_repeat(
 }
 
 fn clone_class(cc: &CharClass) -> CharClass {
-    CharClass { negate: cc.negate, ranges: cc.ranges.clone(), builtins: cc.builtins.clone() }
+    CharClass {
+        negate: cc.negate,
+        ranges: cc.ranges.clone(),
+        builtins: cc.builtins.clone(),
+        props: cc.props.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
