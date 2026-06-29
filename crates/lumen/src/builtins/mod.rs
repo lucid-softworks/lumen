@@ -3837,6 +3837,14 @@ fn ta_info(i: &Interp, o: &Gc) -> Option<crate::value::TaInfo> {
     i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied()
 }
 
+/// RequireObjectCoercible for an `Array.prototype` method receiver (null/undefined → TypeError).
+fn arr_require_coercible(i: &mut Interp, this: &Value) -> Result<(), Value> {
+    if matches!(this, Value::Undefined | Value::Null) {
+        return Err(i.make_error("TypeError", "Array.prototype method called on null or undefined"));
+    }
+    Ok(())
+}
+
 /// `ShadowRealm`: each instance owns a fully isolated sub-interpreter. `evaluate` runs source in it and
 /// only lets primitive completion values cross back (callables are wrapped; objects are a TypeError).
 fn install_shadow_realm(it: &mut Interp) {
@@ -5029,6 +5037,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::from_string(parts.join(&sep)))
     });
     it.def_method(&ap, "concat", 1, |i, this, args| {
+        arr_require_coercible(i, &this)?;
         let mut out = Vec::new();
         let mut push_all = |i: &mut Interp, v: &Value| -> Result<(), Value> {
             if let Value::Obj(o) = v {
@@ -5206,6 +5215,7 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Num(-1.0))
     });
     it.def_method(&ap, "flat", 0, |i, this, args| {
+        arr_require_coercible(i, &this)?;
         let depth = match arg(args, 0) {
             Value::Undefined => 1.0,
             v => ab(i.to_number(&v))?,
@@ -5341,9 +5351,18 @@ fn install_array(it: &mut Interp) {
         }
         Ok(this)
     });
-    it.def_method(&ap, "values", 0, |i, this, _| Ok(make_array_iterator(i, this, 0)));
-    it.def_method(&ap, "keys", 0, |i, this, _| Ok(make_array_iterator(i, this, 1)));
-    it.def_method(&ap, "entries", 0, |i, this, _| Ok(make_array_iterator(i, this, 2)));
+    it.def_method(&ap, "values", 0, |i, this, _| {
+        arr_require_coercible(i, &this)?;
+        Ok(make_array_iterator(i, this, 0))
+    });
+    it.def_method(&ap, "keys", 0, |i, this, _| {
+        arr_require_coercible(i, &this)?;
+        Ok(make_array_iterator(i, this, 1))
+    });
+    it.def_method(&ap, "entries", 0, |i, this, _| {
+        arr_require_coercible(i, &this)?;
+        Ok(make_array_iterator(i, this, 2))
+    });
     // `arr[Symbol.iterator]` is `Array.prototype.values`.
     if let Some(sym) = it.iterator_sym.clone() {
         let values_fn = ap.borrow().props.get("values").map(|p| p.value.clone()).unwrap();
