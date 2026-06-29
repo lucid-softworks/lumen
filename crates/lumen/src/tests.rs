@@ -2117,3 +2117,42 @@ fn loop_completion_values() {
     assert_eq!(run("for(var k in {a:1,b:2}){ k }"), "b");
     assert_eq!(run("for(var i=0;i<3;i++){ continue; 99 }"), "undefined");
 }
+#[test]
+fn fn_decl_stmt_position_probe_tmp() {
+    let cases=[
+      ("if async fn","if(true) async function f(){}"),
+      ("if gen fn","if(true) function* f(){}"),
+      ("if labelled async","if(true) x: async function f(){}"),
+      ("while fn","while(false) function f(){}"),
+      ("for fn","for(;;) function f(){}"),
+      ("if fn sloppy (ok in AnnexB)","if(true) function f(){}"),
+      ("label gen","x: function* f(){}"),
+      ("label async","x: async function f(){}"),
+      ("do fn","do function f(){} while(false)"),
+      ("else async fn","if(x); else async function f(){}"),
+    ];
+    for (n,src) in cases {
+        let r=match crate::Engine::new().eval(src,false){Ok(crate::Completion::Value(_))=>"ACCEPT".to_string(),Ok(crate::Completion::Throw{name,..})=>format!("T:{name}"),Err(_)=>"SyntaxError".into()};
+        eprintln!("FD {} => {}", n, r);
+    }
+}
+#[test]
+fn fn_decl_stmt_position() {
+    // always SyntaxError
+    assert!(Engine::new().eval("if(true) async function f(){}", false).is_err());
+    assert!(Engine::new().eval("if(true) function* f(){}", false).is_err());
+    assert!(Engine::new().eval("while(false) function f(){}", false).is_err());
+    assert!(Engine::new().eval("for(;;) function f(){}", false).is_err());
+    assert!(Engine::new().eval("do function f(){} while(false)", false).is_err());
+    assert!(Engine::new().eval("x: function* f(){}", false).is_err());
+    assert!(Engine::new().eval("x: async function f(){}", false).is_err());
+    // Annex B sloppy: plain function as if/else/label body is OK
+    assert!(Engine::new().eval("if(true) function f(){}", false).is_ok());
+    assert!(Engine::new().eval("if(0); else function f(){}", false).is_ok());
+    assert!(Engine::new().eval("x: function f(){}", false).is_ok());
+    // strict: not allowed
+    assert!(Engine::new().eval("'use strict'; if(true) function f(){}", false).is_err());
+    // normal block declarations still fine
+    assert_eq!(run("{ function f(){return 5} } f()"), "5");
+    assert_eq!(run("if(true){ function g(){return 7} } g()"), "7");
+}

@@ -451,7 +451,7 @@ impl Parser {
                     return self.err(format!("label '{name}' has already been declared"));
                 }
                 self.labels.push(name.clone());
-                let body = self.parse_substatement();
+                let body = self.parse_substatement(true);
                 self.labels.pop();
                 Ok(Stmt::Labeled { label: name, body: Box::new(body?) })
             }
@@ -615,21 +615,27 @@ impl Parser {
         self.expect_punct("(")?;
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
-        let cons = Box::new(self.parse_substatement()?);
+        let cons = Box::new(self.parse_substatement(true)?);
         let alt =
-            if self.eat_kw("else") { Some(Box::new(self.parse_substatement()?)) } else { None };
+            if self.eat_kw("else") { Some(Box::new(self.parse_substatement(true)?)) } else { None };
         Ok(Stmt::If { test, cons, alt })
     }
 
     /// Parse a statement that is the body of `if`/loop/`with`/label — a lexical (`let`/`const`) or
-    /// `class` declaration is not allowed in that position.
-    fn parse_substatement(&mut self) -> Result<Stmt, ParseError> {
+    /// `class` declaration is not allowed there. A plain `FunctionDeclaration` is allowed only in the
+    /// `if`/`else`/label positions in sloppy mode (Annex B); async/generator functions never are.
+    fn parse_substatement(&mut self, annexb_fn: bool) -> Result<Stmt, ParseError> {
         let s = self.parse_stmt()?;
-        if matches!(
-            s,
-            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, .. } | Stmt::ClassDecl(_)
-        ) {
-            return self.err("lexical declaration cannot appear in a single-statement context");
+        match &s {
+            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, .. } | Stmt::ClassDecl(_) => {
+                return self.err("lexical declaration cannot appear in a single-statement context");
+            }
+            Stmt::FuncDecl(f) => {
+                if f.is_async || f.is_generator || !annexb_fn || self.strict {
+                    return self.err("function declaration cannot appear in a single-statement context");
+                }
+            }
+            _ => {}
         }
         Ok(s)
     }
@@ -637,7 +643,7 @@ impl Parser {
     /// Parse a loop body inside an iteration context (so `break`/`continue` are legal).
     fn parse_loop_body(&mut self) -> Result<Stmt, ParseError> {
         self.iter_depth += 1;
-        let r = self.parse_substatement();
+        let r = self.parse_substatement(false);
         self.iter_depth -= 1;
         r
     }
@@ -659,7 +665,7 @@ impl Parser {
         self.expect_punct("(")?;
         let obj = self.parse_expr()?;
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_substatement()?);
+        let body = Box::new(self.parse_substatement(false)?);
         Ok(Stmt::With { obj, body })
     }
 
