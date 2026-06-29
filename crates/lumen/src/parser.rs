@@ -1965,8 +1965,8 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 }
                 let entry = private.iter_mut().find(|((n, s), _)| n == name && *s == m.is_static);
                 match entry {
-                    Some((_, kinds)) => kinds.push(m.kind.clone()),
-                    None => private.push(((name.clone(), m.is_static), vec![m.kind.clone()])),
+                    Some((_, kinds)) => kinds.push(m.kind),
+                    None => private.push(((name.clone(), m.is_static), vec![m.kind])),
                 }
             }
         }
