@@ -30,17 +30,30 @@ pub struct Binding {
 
 impl Binding {
     pub fn data(value: Value, mutable: bool, initialized: bool) -> Binding {
-        Binding { value, mutable, initialized, import_ref: None }
+        Binding {
+            value,
+            mutable,
+            initialized,
+            import_ref: None,
+        }
     }
 }
 
 pub fn new_scope(parent: Option<Env>) -> Env {
-    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent, with_obj: None }))
+    Rc::new(RefCell::new(Scope {
+        vars: HashMap::new(),
+        parent,
+        with_obj: None,
+    }))
 }
 
 /// A `with (obj)` environment: identifier lookups consult `obj` before the enclosing scope.
 pub fn new_with_scope(parent: Env, obj: Value) -> Env {
-    Rc::new(RefCell::new(Scope { vars: HashMap::new(), parent: Some(parent), with_obj: Some(obj) }))
+    Rc::new(RefCell::new(Scope {
+        vars: HashMap::new(),
+        parent: Some(parent),
+        with_obj: Some(obj),
+    }))
 }
 
 /// A non-local completion. Expressions only raise `Throw`; the rest flow out of statements.
@@ -76,7 +89,10 @@ fn block_lexical_names(stmts: &[Stmt]) -> Vec<String> {
     let mut out = Vec::new();
     for s in stmts {
         match s {
-            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, decls } => {
+            Stmt::VarDecl {
+                kind: DeclKind::Let | DeclKind::Const,
+                decls,
+            } => {
                 for (pat, _) in decls {
                     pattern_idents(pat, &mut out);
                 }
@@ -227,7 +243,6 @@ pub struct PromiseState {
     pub reactions: Vec<(Value, Value, Value)>,
 }
 
-
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
 pub struct ClassInfo {
     /// Instance fields: `(property key, optional initializer)`, in declaration order.
@@ -321,7 +336,12 @@ impl Interp {
         let g = Value::Obj(interp.global.clone());
         interp.global_env.borrow_mut().vars.insert(
             "this".to_string(),
-            Binding { value: g, mutable: false, initialized: true, import_ref: None },
+            Binding {
+                value: g,
+                mutable: false,
+                initialized: true,
+                import_ref: None,
+            },
         );
         interp
     }
@@ -338,7 +358,9 @@ impl Interp {
         obj.borrow_mut().exotic = Exotic::Error;
         let msg = message.into();
         if !msg.is_empty() {
-            obj.borrow_mut().props.insert("message", Property::builtin(Value::from_string(msg)));
+            obj.borrow_mut()
+                .props
+                .insert("message", Property::builtin(Value::from_string(msg)));
         }
         Value::Obj(obj)
     }
@@ -420,7 +442,10 @@ impl Interp {
     /// Mint a fresh symbol and register it (so it can be recovered from a property key later).
     pub fn new_symbol(&mut self, description: Option<Rc<str>>) -> Value {
         self.sym_counter += 1;
-        let data = Rc::new(SymbolData { id: self.sym_counter, description });
+        let data = Rc::new(SymbolData {
+            id: self.sym_counter,
+            description,
+        });
         self.sym_registry.insert(data.id, data.clone());
         Value::Sym(data)
     }
@@ -454,7 +479,10 @@ impl Interp {
             for (i, v) in items.into_iter().enumerate() {
                 b.props.insert(i.to_string(), Property::plain(v));
             }
-            b.props.insert("length", Property::data(Value::Num(len as f64), true, false, false));
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(len as f64), true, false, false),
+            );
         }
         Value::Obj(obj)
     }
@@ -474,8 +502,14 @@ impl Interp {
             self.def_method(&obj, "return", 1, crate::builtins::async_generator_return);
             self.def_method(&obj, "throw", 1, crate::builtins::async_generator_throw);
             if let Some(key) = crate::builtins::async_iterator_key(self) {
-                let f = self.make_native("[Symbol.asyncIterator]", 0, crate::builtins::return_this_pub);
-                obj.borrow_mut().props.insert(key.as_str(), Property::builtin(Value::Obj(f)));
+                let f = self.make_native(
+                    "[Symbol.asyncIterator]",
+                    0,
+                    crate::builtins::return_this_pub,
+                );
+                obj.borrow_mut()
+                    .props
+                    .insert(key.as_str(), Property::builtin(Value::Obj(f)));
             }
         } else {
             self.def_method(&obj, "next", 0, crate::builtins::generator_next);
@@ -490,9 +524,14 @@ impl Interp {
         {
             let mut b = obj.borrow_mut();
             b.call = Callable::Native(f);
-            b.props.insert("length", Property::data(Value::Num(len as f64), false, false, true));
-            b.props
-                .insert("name", Property::data(Value::from_string(name.to_string()), false, false, true));
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(len as f64), false, false, true),
+            );
+            b.props.insert(
+                "name",
+                Property::data(Value::from_string(name.to_string()), false, false, true),
+            );
         }
         obj
     }
@@ -500,20 +539,32 @@ impl Interp {
     /// Define a native method on `target` (non-enumerable, as built-ins are).
     pub fn def_method(&self, target: &Gc, name: &str, len: usize, f: NativeFn) {
         let func = self.make_native(name, len, f);
-        target.borrow_mut().props.insert(name, Property::builtin(Value::Obj(func)));
+        target
+            .borrow_mut()
+            .props
+            .insert(name, Property::builtin(Value::Obj(func)));
     }
 
     pub fn make_function(&self, func: Rc<Function>, env: Env) -> Value {
         let obj = Object::new(Some(self.function_proto.clone()));
-        let arity = func.params.iter().take_while(|p| p.default.is_none() && !p.rest).count();
+        let arity = func
+            .params
+            .iter()
+            .take_while(|p| p.default.is_none() && !p.rest)
+            .count();
         let name = func.name.clone().unwrap_or_default();
         let is_arrow = func.is_arrow;
         {
             let mut b = obj.borrow_mut();
             b.call = Callable::User(func, env);
-            b.props.insert("length", Property::data(Value::Num(arity as f64), false, false, true));
-            b.props
-                .insert("name", Property::data(Value::from_string(name), false, false, true));
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(arity as f64), false, false, true),
+            );
+            b.props.insert(
+                "name",
+                Property::data(Value::from_string(name), false, false, true),
+            );
         }
         if !is_arrow {
             // Non-arrow functions get a fresh `prototype` object with a back-reference.
@@ -522,9 +573,10 @@ impl Interp {
                 .borrow_mut()
                 .props
                 .insert("constructor", Property::builtin(Value::Obj(obj.clone())));
-            obj.borrow_mut()
-                .props
-                .insert("prototype", Property::data(Value::Obj(proto), true, false, false));
+            obj.borrow_mut().props.insert(
+                "prototype",
+                Property::data(Value::Obj(proto), true, false, false),
+            );
             obj.borrow_mut().is_constructor = true;
         }
         Value::Obj(obj)
@@ -536,9 +588,10 @@ impl Interp {
     /// handled by routing to their wrapper prototype (and string index/length specially).
     pub fn get_member(&mut self, base: &Value, key: &str) -> Result<Value, Abrupt> {
         match base {
-            Value::Undefined | Value::Null => {
-                Err(self.throw("TypeError", format!("cannot read property '{key}' of {}", type_name(base))))
-            }
+            Value::Undefined | Value::Null => Err(self.throw(
+                "TypeError",
+                format!("cannot read property '{key}' of {}", type_name(base)),
+            )),
             Value::Str(s) => {
                 if key == "length" {
                     return Ok(Value::Num(s.chars().count() as f64));
@@ -562,7 +615,11 @@ impl Interp {
             }
             Value::Sym(s) => {
                 if key == "description" {
-                    return Ok(s.description.clone().map(Value::Str).unwrap_or(Value::Undefined));
+                    return Ok(s
+                        .description
+                        .clone()
+                        .map(Value::Str)
+                        .unwrap_or(Value::Undefined));
                 }
                 let proto = self.symbol_proto.clone();
                 self.get_from_chain(&proto, key, base)
@@ -599,7 +656,11 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "get")?;
                         if trap.is_callable() {
-                            let res = self.call(trap, handler, &[target.clone(), Value::str(key), base.clone()])?;
+                            let res = self.call(
+                                trap,
+                                handler,
+                                &[target.clone(), Value::str(key), base.clone()],
+                            )?;
                             self.proxy_get_invariant(&target, key, &res)?;
                             return Ok(res);
                         }
@@ -614,7 +675,9 @@ impl Interp {
                     }
                     let detached = !self.array_buffers.contains_key(&info.buffer);
                     match key {
-                        "length" => return Ok(Value::Num(if detached { 0.0 } else { info.len as f64 })),
+                        "length" => {
+                            return Ok(Value::Num(if detached { 0.0 } else { info.len as f64 }))
+                        }
                         "byteLength" => {
                             return Ok(Value::Num(if detached {
                                 0.0
@@ -625,11 +688,13 @@ impl Interp {
                         "byteOffset" => {
                             return Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
                         }
-                        "BYTES_PER_ELEMENT" => {
-                            return Ok(Value::Num(info.kind.elsize() as f64))
-                        }
+                        "BYTES_PER_ELEMENT" => return Ok(Value::Num(info.kind.elsize() as f64)),
                         "buffer" => {
-                            return Ok(self.ta_buffer.get(&ptr).cloned().unwrap_or(Value::Undefined))
+                            return Ok(self
+                                .ta_buffer
+                                .get(&ptr)
+                                .cloned()
+                                .unwrap_or(Value::Undefined))
                         }
                         _ => {}
                     }
@@ -663,7 +728,10 @@ impl Interp {
         let obj = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null => {
-                return Err(self.throw("TypeError", format!("cannot set property '{key}' of {}", type_name(base))))
+                return Err(self.throw(
+                    "TypeError",
+                    format!("cannot set property '{key}' of {}", type_name(base)),
+                ))
             }
             // Setting a property on a primitive is a no-op in sloppy mode (and TypeError in strict,
             // which we approximate as a no-op for now).
@@ -676,7 +744,11 @@ impl Interp {
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                 let trap = self.get_member(&handler, "set")?;
                 if trap.is_callable() {
-                    let ok = self.call(trap, handler, &[target.clone(), Value::str(key), value.clone(), base.clone()])?;
+                    let ok = self.call(
+                        trap,
+                        handler,
+                        &[target.clone(), Value::str(key), value.clone(), base.clone()],
+                    )?;
                     // A successful `set` can't contradict a non-configurable property on the target.
                     if self.to_boolean(&ok) {
                         self.proxy_set_invariant(&target, key, &value)?;
@@ -707,7 +779,10 @@ impl Interp {
                         }
                         None => {
                             if self.strict {
-                                Err(self.throw("TypeError", format!("cannot set getter-only property '{key}'")))
+                                Err(self.throw(
+                                    "TypeError",
+                                    format!("cannot set getter-only property '{key}'"),
+                                ))
                             } else {
                                 Ok(())
                             }
@@ -728,7 +803,10 @@ impl Interp {
                 }
                 if !p.writable {
                     if self.strict {
-                        return Err(self.throw("TypeError", format!("cannot assign to read-only property '{key}'")));
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot assign to read-only property '{key}'"),
+                        ));
                     }
                     return Ok(());
                 }
@@ -749,7 +827,8 @@ impl Interp {
             } else {
                 if !obj.borrow().extensible {
                     if self.strict {
-                        return Err(self.throw("TypeError", "cannot add property, object is not extensible"));
+                        return Err(self
+                            .throw("TypeError", "cannot add property, object is not extensible"));
                     }
                     return Ok(());
                 }
@@ -767,11 +846,17 @@ impl Interp {
                 return Err(self.throw("RangeError", "Invalid array length"));
             }
             // A non-writable `length` (frozen/sealed array) rejects the change.
-            let len_writable =
-                obj.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+            let len_writable = obj
+                .borrow()
+                .props
+                .get("length")
+                .map(|p| p.writable)
+                .unwrap_or(true);
             if !len_writable {
                 if self.strict {
-                    return Err(self.throw("TypeError", "cannot assign to read-only property 'length'"));
+                    return Err(
+                        self.throw("TypeError", "cannot assign to read-only property 'length'")
+                    );
                 }
                 return Ok(());
             }
@@ -784,15 +869,18 @@ impl Interp {
                     .props
                     .retain(|k| k.parse::<usize>().map(|i| i < new_len).unwrap_or(true));
             }
-            obj.borrow_mut()
-                .props
-                .insert("length", Property::data(Value::Num(new_len as f64), true, false, false));
+            obj.borrow_mut().props.insert(
+                "length",
+                Property::data(Value::Num(new_len as f64), true, false, false),
+            );
             return Ok(());
         }
         // Adding a new index to a non-extensible (sealed/frozen) array is rejected.
         if !obj.borrow().props.contains(key) && !obj.borrow().extensible {
             if self.strict {
-                return Err(self.throw("TypeError", "cannot add property, object is not extensible"));
+                return Err(
+                    self.throw("TypeError", "cannot add property, object is not extensible")
+                );
             }
             return Ok(());
         }
@@ -815,7 +903,11 @@ impl Interp {
     pub fn array_length(&self, obj: &Gc) -> usize {
         // A TypedArray's length lives in its info slot, not an own `length` property.
         if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
-            return if self.array_buffers.contains_key(&info.buffer) { info.len } else { 0 };
+            return if self.array_buffers.contains_key(&info.buffer) {
+                info.len
+            } else {
+                0
+            };
         }
         match obj.borrow().props.get("length").map(|p| p.value.clone()) {
             Some(Value::Num(n)) => n as usize,
@@ -982,11 +1074,17 @@ impl Interp {
     fn call_inner(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
         let obj = match &callee {
             Value::Obj(o) => o.clone(),
-            _ => return Err(self.throw("TypeError", format!("{} is not a function", type_name(&callee)))),
+            _ => {
+                return Err(self.throw(
+                    "TypeError",
+                    format!("{} is not a function", type_name(&callee)),
+                ))
+            }
         };
         // Proxy with an `apply` trap (or forward to the target).
         if !self.proxies.is_empty() {
-            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned() {
+            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned()
+            {
                 let trap = self.get_member(&handler, "apply")?;
                 let arr = self.make_array(args.to_vec());
                 if trap.is_callable() {
@@ -1004,12 +1102,18 @@ impl Interp {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
             Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),
             Callable::User(func, env) => self.call_user(&func, env, this, args, false, &obj),
-            Callable::Bound { target, this: bthis, args: bargs } => {
+            Callable::Bound {
+                target,
+                this: bthis,
+                args: bargs,
+            } => {
                 let mut all = bargs.clone();
                 all.extend_from_slice(args);
                 self.call(Value::Obj(target), bthis, &all)
             }
-            Callable::WrappedShadow { realm, target } => self.call_wrapped_shadow(realm, *target, args),
+            Callable::WrappedShadow { realm, target } => {
+                self.call_wrapped_shadow(realm, *target, args)
+            }
         };
         self.constructing = saved_ctor;
         r
@@ -1020,16 +1124,28 @@ impl Interp {
         let f = Object::new(Some(self.function_proto.clone()));
         {
             let mut b = f.borrow_mut();
-            b.call = Callable::WrappedShadow { realm, target: Box::new(target) };
-            b.props.insert("length", Property::data(Value::Num(0.0), false, false, true));
-            b.props.insert("name", Property::data(Value::str(""), false, false, true));
+            b.call = Callable::WrappedShadow {
+                realm,
+                target: Box::new(target),
+            };
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(0.0), false, false, true),
+            );
+            b.props
+                .insert("name", Property::data(Value::str(""), false, false, true));
         }
         Value::Obj(f)
     }
 
     /// Call a ShadowRealm wrapped function: marshal primitive args into the sub-realm, call `target`
     /// there, and marshal the primitive (or further-wrapped callable) result back.
-    fn call_wrapped_shadow(&mut self, realm: usize, target: Value, args: &[Value]) -> Result<Value, Abrupt> {
+    fn call_wrapped_shadow(
+        &mut self,
+        realm: usize,
+        target: Value,
+        args: &[Value],
+    ) -> Result<Value, Abrupt> {
         // Only primitive arguments may cross into the shadow realm; callables wrap, objects throw.
         let mut inner_args = Vec::with_capacity(args.len());
         for a in args {
@@ -1052,7 +1168,10 @@ impl Interp {
             Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
             Ok(v) if v.is_callable() => Ok(self.make_wrapped_shadow(realm, v)),
             Ok(_) => Err(self.throw("TypeError", "a wrapped function returned a non-primitive")),
-            Err(_) => Err(self.throw("TypeError", "a wrapped function threw inside the ShadowRealm")),
+            Err(_) => Err(self.throw(
+                "TypeError",
+                "a wrapped function threw inside the ShadowRealm",
+            )),
         }
     }
 
@@ -1081,20 +1200,35 @@ impl Interp {
             };
             scope.borrow_mut().vars.insert(
                 "this".to_string(),
-                Binding { value: this_val, mutable: false, initialized: true, import_ref: None },
+                Binding {
+                    value: this_val,
+                    mutable: false,
+                    initialized: true,
+                    import_ref: None,
+                },
             );
             // A minimal `arguments` array (not the live mapped object).
             let args_arr = self.make_array(args.to_vec());
             scope.borrow_mut().vars.insert(
                 "arguments".to_string(),
-                Binding { value: args_arr, mutable: true, initialized: true, import_ref: None },
+                Binding {
+                    value: args_arr,
+                    mutable: true,
+                    initialized: true,
+                    import_ref: None,
+                },
             );
             // Expose the callee for named function expressions / recursion via `name`.
             if let Some(name) = &func.name {
                 if !scope.borrow().vars.contains_key(name) {
                     scope.borrow_mut().vars.insert(
                         name.clone(),
-                        Binding { value: Value::Obj(fn_obj.clone()), mutable: false, initialized: true, import_ref: None },
+                        Binding {
+                            value: Value::Obj(fn_obj.clone()),
+                            mutable: false,
+                            initialized: true,
+                            import_ref: None,
+                        },
                     );
                 }
             }
@@ -1218,13 +1352,22 @@ impl Interp {
             Value::Obj(o) => Rc::as_ptr(o) as usize,
             _ => unreachable!(),
         };
-        self.drive_async(key, promise.clone(), crate::coroutine::Resume::Next(Value::Undefined));
+        self.drive_async(
+            key,
+            promise.clone(),
+            crate::coroutine::Resume::Next(Value::Undefined),
+        );
         Ok(promise)
     }
 
     /// Resume an async coroutine and react to how it parks: an `await` (Yield) attaches a microtask
     /// that re-drives it once the awaited value settles; completion settles the result promise.
-    pub(crate) fn drive_async(&mut self, key: usize, promise: Value, signal: crate::coroutine::Resume) {
+    pub(crate) fn drive_async(
+        &mut self,
+        key: usize,
+        promise: Value,
+        signal: crate::coroutine::Resume,
+    ) {
         use crate::coroutine::Suspend;
         let mut coro = match self.generators.remove(&key) {
             Some(c) => c,
@@ -1248,7 +1391,12 @@ impl Interp {
     /// Drive an async generator's coroutine, settling the `next()`/`return()`/`throw()` result
     /// promise `r` with `{value, done}`. An `await` parks the generator (the promise stays pending
     /// until a later `yield`/return); a `yield` fulfils the promise.
-    pub(crate) fn drive_async_gen(&mut self, key: usize, r: Value, signal: crate::coroutine::Resume) {
+    pub(crate) fn drive_async_gen(
+        &mut self,
+        key: usize,
+        r: Value,
+        signal: crate::coroutine::Resume,
+    ) {
         use crate::coroutine::{Resume, Suspend};
         let mut coro = match self.generators.remove(&key) {
             Some(c) => c,
@@ -1299,8 +1447,10 @@ impl Interp {
         let o = self.new_object();
         {
             let mut b = o.borrow_mut();
-            b.props.insert("value", Property::data(value, true, true, true));
-            b.props.insert("done", Property::data(Value::Bool(done), true, true, true));
+            b.props
+                .insert("value", Property::data(value, true, true, true));
+            b.props
+                .insert("done", Property::data(Value::Bool(done), true, true, true));
         }
         Value::Obj(o)
     }
@@ -1342,11 +1492,18 @@ impl Interp {
         let target = self.make_native(
             "",
             1,
-            if fulfil { crate::builtins::async_react_fulfil } else { crate::builtins::async_react_reject },
+            if fulfil {
+                crate::builtins::async_react_fulfil
+            } else {
+                crate::builtins::async_react_reject
+            },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call =
-            Callable::Bound { target, this: promise.clone(), args: vec![promise.clone()] };
+        bound.borrow_mut().call = Callable::Bound {
+            target,
+            this: promise.clone(),
+            args: vec![promise.clone()],
+        };
         Value::Obj(bound)
     }
 
@@ -1395,7 +1552,8 @@ impl Interp {
         };
         // Proxy with a `construct` trap (or forward to the target).
         if !self.proxies.is_empty() {
-            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned() {
+            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned()
+            {
                 let trap = self.get_member(&handler, "construct")?;
                 let arr = self.make_array(args.to_vec());
                 if trap.is_callable() {
@@ -1445,7 +1603,11 @@ impl Interp {
                     })
                 }
             }
-            Callable::Bound { target, args: bargs, .. } => {
+            Callable::Bound {
+                target,
+                args: bargs,
+                ..
+            } => {
                 let mut all = bargs.clone();
                 all.extend_from_slice(args);
                 self.construct(Value::Obj(target), &all)
@@ -1462,7 +1624,8 @@ impl Interp {
     /// given strict mode. Used to evaluate code inside a ShadowRealm's isolated interpreter.
     pub fn run_body(&mut self, body: &[Stmt], strict: bool) -> Result<Value, Value> {
         let saved = self.strict;
-        let directive = matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict");
+        let directive =
+            matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict");
         self.strict = strict || directive;
         let r = self.run_program(body);
         self.drain_microtasks();
@@ -1473,7 +1636,12 @@ impl Interp {
     /// Proxy `[[Get]]` invariant: a non-configurable non-writable data property on the target must be
     /// reported with its actual value; a non-configurable accessor with no getter must report
     /// undefined. (`Abrupt` carries the thrown TypeError.)
-    fn proxy_get_invariant(&mut self, target: &Value, key: &str, result: &Value) -> Result<(), Abrupt> {
+    fn proxy_get_invariant(
+        &mut self,
+        target: &Value,
+        key: &str,
+        result: &Value,
+    ) -> Result<(), Abrupt> {
         let prop = match target {
             Value::Obj(t) => t.borrow().props.get(key).cloned(),
             _ => None,
@@ -1481,7 +1649,8 @@ impl Interp {
         if let Some(p) = prop {
             if !p.configurable {
                 let bad = if p.accessor {
-                    matches!(&p.get, None | Some(Value::Undefined)) && !matches!(result, Value::Undefined)
+                    matches!(&p.get, None | Some(Value::Undefined))
+                        && !matches!(result, Value::Undefined)
                 } else {
                     !p.writable && !crate::builtins::same_value_pub(result, &p.value)
                 };
@@ -1498,7 +1667,12 @@ impl Interp {
 
     /// Proxy `[[Set]]` invariant: a `true` result can't contradict a non-configurable non-writable
     /// data property (value must match) or a non-configurable accessor with no setter.
-    fn proxy_set_invariant(&mut self, target: &Value, key: &str, value: &Value) -> Result<(), Abrupt> {
+    fn proxy_set_invariant(
+        &mut self,
+        target: &Value,
+        key: &str,
+        value: &Value,
+    ) -> Result<(), Abrupt> {
         let prop = match target {
             Value::Obj(t) => t.borrow().props.get(key).cloned(),
             _ => None,
@@ -1529,7 +1703,12 @@ impl Interp {
         let hoisted: Vec<String> = self.global_env.borrow().vars.keys().cloned().collect();
         for name in hoisted {
             let binding = self.global_env.borrow_mut().vars.remove(&name).unwrap();
-            let existing = self.global.borrow().props.get(name.as_str()).map(|p| (p.writable, p.configurable));
+            let existing = self
+                .global
+                .borrow()
+                .props
+                .get(name.as_str())
+                .map(|p| (p.writable, p.configurable));
             match existing {
                 None => {
                     self.global.borrow_mut().props.insert(
@@ -1576,10 +1755,15 @@ impl Interp {
             if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
                 if let Some(name) = &func.name {
                     let f = self.make_function(func.clone(), scope.clone());
-                    scope
-                        .borrow_mut()
-                        .vars
-                        .insert(name.clone(), Binding { value: f, mutable: true, initialized: true, import_ref: None });
+                    scope.borrow_mut().vars.insert(
+                        name.clone(),
+                        Binding {
+                            value: f,
+                            mutable: true,
+                            initialized: true,
+                            import_ref: None,
+                        },
+                    );
                 }
             }
         }
@@ -1593,7 +1777,13 @@ impl Interp {
         }
     }
 
-    fn hoist_block_funcs(&mut self, stmt: &Stmt, scope: &Env, in_block: bool, blocked: &mut Vec<String>) {
+    fn hoist_block_funcs(
+        &mut self,
+        stmt: &Stmt,
+        scope: &Env,
+        in_block: bool,
+        blocked: &mut Vec<String>,
+    ) {
         match stmt {
             Stmt::FuncDecl(func) if in_block => {
                 if let Some(name) = &func.name {
@@ -1605,7 +1795,12 @@ impl Interp {
                     let f = self.make_function(func.clone(), scope.clone());
                     scope.borrow_mut().vars.insert(
                         name.clone(),
-                        Binding { value: f, mutable: true, initialized: true, import_ref: None },
+                        Binding {
+                            value: f,
+                            mutable: true,
+                            initialized: true,
+                            import_ref: None,
+                        },
                     );
                 }
             }
@@ -1642,7 +1837,11 @@ impl Interp {
                     }
                 }
             }
-            Stmt::Try { block, handler, finalizer } => {
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
                 for s in block {
                     self.hoist_block_funcs(s, scope, true, blocked);
                 }
@@ -1664,7 +1863,10 @@ impl Interp {
     fn hoist_stmt(&mut self, stmt: &Stmt, scope: &Env) {
         match stmt {
             Stmt::ExportDecl(inner) | Stmt::ExportDefault(inner) => self.hoist_stmt(inner, scope),
-            Stmt::VarDecl { kind: DeclKind::Var, decls } => {
+            Stmt::VarDecl {
+                kind: DeclKind::Var,
+                decls,
+            } => {
                 for (pat, _) in decls {
                     let mut names = Vec::new();
                     pattern_idents(pat, &mut names);
@@ -1672,7 +1874,12 @@ impl Interp {
                         if !scope.borrow().vars.contains_key(&name) {
                             scope.borrow_mut().vars.insert(
                                 name,
-                                Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
+                                Binding {
+                                    value: Value::Undefined,
+                                    mutable: true,
+                                    initialized: true,
+                                    import_ref: None,
+                                },
                             );
                         }
                     }
@@ -1695,14 +1902,23 @@ impl Interp {
             | Stmt::With { body, .. } => self.hoist_stmt(body, scope),
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
-                    if let ForInit::VarDecl { kind: DeclKind::Var, decls } = init.as_ref() {
+                    if let ForInit::VarDecl {
+                        kind: DeclKind::Var,
+                        decls,
+                    } = init.as_ref()
+                    {
                         for (pat, _) in decls {
                             let mut names = Vec::new();
                             pattern_idents(pat, &mut names);
                             for name in names {
                                 scope.borrow_mut().vars.insert(
                                     name,
-                                    Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
+                                    Binding {
+                                        value: Value::Undefined,
+                                        mutable: true,
+                                        initialized: true,
+                                        import_ref: None,
+                                    },
                                 );
                             }
                         }
@@ -1710,19 +1926,33 @@ impl Interp {
                 }
                 self.hoist_stmt(body, scope);
             }
-            Stmt::ForInOf { decl: Some(DeclKind::Var), left, body, .. } => {
+            Stmt::ForInOf {
+                decl: Some(DeclKind::Var),
+                left,
+                body,
+                ..
+            } => {
                 let mut names = Vec::new();
                 pattern_idents(left, &mut names);
                 for name in names {
                     scope.borrow_mut().vars.insert(
                         name,
-                        Binding { value: Value::Undefined, mutable: true, initialized: true, import_ref: None },
+                        Binding {
+                            value: Value::Undefined,
+                            mutable: true,
+                            initialized: true,
+                            import_ref: None,
+                        },
                     );
                 }
                 self.hoist_stmt(body, scope);
             }
             Stmt::ForInOf { body, .. } => self.hoist_stmt(body, scope),
-            Stmt::Try { block, handler, finalizer } => {
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
                 for s in block {
                     self.hoist_var_only(s, scope);
                 }

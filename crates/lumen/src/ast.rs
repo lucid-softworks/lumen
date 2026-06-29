@@ -9,38 +9,82 @@ pub type P<T> = Box<T>;
 pub enum Stmt {
     Expr(Expr),
     /// `var` / `let` / `const` declaration: kind + (target, optional initializer) pairs.
-    VarDecl { kind: DeclKind, decls: Vec<(Pattern, Option<Expr>)> },
+    VarDecl {
+        kind: DeclKind,
+        decls: Vec<(Pattern, Option<Expr>)>,
+    },
     FuncDecl(Rc<Function>),
     Return(Option<Expr>),
-    If { test: Expr, cons: P<Stmt>, alt: Option<P<Stmt>> },
+    If {
+        test: Expr,
+        cons: P<Stmt>,
+        alt: Option<P<Stmt>>,
+    },
     Block(Vec<Stmt>),
-    While { test: Expr, body: P<Stmt> },
-    DoWhile { body: P<Stmt>, test: Expr },
+    While {
+        test: Expr,
+        body: P<Stmt>,
+    },
+    DoWhile {
+        body: P<Stmt>,
+        test: Expr,
+    },
     /// C-style `for (init; test; update) body`.
-    For { init: Option<P<ForInit>>, test: Option<Expr>, update: Option<Expr>, body: P<Stmt> },
+    For {
+        init: Option<P<ForInit>>,
+        test: Option<Expr>,
+        update: Option<Expr>,
+        body: P<Stmt>,
+    },
     /// `for (left in right) body` / `for (left of right) body` (`is_await` for `for await … of`).
-    ForInOf { decl: Option<DeclKind>, left: Pattern, right: Expr, of: bool, is_await: bool, body: P<Stmt> },
+    ForInOf {
+        decl: Option<DeclKind>,
+        left: Pattern,
+        right: Expr,
+        of: bool,
+        is_await: bool,
+        body: P<Stmt>,
+    },
     Break(Option<String>),
     Continue(Option<String>),
     Throw(Expr),
-    Try { block: Vec<Stmt>, handler: Option<(Option<Pattern>, Vec<Stmt>)>, finalizer: Option<Vec<Stmt>> },
-    Switch { disc: Expr, cases: Vec<SwitchCase> },
-    Labeled { label: String, body: P<Stmt> },
+    Try {
+        block: Vec<Stmt>,
+        handler: Option<(Option<Pattern>, Vec<Stmt>)>,
+        finalizer: Option<Vec<Stmt>>,
+    },
+    Switch {
+        disc: Expr,
+        cases: Vec<SwitchCase>,
+    },
+    Labeled {
+        label: String,
+        body: P<Stmt>,
+    },
     /// `with (obj) body` — resolves identifiers against `obj` first (forbidden in strict mode).
-    With { obj: Expr, body: P<Stmt> },
+    With {
+        obj: Expr,
+        body: P<Stmt>,
+    },
     ClassDecl(Rc<Class>),
     Empty,
     Debugger,
     /// `import …from "spec"` (or a bare `import "spec"`).
     Import(ImportDecl),
     /// `export { a, b as c }` or `export { a } from "spec"`.
-    ExportNamed { specs: Vec<ExportSpec>, source: Option<Rc<str>> },
+    ExportNamed {
+        specs: Vec<ExportSpec>,
+        source: Option<Rc<str>>,
+    },
     /// `export const/let/var/function/class …` — the inner declaration plus its exported names.
     ExportDecl(P<Stmt>),
     /// `export default …` (expression, function, or class).
     ExportDefault(P<Stmt>),
     /// `export * from "spec"` or `export * as ns from "spec"`.
-    ExportAll { source: Rc<str>, exported: Option<String> },
+    ExportAll {
+        source: Rc<str>,
+        exported: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +138,10 @@ pub enum MemberKind {
 
 #[derive(Debug, Clone)]
 pub enum ForInit {
-    VarDecl { kind: DeclKind, decls: Vec<(Pattern, Option<Expr>)> },
+    VarDecl {
+        kind: DeclKind,
+        decls: Vec<(Pattern, Option<Expr>)>,
+    },
     Expr(Expr),
 }
 
@@ -127,7 +174,10 @@ pub enum Pattern {
 #[derive(Debug, Clone)]
 pub enum ArrayPatElem {
     Hole,
-    Elem { pattern: Pattern, default: Option<Expr> },
+    Elem {
+        pattern: Pattern,
+        default: Option<Expr>,
+    },
     Rest(Pattern),
 }
 
@@ -156,35 +206,86 @@ pub enum Expr {
     Undefined,
     Ident(String),
     This,
-    Regex { body: Rc<str>, flags: Rc<str> },
+    Regex {
+        body: Rc<str>,
+        flags: Rc<str>,
+    },
     Array(Vec<ArrayElem>),
     Object(Vec<PropDef>),
     Func(Rc<Function>),
     Class(Rc<Class>),
     /// `yield expr` / `yield* expr` (only inside a generator).
-    Yield { delegate: bool, arg: Option<P<Expr>> },
+    Yield {
+        delegate: bool,
+        arg: Option<P<Expr>>,
+    },
     /// `await expr` (only inside an async function).
     Await(P<Expr>),
     /// The bare `super` keyword (only valid as `super(...)` or `super.x` / `super[x]`).
     Super,
-    Unary { op: &'static str, arg: P<Expr> },
-    Update { op: &'static str, prefix: bool, arg: P<Expr> },
-    Binary { op: &'static str, left: P<Expr>, right: P<Expr> },
-    Logical { op: &'static str, left: P<Expr>, right: P<Expr> },
-    Assign { op: &'static str, target: P<Expr>, value: P<Expr> },
-    Cond { test: P<Expr>, cons: P<Expr>, alt: P<Expr> },
-    Call { callee: P<Expr>, args: Vec<ArrayElem>, optional: bool },
-    New { callee: P<Expr>, args: Vec<ArrayElem> },
-    Member { obj: P<Expr>, prop: String, optional: bool },
-    Index { obj: P<Expr>, index: P<Expr>, optional: bool },
+    Unary {
+        op: &'static str,
+        arg: P<Expr>,
+    },
+    Update {
+        op: &'static str,
+        prefix: bool,
+        arg: P<Expr>,
+    },
+    Binary {
+        op: &'static str,
+        left: P<Expr>,
+        right: P<Expr>,
+    },
+    Logical {
+        op: &'static str,
+        left: P<Expr>,
+        right: P<Expr>,
+    },
+    Assign {
+        op: &'static str,
+        target: P<Expr>,
+        value: P<Expr>,
+    },
+    Cond {
+        test: P<Expr>,
+        cons: P<Expr>,
+        alt: P<Expr>,
+    },
+    Call {
+        callee: P<Expr>,
+        args: Vec<ArrayElem>,
+        optional: bool,
+    },
+    New {
+        callee: P<Expr>,
+        args: Vec<ArrayElem>,
+    },
+    Member {
+        obj: P<Expr>,
+        prop: String,
+        optional: bool,
+    },
+    Index {
+        obj: P<Expr>,
+        index: P<Expr>,
+        optional: bool,
+    },
     Seq(Vec<Expr>),
     /// `tag\`a${x}b\`` — `quasis` are (cooked, raw) chunks (one more than `subs`).
-    TaggedTemplate { tag: P<Expr>, quasis: Vec<(Option<String>, String)>, subs: Vec<Expr> },
+    TaggedTemplate {
+        tag: P<Expr>,
+        quasis: Vec<(Option<String>, String)>,
+        subs: Vec<Expr>,
+    },
     /// An optional chain (`a?.b.c`): evaluates the inner LHS, short-circuiting to `undefined` if any
     /// `?.` link sees a nullish base.
     OptionalChain(P<Expr>),
     /// Ergonomic brand check `#field in obj`: whether `obj` carries the private field.
-    PrivateIn { name: String, obj: P<Expr> },
+    PrivateIn {
+        name: String,
+        obj: P<Expr>,
+    },
     /// Dynamic `import(specifier)` — returns a promise of the module namespace.
     ImportCall(P<Expr>),
     /// `import.meta`.
@@ -202,10 +303,19 @@ pub enum ArrayElem {
 #[derive(Debug, Clone)]
 pub enum PropDef {
     /// `key: value` or shorthand `{ x }`.
-    KeyValue { key: PropKey, value: Expr },
+    KeyValue {
+        key: PropKey,
+        value: Expr,
+    },
     /// `get key() {}` / `set key(v) {}`.
-    Getter { key: PropKey, func: Rc<Function> },
-    Setter { key: PropKey, func: Rc<Function> },
+    Getter {
+        key: PropKey,
+        func: Rc<Function>,
+    },
+    Setter {
+        key: PropKey,
+        func: Rc<Function>,
+    },
     Spread(Expr),
 }
 

@@ -29,7 +29,10 @@ pub enum Tok {
     /// A punctuator. Interned to `&'static str` (e.g. `"=>"`, `"==="`, `"+="`).
     Punct(&'static str),
     /// A regular-expression literal: `/body/flags`.
-    Regex { body: String, flags: String },
+    Regex {
+        body: String,
+        flags: String,
+    },
     Eof,
 }
 
@@ -48,10 +51,42 @@ pub enum TplPart {
 /// `await`/`as`/`from`) are deliberately NOT here — they are valid identifiers in many positions,
 /// so they stay `Ident` and the parser recognises them by text where the grammar calls for them.
 pub const KEYWORDS: &[&str] = &[
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
-    "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import",
-    "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try",
-    "typeof", "var", "void", "while", "with",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
 ];
 
 /// Multi-char punctuators, longest first so the lexer is maximal-munch.

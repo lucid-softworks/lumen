@@ -21,7 +21,11 @@ pub fn write(
         total.pass, total.fail, total.skip
     ));
     let ran = total.pass + total.fail;
-    let pct = if ran > 0 { 100.0 * total.pass as f64 / ran as f64 } else { 0.0 };
+    let pct = if ran > 0 {
+        100.0 * total.pass as f64 / ran as f64
+    } else {
+        0.0
+    };
     out.push_str(&format!("  \"pass_rate\": {pct:.1},\n"));
     out.push_str("  \"categories\": {\n");
     let mut first = true;
@@ -46,7 +50,11 @@ pub fn write(
 }
 
 fn json_str_array(items: &[String]) -> String {
-    items.iter().map(|s| json_string(s)).collect::<Vec<_>>().join(", ")
+    items
+        .iter()
+        .map(|s| json_string(s))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn json_string(s: &str) -> String {

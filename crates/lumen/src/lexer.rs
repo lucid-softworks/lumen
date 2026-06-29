@@ -53,7 +53,10 @@ impl<'a> Lexer<'a> {
         c
     }
     fn err(&self, message: impl Into<String>) -> LexError {
-        LexError { message: message.into(), line: self.line }
+        LexError {
+            message: message.into(),
+            line: self.line,
+        }
     }
 
     /// Whether the previously emitted token permits a regex literal to follow (i.e. we are at the
@@ -75,7 +78,12 @@ impl<'a> Lexer<'a> {
     fn push(&mut self, kind: Tok) {
         let nl = self.nl_pending;
         self.nl_pending = false;
-        self.out.push(Token { kind, line: self.line, nl_before: nl, legacy_octal: false });
+        self.out.push(Token {
+            kind,
+            line: self.line,
+            nl_before: nl,
+            legacy_octal: false,
+        });
     }
     /// Flag the most recently pushed token as a legacy-octal construct.
     fn mark_legacy_octal(&mut self) {
@@ -110,7 +118,8 @@ impl<'a> Lexer<'a> {
                 self.read_string(c)?;
             } else if c == '`' {
                 self.read_template()?;
-            } else if c.is_ascii_digit() || (c == '.' && self.peek2().is_some_and(|d| d.is_ascii_digit()))
+            } else if c.is_ascii_digit()
+                || (c == '.' && self.peek2().is_some_and(|d| d.is_ascii_digit()))
             {
                 self.read_number()?;
             } else if is_ident_start(c) || c == '#' || (c == '\\' && self.peek2() == Some('u')) {
@@ -168,7 +177,11 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     match self.read_unicode_escape_char() {
                         Some(ch) => {
-                            let ok = if first { is_ident_start(ch) } else { is_ident_part(ch) };
+                            let ok = if first {
+                                is_ident_start(ch)
+                            } else {
+                                is_ident_part(ch)
+                            };
                             if !ok {
                                 return Err(self.err("invalid character in escaped identifier"));
                             }
@@ -264,12 +277,18 @@ impl<'a> Lexer<'a> {
                 Some('`') => {
                     let raw: String = self.chars[raw_start..self.pos].iter().collect();
                     self.bump();
-                    parts.push(TplPart::Str { cooked: std::mem::take(&mut cooked), raw });
+                    parts.push(TplPart::Str {
+                        cooked: std::mem::take(&mut cooked),
+                        raw,
+                    });
                     break;
                 }
                 Some('$') if self.chars.get(self.pos + 1) == Some(&'{') => {
                     let raw: String = self.chars[raw_start..self.pos].iter().collect();
-                    parts.push(TplPart::Str { cooked: std::mem::take(&mut cooked), raw });
+                    parts.push(TplPart::Str {
+                        cooked: std::mem::take(&mut cooked),
+                        raw,
+                    });
                     self.bump(); // '$'
                     self.bump(); // '{'
                     parts.push(TplPart::Sub(self.read_template_sub()?));
@@ -281,7 +300,9 @@ impl<'a> Lexer<'a> {
                     self.bump(); // consume the backslash
                     self.read_escape(&mut cooked)?;
                     if self.pending_legacy {
-                        return Err(self.err("octal escape sequences are not allowed in template literals"));
+                        return Err(
+                            self.err("octal escape sequences are not allowed in template literals")
+                        );
                     }
                 }
                 Some(c) => {
@@ -546,7 +567,8 @@ impl<'a> Lexer<'a> {
             if c == '_' {
                 let prev = i.checked_sub(1).and_then(|j| s.get(j));
                 let next = s.get(i + 1);
-                let ok = prev.is_some_and(|p| p.is_digit(radix)) && next.is_some_and(|n| n.is_digit(radix));
+                let ok = prev.is_some_and(|p| p.is_digit(radix))
+                    && next.is_some_and(|n| n.is_digit(radix));
                 if !ok {
                     return Err(self.err("invalid use of numeric separator"));
                 }
@@ -578,8 +600,10 @@ impl<'a> Lexer<'a> {
                 }
             }
             self.validate_seps(digits_start, self.pos, radix)?;
-            let digits: String =
-                self.chars[digits_start..self.pos].iter().filter(|c| **c != '_').collect();
+            let digits: String = self.chars[digits_start..self.pos]
+                .iter()
+                .filter(|c| **c != '_')
+                .collect();
             if self.peek() == Some('n') {
                 self.bump();
                 let n = i128::from_str_radix(&digits, radix)
@@ -622,9 +646,14 @@ impl<'a> Lexer<'a> {
         // A BigInt literal is an integer immediately followed by `n` (no fraction/exponent).
         if self.peek() == Some('n') {
             self.validate_seps(start, self.pos, 10)?;
-            let text: String = self.chars[start..self.pos].iter().filter(|c| **c != '_').collect();
+            let text: String = self.chars[start..self.pos]
+                .iter()
+                .filter(|c| **c != '_')
+                .collect();
             self.bump(); // n
-            let n: i128 = text.parse().map_err(|_| self.err("invalid BigInt literal"))?;
+            let n: i128 = text
+                .parse()
+                .map_err(|_| self.err("invalid BigInt literal"))?;
             self.push(Tok::BigInt(n));
             return Ok(());
         }
@@ -644,8 +673,13 @@ impl<'a> Lexer<'a> {
             }
         }
         self.validate_seps(start, self.pos, 10)?;
-        let text: String = self.chars[start..self.pos].iter().filter(|c| **c != '_').collect();
-        let n: f64 = text.parse().map_err(|_| self.err("invalid numeric literal"))?;
+        let text: String = self.chars[start..self.pos]
+            .iter()
+            .filter(|c| **c != '_')
+            .collect();
+        let n: f64 = text
+            .parse()
+            .map_err(|_| self.err("invalid numeric literal"))?;
         self.push(Tok::Num(n));
         Ok(())
     }
@@ -697,10 +731,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_punct(&mut self) -> Result<(), LexError> {
-        let rest: String = self.chars[self.pos..(self.pos + 4).min(self.chars.len())].iter().collect();
+        let rest: String = self.chars[self.pos..(self.pos + 4).min(self.chars.len())]
+            .iter()
+            .collect();
         // `?.` followed by a digit is `?` then `.` (a conditional like `x ? .5 : .3`), not optional
         // chaining.
-        if rest.starts_with("?.") && self.chars.get(self.pos + 2).is_some_and(|c| c.is_ascii_digit()) {
+        if rest.starts_with("?.")
+            && self
+                .chars
+                .get(self.pos + 2)
+                .is_some_and(|c| c.is_ascii_digit())
+        {
             self.bump();
             self.push(Tok::Punct("?"));
             return Ok(());
@@ -715,7 +756,10 @@ impl<'a> Lexer<'a> {
             }
         }
         let _ = self.src; // keep field used; byte view reserved for future fast paths
-        Err(self.err(format!("unexpected character {:?}", self.peek().unwrap_or('\0'))))
+        Err(self.err(format!(
+            "unexpected character {:?}",
+            self.peek().unwrap_or('\0')
+        )))
     }
 }
 

@@ -54,7 +54,9 @@ impl Interp {
                                 if matches!(v, Value::Undefined) {
                                     if let Some(d) = default {
                                         v = me.eval(d, env)?;
-                                        if let (Pattern::Ident(n), true) = (pattern, is_anonymous_fn(d)) {
+                                        if let (Pattern::Ident(n), true) =
+                                            (pattern, is_anonymous_fn(d))
+                                        {
                                             me.set_fn_name(&v, n);
                                         }
                                     }
@@ -118,7 +120,12 @@ impl Interp {
                             }
                         }
                     }
-                    self.bind_pattern(&Pattern::Ident(rest_name.clone()), Value::Obj(obj), env, mode)?;
+                    self.bind_pattern(
+                        &Pattern::Ident(rest_name.clone()),
+                        Value::Obj(obj),
+                        env,
+                        mode,
+                    )?;
                 }
                 Ok(())
             }
@@ -157,14 +164,22 @@ impl Interp {
     pub fn declare_block_lexicals(&mut self, stmts: &[Stmt], scope: &Env, with_functions: bool) {
         for s in stmts {
             match crate::interpreter::unwrap_export(s) {
-                Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, decls } => {
+                Stmt::VarDecl {
+                    kind: DeclKind::Let | DeclKind::Const,
+                    decls,
+                } => {
                     for (pat, _) in decls {
                         let mut names = Vec::new();
                         pattern_idents(pat, &mut names);
                         for name in names {
                             scope.borrow_mut().vars.insert(
                                 name,
-                                Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
+                                Binding {
+                                    value: Value::Undefined,
+                                    mutable: true,
+                                    initialized: false,
+                                    import_ref: None,
+                                },
                             );
                         }
                     }
@@ -174,7 +189,12 @@ impl Interp {
                         let f = self.make_function(func.clone(), scope.clone());
                         scope.borrow_mut().vars.insert(
                             name.clone(),
-                            Binding { value: f, mutable: true, initialized: true, import_ref: None },
+                            Binding {
+                                value: f,
+                                mutable: true,
+                                initialized: true,
+                                import_ref: None,
+                            },
                         );
                     }
                 }
@@ -183,7 +203,12 @@ impl Interp {
                         // Classes are lexically scoped with a TDZ until the declaration executes.
                         scope.borrow_mut().vars.insert(
                             name.clone(),
-                            Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
+                            Binding {
+                                value: Value::Undefined,
+                                mutable: true,
+                                initialized: false,
+                                import_ref: None,
+                            },
                         );
                     }
                 }
@@ -222,7 +247,12 @@ impl Interp {
                                     self.set_fn_name(&value, n);
                                 }
                             }
-                            self.bind_pattern(pat, value, env, BindMode::Lexical(*kind == DeclKind::Const))?;
+                            self.bind_pattern(
+                                pat,
+                                value,
+                                env,
+                                BindMode::Lexical(*kind == DeclKind::Const),
+                            )?;
                         }
                     }
                 }
@@ -276,13 +306,27 @@ impl Interp {
                     }
                 })
             }
-            Stmt::For { init, test, update, body } => self.exec_for(init, test, update, body, env, None),
-            Stmt::ForInOf { decl, left, right, of, is_await, body } => {
-                self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, None)
-            }
+            Stmt::For {
+                init,
+                test,
+                update,
+                body,
+            } => self.exec_for(init, test, update, body, env, None),
+            Stmt::ForInOf {
+                decl,
+                left,
+                right,
+                of,
+                is_await,
+                body,
+            } => self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, None),
             Stmt::Break(label) => Err(Abrupt::Break(label.clone())),
             Stmt::Continue(label) => Err(Abrupt::Continue(label.clone())),
-            Stmt::Try { block, handler, finalizer } => self.exec_try(block, handler, finalizer, env),
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+            } => self.exec_try(block, handler, finalizer, env),
             Stmt::Switch { disc, cases } => self.exec_switch(disc, cases, env),
             Stmt::Labeled { label, body } => self.exec_labeled(label, body, env),
             Stmt::With { obj, body } => {
@@ -304,7 +348,9 @@ impl Interp {
             }
             // Module declarations: imports are resolved at link time (runtime no-op); exports run
             // their inner declaration (the export itself is link-time metadata).
-            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => Ok(Value::Undefined),
+            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => {
+                Ok(Value::Undefined)
+            }
             Stmt::ExportDecl(inner) => self.exec_stmt(inner, env),
             Stmt::ExportDefault(inner) => match &**inner {
                 Stmt::Expr(e) => {
@@ -320,12 +366,20 @@ impl Interp {
     fn exec_labeled(&mut self, label: &str, body: &Stmt, env: &Env) -> Completion {
         // For loops, push the label so labeled break/continue can target them.
         let result = match body {
-            Stmt::For { init, test, update, body } => {
-                self.exec_for(init, test, update, body, env, Some(label))
-            }
-            Stmt::ForInOf { decl, left, right, of, is_await, body } => {
-                self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, Some(label))
-            }
+            Stmt::For {
+                init,
+                test,
+                update,
+                body,
+            } => self.exec_for(init, test, update, body, env, Some(label)),
+            Stmt::ForInOf {
+                decl,
+                left,
+                right,
+                of,
+                is_await,
+                body,
+            } => self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, Some(label)),
             Stmt::While { .. } | Stmt::DoWhile { .. } => self.exec_stmt(body, env),
             other => self.exec_stmt(other, env),
         };
@@ -390,7 +444,12 @@ impl Interp {
                             for name in names {
                                 loop_env.borrow_mut().vars.insert(
                                     name,
-                                    Binding { value: Value::Undefined, mutable: true, initialized: false, import_ref: None },
+                                    Binding {
+                                        value: Value::Undefined,
+                                        mutable: true,
+                                        initialized: false,
+                                        import_ref: None,
+                                    },
                                 );
                             }
                         }
@@ -499,7 +558,11 @@ impl Interp {
             return result;
         }
         // for-in: enumerable string keys along the prototype chain (own first, deduped).
-        let items: Vec<Value> = self.enum_keys(&rhs).into_iter().map(Value::from_string).collect();
+        let items: Vec<Value> = self
+            .enum_keys(&rhs)
+            .into_iter()
+            .map(Value::from_string)
+            .collect();
         let mut idx = 0;
         self.run_loop(label, env, |me, env| {
             if idx >= items.len() {
@@ -533,9 +596,9 @@ impl Interp {
                 Resume::Next(v) => {
                     let result = self.call(next.clone(), iterator.clone(), &[v])?;
                     let done = self.get_member(&result, "done")?;
-                        if self.to_boolean(&done) {
-                            return self.get_member(&result, "value");
-                        }
+                    if self.to_boolean(&done) {
+                        return self.get_member(&result, "value");
+                    }
                     let inner = self.get_member(&result, "value")?;
                     received = crate::coroutine::coroutine_yield(self, inner);
                 }
@@ -543,13 +606,15 @@ impl Interp {
                     let throw = self.get_member(&iterator, "throw")?;
                     if !throw.is_callable() {
                         self.iterator_close(&iterator);
-                        return Err(self.throw("TypeError", "the delegated iterator has no 'throw' method"));
+                        return Err(
+                            self.throw("TypeError", "the delegated iterator has no 'throw' method")
+                        );
                     }
                     let result = self.call(throw, iterator.clone(), &[e])?;
                     let done = self.get_member(&result, "done")?;
-                        if self.to_boolean(&done) {
-                            return self.get_member(&result, "value");
-                        }
+                    if self.to_boolean(&done) {
+                        return self.get_member(&result, "value");
+                    }
                     let inner = self.get_member(&result, "value")?;
                     received = crate::coroutine::coroutine_yield(self, inner);
                 }
@@ -560,10 +625,10 @@ impl Interp {
                     }
                     let result = self.call(ret, iterator.clone(), &[v])?;
                     let done = self.get_member(&result, "done")?;
-                        if self.to_boolean(&done) {
-                            let v = self.get_member(&result, "value")?;
-                            return Err(Abrupt::Return(v));
-                        }
+                    if self.to_boolean(&done) {
+                        let v = self.get_member(&result, "value")?;
+                        return Err(Abrupt::Return(v));
+                    }
                     let inner = self.get_member(&result, "value")?;
                     received = crate::coroutine::coroutine_yield(self, inner);
                 }
@@ -575,7 +640,10 @@ impl Interp {
     pub(crate) fn get_iterator(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
         // A primitive string iterates by code point (it has no own @@iterator method here).
         if let Value::Str(s) = v {
-            let chars: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+            let chars: Vec<Value> = s
+                .chars()
+                .map(|c| Value::from_string(c.to_string()))
+                .collect();
             let arr = self.make_array(chars);
             return self.get_iterator(&arr);
         }
@@ -595,7 +663,11 @@ impl Interp {
         Ok((iter, next))
     }
     /// IteratorStep: `Some(value)` or `None` when done.
-    pub(crate) fn iterator_step(&mut self, iter: &Value, next: &Value) -> Result<Option<Value>, Abrupt> {
+    pub(crate) fn iterator_step(
+        &mut self,
+        iter: &Value,
+        next: &Value,
+    ) -> Result<Option<Value>, Abrupt> {
         let res = self.call(next.clone(), iter.clone(), &[])?;
         if !matches!(res, Value::Obj(_)) {
             return Err(self.throw("TypeError", "iterator result is not an object"));
@@ -621,7 +693,10 @@ impl Interp {
     pub(crate) fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Abrupt> {
         match v {
             Value::Str(s) => {
-                return Ok(s.chars().map(|c| Value::from_string(c.to_string())).collect())
+                return Ok(s
+                    .chars()
+                    .map(|c| Value::from_string(c.to_string()))
+                    .collect())
             }
             Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => {
                 let len = self.checked_array_len(o)?;
@@ -783,7 +858,12 @@ impl Interp {
     fn init_lexical(&mut self, name: &str, value: Value, is_const: bool, env: &Env) {
         env.borrow_mut().vars.insert(
             name.to_string(),
-            Binding { value, mutable: !is_const, initialized: true, import_ref: None },
+            Binding {
+                value,
+                mutable: !is_const,
+                initialized: true,
+                import_ref: None,
+            },
         );
     }
 
@@ -996,7 +1076,10 @@ impl Interp {
                 match o {
                     // Private fields are own props; private methods live on the prototype.
                     Value::Obj(obj) => Ok(Value::Bool(self.has_property(&obj, name))),
-                    _ => Err(self.throw("TypeError", "the right-hand side of 'in' must be an object")),
+                    _ => {
+                        Err(self
+                            .throw("TypeError", "the right-hand side of 'in' must be an object"))
+                    }
                 }
             }
             Expr::OptionalChain(inner) => {
@@ -1011,7 +1094,11 @@ impl Interp {
                     v
                 }
             }
-            Expr::Member { obj, prop, optional } => {
+            Expr::Member {
+                obj,
+                prop,
+                optional,
+            } => {
                 if matches!(**obj, Expr::Super) {
                     let home = self.get_var("%superproto%", env)?;
                     return self.get_member(&home, prop);
@@ -1026,7 +1113,11 @@ impl Interp {
                 }
                 self.get_member(&base, prop)
             }
-            Expr::Index { obj, index, optional } => {
+            Expr::Index {
+                obj,
+                index,
+                optional,
+            } => {
                 if matches!(**obj, Expr::Super) {
                     let home = self.get_var("%superproto%", env)?;
                     let idx = self.eval(index, env)?;
@@ -1045,7 +1136,11 @@ impl Interp {
                 let key = self.to_property_key(&idx)?;
                 self.get_member(&base, &key)
             }
-            Expr::Call { callee, args, optional } => self.eval_call(callee, args, *optional, env),
+            Expr::Call {
+                callee,
+                args,
+                optional,
+            } => self.eval_call(callee, args, *optional, env),
             Expr::TaggedTemplate { tag, quasis, subs } => {
                 self.eval_tagged_template(tag, quasis, subs, env)
             }
@@ -1228,9 +1323,16 @@ impl Interp {
         // The template object: a frozen array of cooked strings with a frozen `.raw` array.
         let cooked: Vec<Value> = quasis
             .iter()
-            .map(|(c, _)| c.as_ref().map(|s| Value::from_string(s.clone())).unwrap_or(Value::Undefined))
+            .map(|(c, _)| {
+                c.as_ref()
+                    .map(|s| Value::from_string(s.clone()))
+                    .unwrap_or(Value::Undefined)
+            })
             .collect();
-        let raw: Vec<Value> = quasis.iter().map(|(_, r)| Value::from_string(r.clone())).collect();
+        let raw: Vec<Value> = quasis
+            .iter()
+            .map(|(_, r)| Value::from_string(r.clone()))
+            .collect();
         let strings = self.make_array(cooked);
         let raw_arr = self.make_array(raw);
         self.freeze_object(&raw_arr);
@@ -1274,7 +1376,8 @@ impl Interp {
         // in the global scope (handled by the global `eval` native).
         if let Expr::Ident(name) = callee {
             if name == "eval" {
-                if let (Ok(Value::Obj(f)), Some(ef)) = (self.get_var("eval", env), self.eval_fn.clone())
+                if let (Ok(Value::Obj(f)), Some(ef)) =
+                    (self.get_var("eval", env), self.eval_fn.clone())
                 {
                     if Rc::ptr_eq(&f, &ef) {
                         let argv = self.eval_args(args, env)?;
@@ -1320,7 +1423,11 @@ impl Interp {
         }
         // Determine `this` for method calls (`obj.m()` → this = obj).
         let (func, this) = match callee {
-            Expr::Member { obj, prop, optional } => {
+            Expr::Member {
+                obj,
+                prop,
+                optional,
+            } => {
                 let base = self.eval(obj, env)?;
                 if self.short_circuit {
                     return Ok(Value::Undefined);
@@ -1332,7 +1439,11 @@ impl Interp {
                 let f = self.get_member(&base, prop)?;
                 (f, base)
             }
-            Expr::Index { obj, index, optional } => {
+            Expr::Index {
+                obj,
+                index,
+                optional,
+            } => {
                 let base = self.eval(obj, env)?;
                 if self.short_circuit {
                     return Ok(Value::Undefined);
@@ -1399,11 +1510,18 @@ impl Interp {
         let target = self.make_native(
             if fulfilling { "resolve" } else { "reject" },
             1,
-            if fulfilling { promise_resolve_native } else { promise_reject_native },
+            if fulfilling {
+                promise_resolve_native
+            } else {
+                promise_reject_native
+            },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call =
-            Callable::Bound { target, this: promise.clone(), args: Vec::new() };
+        bound.borrow_mut().call = Callable::Bound {
+            target,
+            this: promise.clone(),
+            args: Vec::new(),
+        };
         Value::Obj(bound)
     }
 
@@ -1450,7 +1568,12 @@ impl Interp {
         };
         for (on_f, on_r, result) in reactions {
             let handler = if fulfilled { on_f } else { on_r };
-            self.microtasks.push_back(Job { handler, result, value: value.clone(), fulfilled });
+            self.microtasks.push_back(Job {
+                handler,
+                result,
+                value: value.clone(),
+                fulfilled,
+            });
         }
     }
 
@@ -1470,11 +1593,21 @@ impl Interp {
             }
             1 => {
                 let v = self.promises[&ptr].value.clone();
-                self.microtasks.push_back(Job { handler: on_f, result: result.clone(), value: v, fulfilled: true });
+                self.microtasks.push_back(Job {
+                    handler: on_f,
+                    result: result.clone(),
+                    value: v,
+                    fulfilled: true,
+                });
             }
             _ => {
                 let v = self.promises[&ptr].value.clone();
-                self.microtasks.push_back(Job { handler: on_r, result: result.clone(), value: v, fulfilled: false });
+                self.microtasks.push_back(Job {
+                    handler: on_r,
+                    result: result.clone(),
+                    value: v,
+                    fulfilled: false,
+                });
             }
         }
         result
@@ -1490,7 +1623,11 @@ impl Interp {
                 break;
             }
             if job.handler.is_callable() {
-                match self.call(job.handler.clone(), Value::Undefined, std::slice::from_ref(&job.value)) {
+                match self.call(
+                    job.handler.clone(),
+                    Value::Undefined,
+                    std::slice::from_ref(&job.value),
+                ) {
                     Ok(r) => self.resolve_promise(&job.result, r),
                     Err(Abrupt::Throw(e)) => self.reject_promise(&job.result, e),
                     Err(_) => {}
@@ -1506,14 +1643,16 @@ impl Interp {
     /// Compile a regular expression and build a RegExp object (its metadata stored as own props,
     /// the compiled program in the `regexps` side table). A bad pattern throws a SyntaxError.
     pub(crate) fn make_regexp(&mut self, source: &str, flags: &str) -> Result<Value, Abrupt> {
-        let re = crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
+        let re =
+            crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
         let obj = Object::new(self.extra_protos.get("RegExp").cloned());
         let ptr = Rc::as_ptr(&obj) as usize;
         // source/flags/global/... are accessor getters on RegExp.prototype (computed from the
         // matcher); only `lastIndex` is an own writable data property.
-        obj.borrow_mut()
-            .props
-            .insert("lastIndex", Property::data(Value::Num(0.0), true, false, false));
+        obj.borrow_mut().props.insert(
+            "lastIndex",
+            Property::data(Value::Num(0.0), true, false, false),
+        );
         self.regexps.insert(ptr, Rc::new(re));
         Ok(Value::Obj(obj))
     }
@@ -1571,7 +1710,10 @@ impl Interp {
                 (pp, Some(Value::Obj(pc.clone())))
             }
             _ => {
-                return Err(self.throw("TypeError", "Class extends value is not a constructor or null"))
+                return Err(self.throw(
+                    "TypeError",
+                    "Class extends value is not a constructor or null",
+                ))
             }
         };
         let derived = parent.is_some();
@@ -1590,25 +1732,42 @@ impl Interp {
         let class_env = new_scope(Some(env.clone()));
         let inst_env = new_scope(Some(class_env.clone()));
         bind(&inst_env, "%superproto%", opt_obj(&proto_parent));
-        bind(&inst_env, "%superclass%", ctor_parent.clone().unwrap_or(Value::Undefined));
+        bind(
+            &inst_env,
+            "%superclass%",
+            ctor_parent.clone().unwrap_or(Value::Undefined),
+        );
         let static_env = new_scope(Some(class_env.clone()));
-        bind(&static_env, "%superproto%", ctor_parent.clone().unwrap_or(Value::Undefined));
+        bind(
+            &static_env,
+            "%superproto%",
+            ctor_parent.clone().unwrap_or(Value::Undefined),
+        );
 
         // Build the constructor object on `proto`.
         let ctor_val = self.make_function(ctor_func, inst_env.clone());
         let ctor_obj = ctor_val.as_obj().unwrap().clone();
         {
             let mut b = ctor_obj.borrow_mut();
-            b.props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+            b.props.insert(
+                "prototype",
+                Property::data(Value::Obj(proto.clone()), false, false, false),
+            );
             b.proto = match &ctor_parent {
                 Some(Value::Obj(p)) => Some(p.clone()),
                 _ => Some(self.function_proto.clone()),
             };
             if let Some(n) = &class.name {
-                b.props.insert("name", Property::data(Value::from_string(n.clone()), false, false, true));
+                b.props.insert(
+                    "name",
+                    Property::data(Value::from_string(n.clone()), false, false, true),
+                );
             }
         }
-        proto.borrow_mut().props.insert("constructor", Property::builtin(ctor_val.clone()));
+        proto
+            .borrow_mut()
+            .props
+            .insert("constructor", Property::builtin(ctor_val.clone()));
         bind(&inst_env, "%thisctor%", ctor_val.clone());
 
         // Methods, accessors and fields.
@@ -1619,21 +1778,29 @@ impl Interp {
             }
             let key = self.eval_prop_key(&m.key, env)?;
             let menv = if m.is_static { &static_env } else { &inst_env };
-            let target = if m.is_static { ctor_obj.clone() } else { proto.clone() };
+            let target = if m.is_static {
+                ctor_obj.clone()
+            } else {
+                proto.clone()
+            };
             match m.kind {
                 MemberKind::Method => {
                     let f = self.make_function(m.func.clone().unwrap(), menv.clone());
                     if let Value::Obj(fo) = &f {
-                        fo.borrow_mut()
-                            .props
-                            .insert("name", Property::data(Value::from_string(key.clone()), false, false, true));
+                        fo.borrow_mut().props.insert(
+                            "name",
+                            Property::data(Value::from_string(key.clone()), false, false, true),
+                        );
                     }
                     target.borrow_mut().props.insert(key, Property::builtin(f));
                 }
                 MemberKind::Get | MemberKind::Set => {
                     let f = self.make_function(m.func.clone().unwrap(), menv.clone());
-                    let (get, set) =
-                        if m.kind == MemberKind::Get { (Some(f), None) } else { (None, Some(f)) };
+                    let (get, set) = if m.kind == MemberKind::Get {
+                        (Some(f), None)
+                    } else {
+                        (None, Some(f))
+                    };
                     self.define_class_accessor(&target, &key, get, set);
                 }
                 MemberKind::Field => {
@@ -1664,12 +1831,22 @@ impl Interp {
 
         self.class_info.insert(
             Rc::as_ptr(&ctor_obj) as usize,
-            ClassInfo { fields: inst_fields, field_env: inst_env, derived },
+            ClassInfo {
+                fields: inst_fields,
+                field_env: inst_env,
+                derived,
+            },
         );
         Ok(ctor_val)
     }
 
-    fn define_class_accessor(&self, target: &Gc, key: &str, get: Option<Value>, set: Option<Value>) {
+    fn define_class_accessor(
+        &self,
+        target: &Gc,
+        key: &str,
+        get: Option<Value>,
+        set: Option<Value>,
+    ) {
         let mut b = target.borrow_mut();
         if let Some(p) = b.props.get_mut(key) {
             if p.accessor {
@@ -1711,7 +1888,11 @@ impl Interp {
         };
         let ptr = Rc::as_ptr(&obj) as usize;
         let is_class = self.class_info.contains_key(&ptr);
-        let derived = self.class_info.get(&ptr).map(|i| i.derived).unwrap_or(false);
+        let derived = self
+            .class_info
+            .get(&ptr)
+            .map(|i| i.derived)
+            .unwrap_or(false);
         let call = obj.borrow().call.clone();
         match call {
             Callable::User(func, cenv) => {
@@ -1851,7 +2032,12 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         return Ok(Value::Bool(self.proxy_delete(target, handler, prop)?));
                     }
-                    let configurable = o.borrow().props.get(prop).map(|p| p.configurable).unwrap_or(true);
+                    let configurable = o
+                        .borrow()
+                        .props
+                        .get(prop)
+                        .map(|p| p.configurable)
+                        .unwrap_or(true);
                     if configurable {
                         o.borrow_mut().props.remove(prop);
                         return Ok(Value::Bool(true));
@@ -1869,7 +2055,12 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         return Ok(Value::Bool(self.proxy_delete(target, handler, &key)?));
                     }
-                    let configurable = o.borrow().props.get(&key).map(|p| p.configurable).unwrap_or(true);
+                    let configurable = o
+                        .borrow()
+                        .props
+                        .get(&key)
+                        .map(|p| p.configurable)
+                        .unwrap_or(true);
                     if configurable {
                         o.borrow_mut().props.remove(&key);
                         return Ok(Value::Bool(true));
@@ -1883,14 +2074,26 @@ impl Interp {
     }
 
     /// Proxy `[[Delete]]`: call the deleteProperty trap, or forward to the target.
-    pub(crate) fn proxy_delete(&mut self, target: Value, handler: Value, key: &str) -> Result<bool, Abrupt> {
+    pub(crate) fn proxy_delete(
+        &mut self,
+        target: Value,
+        handler: Value,
+        key: &str,
+    ) -> Result<bool, Abrupt> {
         let trap = self.get_member(&handler, "deleteProperty")?;
         if trap.is_callable() {
-            let kv = self.sym_from_key(key).unwrap_or_else(|| Value::from_string(key.to_string()));
+            let kv = self
+                .sym_from_key(key)
+                .unwrap_or_else(|| Value::from_string(key.to_string()));
             let res = self.call(trap, handler, &[target, kv])?;
             Ok(self.to_boolean(&res))
         } else if let Value::Obj(t) = &target {
-            let configurable = t.borrow().props.get(key).map(|p| p.configurable).unwrap_or(true);
+            let configurable = t
+                .borrow()
+                .props
+                .get(key)
+                .map(|p| p.configurable)
+                .unwrap_or(true);
             if configurable {
                 t.borrow_mut().props.remove(key);
                 Ok(true)
@@ -1902,10 +2105,20 @@ impl Interp {
         }
     }
 
-    fn eval_update(&mut self, op: &str, prefix: bool, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
+    fn eval_update(
+        &mut self,
+        op: &str,
+        prefix: bool,
+        arg: &Expr,
+        env: &Env,
+    ) -> Result<Value, Abrupt> {
         let old = self.eval(arg, env)?;
         if let Value::BigInt(n) = old {
-            let new = if op == "++" { n.wrapping_add(1) } else { n.wrapping_sub(1) };
+            let new = if op == "++" {
+                n.wrapping_add(1)
+            } else {
+                n.wrapping_sub(1)
+            };
             self.assign_to_target(arg, Value::BigInt(new), env)?;
             return Ok(Value::BigInt(if prefix { new } else { n }));
         }
@@ -1915,7 +2128,13 @@ impl Interp {
         Ok(Value::Num(if prefix { new } else { n }))
     }
 
-    fn eval_assign(&mut self, op: &str, target: &Expr, value: &Expr, env: &Env) -> Result<Value, Abrupt> {
+    fn eval_assign(
+        &mut self,
+        op: &str,
+        target: &Expr,
+        value: &Expr,
+        env: &Env,
+    ) -> Result<Value, Abrupt> {
         if op == "=" {
             let v = self.eval(value, env)?;
             // `f = function(){}` names the anonymous function after the target identifier.
@@ -2030,14 +2249,22 @@ impl Interp {
                             if let Value::Obj(src) = &value {
                                 let keys: Vec<Rc<str>> = src.borrow().props.keys();
                                 for k in keys {
-                                    if Interp::is_sym_key(&k) || taken.iter().any(|x| x.as_str() == &*k) {
+                                    if Interp::is_sym_key(&k)
+                                        || taken.iter().any(|x| x.as_str() == &*k)
+                                    {
                                         continue;
                                     }
-                                    let enumerable =
-                                        src.borrow().props.get(&k).map(|p| p.enumerable).unwrap_or(false);
+                                    let enumerable = src
+                                        .borrow()
+                                        .props
+                                        .get(&k)
+                                        .map(|p| p.enumerable)
+                                        .unwrap_or(false);
                                     if enumerable {
                                         let v = self.get_member(&value, &k)?;
-                                        rest.borrow_mut().props.insert(k, crate::value::Property::plain(v));
+                                        rest.borrow_mut()
+                                            .props
+                                            .insert(k, crate::value::Property::plain(v));
                                     }
                                 }
                             }
@@ -2054,7 +2281,12 @@ impl Interp {
 
     /// Assign one destructured element, honoring a `target = default` cover.
     fn assign_destructure_elem(&mut self, t: &Expr, v: Value, env: &Env) -> Result<(), Abrupt> {
-        if let Expr::Assign { op: "=", target, value: dflt } = t {
+        if let Expr::Assign {
+            op: "=",
+            target,
+            value: dflt,
+        } = t
+        {
             let v = if matches!(v, Value::Undefined) {
                 let dv = self.eval(dflt, env)?;
                 if let (Expr::Ident(n), true) = (&**target, is_anonymous_fn(dflt)) {
@@ -2088,8 +2320,15 @@ impl Interp {
         // Arithmetic, bitwise, and `+` convert both operands to primitives first (left then right),
         // then dispatch on BigInt / string (for `+`) / number. ToPrimitive runs before the BigInt
         // mixing check so a wrapped BigInt object coerces correctly.
-        if matches!(op, "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>") {
-            let hint = if op == "+" { Hint::Default } else { Hint::Number };
+        if matches!(
+            op,
+            "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>"
+        ) {
+            let hint = if op == "+" {
+                Hint::Default
+            } else {
+                Hint::Number
+            };
             let lp = self.to_primitive(&l, hint)?;
             let rp = self.to_primitive(&r, hint)?;
             if op == "+" && (matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_))) {
@@ -2120,9 +2359,15 @@ impl Interp {
                     Ok(Value::Num(js_mod(a, b)))
                 }
                 "**" => Ok(Value::Num(self.to_number(&lp)?.powf(self.to_number(&rp)?))),
-                "&" => Ok(Value::Num((self.to_int32(&lp)? & self.to_int32(&rp)?) as f64)),
-                "|" => Ok(Value::Num((self.to_int32(&lp)? | self.to_int32(&rp)?) as f64)),
-                "^" => Ok(Value::Num((self.to_int32(&lp)? ^ self.to_int32(&rp)?) as f64)),
+                "&" => Ok(Value::Num(
+                    (self.to_int32(&lp)? & self.to_int32(&rp)?) as f64,
+                )),
+                "|" => Ok(Value::Num(
+                    (self.to_int32(&lp)? | self.to_int32(&rp)?) as f64,
+                )),
+                "^" => Ok(Value::Num(
+                    (self.to_int32(&lp)? ^ self.to_int32(&rp)?) as f64,
+                )),
                 "<<" => {
                     let a = self.to_int32(&lp)?;
                     let b = (self.to_uint32(&rp)?) & 31;
@@ -2168,7 +2413,11 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "has")?;
                         if trap.is_callable() {
-                            let res = self.call(trap, handler, &[target.clone(), Value::str(key.as_str())])?;
+                            let res = self.call(
+                                trap,
+                                handler,
+                                &[target.clone(), Value::str(key.as_str())],
+                            )?;
                             let present = self.to_boolean(&res);
                             // Invariant: can't hide a non-configurable own property, nor any own
                             // property of a non-extensible target.
@@ -2177,7 +2426,10 @@ impl Interp {
                                     let p = t.borrow().props.get(&key).cloned();
                                     if let Some(p) = p {
                                         if !p.configurable || !t.borrow().extensible {
-                                            return Err(self.throw("TypeError", "proxy 'has' trap hid a non-configurable property"));
+                                            return Err(self.throw(
+                                                "TypeError",
+                                                "proxy 'has' trap hid a non-configurable property",
+                                            ));
                                         }
                                     }
                                 }
@@ -2301,9 +2553,16 @@ impl Interp {
     fn instanceof(&mut self, l: &Value, r: &Value) -> Result<Value, Abrupt> {
         let ctor = match r {
             Value::Obj(o) if !matches!(o.borrow().call, Callable::None) => o.clone(),
-            _ => return Err(self.throw("TypeError", "right-hand side of instanceof is not callable")),
+            _ => {
+                return Err(self.throw("TypeError", "right-hand side of instanceof is not callable"))
+            }
         };
-        let proto = match ctor.borrow().props.get("prototype").map(|p| p.value.clone()) {
+        let proto = match ctor
+            .borrow()
+            .props
+            .get("prototype")
+            .map(|p| p.value.clone())
+        {
             Some(Value::Obj(p)) => p,
             _ => return Ok(Value::Bool(false)),
         };
@@ -2382,7 +2641,9 @@ impl Interp {
             Value::Obj(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 match p {
-                    Value::Obj(_) => return Err(self.throw("TypeError", "cannot convert object to string")),
+                    Value::Obj(_) => {
+                        return Err(self.throw("TypeError", "cannot convert object to string"))
+                    }
                     other => self.to_string(&other)?,
                 }
             }
@@ -2399,7 +2660,12 @@ impl Interp {
 
     /// The internal property key for a well-known symbol (e.g. `Symbol.toPrimitive`).
     fn well_known_sym_key(&self, name: &str) -> Option<String> {
-        let sym = self.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+        let sym = self
+            .global
+            .borrow()
+            .props
+            .get("Symbol")
+            .map(|p| p.value.clone())?;
         if let Value::Obj(o) = sym {
             if let Some(p) = o.borrow().props.get(name) {
                 if let Value::Sym(d) = &p.value {
@@ -2426,7 +2692,9 @@ impl Interp {
                 };
                 let r = self.call(f, v.clone(), &[Value::str(hint_str)])?;
                 if matches!(r, Value::Obj(_)) {
-                    return Err(self.throw("TypeError", "Cannot convert object to a primitive value"));
+                    return Err(
+                        self.throw("TypeError", "Cannot convert object to a primitive value")
+                    );
                 }
                 return Ok(r);
             }
@@ -2457,7 +2725,11 @@ impl Interp {
             return "0".to_string();
         }
         if n.is_infinite() {
-            return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+            return if n > 0.0 {
+                "Infinity".to_string()
+            } else {
+                "-Infinity".to_string()
+            };
         }
         let neg = n < 0.0;
         // Rust's `{:e}` yields the shortest round-tripping mantissa + exponent (`d[.ddd]e±E`).
@@ -2481,7 +2753,13 @@ impl Interp {
             if k == 1 {
                 format!("{}e{}{}", digits, sign, exp_part.abs())
             } else {
-                format!("{}.{}e{}{}", &digits[..1], &digits[1..], sign, exp_part.abs())
+                format!(
+                    "{}.{}e{}{}",
+                    &digits[..1],
+                    &digits[1..],
+                    sign,
+                    exp_part.abs()
+                )
             }
         };
         if neg {
@@ -2574,9 +2852,15 @@ enum LoopStep {
 
 /// Insert an initialized, mutable binding into `env` (used for the hidden `%super*%`/`this` slots).
 fn bind(env: &Env, name: &str, value: Value) {
-    env.borrow_mut()
-        .vars
-        .insert(name.to_string(), Binding { value, mutable: true, initialized: true, import_ref: None });
+    env.borrow_mut().vars.insert(
+        name.to_string(),
+        Binding {
+            value,
+            mutable: true,
+            initialized: true,
+            import_ref: None,
+        },
+    );
 }
 
 fn opt_obj(o: &Option<Gc>) -> Value {
@@ -2599,7 +2883,11 @@ fn default_constructor(derived: bool) -> Function {
         Vec::new()
     };
     let params = if derived {
-        vec![Param { pattern: Pattern::Ident("args".to_string()), default: None, rest: true }]
+        vec![Param {
+            pattern: Pattern::Ident("args".to_string()),
+            default: None,
+            rest: true,
+        }]
     } else {
         Vec::new()
     };
@@ -2685,13 +2973,19 @@ fn parse_number(s: &str) -> f64 {
         None => (1.0, t.strip_prefix('+').unwrap_or(t)),
     };
     if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        return i64::from_str_radix(hex, 16).map(|n| sign * n as f64).unwrap_or(f64::NAN);
+        return i64::from_str_radix(hex, 16)
+            .map(|n| sign * n as f64)
+            .unwrap_or(f64::NAN);
     }
     if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-        return i64::from_str_radix(oct, 8).map(|n| sign * n as f64).unwrap_or(f64::NAN);
+        return i64::from_str_radix(oct, 8)
+            .map(|n| sign * n as f64)
+            .unwrap_or(f64::NAN);
     }
     if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        return i64::from_str_radix(bin, 2).map(|n| sign * n as f64).unwrap_or(f64::NAN);
+        return i64::from_str_radix(bin, 2)
+            .map(|n| sign * n as f64)
+            .unwrap_or(f64::NAN);
     }
     t.parse::<f64>().unwrap_or(f64::NAN)
 }

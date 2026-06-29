@@ -69,14 +69,18 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Engine {
-        Engine { interp: Interp::new() }
+        Engine {
+            interp: Interp::new(),
+        }
     }
 
     /// Parse and run `src`. `strict` forces strict mode (used for the test262 strict variant); a
     /// `"use strict"` directive in the source also enables it.
     pub fn eval(&mut self, src: &str, strict: bool) -> Result<Completion, ParseError> {
-        let body = parser::parse_script(src, strict)
-            .map_err(|e| ParseError { message: e.message, line: e.line })?;
+        let body = parser::parse_script(src, strict).map_err(|e| ParseError {
+            message: e.message,
+            line: e.line,
+        })?;
         // A top-level `"use strict"` directive prologue turns on strict mode for the whole script.
         let directive_strict = matches!(
             body.first(),
@@ -129,7 +133,10 @@ impl Engine {
     }
 
     fn render(&mut self, v: &Value) -> String {
-        self.interp.to_string(v).map(|s| s.to_string()).unwrap_or_default()
+        self.interp
+            .to_string(v)
+            .map(|s| s.to_string())
+            .unwrap_or_default()
     }
 
     fn describe_throw(&mut self, thrown: Value) -> Completion {

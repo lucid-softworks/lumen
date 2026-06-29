@@ -47,7 +47,11 @@ pub enum Temporal {
     Instant(i128), // epoch nanoseconds
     /// epoch nanoseconds + a fixed UTC offset (named zones are treated as their fixed offset; no
     /// DST database) + the time-zone id string.
-    Zoned { epoch_ns: i128, offset_ns: i64, tz: Rc<str> },
+    Zoned {
+        epoch_ns: i128,
+        offset_ns: i64,
+        tz: Rc<str>,
+    },
 }
 
 // ----- ISO calendar math ----------------------------------------------------------------------
@@ -275,10 +279,25 @@ fn build_date(i: &Interp, year: i64, month: i64, day: i64) -> Result<IsoDate, Va
     if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month as u8) as i64 {
         return Err(i.make_error("RangeError", "ISO date field is out of range"));
     }
-    check_date(i, IsoDate { year, month: month as u8, day: day as u8 })
+    check_date(
+        i,
+        IsoDate {
+            year,
+            month: month as u8,
+            day: day as u8,
+        },
+    )
 }
 /// Range-check raw integer time fields before narrowing (RejectTime semantics).
-fn build_time(i: &Interp, hour: i64, minute: i64, second: i64, ms: i64, us: i64, ns: i64) -> Result<IsoTime, Value> {
+fn build_time(
+    i: &Interp,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    ms: i64,
+    us: i64,
+    ns: i64,
+) -> Result<IsoTime, Value> {
     if !(0..=23).contains(&hour)
         || !(0..=59).contains(&minute)
         || !(0..=59).contains(&second)
@@ -469,7 +488,9 @@ fn fmt_duration(d: IsoDuration) -> String {
     s
 }
 fn duration_sign(d: IsoDuration) -> i64 {
-    for v in [d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms, d.us, d.ns] {
+    for v in [
+        d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms, d.us, d.ns,
+    ] {
         if v != 0 {
             return if v < 0 { -1 } else { 1 };
         }
@@ -505,7 +526,10 @@ struct Cur<'a> {
 }
 impl<'a> Cur<'a> {
     fn new(s: &'a str) -> Self {
-        Cur { b: s.as_bytes(), i: 0 }
+        Cur {
+            b: s.as_bytes(),
+            i: 0,
+        }
     }
     fn peek(&self) -> Option<u8> {
         self.b.get(self.i).copied()
@@ -591,7 +615,11 @@ fn p_date(c: &mut Cur) -> Option<IsoDate> {
     if day < 1 || day as u8 > days_in_month(year, m) {
         return None;
     }
-    Some(IsoDate { year, month: m, day: day as u8 })
+    Some(IsoDate {
+        year,
+        month: m,
+        day: day as u8,
+    })
 }
 
 /// A fractional second/offset: `.`/`,` then 1..9 digits. Returns `(ms, us, ns)`; `None` only on a
@@ -619,7 +647,11 @@ fn p_fraction(c: &mut Cur) -> Option<(u16, u16, u16)> {
     for _ in digits..9 {
         val *= 10;
     }
-    Some(((val / 1_000_000) as u16, ((val / 1000) % 1000) as u16, (val % 1000) as u16))
+    Some((
+        (val / 1_000_000) as u16,
+        ((val / 1000) % 1000) as u16,
+        (val % 1000) as u16,
+    ))
 }
 
 /// `TimeSpec`: `HH`, `HH:MM`, `HH:MM:SS[.fff]` (extended) or the colon-less basic equivalents.
@@ -648,7 +680,14 @@ fn p_time(c: &mut Cur) -> Option<IsoTime> {
     }
     let (ms, us, ns) = if had_sec { p_fraction(c)? } else { (0, 0, 0) };
     let second = if second == 60 { 59 } else { second };
-    Some(IsoTime { hour: hour as u8, minute: minute as u8, second: second as u8, ms, us, ns })
+    Some(IsoTime {
+        hour: hour as u8,
+        minute: minute as u8,
+        second: second as u8,
+        ms,
+        us,
+        ns,
+    })
 }
 
 /// `DateTimeUTCOffset`: `Z`/`z`, or `±HH[:MM[:SS[.fff]]]` / colon-less basic. Returns `Off::None`
@@ -705,7 +744,9 @@ fn valid_key(k: &str) -> bool {
 
 /// An annotation value: `-`-separated runs of ASCII alphanumerics.
 fn valid_value(v: &str) -> bool {
-    !v.is_empty() && v.split('-').all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric()))
+    !v.is_empty()
+        && v.split('-')
+            .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric()))
 }
 
 /// A time-zone identifier: a numeric offset, or an IANA-style name.
@@ -723,7 +764,9 @@ fn valid_tz(s: &str) -> bool {
             Some(&c0) if c0.is_ascii_alphabetic() || c0 == b'.' || c0 == b'_' => {}
             _ => return false,
         }
-        bytes.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'+'))
+        bytes
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'+'))
     })
 }
 
@@ -797,7 +840,14 @@ fn parse_branch(s: &str, date_first: bool) -> Option<Parsed> {
     if !c.done() {
         return None;
     }
-    Some(Parsed { date, time, designator, offset, calendar, tz })
+    Some(Parsed {
+        date,
+        time,
+        designator,
+        offset,
+        calendar,
+        tz,
+    })
 }
 
 /// The portion of a string before any annotation (used for ambiguity checks).
@@ -860,7 +910,11 @@ fn parse_year_month(s: &str) -> Option<IsoDate> {
             if p.offset == Off::Z || !cal_ok(&p.calendar) || !ym_in_range(d.year, d.month) {
                 return None;
             }
-            return Some(IsoDate { year: d.year, month: d.month, day: 1 });
+            return Some(IsoDate {
+                year: d.year,
+                month: d.month,
+                day: 1,
+            });
         }
         // a bare time falls through to the year-month grammar below
     }
@@ -875,13 +929,24 @@ fn parse_year_month(s: &str) -> Option<IsoDate> {
     if !c.done() || !cal_ok(&cal) || !ym_in_range(year, month as u8) {
         return None;
     }
-    Some(IsoDate { year, month: month as u8, day: 1 })
+    Some(IsoDate {
+        year,
+        month: month as u8,
+        day: 1,
+    })
 }
 
 /// Whether a year-month is representable (its first or last day lies within range).
 fn ym_in_range(year: i64, month: u8) -> bool {
-    date_in_range(IsoDate { year, month, day: 1 })
-        || date_in_range(IsoDate { year, month, day: days_in_month(year, month) })
+    date_in_range(IsoDate {
+        year,
+        month,
+        day: 1,
+    }) || date_in_range(IsoDate {
+        year,
+        month,
+        day: days_in_month(year, month),
+    })
 }
 
 /// Parse a `Temporal.PlainMonthDay` string (a month-day, or a full date taking month+day). The
@@ -892,7 +957,11 @@ fn parse_month_day(s: &str) -> Option<IsoDate> {
             if p.offset == Off::Z || !cal_ok(&p.calendar) {
                 return None;
             }
-            return Some(IsoDate { year: 1972, month: d.month, day: d.day });
+            return Some(IsoDate {
+                year: 1972,
+                month: d.month,
+                day: d.day,
+            });
         }
     }
     let mut c = Cur::new(s);
@@ -912,7 +981,11 @@ fn parse_month_day(s: &str) -> Option<IsoDate> {
     if !c.done() || !cal_ok(&cal) {
         return None;
     }
-    Some(IsoDate { year: 1972, month: month as u8, day: day as u8 })
+    Some(IsoDate {
+        year: 1972,
+        month: month as u8,
+        day: day as u8,
+    })
 }
 
 // ----- install --------------------------------------------------------------------------------
@@ -929,32 +1002,60 @@ pub fn install(it: &mut Interp) {
     install_zoned(it, &ns);
     install_now(it, &ns);
     // toLocaleString aliases toString (lumen has no Intl).
-    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Duration", "Instant", "ZonedDateTime"] {
-        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
+    for name in [
+        "PlainDate",
+        "PlainTime",
+        "PlainDateTime",
+        "PlainYearMonth",
+        "PlainMonthDay",
+        "Duration",
+        "Instant",
+        "ZonedDateTime",
+    ] {
+        if let Some(proto) = it
+            .extra_protos
+            .get(format!("Temporal.{name}").as_str())
+            .cloned()
+        {
             let ts = proto.borrow().props.get("toString").cloned();
             if let Some(p) = ts {
                 proto.borrow_mut().props.insert("toLocaleString", p);
             }
         }
     }
-    it.global.borrow_mut().props.insert("Temporal", Property::builtin(Value::Obj(ns)));
+    it.global
+        .borrow_mut()
+        .props
+        .insert("Temporal", Property::builtin(Value::Obj(ns)));
 }
 
-fn add_ctor(it: &mut Interp, ns: &Gc, name: &'static str, len: usize, proto: Gc, f: NativeFn) -> Gc {
+fn add_ctor(
+    it: &mut Interp,
+    ns: &Gc,
+    name: &'static str,
+    len: usize,
+    proto: Gc,
+    f: NativeFn,
+) -> Gc {
     let ctor = it.make_native(name, len, f);
     ctor.borrow_mut().is_constructor = true;
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(proto.clone()), false, false, false),
     );
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     if let Some(key) = crate::builtins::to_string_tag_key(it) {
         proto.borrow_mut().props.insert(
             key,
             Property::data(Value::str(format!("Temporal.{name}")), false, false, true),
         );
     }
-    ns.borrow_mut().props.insert(name, Property::builtin(Value::Obj(ctor.clone())));
+    ns.borrow_mut()
+        .props
+        .insert(name, Property::builtin(Value::Obj(ctor.clone())));
     ctor
 }
 
@@ -971,17 +1072,33 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Temporal.PlainDate", proto.clone());
 
-    def_getter(it, &proto, "year", |i, t, _| Ok(Value::Num(as_date(i, &t)?.year as f64)));
-    def_getter(it, &proto, "month", |i, t, _| Ok(Value::Num(as_date(i, &t)?.month as f64)));
-    def_getter(it, &proto, "day", |i, t, _| Ok(Value::Num(as_date(i, &t)?.day as f64)));
+    def_getter(it, &proto, "year", |i, t, _| {
+        Ok(Value::Num(as_date(i, &t)?.year as f64))
+    });
+    def_getter(it, &proto, "month", |i, t, _| {
+        Ok(Value::Num(as_date(i, &t)?.month as f64))
+    });
+    def_getter(it, &proto, "day", |i, t, _| {
+        Ok(Value::Num(as_date(i, &t)?.day as f64))
+    });
     def_getter(it, &proto, "monthCode", |i, t, _| {
         Ok(Value::str(month_code(as_date(i, &t)?.month)))
     });
-    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
-    def_getter(it, &proto, "dayOfWeek", |i, t, _| Ok(Value::Num(iso_day_of_week(as_date(i, &t)?) as f64)));
-    def_getter(it, &proto, "dayOfYear", |i, t, _| Ok(Value::Num(iso_day_of_year(as_date(i, &t)?) as f64)));
-    def_getter(it, &proto, "weekOfYear", |i, t, _| Ok(Value::Num(iso_week(as_date(i, &t)?).0 as f64)));
-    def_getter(it, &proto, "yearOfWeek", |i, t, _| Ok(Value::Num(iso_week(as_date(i, &t)?).1 as f64)));
+    def_getter(it, &proto, "calendarId", |_i, _t, _| {
+        Ok(Value::str("iso8601"))
+    });
+    def_getter(it, &proto, "dayOfWeek", |i, t, _| {
+        Ok(Value::Num(iso_day_of_week(as_date(i, &t)?) as f64))
+    });
+    def_getter(it, &proto, "dayOfYear", |i, t, _| {
+        Ok(Value::Num(iso_day_of_year(as_date(i, &t)?) as f64))
+    });
+    def_getter(it, &proto, "weekOfYear", |i, t, _| {
+        Ok(Value::Num(iso_week(as_date(i, &t)?).0 as f64))
+    });
+    def_getter(it, &proto, "yearOfWeek", |i, t, _| {
+        Ok(Value::Num(iso_week(as_date(i, &t)?).1 as f64))
+    });
     def_getter(it, &proto, "daysInWeek", |i, t, _| {
         as_date(i, &t)?;
         Ok(Value::Num(7.0))
@@ -1002,15 +1119,29 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(Value::Bool(is_leap(as_date(i, &t)?.year)))
     });
 
-    it.def_method(&proto, "toString", 0, |i, t, a| { let d=as_date(i,&t)?; Ok(Value::str(format!("{}{}", fmt_date(d), cal_suffix(i,&arg(a,0))?))) });
-    it.def_method(&proto, "toJSON", 0, |i, t, _| Ok(Value::str(fmt_date(as_date(i, &t)?))));
+    it.def_method(&proto, "toString", 0, |i, t, a| {
+        let d = as_date(i, &t)?;
+        Ok(Value::str(format!(
+            "{}{}",
+            fmt_date(d),
+            cal_suffix(i, &arg(a, 0))?
+        )))
+    });
+    it.def_method(&proto, "toJSON", 0, |i, t, _| {
+        Ok(Value::str(fmt_date(as_date(i, &t)?)))
+    });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
-        Err(i.make_error("TypeError", "Temporal.PlainDate has no valueOf; use compare"))
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.PlainDate has no valueOf; use compare",
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(Value::Bool(d.year == o.year && d.month == o.month && d.day == o.day))
+        Ok(Value::Bool(
+            d.year == o.year && d.month == o.month && d.day == o.day,
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -1037,23 +1168,50 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let largest = if largest == "auto" { "day".to_string() } else { largest };
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(diff_date(d, o, &largest))))
+        let largest = if largest == "auto" {
+            "day".to_string()
+        } else {
+            largest
+        };
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(diff_date(d, o, &largest)),
+        ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let largest = if largest == "auto" { "day".to_string() } else { largest };
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(diff_date(d, o, &largest)))))
+        let largest = if largest == "auto" {
+            "day".to_string()
+        } else {
+            largest
+        };
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(diff_date(d, o, &largest))),
+        ))
     });
     it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let time = match arg(a, 0) {
-            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            Value::Undefined => IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            },
             v => to_time(i, &v, &Value::Undefined)?,
         };
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, time)))
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(d, time),
+        ))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let d = as_date(i, &t)?;
@@ -1079,12 +1237,27 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
         let time = match timev {
-            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            Value::Undefined => IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            },
             v => to_time(i, &v, &Value::Undefined)?,
         };
         let local = dt_ns(d, time);
         let offset = offset_for_local(&tz, local);
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: local - offset as i128,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
 
     let ctor = add_ctor(it, ns, "PlainDate", 3, proto, |i, _t, a| {
@@ -1173,7 +1346,13 @@ fn check_increment(i: &Interp, unit: &str, incr: i64) -> Result<(), Value> {
         "hour" => 24,
         "minute" | "second" => 60,
         "millisecond" | "microsecond" | "nanosecond" => 1000,
-        _ => return if incr == 1 { Ok(()) } else { Err(i.make_error("RangeError", "roundingIncrement out of range")) },
+        _ => {
+            return if incr == 1 {
+                Ok(())
+            } else {
+                Err(i.make_error("RangeError", "roundingIncrement out of range"))
+            }
+        }
     };
     if incr >= max || max % incr != 0 {
         return Err(i.make_error("RangeError", "roundingIncrement out of range"));
@@ -1183,7 +1362,14 @@ fn check_increment(i: &Interp, unit: &str, incr: i64) -> Result<(), Value> {
 /// Validate a `roundingMode` option, else RangeError.
 fn check_mode(i: &Interp, m: &str) -> Result<(), Value> {
     const MODES: [&str; 9] = [
-        "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc",
+        "ceil",
+        "floor",
+        "expand",
+        "trunc",
+        "halfCeil",
+        "halfFloor",
+        "halfExpand",
+        "halfTrunc",
         "halfEven",
     ];
     if MODES.contains(&m) {
@@ -1204,7 +1390,7 @@ fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
     }
     let floor = q * inc; // toward -inf
     let ceil = floor + inc; // toward +inf
-    // `ceil`/`expand` and `floor`/`trunc` differ for negative values; half-modes break ties.
+                            // `ceil`/`expand` and `floor`/`trunc` differ for negative values; half-modes break ties.
     let to_ceil = match mode {
         "ceil" => true,
         "floor" => false,
@@ -1251,16 +1437,27 @@ fn unit_rank(u: &str) -> Option<i32> {
 }
 /// The largest non-zero unit of a duration (singular), defaulting to nanosecond.
 fn default_largest(d: &IsoDuration) -> &'static str {
-    if d.years != 0 { "year" }
-    else if d.months != 0 { "month" }
-    else if d.weeks != 0 { "week" }
-    else if d.days != 0 { "day" }
-    else if d.hours != 0 { "hour" }
-    else if d.minutes != 0 { "minute" }
-    else if d.seconds != 0 { "second" }
-    else if d.ms != 0 { "millisecond" }
-    else if d.us != 0 { "microsecond" }
-    else { "nanosecond" }
+    if d.years != 0 {
+        "year"
+    } else if d.months != 0 {
+        "month"
+    } else if d.weeks != 0 {
+        "week"
+    } else if d.days != 0 {
+        "day"
+    } else if d.hours != 0 {
+        "hour"
+    } else if d.minutes != 0 {
+        "minute"
+    } else if d.seconds != 0 {
+        "second"
+    } else if d.ms != 0 {
+        "millisecond"
+    } else if d.us != 0 {
+        "microsecond"
+    } else {
+        "nanosecond"
+    }
 }
 /// Round `num`/`den` (den > 0) to the nearest integer using a rounding mode.
 fn round_div(num: i128, den: i128, mode: &str) -> i128 {
@@ -1286,7 +1483,11 @@ fn round_div(num: i128, den: i128, mode: &str) -> i128 {
             },
         },
     };
-    if up { q + 1 } else { q }
+    if up {
+        q + 1
+    } else {
+        q
+    }
 }
 /// Correctly-rounded conversion of an exact rational `num`/`den` to the nearest f64.
 fn ratio_to_f64(num: i128, den: i128) -> f64 {
@@ -1315,7 +1516,11 @@ fn ratio_to_f64(num: i128, den: i128) -> f64 {
         m += 1;
     }
     let val = (m as f64) * (exp as f64).exp2();
-    if neg { -val } else { val }
+    if neg {
+        -val
+    } else {
+        val
+    }
 }
 /// Round a calendar duration to a calendar `unit` (year/month/week/day) relative to `rel`.
 /// `dest` is the duration's nanosecond span from `rel`; `bal` is its date part balanced to the
@@ -1339,10 +1544,28 @@ fn round_calendar_unit(
     let incr = incr as i64;
     let j1 = comp / incr; // truncate toward zero
     let mk = |c: i64| match unit {
-        "year" => IsoDuration { years: c, ..Default::default() },
-        "month" => IsoDuration { years: bal.years, months: c, ..Default::default() },
-        "week" => IsoDuration { years: bal.years, months: bal.months, weeks: c, ..Default::default() },
-        _ => IsoDuration { years: bal.years, months: bal.months, weeks: bal.weeks, days: c, ..Default::default() },
+        "year" => IsoDuration {
+            years: c,
+            ..Default::default()
+        },
+        "month" => IsoDuration {
+            years: bal.years,
+            months: c,
+            ..Default::default()
+        },
+        "week" => IsoDuration {
+            years: bal.years,
+            months: bal.months,
+            weeks: c,
+            ..Default::default()
+        },
+        _ => IsoDuration {
+            years: bal.years,
+            months: bal.months,
+            weeks: bal.weeks,
+            days: c,
+            ..Default::default()
+        },
     };
     let sd = add_date_dur(rel, mk(j1 * incr));
     let ed = add_date_dur(rel, mk((j1 + sign) * incr));
@@ -1375,7 +1598,11 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
     match largest {
         "year" | "month" => {
-            let mut years = if largest == "year" { hi.year - lo.year } else { 0 };
+            let mut years = if largest == "year" {
+                hi.year - lo.year
+            } else {
+                0
+            };
             let mut mid = constrain_add_ym(lo, years * 12);
             if cmp_date(mid, hi) > 0 {
                 years -= 1;
@@ -1419,13 +1646,21 @@ fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &s
         return IsoDuration::default();
     }
     let sign = if a < b { 1 } else { -1 };
-    let (sd, st, ed, et) = if a < b { (d1, t1, d2, t2) } else { (d2, t2, d1, t1) };
+    let (sd, st, ed, et) = if a < b {
+        (d1, t1, d2, t2)
+    } else {
+        (d2, t2, d1, t1)
+    };
     let mut tdiff = time_to_ns(et) - time_to_ns(st);
     let mut end_date = ed;
     if tdiff < 0 {
         tdiff += 86_400_000_000_000;
         let (y, m, da) = civil_from_days(epoch_days(ed) - 1);
-        end_date = IsoDate { year: y, month: m, day: da };
+        end_date = IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        };
     }
     let mut out = diff_date(sd, end_date, largest); // years/months/weeks/days (positive)
     let time = balance_ns(tdiff as i128, "hour");
@@ -1446,7 +1681,11 @@ fn constrain_add_ym(d: IsoDate, months: i64) -> IsoDate {
     let total = d.year * 12 + (d.month as i64 - 1) + months;
     let (y, m) = balance_year_month(total / 12, total % 12 + 1);
     let day = (d.day).min(days_in_month(y, m));
-    IsoDate { year: y, month: m, day }
+    IsoDate {
+        year: y,
+        month: m,
+        day,
+    }
 }
 
 /// Overflow handling mode for out-of-range date/time components.
@@ -1466,7 +1705,14 @@ fn to_overflow(i: &mut Interp, opts: &Value) -> Result<Overflow, Value> {
     }
 }
 /// Regulate a time component to `[lo, hi]`: clamp under `constrain`, throw under `reject`.
-fn regulate(i: &Interp, val: i64, lo: i64, hi: i64, ovf: Overflow, what: &str) -> Result<i64, Value> {
+fn regulate(
+    i: &Interp,
+    val: i64,
+    lo: i64,
+    hi: i64,
+    ovf: Overflow,
+    what: &str,
+) -> Result<i64, Value> {
     if ovf == Overflow::Reject && (val < lo || val > hi) {
         return Err(i.make_error("RangeError", format!("{what} out of range")));
     }
@@ -1547,14 +1793,29 @@ fn read_date_raw(i: &mut Interp, v: &Value) -> Result<(i64, i64, i64), Value> {
     Ok((year, month, day))
 }
 /// Regulate raw year/month/day into a valid ISO date per `overflow`.
-fn regulate_date(i: &Interp, (year, month, day): (i64, i64, i64), ovf: Overflow) -> Result<IsoDate, Value> {
+fn regulate_date(
+    i: &Interp,
+    (year, month, day): (i64, i64, i64),
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     let month = regulate_high(i, month, 12, ovf, "month")? as u8;
     let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")?;
-    Ok(IsoDate { year, month, day: day as u8 })
+    Ok(IsoDate {
+        year,
+        month,
+        day: day as u8,
+    })
 }
 /// Read the six raw time components from a bag; returns the values and whether any were present.
 fn read_time_raw(i: &mut Interp, v: &Value) -> Result<([i64; 6], bool), Value> {
-    let keys = ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
+    let keys = [
+        "hour",
+        "minute",
+        "second",
+        "millisecond",
+        "microsecond",
+        "nanosecond",
+    ];
     let mut vals = [0i64; 6];
     let mut any = false;
     for (k, slot) in keys.iter().zip(vals.iter_mut()) {
@@ -1590,11 +1851,14 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
     }
     let d = match v {
         Value::Str(s) => {
-            let p = parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid date string"))?;
+            let p =
+                parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid date string"))?;
             if p.offset == Off::Z {
                 return Err(i.make_error("RangeError", "UTC designator not valid for PlainDate"));
             }
-            let d = p.date.ok_or_else(|| i.make_error("RangeError", "no date in PlainDate string"))?;
+            let d = p
+                .date
+                .ok_or_else(|| i.make_error("RangeError", "no date in PlainDate string"))?;
             if !cal_ok(&p.calendar) {
                 return Err(i.make_error("RangeError", "unsupported calendar"));
             }
@@ -1655,7 +1919,14 @@ fn add_to_date(i: &mut Interp, d: IsoDate, dur: IsoDuration, sign: i64) -> Resul
     let day = (d.day as i64).min(dim as i64);
     let z = days_from_civil(y, m as i64, day) + sign * (dur.weeks * 7 + dur.days);
     let (ny, nm, nd) = civil_from_days(z);
-    check_date(i, IsoDate { year: ny, month: nm, day: nd })
+    check_date(
+        i,
+        IsoDate {
+            year: ny,
+            month: nm,
+            day: nd,
+        },
+    )
 }
 
 /// Add a duration's date part (years/months/weeks/days) to a date, clamping the day.
@@ -1665,7 +1936,11 @@ fn add_date_dur(start: IsoDate, d: IsoDuration) -> IsoDate {
     let day = start.day.min(days_in_month(y, m));
     let z = days_from_civil(y, m as i64, day as i64) + d.weeks * 7 + d.days;
     let (ny, nm, nd) = civil_from_days(z);
-    IsoDate { year: ny, month: nm, day: nd }
+    IsoDate {
+        year: ny,
+        month: nm,
+        day: nd,
+    }
 }
 /// Add a full duration (date + time) to a midnight-anchored start date.
 fn add_full_duration(start: IsoDate, d: IsoDuration) -> (IsoDate, IsoTime) {
@@ -1675,7 +1950,14 @@ fn add_full_duration(start: IsoDate, d: IsoDuration) -> (IsoDate, IsoTime) {
     let rem = tns.rem_euclid(86_400_000_000_000);
     let z = epoch_days(nd) as i128 + carry;
     let (y, m, da) = civil_from_days(z as i64);
-    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+    (
+        IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        },
+        ns_to_time(rem),
+    )
 }
 /// Read the `relativeTo` option as an anchor date, if present.
 fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Value> {
@@ -1685,9 +1967,11 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
     let v = getm(i, opts, "relativeTo")?;
     match get(i, &v) {
         Some(Temporal::Date(d)) | Some(Temporal::DateTime(d, _)) => return Ok(Some(d)),
-        Some(Temporal::Zoned { epoch_ns, offset_ns, .. }) => {
-            return Ok(Some(zoned_local(epoch_ns, offset_ns).0))
-        }
+        Some(Temporal::Zoned {
+            epoch_ns,
+            offset_ns,
+            ..
+        }) => return Ok(Some(zoned_local(epoch_ns, offset_ns).0)),
         _ => {}
     }
     match v {
@@ -1697,14 +1981,27 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
 }
 
 /// Add a duration to a date+time, carrying the time overflow into the date.
-fn dt_add(i: &mut Interp, d: IsoDate, t: IsoTime, dur: IsoDuration, sign: i64) -> Result<(IsoDate, IsoTime), Value> {
+fn dt_add(
+    i: &mut Interp,
+    d: IsoDate,
+    t: IsoTime,
+    dur: IsoDuration,
+    sign: i64,
+) -> Result<(IsoDate, IsoTime), Value> {
     let nd = add_to_date(i, d, dur, sign)?;
     let total = time_to_ns(t) as i128 + sign as i128 * duration_time_ns(dur);
     let carry = total.div_euclid(86_400_000_000_000);
     let tns = total.rem_euclid(86_400_000_000_000);
     let z = epoch_days(nd) as i128 + carry;
     let (ny, nm, nday) = civil_from_days(z as i64);
-    let ndate = check_date(i, IsoDate { year: ny, month: nm, day: nday })?;
+    let ndate = check_date(
+        i,
+        IsoDate {
+            year: ny,
+            month: nm,
+            day: nday,
+        },
+    )?;
     Ok((ndate, ns_to_time(tns)))
 }
 
@@ -1714,17 +2011,37 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Temporal.PlainTime", proto.clone());
 
-    def_getter(it, &proto, "hour", |i, t, _| Ok(Value::Num(as_time(i, &t)?.hour as f64)));
-    def_getter(it, &proto, "minute", |i, t, _| Ok(Value::Num(as_time(i, &t)?.minute as f64)));
-    def_getter(it, &proto, "second", |i, t, _| Ok(Value::Num(as_time(i, &t)?.second as f64)));
-    def_getter(it, &proto, "millisecond", |i, t, _| Ok(Value::Num(as_time(i, &t)?.ms as f64)));
-    def_getter(it, &proto, "microsecond", |i, t, _| Ok(Value::Num(as_time(i, &t)?.us as f64)));
-    def_getter(it, &proto, "nanosecond", |i, t, _| Ok(Value::Num(as_time(i, &t)?.ns as f64)));
+    def_getter(it, &proto, "hour", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.hour as f64))
+    });
+    def_getter(it, &proto, "minute", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.minute as f64))
+    });
+    def_getter(it, &proto, "second", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.second as f64))
+    });
+    def_getter(it, &proto, "millisecond", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.ms as f64))
+    });
+    def_getter(it, &proto, "microsecond", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.us as f64))
+    });
+    def_getter(it, &proto, "nanosecond", |i, t, _| {
+        Ok(Value::Num(as_time(i, &t)?.ns as f64))
+    });
 
-    it.def_method(&proto, "toString", 0, |i, t, a| { let x=as_time(i,&t)?; Ok(Value::str(fmt_time_opts(i, x, &arg(a,0))?)) });
-    it.def_method(&proto, "toJSON", 0, |i, t, _| Ok(Value::str(fmt_time(as_time(i, &t)?))));
+    it.def_method(&proto, "toString", 0, |i, t, a| {
+        let x = as_time(i, &t)?;
+        Ok(Value::str(fmt_time_opts(i, x, &arg(a, 0))?))
+    });
+    it.def_method(&proto, "toJSON", 0, |i, t, _| {
+        Ok(Value::str(fmt_time(as_time(i, &t)?)))
+    });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
-        Err(i.make_error("TypeError", "Temporal.PlainTime has no valueOf; use compare"))
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.PlainTime has no valueOf; use compare",
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let x = as_time(i, &t)?;
@@ -1747,32 +2064,51 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let x = as_time(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = (time_to_ns(x) as i128 + duration_time_ns(dur)).rem_euclid(86_400_000_000_000);
-        Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(total))))
+        Ok(make(
+            i,
+            "Temporal.PlainTime",
+            Temporal::Time(ns_to_time(total)),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = (time_to_ns(x) as i128 - duration_time_ns(dur)).rem_euclid(86_400_000_000_000);
-        Ok(make(i, "Temporal.PlainTime", Temporal::Time(ns_to_time(total))))
+        Ok(make(
+            i,
+            "Temporal.PlainTime",
+            Temporal::Time(ns_to_time(total)),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let y = to_time(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         let diff = (time_to_ns(y) - time_to_ns(x)) as i128;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(diff, &largest)),
+        ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let y = to_time(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         let diff = (time_to_ns(x) - time_to_ns(y)) as i128;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(diff, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(diff, &largest)),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let (o, shorthand) = round_opts(&arg(a, 0));
-        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
+        let smallest = match shorthand {
+            Some(s) => s,
+            None => opt_str(i, &o, "smallestUnit", "")?,
+        };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
@@ -1846,7 +2182,12 @@ fn balance_ns(total: i128, largest: &str) -> IsoDuration {
     let millis = (n % 1000) as i64;
     n /= 1000;
     let secs = n as i64; // remaining whole seconds
-    let mut out = IsoDuration { ms: millis, us: micros, ns: nanos, ..Default::default() };
+    let mut out = IsoDuration {
+        ms: millis,
+        us: micros,
+        ns: nanos,
+        ..Default::default()
+    };
     match largest {
         "day" => {
             out.days = secs / 86400;
@@ -1881,17 +2222,23 @@ fn to_time(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoTime, Value> {
     }
     match v {
         Value::Str(s) => {
-            let p = parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid PlainTime string"))?;
+            let p = parse_iso(s)
+                .ok_or_else(|| i.make_error("RangeError", "invalid PlainTime string"))?;
             // A PlainTime string may not carry a UTC designator.
             if p.offset == Off::Z {
                 return Err(i.make_error("RangeError", "UTC designator not valid for PlainTime"));
             }
-            let t = p.time.ok_or_else(|| i.make_error("RangeError", "no time in PlainTime string"))?;
+            let t = p
+                .time
+                .ok_or_else(|| i.make_error("RangeError", "no time in PlainTime string"))?;
             // A bare time that could also be read as a year-month or month-day needs a `T` prefix.
             if !p.designator && p.date.is_none() {
                 let core = iso_core(s);
                 if matches_year_month(core) || matches_month_day(core) {
-                    return Err(i.make_error("RangeError", "ambiguous time string requires a T designator"));
+                    return Err(i.make_error(
+                        "RangeError",
+                        "ambiguous time string requires a T designator",
+                    ));
                 }
             }
             Ok(t)
@@ -1913,21 +2260,48 @@ fn to_time(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoTime, Value> {
 
 fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
-    it.extra_protos.insert("Temporal.PlainDateTime", proto.clone());
+    it.extra_protos
+        .insert("Temporal.PlainDateTime", proto.clone());
 
-    def_getter(it, &proto, "year", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.0.year as f64)));
-    def_getter(it, &proto, "month", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.0.month as f64)));
-    def_getter(it, &proto, "day", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.0.day as f64)));
-    def_getter(it, &proto, "monthCode", |i, t, _| Ok(Value::str(month_code(as_datetime(i, &t)?.0.month))));
-    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
-    def_getter(it, &proto, "hour", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.hour as f64)));
-    def_getter(it, &proto, "minute", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.minute as f64)));
-    def_getter(it, &proto, "second", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.second as f64)));
-    def_getter(it, &proto, "millisecond", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.ms as f64)));
-    def_getter(it, &proto, "microsecond", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.us as f64)));
-    def_getter(it, &proto, "nanosecond", |i, t, _| Ok(Value::Num(as_datetime(i, &t)?.1.ns as f64)));
-    def_getter(it, &proto, "dayOfWeek", |i, t, _| Ok(Value::Num(iso_day_of_week(as_datetime(i, &t)?.0) as f64)));
-    def_getter(it, &proto, "dayOfYear", |i, t, _| Ok(Value::Num(iso_day_of_year(as_datetime(i, &t)?.0) as f64)));
+    def_getter(it, &proto, "year", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.0.year as f64))
+    });
+    def_getter(it, &proto, "month", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.0.month as f64))
+    });
+    def_getter(it, &proto, "day", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.0.day as f64))
+    });
+    def_getter(it, &proto, "monthCode", |i, t, _| {
+        Ok(Value::str(month_code(as_datetime(i, &t)?.0.month)))
+    });
+    def_getter(it, &proto, "calendarId", |_i, _t, _| {
+        Ok(Value::str("iso8601"))
+    });
+    def_getter(it, &proto, "hour", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.hour as f64))
+    });
+    def_getter(it, &proto, "minute", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.minute as f64))
+    });
+    def_getter(it, &proto, "second", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.second as f64))
+    });
+    def_getter(it, &proto, "millisecond", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.ms as f64))
+    });
+    def_getter(it, &proto, "microsecond", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.us as f64))
+    });
+    def_getter(it, &proto, "nanosecond", |i, t, _| {
+        Ok(Value::Num(as_datetime(i, &t)?.1.ns as f64))
+    });
+    def_getter(it, &proto, "dayOfWeek", |i, t, _| {
+        Ok(Value::Num(iso_day_of_week(as_datetime(i, &t)?.0) as f64))
+    });
+    def_getter(it, &proto, "dayOfYear", |i, t, _| {
+        Ok(Value::Num(iso_day_of_year(as_datetime(i, &t)?.0) as f64))
+    });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
         Ok(Value::Num(days_in_month(d.year, d.month) as f64))
@@ -1936,19 +2310,29 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let d = as_datetime(i, &t)?.0;
         Ok(Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }))
     });
-    def_getter(it, &proto, "inLeapYear", |i, t, _| Ok(Value::Bool(is_leap(as_datetime(i, &t)?.0.year))));
+    def_getter(it, &proto, "inLeapYear", |i, t, _| {
+        Ok(Value::Bool(is_leap(as_datetime(i, &t)?.0.year)))
+    });
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
-        Ok(Value::str(format!("{}T{}{}", fmt_date(d), ts, cal_suffix(i, &arg(a, 0))?)))
+        Ok(Value::str(format!(
+            "{}T{}{}",
+            fmt_date(d),
+            ts,
+            cal_suffix(i, &arg(a, 0))?
+        )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let (d, tm) = as_datetime(i, &t)?;
         Ok(Value::str(format!("{}T{}", fmt_date(d), fmt_time(tm))))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
-        Err(i.make_error("TypeError", "Temporal.PlainDateTime has no valueOf; use compare"))
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.PlainDateTime has no valueOf; use compare",
+        ))
     });
     it.def_method(&proto, "toPlainDate", 0, |i, t, _| {
         let (d, _) = as_datetime(i, &t)?;
@@ -1961,7 +2345,14 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
         let (d, _) = as_datetime(i, &t)?;
         let nt = match arg(a, 0) {
-            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            Value::Undefined => IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            },
             v => to_time(i, &v, &Value::Undefined)?,
         };
         Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, nt)))
@@ -1969,7 +2360,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (_, tm) = as_datetime(i, &t)?;
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, tm)))
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, tm),
+        ))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, _| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -1984,24 +2379,42 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         };
         let local = dt_ns(d, tm);
         let offset = offset_for_local(&tz, local);
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: local - offset as i128,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(Value::Bool(cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm)))
+        Ok(Value::Bool(
+            cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm),
+        ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ntm),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ntm),
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -2017,16 +2430,24 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)?;
         let nd = build_date(i, year, month, day)?;
         let nt = build_time(i, hour, minute, second, ms, us, nsf)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, nt)))
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, nt),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (o, shorthand) = round_opts(&arg(a, 0));
-        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
+        let smallest = match shorthand {
+            Some(s) => s,
+            None => opt_str(i, &o, "smallestUnit", "")?,
+        };
         let unit = if smallest == "day" {
             86_400_000_000_000
         } else {
-            unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
+            unit_ns(&smallest)
+                .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
         };
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
@@ -2037,14 +2458,28 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let z = rounded.div_euclid(86_400_000_000_000) as i64;
         let rem = rounded.rem_euclid(86_400_000_000_000);
         let (y, mo, da) = civil_from_days(z);
-        let nd = check_date(i, IsoDate { year: y, month: mo, day: da })?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(nd, ns_to_time(rem))))
+        let nd = check_date(
+            i,
+            IsoDate {
+                year: y,
+                month: mo,
+                day: da,
+            },
+        )?;
+        Ok(make(
+            i,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ns_to_time(rem)),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let dur = if matches!(largest.strip_suffix('s').unwrap_or(&largest), "year" | "month" | "week") {
+        let dur = if matches!(
+            largest.strip_suffix('s').unwrap_or(&largest),
+            "year" | "month" | "week"
+        ) {
             diff_datetime(d, tm, od, otm, &largest)
         } else {
             balance_ns(dt_ns(od, otm) - dt_ns(d, tm), &largest)
@@ -2055,7 +2490,10 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "day")?;
-        let dur = if matches!(largest.strip_suffix('s').unwrap_or(&largest), "year" | "month" | "week") {
+        let dur = if matches!(
+            largest.strip_suffix('s').unwrap_or(&largest),
+            "year" | "month" | "week"
+        ) {
             diff_datetime(od, otm, d, tm, &largest)
         } else {
             balance_ns(dt_ns(d, tm) - dt_ns(od, otm), &largest)
@@ -2087,12 +2525,23 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (xd, xt) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let (yd, yt) = to_datetime(i, &arg(a, 1), &Value::Undefined)?;
         let c = cmp_date(xd, yd);
-        Ok(Value::Num(if c != 0 { c } else { time_to_ns(xt).cmp(&time_to_ns(yt)) as i64 } as f64))
+        Ok(Value::Num(if c != 0 {
+            c
+        } else {
+            time_to_ns(xt).cmp(&time_to_ns(yt)) as i64
+        } as f64))
     });
 }
 
 fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoTime), Value> {
-    let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
+    let midnight = IsoTime {
+        hour: 0,
+        minute: 0,
+        second: 0,
+        ms: 0,
+        us: 0,
+        ns: 0,
+    };
     match get(i, v) {
         Some(Temporal::DateTime(d, t)) => {
             to_overflow(i, opts)?;
@@ -2108,16 +2557,27 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
         Value::Str(s) => {
             let p = parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid datetime"))?;
             if p.offset == Off::Z {
-                return Err(i.make_error("RangeError", "UTC designator not valid for PlainDateTime"));
+                return Err(
+                    i.make_error("RangeError", "UTC designator not valid for PlainDateTime")
+                );
             }
-            let d = p.date.ok_or_else(|| i.make_error("RangeError", "no date in PlainDateTime string"))?;
+            let d = p
+                .date
+                .ok_or_else(|| i.make_error("RangeError", "no date in PlainDateTime string"))?;
             if !cal_ok(&p.calendar) {
                 return Err(i.make_error("RangeError", "unsupported calendar"));
             }
             if !date_in_range(d) {
                 return Err(i.make_error("RangeError", "date outside representable range"));
             }
-            let t = p.time.unwrap_or(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+            let t = p.time.unwrap_or(IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            });
             Ok((d, t))
         }
         Value::Obj(_) => {
@@ -2135,26 +2595,46 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
 
 fn install_year_month(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
-    it.extra_protos.insert("Temporal.PlainYearMonth", proto.clone());
-    def_getter(it, &proto, "year", |i, t, _| Ok(Value::Num(as_yearmonth(i, &t)?.year as f64)));
-    def_getter(it, &proto, "month", |i, t, _| Ok(Value::Num(as_yearmonth(i, &t)?.month as f64)));
-    def_getter(it, &proto, "monthCode", |i, t, _| Ok(Value::str(month_code(as_yearmonth(i, &t)?.month))));
-    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
+    it.extra_protos
+        .insert("Temporal.PlainYearMonth", proto.clone());
+    def_getter(it, &proto, "year", |i, t, _| {
+        Ok(Value::Num(as_yearmonth(i, &t)?.year as f64))
+    });
+    def_getter(it, &proto, "month", |i, t, _| {
+        Ok(Value::Num(as_yearmonth(i, &t)?.month as f64))
+    });
+    def_getter(it, &proto, "monthCode", |i, t, _| {
+        Ok(Value::str(month_code(as_yearmonth(i, &t)?.month)))
+    });
+    def_getter(it, &proto, "calendarId", |_i, _t, _| {
+        Ok(Value::str("iso8601"))
+    });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
         Ok(Value::Num(days_in_month(d.year, d.month) as f64))
     });
     def_getter(it, &proto, "daysInYear", |i, t, _| {
-        Ok(Value::Num(if is_leap(as_yearmonth(i, &t)?.year) { 366.0 } else { 365.0 }))
+        Ok(Value::Num(if is_leap(as_yearmonth(i, &t)?.year) {
+            366.0
+        } else {
+            365.0
+        }))
     });
     def_getter(it, &proto, "monthsInYear", |i, t, _| {
         as_yearmonth(i, &t)?;
         Ok(Value::Num(12.0))
     });
-    def_getter(it, &proto, "inLeapYear", |i, t, _| Ok(Value::Bool(is_leap(as_yearmonth(i, &t)?.year))));
+    def_getter(it, &proto, "inLeapYear", |i, t, _| {
+        Ok(Value::Bool(is_leap(as_yearmonth(i, &t)?.year)))
+    });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::str(format!("{}-{:02}{}", pad_year(d.year), d.month, cal_suffix(i, &arg(a, 0))?)))
+        Ok(Value::str(format!(
+            "{}-{:02}{}",
+            pad_year(d.year),
+            d.month,
+            cal_suffix(i, &arg(a, 0))?
+        )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_yearmonth(i, &t)?;
@@ -2173,21 +2653,45 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         if !(1..=12).contains(&month) || !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "invalid year-month"));
         }
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year, month: month as u8, day: 1 })))
+        Ok(make(
+            i,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(IsoDate {
+                year,
+                month: month as u8,
+                day: 1,
+            }),
+        ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = d.year * 12 + (d.month as i64 - 1) + dur.years * 12 + dur.months;
         let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1 })))
+        Ok(make(
+            i,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(IsoDate {
+                year: y,
+                month: m,
+                day: 1,
+            }),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = d.year * 12 + (d.month as i64 - 1) - dur.years * 12 - dur.months;
         let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1 })))
+        Ok(make(
+            i,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(IsoDate {
+                year: y,
+                month: m,
+                day: 1,
+            }),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -2195,9 +2699,16 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let months = (o.year * 12 + o.month as i64) - (d.year * 12 + d.month as i64);
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
         let dur = if largest == "month" {
-            IsoDuration { months, ..Default::default() }
+            IsoDuration {
+                months,
+                ..Default::default()
+            }
         } else {
-            IsoDuration { years: months / 12, months: months % 12, ..Default::default() }
+            IsoDuration {
+                years: months / 12,
+                months: months % 12,
+                ..Default::default()
+            }
         };
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
@@ -2207,9 +2718,16 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let months = (d.year * 12 + d.month as i64) - (o.year * 12 + o.month as i64);
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
         let dur = if largest == "month" {
-            IsoDuration { months, ..Default::default() }
+            IsoDuration {
+                months,
+                ..Default::default()
+            }
         } else {
-            IsoDuration { years: months / 12, months: months % 12, ..Default::default() }
+            IsoDuration {
+                years: months / 12,
+                months: months % 12,
+                ..Default::default()
+            }
         };
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
@@ -2225,7 +2743,15 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         if !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "year-month is outside the supported range"));
         }
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year, month: month as u8, day: day as u8 })))
+        Ok(make(
+            i,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(IsoDate {
+                year,
+                month: month as u8,
+                day: day as u8,
+            }),
+        ))
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let d = to_yearmonth(i, &arg(a, 0), &arg(a, 1))?;
@@ -2254,7 +2780,11 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
             let month = field_month(i, v)?;
             let ovf = to_overflow(i, opts)?;
             let month = regulate_high(i, month, 12, ovf, "month")? as u8;
-            IsoDate { year, month, day: 1 }
+            IsoDate {
+                year,
+                month,
+                day: 1,
+            }
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainYearMonth")),
     };
@@ -2266,13 +2796,25 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
 
 fn install_month_day(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
-    it.extra_protos.insert("Temporal.PlainMonthDay", proto.clone());
-    def_getter(it, &proto, "monthCode", |i, t, _| Ok(Value::str(month_code(as_monthday(i, &t)?.month))));
-    def_getter(it, &proto, "day", |i, t, _| Ok(Value::Num(as_monthday(i, &t)?.day as f64)));
-    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
+    it.extra_protos
+        .insert("Temporal.PlainMonthDay", proto.clone());
+    def_getter(it, &proto, "monthCode", |i, t, _| {
+        Ok(Value::str(month_code(as_monthday(i, &t)?.month)))
+    });
+    def_getter(it, &proto, "day", |i, t, _| {
+        Ok(Value::Num(as_monthday(i, &t)?.day as f64))
+    });
+    def_getter(it, &proto, "calendarId", |_i, _t, _| {
+        Ok(Value::str("iso8601"))
+    });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        Ok(Value::str(format!("{:02}-{:02}{}", d.month, d.day, cal_suffix(i, &arg(a, 0))?)))
+        Ok(Value::str(format!(
+            "{:02}-{:02}{}",
+            d.month,
+            d.day,
+            cal_suffix(i, &arg(a, 0))?
+        )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_monthday(i, &t)?;
@@ -2316,7 +2858,11 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
             let ovf = to_overflow(i, opts)?;
             let month = regulate_high(i, month, 12, ovf, "month")? as u8;
             let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
-            Ok(IsoDate { year: 1972, month, day })
+            Ok(IsoDate {
+                year: 1972,
+                month,
+                day,
+            })
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainMonthDay")),
     }
@@ -2327,31 +2873,67 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
 fn install_duration(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Temporal.Duration", proto.clone());
-    def_getter(it, &proto, "years", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.years as f64)));
-    def_getter(it, &proto, "months", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.months as f64)));
-    def_getter(it, &proto, "weeks", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.weeks as f64)));
-    def_getter(it, &proto, "days", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.days as f64)));
-    def_getter(it, &proto, "hours", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.hours as f64)));
-    def_getter(it, &proto, "minutes", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.minutes as f64)));
-    def_getter(it, &proto, "seconds", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.seconds as f64)));
-    def_getter(it, &proto, "milliseconds", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.ms as f64)));
-    def_getter(it, &proto, "microseconds", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.us as f64)));
-    def_getter(it, &proto, "nanoseconds", |i, t, _| Ok(Value::Num(as_duration(i, &t)?.ns as f64)));
-    def_getter(it, &proto, "sign", |i, t, _| Ok(Value::Num(duration_sign(as_duration(i, &t)?) as f64)));
-    def_getter(it, &proto, "blank", |i, t, _| Ok(Value::Bool(duration_sign(as_duration(i, &t)?) == 0)));
+    def_getter(it, &proto, "years", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.years as f64))
+    });
+    def_getter(it, &proto, "months", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.months as f64))
+    });
+    def_getter(it, &proto, "weeks", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.weeks as f64))
+    });
+    def_getter(it, &proto, "days", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.days as f64))
+    });
+    def_getter(it, &proto, "hours", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.hours as f64))
+    });
+    def_getter(it, &proto, "minutes", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.minutes as f64))
+    });
+    def_getter(it, &proto, "seconds", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.seconds as f64))
+    });
+    def_getter(it, &proto, "milliseconds", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.ms as f64))
+    });
+    def_getter(it, &proto, "microseconds", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.us as f64))
+    });
+    def_getter(it, &proto, "nanoseconds", |i, t, _| {
+        Ok(Value::Num(as_duration(i, &t)?.ns as f64))
+    });
+    def_getter(it, &proto, "sign", |i, t, _| {
+        Ok(Value::Num(duration_sign(as_duration(i, &t)?) as f64))
+    });
+    def_getter(it, &proto, "blank", |i, t, _| {
+        Ok(Value::Bool(duration_sign(as_duration(i, &t)?) == 0))
+    });
 
-    it.def_method(&proto, "toString", 0, |i, t, _| Ok(Value::str(fmt_duration(as_duration(i, &t)?))));
-    it.def_method(&proto, "toJSON", 0, |i, t, _| Ok(Value::str(fmt_duration(as_duration(i, &t)?))));
+    it.def_method(&proto, "toString", 0, |i, t, _| {
+        Ok(Value::str(fmt_duration(as_duration(i, &t)?)))
+    });
+    it.def_method(&proto, "toJSON", 0, |i, t, _| {
+        Ok(Value::str(fmt_duration(as_duration(i, &t)?)))
+    });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.Duration has no valueOf; use compare"))
     });
     it.def_method(&proto, "negated", 0, |i, t, _| {
         let d = as_duration(i, &t)?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(d))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(d)),
+        ))
     });
     it.def_method(&proto, "abs", 0, |i, t, _| {
         let d = as_duration(i, &t)?;
-        let d = if duration_sign(d) < 0 { neg_duration(d) } else { d };
+        let d = if duration_sign(d) < 0 {
+            neg_duration(d)
+        } else {
+            d
+        };
         Ok(make(i, "Temporal.Duration", Temporal::Duration(d)))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -2375,12 +2957,20 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(add_duration(d, o, 1))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(add_duration(d, o, 1)),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(add_duration(d, o, -1))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(add_duration(d, o, -1)),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
@@ -2414,7 +3004,11 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         // Resolve largestUnit ("auto" -> larger of existing-largest and smallestUnit).
         let largest: String = if largest_raw.is_empty() || largest_raw == "auto" {
             let ex = default_largest(&d);
-            if unit_rank(ex) >= unit_rank(&smallest) { ex.into() } else { smallest.clone() }
+            if unit_rank(ex) >= unit_rank(&smallest) {
+                ex.into()
+            } else {
+                smallest.clone()
+            }
         } else {
             match unit_rank(&largest_raw) {
                 Some(_) => sing(&largest_raw).into(),
@@ -2433,7 +3027,10 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
                 return Err(i.make_error("RangeError", "roundingIncrement out of range"));
             }
             if incr_raw > 1 && smallest != largest {
-                return Err(i.make_error("RangeError", "cannot round to an increment > 1 while balancing"));
+                return Err(i.make_error(
+                    "RangeError",
+                    "cannot round to an increment > 1 while balancing",
+                ));
             }
         } else {
             check_increment(i, &smallest, incr_raw)?;
@@ -2468,7 +3065,15 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
                     let rdays = rounded / day_ns;
                     let sub = rounded % day_ns;
                     let (y, m, da) = civil_from_days(epoch_days(rel) + rdays as i64);
-                    let mut out = diff_date(rel, IsoDate { year: y, month: m, day: da }, &largest);
+                    let mut out = diff_date(
+                        rel,
+                        IsoDate {
+                            year: y,
+                            month: m,
+                            day: da,
+                        },
+                        &largest,
+                    );
                     let tb = balance_ns(sub, "hour");
                     out.hours = tb.hours;
                     out.minutes = tb.minutes;
@@ -2483,11 +3088,17 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
             }
         } else {
             if need_rel {
-                return Err(i.make_error("RangeError", "rounding calendar units requires relativeTo"));
+                return Err(
+                    i.make_error("RangeError", "rounding calendar units requires relativeTo")
+                );
             }
             // Without a reference point, days are fixed 24-hour spans.
             let total = d.days as i128 * day_ns + duration_time_ns(d);
-            let un = if smallest == "day" { day_ns } else { unit_ns(&smallest).unwrap() };
+            let un = if smallest == "day" {
+                day_ns
+            } else {
+                unit_ns(&smallest).unwrap()
+            };
             let rounded = round_ns(total, un * incr, &mode);
             balance_ns(rounded, &largest)
         };
@@ -2515,13 +3126,19 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
             || d.weeks != 0
             || matches!(unit, "year" | "month" | "week");
         if need_rel && rel.is_none() {
-            return Err(i.make_error("RangeError", "total of a calendar duration requires relativeTo"));
+            return Err(i.make_error(
+                "RangeError",
+                "total of a calendar duration requires relativeTo",
+            ));
         }
         // dest is the duration's nanosecond span from the reference (or from a 24h-day origin).
         let (rel_o, dest) = match rel {
             Some(rel) => {
                 let (ed, et) = add_full_duration(rel, d);
-                (Some((rel, ed)), (epoch_days(ed) - epoch_days(rel)) as i128 * day_ns + time_to_ns(et) as i128)
+                (
+                    Some((rel, ed)),
+                    (epoch_days(ed) - epoch_days(rel)) as i128 * day_ns + time_to_ns(et) as i128,
+                )
             }
             None => (None, d.days as i128 * day_ns + duration_time_ns(d)),
         };
@@ -2534,9 +3151,21 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
                 _ => bal.weeks,
             };
             let mk = |c: i64| match unit {
-                "year" => IsoDuration { years: c, ..Default::default() },
-                "month" => IsoDuration { years: bal.years, months: c, ..Default::default() },
-                _ => IsoDuration { years: bal.years, months: bal.months, weeks: c, ..Default::default() },
+                "year" => IsoDuration {
+                    years: c,
+                    ..Default::default()
+                },
+                "month" => IsoDuration {
+                    years: bal.years,
+                    months: c,
+                    ..Default::default()
+                },
+                _ => IsoDuration {
+                    years: bal.years,
+                    months: bal.months,
+                    weeks: c,
+                    ..Default::default()
+                },
             };
             let sd = add_date_dur(rel, mk(comp));
             let ed2 = add_date_dur(rel, mk(comp + sign));
@@ -2551,7 +3180,11 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
             }
             ratio_to_f64(num, den)
         } else {
-            let u = if unit == "day" { day_ns } else { unit_ns(unit).unwrap() };
+            let u = if unit == "day" {
+                day_ns
+            } else {
+                unit_ns(unit).unwrap()
+            };
             ratio_to_f64(dest, u)
         };
         Ok(Value::Num(value))
@@ -2581,10 +3214,19 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_duration(i, &arg(a, 0))?;
         let y = to_duration(i, &arg(a, 1))?;
-        let has_cal = x.years != 0 || x.months != 0 || x.weeks != 0 || y.years != 0 || y.months != 0 || y.weeks != 0;
+        let has_cal = x.years != 0
+            || x.months != 0
+            || x.weeks != 0
+            || y.years != 0
+            || y.months != 0
+            || y.weeks != 0;
         let (xn, yn) = if has_cal {
-            let start = read_relative_to(i, &arg(a, 2))?
-                .ok_or_else(|| i.make_error("RangeError", "comparing calendar durations requires relativeTo"))?;
+            let start = read_relative_to(i, &arg(a, 2))?.ok_or_else(|| {
+                i.make_error(
+                    "RangeError",
+                    "comparing calendar durations requires relativeTo",
+                )
+            })?;
             let (xd, xt) = add_full_duration(start, x);
             let (yd, yt) = add_full_duration(start, y);
             (dt_ns(xd, xt), dt_ns(yd, yt))
@@ -2640,7 +3282,9 @@ fn duration_total_ns(d: IsoDuration) -> i128 {
 /// already enforced when the fields are read.)
 fn validate_duration(i: &Interp, d: IsoDuration) -> Result<(), Value> {
     let mut sign = 0i64;
-    for v in [d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms, d.us, d.ns] {
+    for v in [
+        d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms, d.us, d.ns,
+    ] {
         if v != 0 {
             let s = if v < 0 { -1 } else { 1 };
             if sign != 0 && sign != s {
@@ -2667,7 +3311,8 @@ fn to_duration(i: &mut Interp, v: &Value) -> Result<IsoDuration, Value> {
     }
     match v {
         Value::Str(s) => {
-            let d = parse_duration_str(s).ok_or_else(|| i.make_error("RangeError", "invalid duration"))?;
+            let d = parse_duration_str(s)
+                .ok_or_else(|| i.make_error("RangeError", "invalid duration"))?;
             validate_duration(i, d)?;
             Ok(d)
         }
@@ -2692,7 +3337,10 @@ fn to_duration(i: &mut Interp, v: &Value) -> Result<IsoDuration, Value> {
 }
 fn parse_duration_str(s: &str) -> Option<IsoDuration> {
     let s = s.trim();
-    let (neg, s) = match s.strip_prefix('-').or_else(|| s.strip_prefix('+').map(|_| s)) {
+    let (neg, s) = match s
+        .strip_prefix('-')
+        .or_else(|| s.strip_prefix('+').map(|_| s))
+    {
         Some(r) if s.starts_with('-') => (true, r),
         _ => (false, s.trim_start_matches('+')),
     };
@@ -2748,7 +3396,9 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Temporal.Instant", proto.clone());
     def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
-        Ok(Value::Num((as_instant(i, &t)?.div_euclid(1_000_000)) as f64))
+        Ok(Value::Num(
+            (as_instant(i, &t)?.div_euclid(1_000_000)) as f64,
+        ))
     });
     def_getter(it, &proto, "epochNanoseconds", |i, t, _| {
         Ok(Value::BigInt(as_instant(i, &t)?))
@@ -2768,7 +3418,15 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             ns: (rem % 1000) as u16,
         };
         let ts = fmt_time_opts(i, t, &arg(a, 0))?;
-        Ok(Value::str(format!("{}T{}Z", fmt_date(IsoDate { year: y, month: mo, day: da }), ts)))
+        Ok(Value::str(format!(
+            "{}T{}Z",
+            fmt_date(IsoDate {
+                year: y,
+                month: mo,
+                day: da
+            }),
+            ts
+        )))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error("TypeError", "Temporal.Instant has no valueOf; use compare"))
@@ -2780,7 +3438,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let (y, mo, da) = civil_from_days(z);
         Ok(Value::str(format!(
             "{}T{}Z",
-            fmt_date(IsoDate { year: y, month: mo, day: da }),
+            fmt_date(IsoDate {
+                year: y,
+                month: mo,
+                day: da
+            }),
             fmt_time(ns_to_time(rem))
         )))
     });
@@ -2797,7 +3459,15 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
         let offset = zone_offset(&tz, e);
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: offset, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: e,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
@@ -2805,20 +3475,34 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         if dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0 {
             return Err(i.make_error("RangeError", "Instant.add does not accept calendar units"));
         }
-        Ok(make(i, "Temporal.Instant", Temporal::Instant(x + duration_time_ns(dur))))
+        Ok(make(
+            i,
+            "Temporal.Instant",
+            Temporal::Instant(x + duration_time_ns(dur)),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         if dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0 {
-            return Err(i.make_error("RangeError", "Instant.subtract does not accept calendar units"));
+            return Err(i.make_error(
+                "RangeError",
+                "Instant.subtract does not accept calendar units",
+            ));
         }
-        Ok(make(i, "Temporal.Instant", Temporal::Instant(x - duration_time_ns(dur))))
+        Ok(make(
+            i,
+            "Temporal.Instant",
+            Temporal::Instant(x - duration_time_ns(dur)),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let (o, shorthand) = round_opts(&arg(a, 0));
-        let smallest = match shorthand { Some(s) => s, None => opt_str(i, &o, "smallestUnit", "")? };
+        let smallest = match shorthand {
+            Some(s) => s,
+            None => opt_str(i, &o, "smallestUnit", "")?,
+        };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
@@ -2826,19 +3510,31 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         check_mode(i, &mode)?;
         check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
         let incr = incr_raw as i128;
-        Ok(make(i, "Temporal.Instant", Temporal::Instant(round_ns(x, unit * incr, &mode))))
+        Ok(make(
+            i,
+            "Temporal.Instant",
+            Temporal::Instant(round_ns(x, unit * incr, &mode)),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(y - x, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(y - x, &largest)),
+        ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(x - y, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(x - y, &largest)),
+        ))
     });
     let ctor = add_ctor(it, ns, "Instant", 1, proto, |i, _t, a| {
         require_new(i)?;
@@ -2854,7 +3550,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&ctor, "fromEpochMilliseconds", 1, |i, _t, a| {
         let ms = to_int(i, &arg(a, 0))? as i128;
-        Ok(make(i, "Temporal.Instant", Temporal::Instant(ms * 1_000_000)))
+        Ok(make(
+            i,
+            "Temporal.Instant",
+            Temporal::Instant(ms * 1_000_000),
+        ))
     });
     it.def_method(&ctor, "fromEpochNanoseconds", 1, |i, _t, a| {
         let ns = match arg(a, 0) {
@@ -2877,7 +3577,9 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
     }
     match v {
         Value::BigInt(n) => Ok(*n),
-        Value::Str(s) => parse_instant(s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string")),
+        Value::Str(s) => {
+            parse_instant(s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
+        }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.Instant")),
     }
 }
@@ -2917,8 +3619,18 @@ fn zone_rule(tz: &str) -> Option<ZoneRule> {
     let h = |n: i64| n * 3600 * SEC;
     let hm = |hh: i64, mm: i64| (hh * 3600 + mm * 60) * SEC;
     let fixed = |o: i64| Some(ZoneRule { std: o, dst: None });
-    let us = |std: i64, dst: i64| Some(ZoneRule { std, dst: Some((dst, US_START, US_END, false)) });
-    let eu = |std: i64, dst: i64| Some(ZoneRule { std, dst: Some((dst, EU_START, EU_END, true)) });
+    let us = |std: i64, dst: i64| {
+        Some(ZoneRule {
+            std,
+            dst: Some((dst, US_START, US_END, false)),
+        })
+    };
+    let eu = |std: i64, dst: i64| {
+        Some(ZoneRule {
+            std,
+            dst: Some((dst, EU_START, EU_END, true)),
+        })
+    };
     match tz {
         "UTC" | "Z" | "Etc/UTC" | "Etc/GMT" | "GMT" => fixed(0),
         "Africa/Abidjan" | "Africa/Accra" | "Atlantic/Reykjavik" | "Africa/Monrovia" => fixed(0),
@@ -2981,7 +3693,10 @@ fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
     }
     match zone_rule(tz) {
         Some(ZoneRule { std, dst: None }) => std,
-        Some(ZoneRule { std, dst: Some((dst, start, end, utc_rule)) }) => {
+        Some(ZoneRule {
+            std,
+            dst: Some((dst, start, end, utc_rule)),
+        }) => {
             let year = civil_from_days((epoch_ns.div_euclid(86_400 * SEC as i128)) as i64).0;
             let s = transition_ns(year, start, std, utc_rule);
             let e = transition_ns(year, end, dst, utc_rule);
@@ -3059,7 +3774,14 @@ fn zoned_local(epoch_ns: i128, offset_ns: i64) -> (IsoDate, IsoTime) {
         us: ((rem / 1000) % 1000) as u16,
         ns: (rem % 1000) as u16,
     };
-    (IsoDate { year: y, month: mo, day: da }, t)
+    (
+        IsoDate {
+            year: y,
+            month: mo,
+            day: da,
+        },
+        t,
+    )
 }
 fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
     match get(i, this) {
@@ -3074,19 +3796,34 @@ fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
 /// ToTemporalZonedDateTime: a ZonedDateTime, an ISO string with `[timeZone]`, or a fields object
 /// carrying `timeZone`.
 fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<str>), Value> {
-    if let Some(Temporal::Zoned { epoch_ns, offset_ns, tz }) = get(i, v) {
+    if let Some(Temporal::Zoned {
+        epoch_ns,
+        offset_ns,
+        tz,
+    }) = get(i, v)
+    {
         to_overflow(i, opts)?;
         return Ok((epoch_ns, offset_ns, tz));
     }
     match v {
         Value::Str(s) => {
-            let p = parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
-            let date = p.date.ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
+            let p =
+                parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
+            let date = p
+                .date
+                .ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
             let tz: Rc<str> = match p.tz {
                 Some(t) => Rc::from(t.as_str()),
                 None => return Err(i.make_error("RangeError", "missing time zone")),
             };
-            let time = p.time.unwrap_or(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+            let time = p.time.unwrap_or(IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            });
             let local = dt_ns(date, time);
             let off = match p.offset {
                 Off::Z => 0,
@@ -3120,7 +3857,8 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
 
 fn install_zoned(it: &mut Interp, ns: &Gc) {
     let proto = Object::new(Some(it.object_proto.clone()));
-    it.extra_protos.insert("Temporal.ZonedDateTime", proto.clone());
+    it.extra_protos
+        .insert("Temporal.ZonedDateTime", proto.clone());
 
     macro_rules! date_get {
         ($name:literal, $f:expr) => {
@@ -3144,10 +3882,20 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     date_get!("month", |d: IsoDate| Value::Num(d.month as f64));
     date_get!("day", |d: IsoDate| Value::Num(d.day as f64));
     date_get!("monthCode", |d: IsoDate| Value::str(month_code(d.month)));
-    date_get!("dayOfWeek", |d: IsoDate| Value::Num(iso_day_of_week(d) as f64));
-    date_get!("dayOfYear", |d: IsoDate| Value::Num(iso_day_of_year(d) as f64));
-    date_get!("daysInMonth", |d: IsoDate| Value::Num(days_in_month(d.year, d.month) as f64));
-    date_get!("daysInYear", |d: IsoDate| Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }));
+    date_get!("dayOfWeek", |d: IsoDate| Value::Num(
+        iso_day_of_week(d) as f64
+    ));
+    date_get!("dayOfYear", |d: IsoDate| Value::Num(
+        iso_day_of_year(d) as f64
+    ));
+    date_get!("daysInMonth", |d: IsoDate| Value::Num(
+        days_in_month(d.year, d.month) as f64
+    ));
+    date_get!("daysInYear", |d: IsoDate| Value::Num(if is_leap(d.year) {
+        366.0
+    } else {
+        365.0
+    }));
     date_get!("inLeapYear", |d: IsoDate| Value::Bool(is_leap(d.year)));
     date_get!("weekOfYear", |d: IsoDate| Value::Num(iso_week(d).0 as f64));
     date_get!("yearOfWeek", |d: IsoDate| Value::Num(iso_week(d).1 as f64));
@@ -3156,16 +3904,32 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "hoursInDay", |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
-        let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
+        let midnight = IsoTime {
+            hour: 0,
+            minute: 0,
+            second: 0,
+            ms: 0,
+            us: 0,
+            ns: 0,
+        };
         let today_local = dt_ns(d, midnight);
         let today = today_local - offset_for_local(&tz, today_local) as i128;
         let (ty, tm, td) = civil_from_days(epoch_days(d) + 1);
-        let tomorrow_local = dt_ns(IsoDate { year: ty, month: tm, day: td }, midnight);
+        let tomorrow_local = dt_ns(
+            IsoDate {
+                year: ty,
+                month: tm,
+                day: td,
+            },
+            midnight,
+        );
         let tomorrow = tomorrow_local - offset_for_local(&tz, tomorrow_local) as i128;
         Ok(Value::Num((tomorrow - today) as f64 / 3_600_000_000_000.0))
     });
     def_getter(it, &proto, "epochSeconds", |i, t, _| {
-        Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000_000) as f64))
+        Ok(Value::Num(
+            as_zoned(i, &t)?.0.div_euclid(1_000_000_000) as f64
+        ))
     });
     def_getter(it, &proto, "epochMicroseconds", |i, t, _| {
         Ok(Value::BigInt(as_zoned(i, &t)?.0.div_euclid(1000)))
@@ -3176,13 +3940,21 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     time_get!("millisecond", |t: IsoTime| Value::Num(t.ms as f64));
     time_get!("microsecond", |t: IsoTime| Value::Num(t.us as f64));
     time_get!("nanosecond", |t: IsoTime| Value::Num(t.ns as f64));
-    def_getter(it, &proto, "calendarId", |_i, _t, _| Ok(Value::str("iso8601")));
+    def_getter(it, &proto, "calendarId", |_i, _t, _| {
+        Ok(Value::str("iso8601"))
+    });
     def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
         Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000) as f64))
     });
-    def_getter(it, &proto, "epochNanoseconds", |i, t, _| Ok(Value::BigInt(as_zoned(i, &t)?.0)));
-    def_getter(it, &proto, "offsetNanoseconds", |i, t, _| Ok(Value::Num(as_zoned(i, &t)?.1 as f64)));
-    def_getter(it, &proto, "offset", |i, t, _| Ok(Value::str(offset_string(as_zoned(i, &t)?.1))));
+    def_getter(it, &proto, "epochNanoseconds", |i, t, _| {
+        Ok(Value::BigInt(as_zoned(i, &t)?.0))
+    });
+    def_getter(it, &proto, "offsetNanoseconds", |i, t, _| {
+        Ok(Value::Num(as_zoned(i, &t)?.1 as f64))
+    });
+    def_getter(it, &proto, "offset", |i, t, _| {
+        Ok(Value::str(offset_string(as_zoned(i, &t)?.1)))
+    });
     def_getter(it, &proto, "timeZoneId", |i, t, _| {
         Ok(Value::Str(as_zoned(i, &t)?.2))
     });
@@ -3193,11 +3965,19 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainDate", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(zoned_local(e, o).0)))
+        Ok(make(
+            i,
+            "Temporal.PlainDate",
+            Temporal::Date(zoned_local(e, o).0),
+        ))
     });
     it.def_method(&proto, "toPlainTime", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(i, "Temporal.PlainTime", Temporal::Time(zoned_local(e, o).1)))
+        Ok(make(
+            i,
+            "Temporal.PlainTime",
+            Temporal::Time(zoned_local(e, o).1),
+        ))
     });
     it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
@@ -3206,57 +3986,118 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(zoned_local(e, o).0)))
+        Ok(make(
+            i,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(zoned_local(e, o).0),
+        ))
     });
     it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(zoned_local(e, o).0)))
+        Ok(make(
+            i,
+            "Temporal.PlainMonthDay",
+            Temporal::MonthDay(zoned_local(e, o).0),
+        ))
     });
     it.def_method(&proto, "startOfDay", 0, |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
-        let midnight = IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 };
-        let local = dt_ns(d, midnight); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
+        let midnight = IsoTime {
+            hour: 0,
+            minute: 0,
+            second: 0,
+            ms: 0,
+            us: 0,
+            ns: 0,
+        };
+        let local = dt_ns(d, midnight);
+        let off = offset_for_local(&tz, local);
+        let epoch = local - off as i128;
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (e, _, tz) = as_zoned(i, &t)?;
         match get(i, &arg(a, 0)) {
-            Some(Temporal::Zoned { epoch_ns, tz: otz, .. }) => {
-                Ok(Value::Bool(e == epoch_ns && tz == otz))
-            }
+            Some(Temporal::Zoned {
+                epoch_ns, tz: otz, ..
+            }) => Ok(Value::Bool(e == epoch_ns && tz == otz)),
             _ => Ok(Value::Bool(false)),
         }
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
-        Err(i.make_error("TypeError", "Temporal.ZonedDateTime has no valueOf; use compare"))
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.ZonedDateTime has no valueOf; use compare",
+        ))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
-        Ok(Value::str(format!("{}T{}{}[{}]", fmt_date(d), fmt_time(tm), offset_string(o), tz)))
+        Ok(Value::str(format!(
+            "{}T{}{}[{}]",
+            fmt_date(d),
+            fmt_time(tm),
+            offset_string(o),
+            tz
+        )))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
         let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
-        Ok(Value::str(format!("{}T{}{}[{}]{}", fmt_date(d), ts, offset_string(o), tz, cal_suffix(i, &arg(a, 0))?)))
+        Ok(Value::str(format!(
+            "{}T{}{}[{}]{}",
+            fmt_date(d),
+            ts,
+            offset_string(o),
+            tz,
+            cal_suffix(i, &arg(a, 0))?
+        )))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
-        let local = dt_ns(nd, ntm); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
+        let local = dt_ns(nd, ntm);
+        let off = offset_for_local(&tz, local);
+        let epoch = local - off as i128;
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
-        let local = dt_ns(nd, ntm); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
+        let local = dt_ns(nd, ntm);
+        let off = offset_for_local(&tz, local);
+        let epoch = local - off as i128;
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -3272,21 +4113,49 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
         let nd = check_date(i, IsoDate { year, month, day })?;
-        let nt = check_time(i, IsoTime { hour, minute, second, ms, us, ns: nsf })?;
-        let local = dt_ns(nd, nt); let off = offset_for_local(&tz, local); let epoch = local - off as i128;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }))
+        let nt = check_time(
+            i,
+            IsoTime {
+                hour,
+                minute,
+                second,
+                ms,
+                us,
+                ns: nsf,
+            },
+        )?;
+        let local = dt_ns(nd, nt);
+        let off = offset_for_local(&tz, local);
+        let epoch = local - off as i128;
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
         let o = to_instant(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(o - e, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(o - e, &largest)),
+        ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
         let o = to_instant(i, &arg(a, 0))?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(balance_ns(e - o, &largest))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(balance_ns(e - o, &largest)),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -3295,7 +4164,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let unit = if smallest == "day" {
             86_400_000_000_000
         } else {
-            unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
+            unit_ns(&smallest)
+                .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
         };
         let incr_raw = opt_num(i, &opts, "roundingIncrement", 1)?;
         let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
@@ -3304,7 +4174,15 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let incr = incr_raw as i128;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: rounded - o as i128,
+                offset_ns: o,
+                tz,
+            },
+        ))
     });
 
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
@@ -3320,11 +4198,27 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
         let offset_ns = tz_offset_ns(&tz);
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns, offset_ns, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns,
+                offset_ns,
+                tz,
+            },
+        ))
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let (epoch_ns, offset_ns, tz) = to_zoned(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(i, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns, offset_ns, tz }))
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns,
+                offset_ns,
+                tz,
+            },
+        ))
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_zoned(i, &arg(a, 0), &Value::Undefined)?.0;
@@ -3339,22 +4233,56 @@ fn install_now(it: &mut Interp, ns: &Gc) {
     let now = Object::new(Some(it.object_proto.clone()));
     // lumen has no real clock; the epoch is fixed at 1970-01-01T00:00:00Z. Structure/type tests
     // pass even though absolute-time tests do not.
-    it.def_method(&now, "instant", 0, |i, _t, _| Ok(make(i, "Temporal.Instant", Temporal::Instant(0))));
+    it.def_method(&now, "instant", 0, |i, _t, _| {
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(0)))
+    });
     it.def_method(&now, "plainDateISO", 0, |i, _t, _| {
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(IsoDate { year: 1970, month: 1, day: 1 })))
+        Ok(make(
+            i,
+            "Temporal.PlainDate",
+            Temporal::Date(IsoDate {
+                year: 1970,
+                month: 1,
+                day: 1,
+            }),
+        ))
     });
     it.def_method(&now, "plainTimeISO", 0, |i, _t, _| {
-        Ok(make(i, "Temporal.PlainTime", Temporal::Time(IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 })))
+        Ok(make(
+            i,
+            "Temporal.PlainTime",
+            Temporal::Time(IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            }),
+        ))
     });
     it.def_method(&now, "plainDateTimeISO", 0, |i, _t, _| {
         Ok(make(
             i,
             "Temporal.PlainDateTime",
             Temporal::DateTime(
-                IsoDate { year: 1970, month: 1, day: 1 },
-                IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+                IsoDate {
+                    year: 1970,
+                    month: 1,
+                    day: 1,
+                },
+                IsoTime {
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    ms: 0,
+                    us: 0,
+                    ns: 0,
+                },
             ),
         ))
     });
-    ns.borrow_mut().props.insert("Now", Property::builtin(Value::Obj(now)));
+    ns.borrow_mut()
+        .props
+        .insert("Now", Property::builtin(Value::Obj(now)));
 }

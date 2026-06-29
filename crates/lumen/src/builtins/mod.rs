@@ -169,10 +169,20 @@ fn install_disposable_stack(it: &mut Interp) {
         Ok(Value::Obj(fresh))
     });
     // `disposed` accessor + `[Symbol.dispose]` alias for `dispose`.
-    let disposed_getter = it.make_native("get disposed", 0, |i, this, _| Ok(Value::Bool(ds_disposed(i, &this)?)));
+    let disposed_getter = it.make_native("get disposed", 0, |i, this, _| {
+        Ok(Value::Bool(ds_disposed(i, &this)?))
+    });
     proto.borrow_mut().props.insert(
         "disposed",
-        Property { value: Value::Undefined, get: Some(Value::Obj(disposed_getter)), set: None, accessor: true, writable: false, enumerable: false, configurable: true },
+        Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(disposed_getter)),
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
     );
     if let Some(key) = well_known_key(it, "dispose") {
         let dispose = proto.borrow().props.get("dispose").map(|p| p.value.clone());
@@ -191,8 +201,14 @@ fn install_disposable_stack(it: &mut Interp) {
         set_internal(&obj, "__ds_disposed", Value::Bool(false));
         Ok(Value::Obj(obj))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "DisposableStack", Value::Obj(ctor));
 
     install_async_disposable_stack(it);
@@ -202,7 +218,8 @@ fn install_disposable_stack(it: &mut Interp) {
 /// promise and awaits each disposer (lumen runs them synchronously and settles the promise).
 fn install_async_disposable_stack(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
-    it.extra_protos.insert("AsyncDisposableStack", proto.clone());
+    it.extra_protos
+        .insert("AsyncDisposableStack", proto.clone());
 
     it.def_method(&proto, "use", 1, |i, this, a| {
         if ds_disposed(i, &this)? {
@@ -296,13 +313,27 @@ fn install_async_disposable_stack(it: &mut Interp) {
         set_internal(this.as_obj().unwrap(), "__ds_disposed", Value::Bool(true));
         Ok(Value::Obj(fresh))
     });
-    let disposed_getter = it.make_native("get disposed", 0, |i, this, _| Ok(Value::Bool(ds_disposed(i, &this)?)));
+    let disposed_getter = it.make_native("get disposed", 0, |i, this, _| {
+        Ok(Value::Bool(ds_disposed(i, &this)?))
+    });
     proto.borrow_mut().props.insert(
         "disposed",
-        Property { value: Value::Undefined, get: Some(Value::Obj(disposed_getter)), set: None, accessor: true, writable: false, enumerable: false, configurable: true },
+        Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(disposed_getter)),
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
     );
     if let Some(key) = well_known_key(it, "asyncDispose") {
-        let d = proto.borrow().props.get("disposeAsync").map(|p| p.value.clone());
+        let d = proto
+            .borrow()
+            .props
+            .get("disposeAsync")
+            .map(|p| p.value.clone());
         if let Some(d) = d {
             proto.borrow_mut().props.insert(key, Property::builtin(d));
         }
@@ -310,7 +341,10 @@ fn install_async_disposable_stack(it: &mut Interp) {
 
     let ctor = it.make_native("AsyncDisposableStack", 0, |i, _t, _a| {
         if !i.constructing {
-            return Err(i.make_error("TypeError", "Constructor AsyncDisposableStack requires 'new'"));
+            return Err(i.make_error(
+                "TypeError",
+                "Constructor AsyncDisposableStack requires 'new'",
+            ));
         }
         let obj = Object::new(i.extra_protos.get("AsyncDisposableStack").cloned());
         let list = i.make_array(Vec::new());
@@ -318,8 +352,14 @@ fn install_async_disposable_stack(it: &mut Interp) {
         set_internal(&obj, "__ds_disposed", Value::Bool(false));
         Ok(Value::Obj(obj))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "AsyncDisposableStack", Value::Obj(ctor));
 }
 
@@ -327,7 +367,9 @@ fn install_async_disposable_stack(it: &mut Interp) {
 /// WeakRef holds its target (deref always returns it) and FinalizationRegistry callbacks never fire.
 fn install_weak_refs(it: &mut Interp) {
     let wr_proto = Object::new(Some(it.object_proto.clone()));
-    it.def_method(&wr_proto, "deref", 0, |i, this, _| ab(i.get_member(&this, "__target")));
+    it.def_method(&wr_proto, "deref", 0, |i, this, _| {
+        ab(i.get_member(&this, "__target"))
+    });
     let wr_ctor = it.make_native("WeakRef", 1, |i, _t, a| {
         if !i.constructing {
             return Err(i.make_error("TypeError", "WeakRef requires 'new'"));
@@ -341,8 +383,14 @@ fn install_weak_refs(it: &mut Interp) {
         Ok(Value::Obj(obj))
     });
     it.extra_protos.insert("WeakRef", wr_proto.clone());
-    wr_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(wr_proto.clone()), false, false, false));
-    wr_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(wr_ctor.clone())));
+    wr_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(wr_proto.clone()), false, false, false),
+    );
+    wr_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::builtin(Value::Obj(wr_ctor.clone())),
+    );
     set_builtin(&it.global, "WeakRef", Value::Obj(wr_ctor));
 
     let fr_proto = Object::new(Some(it.object_proto.clone()));
@@ -352,7 +400,9 @@ fn install_weak_refs(it: &mut Interp) {
         }
         Ok(Value::Undefined)
     });
-    it.def_method(&fr_proto, "unregister", 1, |_i, _this, _a| Ok(Value::Bool(false)));
+    it.def_method(&fr_proto, "unregister", 1, |_i, _this, _a| {
+        Ok(Value::Bool(false))
+    });
     let fr_ctor = it.make_native("FinalizationRegistry", 1, |i, _t, a| {
         if !i.constructing {
             return Err(i.make_error("TypeError", "FinalizationRegistry requires 'new'"));
@@ -360,11 +410,20 @@ fn install_weak_refs(it: &mut Interp) {
         if !arg(a, 0).is_callable() {
             return Err(i.make_error("TypeError", "cleanup callback must be callable"));
         }
-        Ok(Value::Obj(Object::new(i.extra_protos.get("FinalizationRegistry").cloned())))
+        Ok(Value::Obj(Object::new(
+            i.extra_protos.get("FinalizationRegistry").cloned(),
+        )))
     });
-    it.extra_protos.insert("FinalizationRegistry", fr_proto.clone());
-    fr_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(fr_proto.clone()), false, false, false));
-    fr_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(fr_ctor.clone())));
+    it.extra_protos
+        .insert("FinalizationRegistry", fr_proto.clone());
+    fr_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(fr_proto.clone()), false, false, false),
+    );
+    fr_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::builtin(Value::Obj(fr_ctor.clone())),
+    );
     set_builtin(&it.global, "FinalizationRegistry", Value::Obj(fr_ctor));
 }
 
@@ -459,7 +518,11 @@ fn install_atomics(it: &mut Interp) {
         let (info, idx) = target(i, a)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         // Single-threaded: never blocks; report whether the value already differs.
-        Ok(Value::str(if read_i128(i, &info, idx) == expected { "timed-out" } else { "not-equal" }))
+        Ok(Value::str(if read_i128(i, &info, idx) == expected {
+            "timed-out"
+        } else {
+            "not-equal"
+        }))
     });
     it.def_method(&atomics, "notify", 3, |i, _t, a| {
         target(i, a)?;
@@ -514,7 +577,10 @@ fn install_host(it: &mut Interp) {
 
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i
+        .data_views
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
     let es = kind.elsize();
@@ -535,7 +601,10 @@ fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
 
 fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i
+        .data_views
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
@@ -568,7 +637,10 @@ fn to_index(i: &mut Interp, v: &Value) -> Result<usize, Value> {
 
 fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i
+        .data_views
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
     if byte_off.checked_add(8).is_none_or(|e| e > len) {
@@ -583,12 +655,19 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
         b.reverse();
     }
     let raw = u64::from_le_bytes(b.try_into().unwrap());
-    Ok(Value::BigInt(if signed { raw as i64 as i128 } else { raw as i128 }))
+    Ok(Value::BigInt(if signed {
+        raw as i64 as i128
+    } else {
+        raw as i128
+    }))
 }
 
 fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i.data_views.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    let (buf, off, len) = *i
+        .data_views
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
@@ -626,10 +705,18 @@ fn install_dataview(it: &mut Interp) {
     dvm!("getFloat16", "setFloat16", TaKind::F16);
     dvm!("getFloat32", "setFloat32", TaKind::F32);
     dvm!("getFloat64", "setFloat64", TaKind::F64);
-    it.def_method(&proto, "getBigInt64", 1, |i, this, a| dv_get_big(i, &this, a, true));
-    it.def_method(&proto, "getBigUint64", 1, |i, this, a| dv_get_big(i, &this, a, false));
-    it.def_method(&proto, "setBigInt64", 2, |i, this, a| dv_set_big(i, &this, a));
-    it.def_method(&proto, "setBigUint64", 2, |i, this, a| dv_set_big(i, &this, a));
+    it.def_method(&proto, "getBigInt64", 1, |i, this, a| {
+        dv_get_big(i, &this, a, true)
+    });
+    it.def_method(&proto, "getBigUint64", 1, |i, this, a| {
+        dv_get_big(i, &this, a, false)
+    });
+    it.def_method(&proto, "setBigInt64", 2, |i, this, a| {
+        dv_set_big(i, &this, a)
+    });
+    it.def_method(&proto, "setBigUint64", 2, |i, this, a| {
+        dv_set_big(i, &this, a)
+    });
 
     let ctor = it.make_native("DataView", 1, |i, _t, a| {
         if !i.constructing {
@@ -677,8 +764,14 @@ fn install_dataview(it: &mut Interp) {
         set_internal(&obj, "byteLength", Value::Num(len as f64));
         Ok(Value::Obj(obj))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "DataView", Value::Obj(ctor));
 }
 
@@ -699,7 +792,10 @@ fn re_flag_get(i: &Interp, this: &Value, flag: Option<char>) -> Result<Value, Va
             });
         }
     }
-    Err(i.make_error("TypeError", "RegExp.prototype getter called on a non-RegExp"))
+    Err(i.make_error(
+        "TypeError",
+        "RegExp.prototype getter called on a non-RegExp",
+    ))
 }
 fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     if let Some(ptr) = map_ptr(&this) {
@@ -710,7 +806,10 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
             return Ok(Value::str("(?:)"));
         }
     }
-    Err(i.make_error("TypeError", "RegExp.prototype.source called on a non-RegExp"))
+    Err(i.make_error(
+        "TypeError",
+        "RegExp.prototype.source called on a non-RegExp",
+    ))
 }
 
 fn install_regexp(it: &mut Interp) {
@@ -734,17 +833,36 @@ fn install_regexp(it: &mut Interp) {
     };
     add_getter(it, &proto, "source", re_source_get);
     add_getter(it, &proto, "flags", |i, t, _| re_flag_get(i, &t, None));
-    add_getter(it, &proto, "global", |i, t, _| re_flag_get(i, &t, Some('g')));
-    add_getter(it, &proto, "ignoreCase", |i, t, _| re_flag_get(i, &t, Some('i')));
-    add_getter(it, &proto, "multiline", |i, t, _| re_flag_get(i, &t, Some('m')));
-    add_getter(it, &proto, "dotAll", |i, t, _| re_flag_get(i, &t, Some('s')));
-    add_getter(it, &proto, "sticky", |i, t, _| re_flag_get(i, &t, Some('y')));
-    add_getter(it, &proto, "unicode", |i, t, _| re_flag_get(i, &t, Some('u')));
-    add_getter(it, &proto, "hasIndices", |i, t, _| re_flag_get(i, &t, Some('d')));
-    add_getter(it, &proto, "unicodeSets", |i, t, _| re_flag_get(i, &t, Some('v')));
+    add_getter(it, &proto, "global", |i, t, _| {
+        re_flag_get(i, &t, Some('g'))
+    });
+    add_getter(it, &proto, "ignoreCase", |i, t, _| {
+        re_flag_get(i, &t, Some('i'))
+    });
+    add_getter(it, &proto, "multiline", |i, t, _| {
+        re_flag_get(i, &t, Some('m'))
+    });
+    add_getter(it, &proto, "dotAll", |i, t, _| {
+        re_flag_get(i, &t, Some('s'))
+    });
+    add_getter(it, &proto, "sticky", |i, t, _| {
+        re_flag_get(i, &t, Some('y'))
+    });
+    add_getter(it, &proto, "unicode", |i, t, _| {
+        re_flag_get(i, &t, Some('u'))
+    });
+    add_getter(it, &proto, "hasIndices", |i, t, _| {
+        re_flag_get(i, &t, Some('d'))
+    });
+    add_getter(it, &proto, "unicodeSets", |i, t, _| {
+        re_flag_get(i, &t, Some('v'))
+    });
     it.def_method(&proto, "exec", 1, regexp_exec);
     it.def_method(&proto, "test", 1, |i, this, a| {
-        Ok(Value::Bool(!matches!(regexp_exec(i, this, a)?, Value::Null)))
+        Ok(Value::Bool(!matches!(
+            regexp_exec(i, this, a)?,
+            Value::Null
+        )))
     });
     it.def_method(&proto, "toString", 0, |i, this, _| {
         let src_v = ab(i.get_member(&this, "source"))?;
@@ -781,8 +899,14 @@ fn install_regexp(it: &mut Interp) {
         };
         ab(i.make_regexp(&source, &flags))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     install_species(it, &ctor);
 
     // The @@match/@@replace/@@search/@@split/@@matchAll methods on RegExp.prototype (what
@@ -797,7 +921,10 @@ fn install_regexp(it: &mut Interp) {
     for (sym, f) in methods {
         if let Some(key) = well_known_key(it, sym) {
             let m = it.make_native(&format!("[Symbol.{sym}]"), 1, f);
-            proto.borrow_mut().props.insert(key, Property::builtin(Value::Obj(m)));
+            proto
+                .borrow_mut()
+                .props
+                .insert(key, Property::builtin(Value::Obj(m)));
         }
     }
     it.def_method(&ctor, "escape", 1, |i, _t, a| {
@@ -944,7 +1071,9 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
                 if mstart >= chars.len() {
                     break;
                 }
-                out.push(Value::from_string(chars[last..mstart].iter().collect::<String>()));
+                out.push(Value::from_string(
+                    chars[last..mstart].iter().collect::<String>(),
+                ));
                 for g in 1..=re.ngroups {
                     out.push(match caps[g] {
                         Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
@@ -967,7 +1096,11 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
 /// `lastIndex` for global/sticky regexes.
 fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
-    let re = i.regexps.get(&ptr).cloned().ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
+    let re = i
+        .regexps
+        .get(&ptr)
+        .cloned()
+        .ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
     let input = ab(i.to_string(&arg(args, 0)))?;
     let chars: Vec<char> = input.chars().collect();
     let use_last = re.global || re.sticky;
@@ -995,7 +1128,9 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
             if use_last {
                 ab(i.set_member(&this, "lastIndex", Value::Num(end as f64)))?;
             }
-            let mut items = vec![Value::from_string(chars[start..end].iter().collect::<String>())];
+            let mut items = vec![Value::from_string(
+                chars[start..end].iter().collect::<String>(),
+            )];
             for g in 1..=re.ngroups {
                 items.push(match caps[g] {
                     Some((a, b)) => Value::from_string(chars[a..b].iter().collect::<String>()),
@@ -1038,7 +1173,10 @@ fn expand_dollar(
 ) -> String {
     let (ms, me) = caps[0].unwrap();
     let group = |g: usize| -> String {
-        caps.get(g).and_then(|c| *c).map(|(a, b)| chars[a..b].iter().collect()).unwrap_or_default()
+        caps.get(g)
+            .and_then(|c| *c)
+            .map(|(a, b)| chars[a..b].iter().collect())
+            .unwrap_or_default()
     };
     let t: Vec<char> = template.chars().collect();
     let mut out = String::new();
@@ -1189,14 +1327,21 @@ fn install_shared_array_buffer(it: &mut Interp) {
     it.extra_protos.insert("SharedArrayBuffer", proto.clone());
     it.def_method(&proto, "slice", 2, |i, this, a| {
         let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
-        let bytes = ptr.and_then(|p| i.array_buffers.get(&p)).cloned().unwrap_or_default();
+        let bytes = ptr
+            .and_then(|p| i.array_buffers.get(&p))
+            .cloned()
+            .unwrap_or_default();
         let len = bytes.len() as i64;
         let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
         let end = match arg(a, 1) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        let slice = if begin < end { bytes[begin as usize..end as usize].to_vec() } else { Vec::new() };
+        let slice = if begin < end {
+            bytes[begin as usize..end as usize].to_vec()
+        } else {
+            Vec::new()
+        };
         let (bv, bp) = make_array_buffer(i, slice.len());
         if let Some(buf) = i.array_buffers.get_mut(&bp) {
             buf.copy_from_slice(&slice);
@@ -1218,8 +1363,14 @@ fn install_shared_array_buffer(it: &mut Interp) {
         }
         Ok(bv)
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "SharedArrayBuffer", Value::Obj(ctor));
 }
 
@@ -1278,14 +1429,21 @@ fn install_array_buffer(it: &mut Interp) {
     it.extra_protos.insert("ArrayBuffer", proto.clone());
     it.def_method(&proto, "slice", 2, |i, this, a| {
         let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
-        let bytes = ptr.and_then(|p| i.array_buffers.get(&p)).cloned().unwrap_or_default();
+        let bytes = ptr
+            .and_then(|p| i.array_buffers.get(&p))
+            .cloned()
+            .unwrap_or_default();
         let len = bytes.len() as i64;
         let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
         let end = match arg(a, 1) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        let slice = if begin < end { bytes[begin as usize..end as usize].to_vec() } else { Vec::new() };
+        let slice = if begin < end {
+            bytes[begin as usize..end as usize].to_vec()
+        } else {
+            Vec::new()
+        };
         let (bv, bp) = make_array_buffer(i, slice.len());
         if let Some(buf) = i.array_buffers.get_mut(&bp) {
             buf.copy_from_slice(&slice);
@@ -1293,7 +1451,10 @@ fn install_array_buffer(it: &mut Interp) {
         Ok(bv)
     });
     it.def_method(&proto, "resize", 1, |i, this, a| {
-        let o = this.as_obj().cloned().ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        let o = this
+            .as_obj()
+            .cloned()
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
         let rv = ab(i.get_member(&this, "resizable"))?;
         if !i.to_boolean(&rv) {
             return Err(i.make_error("TypeError", "ArrayBuffer is not resizable"));
@@ -1312,8 +1473,15 @@ fn install_array_buffer(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     it.def_method(&proto, "transfer", 1, |i, this, a| {
-        let o = this.as_obj().cloned().ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
-        let bytes = i.array_buffers.get(&(Rc::as_ptr(&o) as usize)).cloned().unwrap_or_default();
+        let o = this
+            .as_obj()
+            .cloned()
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        let bytes = i
+            .array_buffers
+            .get(&(Rc::as_ptr(&o) as usize))
+            .cloned()
+            .unwrap_or_default();
         let new_len = match arg(a, 0) {
             Value::Undefined => bytes.len(),
             v => ab(i.to_number(&v))?.max(0.0) as usize,
@@ -1357,8 +1525,14 @@ fn install_array_buffer(it: &mut Interp) {
         }
         Ok(bv)
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "isView", 1, |i, _t, a| {
         let is_view = match arg(a, 0) {
             Value::Obj(o) => i.typed_arrays.contains_key(&(Rc::as_ptr(&o) as usize)),
@@ -1379,13 +1553,19 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
     };
     // ValidateTypedArray: a detached backing buffer makes the operation throw.
     if !i.array_buffers.contains_key(&info.buffer) {
-        return Err(i.make_error("TypeError", "Cannot perform operation on a detached ArrayBuffer"));
+        return Err(i.make_error(
+            "TypeError",
+            "Cannot perform operation on a detached ArrayBuffer",
+        ));
     }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;
     // Methods that produce a new collection return a TypedArray of the receiver's kind, not a plain
     // Array: build it via the receiver's constructor from the delegated result.
-    if matches!(method, "map" | "filter" | "slice" | "toReversed" | "toSorted" | "with") {
+    if matches!(
+        method,
+        "map" | "filter" | "slice" | "toReversed" | "toSorted" | "with"
+    ) {
         let ctor = ab(i.get_member(this, "constructor"))?;
         if ctor.is_callable() {
             return ab(i.construct(ctor, &[result]));
@@ -1394,7 +1574,12 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
     Ok(result)
 }
 fn it_array_method(i: &Interp, method: &str) -> Value {
-    i.array_proto.borrow().props.get(method).map(|p| p.value.clone()).unwrap_or(Value::Undefined)
+    i.array_proto
+        .borrow()
+        .props
+        .get(method)
+        .map(|p| p.value.clone())
+        .unwrap_or(Value::Undefined)
 }
 macro_rules! ta_methods {
     ($($name:literal => $fname:ident),* $(,)?) => {
@@ -1467,7 +1652,12 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             };
             let len = items.len();
             let (bv, bp) = make_array_buffer(i, len * es);
-            let info = TaInfo { buffer: bp, offset: 0, len, kind };
+            let info = TaInfo {
+                buffer: bp,
+                offset: 0,
+                len,
+                kind,
+            };
             for (idx, item) in items.iter().enumerate() {
                 ab(i.ta_store(&info, idx, item))?;
             }
@@ -1476,7 +1666,15 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     };
     let obj = Object::new(i.extra_protos.get(kind.name()).cloned());
     let p = Rc::as_ptr(&obj) as usize;
-    i.typed_arrays.insert(p, TaInfo { buffer: buf_ptr, offset, len, kind });
+    i.typed_arrays.insert(
+        p,
+        TaInfo {
+            buffer: buf_ptr,
+            offset,
+            len,
+            kind,
+        },
+    );
     // length / byteLength / byteOffset / buffer / BYTES_PER_ELEMENT are inherited accessors+constants,
     // not own properties: length/byteLength/byteOffset are computed in get_member, the buffer object
     // is kept in a side table, and BYTES_PER_ELEMENT lives on the prototype.
@@ -1487,7 +1685,10 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
 
 fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
-    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
+    let info = *i
+        .typed_arrays
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
     let offset = match arg(args, 1) {
         Value::Undefined => 0,
         v => ab(i.to_number(&v))? as usize,
@@ -1513,8 +1714,12 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
-    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
+    let ptr =
+        map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
+    let info = *i
+        .typed_arrays
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
     let es = info.kind.elsize();
     let len = info.len as i64;
     let begin = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
@@ -1527,7 +1732,15 @@ fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     let buf_val = ab(i.get_member(&this, "buffer"))?;
     let obj = Object::new(i.extra_protos.get(info.kind.name()).cloned());
     let p = Rc::as_ptr(&obj) as usize;
-    i.typed_arrays.insert(p, TaInfo { buffer: info.buffer, offset: new_offset, len: new_len, kind: info.kind });
+    i.typed_arrays.insert(
+        p,
+        TaInfo {
+            buffer: info.buffer,
+            offset: new_offset,
+            len: new_len,
+            kind: info.kind,
+        },
+    );
     set_internal(&obj, "length", Value::Num(new_len as f64));
     set_internal(&obj, "byteLength", Value::Num((new_len * es) as f64));
     set_internal(&obj, "byteOffset", Value::Num(new_offset as f64));
@@ -1579,7 +1792,10 @@ fn install_typed_arrays(it: &mut Interp) {
     // length / byteLength / byteOffset / buffer are accessor getters on %TypedArray.prototype% that
     // brand-check the receiver (calling one on a non-TypedArray is a TypeError).
     for (name, getter) in [
-        ("length", ta_length_get as fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>),
+        (
+            "length",
+            ta_length_get as fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>,
+        ),
         ("byteLength", ta_bytelength_get),
         ("byteOffset", ta_byteoffset_get),
         ("buffer", ta_buffer_get),
@@ -1604,7 +1820,10 @@ fn install_typed_arrays(it: &mut Interp) {
     let ta_ctor = it.make_native("TypedArray", 0, |i, t, _a| {
         // Abstract: a direct `new %TypedArray%()` throws; subclass `super()` (this is set) is allowed.
         if matches!(t, Value::Undefined) {
-            return Err(i.make_error("TypeError", "Abstract class TypedArray not directly constructable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Abstract class TypedArray not directly constructable",
+            ));
         }
         Ok(t)
     });
@@ -1613,7 +1832,10 @@ fn install_typed_arrays(it: &mut Interp) {
         "prototype",
         Property::data(Value::Obj(ta_proto.clone()), false, false, false),
     );
-    ta_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ta_ctor.clone())));
+    ta_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::builtin(Value::Obj(ta_ctor.clone())),
+    );
     it.def_method(&ta_ctor, "of", 0, ta_of);
     it.def_method(&ta_ctor, "from", 1, ta_from);
     install_species(it, &ta_ctor);
@@ -1635,11 +1857,21 @@ fn install_typed_arrays(it: &mut Interp) {
     for (kind, ctor_fn) in kinds {
         let proto = Object::new(Some(ta_proto.clone()));
         it.extra_protos.insert(kind.name(), proto.clone());
-        set_builtin(&proto, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
+        set_builtin(
+            &proto,
+            "BYTES_PER_ELEMENT",
+            Value::Num(kind.elsize() as f64),
+        );
         let ctor = it.make_native(kind.name(), 3, ctor_fn);
         ctor.borrow_mut().proto = Some(ta_ctor.clone()); // [[Prototype]] is %TypedArray%
-        ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-        proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+        ctor.borrow_mut().props.insert(
+            "prototype",
+            Property::data(Value::Obj(proto.clone()), false, false, false),
+        );
+        proto
+            .borrow_mut()
+            .props
+            .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
         // Static from/of construct through `this` (the constructor), so they work for every kind.
         it.def_method(&ctor, "of", 0, ta_of);
@@ -1733,11 +1965,17 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// Read a Uint8Array receiver's bytes; errors if `this` isn't a (non-detached) Uint8Array.
 fn u8_bytes(i: &mut Interp, this: &Value) -> Result<Vec<u8>, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
-    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    let info = *i
+        .typed_arrays
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
     if !matches!(info.kind, TaKind::U8) {
         return Err(i.make_error("TypeError", "method requires a Uint8Array"));
     }
-    let buf = i.array_buffers.get(&info.buffer).ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
+    let buf = i
+        .array_buffers
+        .get(&info.buffer)
+        .ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
     Ok(buf[info.offset..info.offset + info.len].to_vec())
 }
 fn make_u8array(i: &mut Interp, bytes: Vec<u8>) -> Result<Value, Value> {
@@ -1770,7 +2008,13 @@ fn b64_option_url(i: &mut Interp, opts: &Value) -> Result<bool, Value> {
 
 fn install_uint8_base64(it: &mut Interp) {
     let proto = it.extra_protos.get("Uint8Array").cloned().unwrap();
-    let ctor = match it.global.borrow().props.get("Uint8Array").map(|p| p.value.clone()) {
+    let ctor = match it
+        .global
+        .borrow()
+        .props
+        .get("Uint8Array")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Obj(c)) => c,
         _ => return,
     };
@@ -1798,7 +2042,8 @@ fn install_uint8_base64(it: &mut Interp) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "fromHex requires a string")),
         };
-        let bytes = hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
+        let bytes =
+            hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
         make_u8array(i, bytes)
     });
     it.def_method(&ctor, "fromBase64", 1, |i, _t, a| {
@@ -1807,7 +2052,8 @@ fn install_uint8_base64(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "fromBase64 requires a string")),
         };
         let url = b64_option_url(i, &arg(a, 1))?;
-        let bytes = b64_decode(&s, url).ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
+        let bytes = b64_decode(&s, url)
+            .ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
         make_u8array(i, bytes)
     });
     it.def_method(&proto, "setFromHex", 1, |i, this, a| {
@@ -1815,7 +2061,8 @@ fn install_uint8_base64(it: &mut Interp) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "setFromHex requires a string")),
         };
-        let bytes = hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
+        let bytes =
+            hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
         u8_set_bytes(i, &this, &bytes, s.len())
     });
     it.def_method(&proto, "setFromBase64", 1, |i, this, a| {
@@ -1824,16 +2071,25 @@ fn install_uint8_base64(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "setFromBase64 requires a string")),
         };
         let url = b64_option_url(i, &arg(a, 1))?;
-        let bytes = b64_decode(&s, url).ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
+        let bytes = b64_decode(&s, url)
+            .ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
         u8_set_bytes(i, &this, &bytes, s.len())
     });
 }
 
 /// Write decoded `bytes` into the Uint8Array receiver (truncating to its length); returns
 /// `{read, written}`.
-fn u8_set_bytes(i: &mut Interp, this: &Value, bytes: &[u8], src_len: usize) -> Result<Value, Value> {
+fn u8_set_bytes(
+    i: &mut Interp,
+    this: &Value,
+    bytes: &[u8],
+    src_len: usize,
+) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
-    let info = *i.typed_arrays.get(&ptr).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
+    let info = *i
+        .typed_arrays
+        .get(&ptr)
+        .ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
     if !matches!(info.kind, TaKind::U8) {
         return Err(i.make_error("TypeError", "requires a Uint8Array"));
     }
@@ -1859,7 +2115,10 @@ fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
 }
 fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     if !this.is_callable() {
-        return Err(i.make_error("TypeError", "TypedArray.from requires a constructor receiver"));
+        return Err(i.make_error(
+            "TypeError",
+            "TypedArray.from requires a constructor receiver",
+        ));
     }
     let mapfn = arg(args, 1);
     if !matches!(mapfn, Value::Undefined) && !mapfn.is_callable() {
@@ -1916,22 +2175,28 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// (year, month0, day, hour, minute, second, millisecond, weekday[0=Sun]).
 const WDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS: [&str; 12] =
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 fn date_str_part(t: f64) -> Option<String> {
     if !t.is_finite() {
         return None;
     }
     let (y, mo, d, _, _, _, _, wd) = ms_to_parts(t);
-    Some(format!("{} {} {:02} {:04}", WDAYS[wd as usize], MONTHS[mo as usize], d, y))
+    Some(format!(
+        "{} {} {:02} {:04}",
+        WDAYS[wd as usize], MONTHS[mo as usize], d, y
+    ))
 }
 fn time_str_part(t: f64) -> Option<String> {
     if !t.is_finite() {
         return None;
     }
     let (_, _, _, h, mi, s, _, _) = ms_to_parts(t);
-    Some(format!("{h:02}:{mi:02}:{s:02} GMT+0000 (Coordinated Universal Time)"))
+    Some(format!(
+        "{h:02}:{mi:02}:{s:02} GMT+0000 (Coordinated Universal Time)"
+    ))
 }
 fn utc_string(t: f64) -> Option<String> {
     if !t.is_finite() {
@@ -1970,7 +2235,9 @@ fn parts_to_ms(y: i64, mo0: i64, d: i64, h: i64, mi: i64, s: i64, ml: i64) -> f6
 }
 
 fn set_internal(obj: &Gc, key: &str, v: Value) {
-    obj.borrow_mut().props.insert(key, Property::data(v, true, false, false));
+    obj.borrow_mut()
+        .props
+        .insert(key, Property::data(v, true, false, false));
 }
 
 fn date_ms(i: &mut Interp, this: &Value) -> Result<f64, Value> {
@@ -2006,8 +2273,11 @@ fn date_get(i: &mut Interp, this: &Value, sel: u8) -> Result<Value, Value> {
 
 fn date_set(i: &mut Interp, this: &Value, sel: u8, nv: f64) -> Result<Value, Value> {
     let t = date_ms(i, this)?;
-    let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) =
-        if t.is_nan() { (1970, 0, 1, 0, 0, 0, 0, 0) } else { ms_to_parts(t) };
+    let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = if t.is_nan() {
+        (1970, 0, 1, 0, 0, 0, 0, 0)
+    } else {
+        ms_to_parts(t)
+    };
     let n = nv as i64;
     match sel {
         0 => y = n,
@@ -2018,7 +2288,11 @@ fn date_set(i: &mut Interp, this: &Value, sel: u8, nv: f64) -> Result<Value, Val
         6 => s = n,
         _ => ml = n,
     }
-    let ms = if nv.is_nan() { f64::NAN } else { parts_to_ms(y, mo, d, h, mi, s, ml) };
+    let ms = if nv.is_nan() {
+        f64::NAN
+    } else {
+        parts_to_ms(y, mo, d, h, mi, s, ml)
+    };
     if let Value::Obj(o) = this {
         set_internal(o, "__date_ms", Value::Num(ms));
     }
@@ -2029,9 +2303,11 @@ fn date_set(i: &mut Interp, this: &Value, sel: u8, nv: f64) -> Result<Value, Val
 /// Best-effort parse of the RFC-2822-ish / `toString`/`toUTCString`/`toDateString` formats (e.g.
 /// "Thu, 01 Jan 1970 00:00:00 GMT", "Wed Jul 28 1993 14:39:07 GMT-0600 (…)").
 fn parse_rfc(s: &str) -> f64 {
-    const MONTHS: [&str; 12] =
-        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let (mut year, mut month, mut day): (Option<i64>, Option<i64>, Option<i64>) = (None, None, None);
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let (mut year, mut month, mut day): (Option<i64>, Option<i64>, Option<i64>) =
+        (None, None, None);
     let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
     let mut offset: i64 = 0; // minutes east of UTC
     let mut got_time = false;
@@ -2102,7 +2378,12 @@ fn parse_iso(s: &str) -> f64 {
         mi = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
         s = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
         if let Some(f) = frac {
-            let f3: String = f.chars().take(3).chain(std::iter::repeat('0')).take(3).collect();
+            let f3: String = f
+                .chars()
+                .take(3)
+                .chain(std::iter::repeat('0'))
+                .take(3)
+                .collect();
             ml = f3.parse().unwrap_or(0);
         }
     }
@@ -2122,11 +2403,31 @@ fn date_ctor(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> 
                 y += 1900;
             }
             let mo = ab(i.to_number(&arg(args, 1)))? as i64;
-            let d = if args.len() > 2 { ab(i.to_number(&args[2]))? as i64 } else { 1 };
-            let h = if args.len() > 3 { ab(i.to_number(&args[3]))? as i64 } else { 0 };
-            let mi = if args.len() > 4 { ab(i.to_number(&args[4]))? as i64 } else { 0 };
-            let s = if args.len() > 5 { ab(i.to_number(&args[5]))? as i64 } else { 0 };
-            let ml = if args.len() > 6 { ab(i.to_number(&args[6]))? as i64 } else { 0 };
+            let d = if args.len() > 2 {
+                ab(i.to_number(&args[2]))? as i64
+            } else {
+                1
+            };
+            let h = if args.len() > 3 {
+                ab(i.to_number(&args[3]))? as i64
+            } else {
+                0
+            };
+            let mi = if args.len() > 4 {
+                ab(i.to_number(&args[4]))? as i64
+            } else {
+                0
+            };
+            let s = if args.len() > 5 {
+                ab(i.to_number(&args[5]))? as i64
+            } else {
+                0
+            };
+            let ml = if args.len() > 6 {
+                ab(i.to_number(&args[6]))? as i64
+            } else {
+                0
+            };
             parts_to_ms(y, mo, d, h, mi, s, ml)
         }
     };
@@ -2140,15 +2441,22 @@ fn iso_string(t: f64) -> Option<String> {
         return None;
     }
     let (y, mo, d, h, mi, s, ml, _) = ms_to_parts(t);
-    Some(format!("{y:04}-{:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ml:03}Z", mo + 1))
+    Some(format!(
+        "{y:04}-{:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ml:03}Z",
+        mo + 1
+    ))
 }
 
 fn install_date(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Date", proto.clone());
 
-    it.def_method(&proto, "getTime", 0, |i, this, _| Ok(Value::Num(date_ms(i, &this)?)));
-    it.def_method(&proto, "valueOf", 0, |i, this, _| Ok(Value::Num(date_ms(i, &this)?)));
+    it.def_method(&proto, "getTime", 0, |i, this, _| {
+        Ok(Value::Num(date_ms(i, &this)?))
+    });
+    it.def_method(&proto, "valueOf", 0, |i, this, _| {
+        Ok(Value::Num(date_ms(i, &this)?))
+    });
     it.def_method(&proto, "setTime", 1, |i, this, a| {
         let v = ab(i.to_number(&arg(a, 0)))?.trunc();
         if let Value::Obj(o) = &this {
@@ -2224,7 +2532,11 @@ fn install_date(it: &mut Interp) {
             f64::NAN
         } else {
             let yi = y.trunc() as i64;
-            if (0..=99).contains(&yi) { 1900.0 + yi as f64 } else { y }
+            if (0..=99).contains(&yi) {
+                1900.0 + yi as f64
+            } else {
+                y
+            }
         };
         date_set(i, &this, 0, full)
     });
@@ -2294,41 +2606,63 @@ fn install_date(it: &mut Interp) {
     });
     it.def_method(&proto, "toString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(iso_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            iso_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toDateString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toTimeString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toUTCString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(utc_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            utc_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toGMTString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(utc_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            utc_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     // No Intl: toLocale* return a stable implementation-defined string.
     it.def_method(&proto, "toLocaleString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(iso_string(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            iso_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toLocaleDateString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
     it.def_method(&proto, "toLocaleTimeString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string())))
+        Ok(Value::from_string(
+            time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
+        ))
     });
 
     let ctor = it.make_native("Date", 7, date_ctor);
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "now", 0, |_i, _t, _a| Ok(Value::Num(now_ms())));
     it.def_method(&ctor, "parse", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
@@ -2340,18 +2674,45 @@ fn install_date(it: &mut Interp) {
         if (0..=99).contains(&y) {
             y += 1900;
         }
-        let mo = if a.len() > 1 { ab(i.to_number(&a[1]))? as i64 } else { 0 };
-        let d = if a.len() > 2 { ab(i.to_number(&a[2]))? as i64 } else { 1 };
-        let h = if a.len() > 3 { ab(i.to_number(&a[3]))? as i64 } else { 0 };
-        let mi = if a.len() > 4 { ab(i.to_number(&a[4]))? as i64 } else { 0 };
-        let s = if a.len() > 5 { ab(i.to_number(&a[5]))? as i64 } else { 0 };
-        let ml = if a.len() > 6 { ab(i.to_number(&a[6]))? as i64 } else { 0 };
+        let mo = if a.len() > 1 {
+            ab(i.to_number(&a[1]))? as i64
+        } else {
+            0
+        };
+        let d = if a.len() > 2 {
+            ab(i.to_number(&a[2]))? as i64
+        } else {
+            1
+        };
+        let h = if a.len() > 3 {
+            ab(i.to_number(&a[3]))? as i64
+        } else {
+            0
+        };
+        let mi = if a.len() > 4 {
+            ab(i.to_number(&a[4]))? as i64
+        } else {
+            0
+        };
+        let s = if a.len() > 5 {
+            ab(i.to_number(&a[5]))? as i64
+        } else {
+            0
+        };
+        let ml = if a.len() > 6 {
+            ab(i.to_number(&a[6]))? as i64
+        } else {
+            0
+        };
         Ok(Value::Num(parts_to_ms(y, mo, d, h, mi, s, ml)))
     });
     // Date.prototype[@@toPrimitive]: "number" hint uses valueOf, "string"/"default" use toString.
     let prim = it.make_native("[Symbol.toPrimitive]", 1, |i, this, a| {
         if !matches!(this, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "Date.prototype[Symbol.toPrimitive] on non-object"));
+            return Err(i.make_error(
+                "TypeError",
+                "Date.prototype[Symbol.toPrimitive] on non-object",
+            ));
         }
         let hint = ab(i.to_string(&arg(a, 0)))?;
         let method = match &*hint {
@@ -2363,7 +2724,10 @@ fn install_date(it: &mut Interp) {
         ab(i.call(f, this.clone(), &[]))
     });
     if let Some(key) = well_known_key(it, "toPrimitive") {
-        proto.borrow_mut().props.insert(key, Property::builtin(Value::Obj(prim)));
+        proto
+            .borrow_mut()
+            .props
+            .insert(key, Property::builtin(Value::Obj(prim)));
     }
     set_builtin(&it.global, "Date", Value::Obj(ctor));
 }
@@ -2398,7 +2762,12 @@ fn install_species(it: &Interp, ctor: &Gc) {
 
 /// The internal property key for a well-known `Symbol.<name>`.
 fn well_known_key(it: &Interp, name: &str) -> Option<String> {
-    let sym = it.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+    let sym = it
+        .global
+        .borrow()
+        .props
+        .get("Symbol")
+        .map(|p| p.value.clone())?;
     if let Value::Obj(o) = sym {
         if let Some(p) = o.borrow().props.get(name) {
             if let Value::Sym(d) = &p.value {
@@ -2418,9 +2787,10 @@ fn map_ptr(this: &Value) -> Option<usize> {
 fn make_sparse_array(i: &mut Interp, len: usize) -> Value {
     let arr = i.make_array(Vec::new());
     if let Value::Obj(o) = &arr {
-        o.borrow_mut()
-            .props
-            .insert("length", crate::value::Property::data(Value::Num(len as f64), true, false, false));
+        o.borrow_mut().props.insert(
+            "length",
+            crate::value::Property::data(Value::Num(len as f64), true, false, false),
+        );
     }
     arr
 }
@@ -2440,7 +2810,12 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
     if matches!(species, Value::Undefined | Value::Null) {
         return Ok(make_sparse_array(i, len));
     }
-    let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value.clone());
+    let array_ctor = i
+        .global
+        .borrow()
+        .props
+        .get("Array")
+        .map(|p| p.value.clone());
     if let (Value::Obj(s), Some(Value::Obj(ac))) = (&species, &array_ctor) {
         if Rc::ptr_eq(s, ac) {
             return Ok(make_sparse_array(i, len));
@@ -2464,7 +2839,12 @@ fn ordered_enum_keys(o: &Gc) -> Vec<Rc<str>> {
 
 /// The property key for `@@toStringTag` (`Symbol.toStringTag`), if Symbol is installed.
 pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
-    let sym = i.global.borrow().props.get("Symbol").map(|p| p.value.clone())?;
+    let sym = i
+        .global
+        .borrow()
+        .props
+        .get("Symbol")
+        .map(|p| p.value.clone())?;
     if let Value::Obj(o) = sym {
         if let Some(p) = o.borrow().props.get("toStringTag") {
             if let Value::Sym(d) = &p.value {
@@ -2478,9 +2858,10 @@ pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
 /// Install a non-enumerable, configurable `@@toStringTag` data property.
 pub(crate) fn set_to_string_tag(i: &Interp, obj: &Gc, tag: &str) {
     if let Some(key) = to_string_tag_key(i) {
-        obj.borrow_mut()
-            .props
-            .insert(key, Property::data(Value::from_string(tag.to_string()), false, false, true));
+        obj.borrow_mut().props.insert(
+            key,
+            Property::data(Value::from_string(tag.to_string()), false, false, true),
+        );
     }
 }
 
@@ -2563,32 +2944,57 @@ fn install_map_methods(it: &mut Interp) {
     // getOrInsert(key, value): return the existing value, or insert and return `value`.
     it.def_method(&mp, "getOrInsert", 2, |i, this, a| {
         let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
-        let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "Map.prototype.getOrInsert called on incompatible receiver"))?;
+        let ptr = ptr.ok_or_else(|| {
+            i.make_error(
+                "TypeError",
+                "Map.prototype.getOrInsert called on incompatible receiver",
+            )
+        })?;
         let key = arg(a, 0);
-        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+        if let Some((_, v)) = i.map_data[&ptr]
+            .iter()
+            .find(|(k, _)| same_value_zero(k, &key))
+        {
             return Ok(v.clone());
         }
         let value = arg(a, 1);
-        i.map_data.entry(ptr).or_default().push((key, value.clone()));
+        i.map_data
+            .entry(ptr)
+            .or_default()
+            .push((key, value.clone()));
         Ok(value)
     });
     it.def_method(&mp, "getOrInsertComputed", 2, |i, this, a| {
         let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
-        let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "Map.prototype.getOrInsertComputed called on incompatible receiver"))?;
+        let ptr = ptr.ok_or_else(|| {
+            i.make_error(
+                "TypeError",
+                "Map.prototype.getOrInsertComputed called on incompatible receiver",
+            )
+        })?;
         let key = arg(a, 0);
         let cb = arg(a, 1);
         if !cb.is_callable() {
             return Err(i.make_error("TypeError", "callback is not callable"));
         }
-        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+        if let Some((_, v)) = i.map_data[&ptr]
+            .iter()
+            .find(|(k, _)| same_value_zero(k, &key))
+        {
             return Ok(v.clone());
         }
         let value = ab(i.call(cb, Value::Undefined, std::slice::from_ref(&key)))?;
         // Re-check (the callback may have mutated the map), then insert.
-        if let Some((_, v)) = i.map_data[&ptr].iter().find(|(k, _)| same_value_zero(k, &key)) {
+        if let Some((_, v)) = i.map_data[&ptr]
+            .iter()
+            .find(|(k, _)| same_value_zero(k, &key))
+        {
             return Ok(v.clone());
         }
-        i.map_data.entry(ptr).or_default().push((key, value.clone()));
+        i.map_data
+            .entry(ptr)
+            .or_default()
+            .push((key, value.clone()));
         Ok(value)
     });
 }
@@ -2738,7 +3144,12 @@ fn weakset_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> 
     collection_ctor(i, a, "WeakSet", true)
 }
 
-fn collection_ctor(i: &mut Interp, args: &[Value], name: &str, is_set: bool) -> Result<Value, Value> {
+fn collection_ctor(
+    i: &mut Interp,
+    args: &[Value],
+    name: &str,
+    is_set: bool,
+) -> Result<Value, Value> {
     if !i.constructing {
         return Err(i.make_error("TypeError", "Constructor requires 'new'"));
     }
@@ -2793,14 +3204,23 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
             Ok(this)
         }
     };
-    it.def_method(&proto, if is_set { "add" } else { "set" }, if is_set { 1 } else { 2 }, adder);
+    it.def_method(
+        &proto,
+        if is_set { "add" } else { "set" },
+        if is_set { 1 } else { 2 },
+        adder,
+    );
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
             let ptr = coll_ptr(i, &this)?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
-                .and_then(|e| e.iter().find(|(k, _)| same_value_zero(k, &key)).map(|(_, v)| v.clone()))
+                .and_then(|e| {
+                    e.iter()
+                        .find(|(k, _)| same_value_zero(k, &key))
+                        .map(|(_, v)| v.clone())
+                })
                 .unwrap_or(Value::Undefined))
         });
     }
@@ -2808,7 +3228,10 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         let ptr = coll_ptr(i, &this)?;
         let key = arg(a, 0);
         Ok(Value::Bool(
-            i.map_data.get(&ptr).map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key))).unwrap_or(false),
+            i.map_data
+                .get(&ptr)
+                .map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key)))
+                .unwrap_or(false),
         ))
     });
     it.def_method(&proto, "delete", 1, |i, this, a| {
@@ -2839,14 +3262,20 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         }
         Ok(Value::Undefined)
     });
-    it.def_method(&proto, "values", 0, |i, this, _| collection_iter(i, &this, 0));
+    it.def_method(&proto, "values", 0, |i, this, _| {
+        collection_iter(i, &this, 0)
+    });
     it.def_method(&proto, "keys", 0, |i, this, _| collection_iter(i, &this, 1));
-    it.def_method(&proto, "entries", 0, |i, this, _| collection_iter(i, &this, 2));
+    it.def_method(&proto, "entries", 0, |i, this, _| {
+        collection_iter(i, &this, 2)
+    });
 
     // `size` accessor.
     let size_getter = it.make_native("get size", 0, |i, this, _| {
         let ptr = coll_ptr(i, &this)?;
-        Ok(Value::Num(i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64))
+        Ok(Value::Num(
+            i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
+        ))
     });
     proto.borrow_mut().props.insert(
         "size",
@@ -2863,13 +3292,27 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     // @@iterator: Set -> values, Map -> entries.
     if let Some(sym) = it.iterator_sym.clone() {
         let default = if is_set { "values" } else { "entries" };
-        let f = proto.borrow().props.get(default).map(|p| p.value.clone()).unwrap();
-        proto.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(f));
+        let f = proto
+            .borrow()
+            .props
+            .get(default)
+            .map(|p| p.value.clone())
+            .unwrap();
+        proto
+            .borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(f));
     }
 
     let ctor = it.make_native(name, 0, ctor_fn);
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     if !is_set {
         // Map.groupBy(items, cb) -> a Map of key -> [items...].
         it.def_method(&ctor, "groupBy", 2, |i, _t, a| {
@@ -2880,7 +3323,11 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
             let elems = ab(i.iterate(&arg(a, 0)))?;
             let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
             for (idx, el) in elems.into_iter().enumerate() {
-                let key = ab(i.call(cb.clone(), Value::Undefined, &[el.clone(), Value::Num(idx as f64)]))?;
+                let key = ab(i.call(
+                    cb.clone(),
+                    Value::Undefined,
+                    &[el.clone(), Value::Num(idx as f64)],
+                ))?;
                 match groups.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
                     Some(g) => g.1.push(el),
                     None => groups.push((key, vec![el])),
@@ -2888,8 +3335,10 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
             }
             let m = Object::new(i.extra_protos.get("Map").cloned());
             let ptr = Rc::as_ptr(&m) as usize;
-            let entries: Vec<(Value, Value)> =
-                groups.into_iter().map(|(k, v)| (k, i.make_array(v))).collect();
+            let entries: Vec<(Value, Value)> = groups
+                .into_iter()
+                .map(|(k, v)| (k, i.make_array(v)))
+                .collect();
             i.map_data.insert(ptr, entries);
             Ok(Value::Obj(m))
         });
@@ -2905,7 +3354,8 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
     it.extra_protos.insert(name, proto.clone());
     let adder: NativeFn = if is_set {
         |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-WeakSet"))?;
+            let ptr =
+                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-WeakSet"))?;
             let key = arg(a, 0);
             if !matches!(key, Value::Obj(_)) {
                 return Err(i.make_error("TypeError", "Invalid value used in weak set"));
@@ -2918,7 +3368,8 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         }
     } else {
         |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-WeakMap"))?;
+            let ptr =
+                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-WeakMap"))?;
             let (key, val) = (arg(a, 0), arg(a, 1));
             if !matches!(key, Value::Obj(_)) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
@@ -2932,14 +3383,24 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
             Ok(this)
         }
     };
-    it.def_method(&proto, if is_set { "add" } else { "set" }, if is_set { 1 } else { 2 }, adder);
+    it.def_method(
+        &proto,
+        if is_set { "add" } else { "set" },
+        if is_set { 1 } else { 2 },
+        adder,
+    );
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-WeakMap"))?;
+            let ptr =
+                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-WeakMap"))?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
-                .and_then(|e| e.iter().find(|(k, _)| same_value_zero(k, &key)).map(|(_, v)| v.clone()))
+                .and_then(|e| {
+                    e.iter()
+                        .find(|(k, _)| same_value_zero(k, &key))
+                        .map(|(_, v)| v.clone())
+                })
                 .unwrap_or(Value::Undefined))
         });
     }
@@ -2947,7 +3408,10 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "has on non-weak"))?;
         let key = arg(a, 0);
         Ok(Value::Bool(
-            i.map_data.get(&ptr).map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key))).unwrap_or(false),
+            i.map_data
+                .get(&ptr)
+                .map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key)))
+                .unwrap_or(false),
         ))
     });
     it.def_method(&proto, "delete", 1, |i, this, a| {
@@ -2962,8 +3426,14 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         Ok(Value::Bool(removed))
     });
     let ctor = it.make_native(name, 0, ctor_fn);
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, name, Value::Obj(ctor));
 }
 
@@ -2994,14 +3464,21 @@ fn install_reflect(it: &mut Interp) {
     it.def_method(&r, "getOwnPropertyDescriptor", 2, |i, _t, a| {
         let o = match arg(a, 0) {
             Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Reflect.getOwnPropertyDescriptor on non-object")),
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Reflect.getOwnPropertyDescriptor on non-object",
+                ))
+            }
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
         let prop = o.borrow().props.get(&key).cloned();
-        Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined))
+        Ok(prop
+            .map(|p| descriptor_from_prop(i, p))
+            .unwrap_or(Value::Undefined))
     });
     it.def_method(&r, "deleteProperty", 2, |i, _t, a| {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
@@ -3009,7 +3486,12 @@ fn install_reflect(it: &mut Interp) {
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                 return Ok(Value::Bool(ab(i.proxy_delete(target, handler, &key))?));
             }
-            let configurable = o.borrow().props.get(&key).map(|p| p.configurable).unwrap_or(true);
+            let configurable = o
+                .borrow()
+                .props
+                .get(&key)
+                .map(|p| p.configurable)
+                .unwrap_or(true);
             if configurable {
                 o.borrow_mut().props.remove(&key);
                 return Ok(Value::Bool(true));
@@ -3052,7 +3534,11 @@ fn install_reflect(it: &mut Interp) {
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                 return proxy_get_prototype(i, &target, &handler);
             }
-            Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+            Ok(o.borrow()
+                .proto
+                .clone()
+                .map(Value::Obj)
+                .unwrap_or(Value::Null))
         }
         _ => Err(i.make_error("TypeError", "Reflect.getPrototypeOf called on non-object")),
     });
@@ -3072,7 +3558,13 @@ fn install_reflect(it: &mut Interp) {
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-            return Ok(Value::Bool(ab(proxy_define_property(i, &target, &handler, &key, &arg(a, 2)))?));
+            return Ok(Value::Bool(ab(proxy_define_property(
+                i,
+                &target,
+                &handler,
+                &key,
+                &arg(a, 2),
+            ))?));
         }
         let ok = ab(define_own_property(i, &o, &key, &arg(a, 2)))?;
         Ok(Value::Bool(ok))
@@ -3091,7 +3583,10 @@ fn install_reflect(it: &mut Interp) {
         }
         // The optional newTarget (3rd arg) must also be a constructor.
         if a.len() >= 3 && !is_constructor_value(&arg(a, 2)) {
-            return Err(i.make_error("TypeError", "Reflect.construct newTarget is not a constructor"));
+            return Err(i.make_error(
+                "TypeError",
+                "Reflect.construct newTarget is not a constructor",
+            ));
         }
         let args = match arg(a, 1) {
             Value::Undefined | Value::Null => Vec::new(),
@@ -3100,7 +3595,9 @@ fn install_reflect(it: &mut Interp) {
         ab(i.construct(target, &args))
     });
     it.def_method(&r, "isExtensible", 1, |_i, _t, a| {
-        Ok(Value::Bool(matches!(arg(a, 0), Value::Obj(o) if o.borrow().extensible)))
+        Ok(Value::Bool(
+            matches!(arg(a, 0), Value::Obj(o) if o.borrow().extensible),
+        ))
     });
     it.def_method(&r, "preventExtensions", 1, |_i, _t, a| {
         if let Value::Obj(o) = arg(a, 0) {
@@ -3123,7 +3620,11 @@ fn proxy_uncallable(i: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Va
 fn make_bound(i: &Interp, target: NativeFn, bound_args: Vec<Value>) -> Value {
     let t = i.make_native("", 1, target);
     let obj = Object::new(Some(i.function_proto.clone()));
-    obj.borrow_mut().call = Callable::Bound { target: t, this: Value::Undefined, args: bound_args };
+    obj.borrow_mut().call = Callable::Bound {
+        target: t,
+        this: Value::Undefined,
+        args: bound_args,
+    };
     Value::Obj(obj)
 }
 
@@ -3172,7 +3673,9 @@ fn promise_keyed_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result
     let value = arg(args, 2);
     let results = ab(i.get_member(&result, "__results"))?;
     if let Value::Obj(o) = &results {
-        o.borrow_mut().props.insert(&*key, Property::data(value, true, true, true));
+        o.borrow_mut()
+            .props
+            .insert(&*key, Property::data(value, true, true, true));
     }
     let rem_v = ab(i.get_member(&result, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
@@ -3187,11 +3690,17 @@ fn promise_keyed_settle(i: &mut Interp, args: &[Value], fulfilled: bool) -> Resu
     let key = ab(i.to_string(&arg(args, 1)))?;
     let value = arg(args, 2);
     let status = i.new_object();
-    set_data(&status, "status", Value::str(if fulfilled { "fulfilled" } else { "rejected" }));
+    set_data(
+        &status,
+        "status",
+        Value::str(if fulfilled { "fulfilled" } else { "rejected" }),
+    );
     set_data(&status, if fulfilled { "value" } else { "reason" }, value);
     let results = ab(i.get_member(&result, "__results"))?;
     if let Value::Obj(o) = &results {
-        o.borrow_mut().props.insert(&*key, Property::data(Value::Obj(status), true, true, true));
+        o.borrow_mut()
+            .props
+            .insert(&*key, Property::data(Value::Obj(status), true, true, true));
     }
     let rem_v = ab(i.get_member(&result, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
@@ -3213,7 +3722,11 @@ fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Va
     let idx = ab(i.to_number(&arg(args, 1)))? as usize;
     let value = arg(args, 2);
     let status = i.new_object();
-    set_data(&status, "status", Value::str(if fulfilled { "fulfilled" } else { "rejected" }));
+    set_data(
+        &status,
+        "status",
+        Value::str(if fulfilled { "fulfilled" } else { "rejected" }),
+    );
     set_data(&status, if fulfilled { "value" } else { "reason" }, value);
     let results = ab(i.get_member(&result, "__results"))?;
     ab(i.set_member(&results, &idx.to_string(), Value::Obj(status)))?;
@@ -3256,7 +3769,10 @@ fn install_promise(it: &mut Interp) {
     it.extra_protos.insert("Promise", proto.clone());
     it.def_method(&proto, "then", 2, |i, this, a| {
         if map_ptr(&this).map(|p| i.promises.contains_key(&p)) != Some(true) {
-            return Err(i.make_error("TypeError", "Promise.prototype.then called on a non-Promise"));
+            return Err(i.make_error(
+                "TypeError",
+                "Promise.prototype.then called on a non-Promise",
+            ));
         }
         Ok(i.promise_then(&this, arg(a, 0), arg(a, 1)))
     });
@@ -3286,8 +3802,14 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(promise)
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "withResolvers", 0, |i, _t, _a| {
         let promise = i.new_promise();
         let resolve = i.make_resolver(&promise, true);
@@ -3336,7 +3858,11 @@ fn install_promise(it: &mut Interp) {
         }
         for (idx, item) in items.into_iter().enumerate() {
             let p = promise_resolve_value(i, item);
-            let on_f = make_bound(i, promise_all_element, vec![result.clone(), Value::Num(idx as f64)]);
+            let on_f = make_bound(
+                i,
+                promise_all_element,
+                vec![result.clone(), Value::Num(idx as f64)],
+            );
             let on_r = i.make_resolver(&result, false);
             if !combinator_then(i, &result, p, on_f, on_r) {
                 return Ok(result);
@@ -3388,8 +3914,16 @@ fn install_promise(it: &mut Interp) {
         }
         for (idx, item) in items.into_iter().enumerate() {
             let p = promise_resolve_value(i, item);
-            let on_f = make_bound(i, promise_settled_fulfill, vec![result.clone(), Value::Num(idx as f64)]);
-            let on_r = make_bound(i, promise_settled_reject, vec![result.clone(), Value::Num(idx as f64)]);
+            let on_f = make_bound(
+                i,
+                promise_settled_fulfill,
+                vec![result.clone(), Value::Num(idx as f64)],
+            );
+            let on_r = make_bound(
+                i,
+                promise_settled_reject,
+                vec![result.clone(), Value::Num(idx as f64)],
+            );
             if !combinator_then(i, &result, p, on_f, on_r) {
                 return Ok(result);
             }
@@ -3420,7 +3954,11 @@ fn install_promise(it: &mut Interp) {
         for (idx, item) in items.into_iter().enumerate() {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
-            let on_r = make_bound(i, promise_any_reject, vec![result.clone(), Value::Num(idx as f64)]);
+            let on_r = make_bound(
+                i,
+                promise_any_reject,
+                vec![result.clone(), Value::Num(idx as f64)],
+            );
             if !combinator_then(i, &result, p, on_f, on_r) {
                 return Ok(result);
             }
@@ -3437,11 +3975,25 @@ fn install_promise(it: &mut Interp) {
                 return Ok(result);
             }
         };
-        let keys: Vec<Rc<str>> = dict.borrow().props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()).collect();
+        let keys: Vec<Rc<str>> = dict
+            .borrow()
+            .props
+            .iter()
+            .filter(|(_, p)| p.enumerable)
+            .map(|(k, _)| k.clone())
+            .collect();
         let results = i.new_object();
         results.borrow_mut().proto = None;
-        set_internal(&result.as_obj().unwrap().clone(), "__results", Value::Obj(results.clone()));
-        set_internal(&result.as_obj().unwrap().clone(), "__remaining", Value::Num(keys.len() as f64));
+        set_internal(
+            &result.as_obj().unwrap().clone(),
+            "__results",
+            Value::Obj(results.clone()),
+        );
+        set_internal(
+            &result.as_obj().unwrap().clone(),
+            "__remaining",
+            Value::Num(keys.len() as f64),
+        );
         if keys.is_empty() {
             i.resolve_promise(&result, Value::Obj(results));
             return Ok(result);
@@ -3449,7 +4001,11 @@ fn install_promise(it: &mut Interp) {
         for k in keys {
             let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
             let p = promise_resolve_value(i, item);
-            let on_f = make_bound(i, promise_keyed_element, vec![result.clone(), Value::str(&*k)]);
+            let on_f = make_bound(
+                i,
+                promise_keyed_element,
+                vec![result.clone(), Value::str(&*k)],
+            );
             let on_r = i.make_resolver(&result, false);
             if !combinator_then(i, &result, p, on_f, on_r) {
                 return Ok(result);
@@ -3462,16 +4018,33 @@ fn install_promise(it: &mut Interp) {
         let dict = match arg(a, 0) {
             Value::Obj(o) => o,
             _ => {
-                let e = i.make_error("TypeError", "Promise.allSettledKeyed argument must be an object");
+                let e = i.make_error(
+                    "TypeError",
+                    "Promise.allSettledKeyed argument must be an object",
+                );
                 i.reject_promise(&result, e);
                 return Ok(result);
             }
         };
-        let keys: Vec<Rc<str>> = dict.borrow().props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()).collect();
+        let keys: Vec<Rc<str>> = dict
+            .borrow()
+            .props
+            .iter()
+            .filter(|(_, p)| p.enumerable)
+            .map(|(k, _)| k.clone())
+            .collect();
         let results = i.new_object();
         results.borrow_mut().proto = None;
-        set_internal(&result.as_obj().unwrap().clone(), "__results", Value::Obj(results.clone()));
-        set_internal(&result.as_obj().unwrap().clone(), "__remaining", Value::Num(keys.len() as f64));
+        set_internal(
+            &result.as_obj().unwrap().clone(),
+            "__results",
+            Value::Obj(results.clone()),
+        );
+        set_internal(
+            &result.as_obj().unwrap().clone(),
+            "__remaining",
+            Value::Num(keys.len() as f64),
+        );
         if keys.is_empty() {
             i.resolve_promise(&result, Value::Obj(results));
             return Ok(result);
@@ -3479,8 +4052,16 @@ fn install_promise(it: &mut Interp) {
         for k in keys {
             let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
             let p = promise_resolve_value(i, item);
-            let on_f = make_bound(i, promise_keyed_settle_f, vec![result.clone(), Value::str(&*k)]);
-            let on_r = make_bound(i, promise_keyed_settle_r, vec![result.clone(), Value::str(&*k)]);
+            let on_f = make_bound(
+                i,
+                promise_keyed_settle_f,
+                vec![result.clone(), Value::str(&*k)],
+            );
+            let on_r = make_bound(
+                i,
+                promise_keyed_settle_r,
+                vec![result.clone(), Value::str(&*k)],
+            );
             if !combinator_then(i, &result, p, on_f, on_r) {
                 return Ok(result);
             }
@@ -3516,13 +4097,18 @@ fn promise_resolve_value(i: &mut Interp, v: Value) -> Value {
 
 fn set_internal_obj(target: &Value, key: &str, v: Value) {
     if let Value::Obj(o) = target {
-        o.borrow_mut().props.insert(key, Property::data(v, true, false, false));
+        o.borrow_mut()
+            .props
+            .insert(key, Property::data(v, true, false, false));
     }
 }
 
 fn make_proxy(i: &mut Interp, target: Value, handler: Value) -> Result<Value, Value> {
     if !matches!(target, Value::Obj(_)) || !matches!(handler, Value::Obj(_)) {
-        return Err(i.make_error("TypeError", "Cannot create proxy with a non-object as target or handler"));
+        return Err(i.make_error(
+            "TypeError",
+            "Cannot create proxy with a non-object as target or handler",
+        ));
     }
     let proto = match &target {
         Value::Obj(o) => o.borrow().proto.clone(),
@@ -3635,7 +4221,11 @@ fn json_str(
         Value::Undefined | Value::Sym(_) => Ok(None),
         Value::Null => Ok(Some("null".to_string())),
         Value::Bool(b) => Ok(Some(if *b { "true" } else { "false" }.to_string())),
-        Value::Num(n) => Ok(Some(if n.is_finite() { i.num_to_str(*n) } else { "null".to_string() })),
+        Value::Num(n) => Ok(Some(if n.is_finite() {
+            i.num_to_str(*n)
+        } else {
+            "null".to_string()
+        })),
         // JSON.stringify of a BigInt throws (matches the spec).
         Value::BigInt(_) => Err(i.make_error("TypeError", "Do not know how to serialize a BigInt")),
         Value::Str(s) => Ok(Some(json_quote(s))),
@@ -3655,7 +4245,10 @@ fn json_str(
                 let mut items = Vec::with_capacity(len);
                 for k in 0..len {
                     let elem = ab(i.get_member(&value, &k.to_string()))?;
-                    items.push(json_str(i, &elem, gap, &new_indent, seen)?.unwrap_or_else(|| "null".to_string()));
+                    items.push(
+                        json_str(i, &elem, gap, &new_indent, seen)?
+                            .unwrap_or_else(|| "null".to_string()),
+                    );
                 }
                 join_json("[", "]", items, gap, &new_indent, indent)
             } else {
@@ -3676,13 +4269,23 @@ fn json_str(
     }
 }
 
-fn join_json(open: &str, close: &str, parts: Vec<String>, gap: &str, inner: &str, outer: &str) -> String {
+fn join_json(
+    open: &str,
+    close: &str,
+    parts: Vec<String>,
+    gap: &str,
+    inner: &str,
+    outer: &str,
+) -> String {
     if parts.is_empty() {
         format!("{open}{close}")
     } else if gap.is_empty() {
         format!("{open}{}{close}", parts.join(","))
     } else {
-        format!("{open}\n{inner}{}\n{outer}{close}", parts.join(&format!(",\n{inner}")))
+        format!(
+            "{open}\n{inner}{}\n{outer}{close}",
+            parts.join(&format!(",\n{inner}"))
+        )
     }
 }
 
@@ -3694,7 +4297,9 @@ fn json_skip_ws(chars: &[char], pos: &mut usize) {
 
 fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<Value, Value> {
     json_skip_ws(chars, pos);
-    let c = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Unexpected end of JSON input"))?;
+    let c = *chars
+        .get(*pos)
+        .ok_or_else(|| i.make_error("SyntaxError", "Unexpected end of JSON input"))?;
     match c {
         '{' => {
             *pos += 1;
@@ -3726,7 +4331,11 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
                         *pos += 1;
                         break;
                     }
-                    _ => return Err(i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")),
+                    _ => {
+                        return Err(
+                            i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")
+                        )
+                    }
                 }
             }
             Ok(Value::Obj(obj))
@@ -3750,7 +4359,9 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
                         *pos += 1;
                         break;
                     }
-                    _ => return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array")),
+                    _ => {
+                        return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array"))
+                    }
                 }
             }
             Ok(i.make_array(items))
@@ -3764,7 +4375,9 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
             if chars[*pos] == '-' {
                 *pos += 1;
             }
-            while *pos < chars.len() && matches!(chars[*pos], '0'..='9' | '.' | 'e' | 'E' | '+' | '-') {
+            while *pos < chars.len()
+                && matches!(chars[*pos], '0'..='9' | '.' | 'e' | 'E' | '+' | '-')
+            {
                 *pos += 1;
             }
             let s: String = chars[start..*pos].iter().collect();
@@ -3796,12 +4409,16 @@ fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<
     *pos += 1; // opening quote
     let mut s = String::new();
     loop {
-        let c = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Unterminated JSON string"))?;
+        let c = *chars
+            .get(*pos)
+            .ok_or_else(|| i.make_error("SyntaxError", "Unterminated JSON string"))?;
         *pos += 1;
         match c {
             '"' => return Ok(s),
             '\\' => {
-                let e = *chars.get(*pos).ok_or_else(|| i.make_error("SyntaxError", "Bad escape in JSON"))?;
+                let e = *chars
+                    .get(*pos)
+                    .ok_or_else(|| i.make_error("SyntaxError", "Bad escape in JSON"))?;
                 *pos += 1;
                 match e {
                     '"' => s.push('"'),
@@ -3865,10 +4482,17 @@ fn install_function_proto(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "bind must be called on a function")),
         };
         let bound_this = arg(args, 0);
-        let bound_args = if args.is_empty() { Vec::new() } else { args[1..].to_vec() };
+        let bound_args = if args.is_empty() {
+            Vec::new()
+        } else {
+            args[1..].to_vec()
+        };
         let obj = Object::new(Some(i.function_proto.clone()));
-        obj.borrow_mut().call =
-            Callable::Bound { target, this: bound_this, args: bound_args };
+        obj.borrow_mut().call = Callable::Bound {
+            target,
+            this: bound_this,
+            args: bound_args,
+        };
         obj.borrow_mut().is_constructor = true;
         set_builtin(&obj, "name", Value::str("bound"));
         Ok(Value::Obj(obj))
@@ -3880,7 +4504,10 @@ fn install_function_proto(it: &mut Interp) {
     // The %ThrowTypeError% poison pill: `caller`/`arguments` accessors on Function.prototype that
     // throw on get or set (CallerArguments restriction).
     let throw_type_error = it.make_native("", 0, |i, _t, _a| {
-        Err(i.make_error("TypeError", "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions"))
+        Err(i.make_error(
+            "TypeError",
+            "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
+        ))
     });
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
@@ -3924,8 +4551,13 @@ fn install_function_proto(it: &mut Interp) {
     // `Function.prototype` is the shared function prototype, so `f instanceof Function` holds for
     // every function (their [[Prototype]] is `function_proto`).
     ctor.borrow_mut().proto = Some(fp.clone());
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(fp.clone()), false, false, false));
-    fp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(fp.clone()), false, false, false),
+    );
+    fp.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Function", Value::Obj(ctor));
 }
 
@@ -3961,7 +4593,10 @@ fn require_constructor(i: &mut Interp, this: &Value) -> Result<(), Value> {
     if ok {
         Ok(())
     } else {
-        Err(i.make_error("TypeError", "Promise combinator called on a non-constructor"))
+        Err(i.make_error(
+            "TypeError",
+            "Promise combinator called on a non-constructor",
+        ))
     }
 }
 
@@ -3974,7 +4609,10 @@ fn arr_to_object(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
 /// RequireObjectCoercible for an `Array.prototype` method receiver (null/undefined → TypeError).
 fn arr_require_coercible(i: &mut Interp, this: &Value) -> Result<(), Value> {
     if matches!(this, Value::Undefined | Value::Null) {
-        return Err(i.make_error("TypeError", "Array.prototype method called on null or undefined"));
+        return Err(i.make_error(
+            "TypeError",
+            "Array.prototype method called on null or undefined",
+        ));
     }
     Ok(())
 }
@@ -3996,18 +4634,37 @@ fn install_shadow_realm(it: &mut Interp) {
         i.shadow_realms.insert(p, Box::new(Interp::new()));
         Ok(Value::Obj(obj))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-    it.global.borrow_mut().props.insert("ShadowRealm", Property::builtin(Value::Obj(ctor)));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.global
+        .borrow_mut()
+        .props
+        .insert("ShadowRealm", Property::builtin(Value::Obj(ctor)));
 }
 
 fn shadow_evaluate(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(&this)
         .filter(|p| i.shadow_realms.contains_key(p))
-        .ok_or_else(|| i.make_error("TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm"))?;
+        .ok_or_else(|| {
+            i.make_error(
+                "TypeError",
+                "ShadowRealm.prototype.evaluate called on a non-ShadowRealm",
+            )
+        })?;
     let src = match arg(a, 0) {
         Value::Str(s) => s.to_string(),
-        _ => return Err(i.make_error("TypeError", "ShadowRealm.prototype.evaluate expects a string")),
+        _ => {
+            return Err(i.make_error(
+                "TypeError",
+                "ShadowRealm.prototype.evaluate expects a string",
+            ))
+        }
     };
     // A parse failure is a SyntaxError of the *calling* realm (not wrapped).
     let body = match crate::parser::parse_script(&src, false) {
@@ -4022,9 +4679,15 @@ fn shadow_evaluate(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
         // cross the realm boundary directly.
         Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
         Ok(v) if v.is_callable() => Ok(i.make_wrapped_shadow(ptr, v)),
-        Ok(_) => Err(i.make_error("TypeError", "ShadowRealm.prototype.evaluate result must be a primitive")),
+        Ok(_) => Err(i.make_error(
+            "TypeError",
+            "ShadowRealm.prototype.evaluate result must be a primitive",
+        )),
         // An error thrown inside the shadow realm is re-thrown as a TypeError of the calling realm.
-        Err(_) => Err(i.make_error("TypeError", "ShadowRealm evaluate: the provided source threw an error")),
+        Err(_) => Err(i.make_error(
+            "TypeError",
+            "ShadowRealm evaluate: the provided source threw an error",
+        )),
     }
 }
 
@@ -4036,7 +4699,10 @@ fn ta_receiver(i: &mut Interp, this: &Value) -> Result<(crate::value::TaInfo, bo
             let info = i.typed_arrays[&p];
             Ok((info, !i.array_buffers.contains_key(&info.buffer)))
         }
-        None => Err(i.make_error("TypeError", "TypedArray.prototype accessor called on a non-TypedArray")),
+        None => Err(i.make_error(
+            "TypeError",
+            "TypedArray.prototype accessor called on a non-TypedArray",
+        )),
     }
 }
 fn ta_length_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
@@ -4045,7 +4711,11 @@ fn ta_length_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
 }
 fn ta_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let (info, detached) = ta_receiver(i, &this)?;
-    Ok(Value::Num(if detached { 0.0 } else { (info.len * info.kind.elsize()) as f64 }))
+    Ok(Value::Num(if detached {
+        0.0
+    } else {
+        (info.len * info.kind.elsize()) as f64
+    }))
 }
 fn ta_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let (info, detached) = ta_receiver(i, &this)?;
@@ -4056,7 +4726,13 @@ fn ta_buffer_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
     let ptr = map_ptr(&this).unwrap();
     Ok(i.ta_buffer.get(&ptr).cloned().unwrap_or(Value::Undefined))
 }
-const TA_META_KEYS: [&str; 5] = ["length", "byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"];
+const TA_META_KEYS: [&str; 5] = [
+    "length",
+    "byteLength",
+    "byteOffset",
+    "buffer",
+    "BYTES_PER_ELEMENT",
+];
 
 /// If `v` is a Proxy, its (target, handler) pair.
 fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
@@ -4072,11 +4748,18 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
     if trap.is_callable() {
         let res = ab(i.call(trap, handler.clone(), std::slice::from_ref(target)))?;
         if !matches!(res, Value::Obj(_) | Value::Null) {
-            return Err(i.make_error("TypeError", "getPrototypeOf trap must return an object or null"));
+            return Err(i.make_error(
+                "TypeError",
+                "getPrototypeOf trap must return an object or null",
+            ));
         }
         Ok(res)
     } else if let Value::Obj(t) = target {
-        Ok(t.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+        Ok(t.borrow()
+            .proto
+            .clone()
+            .map(Value::Obj)
+            .unwrap_or(Value::Null))
     } else {
         Ok(Value::Null)
     }
@@ -4093,12 +4776,20 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
         let keys = ab(i.iterate(&res))?;
         for k in &keys {
             if !matches!(k, Value::Str(_) | Value::Sym(_)) {
-                return Err(i.make_error("TypeError", "ownKeys trap result must contain only strings and symbols"));
+                return Err(i.make_error(
+                    "TypeError",
+                    "ownKeys trap result must contain only strings and symbols",
+                ));
             }
         }
         Ok(keys)
     } else if let Value::Obj(t) = target {
-        Ok(t.borrow().props.keys().into_iter().map(Value::Str).collect())
+        Ok(t.borrow()
+            .props
+            .keys()
+            .into_iter()
+            .map(Value::Str)
+            .collect())
     } else {
         Ok(Vec::new())
     }
@@ -4114,8 +4805,14 @@ fn proxy_define_property(
 ) -> Result<bool, Abrupt> {
     let trap = i.get_member(handler, "defineProperty")?;
     if trap.is_callable() {
-        let key_val = i.sym_from_key(key).unwrap_or_else(|| Value::from_string(key.to_string()));
-        let res = i.call(trap, handler.clone(), &[target.clone(), key_val, desc.clone()])?;
+        let key_val = i
+            .sym_from_key(key)
+            .unwrap_or_else(|| Value::from_string(key.to_string()));
+        let res = i.call(
+            trap,
+            handler.clone(),
+            &[target.clone(), key_val, desc.clone()],
+        )?;
         Ok(i.to_boolean(&res))
     } else if let Value::Obj(t) = target {
         define_own_property(i, t, key, desc)
@@ -4139,7 +4836,12 @@ fn proxy_enum_string_keys(i: &mut Interp, proxy: &Value) -> Result<Vec<Value>, V
     }
     Ok(out)
 }
-fn proxy_key_enumerable(i: &mut Interp, target: &Value, handler: &Value, key: &str) -> Result<bool, Value> {
+fn proxy_key_enumerable(
+    i: &mut Interp,
+    target: &Value,
+    handler: &Value,
+    key: &str,
+) -> Result<bool, Value> {
     let trap = ab(i.get_member(handler, "getOwnPropertyDescriptor"))?;
     if trap.is_callable() {
         let kv = Value::from_string(key.to_string());
@@ -4150,7 +4852,11 @@ fn proxy_key_enumerable(i: &mut Interp, target: &Value, handler: &Value, key: &s
         let enum_v = ab(i.get_member(&res, "enumerable"))?;
         Ok(i.to_boolean(&enum_v))
     } else if let Value::Obj(t) = target {
-        Ok(t.borrow().props.get(key).map(|p| p.enumerable).unwrap_or(false))
+        Ok(t.borrow()
+            .props
+            .get(key)
+            .map(|p| p.enumerable)
+            .unwrap_or(false))
     } else {
         Ok(false)
     }
@@ -4179,22 +4885,33 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Bool(has))
     });
     // Annex B __defineGetter__/__defineSetter__/__lookupGetter__/__lookupSetter__.
-    fn define_accessor(i: &mut Interp, this: &Value, args: &[Value], is_get: bool) -> Result<Value, Value> {
+    fn define_accessor(
+        i: &mut Interp,
+        this: &Value,
+        args: &[Value],
+        is_get: bool,
+    ) -> Result<Value, Value> {
         let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "called on non-object"))?;
         let f = arg(args, 1);
         if !f.is_callable() {
             return Err(i.make_error("TypeError", "accessor must be a function"));
         }
         let key = ab(i.to_property_key(&arg(args, 0)))?;
-        let mut existing = o.borrow().props.get(&key).cloned().filter(|p| p.accessor).unwrap_or(Property {
-            value: Value::Undefined,
-            get: None,
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: true,
-            configurable: true,
-        });
+        let mut existing = o
+            .borrow()
+            .props
+            .get(&key)
+            .cloned()
+            .filter(|p| p.accessor)
+            .unwrap_or(Property {
+                value: Value::Undefined,
+                get: None,
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: true,
+                configurable: true,
+            });
         if is_get {
             existing.get = Some(f);
         } else {
@@ -4203,7 +4920,12 @@ fn install_object(it: &mut Interp) {
         o.borrow_mut().props.insert(key, existing);
         Ok(Value::Undefined)
     }
-    fn lookup_accessor(i: &mut Interp, this: &Value, args: &[Value], is_get: bool) -> Result<Value, Value> {
+    fn lookup_accessor(
+        i: &mut Interp,
+        this: &Value,
+        args: &[Value],
+        is_get: bool,
+    ) -> Result<Value, Value> {
         let mut cur = this_obj(this);
         let key = ab(i.to_property_key(&arg(args, 0)))?;
         while let Some(o) = cur {
@@ -4218,10 +4940,18 @@ fn install_object(it: &mut Interp) {
         }
         Ok(Value::Undefined)
     }
-    it.def_method(&op, "__defineGetter__", 2, |i, this, a| define_accessor(i, &this, a, true));
-    it.def_method(&op, "__defineSetter__", 2, |i, this, a| define_accessor(i, &this, a, false));
-    it.def_method(&op, "__lookupGetter__", 1, |i, this, a| lookup_accessor(i, &this, a, true));
-    it.def_method(&op, "__lookupSetter__", 1, |i, this, a| lookup_accessor(i, &this, a, false));
+    it.def_method(&op, "__defineGetter__", 2, |i, this, a| {
+        define_accessor(i, &this, a, true)
+    });
+    it.def_method(&op, "__defineSetter__", 2, |i, this, a| {
+        define_accessor(i, &this, a, false)
+    });
+    it.def_method(&op, "__lookupGetter__", 1, |i, this, a| {
+        lookup_accessor(i, &this, a, true)
+    });
+    it.def_method(&op, "__lookupSetter__", 1, |i, this, a| {
+        lookup_accessor(i, &this, a, false)
+    });
     it.def_method(&op, "isPrototypeOf", 1, |_i, this, args| {
         let target = match arg(args, 0) {
             Value::Obj(o) => o,
@@ -4274,8 +5004,13 @@ fn install_object(it: &mut Interp) {
             other => box_primitive(i, other),
         })
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(op.clone()), false, false, false));
-    op.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(op.clone()), false, false, false),
+    );
+    op.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
 
     it.def_method(&ctor, "hasOwn", 2, |i, _this, args| {
         let o = match arg(args, 0) {
@@ -4294,7 +5029,11 @@ fn install_object(it: &mut Interp) {
         let elems = ab(i.iterate(&arg(args, 0)))?;
         let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
         for (idx, el) in elems.into_iter().enumerate() {
-            let key_v = ab(i.call(cb.clone(), Value::Undefined, &[el.clone(), Value::Num(idx as f64)]))?;
+            let key_v = ab(i.call(
+                cb.clone(),
+                Value::Undefined,
+                &[el.clone(), Value::Num(idx as f64)],
+            ))?;
             let key = ab(i.to_property_key(&key_v))?;
             match groups.iter_mut().find(|(k, _)| *k == key) {
                 Some(g) => g.1.push(el),
@@ -4322,16 +5061,26 @@ fn install_object(it: &mut Interp) {
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyNames")?;
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let keys = proxy_own_keys(i, &target, &handler)?;
-            let strs: Vec<Value> = keys.into_iter().filter(|k| matches!(k, Value::Str(_))).collect();
+            let strs: Vec<Value> = keys
+                .into_iter()
+                .filter(|k| matches!(k, Value::Str(_)))
+                .collect();
             return Ok(i.make_array(strs));
         }
         // A TypedArray's own keys are its integer indices, then any string expandos (the
         // length/buffer/... metadata are inherited, not own).
         if let Some(info) = ta_info(i, &o) {
-            let n = if i.array_buffers.contains_key(&info.buffer) { info.len } else { 0 };
+            let n = if i.array_buffers.contains_key(&info.buffer) {
+                info.len
+            } else {
+                0
+            };
             let mut keys: Vec<Value> = (0..n).map(|k| Value::from_string(k.to_string())).collect();
             for k in o.borrow().props.keys() {
-                if !Interp::is_sym_key(&k) && k.parse::<usize>().is_err() && !TA_META_KEYS.contains(&&*k) {
+                if !Interp::is_sym_key(&k)
+                    && k.parse::<usize>().is_err()
+                    && !TA_META_KEYS.contains(&&*k)
+                {
                     keys.push(Value::Str(k));
                 }
             }
@@ -4368,17 +5117,28 @@ fn install_object(it: &mut Interp) {
                 if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                     return proxy_get_prototype(i, &target, &handler);
                 }
-                Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null))
+                Ok(o.borrow()
+                    .proto
+                    .clone()
+                    .map(Value::Obj)
+                    .unwrap_or(Value::Null))
             }
             // ToObject coerces a primitive (Object.getPrototypeOf('') → String.prototype).
-            Value::Undefined | Value::Null => Err(i.make_error("TypeError", "called on null or undefined")),
+            Value::Undefined | Value::Null => {
+                Err(i.make_error("TypeError", "called on null or undefined"))
+            }
             Value::Str(_) => Ok(Value::Obj(i.string_proto.clone())),
             Value::Num(_) => Ok(Value::Obj(i.number_proto.clone())),
             Value::Bool(_) => Ok(Value::Obj(i.boolean_proto.clone())),
             other => {
                 let boxed = maybe_box(i, other);
                 match boxed {
-                    Value::Obj(o) => Ok(o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null)),
+                    Value::Obj(o) => Ok(o
+                        .borrow()
+                        .proto
+                        .clone()
+                        .map(Value::Obj)
+                        .unwrap_or(Value::Null)),
                     _ => Ok(Value::Null),
                 }
             }
@@ -4387,10 +5147,16 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "setPrototypeOf", 2, |i, _this, args| {
         let proto = arg(args, 1);
         if !matches!(proto, Value::Obj(_) | Value::Null) {
-            return Err(i.make_error("TypeError", "Object prototype may only be an Object or null"));
+            return Err(i.make_error(
+                "TypeError",
+                "Object prototype may only be an Object or null",
+            ));
         }
         if matches!(arg(args, 0), Value::Undefined | Value::Null) {
-            return Err(i.make_error("TypeError", "Object.setPrototypeOf called on null or undefined"));
+            return Err(i.make_error(
+                "TypeError",
+                "Object.setPrototypeOf called on null or undefined",
+            ));
         }
         if let Value::Obj(o) = arg(args, 0) {
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
@@ -4398,7 +5164,10 @@ fn install_object(it: &mut Interp) {
                 if trap.is_callable() {
                     let res = ab(i.call(trap, handler, &[target, proto.clone()]))?;
                     if !i.to_boolean(&res) {
-                        return Err(i.make_error("TypeError", "setPrototypeOf trap returned a falsish value"));
+                        return Err(i.make_error(
+                            "TypeError",
+                            "setPrototypeOf trap returned a falsish value",
+                        ));
                     }
                     return Ok(arg(args, 0));
                 }
@@ -4421,7 +5190,9 @@ fn install_object(it: &mut Interp) {
         let proto = match arg(args, 0) {
             Value::Obj(o) => Some(o),
             Value::Null => None,
-            _ => return Err(i.make_error("TypeError", "Object.create proto must be object or null")),
+            _ => {
+                return Err(i.make_error("TypeError", "Object.create proto must be object or null"))
+            }
         };
         let obj = Object::new(proto);
         if let Value::Obj(descs) = arg(args, 1) {
@@ -4437,7 +5208,9 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "defineProperty", 3, |i, _this, args| {
         let o = match arg(args, 0) {
             Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.defineProperty called on non-object")),
+            _ => {
+                return Err(i.make_error("TypeError", "Object.defineProperty called on non-object"))
+            }
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
         // Defining a TypedArray integer index writes through to the buffer (in range) or fails.
@@ -4445,10 +5218,17 @@ fn install_object(it: &mut Interp) {
             if let Ok(idx) = key.parse::<usize>() {
                 let detached = !i.array_buffers.contains_key(&info.buffer);
                 if detached || idx >= info.len {
-                    return Err(i.make_error("TypeError", "cannot define an out-of-bounds TypedArray index"));
+                    return Err(i.make_error(
+                        "TypeError",
+                        "cannot define an out-of-bounds TypedArray index",
+                    ));
                 }
                 let pd = ab(build_partial(i, &arg(args, 2)))?;
-                if pd.is_accessor() || pd.configurable == Some(false) || pd.enumerable == Some(false) || pd.writable == Some(false) {
+                if pd.is_accessor()
+                    || pd.configurable == Some(false)
+                    || pd.enumerable == Some(false)
+                    || pd.writable == Some(false)
+                {
                     return Err(i.make_error("TypeError", "invalid TypedArray index descriptor"));
                 }
                 if let Some(v) = pd.value {
@@ -4458,8 +5238,16 @@ fn install_object(it: &mut Interp) {
             }
         }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-            if !ab(proxy_define_property(i, &target, &handler, &key, &arg(args, 2)))? {
-                return Err(i.make_error("TypeError", "proxy defineProperty returned a falsish value"));
+            if !ab(proxy_define_property(
+                i,
+                &target,
+                &handler,
+                &key,
+                &arg(args, 2),
+            ))? {
+                return Err(
+                    i.make_error("TypeError", "proxy defineProperty returned a falsish value")
+                );
             }
             return Ok(Value::Obj(o));
         }
@@ -4485,26 +5273,36 @@ fn install_object(it: &mut Interp) {
                     return Ok(Value::Undefined);
                 }
                 let val = i.ta_read(&info, idx);
-                return Ok(descriptor_from_prop(i, Property::data(val, true, true, true)));
+                return Ok(descriptor_from_prop(
+                    i,
+                    Property::data(val, true, true, true),
+                ));
             }
         }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let trap = ab(i.get_member(&handler, "getOwnPropertyDescriptor"))?;
             if trap.is_callable() {
-                let key_val = i.sym_from_key(&key).unwrap_or_else(|| Value::from_string(key.clone()));
+                let key_val = i
+                    .sym_from_key(&key)
+                    .unwrap_or_else(|| Value::from_string(key.clone()));
                 let res = ab(i.call(trap, handler, &[target, key_val]))?;
                 if matches!(res, Value::Undefined) {
                     return Ok(Value::Undefined);
                 }
                 if !matches!(res, Value::Obj(_)) {
-                    return Err(i.make_error("TypeError", "getOwnPropertyDescriptor trap must return an object or undefined"));
+                    return Err(i.make_error(
+                        "TypeError",
+                        "getOwnPropertyDescriptor trap must return an object or undefined",
+                    ));
                 }
                 let pd = ab(build_partial(i, &res))?;
                 return Ok(descriptor_from_prop(i, complete_descriptor(pd)));
             }
             if let Value::Obj(t) = &target {
                 let prop = t.borrow().props.get(&key).cloned();
-                return Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined));
+                return Ok(prop
+                    .map(|p| descriptor_from_prop(i, p))
+                    .unwrap_or(Value::Undefined));
             }
         }
         let prop = o.borrow().props.get(&key).cloned();
@@ -4533,7 +5331,10 @@ fn install_object(it: &mut Interp) {
                 }
                 set_data(&d, "enumerable", Value::Bool(p.enumerable));
                 set_data(&d, "configurable", Value::Bool(p.configurable));
-                result.borrow_mut().props.insert(key, Property::plain(Value::Obj(d)));
+                result
+                    .borrow_mut()
+                    .props
+                    .insert(key, Property::plain(Value::Obj(d)));
             }
         }
         Ok(Value::Obj(result))
@@ -4558,7 +5359,10 @@ fn install_object(it: &mut Interp) {
                 if trap.is_callable() {
                     let res = ab(i.call(trap, handler, &[target]))?;
                     if !i.to_boolean(&res) {
-                        return Err(i.make_error("TypeError", "preventExtensions trap returned a falsish value"));
+                        return Err(i.make_error(
+                            "TypeError",
+                            "preventExtensions trap returned a falsish value",
+                        ));
                     }
                     return Ok(arg(args, 0));
                 }
@@ -4581,14 +5385,21 @@ fn install_object(it: &mut Interp) {
                     // Invariant: the trap result must equal the target's extensibility.
                     let target_ext = matches!(&target, Value::Obj(t) if t.borrow().extensible);
                     if result != target_ext {
-                        return Err(i.make_error("TypeError", "proxy 'isExtensible' must match the target"));
+                        return Err(i.make_error(
+                            "TypeError",
+                            "proxy 'isExtensible' must match the target",
+                        ));
                     }
                     return Ok(Value::Bool(result));
                 }
-                return Ok(Value::Bool(matches!(&target, Value::Obj(t) if t.borrow().extensible)));
+                return Ok(Value::Bool(
+                    matches!(&target, Value::Obj(t) if t.borrow().extensible),
+                ));
             }
         }
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if o.borrow().extensible)))
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Obj(o) if o.borrow().extensible),
+        ))
     });
     it.def_method(&ctor, "assign", 2, |i, _this, args| {
         let target = arg(args, 0);
@@ -4683,7 +5494,10 @@ fn install_object(it: &mut Interp) {
         let frozen = match arg(args, 0) {
             Value::Obj(o) => {
                 !o.borrow().extensible
-                    && o.borrow().props.iter().all(|(_, p)| !p.configurable && (p.accessor || !p.writable))
+                    && o.borrow()
+                        .props
+                        .iter()
+                        .all(|(_, p)| !p.configurable && (p.accessor || !p.writable))
             }
             _ => true,
         };
@@ -4771,9 +5585,21 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
     let enumerable = bool_field(i, "enumerable")?;
     let configurable = bool_field(i, "configurable")?;
     let writable = bool_field(i, "writable")?;
-    let value = if has("value") { Some(i.get_member(&base, "value")?) } else { None };
-    let get = if has("get") { Some(i.get_member(&base, "get")?) } else { None };
-    let set = if has("set") { Some(i.get_member(&base, "set")?) } else { None };
+    let value = if has("value") {
+        Some(i.get_member(&base, "value")?)
+    } else {
+        None
+    };
+    let get = if has("get") {
+        Some(i.get_member(&base, "get")?)
+    } else {
+        None
+    };
+    let set = if has("set") {
+        Some(i.get_member(&base, "set")?)
+    } else {
+        None
+    };
     if (get.is_some() || set.is_some()) && (value.is_some() || writable.is_some()) {
         return Err(i.throw(
             "TypeError",
@@ -4790,13 +5616,24 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
             return Err(i.throw("TypeError", "Setter must be a function"));
         }
     }
-    Ok(PartialDesc { value, get, set, writable, enumerable, configurable })
+    Ok(PartialDesc {
+        value,
+        get,
+        set,
+        writable,
+        enumerable,
+        configurable,
+    })
 }
 
 /// `Number.prototype.toPrecision(p)`: `p` significant digits, fixed or exponential per the exponent.
 fn to_precision(n: f64, p: usize) -> String {
     if n == 0.0 {
-        return if p == 1 { "0".to_string() } else { format!("0.{}", "0".repeat(p - 1)) };
+        return if p == 1 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(p - 1))
+        };
     }
     let neg = n < 0.0;
     // `p` significant digits via scientific notation (`d.ddde±E`, the mantissa has exactly `p` digits).
@@ -4848,7 +5685,14 @@ fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Resul
     if let Some(idx) = array_index {
         // Adding an index at or past a non-writable `length` is rejected.
         let len = i.array_length(o);
-        if idx as usize >= len && !o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true) {
+        if idx as usize >= len
+            && !o
+                .borrow()
+                .props
+                .get("length")
+                .map(|p| p.writable)
+                .unwrap_or(true)
+        {
             return Ok(false);
         }
     }
@@ -4962,7 +5806,12 @@ fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Resul
 fn grow_array_length(i: &mut Interp, o: &Gc, array_index: Option<u32>) {
     if let Some(idx) = array_index {
         if idx as usize >= i.array_length(o) {
-            let writable = o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+            let writable = o
+                .borrow()
+                .props
+                .get("length")
+                .map(|p| p.writable)
+                .unwrap_or(true);
             o.borrow_mut().props.insert(
                 "length",
                 Property::data(Value::Num((idx as f64) + 1.0), writable, false, false),
@@ -4974,7 +5823,12 @@ fn grow_array_length(i: &mut Interp, o: &Gc, array_index: Option<u32>) {
 /// Array exotic `length` define: validate the new length is a valid uint32, honor a non-writable
 /// `length`, and drop the now-out-of-range index properties.
 fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abrupt> {
-    let len_writable = o.borrow().props.get("length").map(|p| p.writable).unwrap_or(true);
+    let len_writable = o
+        .borrow()
+        .props
+        .get("length")
+        .map(|p| p.writable)
+        .unwrap_or(true);
     let new_len = match &d.value {
         None => {
             // No value: only a writable change (length is non-configurable, non-enumerable).
@@ -4986,13 +5840,19 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
                     return Ok(false); // can't make a non-writable length writable again
                 }
                 let cur = i.array_length(o) as f64;
-                o.borrow_mut().props.insert("length", Property::data(Value::Num(cur), w, false, false));
+                o.borrow_mut()
+                    .props
+                    .insert("length", Property::data(Value::Num(cur), w, false, false));
             }
             return Ok(true);
         }
         Some(v) => {
             let n = i.to_number(v)?;
-            let u = if n.is_finite() && n >= 0.0 { n as u64 } else { u64::MAX };
+            let u = if n.is_finite() && n >= 0.0 {
+                n as u64
+            } else {
+                u64::MAX
+            };
             if u > 4294967295 || (u as f64) != n {
                 return Err(i.throw("RangeError", "Invalid array length"));
             }
@@ -5009,15 +5869,20 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
             .retain(|k| k.parse::<usize>().map(|idx| idx < new_len).unwrap_or(true));
     }
     let writable = d.writable.unwrap_or(len_writable);
-    o.borrow_mut()
-        .props
-        .insert("length", Property::data(Value::Num(new_len as f64), writable, false, false));
+    o.borrow_mut().props.insert(
+        "length",
+        Property::data(Value::Num(new_len as f64), writable, false, false),
+    );
     Ok(true)
 }
 
-pub(crate) fn same_value_pub(a: &Value, b: &Value) -> bool { same_value(a, b) }
+pub(crate) fn same_value_pub(a: &Value, b: &Value) -> bool {
+    same_value(a, b)
+}
 /// ToObject on a primitive (for sloppy-mode `this` coercion). Objects pass through.
-pub(crate) fn box_primitive_pub(i: &mut Interp, v: Value) -> Value { box_primitive(i, v) }
+pub(crate) fn box_primitive_pub(i: &mut Interp, v: Value) -> Value {
+    box_primitive(i, v)
+}
 fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => {
@@ -5045,7 +5910,10 @@ fn same_value(a: &Value, b: &Value) -> bool {
 fn install_array(it: &mut Interp) {
     let ap = it.array_proto.clone();
     ap.borrow_mut().exotic = Exotic::Array;
-    ap.borrow_mut().props.insert("length", Property::data(Value::Num(0.0), true, false, false));
+    ap.borrow_mut().props.insert(
+        "length",
+        Property::data(Value::Num(0.0), true, false, false),
+    );
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
@@ -5128,7 +5996,11 @@ fn install_array(it: &mut Interp) {
             Value::Undefined => 0usize,
             v => {
                 let n = ab(i.to_number(&v))?;
-                if n >= 0.0 { n as usize } else { (len as f64 + n).max(0.0) as usize }
+                if n >= 0.0 {
+                    n as usize
+                } else {
+                    (len as f64 + n).max(0.0) as usize
+                }
             }
         };
         for k in from..len {
@@ -5175,7 +6047,9 @@ fn install_array(it: &mut Interp) {
         arr_require_coercible(i, &this)?;
         let result = array_species_create(i, &this, 0)?;
         let mut n = 0usize;
-        let items: Vec<Value> = std::iter::once(this.clone()).chain(args.iter().cloned()).collect();
+        let items: Vec<Value> = std::iter::once(this.clone())
+            .chain(args.iter().cloned())
+            .collect();
         for v in &items {
             // IsConcatSpreadable: @@isConcatSpreadable if defined, else IsArray.
             let spreadable = if let Value::Obj(_) = v {
@@ -5185,17 +6059,28 @@ fn install_array(it: &mut Interp) {
                     None => Value::Undefined,
                 };
                 match flag {
-                    Value::Undefined => matches!(v, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)),
+                    Value::Undefined => {
+                        matches!(v, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array))
+                    }
                     other => i.to_boolean(&other),
                 }
             } else {
                 false
             };
             if spreadable {
-                let len = ab(i.checked_array_len(&match v { Value::Obj(o) => o.clone(), _ => unreachable!() }))?;
+                let len = ab(i.checked_array_len(&match v {
+                    Value::Obj(o) => o.clone(),
+                    _ => unreachable!(),
+                }))?;
                 for k in 0..len {
                     let key = k.to_string();
-                    if i.has_property(&match v { Value::Obj(o) => o.clone(), _ => unreachable!() }, &key) {
+                    if i.has_property(
+                        &match v {
+                            Value::Obj(o) => o.clone(),
+                            _ => unreachable!(),
+                        },
+                        &key,
+                    ) {
                         let elem = ab(i.get_member(v, &key))?;
                         ab(i.set_member(&result, &n.to_string(), elem))?;
                     }
@@ -5214,7 +6099,10 @@ fn install_array(it: &mut Interp) {
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
-            return Err(i.make_error("TypeError", "Array.prototype.forEach callback is not callable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Array.prototype.forEach callback is not callable",
+            ));
         }
         let cb_this = arg(args, 1);
         for k in 0..len {
@@ -5222,7 +6110,11 @@ fn install_array(it: &mut Interp) {
                 continue; // skip array holes
             }
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
+            ab(i.call(
+                cb.clone(),
+                cb_this.clone(),
+                &[v, Value::Num(k as f64), this.clone()],
+            ))?;
         }
         Ok(Value::Undefined)
     });
@@ -5240,7 +6132,11 @@ fn install_array(it: &mut Interp) {
                 continue; // holes stay holes in the result
             }
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            let mapped = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
+            let mapped = ab(i.call(
+                cb.clone(),
+                cb_this.clone(),
+                &[v, Value::Num(k as f64), this.clone()],
+            ))?;
             ab(i.set_member(&result, &k.to_string(), mapped))?;
         }
         Ok(result)
@@ -5250,7 +6146,10 @@ fn install_array(it: &mut Interp) {
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
-            return Err(i.make_error("TypeError", "Array.prototype.filter callback is not callable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Array.prototype.filter callback is not callable",
+            ));
         }
         let cb_this = arg(args, 1);
         let result = array_species_create(i, &this, 0)?;
@@ -5260,7 +6159,11 @@ fn install_array(it: &mut Interp) {
                 continue;
             }
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            let keep = ab(i.call(cb.clone(), cb_this.clone(), &[v.clone(), Value::Num(k as f64), this.clone()]))?;
+            let keep = ab(i.call(
+                cb.clone(),
+                cb_this.clone(),
+                &[v.clone(), Value::Num(k as f64), this.clone()],
+            ))?;
             if i.to_boolean(&keep) {
                 ab(i.set_member(&result, &to.to_string(), v))?;
                 to += 1;
@@ -5273,7 +6176,10 @@ fn install_array(it: &mut Interp) {
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
-            return Err(i.make_error("TypeError", "Array.prototype.reduce callback is not callable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Array.prototype.reduce callback is not callable",
+            ));
         }
         let mut k = 0;
         let mut acc;
@@ -5283,7 +6189,9 @@ fn install_array(it: &mut Interp) {
             // Seed with the first present element (holes are skipped).
             loop {
                 if k >= len {
-                    return Err(i.make_error("TypeError", "Reduce of empty array with no initial value"));
+                    return Err(
+                        i.make_error("TypeError", "Reduce of empty array with no initial value")
+                    );
                 }
                 if i.has_property(&o, &k.to_string()) {
                     acc = ab(i.get_member(&this, &k.to_string()))?;
@@ -5296,7 +6204,11 @@ fn install_array(it: &mut Interp) {
         while k < len {
             if i.has_property(&o, &k.to_string()) {
                 let v = ab(i.get_member(&this, &k.to_string()))?;
-                acc = ab(i.call(cb.clone(), Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()]))?;
+                acc = ab(i.call(
+                    cb.clone(),
+                    Value::Undefined,
+                    &[acc, v, Value::Num(k as f64), this.clone()],
+                ))?;
             }
             k += 1;
         }
@@ -5333,12 +6245,24 @@ fn install_array(it: &mut Interp) {
         }
         ab(i.get_member(&this, &idx.to_string()))
     });
-    it.def_method(&ap, "find", 1, |i, this, args| array_find(i, this, args, true, false));
-    it.def_method(&ap, "findIndex", 1, |i, this, args| array_find(i, this, args, false, false));
-    it.def_method(&ap, "findLast", 1, |i, this, args| array_find(i, this, args, true, true));
-    it.def_method(&ap, "findLastIndex", 1, |i, this, args| array_find(i, this, args, false, true));
-    it.def_method(&ap, "some", 1, |i, this, args| array_some_every(i, this, args, false));
-    it.def_method(&ap, "every", 1, |i, this, args| array_some_every(i, this, args, true));
+    it.def_method(&ap, "find", 1, |i, this, args| {
+        array_find(i, this, args, true, false)
+    });
+    it.def_method(&ap, "findIndex", 1, |i, this, args| {
+        array_find(i, this, args, false, false)
+    });
+    it.def_method(&ap, "findLast", 1, |i, this, args| {
+        array_find(i, this, args, true, true)
+    });
+    it.def_method(&ap, "findLastIndex", 1, |i, this, args| {
+        array_find(i, this, args, false, true)
+    });
+    it.def_method(&ap, "some", 1, |i, this, args| {
+        array_some_every(i, this, args, false)
+    });
+    it.def_method(&ap, "every", 1, |i, this, args| {
+        array_some_every(i, this, args, true)
+    });
     it.def_method(&ap, "fill", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;
@@ -5383,7 +6307,11 @@ fn install_array(it: &mut Interp) {
         let mut mapped = Vec::with_capacity(len);
         for k in 0..len {
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            mapped.push(ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?);
+            mapped.push(ab(i.call(
+                cb.clone(),
+                cb_this.clone(),
+                &[v, Value::Num(k as f64), this.clone()],
+            ))?);
         }
         let arr = i.make_array(mapped);
         let mut out = Vec::new();
@@ -5394,7 +6322,10 @@ fn install_array(it: &mut Interp) {
     it.def_method(&ap, "sort", 1, |i, this, args| {
         let cmp = arg(args, 0);
         if !matches!(cmp, Value::Undefined) && !cmp.is_callable() {
-            return Err(i.make_error("TypeError", "the comparator must be a function or undefined"));
+            return Err(i.make_error(
+                "TypeError",
+                "the comparator must be a function or undefined",
+            ));
         }
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
@@ -5436,7 +6367,11 @@ fn install_array(it: &mut Interp) {
         let items = collect_items(i, &this)?;
         let len = items.len() as i64;
         let rel = ab(i.to_number(&arg(args, 0)))?;
-        let idx = if rel < 0.0 { len + rel as i64 } else { rel as i64 };
+        let idx = if rel < 0.0 {
+            len + rel as i64
+        } else {
+            rel as i64
+        };
         if idx < 0 || idx >= len {
             return Err(i.make_error("RangeError", "invalid index"));
         }
@@ -5467,14 +6402,20 @@ fn install_array(it: &mut Interp) {
             acc = arg(args, 1);
         } else {
             if len == 0 {
-                return Err(i.make_error("TypeError", "reduce of empty array with no initial value"));
+                return Err(
+                    i.make_error("TypeError", "reduce of empty array with no initial value")
+                );
             }
             acc = ab(i.get_member(&this, &k.to_string()))?;
             k -= 1;
         }
         while k >= 0 {
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            acc = ab(i.call(cb.clone(), Value::Undefined, &[acc, v, Value::Num(k as f64), this.clone()]))?;
+            acc = ab(i.call(
+                cb.clone(),
+                Value::Undefined,
+                &[acc, v, Value::Num(k as f64), this.clone()],
+            ))?;
             k -= 1;
         }
         Ok(acc)
@@ -5519,8 +6460,15 @@ fn install_array(it: &mut Interp) {
     });
     // `arr[Symbol.iterator]` is `Array.prototype.values`.
     if let Some(sym) = it.iterator_sym.clone() {
-        let values_fn = ap.borrow().props.get("values").map(|p| p.value.clone()).unwrap();
-        ap.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(values_fn));
+        let values_fn = ap
+            .borrow()
+            .props
+            .get("values")
+            .map(|p| p.value.clone())
+            .unwrap();
+        ap.borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(values_fn));
     }
 
     let ctor = it.make_native("Array", 1, |i, _this, args| {
@@ -5535,14 +6483,21 @@ fn install_array(it: &mut Interp) {
         }
         Ok(i.make_array(args.to_vec()))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(ap.clone()), false, false, false));
-    ap.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(ap.clone()), false, false, false),
+    );
+    ap.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "isArray", 1, |i, _this, args| {
         // IsArray unwraps Proxies: a proxy of an array is an array (a revoked proxy throws).
         let mut v = arg(args, 0);
         loop {
             match &v {
-                Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => return Ok(Value::Bool(true)),
+                Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => {
+                    return Ok(Value::Bool(true))
+                }
                 Value::Obj(_) => match proxy_pair(i, &v) {
                     Some((target, _)) => v = target,
                     None => return Ok(Value::Bool(false)),
@@ -5551,7 +6506,9 @@ fn install_array(it: &mut Interp) {
             }
         }
     });
-    it.def_method(&ctor, "of", 0, |i, _this, args| Ok(i.make_array(args.to_vec())));
+    it.def_method(&ctor, "of", 0, |i, _this, args| {
+        Ok(i.make_array(args.to_vec()))
+    });
     it.def_method(&ctor, "from", 1, |i, this, args| {
         let source = arg(args, 0);
         let mapfn = arg(args, 1);
@@ -5626,15 +6583,28 @@ fn array_find(
     for step in 0..len {
         let k = if from_last { len - 1 - step } else { step };
         let v = ab(i.get_member(&this, &k.to_string()))?;
-        let r = ab(i.call(cb.clone(), cb_this.clone(), &[v.clone(), Value::Num(k as f64), this.clone()]))?;
+        let r = ab(i.call(
+            cb.clone(),
+            cb_this.clone(),
+            &[v.clone(), Value::Num(k as f64), this.clone()],
+        ))?;
         if i.to_boolean(&r) {
             return Ok(if want_value { v } else { Value::Num(k as f64) });
         }
     }
-    Ok(if want_value { Value::Undefined } else { Value::Num(-1.0) })
+    Ok(if want_value {
+        Value::Undefined
+    } else {
+        Value::Num(-1.0)
+    })
 }
 
-fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) -> Result<Value, Value> {
+fn array_some_every(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+    every: bool,
+) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
     let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
@@ -5647,7 +6617,11 @@ fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) ->
             continue; // skip holes
         }
         let v = ab(i.get_member(&this, &k.to_string()))?;
-        let r = ab(i.call(cb.clone(), cb_this.clone(), &[v, Value::Num(k as f64), this.clone()]))?;
+        let r = ab(i.call(
+            cb.clone(),
+            cb_this.clone(),
+            &[v, Value::Num(k as f64), this.clone()],
+        ))?;
         let b = i.to_boolean(&r);
         if every && !b {
             return Ok(Value::Bool(false));
@@ -5659,7 +6633,12 @@ fn array_some_every(i: &mut Interp, this: Value, args: &[Value], every: bool) ->
     Ok(Value::Bool(every))
 }
 
-fn array_flatten(i: &mut Interp, arr: &Value, depth: i64, out: &mut Vec<Value>) -> Result<(), Value> {
+fn array_flatten(
+    i: &mut Interp,
+    arr: &Value,
+    depth: i64,
+    out: &mut Vec<Value>,
+) -> Result<(), Value> {
     let o = match arr {
         Value::Obj(o) => o.clone(),
         _ => return Ok(()),
@@ -5686,7 +6665,11 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     } else {
         (ab(i.to_number(&arg(args, 1)))? as i64).clamp(0, len - start)
     };
-    let items: Vec<Value> = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
+    let items: Vec<Value> = if args.len() > 2 {
+        args[2..].to_vec()
+    } else {
+        Vec::new()
+    };
     let mut removed = Vec::with_capacity(delete_count.max(0) as usize);
     for k in 0..delete_count {
         removed.push(ab(i.get_member(&this, &(start + k).to_string()))?);
@@ -5775,14 +6758,27 @@ fn install_iterator(it: &mut Interp) {
     it.extra_protos.insert("%IteratorPrototype%", proto.clone());
     if let Some(sym) = it.iterator_sym.clone() {
         let f = it.make_native("[Symbol.iterator]", 0, return_this);
-        proto.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+        proto
+            .borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
     }
     // Iterator-helper methods on %IteratorPrototype%.
-    it.def_method(&proto, "map", 1, |i, t, a| make_iter_helper(i, t, "map", arg(a, 0)));
-    it.def_method(&proto, "filter", 1, |i, t, a| make_iter_helper(i, t, "filter", arg(a, 0)));
-    it.def_method(&proto, "take", 1, |i, t, a| make_iter_helper(i, t, "take", arg(a, 0)));
-    it.def_method(&proto, "drop", 1, |i, t, a| make_iter_helper(i, t, "drop", arg(a, 0)));
-    it.def_method(&proto, "flatMap", 1, |i, t, a| make_iter_helper(i, t, "flatMap", arg(a, 0)));
+    it.def_method(&proto, "map", 1, |i, t, a| {
+        make_iter_helper(i, t, "map", arg(a, 0))
+    });
+    it.def_method(&proto, "filter", 1, |i, t, a| {
+        make_iter_helper(i, t, "filter", arg(a, 0))
+    });
+    it.def_method(&proto, "take", 1, |i, t, a| {
+        make_iter_helper(i, t, "take", arg(a, 0))
+    });
+    it.def_method(&proto, "drop", 1, |i, t, a| {
+        make_iter_helper(i, t, "drop", arg(a, 0))
+    });
+    it.def_method(&proto, "flatMap", 1, |i, t, a| {
+        make_iter_helper(i, t, "flatMap", arg(a, 0))
+    });
     it.def_method(&proto, "toArray", 0, |i, this, _| {
         let mut out = Vec::new();
         while let Some(v) = step_iter(i, &this)? {
@@ -5793,7 +6789,10 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&proto, "forEach", 1, |i, this, a| {
         let f = arg(a, 0);
         if !f.is_callable() {
-            return Err(i.make_error("TypeError", "Iterator.prototype.forEach argument is not callable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Iterator.prototype.forEach argument is not callable",
+            ));
         }
         let mut k = 0.0;
         while let Some(v) = step_iter(i, &this)? {
@@ -5814,7 +6813,12 @@ fn install_iterator(it: &mut Interp) {
         } else {
             acc = match step_iter(i, &this)? {
                 Some(v) => v,
-                None => return Err(i.make_error("TypeError", "Reduce of empty iterator with no initial value")),
+                None => {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "Reduce of empty iterator with no initial value",
+                    ))
+                }
             };
             k = 1.0;
         }
@@ -5825,7 +6829,9 @@ fn install_iterator(it: &mut Interp) {
         Ok(acc)
     });
     it.def_method(&proto, "some", 1, |i, t, a| iter_some_every(i, t, a, true));
-    it.def_method(&proto, "every", 1, |i, t, a| iter_some_every(i, t, a, false));
+    it.def_method(&proto, "every", 1, |i, t, a| {
+        iter_some_every(i, t, a, false)
+    });
     it.def_method(&proto, "find", 1, |i, this, a| {
         let f = arg(a, 0);
         if !f.is_callable() {
@@ -5847,7 +6853,10 @@ fn install_iterator(it: &mut Interp) {
         // Abstract: `new Iterator()` (this === undefined) throws, but `super()` from a subclass
         // (this is the instance) is allowed.
         if matches!(t, Value::Undefined) {
-            return Err(i.make_error("TypeError", "Abstract class Iterator not directly constructable"));
+            return Err(i.make_error(
+                "TypeError",
+                "Abstract class Iterator not directly constructable",
+            ));
         }
         Ok(t)
     });
@@ -5858,8 +6867,14 @@ fn install_iterator(it: &mut Interp) {
         let (iter, _next) = ab(i.get_iterator(&v))?;
         Ok(iter)
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Iterator", Value::Obj(ctor));
 }
 
@@ -5905,7 +6920,8 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
             for (k, raw) in ab(i.iterate(&source))?.into_iter().enumerate() {
                 let mut v = ab(i.await_value(raw))?;
                 if mapfn.is_callable() {
-                    let mapped = ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
+                    let mapped =
+                        ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
                     v = ab(i.await_value(mapped))?;
                 }
                 out.push(v);
@@ -5916,13 +6932,17 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
                 let raw = ab(i.get_member(&source, &k.to_string()))?;
                 let mut v = ab(i.await_value(raw))?;
                 if mapfn.is_callable() {
-                    let mapped = ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
+                    let mapped =
+                        ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
                     v = ab(i.await_value(mapped))?;
                 }
                 out.push(v);
             }
         } else {
-            return Err(i.make_error("TypeError", "Array.fromAsync requires an iterable or array-like"));
+            return Err(i.make_error(
+                "TypeError",
+                "Array.fromAsync requires an iterable or array-like",
+            ));
         }
         Ok(i.make_array(out))
     })();
@@ -5991,7 +7011,9 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     i.def_method(&obj, "next", 0, iter_helper_next);
     if let Some(sym) = i.iterator_sym.clone() {
         let itf = i.make_native("[Symbol.iterator]", 0, return_this);
-        obj.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
+        obj.borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
     }
     Ok(Value::Obj(obj))
 }
@@ -6015,7 +7037,11 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
             None => Ok(iter_result(i, Value::Undefined, true)),
             Some(v) => {
                 let mv = ab(i.call(f, Value::Undefined, &[v, Value::Num(count)]))?;
-                set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(count + 1.0));
+                set_internal(
+                    this.as_obj().unwrap(),
+                    "__ih_count",
+                    Value::Num(count + 1.0),
+                );
                 Ok(iter_result(i, mv, false))
             }
         },
@@ -6025,7 +7051,8 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 match step_iter(i, &src)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
-                        let r = ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
+                        let r =
+                            ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
                         k += 1.0;
                         if i.to_boolean(&r) {
                             set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(k));
@@ -6042,7 +7069,11 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 i.iterator_close(&src);
                 return Ok(iter_result(i, Value::Undefined, true));
             }
-            set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(count + 1.0));
+            set_internal(
+                this.as_obj().unwrap(),
+                "__ih_count",
+                Value::Num(count + 1.0),
+            );
             match step_iter(i, &src)? {
                 None => Ok(iter_result(i, Value::Undefined, true)),
                 Some(v) => Ok(iter_result(i, v, false)),
@@ -6078,7 +7109,11 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                     let len = ab(i.to_number(&len_v))? as usize;
                     if bi < len {
                         let v = ab(i.get_member(&buf, &bi.to_string()))?;
-                        set_internal(this.as_obj().unwrap(), "__ih_bi", Value::Num((bi + 1) as f64));
+                        set_internal(
+                            this.as_obj().unwrap(),
+                            "__ih_bi",
+                            Value::Num((bi + 1) as f64),
+                        );
                         return Ok(iter_result(i, v, false));
                     }
                 }
@@ -6104,7 +7139,11 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
 /// Build an Array Iterator over `target`. `kind`: 0 = values, 1 = keys, 2 = [key, value] entries.
 /// State lives in non-enumerable internal slots so `next` can advance it.
 fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
-    let proto = i.extra_protos.get("%IteratorPrototype%").cloned().or_else(|| Some(i.object_proto.clone()));
+    let proto = i
+        .extra_protos
+        .get("%IteratorPrototype%")
+        .cloned()
+        .or_else(|| Some(i.object_proto.clone()));
     let obj = Object::new(proto);
     set_builtin(&obj, "__ai_target", target);
     set_builtin(&obj, "__ai_index", Value::Num(0.0));
@@ -6112,7 +7151,9 @@ fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
     i.def_method(&obj, "next", 0, array_iter_next);
     if let Some(sym) = i.iterator_sym.clone() {
         let f = i.make_native("[Symbol.iterator]", 0, return_this);
-        obj.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+        obj.borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
     }
     Value::Obj(obj)
 }
@@ -6121,7 +7162,11 @@ fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
 /// any stored error, then return `{ value: <return>, done: true }`.
 /// Drive a generator's coroutine with a resume signal, returning its `{value, done}` (or propagating
 /// a throw). The generators map doubles as the brand check.
-fn drive_generator(i: &mut Interp, this: &Value, signal: crate::coroutine::Resume) -> Result<Value, Value> {
+fn drive_generator(
+    i: &mut Interp,
+    this: &Value,
+    signal: crate::coroutine::Resume,
+) -> Result<Value, Value> {
     use crate::coroutine::{Resume, Suspend};
     let key = match this {
         Value::Obj(o) => Rc::as_ptr(o) as usize,
@@ -6151,16 +7196,32 @@ fn drive_generator(i: &mut Interp, this: &Value, signal: crate::coroutine::Resum
 
 /// Microtask reaction: the awaited promise fulfilled with `args[1]`; resume the async coroutine
 /// (whose result promise is `args[0]`, also the coroutine key).
-pub(crate) fn async_react_fulfil(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn async_react_fulfil(
+    i: &mut Interp,
+    _this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     if let Value::Obj(o) = arg(args, 0) {
-        i.drive_async(Rc::as_ptr(&o) as usize, arg(args, 0), crate::coroutine::Resume::Next(arg(args, 1)));
+        i.drive_async(
+            Rc::as_ptr(&o) as usize,
+            arg(args, 0),
+            crate::coroutine::Resume::Next(arg(args, 1)),
+        );
     }
     Ok(Value::Undefined)
 }
 /// Microtask reaction: the awaited promise rejected with `args[1]`; throw it at the suspended await.
-pub(crate) fn async_react_reject(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn async_react_reject(
+    i: &mut Interp,
+    _this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     if let Value::Obj(o) = arg(args, 0) {
-        i.drive_async(Rc::as_ptr(&o) as usize, arg(args, 0), crate::coroutine::Resume::Throw(arg(args, 1)));
+        i.drive_async(
+            Rc::as_ptr(&o) as usize,
+            arg(args, 0),
+            crate::coroutine::Resume::Throw(arg(args, 1)),
+        );
     }
     Ok(Value::Undefined)
 }
@@ -6170,7 +7231,11 @@ pub(crate) fn generator_next(i: &mut Interp, this: Value, args: &[Value]) -> Res
 }
 
 /// `gen.return(v)`: inject a return completion at the suspended `yield` (runs any `finally`).
-pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn generator_return(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     drive_generator(i, &this, crate::coroutine::Resume::Return(arg(args, 0)))
 }
 
@@ -6178,7 +7243,11 @@ pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> R
 pub(crate) fn generator_throw(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     drive_generator(i, &this, crate::coroutine::Resume::Throw(arg(args, 0)))
 }
-fn async_gen_drive(i: &mut Interp, this: &Value, signal: crate::coroutine::Resume) -> Result<Value, Value> {
+fn async_gen_drive(
+    i: &mut Interp,
+    this: &Value,
+    signal: crate::coroutine::Resume,
+) -> Result<Value, Value> {
     let r = i.new_promise();
     match this {
         Value::Obj(o) => i.drive_async_gen(Rc::as_ptr(o) as usize, r.clone(), signal),
@@ -6189,24 +7258,50 @@ fn async_gen_drive(i: &mut Interp, this: &Value, signal: crate::coroutine::Resum
     }
     Ok(r)
 }
-pub(crate) fn async_generator_next(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+pub(crate) fn async_generator_next(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
     async_gen_drive(i, &this, crate::coroutine::Resume::Next(arg(a, 0)))
 }
-pub(crate) fn async_generator_return(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+pub(crate) fn async_generator_return(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
     async_gen_drive(i, &this, crate::coroutine::Resume::Return(arg(a, 0)))
 }
-pub(crate) fn async_generator_throw(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+pub(crate) fn async_generator_throw(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
     async_gen_drive(i, &this, crate::coroutine::Resume::Throw(arg(a, 0)))
 }
 /// Microtask reactions that re-drive an async generator when an awaited value settles. `args` is
 /// `[keyMarker, resultPromise, settledValue]`.
-pub(crate) fn async_gen_react_fulfil(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    let key = match arg(a, 0) { Value::Num(n) => n as usize, _ => return Ok(Value::Undefined) };
+pub(crate) fn async_gen_react_fulfil(
+    i: &mut Interp,
+    _t: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
+    let key = match arg(a, 0) {
+        Value::Num(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
     i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Next(arg(a, 2)));
     Ok(Value::Undefined)
 }
-pub(crate) fn async_gen_react_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    let key = match arg(a, 0) { Value::Num(n) => n as usize, _ => return Ok(Value::Undefined) };
+pub(crate) fn async_gen_react_reject(
+    i: &mut Interp,
+    _t: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
+    let key = match arg(a, 0) {
+        Value::Num(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
     i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
     Ok(Value::Undefined)
 }
@@ -6282,9 +7377,10 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
             _ => ab(i.to_string(this)),
         },
         // String.prototype methods RequireObjectCoercible(this): null/undefined → TypeError.
-        Value::Undefined | Value::Null => {
-            Err(i.make_error("TypeError", "String.prototype method called on null or undefined"))
-        }
+        Value::Undefined | Value::Null => Err(i.make_error(
+            "TypeError",
+            "String.prototype method called on null or undefined",
+        )),
         _ => ab(i.to_string(this)),
     }
 }
@@ -6295,16 +7391,25 @@ fn install_string(it: &mut Interp) {
     if let Some(sym) = it.iterator_sym.clone() {
         let f = it.make_native("[Symbol.iterator]", 0, |i, this, _| {
             let s = this_string(i, &this)?;
-            let chars: Vec<Value> = s.chars().map(|c| Value::from_string(c.to_string())).collect();
+            let chars: Vec<Value> = s
+                .chars()
+                .map(|c| Value::from_string(c.to_string()))
+                .collect();
             let arr = i.make_array(chars);
             let key = Interp::sym_key(i.iterator_sym.as_ref().unwrap());
             let itfn = ab(i.get_member(&arr, &key))?;
             ab(i.call(itfn, arr, &[]))
         });
-        sp.borrow_mut().props.insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
+        sp.borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
     }
-    it.def_method(&sp, "toString", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
-    it.def_method(&sp, "valueOf", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
+    it.def_method(&sp, "toString", 0, |i, this, _| {
+        Ok(Value::Str(this_string(i, &this)?))
+    });
+    it.def_method(&sp, "valueOf", 0, |i, this, _| {
+        Ok(Value::Str(this_string(i, &this)?))
+    });
     it.def_method(&sp, "charAt", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let idx = ab(i.to_number(&arg(args, 0)))? as i64;
@@ -6339,7 +7444,11 @@ fn install_string(it: &mut Interp) {
             Value::Undefined => chars.len(),
             v => {
                 let p = ab(i.to_number(&v))?;
-                if p.is_nan() { chars.len() } else { (p.max(0.0) as usize).min(chars.len()) }
+                if p.is_nan() {
+                    chars.len()
+                } else {
+                    (p.max(0.0) as usize).min(chars.len())
+                }
             }
         };
         let mut found = -1.0;
@@ -6401,7 +7510,9 @@ fn install_string(it: &mut Interp) {
         if a > b {
             std::mem::swap(&mut a, &mut b);
         }
-        Ok(Value::from_string(chars[a as usize..b as usize].iter().collect::<String>()))
+        Ok(Value::from_string(
+            chars[a as usize..b as usize].iter().collect::<String>(),
+        ))
     });
     it.def_method(&sp, "toUpperCase", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.to_uppercase()))
@@ -6414,9 +7525,13 @@ fn install_string(it: &mut Interp) {
         this_string(i, &this)?;
         Ok(Value::Bool(true))
     });
-    it.def_method(&sp, "toWellFormed", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
+    it.def_method(&sp, "toWellFormed", 0, |i, this, _| {
+        Ok(Value::Str(this_string(i, &this)?))
+    });
     it.def_method(&sp, "trim", 0, |i, this, _| {
-        Ok(Value::from_string(this_string(i, &this)?.trim().to_string()))
+        Ok(Value::from_string(
+            this_string(i, &this)?.trim().to_string(),
+        ))
     });
     it.def_method(&sp, "localeCompare", 1, |i, this, args| {
         let a = this_string(i, &this)?;
@@ -6427,7 +7542,9 @@ fn install_string(it: &mut Interp) {
             std::cmp::Ordering::Greater => 1.0,
         }))
     });
-    it.def_method(&sp, "toLocaleString", 0, |i, this, _| Ok(Value::Str(this_string(i, &this)?)));
+    it.def_method(&sp, "toLocaleString", 0, |i, this, _| {
+        Ok(Value::Str(this_string(i, &this)?))
+    });
     it.def_method(&sp, "concat", 1, |i, this, args| {
         let mut s = this_string(i, &this)?.to_string();
         for a in args {
@@ -6479,13 +7596,17 @@ fn install_string(it: &mut Interp) {
                     if a == b && (b == 0 || a >= chars.len()) {
                         continue;
                     }
-                    parts.push(Value::from_string(chars[last..a].iter().collect::<String>()));
+                    parts.push(Value::from_string(
+                        chars[last..a].iter().collect::<String>(),
+                    ));
                     if parts.len() >= limit {
                         break;
                     }
                     for g in 1..=re.ngroups {
                         parts.push(match caps[g] {
-                            Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
+                            Some((x, y)) => {
+                                Value::from_string(chars[x..y].iter().collect::<String>())
+                            }
                             None => Value::Undefined,
                         });
                         if parts.len() >= limit {
@@ -6506,9 +7627,13 @@ fn install_string(it: &mut Interp) {
             sep => {
                 let sep = ab(i.to_string(&sep))?;
                 let mut parts: Vec<Value> = if sep.is_empty() {
-                    s.chars().map(|c| Value::from_string(c.to_string())).collect()
+                    s.chars()
+                        .map(|c| Value::from_string(c.to_string()))
+                        .collect()
                 } else {
-                    s.split(sep.as_ref()).map(|p| Value::from_string(p.to_string())).collect()
+                    s.split(sep.as_ref())
+                        .map(|p| Value::from_string(p.to_string()))
+                        .collect()
                 };
                 parts.truncate(limit);
                 Ok(i.make_array(parts))
@@ -6538,13 +7663,21 @@ fn install_string(it: &mut Interp) {
         })
     });
     it.def_method(&sp, "trimStart", 0, |i, this, _| {
-        Ok(Value::from_string(this_string(i, &this)?.trim_start().to_string()))
+        Ok(Value::from_string(
+            this_string(i, &this)?.trim_start().to_string(),
+        ))
     });
     it.def_method(&sp, "trimEnd", 0, |i, this, _| {
-        Ok(Value::from_string(this_string(i, &this)?.trim_end().to_string()))
+        Ok(Value::from_string(
+            this_string(i, &this)?.trim_end().to_string(),
+        ))
     });
-    it.def_method(&sp, "padStart", 1, |i, this, args| string_pad(i, this, args, true));
-    it.def_method(&sp, "padEnd", 1, |i, this, args| string_pad(i, this, args, false));
+    it.def_method(&sp, "padStart", 1, |i, this, args| {
+        string_pad(i, this, args, true)
+    });
+    it.def_method(&sp, "padEnd", 1, |i, this, args| {
+        string_pad(i, this, args, false)
+    });
     it.def_method(&sp, "match", 1, |i, this, a| {
         let s = this_string(i, &this)?;
         let re_obj = coerce_regexp(i, arg(a, 0))?;
@@ -6619,7 +7752,12 @@ fn install_string(it: &mut Interp) {
             Some(pos) => {
                 let matched = &s[pos..pos + pat.len()];
                 let rep = string_replacement(i, &repl, matched, &s, pos)?;
-                Ok(Value::from_string(format!("{}{}{}", &s[..pos], rep, &s[pos + pat.len()..])))
+                Ok(Value::from_string(format!(
+                    "{}{}{}",
+                    &s[..pos],
+                    rep,
+                    &s[pos + pat.len()..]
+                )))
             }
         }
     });
@@ -6633,7 +7771,10 @@ fn install_string(it: &mut Interp) {
         match regex_global {
             Some(true) => return regex_replace(i, &s, &arg(args, 0), &arg(args, 1)),
             Some(false) => {
-                return Err(i.make_error("TypeError", "replaceAll must be called with a global RegExp"));
+                return Err(i.make_error(
+                    "TypeError",
+                    "replaceAll must be called with a global RegExp",
+                ));
             }
             None => {}
         }
@@ -6661,15 +7802,21 @@ fn install_string(it: &mut Interp) {
             None => Value::str(""),
             // `String(sym)` stringifies a symbol to its descriptive string; `new String(sym)`
             // instead throws (via ToString below).
-            Some(Value::Sym(s)) if !i.constructing => {
-                Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or("")))
-            }
+            Some(Value::Sym(s)) if !i.constructing => Value::from_string(format!(
+                "Symbol({})",
+                s.description.as_deref().unwrap_or("")
+            )),
             Some(v) => Value::Str(ab(i.to_string(v))?),
         };
         Ok(maybe_box(i, s))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(sp.clone()), false, false, false));
-    sp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(sp.clone()), false, false, false),
+    );
+    sp.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "fromCharCode", 1, |i, _this, args| {
         let mut s = String::new();
         for a in args {
@@ -6681,7 +7828,8 @@ fn install_string(it: &mut Interp) {
     it.def_method(&ctor, "raw", 1, |i, _this, args| {
         let template = arg(args, 0);
         let raw = ab(i.get_member(&template, "raw"))?;
-        let raw_obj = this_obj(&raw).ok_or_else(|| i.make_error("TypeError", "raw is not an object"))?;
+        let raw_obj =
+            this_obj(&raw).ok_or_else(|| i.make_error("TypeError", "raw is not an object"))?;
         let len = ab(i.to_length(&raw_obj))?;
         let mut out = String::new();
         for k in 0..len {
@@ -6732,7 +7880,10 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
                 Property::data(Value::from_string(ch.to_string()), false, true, false),
             );
         }
-        b.props.insert("length", Property::data(Value::Num(chars.len() as f64), false, false, false));
+        b.props.insert(
+            "length",
+            Property::data(Value::Num(chars.len() as f64), false, false, false),
+        );
     }
     obj.borrow_mut().exotic = exotic;
     Value::Obj(obj)
@@ -6771,7 +7922,11 @@ fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Re
         fill.push(c);
     }
     let fill: String = fill.chars().take(need).collect();
-    Ok(Value::from_string(if at_start { format!("{fill}{s}") } else { format!("{s}{fill}") }))
+    Ok(Value::from_string(if at_start {
+        format!("{fill}{s}")
+    } else {
+        format!("{s}{fill}")
+    }))
 }
 
 /// Compute the replacement text for String.prototype.replace/replaceAll. A function replacer is
@@ -6787,7 +7942,11 @@ fn string_replacement(
         let r = ab(i.call(
             repl.clone(),
             Value::Undefined,
-            &[Value::from_string(matched.to_string()), Value::Num(pos as f64), Value::from_string(whole.to_string())],
+            &[
+                Value::from_string(matched.to_string()),
+                Value::Num(pos as f64),
+                Value::from_string(whole.to_string()),
+            ],
         ))?;
         Ok(ab(i.to_string(&r))?.to_string())
     } else {
@@ -6857,7 +8016,9 @@ fn install_number(it: &mut Interp) {
             Ok(Value::from_string(to_radix_string(n, radix as u32)))
         }
     });
-    it.def_method(&np, "valueOf", 0, |i, this, _| Ok(Value::Num(this_number(i, &this)?)));
+    it.def_method(&np, "valueOf", 0, |i, this, _| {
+        Ok(Value::Num(this_number(i, &this)?))
+    });
     it.def_method(&np, "toExponential", 1, |i, this, args| {
         let n = this_number(i, &this)?;
         let s = match arg(args, 0) {
@@ -6868,7 +8029,9 @@ fn install_number(it: &mut Interp) {
             }
         };
         // Rust prints `1e2`; JS wants `1e+2`.
-        Ok(Value::from_string(s.replace('e', "e+").replace("e+-", "e-")))
+        Ok(Value::from_string(
+            s.replace('e', "e+").replace("e+-", "e-"),
+        ))
     });
     it.def_method(&np, "toPrecision", 1, |i, this, args| {
         let n = this_number(i, &this)?;
@@ -6883,7 +8046,10 @@ fn install_number(it: &mut Interp) {
             return Ok(Value::from_string(i.num_to_str(n)));
         }
         if !(1.0..=100.0).contains(&p) {
-            return Err(i.make_error("RangeError", "toPrecision() argument must be between 1 and 100"));
+            return Err(i.make_error(
+                "RangeError",
+                "toPrecision() argument must be between 1 and 100",
+            ));
         }
         Ok(Value::from_string(to_precision(n, p as usize)))
     });
@@ -6892,7 +8058,10 @@ fn install_number(it: &mut Interp) {
         let d = ab(i.to_number(&arg(args, 0)))?;
         // Spec: fractionDigits in 0..=100, else RangeError (also guards a giant `format!`).
         if !(0.0..=100.0).contains(&d) {
-            return Err(i.make_error("RangeError", "toFixed() digits argument must be between 0 and 100"));
+            return Err(i.make_error(
+                "RangeError",
+                "toFixed() digits argument must be between 0 and 100",
+            ));
         }
         if n.is_nan() {
             return Ok(Value::str("NaN"));
@@ -6904,7 +8073,11 @@ fn install_number(it: &mut Interp) {
         let digits = d as usize;
         // The sign is `-` only for a strictly-negative value (not -0), and the magnitude is rounded.
         let body = format!("{:.*}", digits, n.abs());
-        Ok(Value::from_string(if n < 0.0 { format!("-{body}") } else { body }))
+        Ok(Value::from_string(if n < 0.0 {
+            format!("-{body}")
+        } else {
+            body
+        }))
     });
 
     let ctor = it.make_native("Number", 1, |i, _this, args| {
@@ -6916,8 +8089,13 @@ fn install_number(it: &mut Interp) {
         };
         Ok(maybe_box(i, Value::Num(n)))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(np.clone()), false, false, false));
-    np.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(np.clone()), false, false, false),
+    );
+    np.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&ctor, "MAX_SAFE_INTEGER", Value::Num(9007199254740991.0));
     set_builtin(&ctor, "MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
     set_builtin(&ctor, "MAX_VALUE", Value::Num(f64::MAX));
@@ -6927,10 +8105,14 @@ fn install_number(it: &mut Interp) {
     set_builtin(&ctor, "NaN", Value::Num(f64::NAN));
     set_builtin(&ctor, "EPSILON", Value::Num(f64::EPSILON));
     it.def_method(&ctor, "isNaN", 1, |_i, _this, args| {
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Num(n) if n.is_nan())))
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Num(n) if n.is_nan()),
+        ))
     });
     it.def_method(&ctor, "isFinite", 1, |_i, _this, args| {
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Num(n) if n.is_finite())))
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Num(n) if n.is_finite()),
+        ))
     });
     it.def_method(&ctor, "isSafeInteger", 1, |_i, _this, args| {
         Ok(Value::Bool(
@@ -6938,7 +8120,9 @@ fn install_number(it: &mut Interp) {
         ))
     });
     it.def_method(&ctor, "isInteger", 1, |_i, _this, args| {
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Num(n) if n.is_finite() && n.fract() == 0.0)))
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Num(n) if n.is_finite() && n.fract() == 0.0),
+        ))
     });
     set_builtin(&it.global, "Number", Value::Obj(ctor));
 }
@@ -6991,15 +8175,26 @@ fn to_radix_string(n: f64, radix: u32) -> String {
 fn install_boolean(it: &mut Interp) {
     let bp = it.boolean_proto.clone();
     it.def_method(&bp, "toString", 0, |i, this, _| {
-        Ok(Value::str(if this_boolean(i, &this)? { "true" } else { "false" }))
+        Ok(Value::str(if this_boolean(i, &this)? {
+            "true"
+        } else {
+            "false"
+        }))
     });
-    it.def_method(&bp, "valueOf", 0, |i, this, _| Ok(Value::Bool(this_boolean(i, &this)?)));
+    it.def_method(&bp, "valueOf", 0, |i, this, _| {
+        Ok(Value::Bool(this_boolean(i, &this)?))
+    });
     let ctor = it.make_native("Boolean", 1, |i, _this, args| {
         let b = Value::Bool(i.to_boolean(&arg(args, 0)));
         Ok(maybe_box(i, b))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(bp.clone()), false, false, false));
-    bp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(bp.clone()), false, false, false),
+    );
+    bp.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Boolean", Value::Obj(ctor));
 }
 
@@ -7009,18 +8204,25 @@ fn this_boolean(i: &mut Interp, this: &Value) -> Result<bool, Value> {
         Value::Bool(b) => Ok(*b),
         Value::Obj(o) => match o.borrow().exotic {
             Exotic::BoolWrap(b) => Ok(b),
-            _ => Err(i.make_error("TypeError", "Boolean method called on incompatible receiver")),
+            _ => Err(i.make_error(
+                "TypeError",
+                "Boolean method called on incompatible receiver",
+            )),
         },
-        _ => Err(i.make_error("TypeError", "Boolean method called on incompatible receiver")),
+        _ => Err(i.make_error(
+            "TypeError",
+            "Boolean method called on incompatible receiver",
+        )),
     }
 }
 
 fn install_symbol(it: &mut Interp) {
     let sp = it.symbol_proto.clone();
     it.def_method(&sp, "toString", 0, |i, this, _| match &this {
-        Value::Sym(s) => {
-            Ok(Value::from_string(format!("Symbol({})", s.description.as_deref().unwrap_or(""))))
-        }
+        Value::Sym(s) => Ok(Value::from_string(format!(
+            "Symbol({})",
+            s.description.as_deref().unwrap_or("")
+        ))),
         _ => Err(i.make_error("TypeError", "Symbol.prototype.toString requires a symbol")),
     });
     it.def_method(&sp, "valueOf", 0, |i, this, _| match this {
@@ -7029,10 +8231,15 @@ fn install_symbol(it: &mut Interp) {
     });
 
     let desc_getter = it.make_native("get description", 0, |i, this, _| match &this {
-        Value::Sym(s) => {
-            Ok(s.description.as_deref().map(|d| Value::from_string(d.to_string())).unwrap_or(Value::Undefined))
-        }
-        _ => Err(i.make_error("TypeError", "Symbol.prototype.description requires a symbol")),
+        Value::Sym(s) => Ok(s
+            .description
+            .as_deref()
+            .map(|d| Value::from_string(d.to_string()))
+            .unwrap_or(Value::Undefined)),
+        _ => Err(i.make_error(
+            "TypeError",
+            "Symbol.prototype.description requires a symbol",
+        )),
     });
     sp.borrow_mut().props.insert(
         "description",
@@ -7057,14 +8264,32 @@ fn install_symbol(it: &mut Interp) {
         };
         Ok(i.new_symbol(desc))
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(sp.clone()), false, false, false));
-    sp.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(sp.clone()), false, false, false),
+    );
+    sp.borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
 
     // Well-known symbols (each a unique, frozen instance on the constructor).
     for name in [
-        "iterator", "asyncIterator", "hasInstance", "isConcatSpreadable", "match", "matchAll",
-        "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables",
-        "dispose", "asyncDispose", "metadata",
+        "iterator",
+        "asyncIterator",
+        "hasInstance",
+        "isConcatSpreadable",
+        "match",
+        "matchAll",
+        "replace",
+        "search",
+        "species",
+        "split",
+        "toPrimitive",
+        "toStringTag",
+        "unscopables",
+        "dispose",
+        "asyncDispose",
+        "metadata",
     ] {
         let sym = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
         if name == "iterator" {
@@ -7072,7 +8297,9 @@ fn install_symbol(it: &mut Interp) {
                 it.iterator_sym = Some(d.clone());
             }
         }
-        ctor.borrow_mut().props.insert(name, Property::data(sym, false, false, false));
+        ctor.borrow_mut()
+            .props
+            .insert(name, Property::data(sym, false, false, false));
     }
 
     it.def_method(&ctor, "for", 1, |i, _this, args| {
@@ -7128,7 +8355,9 @@ fn install_bigint(it: &mut Interp) {
     it.def_method(&proto, "toString", 1, |i, this, a| {
         let n = match this {
             Value::BigInt(n) => n,
-            _ => return Err(i.make_error("TypeError", "BigInt.prototype.toString requires a BigInt")),
+            _ => {
+                return Err(i.make_error("TypeError", "BigInt.prototype.toString requires a BigInt"))
+            }
         };
         let radix = match arg(a, 0) {
             Value::Undefined => 10,
@@ -7145,27 +8374,33 @@ fn install_bigint(it: &mut Interp) {
             return Err(i.make_error("TypeError", "BigInt is not a constructor"));
         }
         match arg(a, 0) {
-        Value::BigInt(n) => Ok(Value::BigInt(n)),
-        Value::Num(n) => {
-            if n.is_finite() && n.fract() == 0.0 {
-                Ok(Value::BigInt(n as i128))
-            } else {
-                Err(i.make_error("RangeError", "The number is not a safe integer"))
+            Value::BigInt(n) => Ok(Value::BigInt(n)),
+            Value::Num(n) => {
+                if n.is_finite() && n.fract() == 0.0 {
+                    Ok(Value::BigInt(n as i128))
+                } else {
+                    Err(i.make_error("RangeError", "The number is not a safe integer"))
+                }
             }
-        }
-        Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
-        Value::Str(s) => {
-            let t = s.trim();
-            let t = if t.is_empty() { "0" } else { t };
-            t.parse::<i128>()
-                .map(Value::BigInt)
-                .map_err(|_| i.make_error("SyntaxError", "Cannot convert string to a BigInt"))
-        }
-        _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
+            Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
+            Value::Str(s) => {
+                let t = s.trim();
+                let t = if t.is_empty() { "0" } else { t };
+                t.parse::<i128>()
+                    .map(Value::BigInt)
+                    .map_err(|_| i.make_error("SyntaxError", "Cannot convert string to a BigInt"))
+            }
+            _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
         }
     });
-    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto.clone()), false, false, false),
+    );
+    proto
+        .borrow_mut()
+        .props
+        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "asIntN", 2, |i, _t, a| {
         let bits = ab(i.to_number(&arg(a, 0)))? as u32;
         let n = match arg(a, 1) {
@@ -7224,7 +8459,11 @@ fn install_math(it: &mut Interp) {
     unary!("trunc", f64::trunc);
     unary!("sqrt", f64::sqrt);
     unary!("cbrt", f64::cbrt);
-    unary!("sign", |x: f64| if x.is_nan() || x == 0.0 { x } else { x.signum() });
+    unary!("sign", |x: f64| if x.is_nan() || x == 0.0 {
+        x
+    } else {
+        x.signum()
+    });
     unary!("expm1", f64::exp_m1);
     unary!("log1p", f64::ln_1p);
     unary!("sinh", f64::sinh);
@@ -7234,7 +8473,10 @@ fn install_math(it: &mut Interp) {
     unary!("acosh", f64::acosh);
     unary!("atanh", f64::atanh);
     unary!("fround", |x: f64| x as f32 as f64);
-    unary!("f16round", |x: f64| crate::value::f16_to_f32(crate::value::f32_to_f16(x as f32)) as f64);
+    unary!(
+        "f16round",
+        |x: f64| crate::value::f16_to_f32(crate::value::f32_to_f16(x as f32)) as f64
+    );
     unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
     it.def_method(&math, "hypot", 2, |i, _t, a| {
         let mut sum = 0.0;
@@ -7249,7 +8491,9 @@ fn install_math(it: &mut Interp) {
         let y = to_uint32(ab(i.to_number(&arg(a, 1)))?) as i32;
         Ok(Value::Num(x.wrapping_mul(y) as f64))
     });
-    it.def_method(&math, "random", 0, |_i, _t, _a| Ok(Value::Num(next_random())));
+    it.def_method(&math, "random", 0, |_i, _t, _a| {
+        Ok(Value::Num(next_random()))
+    });
     unary!("log", f64::ln);
     unary!("log2", f64::log2);
     unary!("log10", f64::log10);
@@ -7261,10 +8505,14 @@ fn install_math(it: &mut Interp) {
     unary!("asin", f64::asin);
     unary!("acos", f64::acos);
     it.def_method(&math, "pow", 2, |i, _t, a| {
-        Ok(Value::Num(ab(i.to_number(&arg(a, 0)))?.powf(ab(i.to_number(&arg(a, 1)))?)))
+        Ok(Value::Num(
+            ab(i.to_number(&arg(a, 0)))?.powf(ab(i.to_number(&arg(a, 1)))?),
+        ))
     });
     it.def_method(&math, "atan2", 2, |i, _t, a| {
-        Ok(Value::Num(ab(i.to_number(&arg(a, 0)))?.atan2(ab(i.to_number(&arg(a, 1)))?)))
+        Ok(Value::Num(
+            ab(i.to_number(&arg(a, 0)))?.atan2(ab(i.to_number(&arg(a, 1)))?),
+        ))
     });
     it.def_method(&math, "max", 2, |i, _t, a| {
         let mut m = f64::NEG_INFINITY;
@@ -7298,7 +8546,15 @@ fn install_math(it: &mut Interp) {
 
 fn install_errors(it: &mut Interp) {
     // Base Error first (its prototype's proto is Object.prototype).
-    let names = ["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError"];
+    let names = [
+        "Error",
+        "TypeError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "EvalError",
+        "URIError",
+    ];
     // Create Error.prototype.
     let error_proto = Object::new(Some(it.object_proto.clone()));
     set_builtin(&error_proto, "name", Value::str("Error"));
@@ -7344,8 +8600,14 @@ fn install_errors(it: &mut Interp) {
             _ => unreachable!(),
         };
         let ctor = it.make_native(name, 1, ctor_fn);
-        ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
-        proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+        ctor.borrow_mut().props.insert(
+            "prototype",
+            Property::data(Value::Obj(proto.clone()), false, false, false),
+        );
+        proto
+            .borrow_mut()
+            .props
+            .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&it.global, name, Value::Obj(ctor));
     }
 
@@ -7369,8 +8631,14 @@ fn install_errors(it: &mut Interp) {
         install_error_cause(i, &err, a.get(2));
         Ok(err)
     });
-    agg_ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(agg_proto.clone()), false, false, false));
-    agg_proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(agg_ctor.clone())));
+    agg_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(agg_proto.clone()), false, false, false),
+    );
+    agg_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::builtin(Value::Obj(agg_ctor.clone())),
+    );
     set_builtin(&it.global, "AggregateError", Value::Obj(agg_ctor));
 }
 
@@ -7394,7 +8662,9 @@ fn install_error_cause(i: &mut Interp, err: &Value, options: Option<&Value>) {
         if i.has_property(o, "cause") {
             if let Ok(cause) = i.get_member(opts, "cause") {
                 if let Some(e) = err.as_obj() {
-                    e.borrow_mut().props.insert("cause", Property::data(cause, true, false, true));
+                    e.borrow_mut()
+                        .props
+                        .insert("cause", Property::data(cause, true, false, true));
                 }
             }
         }
@@ -7421,12 +8691,32 @@ fn install_globals(it: &mut Interp) {
         Ok(Value::Num(parse_float(&s)))
     });
     // Number.parseInt / Number.parseFloat are the same functions as the globals.
-    if let Some(num) = it.global.borrow().props.get("Number").map(|p| p.value.clone()) {
-        let pi = it.global.borrow().props.get("parseInt").map(|p| p.value.clone());
-        let pf = it.global.borrow().props.get("parseFloat").map(|p| p.value.clone());
+    if let Some(num) = it
+        .global
+        .borrow()
+        .props
+        .get("Number")
+        .map(|p| p.value.clone())
+    {
+        let pi = it
+            .global
+            .borrow()
+            .props
+            .get("parseInt")
+            .map(|p| p.value.clone());
+        let pf = it
+            .global
+            .borrow()
+            .props
+            .get("parseFloat")
+            .map(|p| p.value.clone());
         if let (Value::Obj(n), Some(pi), Some(pf)) = (num, pi, pf) {
-            n.borrow_mut().props.insert("parseInt", Property::builtin(pi));
-            n.borrow_mut().props.insert("parseFloat", Property::builtin(pf));
+            n.borrow_mut()
+                .props
+                .insert("parseInt", Property::builtin(pi));
+            n.borrow_mut()
+                .props
+                .insert("parseFloat", Property::builtin(pf));
         }
     }
     global_fn(it, "isNaN", 1, |i, _t, a| {
@@ -7463,12 +8753,18 @@ fn install_globals(it: &mut Interp) {
         while k < chars.len() {
             if chars[k] == '%' {
                 if k + 5 < chars.len() + 1 && chars.get(k + 1) == Some(&'u') {
-                    if let Some(h) = chars.get(k + 2..k + 6).and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok()) {
+                    if let Some(h) = chars
+                        .get(k + 2..k + 6)
+                        .and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok())
+                    {
                         units.push(h);
                         k += 6;
                         continue;
                     }
-                } else if let Some(h) = chars.get(k + 1..k + 3).and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok()) {
+                } else if let Some(h) = chars
+                    .get(k + 1..k + 3)
+                    .and_then(|s| u16::from_str_radix(&s.iter().collect::<String>(), 16).ok())
+                {
                     units.push(h);
                     k += 3;
                     continue;
@@ -7480,10 +8776,16 @@ fn install_globals(it: &mut Interp) {
         Ok(Value::from_string(String::from_utf16_lossy(&units)))
     });
     global_fn(it, "encodeURIComponent", 1, |i, _t, a| {
-        Ok(Value::from_string(uri_encode(&ab(i.to_string(&arg(a, 0)))?, "")))
+        Ok(Value::from_string(uri_encode(
+            &ab(i.to_string(&arg(a, 0)))?,
+            "",
+        )))
     });
     global_fn(it, "encodeURI", 1, |i, _t, a| {
-        Ok(Value::from_string(uri_encode(&ab(i.to_string(&arg(a, 0)))?, ";,/?:@&=+$#")))
+        Ok(Value::from_string(uri_encode(
+            &ab(i.to_string(&arg(a, 0)))?,
+            ";,/?:@&=+$#",
+        )))
     });
     global_fn(it, "decodeURIComponent", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
@@ -7517,8 +8819,10 @@ fn install_globals(it: &mut Interp) {
 fn install_console(it: &mut Interp) {
     let console = it.new_object();
     let log: NativeFn = |i, _t, a| {
-        let parts: Result<Vec<String>, Value> =
-            a.iter().map(|v| ab(i.to_string(v)).map(|s| s.to_string())).collect();
+        let parts: Result<Vec<String>, Value> = a
+            .iter()
+            .map(|v| ab(i.to_string(v)).map(|s| s.to_string()))
+            .collect();
         i.console.push(parts?.join(" "));
         Ok(Value::Undefined)
     };
@@ -7584,7 +8888,9 @@ fn parse_float(s: &str) -> f64 {
             seen_dot = true;
         } else if (c == 'e' || c == 'E') && !seen_e && end > 0 {
             seen_e = true;
-        } else if (c == '+' || c == '-') && (end == 0 || matches!(bytes[end - 1] as char, 'e' | 'E')) {
+        } else if (c == '+' || c == '-')
+            && (end == 0 || matches!(bytes[end - 1] as char, 'e' | 'E'))
+        {
         } else {
             break;
         }

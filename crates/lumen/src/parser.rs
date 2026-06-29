@@ -14,8 +14,29 @@ pub struct ParseError {
 /// Parse a complete script. `strict` seeds strict mode (e.g. for the strict test262 variant); a
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
-    let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, module: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
+    let tokens = tokenize(src).map_err(|e| ParseError {
+        message: e.message,
+        line: e.line,
+    })?;
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        strict,
+        depth: 0,
+        in_generator: false,
+        in_async: false,
+        no_in: false,
+        module: false,
+        fn_depth: 0,
+        iter_depth: 0,
+        switch_depth: 0,
+        labels: Vec::new(),
+        decl_scopes: vec![DeclScope {
+            fn_boundary: true,
+            ..Default::default()
+        }],
+        next_scope_is_fn_boundary: false,
+    };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -26,8 +47,29 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
 /// Parse a module (always strict; `import`/`export` are allowed only here). Modules permit top-level
 /// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
-    let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
+    let tokens = tokenize(src).map_err(|e| ParseError {
+        message: e.message,
+        line: e.line,
+    })?;
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        strict: true,
+        depth: 0,
+        in_generator: false,
+        in_async: true,
+        no_in: false,
+        module: true,
+        fn_depth: 0,
+        iter_depth: 0,
+        switch_depth: 0,
+        labels: Vec::new(),
+        decl_scopes: vec![DeclScope {
+            fn_boundary: true,
+            ..Default::default()
+        }],
+        next_scope_is_fn_boundary: false,
+    };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
     validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
@@ -60,7 +102,9 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
                     collect_top_decl(inner, &mut lexical, &mut vars);
                 }
             }
-            Stmt::ExportAll { exported: Some(n), .. } => exported.push(n.clone()),
+            Stmt::ExportAll {
+                exported: Some(n), ..
+            } => exported.push(n.clone()),
             Stmt::ExportNamed { specs, source } => {
                 for s in specs {
                     exported.push(s.exported.clone());
@@ -82,7 +126,10 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
     }
 
     if let Some(dup) = first_duplicate(&exported) {
-        return Err(ParseError { message: format!("duplicate export name '{dup}'"), line: 0 });
+        return Err(ParseError {
+            message: format!("duplicate export name '{dup}'"),
+            line: 0,
+        });
     }
     if let Some(dup) = first_duplicate(&lexical) {
         return Err(ParseError {
@@ -137,7 +184,10 @@ fn decl_bound_names(stmt: &Stmt, out: &mut Vec<String>) {
 /// Partition a top-level declaration's bound names into lexical (let/const/class/function) vs var.
 fn collect_top_decl(stmt: &Stmt, lexical: &mut Vec<String>, vars: &mut Vec<String>) {
     match stmt {
-        Stmt::VarDecl { kind: DeclKind::Var, decls } => {
+        Stmt::VarDecl {
+            kind: DeclKind::Var,
+            decls,
+        } => {
             for (pat, _) in decls {
                 pattern_names(pat, vars);
             }
@@ -214,7 +264,10 @@ impl Parser {
         t
     }
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, ParseError> {
-        Err(ParseError { message: msg.into(), line: self.line() })
+        Err(ParseError {
+            message: msg.into(),
+            line: self.line(),
+        })
     }
 
     fn is_punct(&self, p: &str) -> bool {
@@ -262,7 +315,12 @@ impl Parser {
     /// Register a function declaration's name. In a *block*, a generator/async-function declaration is
     /// a lexical binding (so it conflicts on redeclaration); a plain function keeps Annex B var-like
     /// semantics. At a function/program top level every function declaration is var-like.
-    fn declare_fn_decl(&mut self, name: &str, is_async: bool, is_generator: bool) -> Result<(), ParseError> {
+    fn declare_fn_decl(
+        &mut self,
+        name: &str,
+        is_async: bool,
+        is_generator: bool,
+    ) -> Result<(), ParseError> {
         let in_block = !self.decl_scopes.last().unwrap().fn_boundary;
         if in_block && (is_async || is_generator) {
             self.declare_lexical(name)
@@ -275,20 +333,29 @@ impl Parser {
     /// identifier — not a reserved word (even one spelled with a `\u` escape, which lexes as a keyword).
     fn check_shorthand_ident(&self, name: &str) -> Result<(), ParseError> {
         if KEYWORDS.contains(&name) {
-            return self.err(format!("'{name}' is a reserved word and cannot be a shorthand property"));
+            return self.err(format!(
+                "'{name}' is a reserved word and cannot be a shorthand property"
+            ));
         }
         if self.strict && is_strict_reserved_binding(name) {
-            return self.err(format!("'{name}' cannot be used as a shorthand property in strict mode"));
+            return self.err(format!(
+                "'{name}' cannot be used as a shorthand property in strict mode"
+            ));
         }
         if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
-            return self.err(format!("'{name}' cannot be used as a shorthand property here"));
+            return self.err(format!(
+                "'{name}' cannot be used as a shorthand property here"
+            ));
         }
         Ok(())
     }
 
     fn push_decl_scope(&mut self) {
         let fn_boundary = std::mem::take(&mut self.next_scope_is_fn_boundary);
-        self.decl_scopes.push(DeclScope { fn_boundary, ..Default::default() });
+        self.decl_scopes.push(DeclScope {
+            fn_boundary,
+            ..Default::default()
+        });
     }
     fn pop_decl_scope(&mut self) {
         self.decl_scopes.pop();
@@ -302,7 +369,11 @@ impl Parser {
         if conflict {
             return self.err(format!("Identifier '{name}' has already been declared"));
         }
-        self.decl_scopes.last_mut().unwrap().lexical.push(name.to_string());
+        self.decl_scopes
+            .last_mut()
+            .unwrap()
+            .lexical
+            .push(name.to_string());
         Ok(())
     }
     /// Record a `var`/function binding. A `var` (`hoist_through = true`) conflicts with a lexical of
@@ -318,7 +389,11 @@ impl Parser {
                 break;
             }
         }
-        self.decl_scopes.last_mut().unwrap().var.push(name.to_string());
+        self.decl_scopes
+            .last_mut()
+            .unwrap()
+            .var
+            .push(name.to_string());
         Ok(())
     }
 
@@ -362,7 +437,9 @@ impl Parser {
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
             // `async function f(){}` declaration (async is a contextual keyword).
-            Tok::Ident(w) if w == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) => {
+            Tok::Ident(w)
+                if w == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+            {
                 self.advance();
                 let f = self.parse_function(true)?;
                 if let Some(n) = &f.name {
@@ -387,7 +464,11 @@ impl Parser {
                 if self.fn_depth == 0 {
                     return self.err("'return' outside of a function");
                 }
-                let arg = if self.can_end_stmt() { None } else { Some(self.parse_expr()?) };
+                let arg = if self.can_end_stmt() {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
                 self.consume_semicolon()?;
                 Ok(Stmt::Return(arg))
             }
@@ -395,7 +476,9 @@ impl Parser {
                 self.advance();
                 let label = self.parse_opt_label();
                 match &label {
-                    Some(l) if !self.labels.contains(l) => return self.err("undefined break label"),
+                    Some(l) if !self.labels.contains(l) => {
+                        return self.err("undefined break label")
+                    }
                     None if self.iter_depth == 0 && self.switch_depth == 0 => {
                         return self.err("illegal 'break' statement");
                     }
@@ -408,8 +491,12 @@ impl Parser {
                 self.advance();
                 let label = self.parse_opt_label();
                 match &label {
-                    Some(l) if !self.labels.contains(l) => return self.err("undefined continue label"),
-                    None if self.iter_depth == 0 => return self.err("illegal 'continue' statement"),
+                    Some(l) if !self.labels.contains(l) => {
+                        return self.err("undefined continue label")
+                    }
+                    None if self.iter_depth == 0 => {
+                        return self.err("illegal 'continue' statement")
+                    }
                     _ => {}
                 }
                 self.consume_semicolon()?;
@@ -427,7 +514,8 @@ impl Parser {
             Tok::Keyword("try") => self.parse_try(),
             // `import …` declaration (but `import(` / `import.meta` are expressions).
             Tok::Keyword("import")
-                if self.module && !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
+                if self.module
+                    && !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
             {
                 self.parse_import()
             }
@@ -453,7 +541,10 @@ impl Parser {
                 self.labels.push(name.clone());
                 let body = self.parse_substatement(true);
                 self.labels.pop();
-                Ok(Stmt::Labeled { label: name, body: Box::new(body?) })
+                Ok(Stmt::Labeled {
+                    label: name,
+                    body: Box::new(body?),
+                })
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -464,12 +555,18 @@ impl Parser {
     }
 
     fn peek_kind(&self, ahead: usize) -> Tok {
-        self.toks.get(self.pos + ahead).map(|t| t.kind.clone()).unwrap_or(Tok::Eof)
+        self.toks
+            .get(self.pos + ahead)
+            .map(|t| t.kind.clone())
+            .unwrap_or(Tok::Eof)
     }
 
     /// After `let`, decide whether this is a `let` declaration (vs `let` used as an identifier).
     fn starts_let_decl(&self) -> bool {
-        matches!(self.peek_kind(1), Tok::Ident(_) | Tok::Punct("[") | Tok::Punct("{"))
+        matches!(
+            self.peek_kind(1),
+            Tok::Ident(_) | Tok::Punct("[") | Tok::Punct("{")
+        )
     }
 
     fn parse_block_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -512,7 +609,11 @@ impl Parser {
         let mut decls = Vec::new();
         loop {
             let pat = self.parse_binding_pattern()?;
-            let init = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+            let init = if self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
             decls.push((pat, init));
             if !self.eat_punct(",") {
                 break;
@@ -530,7 +631,9 @@ impl Parser {
             Tok::Ident(name) => {
                 // In strict mode `eval`/`arguments` and the strict-reserved words can't be bound.
                 if self.strict && is_strict_reserved_binding(&name) {
-                    return self.err(format!("'{name}' cannot be used as a binding in strict mode"));
+                    return self.err(format!(
+                        "'{name}' cannot be used as a binding in strict mode"
+                    ));
                 }
                 // `await`/`yield` are reserved as bindings inside async/generator bodies.
                 if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
@@ -567,7 +670,11 @@ impl Parser {
                 break;
             }
             let pattern = self.parse_binding_pattern()?;
-            let default = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+            let default = if self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
             elems.push(ArrayPatElem::Elem { pattern, default });
             if !self.eat_punct(",") {
                 break;
@@ -589,7 +696,11 @@ impl Parser {
             let key = self.parse_prop_key()?;
             let (value, default) = if self.eat_punct(":") {
                 let v = self.parse_binding_pattern()?;
-                let d = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+                let d = if self.eat_punct("=") {
+                    Some(self.parse_assign()?)
+                } else {
+                    None
+                };
                 (v, d)
             } else {
                 // Shorthand `{ a }` or `{ a = default }` — key must be a plain identifier.
@@ -598,10 +709,18 @@ impl Parser {
                     _ => return self.err("invalid shorthand destructuring target"),
                 };
                 self.check_shorthand_ident(&name)?;
-                let d = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+                let d = if self.eat_punct("=") {
+                    Some(self.parse_assign()?)
+                } else {
+                    None
+                };
                 (Pattern::Ident(name), d)
             };
-            props.push(ObjPatProp { key, value, default });
+            props.push(ObjPatProp {
+                key,
+                value,
+                default,
+            });
             if !self.eat_punct(",") {
                 break;
             }
@@ -616,8 +735,11 @@ impl Parser {
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
         let cons = Box::new(self.parse_substatement(true)?);
-        let alt =
-            if self.eat_kw("else") { Some(Box::new(self.parse_substatement(true)?)) } else { None };
+        let alt = if self.eat_kw("else") {
+            Some(Box::new(self.parse_substatement(true)?))
+        } else {
+            None
+        };
         Ok(Stmt::If { test, cons, alt })
     }
 
@@ -627,11 +749,16 @@ impl Parser {
     fn parse_substatement(&mut self, annexb_fn: bool) -> Result<Stmt, ParseError> {
         let s = self.parse_stmt()?;
         match &s {
-            Stmt::VarDecl { kind: DeclKind::Let | DeclKind::Const, .. } | Stmt::ClassDecl(_) => {
+            Stmt::VarDecl {
+                kind: DeclKind::Let | DeclKind::Const,
+                ..
+            }
+            | Stmt::ClassDecl(_) => {
                 return self.err("lexical declaration cannot appear in a single-statement context");
             }
             Stmt::FuncDecl(f) if f.is_async || f.is_generator || !annexb_fn || self.strict => {
-                return self.err("function declaration cannot appear in a single-statement context");
+                return self
+                    .err("function declaration cannot appear in a single-statement context");
             }
             _ => {}
         }
@@ -719,14 +846,29 @@ impl Parser {
                 let right = self.parse_assign()?;
                 self.expect_punct(")")?;
                 let body = Box::new(self.parse_loop_body()?);
-                return Ok(Stmt::ForInOf { decl: Some(kind), left: first, right, of, is_await, body });
+                return Ok(Stmt::ForInOf {
+                    decl: Some(kind),
+                    left: first,
+                    right,
+                    of,
+                    is_await,
+                    body,
+                });
             }
             // Plain C-style for with a declaration init (possibly multiple declarators).
-            let init_expr = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+            let init_expr = if self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
             let mut decls = vec![(first, init_expr)];
             while self.eat_punct(",") {
                 let pat = self.parse_binding_pattern()?;
-                let init = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+                let init = if self.eat_punct("=") {
+                    Some(self.parse_assign()?)
+                } else {
+                    None
+                };
                 decls.push((pat, init));
             }
             self.expect_punct(";")?;
@@ -744,21 +886,43 @@ impl Parser {
             let right = self.parse_assign()?;
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
-            let left = expr_to_pattern(&init_expr)
-                .ok_or_else(|| ParseError { message: "invalid for-in/of target".into(), line: self.line() })?;
-            return Ok(Stmt::ForInOf { decl: None, left, right, of, is_await, body });
+            let left = expr_to_pattern(&init_expr).ok_or_else(|| ParseError {
+                message: "invalid for-in/of target".into(),
+                line: self.line(),
+            })?;
+            return Ok(Stmt::ForInOf {
+                decl: None,
+                left,
+                right,
+                of,
+                is_await,
+                body,
+            });
         }
         self.expect_punct(";")?;
         self.finish_c_for(Some(Box::new(ForInit::Expr(init_expr))))
     }
 
     fn finish_c_for(&mut self, init: Option<Box<ForInit>>) -> Result<Stmt, ParseError> {
-        let test = if self.is_punct(";") { None } else { Some(self.parse_expr()?) };
+        let test = if self.is_punct(";") {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
         self.expect_punct(";")?;
-        let update = if self.is_punct(")") { None } else { Some(self.parse_expr()?) };
+        let update = if self.is_punct(")") {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
         self.expect_punct(")")?;
         let body = Box::new(self.parse_loop_body()?);
-        Ok(Stmt::For { init, test, update, body })
+        Ok(Stmt::For {
+            init,
+            test,
+            update,
+            body,
+        })
     }
 
     /// A ModuleExportName: an identifier/keyword, or a string literal (`export { x as "y" }`).
@@ -810,12 +974,15 @@ impl Parser {
 
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // 'import'
-        // Bare import: `import "spec";`
+                        // Bare import: `import "spec";`
         if let Tok::Str(s) = self.cur().clone() {
             self.advance();
             let source = Rc::from(s.as_str());
             self.consume_semicolon()?;
-            return Ok(Stmt::Import(ImportDecl { source, specs: Vec::new() }));
+            return Ok(Stmt::Import(ImportDecl {
+                source,
+                specs: Vec::new(),
+            }));
         }
         let mut specs = Vec::new();
         let mut need_from = true;
@@ -833,8 +1000,12 @@ impl Parser {
             self.advance();
             while !self.is_punct("}") {
                 let imported = self.parse_module_export_name()?;
-                let local =
-                    if self.is_ident_word("as") { self.advance(); self.parse_binding_ident_name()? } else { imported.clone() };
+                let local = if self.is_ident_word("as") {
+                    self.advance();
+                    self.parse_binding_ident_name()?
+                } else {
+                    imported.clone()
+                };
                 specs.push(ImportSpec::Named { imported, local });
                 if !self.eat_punct(",") {
                     break;
@@ -851,9 +1022,12 @@ impl Parser {
 
     fn parse_export(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // 'export'
-        // export default …
+                        // export default …
         if self.eat_kw("default") {
-            let stmt = if self.is_kw("function") || (self.is_ident_word("async") && matches!(self.peek_kind(1), Tok::Keyword("function"))) {
+            let stmt = if self.is_kw("function")
+                || (self.is_ident_word("async")
+                    && matches!(self.peek_kind(1), Tok::Keyword("function")))
+            {
                 let is_async = self.eat_ident_word("async");
                 Stmt::FuncDecl(Rc::new(self.parse_function(is_async)?))
             } else if self.is_kw("class") {
@@ -884,8 +1058,12 @@ impl Parser {
             let mut specs = Vec::new();
             while !self.is_punct("}") {
                 let local = self.parse_module_export_name()?;
-                let exported =
-                    if self.is_ident_word("as") { self.advance(); self.parse_module_export_name()? } else { local.clone() };
+                let exported = if self.is_ident_word("as") {
+                    self.advance();
+                    self.parse_module_export_name()?
+                } else {
+                    local.clone()
+                };
                 specs.push(ExportSpec { local, exported });
                 if !self.eat_punct(",") {
                     break;
@@ -952,7 +1130,11 @@ impl Parser {
         if handler.is_none() && finalizer.is_none() {
             return self.err("missing catch or finally after try");
         }
-        Ok(Stmt::Try { block, handler, finalizer })
+        Ok(Stmt::Try {
+            block,
+            handler,
+            finalizer,
+        })
     }
 
     fn parse_switch(&mut self) -> Result<Stmt, ParseError> {
@@ -982,7 +1164,10 @@ impl Parser {
             };
             self.expect_punct(":")?;
             let mut body = Vec::new();
-            while !self.is_punct("}") && !self.is_kw("case") && !self.is_kw("default") && !self.at_eof()
+            while !self.is_punct("}")
+                && !self.is_kw("case")
+                && !self.is_kw("default")
+                && !self.at_eof()
             {
                 body.push(self.parse_stmt()?);
             }
@@ -1093,11 +1278,16 @@ impl Parser {
                 if self.strict {
                     if let Expr::Ident(n) = &left {
                         if n == "eval" || n == "arguments" {
-                            return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
+                            return self
+                                .err("cannot assign to 'eval' or 'arguments' in strict mode");
                         }
                     }
                 }
-                return Ok(Expr::Assign { op, target: Box::new(left), value: Box::new(value) });
+                return Ok(Expr::Assign {
+                    op,
+                    target: Box::new(left),
+                    value: Box::new(value),
+                });
             }
         }
         Ok(left)
@@ -1112,7 +1302,11 @@ impl Parser {
                 self.cur(),
                 Tok::Punct(";" | ")" | "]" | "}" | "," | ":") | Tok::Eof
             );
-        let arg = if no_arg { None } else { Some(Box::new(self.parse_assign()?)) };
+        let arg = if no_arg {
+            None
+        } else {
+            Some(Box::new(self.parse_assign()?))
+        };
         Ok(Expr::Yield { delegate, arg })
     }
 
@@ -1122,7 +1316,11 @@ impl Parser {
             let cons = self.parse_assign()?;
             self.expect_punct(":")?;
             let alt = self.parse_assign()?;
-            Ok(Expr::Cond { test: Box::new(test), cons: Box::new(cons), alt: Box::new(alt) })
+            Ok(Expr::Cond {
+                test: Box::new(test),
+                cons: Box::new(cons),
+                alt: Box::new(alt),
+            })
         } else {
             Ok(test)
         }
@@ -1138,18 +1336,33 @@ impl Parser {
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_binary(next_min)?;
             left = if logical {
-                Expr::Logical { op, left: Box::new(left), right: Box::new(right) }
+                Expr::Logical {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
             } else if op == "in" {
                 // `#field in obj` is the ergonomic brand check, not a normal `in`.
                 if let Expr::Ident(n) = &left {
                     if n.starts_with('#') {
-                        left = Expr::PrivateIn { name: n.clone(), obj: Box::new(right) };
+                        left = Expr::PrivateIn {
+                            name: n.clone(),
+                            obj: Box::new(right),
+                        };
                         continue;
                     }
                 }
-                Expr::Binary { op, left: Box::new(left), right: Box::new(right) }
+                Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
             } else {
-                Expr::Binary { op, left: Box::new(left), right: Box::new(right) }
+                Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
             };
         }
         Ok(left)
@@ -1220,7 +1433,10 @@ impl Parser {
             if op == "delete" && deletes_private_member(&arg) {
                 return self.err("private fields cannot be deleted");
             }
-            return Ok(Expr::Unary { op, arg: Box::new(arg) });
+            return Ok(Expr::Unary {
+                op,
+                arg: Box::new(arg),
+            });
         }
         // Prefix ++/--
         if self.is_punct("++") || self.is_punct("--") {
@@ -1228,7 +1444,11 @@ impl Parser {
             self.advance();
             let arg = self.parse_unary()?;
             self.check_strict_update_target(&arg)?;
-            return Ok(Expr::Update { op, prefix: true, arg: Box::new(arg) });
+            return Ok(Expr::Update {
+                op,
+                prefix: true,
+                arg: Box::new(arg),
+            });
         }
         self.parse_postfix()
     }
@@ -1238,7 +1458,8 @@ impl Parser {
         match arg {
             Expr::Ident(n) => {
                 if self.strict && (n == "eval" || n == "arguments") {
-                    return self.err("cannot increment/decrement 'eval' or 'arguments' in strict mode");
+                    return self
+                        .err("cannot increment/decrement 'eval' or 'arguments' in strict mode");
                 }
             }
             Expr::Member { .. } | Expr::Index { .. } => {}
@@ -1253,7 +1474,11 @@ impl Parser {
             let op = if self.is_punct("++") { "++" } else { "--" };
             self.advance();
             self.check_strict_update_target(&expr)?;
-            return Ok(Expr::Update { op, prefix: false, arg: Box::new(expr) });
+            return Ok(Expr::Update {
+                op,
+                prefix: false,
+                arg: Box::new(expr),
+            });
         }
         Ok(expr)
     }
@@ -1264,14 +1489,26 @@ impl Parser {
         loop {
             if self.is_punct("(") {
                 let args = self.parse_args()?;
-                expr = Expr::Call { callee: Box::new(expr), args, optional: false };
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    args,
+                    optional: false,
+                };
             } else if self.eat_punct(".") {
                 let name = self.parse_property_name_ident()?;
-                expr = Expr::Member { obj: Box::new(expr), prop: name, optional: false };
+                expr = Expr::Member {
+                    obj: Box::new(expr),
+                    prop: name,
+                    optional: false,
+                };
             } else if self.eat_punct("[") {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
-                expr = Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: false };
+                expr = Expr::Index {
+                    obj: Box::new(expr),
+                    index: Box::new(index),
+                    optional: false,
+                };
             } else if let Tok::Template(parts) = self.cur().clone() {
                 if had_optional {
                     return self.err("tagged template cannot appear in an optional chain");
@@ -1283,15 +1520,26 @@ impl Parser {
                 had_optional = true;
                 if self.is_punct("(") {
                     let args = self.parse_args()?;
-                    expr = Expr::Call { callee: Box::new(expr), args, optional: true };
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        args,
+                        optional: true,
+                    };
                 } else if self.eat_punct("[") {
                     let index = self.parse_expr_allow_in()?;
                     self.expect_punct("]")?;
-                    expr =
-                        Expr::Index { obj: Box::new(expr), index: Box::new(index), optional: true };
+                    expr = Expr::Index {
+                        obj: Box::new(expr),
+                        index: Box::new(index),
+                        optional: true,
+                    };
                 } else {
                     let name = self.parse_property_name_ident()?;
-                    expr = Expr::Member { obj: Box::new(expr), prop: name, optional: true };
+                    expr = Expr::Member {
+                        obj: Box::new(expr),
+                        prop: name,
+                        optional: true,
+                    };
                 }
             } else {
                 break;
@@ -1325,8 +1573,15 @@ impl Parser {
                 if callee_has_import_call(&callee) {
                     return self.err("'import(...)' cannot be used with 'new'");
                 }
-                let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() };
-                Expr::New { callee: Box::new(callee), args }
+                let args = if self.is_punct("(") {
+                    self.parse_args()?
+                } else {
+                    Vec::new()
+                };
+                Expr::New {
+                    callee: Box::new(callee),
+                    args,
+                }
             }
         } else {
             self.parse_primary()?
@@ -1334,11 +1589,19 @@ impl Parser {
         loop {
             if self.eat_punct(".") {
                 let name = self.parse_property_name_ident()?;
-                base = Expr::Member { obj: Box::new(base), prop: name, optional: false };
+                base = Expr::Member {
+                    obj: Box::new(base),
+                    prop: name,
+                    optional: false,
+                };
             } else if self.eat_punct("[") {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
-                base = Expr::Index { obj: Box::new(base), index: Box::new(index), optional: false };
+                base = Expr::Index {
+                    obj: Box::new(base),
+                    index: Box::new(index),
+                    optional: false,
+                };
             } else {
                 break;
             }
@@ -1410,7 +1673,10 @@ impl Parser {
                 if let Err(msg) = crate::regex::Regex::new(&body, &flags) {
                     return self.err(msg);
                 }
-                Ok(Expr::Regex { body: Rc::from(body.as_str()), flags: Rc::from(flags.as_str()) })
+                Ok(Expr::Regex {
+                    body: Rc::from(body.as_str()),
+                    flags: Rc::from(flags.as_str()),
+                })
             }
             Tok::Keyword("true") => {
                 self.advance();
@@ -1461,7 +1727,8 @@ impl Parser {
                     Ok(Expr::ImportCall(Box::new(spec)))
                 }
             }
-            Tok::Ident(name) if name == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+            Tok::Ident(name)
+                if name == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
                 let f = self.parse_function(true)?;
@@ -1495,37 +1762,87 @@ impl Parser {
             let piece = match part {
                 TplPart::Str { cooked, .. } => Expr::Str(Rc::from(cooked.as_str())),
                 TplPart::Sub(src) => {
-                    let tokens = tokenize(&src)
-                        .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
+                    let tokens = tokenize(&src).map_err(|e| ParseError {
+                        message: e.message,
+                        line: e.line,
+                    })?;
+                    let mut sub = Parser {
+                        toks: tokens,
+                        pos: 0,
+                        strict: self.strict,
+                        depth: self.depth,
+                        in_generator: self.in_generator,
+                        in_async: self.in_async,
+                        no_in: false,
+                        module: self.module,
+                        fn_depth: self.fn_depth,
+                        iter_depth: self.iter_depth,
+                        switch_depth: self.switch_depth,
+                        labels: Vec::new(),
+                        decl_scopes: vec![DeclScope {
+                            fn_boundary: true,
+                            ..Default::default()
+                        }],
+                        next_scope_is_fn_boundary: false,
+                    };
                     sub.parse_expr()?
                 }
             };
             expr = Some(match expr {
                 None => piece,
-                Some(left) => {
-                    Expr::Binary { op: "+", left: Box::new(left), right: Box::new(piece) }
-                }
+                Some(left) => Expr::Binary {
+                    op: "+",
+                    left: Box::new(left),
+                    right: Box::new(piece),
+                },
             });
         }
         Ok(expr.unwrap_or(Expr::Str(Rc::from(""))))
     }
 
-    fn build_tagged_template(&mut self, tag: Expr, parts: Vec<TplPart>) -> Result<Expr, ParseError> {
+    fn build_tagged_template(
+        &mut self,
+        tag: Expr,
+        parts: Vec<TplPart>,
+    ) -> Result<Expr, ParseError> {
         let mut quasis = Vec::new();
         let mut subs = Vec::new();
         for part in parts {
             match part {
                 TplPart::Str { cooked, raw } => quasis.push((Some(cooked), raw)),
                 TplPart::Sub(src) => {
-                    let tokens = tokenize(&src)
-                        .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
+                    let tokens = tokenize(&src).map_err(|e| ParseError {
+                        message: e.message,
+                        line: e.line,
+                    })?;
+                    let mut sub = Parser {
+                        toks: tokens,
+                        pos: 0,
+                        strict: self.strict,
+                        depth: self.depth,
+                        in_generator: self.in_generator,
+                        in_async: self.in_async,
+                        no_in: false,
+                        module: self.module,
+                        fn_depth: self.fn_depth,
+                        iter_depth: self.iter_depth,
+                        switch_depth: self.switch_depth,
+                        labels: Vec::new(),
+                        decl_scopes: vec![DeclScope {
+                            fn_boundary: true,
+                            ..Default::default()
+                        }],
+                        next_scope_is_fn_boundary: false,
+                    };
                     subs.push(sub.parse_expr()?);
                 }
             }
         }
-        Ok(Expr::TaggedTemplate { tag: Box::new(tag), quasis, subs })
+        Ok(Expr::TaggedTemplate {
+            tag: Box::new(tag),
+            quasis,
+            subs,
+        })
     }
 
     fn parse_array(&mut self) -> Result<Expr, ParseError> {
@@ -1569,16 +1886,25 @@ impl Parser {
             }
             // get/set accessors
             if (self.is_ident_word("get") || self.is_ident_word("set"))
-                && !matches!(self.peek_kind(1), Tok::Punct(":") | Tok::Punct(",") | Tok::Punct("}") | Tok::Punct("("))
+                && !matches!(
+                    self.peek_kind(1),
+                    Tok::Punct(":") | Tok::Punct(",") | Tok::Punct("}") | Tok::Punct("(")
+                )
             {
                 let is_get = self.is_ident_word("get");
                 self.advance();
                 let key = self.parse_prop_key()?;
                 let func = self.parse_accessor_function(is_get)?;
                 props.push(if is_get {
-                    PropDef::Getter { key, func: Rc::new(func) }
+                    PropDef::Getter {
+                        key,
+                        func: Rc::new(func),
+                    }
                 } else {
-                    PropDef::Setter { key, func: Rc::new(func) }
+                    PropDef::Setter {
+                        key,
+                        func: Rc::new(func),
+                    }
                 });
                 if !self.eat_punct(",") {
                     break;
@@ -1589,7 +1915,11 @@ impl Parser {
             let is_async = self.is_ident_word("async")
                 && !matches!(
                     self.peek_kind(1),
-                    Tok::Punct(":") | Tok::Punct(",") | Tok::Punct("}") | Tok::Punct("(") | Tok::Punct("=")
+                    Tok::Punct(":")
+                        | Tok::Punct(",")
+                        | Tok::Punct("}")
+                        | Tok::Punct("(")
+                        | Tok::Punct("=")
                 );
             if is_async {
                 self.advance();
@@ -1603,7 +1933,10 @@ impl Parser {
                 } else {
                     self.parse_method_function()?
                 };
-                props.push(PropDef::KeyValue { key, value: Expr::Func(Rc::new(func)) });
+                props.push(PropDef::KeyValue {
+                    key,
+                    value: Expr::Func(Rc::new(func)),
+                });
             } else if self.eat_punct(":") {
                 // Two `__proto__: value` data properties in one literal are a SyntaxError.
                 let is_proto = matches!(&key, PropKey::Ident(n) if n == "__proto__")
@@ -1745,8 +2078,15 @@ impl Parser {
         }
         self.strict = saved;
         self.expect_punct("}")?;
-        validate_class(&members).map_err(|m| ParseError { message: m, line: self.line() })?;
-        Ok(Class { name, superclass, members })
+        validate_class(&members).map_err(|m| ParseError {
+            message: m,
+            line: self.line(),
+        })?;
+        Ok(Class {
+            name,
+            superclass,
+            members,
+        })
     }
 
     /// True when the token `ahead` of the cursor ends a member head — i.e. the current contextual
@@ -1790,9 +2130,14 @@ impl Parser {
             }));
         }
         let mut kind = MemberKind::Method;
-        if (self.is_ident_word("get") || self.is_ident_word("set")) && !self.next_is_member_terminator(1)
+        if (self.is_ident_word("get") || self.is_ident_word("set"))
+            && !self.next_is_member_terminator(1)
         {
-            kind = if self.is_ident_word("get") { MemberKind::Get } else { MemberKind::Set };
+            kind = if self.is_ident_word("get") {
+                MemberKind::Get
+            } else {
+                MemberKind::Set
+            };
             self.advance();
         }
         let is_async = self.is_ident_word("async") && !self.next_is_member_terminator(1);
@@ -1806,20 +2151,38 @@ impl Parser {
         if self.is_punct("(") {
             let func = self.parse_method_function_kind(is_generator, is_async)?;
             if matches!(kind, MemberKind::Get | MemberKind::Set) {
-                check_accessor_arity(&func, kind == MemberKind::Get)
-                    .map_err(|m| ParseError { message: m, line: self.line() })?;
+                check_accessor_arity(&func, kind == MemberKind::Get).map_err(|m| ParseError {
+                    message: m,
+                    line: self.line(),
+                })?;
             }
             let kind = if kind == MemberKind::Method && !is_static && key_is(&key, "constructor") {
                 MemberKind::Constructor
             } else {
                 kind
             };
-            Ok(Some(ClassMember { key, kind, is_static, func: Some(Rc::new(func)), value: None }))
+            Ok(Some(ClassMember {
+                key,
+                kind,
+                is_static,
+                func: Some(Rc::new(func)),
+                value: None,
+            }))
         } else {
             // Field declaration.
-            let value = if self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
+            let value = if self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
             self.consume_semicolon()?;
-            Ok(Some(ClassMember { key, kind: MemberKind::Field, is_static, func: None, value }))
+            Ok(Some(ClassMember {
+                key,
+                kind: MemberKind::Field,
+                is_static,
+                func: None,
+                value,
+            }))
         }
     }
 
@@ -1853,7 +2216,10 @@ impl Parser {
 
     fn parse_accessor_function(&mut self, is_get: bool) -> Result<Function, ParseError> {
         let f = self.parse_method_function()?;
-        check_accessor_arity(&f, is_get).map_err(|m| ParseError { message: m, line: self.line() })?;
+        check_accessor_arity(&f, is_get).map_err(|m| ParseError {
+            message: m,
+            line: self.line(),
+        })?;
         Ok(f)
     }
 
@@ -1863,9 +2229,16 @@ impl Parser {
         while !self.is_punct(")") {
             let rest = self.eat_punct("...");
             let pattern = self.parse_binding_pattern()?;
-            let default =
-                if !rest && self.eat_punct("=") { Some(self.parse_assign()?) } else { None };
-            params.push(Param { pattern, default, rest });
+            let default = if !rest && self.eat_punct("=") {
+                Some(self.parse_assign()?)
+            } else {
+                None
+            };
+            params.push(Param {
+                pattern,
+                default,
+                rest,
+            });
             if rest || !self.eat_punct(",") {
                 break;
             }
@@ -1874,14 +2247,19 @@ impl Parser {
         Ok(params)
     }
 
-    fn parse_function_body(&mut self, params_simple: bool) -> Result<(Vec<Stmt>, bool), ParseError> {
+    fn parse_function_body(
+        &mut self,
+        params_simple: bool,
+    ) -> Result<(Vec<Stmt>, bool), ParseError> {
         self.expect_punct("{")?;
         let saved_strict = self.strict;
         let inner_strict = matches!(self.cur(), Tok::Str(s) if s == "use strict");
         // A function with a non-simple parameter list (defaults / rest / destructuring) can't apply a
         // `"use strict"` directive to its own body.
         if inner_strict && !params_simple {
-            return self.err("illegal 'use strict' directive in a function with a non-simple parameter list");
+            return self.err(
+                "illegal 'use strict' directive in a function with a non-simple parameter list",
+            );
         }
         if inner_strict {
             self.strict = true;
@@ -1909,7 +2287,11 @@ impl Parser {
     fn try_parse_arrow(&mut self) -> Result<Option<Expr>, ParseError> {
         // Optional `async` prefix (on the same line) for an async arrow.
         let async_arrow = self.is_ident_word("async")
-            && !self.toks.get(self.pos + 1).map(|t| t.nl_before).unwrap_or(true)
+            && !self
+                .toks
+                .get(self.pos + 1)
+                .map(|t| t.nl_before)
+                .unwrap_or(true)
             && matches!(self.peek_kind(1), Tok::Ident(_) | Tok::Punct("("));
         let base = if async_arrow { 1 } else { 0 };
 
@@ -1922,15 +2304,21 @@ impl Parser {
                     self.advance(); // (async) ident
                 }
                 self.advance(); // =>
-                let params = vec![Param { pattern: Pattern::Ident(name), default: None, rest: false }];
+                let params = vec![Param {
+                    pattern: Pattern::Ident(name),
+                    default: None,
+                    rest: false,
+                }];
                 return Ok(Some(self.finish_arrow(params, async_arrow)?));
             }
         }
         // `( params ) => ...`
         if matches!(self.peek_kind(base), Tok::Punct("(")) {
             if let Some(close) = self.matching_paren(self.pos + base) {
-                if matches!(self.toks.get(close + 1).map(|t| &t.kind), Some(Tok::Punct("=>")))
-                    && !self.toks[close + 1].nl_before
+                if matches!(
+                    self.toks.get(close + 1).map(|t| &t.kind),
+                    Some(Tok::Punct("=>"))
+                ) && !self.toks[close + 1].nl_before
                 {
                     if async_arrow {
                         self.advance();
@@ -2005,8 +2393,21 @@ impl Parser {
 fn is_assign_op(op: &str) -> bool {
     matches!(
         op,
-        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | ">>>=" | "&=" | "|="
-            | "^=" | "&&=" | "||=" | "??="
+        "=" | "+="
+            | "-="
+            | "*="
+            | "/="
+            | "%="
+            | "**="
+            | "<<="
+            | ">>="
+            | ">>>="
+            | "&="
+            | "|="
+            | "^="
+            | "&&="
+            | "||="
+            | "??="
     )
 }
 
@@ -2040,7 +2441,9 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 if name == "#constructor" {
                     return Err("'#constructor' is a reserved private name".into());
                 }
-                let entry = private.iter_mut().find(|((n, s), _)| n == name && *s == m.is_static);
+                let entry = private
+                    .iter_mut()
+                    .find(|((n, s), _)| n == name && *s == m.is_static);
                 match entry {
                     Some((_, kinds)) => kinds.push(m.kind),
                     None => private.push(((name.clone(), m.is_static), vec![m.kind])),
@@ -2176,7 +2579,12 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             pn_expr(test, st)?;
             pn_stmt(body, st)?;
         }
-        Stmt::For { init, test, update, body } => {
+        Stmt::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
             if let Some(fi) = init {
                 match &**fi {
                     ForInit::VarDecl { decls, .. } => {
@@ -2198,12 +2606,18 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             }
             pn_stmt(body, st)?;
         }
-        Stmt::ForInOf { left, right, body, .. } => {
+        Stmt::ForInOf {
+            left, right, body, ..
+        } => {
             pn_pattern(left, st)?;
             pn_expr(right, st)?;
             pn_stmt(body, st)?;
         }
-        Stmt::Try { block, handler, finalizer } => {
+        Stmt::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
             pn_stmts(block, st)?;
             if let Some((param, body)) = handler {
                 if let Some(p) = param {
@@ -2250,13 +2664,17 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
     match expr {
         Expr::Member { obj, prop, .. } => {
             if prop.starts_with('#') && !pn_declared(st, prop) {
-                return Err(format!("Private name '{prop}' is not declared in an enclosing class"));
+                return Err(format!(
+                    "Private name '{prop}' is not declared in an enclosing class"
+                ));
             }
             pn_expr(obj, st)?;
         }
         Expr::PrivateIn { name, obj } => {
             if !pn_declared(st, name) {
-                return Err(format!("Private name '{name}' is not declared in an enclosing class"));
+                return Err(format!(
+                    "Private name '{name}' is not declared in an enclosing class"
+                ));
             }
             pn_expr(obj, st)?;
         }
@@ -2395,7 +2813,9 @@ fn param_names(params: &[Param]) -> Vec<String> {
     out
 }
 fn params_complex(params: &[Param]) -> bool {
-    params.iter().any(|p| p.default.is_some() || p.rest || !matches!(p.pattern, Pattern::Ident(_)))
+    params
+        .iter()
+        .any(|p| p.default.is_some() || p.rest || !matches!(p.pattern, Pattern::Ident(_)))
 }
 fn duplicate_name(names: &[String]) -> Option<String> {
     for (idx, n) in names.iter().enumerate() {
@@ -2433,31 +2853,43 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                 match el {
                     ArrayElem::Hole => out.push(ArrayPatElem::Hole),
                     ArrayElem::Spread(t) => out.push(ArrayPatElem::Rest(expr_to_pattern(t)?)),
-                    ArrayElem::Item(Expr::Assign { op: "=", target, value }) => {
-                        out.push(ArrayPatElem::Elem {
-                            pattern: expr_to_pattern(target)?,
-                            default: Some((**value).clone()),
-                        })
-                    }
-                    ArrayElem::Item(t) => {
-                        out.push(ArrayPatElem::Elem { pattern: expr_to_pattern(t)?, default: None })
-                    }
+                    ArrayElem::Item(Expr::Assign {
+                        op: "=",
+                        target,
+                        value,
+                    }) => out.push(ArrayPatElem::Elem {
+                        pattern: expr_to_pattern(target)?,
+                        default: Some((**value).clone()),
+                    }),
+                    ArrayElem::Item(t) => out.push(ArrayPatElem::Elem {
+                        pattern: expr_to_pattern(t)?,
+                        default: None,
+                    }),
                 }
             }
             Some(Pattern::Array(out))
         }
         Expr::Object(props) => {
-            let mut pat = ObjectPat { props: Vec::new(), rest: None };
+            let mut pat = ObjectPat {
+                props: Vec::new(),
+                rest: None,
+            };
             for p in props {
                 match p {
                     PropDef::KeyValue { key, value } => {
                         let (value, default) = match value {
-                            Expr::Assign { op: "=", target, value: d } => {
-                                (expr_to_pattern(target)?, Some((**d).clone()))
-                            }
+                            Expr::Assign {
+                                op: "=",
+                                target,
+                                value: d,
+                            } => (expr_to_pattern(target)?, Some((**d).clone())),
                             v => (expr_to_pattern(v)?, None),
                         };
-                        pat.props.push(ObjPatProp { key: key.clone(), value, default });
+                        pat.props.push(ObjPatProp {
+                            key: key.clone(),
+                            value,
+                            default,
+                        });
                     }
                     PropDef::Spread(Expr::Ident(name)) => pat.rest = Some(name.clone()),
                     _ => return None,
@@ -2466,9 +2898,12 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
             Some(Pattern::Object(pat))
         }
         // A member expression (`o.p` / `o[k]`) is a valid assignment target.
-        Expr::Member { optional: false, .. } | Expr::Index { optional: false, .. } => {
-            Some(Pattern::Member(Box::new(e.clone())))
+        Expr::Member {
+            optional: false, ..
         }
+        | Expr::Index {
+            optional: false, ..
+        } => Some(Pattern::Member(Box::new(e.clone()))),
         _ => None,
     }
 }

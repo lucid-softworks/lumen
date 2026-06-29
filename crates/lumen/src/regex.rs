@@ -40,10 +40,18 @@ enum Inst {
     AssertEnd,
     WordBoundary(bool),
     Backref(usize),
-    Look { negate: bool, prog: Rc<Vec<Inst>> },
+    Look {
+        negate: bool,
+        prog: Rc<Vec<Inst>>,
+    },
     /// A repeated single-character matcher (`a*`, `\w+`, `.{2,5}`, `\p{L}+`). Consumed iteratively so
     /// a long run doesn't recurse once per character (which overflows the backtracking depth limit).
-    Many { rep: Rep, min: usize, max: Option<usize>, greedy: bool },
+    Many {
+        rep: Rep,
+        min: usize,
+        max: Option<usize>,
+        greedy: bool,
+    },
     /// `(?ims-ims:…)` inline modifiers: push a new `(icase, multiline, dotall)` flag set for the
     /// group body (`Some` = add/remove, `None` = inherit), then `PopFlags` restores it.
     PushFlags(Option<bool>, Option<bool>, Option<bool>),
@@ -182,7 +190,11 @@ enum Node {
     NamedBackref(String),
     Look(bool, Box<Node>),
     /// `(?ims-ims:…)` inline-modifier group: `(add, remove)` flag deltas over `(i, m, s)`.
-    Modifier { add: (bool, bool, bool), remove: (bool, bool, bool), inner: Box<Node> },
+    Modifier {
+        add: (bool, bool, bool),
+        remove: (bool, bool, bool),
+        inner: Box<Node>,
+    },
 }
 
 struct Parser {
@@ -262,7 +274,11 @@ impl Regex {
         Ok(Regex {
             prog,
             ngroups: p.ngroups,
-            source: if pattern.is_empty() { "(?:)".into() } else { pattern.to_string() },
+            source: if pattern.is_empty() {
+                "(?:)".into()
+            } else {
+                pattern.to_string()
+            },
             flags: canonical,
             global: flags.contains('g'),
             ignore_case: flags.contains('i'),
@@ -543,13 +559,17 @@ impl Parser {
             }
         }
         self.bump(); // ':'
-        // At least one flag, and a lone `(?-:` (negation with nothing) is invalid.
+                     // At least one flag, and a lone `(?-:` (negation with nothing) is invalid.
         if !seen_any || (neg && remove == (false, false, false)) {
             return Err("empty inline modifier".into());
         }
         let inner = self.parse_alt()?;
         self.expect(')')?;
-        Ok(Node::Modifier { add, remove, inner: Box::new(inner) })
+        Ok(Node::Modifier {
+            add,
+            remove,
+            inner: Box::new(inner),
+        })
     }
 
     fn parse_class(&mut self) -> Result<Node, String> {
@@ -627,12 +647,16 @@ impl Parser {
     fn parse_escape(&mut self) -> Result<Node, String> {
         match self.bump() {
             None => Err("trailing backslash".into()),
-            Some(c @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => {
-                Ok(Node::Class(CharClass { builtins: vec![c], ..Default::default() }))
-            }
+            Some(c @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => Ok(Node::Class(CharClass {
+                builtins: vec![c],
+                ..Default::default()
+            })),
             Some(c @ ('p' | 'P')) if self.unicode => {
                 let prop = self.parse_prop_escape(c == 'P')?;
-                Ok(Node::Class(CharClass { props: vec![prop], ..Default::default() }))
+                Ok(Node::Class(CharClass {
+                    props: vec![prop],
+                    ..Default::default()
+                }))
             }
             Some('b') => Ok(Node::WordB(true)),
             Some('B') => Ok(Node::WordB(false)),
@@ -731,7 +755,8 @@ impl Parser {
             }
         }
         let mut chars = name.chars();
-        let valid = matches!(chars.next(), Some(c) if regex_ident_start(c)) && chars.all(regex_ident_part);
+        let valid =
+            matches!(chars.next(), Some(c) if regex_ident_start(c)) && chars.all(regex_ident_part);
         if !valid {
             return Err(format!("invalid capture group name <{name}>"));
         }
@@ -748,7 +773,10 @@ impl Parser {
                 }
             }
         }
-        u32::from_str_radix(&s, 16).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}')
+        u32::from_str_radix(&s, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or('\u{FFFD}')
     }
 
     fn unicode_escape(&mut self) -> char {
@@ -763,7 +791,10 @@ impl Parser {
                 s.push(c);
                 self.bump();
             }
-            u32::from_str_radix(&s, 16).ok().and_then(char::from_u32).unwrap_or('\u{FFFD}')
+            u32::from_str_radix(&s, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or('\u{FFFD}')
         } else {
             self.hex(4)
         }
@@ -809,8 +840,20 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
         // Resolved to `Backref` before compile; treat any stray one as group 0 (never matches).
         Node::NamedBackref(_) => prog.push(Inst::Backref(0)),
         Node::Modifier { add, remove, inner } => {
-            let opt = |a: bool, r: bool| if a { Some(true) } else if r { Some(false) } else { None };
-            prog.push(Inst::PushFlags(opt(add.0, remove.0), opt(add.1, remove.1), opt(add.2, remove.2)));
+            let opt = |a: bool, r: bool| {
+                if a {
+                    Some(true)
+                } else if r {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            prog.push(Inst::PushFlags(
+                opt(add.0, remove.0),
+                opt(add.1, remove.1),
+                opt(add.2, remove.2),
+            ));
             compile(inner, prog)?;
             prog.push(Inst::PopFlags);
         }
@@ -853,7 +896,10 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
             let mut sub = Vec::new();
             compile(inner, &mut sub)?;
             sub.push(Inst::Match);
-            prog.push(Inst::Look { negate: *negate, prog: Rc::new(sub) });
+            prog.push(Inst::Look {
+                negate: *negate,
+                prog: Rc::new(sub),
+            });
         }
         Node::Repeat(inner, min, max, greedy) => compile_repeat(inner, *min, *max, *greedy, prog)?,
     }
@@ -872,7 +918,12 @@ fn compile_repeat(
     }
     // Fast path: a repeated single-character atom consumes iteratively (no per-character recursion).
     if let Some(rep) = single_char_rep(inner) {
-        prog.push(Inst::Many { rep, min, max, greedy });
+        prog.push(Inst::Many {
+            rep,
+            min,
+            max,
+            greedy,
+        });
         return Ok(());
     }
     for _ in 0..min {
@@ -888,7 +939,11 @@ fn compile_repeat(
             compile(inner, prog)?;
             prog.push(Inst::Jmp(l1));
             let end = prog.len();
-            prog[sp] = if greedy { Inst::Split(body, end) } else { Inst::Split(end, body) };
+            prog[sp] = if greedy {
+                Inst::Split(body, end)
+            } else {
+                Inst::Split(end, body)
+            };
         }
         Some(m) => {
             let extra = m.saturating_sub(min);
@@ -902,7 +957,11 @@ fn compile_repeat(
             }
             let end = prog.len();
             for (sp, body) in splits {
-                prog[sp] = if greedy { Inst::Split(body, end) } else { Inst::Split(end, body) };
+                prog[sp] = if greedy {
+                    Inst::Split(body, end)
+                } else {
+                    Inst::Split(end, body)
+                };
             }
         }
     }
@@ -914,16 +973,20 @@ fn compile_repeat(
 fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
     match node {
         Node::NamedBackref(name) => {
-            let idx = names.iter().find(|(n, _)| n == name).map(|(_, i)| *i).unwrap_or(0);
+            let idx = names
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, i)| *i)
+                .unwrap_or(0);
             *node = Node::Backref(idx);
         }
-        Node::Concat(v) | Node::Alt(v) => v.iter_mut().for_each(|n| resolve_named_backrefs(n, names)),
+        Node::Concat(v) | Node::Alt(v) => {
+            v.iter_mut().for_each(|n| resolve_named_backrefs(n, names))
+        }
         Node::Group(_, inner)
         | Node::Repeat(inner, ..)
         | Node::Look(_, inner)
-        | Node::Modifier { inner, .. } => {
-            resolve_named_backrefs(inner, names)
-        }
+        | Node::Modifier { inner, .. } => resolve_named_backrefs(inner, names),
         _ => {}
     }
 }
@@ -1044,7 +1107,12 @@ impl Matcher<'_> {
                 let (a, b) = (*a, *b);
                 self.run(prog, a, pos) || self.run(prog, b, pos)
             }
-            Inst::Many { rep, min, max, greedy } => {
+            Inst::Many {
+                rep,
+                min,
+                max,
+                greedy,
+            } => {
                 let (min, max, greedy) = (*min, *max, *greedy);
                 // Consume as many as the input allows (up to `max`), iteratively.
                 let cap = max.unwrap_or(usize::MAX);

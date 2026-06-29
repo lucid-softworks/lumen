@@ -80,10 +80,17 @@ pub enum Callable {
     /// An interpreted function: its AST plus the lexical environment it closed over.
     User(Rc<Function>, Env),
     /// The result of `Function.prototype.bind`.
-    Bound { target: Gc, this: Value, args: Vec<Value> },
+    Bound {
+        target: Gc,
+        this: Value,
+        args: Vec<Value>,
+    },
     /// A ShadowRealm wrapped function: `target` is a callable inside the sub-realm identified by
     /// `realm` (its pointer). Calls marshal primitive args in and the primitive result out.
-    WrappedShadow { realm: usize, target: Box<Value> },
+    WrappedShadow {
+        realm: usize,
+        target: Box<Value>,
+    },
 }
 
 /// Exotic internal data for built-in object kinds (arrays, primitive wrappers). The wrapper
@@ -250,7 +257,11 @@ impl TaKind {
             TaKind::I8 => vec![int(n) as i8 as u8],
             TaKind::U8 => vec![int(n) as u8],
             TaKind::U8Clamped => {
-                let c = if n.is_nan() { 0.0 } else { n.round().clamp(0.0, 255.0) };
+                let c = if n.is_nan() {
+                    0.0
+                } else {
+                    n.round().clamp(0.0, 255.0)
+                };
                 vec![c as u8]
             }
             TaKind::I16 => (int(n) as i16).to_le_bytes().to_vec(),
@@ -325,7 +336,10 @@ impl Default for Props {
 
 impl Props {
     pub fn new() -> Props {
-        Props { entries: Vec::new(), index: HashMap::new() }
+        Props {
+            entries: Vec::new(),
+            index: HashMap::new(),
+        }
     }
     pub fn get(&self, key: &str) -> Option<&Property> {
         self.index.get(key).map(|i| &self.entries[*i].1)
@@ -378,7 +392,11 @@ impl Props {
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub fn keys(&self) -> Vec<Rc<str>> {
-        self.entries.iter().map(|(k, _)| k.clone()).filter(|k| !k.starts_with('#')).collect()
+        self.entries
+            .iter()
+            .map(|(k, _)| k.clone())
+            .filter(|k| !k.starts_with('#'))
+            .collect()
     }
     /// Keys in spec [[OwnPropertyKeys]] order: array-index keys ascending, then other string keys
     /// in insertion order, then symbol keys in insertion order.
@@ -399,7 +417,11 @@ impl Props {
             }
         }
         ints.sort_by_key(|(n, _)| *n);
-        ints.into_iter().map(|(_, k)| k).chain(strs).chain(syms).collect()
+        ints.into_iter()
+            .map(|(_, k)| k)
+            .chain(strs)
+            .chain(syms)
+            .collect()
     }
     pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Property)> {
         self.entries.iter().map(|(k, p)| (k, p))
@@ -464,7 +486,11 @@ pub fn f32_to_f16(value: f32) -> u16 {
     let mant = (x & 0x7f_ffff) as i32;
     let exp = ((x >> 23) & 0xff) as i32;
     if exp == 0xff {
-        return if mant != 0 { sign | 0x7e00 } else { sign | 0x7c00 };
+        return if mant != 0 {
+            sign | 0x7e00
+        } else {
+            sign | 0x7c00
+        };
     }
     let half_exp = exp - 127 + 15;
     if half_exp >= 0x1f {

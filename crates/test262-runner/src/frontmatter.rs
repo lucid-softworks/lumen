@@ -96,7 +96,11 @@ fn collect_list(rest: &str, lines: &[&str], i: &mut usize, key_indent: usize) ->
             break;
         }
         if let Some(item) = t.strip_prefix('-') {
-            out.push(item.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
+            out.push(
+                item.trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string(),
+            );
             *i += 1;
         } else {
             break;

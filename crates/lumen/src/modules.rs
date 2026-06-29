@@ -17,7 +17,8 @@ impl Interp {
         if let Some(ns) = self.modules.get(key) {
             return Ok(ns.clone());
         }
-        let body = crate::parser::parse_module(src).map_err(|e| self.throw("SyntaxError", e.message))?;
+        let body =
+            crate::parser::parse_module(src).map_err(|e| self.throw("SyntaxError", e.message))?;
 
         // The module's scope and namespace are created up front so circular imports resolve to the
         // (still-populating) namespace rather than recursing forever.
@@ -34,7 +35,10 @@ impl Interp {
                     let dep = self.resolve_and_load(&decl.source, key)?;
                     self.bind_imports(&decl.specs, &dep, &mod_env)?;
                 }
-                Stmt::ExportNamed { source: Some(src), .. } | Stmt::ExportAll { source: src, .. } => {
+                Stmt::ExportNamed {
+                    source: Some(src), ..
+                }
+                | Stmt::ExportAll { source: src, .. } => {
                     self.resolve_and_load(src, key)?;
                 }
                 _ => {}
@@ -46,7 +50,10 @@ impl Interp {
         let saved_strict = self.strict;
         self.strict = true;
         let meta = self.new_object();
-        meta.borrow_mut().props.insert("url", Property::data(Value::from_string(key.to_string()), true, true, true));
+        meta.borrow_mut().props.insert(
+            "url",
+            Property::data(Value::from_string(key.to_string()), true, true, true),
+        );
         self.import_meta = Some(Value::Obj(meta));
         let result = self.eval_in_scope(&body, &mod_env);
         self.import_meta = saved_meta;
@@ -76,7 +83,12 @@ impl Interp {
     }
 
     /// Bind a module's import specifiers into its scope (snapshotting the dependency's exports).
-    fn bind_imports(&mut self, specs: &[ImportSpec], dep_ns: &Value, env: &Env) -> Result<(), Abrupt> {
+    fn bind_imports(
+        &mut self,
+        specs: &[ImportSpec],
+        dep_ns: &Value,
+        env: &Env,
+    ) -> Result<(), Abrupt> {
         let dep_ptr = match dep_ns {
             Value::Obj(o) => Rc::as_ptr(o) as usize,
             _ => 0,
@@ -132,7 +144,9 @@ impl Interp {
     }
 
     fn declare_import_binding(&self, name: &str, value: Value, env: &Env) {
-        env.borrow_mut().vars.insert(name.to_string(), Binding::data(value, false, true));
+        env.borrow_mut()
+            .vars
+            .insert(name.to_string(), Binding::data(value, false, true));
     }
 
     /// Build the module namespace: one data property per export name, in sorted order.
@@ -145,7 +159,8 @@ impl Interp {
     ) -> Result<(), Abrupt> {
         let mut entries: Vec<(String, Value)> = Vec::new();
         // Direct exports map `export name → local name` for live namespace reads.
-        let mut export_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut export_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for stmt in body {
             match stmt {
                 Stmt::ExportDecl(inner) => {
@@ -205,11 +220,14 @@ impl Interp {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         entries.dedup_by(|a, b| a.0 == b.0);
         for (name, value) in entries {
-            ns.borrow_mut().props.insert(name.as_str(), Property::data(value, false, true, false));
+            ns.borrow_mut()
+                .props
+                .insert(name.as_str(), Property::data(value, false, true, false));
         }
         ns.borrow_mut().extensible = false;
         // Register the live state so namespace reads of direct exports stay current.
-        self.module_ns.insert(Rc::as_ptr(ns) as usize, (env.clone(), export_map));
+        self.module_ns
+            .insert(Rc::as_ptr(ns) as usize, (env.clone(), export_map));
         Ok(())
     }
 

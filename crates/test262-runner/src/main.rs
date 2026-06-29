@@ -89,7 +89,10 @@ impl Harness {
             return s.clone();
         }
         let text = std::fs::read_to_string(self.dir.join(name)).unwrap_or_default();
-        self.cache.lock().unwrap().insert(name.to_string(), text.clone());
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), text.clone());
         text
     }
 }
@@ -121,7 +124,9 @@ fn main() {
     let targets: Vec<String> = if args.is_empty() {
         vec!["language/expressions".into(), "language/statements".into()]
     } else {
-        args.iter().map(|a| a.trim_start_matches("test/").to_string()).collect()
+        args.iter()
+            .map(|a| a.trim_start_matches("test/").to_string())
+            .collect()
     };
 
     let mut files = Vec::new();
@@ -129,7 +134,11 @@ fn main() {
         collect(&root.join("test").join(t), &mut files);
     }
     files.sort();
-    println!("test262: {} files under {}", files.len(), targets.join(", "));
+    println!(
+        "test262: {} files under {}",
+        files.len(),
+        targets.join(", ")
+    );
 
     let results = run_isolated(&root, &files);
     report_results(&results, &targets);
@@ -154,7 +163,10 @@ fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
 
     // Shared work queue of [lo, hi) ranges and a slot per test for its result.
     let queue: Arc<Mutex<VecDeque<(usize, usize)>>> = Arc::new(Mutex::new(
-        (0..files.len()).step_by(CHUNK).map(|lo| (lo, (lo + CHUNK).min(files.len()))).collect(),
+        (0..files.len())
+            .step_by(CHUNK)
+            .map(|lo| (lo, (lo + CHUNK).min(files.len())))
+            .collect(),
     ));
     let slots: Arc<Vec<Mutex<Option<Outcome>>>> =
         Arc::new((0..files.len()).map(|_| Mutex::new(None)).collect());
@@ -165,7 +177,10 @@ fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
     let total = files.len();
     let done = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    let nproc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(MAX_WORKERS);
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(MAX_WORKERS);
     eprintln!("running {total} tests across {nproc} worker processes...");
     let handles: Vec<_> = (0..nproc)
         .map(|_| {
@@ -176,7 +191,9 @@ fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
             let root_s = root_s.clone();
             let paths_s = paths_s.clone();
             std::thread::spawn(move || {
-                worker_loop(&queue, &slots, &self_exe, &root_s, &paths_s, &done, total, started);
+                worker_loop(
+                    &queue, &slots, &self_exe, &root_s, &paths_s, &done, total, started,
+                );
             })
         })
         .collect();
@@ -192,9 +209,11 @@ fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
         .enumerate()
         .map(|(i, p)| {
             let rel = rel_path(root, p);
-            let outcome = slots[i].lock().unwrap().take().unwrap_or_else(|| {
-                Outcome::Fail("not executed".into())
-            });
+            let outcome = slots[i]
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Outcome::Fail("not executed".into()));
             (rel, outcome)
         })
         .collect()
@@ -231,7 +250,11 @@ fn worker_loop(
         );
         // Spawn the worker and wait with a deadline; kill it if it blows the time budget.
         let mut timed_out = false;
-        let status = match std::process::Command::new("/bin/sh").arg("-c").arg(&worker_cmd).spawn() {
+        let status = match std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&worker_cmd)
+            .spawn()
+        {
             Ok(mut child) => {
                 // The deadline is per-*test*, not per-chunk: it resets whenever the worker writes a
                 // new result (the out file grows). So a chunk of merely-slow tests keeps running as
@@ -302,10 +325,12 @@ fn worker_loop(
             let pct = 100.0 * now as f64 / total as f64;
             let secs = started.elapsed().as_secs_f64();
             let rate = if secs > 0.0 { now as f64 / secs } else { 0.0 };
-            let eta = if rate > 0.0 { (total - now) as f64 / rate } else { 0.0 };
-            eprintln!(
-                "  progress: {now}/{total} ({pct:.0}%)  {rate:.0} tests/s  eta {eta:.0}s",
-            );
+            let eta = if rate > 0.0 {
+                (total - now) as f64 / rate
+            } else {
+                0.0
+            };
+            eprintln!("  progress: {now}/{total} ({pct:.0}%)  {rate:.0} tests/s  eta {eta:.0}s",);
         }
     }
 }
@@ -332,8 +357,11 @@ fn run_worker_inner(argv: &[String]) {
     let hi: usize = argv[6].parse().unwrap_or(0);
 
     let harness = Harness::build(&root);
-    let paths: Vec<String> =
-        std::fs::read_to_string(paths_file).unwrap_or_default().lines().map(String::from).collect();
+    let paths: Vec<String> = std::fs::read_to_string(paths_file)
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect();
     let mut out = std::fs::File::create(out_file).expect("create worker out");
 
     for idx in lo..hi {
@@ -404,18 +432,34 @@ fn report_results(results: &[(String, Outcome)], targets: &[String]) {
         }
     }
 
-    println!("\n{:<48} {:>7} {:>7} {:>7}", "category", "pass", "fail", "skip");
+    println!(
+        "\n{:<48} {:>7} {:>7} {:>7}",
+        "category", "pass", "fail", "skip"
+    );
     println!("{}", "-".repeat(72));
     for (cat, t) in &by_cat {
         println!("{cat:<48} {:>7} {:>7} {:>7}", t.pass, t.fail, t.skip);
     }
     println!("{}", "-".repeat(72));
-    println!("{:<48} {:>7} {:>7} {:>7}", "TOTAL", total.pass, total.fail, total.skip);
+    println!(
+        "{:<48} {:>7} {:>7} {:>7}",
+        "TOTAL", total.pass, total.fail, total.skip
+    );
     let ran = total.pass + total.fail;
-    let pct = if ran > 0 { 100.0 * total.pass as f64 / ran as f64 } else { 0.0 };
-    println!("\npass rate (excl. skipped): {pct:.1}%  ({}/{})", total.pass, ran);
+    let pct = if ran > 0 {
+        100.0 * total.pass as f64 / ran as f64
+    } else {
+        0.0
+    };
+    println!(
+        "\npass rate (excl. skipped): {pct:.1}%  ({}/{})",
+        total.pass, ran
+    );
     if !skip_reasons.is_empty() {
-        let parts: Vec<String> = skip_reasons.iter().map(|(r, n)| format!("{r}={n}")).collect();
+        let parts: Vec<String> = skip_reasons
+            .iter()
+            .map(|(r, n)| format!("{r}={n}"))
+            .collect();
         println!("skips: {}", parts.join(", "));
     }
 
@@ -430,7 +474,10 @@ fn report_results(results: &[(String, Outcome)], targets: &[String]) {
 
     if std::env::var("T262_SAMPLES").is_ok() {
         println!("\nsample failures:");
-        for (rel, outcome) in results.iter().filter(|(_, o)| matches!(o, Outcome::Fail(_))).take(40)
+        for (rel, outcome) in results
+            .iter()
+            .filter(|(_, o)| matches!(o, Outcome::Fail(_)))
+            .take(40)
         {
             if let Outcome::Fail(why) = outcome {
                 println!("  {rel}\n      {why}");
@@ -483,7 +530,10 @@ fn category(rel: &str) -> String {
 }
 
 fn rel_path(root: &Path, p: &Path) -> String {
-    p.strip_prefix(root.join("test")).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    p.strip_prefix(root.join("test"))
+        .unwrap_or(p)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -493,8 +543,10 @@ fn rel_path(root: &Path, p: &Path) -> String {
 /// Isolate ordinary panics inside lumen as a `Fail`. (A stack overflow still aborts the worker —
 /// the parent handles that as a crash.)
 fn run_one(path: &Path, harness: &Harness) -> Outcome {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one_inner(path, harness)))
-        .unwrap_or_else(|_| Outcome::Fail("panicked".into()))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_one_inner(path, harness)
+    }))
+    .unwrap_or_else(|_| Outcome::Fail("panicked".into()))
 }
 
 fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
@@ -510,7 +562,11 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     let is_async = fm.has_flag("async");
 
     if fm.has_flag("raw") {
-        return if is_async { check_async(&src, false, &fm, path) } else { check(&src, false, &fm, path) };
+        return if is_async {
+            check_async(&src, false, &fm, path)
+        } else {
+            check(&src, false, &fm, path)
+        };
     }
 
     let mut preamble = harness.base.clone();
@@ -524,7 +580,13 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
         preamble.push('\n');
     }
     let program = format!("{preamble}\n{src}");
-    let judge = |p: &str, strict: bool| if is_async { check_async(p, strict, &fm, path) } else { check(p, strict, &fm, path) };
+    let judge = |p: &str, strict: bool| {
+        if is_async {
+            check_async(p, strict, &fm, path)
+        } else {
+            check(p, strict, &fm, path)
+        }
+    };
 
     let mut ran = false;
     if !fm.has_flag("onlyStrict") {
@@ -574,8 +636,14 @@ fn check_async(program: &str, strict: bool, _fm: &Frontmatter, path: &Path) -> O
     let console = engine.take_console();
     if console.iter().any(|l| l == "Test262:AsyncTestComplete") {
         Outcome::Pass
-    } else if let Some(fail) = console.iter().find(|l| l.starts_with("Test262:AsyncTestFailure:")) {
-        Outcome::Fail(format!("async: {}", &fail["Test262:AsyncTestFailure:".len()..]))
+    } else if let Some(fail) = console
+        .iter()
+        .find(|l| l.starts_with("Test262:AsyncTestFailure:"))
+    {
+        Outcome::Fail(format!(
+            "async: {}",
+            &fail["Test262:AsyncTestFailure:".len()..]
+        ))
     } else {
         Outcome::Fail("async test did not signal completion".into())
     }
@@ -630,7 +698,9 @@ fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter)
         }
         (None, Err(e)) => Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
         // A parse/early/resolution error surfaces as a SyntaxError (thrown or at parse time).
-        (Some(neg), Err(_)) if matches!(neg.phase, Phase::Parse | Phase::Early | Phase::Resolution) => {
+        (Some(neg), Err(_))
+            if matches!(neg.phase, Phase::Parse | Phase::Early | Phase::Resolution) =>
+        {
             if neg.error_type == "SyntaxError" {
                 Outcome::Pass
             } else {
@@ -644,12 +714,14 @@ fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter)
                 Outcome::Fail(format!("expected {}, threw {name}", neg.error_type))
             }
         }
-        (Some(neg), Ok(Completion::Value(_))) => {
-            Outcome::Fail(format!("expected {} but completed normally", neg.error_type))
-        }
-        (Some(neg), Err(e)) => {
-            Outcome::Fail(format!("expected runtime {} but parse failed: {}", neg.error_type, e.message))
-        }
+        (Some(neg), Ok(Completion::Value(_))) => Outcome::Fail(format!(
+            "expected {} but completed normally",
+            neg.error_type
+        )),
+        (Some(neg), Err(e)) => Outcome::Fail(format!(
+            "expected runtime {} but parse failed: {}",
+            neg.error_type, e.message
+        )),
     }
 }
 
@@ -663,7 +735,9 @@ fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome 
         }
         (None, Err(e)) => Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
 
-        (Some(neg), Err(_)) if matches!(neg.phase, Phase::Parse | Phase::Early | Phase::Resolution) => {
+        (Some(neg), Err(_))
+            if matches!(neg.phase, Phase::Parse | Phase::Early | Phase::Resolution) =>
+        {
             if neg.error_type == "SyntaxError" {
                 Outcome::Pass
             } else {
@@ -676,7 +750,10 @@ fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome 
             if name == neg.error_type {
                 Outcome::Pass
             } else {
-                Outcome::Fail(format!("expected {} at {:?}, threw {name}", neg.error_type, neg.phase))
+                Outcome::Fail(format!(
+                    "expected {} at {:?}, threw {name}",
+                    neg.error_type, neg.phase
+                ))
             }
         }
 
@@ -687,12 +764,14 @@ fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome 
                 Outcome::Fail(format!("expected {}, threw {name}", neg.error_type))
             }
         }
-        (Some(neg), Ok(Completion::Value(_))) => {
-            Outcome::Fail(format!("expected {} but completed normally", neg.error_type))
-        }
-        (Some(neg), Err(e)) => {
-            Outcome::Fail(format!("expected runtime {} but parse failed: {}", neg.error_type, e.message))
-        }
+        (Some(neg), Ok(Completion::Value(_))) => Outcome::Fail(format!(
+            "expected {} but completed normally",
+            neg.error_type
+        )),
+        (Some(neg), Err(e)) => Outcome::Fail(format!(
+            "expected runtime {} but parse failed: {}",
+            neg.error_type, e.message
+        )),
     }
 }
 

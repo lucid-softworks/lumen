@@ -152,7 +152,12 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> Coroutine {
             let ptr = ptr;
             let body = body;
             let SendBody(body) = body;
-            YIELDER.with(|y| *y.borrow_mut() = Some(Yielder { suspend_tx, resume_rx }));
+            YIELDER.with(|y| {
+                *y.borrow_mut() = Some(Yielder {
+                    suspend_tx,
+                    resume_rx,
+                })
+            });
             // Park until the first next()/return()/throw(); the body doesn't run before then.
             let first = YIELDER.with(|y| y.borrow().as_ref().unwrap().resume_rx.recv());
             let outcome = match first {
@@ -171,5 +176,10 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> Coroutine {
             });
         })
         .expect("spawn generator thread");
-    Coroutine { resume_tx, suspend_rx, done: false, _handle: handle }
+    Coroutine {
+        resume_tx,
+        suspend_rx,
+        done: false,
+        _handle: handle,
+    }
 }
