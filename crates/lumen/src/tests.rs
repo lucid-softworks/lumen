@@ -1753,3 +1753,15 @@ fn numeric_separators() {
     assert_eq!(run("0b1_0"), "2");
     assert_eq!(run("123_456n"), "123456");
 }
+#[test]
+fn var_nested_block_redecl() {
+    assert!(Engine::new().eval("{ let x; { var x; } }", false).is_err());
+    assert!(Engine::new().eval("{ const x=1; { { var x; } } }", false).is_err());
+    assert!(Engine::new().eval("let y; { var y; }", false).is_err());
+    // a var in a nested FUNCTION doesn't conflict with the outer let
+    assert_eq!(run("{ let x=1; (function(){ var x=2; return x; }); x }"), "1");
+    // same-scope var-then-let still caught
+    assert!(Engine::new().eval("{ var z; let z; }", false).is_err());
+    // unrelated names fine
+    assert_eq!(run("{ let a=1; { var b=2; } a }"), "1");
+}

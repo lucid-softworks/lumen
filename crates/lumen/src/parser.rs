@@ -15,7 +15,7 @@ pub struct ParseError {
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, module: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    let mut p = Parser { toks: tokens, pos: 0, strict, depth: 0, in_generator: false, in_async: false, no_in: false, module: false, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
@@ -26,7 +26,7 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
 /// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError { message: e.message, line: e.line })?;
-    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+    let mut p = Parser { toks: tokens, pos: 0, strict: true, depth: 0, in_generator: false, in_async: true, no_in: false, module: true, fn_depth: 0, iter_depth: 0, switch_depth: 0, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
     Ok(body)
@@ -178,12 +178,17 @@ struct Parser {
     labels: Vec<String>,
     /// Per-scope declared names, for detecting lexical redeclaration.
     decl_scopes: Vec<DeclScope>,
+    /// Set just before parsing a function body so the scope it pushes is marked a var boundary.
+    next_scope_is_fn_boundary: bool,
 }
 
 #[derive(Default)]
 struct DeclScope {
     lexical: Vec<String>,
     var: Vec<String>,
+    /// A `var` hoists up to (and conflicts with lexicals only up to) the nearest such boundary — the
+    /// program/function top. Block / `for` / `switch` scopes are not boundaries.
+    fn_boundary: bool,
 }
 
 impl Parser {
@@ -253,7 +258,8 @@ impl Parser {
     }
 
     fn push_decl_scope(&mut self) {
-        self.decl_scopes.push(DeclScope::default());
+        let fn_boundary = std::mem::take(&mut self.next_scope_is_fn_boundary);
+        self.decl_scopes.push(DeclScope { fn_boundary, ..Default::default() });
     }
     fn pop_decl_scope(&mut self) {
         self.decl_scopes.pop();
@@ -270,11 +276,18 @@ impl Parser {
         self.decl_scopes.last_mut().unwrap().lexical.push(name.to_string());
         Ok(())
     }
-    /// Record a `var`/function binding; only conflicts with a lexical binding in the same scope.
-    fn declare_var(&mut self, name: &str) -> Result<(), ParseError> {
-        let conflict = self.decl_scopes.last().unwrap().lexical.iter().any(|n| n == name);
-        if conflict {
-            return self.err(format!("Identifier '{name}' has already been declared"));
+    /// Record a `var`/function binding. A `var` (`hoist_through = true`) conflicts with a lexical of
+    /// the same name in any block scope it hoists through — from here up to (and including) the
+    /// nearest function/program boundary. A block-level *function* declaration (`hoist_through =
+    /// false`) only conflicts in its own scope (Annex B.3.3 lets it shadow an enclosing lexical).
+    fn declare_var(&mut self, name: &str, hoist_through: bool) -> Result<(), ParseError> {
+        for scope in self.decl_scopes.iter().rev() {
+            if scope.lexical.iter().any(|n| n == name) {
+                return self.err(format!("Identifier '{name}' has already been declared"));
+            }
+            if scope.fn_boundary || !hoist_through {
+                break;
+            }
         }
         self.decl_scopes.last_mut().unwrap().var.push(name.to_string());
         Ok(())
@@ -315,7 +328,7 @@ impl Parser {
             Tok::Keyword("function") => {
                 let f = self.parse_function(false)?;
                 if let Some(n) = &f.name {
-                    self.declare_var(n)?;
+                    self.declare_var(n, false)?;
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
@@ -324,7 +337,7 @@ impl Parser {
                 self.advance();
                 let f = self.parse_function(true)?;
                 if let Some(n) = &f.name {
-                    self.declare_var(n)?;
+                    self.declare_var(n, false)?;
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
@@ -458,7 +471,7 @@ impl Parser {
         }
         for n in &names {
             match kind {
-                DeclKind::Var => self.declare_var(n)?,
+                DeclKind::Var => self.declare_var(n, true)?,
                 _ => self.declare_lexical(n)?,
             }
         }
@@ -1445,7 +1458,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
                     sub.parse_expr()?
                 }
             };
@@ -1468,7 +1481,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = tokenize(&src)
                         .map_err(|e| ParseError { message: e.message, line: e.line })?;
-                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope::default()] };
+                    let mut sub = Parser { toks: tokens, pos: 0, strict: self.strict, depth: self.depth, in_generator: self.in_generator, in_async: self.in_async, no_in: false, module: self.module, fn_depth: self.fn_depth, iter_depth: self.iter_depth, switch_depth: self.switch_depth, labels: Vec::new(), decl_scopes: vec![DeclScope { fn_boundary: true, ..Default::default() }], next_scope_is_fn_boundary: false };
                     subs.push(sub.parse_expr()?);
                 }
             }
@@ -1834,6 +1847,7 @@ impl Parser {
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
+        self.next_scope_is_fn_boundary = true;
         let body = self.parse_block_body();
         self.fn_depth -= 1;
         self.iter_depth = siter;
