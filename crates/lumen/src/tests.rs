@@ -1694,3 +1694,16 @@ fn regex_literal_parse_validation() {
     assert_eq!(run(r"/\p{L}+/u.test('abc')"), "true");
     assert_eq!(run("/a+/.test('aaa')"), "true");
 }
+#[test]
+fn unicode_identifiers() {
+    // ID_Start / ID_Continue per the bundled UCD tables
+    assert_eq!(run("var \u{00C5}=1; \u{00C5}"), "1");              // Å (Lu, ID_Start)
+    assert_eq!(run("var \u{03B1}\u{03B2}=2; \u{03B1}\u{03B2}"), "2"); // αβ (Greek)
+    assert_eq!(run("var _\u{0300}=3; _\u{0300}"), "3");           // _ + combining mark (ID_Continue)
+    assert_eq!(run("var $x=4; $x"), "4");
+    assert_eq!(run("var \u{4E2D}\u{6587}=5; \u{4E2D}\u{6587}"), "5"); // CJK
+    // a lone combining mark can't START an identifier
+    assert!(Engine::new().eval("var \u{0300}x=1", false).is_err());
+    // ZWNJ/ZWJ valid as ID_Continue
+    assert_eq!(run("var a\u{200D}b=6; a\u{200D}b"), "6");
+}

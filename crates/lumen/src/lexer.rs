@@ -691,33 +691,36 @@ fn regex_allowed_after(last: Option<char>) -> bool {
 fn is_line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
+/// Whether code point `c` is in the Unicode property `name` (an ASCII-free path; the bundled UCD
+/// tables give the exact ID_Start/ID_Continue sets).
+fn prop_has(name: &str, c: char) -> bool {
+    let u = c as u32;
+    crate::unicode_props::lookup(name, None)
+        .map(|r| {
+            r.binary_search_by(|&(lo, hi)| {
+                if u < lo {
+                    std::cmp::Ordering::Greater
+                } else if u > hi {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+        })
+        .unwrap_or(false)
+}
 fn is_ident_start(c: char) -> bool {
-    // ID_Start ≈ alphabetic + a few Other_ID_Start characters.
-    c == '_'
-        || c == '$'
-        || c.is_alphabetic()
-        || matches!(c, '\u{1885}' | '\u{1886}' | '\u{2118}' | '\u{212E}' | '\u{309B}' | '\u{309C}')
+    // IdentifierStart = ID_Start ∪ {$, _} (plus `\u` escapes, handled by the caller).
+    if c.is_ascii() {
+        return c == '_' || c == '$' || c.is_ascii_alphabetic();
+    }
+    prop_has("ID_Start", c)
 }
 fn is_ident_part(c: char) -> bool {
-    // ZWNJ / ZWJ are valid IdentifierPart characters.
-    // ID_Continue ≈ ID_Start + combining marks (Mn/Mc) + connector punctuation + a few extras.
-    c == '_'
-        || c == '$'
-        || c == '\u{200C}'
-        || c == '\u{200D}'
-        || c.is_alphanumeric()
-        || is_ident_start(c)
-        || matches!(c,
-            '\u{00B7}' | '\u{0387}' | '\u{19DA}'
-            | '\u{0300}'..='\u{036F}'  // combining diacritical marks (Mn)
-            | '\u{0483}'..='\u{0489}'
-            | '\u{0591}'..='\u{05BD}'
-            | '\u{0610}'..='\u{061A}'
-            | '\u{064B}'..='\u{065F}'
-            | '\u{0670}'
-            | '\u{06D6}'..='\u{06DC}'
-            | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}'
-            | '\u{203F}' | '\u{2040}' | '\u{2054}'  // connector punctuation (Pc)
-            | '\u{FE33}' | '\u{FE34}' | '\u{FE4D}'..='\u{FE4F}' | '\u{FF3F}'
-        )
+    // IdentifierPart = ID_Continue ∪ {$, _, ZWNJ, ZWJ}.
+    if c.is_ascii() {
+        return c == '_' || c == '$' || c.is_ascii_alphanumeric();
+    }
+    c == '\u{200C}' || c == '\u{200D}' || prop_has("ID_Continue", c)
 }
