@@ -5384,13 +5384,16 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "splice", 2, array_splice);
     it.def_method(&ap, "sort", 1, |i, this, args| {
+        let cmp = arg(args, 0);
+        if !matches!(cmp, Value::Undefined) && !cmp.is_callable() {
+            return Err(i.make_error("TypeError", "the comparator must be a function or undefined"));
+        }
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let mut items = Vec::with_capacity(len);
         for k in 0..len {
             items.push(ab(i.get_member(&this, &k.to_string()))?);
         }
-        let cmp = arg(args, 0);
         merge_sort(i, &mut items, &cmp)?;
         for (k, v) in items.into_iter().enumerate() {
             ab(i.set_member(&this, &k.to_string(), v))?;

@@ -2165,3 +2165,12 @@ fn regex_prop_invalid_special() {
     assert_eq!(run(r"/\p{ASCII_Hex_Digit}/u.test('F')"), "true");
     assert_eq!(run(r"/\p{Lowercase}/u.test('a')"), "true");
 }
+#[test]
+fn sort_comparator_validation() {
+    assert!(matches!(Engine::new().eval("[1,2].sort('x')", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert!(matches!(Engine::new().eval("[1,2].sort(5)", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert!(matches!(Engine::new().eval("[1,2].sort({})", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert_eq!(run("[3,1,2].sort().join(',')"), "1,2,3");
+    assert_eq!(run("[3,1,2].sort((a,b)=>a-b).join(',')"), "1,2,3");
+    assert_eq!(run("[3,1,2].sort(undefined).join(',')"), "1,2,3");
+}
