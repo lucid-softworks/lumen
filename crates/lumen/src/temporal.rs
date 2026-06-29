@@ -288,6 +288,31 @@ fn build_date(i: &Interp, year: i64, month: i64, day: i64) -> Result<IsoDate, Va
         },
     )
 }
+/// Build a date honoring `overflow`: `reject` range-checks (as [`build_date`]); `constrain` clamps
+/// month into 1..12 and day into the target month's valid range.
+fn build_date_ovf(
+    i: &Interp,
+    year: i64,
+    month: i64,
+    day: i64,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
+    match ovf {
+        Overflow::Reject => build_date(i, year, month, day),
+        Overflow::Constrain => {
+            let m = month.clamp(1, 12);
+            let d = day.clamp(1, days_in_month(year, m as u8) as i64);
+            check_date(
+                i,
+                IsoDate {
+                    year,
+                    month: m as u8,
+                    day: d as u8,
+                },
+            )
+        }
+    }
+}
 /// Range-check raw integer time fields before narrowing (RejectTime semantics).
 fn build_time(
     i: &Interp,
@@ -315,6 +340,31 @@ fn build_time(
         us: us as u16,
         ns: ns as u16,
     })
+}
+/// Build a time honoring `overflow`: `reject` range-checks (as [`build_time`]); `constrain` clamps
+/// each field into its valid range.
+#[allow(clippy::too_many_arguments)]
+fn build_time_ovf(
+    i: &Interp,
+    hour: i64,
+    minute: i64,
+    second: i64,
+    ms: i64,
+    us: i64,
+    ns: i64,
+    ovf: Overflow,
+) -> Result<IsoTime, Value> {
+    match ovf {
+        Overflow::Reject => build_time(i, hour, minute, second, ms, us, ns),
+        Overflow::Constrain => Ok(IsoTime {
+            hour: hour.clamp(0, 23) as u8,
+            minute: minute.clamp(0, 59) as u8,
+            second: second.clamp(0, 59) as u8,
+            ms: ms.clamp(0, 999) as u16,
+            us: us.clamp(0, 999) as u16,
+            ns: ns.clamp(0, 999) as u16,
+        }),
+    }
 }
 /// Validate a constructor's calendar argument: `undefined`, or an ASCII case-insensitive "iso8601".
 /// A non-string (other than undefined) is a TypeError; an unknown calendar id is a RangeError.
@@ -1149,7 +1199,8 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let year = field_int(i, &f, "year", d.year)?;
         let month = field_int(i, &f, "month", d.month as i64)?;
         let day = field_int(i, &f, "day", d.day as i64)?;
-        let nd = build_date(i, year, month, day)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let nd = build_date_ovf(i, year, month, day, ovf)?;
         Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -2139,7 +2190,8 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
         let ms = field_int(i, &f, "millisecond", x.ms as i64)?;
         let us = field_int(i, &f, "microsecond", x.us as i64)?;
         let ns = field_int(i, &f, "nanosecond", x.ns as i64)?;
-        let nt = build_time(i, hour, minute, second, ms, us, ns)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let nt = build_time_ovf(i, hour, minute, second, ms, us, ns, ovf)?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(nt)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -2504,8 +2556,9 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let ms = field_int(i, &f, "millisecond", tm.ms as i64)?;
         let us = field_int(i, &f, "microsecond", tm.us as i64)?;
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)?;
-        let nd = build_date(i, year, month, day)?;
-        let nt = build_time(i, hour, minute, second, ms, us, nsf)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let nd = build_date_ovf(i, year, month, day, ovf)?;
+        let nt = build_time_ovf(i, hour, minute, second, ms, us, nsf, ovf)?;
         Ok(make(
             i,
             "Temporal.PlainDateTime",
@@ -2727,7 +2780,12 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let d = as_yearmonth(i, &t)?;
         let f = arg(a, 0);
         let year = field_int(i, &f, "year", d.year)?;
-        let month = field_int(i, &f, "month", d.month as i64)?;
+        let month_raw = field_int(i, &f, "month", d.month as i64)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let month = match ovf {
+            Overflow::Constrain => month_raw.clamp(1, 12),
+            Overflow::Reject => month_raw,
+        };
         if !(1..=12).contains(&month) || !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "invalid year-month"));
         }
@@ -4186,6 +4244,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let ms = field_int(i, &f, "millisecond", tm.ms as i64)? as u16;
         let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
+        to_overflow(i, &arg(a, 1))?; // validate the overflow option
         let nd = check_date(i, IsoDate { year, month, day })?;
         let nt = check_time(
             i,
