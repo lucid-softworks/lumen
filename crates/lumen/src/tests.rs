@@ -2032,3 +2032,11 @@ fn object_methods_coerce() {
     // normal objects still work
     assert_eq!(run("Object.keys({a:1,b:2}).join(',')"), "a,b");
 }
+#[test]
+fn array_isarray_proxy() {
+    assert_eq!(run("Array.isArray(new Proxy([],{}))"), "true");
+    assert_eq!(run("Array.isArray(new Proxy(new Proxy([],{}),{}))"), "true");
+    assert_eq!(run("Array.isArray(new Proxy({},{}))"), "false");
+    assert_eq!(run("Array.isArray([])"), "true");
+    assert_eq!(run("Array.isArray({})"), "false");
+}

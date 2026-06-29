@@ -5393,8 +5393,19 @@ fn install_array(it: &mut Interp) {
     });
     ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(ap.clone()), false, false, false));
     ap.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-    it.def_method(&ctor, "isArray", 1, |_i, _this, args| {
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array))))
+    it.def_method(&ctor, "isArray", 1, |i, _this, args| {
+        // IsArray unwraps Proxies: a proxy of an array is an array (a revoked proxy throws).
+        let mut v = arg(args, 0);
+        loop {
+            match &v {
+                Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => return Ok(Value::Bool(true)),
+                Value::Obj(_) => match proxy_pair(i, &v) {
+                    Some((target, _)) => v = target,
+                    None => return Ok(Value::Bool(false)),
+                },
+                _ => return Ok(Value::Bool(false)),
+            }
+        }
     });
     it.def_method(&ctor, "of", 0, |i, _this, args| Ok(i.make_array(args.to_vec())));
     it.def_method(&ctor, "from", 1, |i, this, args| {
