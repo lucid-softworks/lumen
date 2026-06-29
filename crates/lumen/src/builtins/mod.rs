@@ -2970,10 +2970,16 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
 fn install_reflect(it: &mut Interp) {
     let r = it.new_object();
     it.def_method(&r, "get", 2, |i, _t, a| {
+        if !matches!(arg(a, 0), Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.get called on non-object"));
+        }
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         ab(i.get_member(&arg(a, 0), &key))
     });
     it.def_method(&r, "set", 3, |i, _t, a| {
+        if !matches!(arg(a, 0), Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.set called on non-object"));
+        }
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         ab(i.set_member(&arg(a, 0), &key, arg(a, 2)))?;
         Ok(Value::Bool(true))
