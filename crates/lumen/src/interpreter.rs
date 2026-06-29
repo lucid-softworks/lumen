@@ -185,6 +185,9 @@ pub struct Interp {
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
     pub ta_buffer: HashMap<usize, Value>,
+    /// Each `ShadowRealm` instance owns an isolated realm (a full sub-interpreter), keyed by the
+    /// ShadowRealm object's pointer. Only primitive completion values cross the boundary.
+    pub shadow_realms: HashMap<usize, Box<Interp>>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
     pub data_views: HashMap<usize, (usize, usize, usize)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
@@ -302,6 +305,7 @@ impl Interp {
             array_buffers: HashMap::new(),
             typed_arrays: HashMap::new(),
             ta_buffer: HashMap::new(),
+            shadow_realms: HashMap::new(),
             data_views: HashMap::new(),
             regexps: HashMap::new(),
             proxies: HashMap::new(),
@@ -1236,6 +1240,18 @@ impl Interp {
     }
 
     // ----- program / statement execution ------------------------------------------------------
+
+    /// Run an already-parsed program body to completion (running the microtask checkpoint), under a
+    /// given strict mode. Used to evaluate code inside a ShadowRealm's isolated interpreter.
+    pub fn run_body(&mut self, body: &[Stmt], strict: bool) -> Result<Value, Value> {
+        let saved = self.strict;
+        let directive = matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict");
+        self.strict = strict || directive;
+        let r = self.run_program(body);
+        self.drain_microtasks();
+        self.strict = saved;
+        r
+    }
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
         self.hoist(body, &self.global_env.clone(), true);

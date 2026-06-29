@@ -63,6 +63,7 @@ pub fn install(it: &mut Interp) {
     install_atomics(it);
     install_weak_refs(it);
     install_disposable_stack(it);
+    install_shadow_realm(it);
     crate::temporal::install(it);
 }
 
@@ -3834,6 +3835,55 @@ fn install_function_proto(it: &mut Interp) {
 /// TypedArray info for `o`, if it is one.
 fn ta_info(i: &Interp, o: &Gc) -> Option<crate::value::TaInfo> {
     i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied()
+}
+
+/// `ShadowRealm`: each instance owns a fully isolated sub-interpreter. `evaluate` runs source in it and
+/// only lets primitive completion values cross back (callables are wrapped; objects are a TypeError).
+fn install_shadow_realm(it: &mut Interp) {
+    let proto = Object::new(Some(it.object_proto.clone()));
+    it.extra_protos.insert("ShadowRealm", proto.clone());
+    set_to_string_tag(it, &proto, "ShadowRealm");
+    it.def_method(&proto, "evaluate", 1, shadow_evaluate);
+
+    let ctor = it.make_native("ShadowRealm", 0, |i, _t, _a| {
+        if !i.constructing {
+            return Err(i.make_error("TypeError", "ShadowRealm constructor requires 'new'"));
+        }
+        let obj = Object::new(i.extra_protos.get("ShadowRealm").cloned());
+        let p = Rc::as_ptr(&obj) as usize;
+        i.shadow_realms.insert(p, Box::new(Interp::new()));
+        Ok(Value::Obj(obj))
+    });
+    ctor.borrow_mut().props.insert("prototype", Property::data(Value::Obj(proto.clone()), false, false, false));
+    proto.borrow_mut().props.insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    it.global.borrow_mut().props.insert("ShadowRealm", Property::builtin(Value::Obj(ctor)));
+}
+
+fn shadow_evaluate(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this)
+        .filter(|p| i.shadow_realms.contains_key(p))
+        .ok_or_else(|| i.make_error("TypeError", "ShadowRealm.prototype.evaluate called on a non-ShadowRealm"))?;
+    let src = match arg(a, 0) {
+        Value::Str(s) => s.to_string(),
+        _ => return Err(i.make_error("TypeError", "ShadowRealm.prototype.evaluate expects a string")),
+    };
+    // A parse failure is a SyntaxError of the *calling* realm (not wrapped).
+    let body = match crate::parser::parse_script(&src, false) {
+        Ok(b) => b,
+        Err(e) => return Err(i.make_error("SyntaxError", e.message)),
+    };
+    let mut sub = i.shadow_realms.remove(&ptr).unwrap();
+    let result = sub.run_body(&body, false);
+    i.shadow_realms.insert(ptr, sub);
+    match result {
+        // Primitive values (number/string/bool/null/undefined/bigint/symbol) are self-contained and
+        // cross the realm boundary directly.
+        Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
+        Ok(v) if v.is_callable() => Err(i.make_error("TypeError", "ShadowRealm cannot yet wrap a returned function")),
+        Ok(_) => Err(i.make_error("TypeError", "ShadowRealm.prototype.evaluate result must be a primitive")),
+        // An error thrown inside the shadow realm is re-thrown as a TypeError of the calling realm.
+        Err(_) => Err(i.make_error("TypeError", "ShadowRealm evaluate: the provided source threw an error")),
+    }
 }
 
 /// `(info, detached)` for a TypedArray receiver, or a TypeError (brand check for the meta getters).

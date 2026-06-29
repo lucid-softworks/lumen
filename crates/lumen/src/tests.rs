@@ -1920,3 +1920,22 @@ fn number_methods_fixed() {
       ("(255).toString(16)","ff"),("(123.456).toExponential(2)","1.23e+2")];
     for (src,want) in cases { assert_eq!(run(src), want, "{src}"); }
 }
+#[test]
+fn shadow_realm_basic() {
+    assert_eq!(run("typeof ShadowRealm"), "function");
+    assert_eq!(run("typeof ShadowRealm.prototype.evaluate"), "function");
+    assert_eq!(run("var r=new ShadowRealm(); r.evaluate('1+1')"), "2");
+    assert_eq!(run("var r=new ShadowRealm(); r.evaluate('null')"), "null");
+    assert_eq!(run("var r=new ShadowRealm(); typeof r.evaluate('undefined')"), "undefined");
+    assert_eq!(run("var r=new ShadowRealm(); r.evaluate('\"str\"')"), "str");
+    assert_eq!(run("var r=new ShadowRealm(); typeof r.evaluate('function fn(){}')"), "undefined");
+    // isolation: the shadow realm has its own globals
+    assert_eq!(run("var r=new ShadowRealm(); globalThis.x=5; typeof r.evaluate('typeof x')"), "string");
+    assert_eq!(run("var r=new ShadowRealm(); r.evaluate('typeof x')"), "undefined");
+    // errors: non-string arg, bad syntax, thrown error
+    assert_eq!(run("var r=new ShadowRealm(); try{r.evaluate(1)}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("var r=new ShadowRealm(); try{r.evaluate('(')}catch(e){e.constructor.name}"), "SyntaxError");
+    assert_eq!(run("var r=new ShadowRealm(); try{r.evaluate('throw 1')}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("var r=new ShadowRealm(); try{r.evaluate('({})')}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("try{ShadowRealm()}catch(e){e.constructor.name}"), "TypeError");
+}
