@@ -5333,29 +5333,6 @@ fn install_object(it: &mut Interp) {
             }
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
-        // Defining a TypedArray integer index writes through to the buffer (in range) or fails.
-        if let Some(info) = ta_info(i, &o) {
-            if let Ok(idx) = key.parse::<usize>() {
-                if idx >= i.ta_len(&info).unwrap_or(0) {
-                    return Err(i.make_error(
-                        "TypeError",
-                        "cannot define an out-of-bounds TypedArray index",
-                    ));
-                }
-                let pd = ab(build_partial(i, &arg(args, 2)))?;
-                if pd.is_accessor()
-                    || pd.configurable == Some(false)
-                    || pd.enumerable == Some(false)
-                    || pd.writable == Some(false)
-                {
-                    return Err(i.make_error("TypeError", "invalid TypedArray index descriptor"));
-                }
-                if let Some(v) = pd.value {
-                    ab(i.ta_store(&info, idx, &v))?;
-                }
-                return Ok(Value::Obj(o));
-            }
-        }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             if !ab(proxy_define_property(
                 i,
@@ -5790,6 +5767,28 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
     let d = build_partial(i, desc)?;
+    // TypedArray integer-index [[DefineOwnProperty]]: a valid in-range index accepts only a
+    // configurable+enumerable+writable data descriptor and writes the value; a canonical-numeric
+    // non-index can't be defined; both never touch the property map.
+    if let Some(info) = ta_info(i, o) {
+        match i.ta_index_kind(&info, key) {
+            crate::value::TaIndex::Element(idx) => {
+                if d.is_accessor()
+                    || d.configurable == Some(false)
+                    || d.enumerable == Some(false)
+                    || d.writable == Some(false)
+                {
+                    return Ok(false);
+                }
+                if let Some(v) = d.value.clone() {
+                    i.ta_store(&info, idx, &v)?;
+                }
+                return Ok(true);
+            }
+            crate::value::TaIndex::Exotic => return Ok(false),
+            crate::value::TaIndex::Ordinary => {}
+        }
+    }
     let is_array = matches!(o.borrow().exotic, crate::value::Exotic::Array);
     // Array exotic [[DefineOwnProperty]]: `length` and array indices have special rules.
     if is_array && key == "length" {
