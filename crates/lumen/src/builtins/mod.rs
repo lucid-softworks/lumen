@@ -2007,6 +2007,57 @@ fn date_set(i: &mut Interp, this: &Value, sel: u8, nv: f64) -> Result<Value, Val
 }
 
 /// Minimal ISO-8601 parser: `YYYY[-MM[-DD]][THH:mm[:ss[.sss]]][Z]`. Returns NaN on anything else.
+/// Best-effort parse of the RFC-2822-ish / `toString`/`toUTCString`/`toDateString` formats (e.g.
+/// "Thu, 01 Jan 1970 00:00:00 GMT", "Wed Jul 28 1993 14:39:07 GMT-0600 (…)").
+fn parse_rfc(s: &str) -> f64 {
+    const MONTHS: [&str; 12] =
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let (mut year, mut month, mut day): (Option<i64>, Option<i64>, Option<i64>) = (None, None, None);
+    let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
+    let mut offset: i64 = 0; // minutes east of UTC
+    let mut got_time = false;
+    for tok in s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')')) {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let low = tok.to_lowercase();
+        if let Some(idx) = MONTHS.iter().position(|m| low.starts_with(m)) {
+            month = Some(idx as i64);
+        } else if tok.contains(':') && !got_time {
+            let mut p = tok.split(':');
+            hh = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            mm = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            ss = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            got_time = true;
+        } else if let Ok(n) = tok.parse::<i64>() {
+            if tok.len() >= 4 || n > 31 {
+                year = Some(n);
+            } else if day.is_none() {
+                day = Some(n);
+            } else if year.is_none() {
+                year = Some(n);
+            }
+        } else if low.starts_with("gmt") || low.starts_with('+') || low.starts_with('-') {
+            let rest = low.trim_start_matches("gmt");
+            let sign = rest.chars().next();
+            let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.len() >= 4 {
+                let oh: i64 = digits[..2].parse().unwrap_or(0);
+                let om: i64 = digits[2..4].parse().unwrap_or(0);
+                let mag = oh * 60 + om;
+                offset = if sign == Some('-') { -mag } else { mag };
+            }
+        }
+    }
+    match (year, month, day) {
+        (Some(y), Some(mo), Some(d)) => {
+            parts_to_ms(y, mo, d, hh, mm, ss, 0) - (offset as f64) * 60000.0
+        }
+        _ => f64::NAN,
+    }
+}
+
 fn parse_iso(s: &str) -> f64 {
     let s = s.trim();
     let (date_part, time_part) = match s.split_once('T') {
@@ -2141,6 +2192,23 @@ fn install_date(it: &mut Interp) {
         let v = ab(i.to_number(&arg(a, 0)))?;
         date_set(i, &this, 0, v)
     });
+    // Annex B legacy getYear/setYear (years offset from 1900).
+    it.def_method(&proto, "getYear", 0, |i, this, _| {
+        let f = ab(i.get_member(&this, "getFullYear"))?;
+        let yv = ab(i.call(f, this.clone(), &[]))?;
+        let y = ab(i.to_number(&yv))?;
+        Ok(Value::Num(if y.is_nan() { f64::NAN } else { y - 1900.0 }))
+    });
+    it.def_method(&proto, "setYear", 1, |i, this, a| {
+        let y = ab(i.to_number(&arg(a, 0)))?;
+        let full = if y.is_nan() {
+            f64::NAN
+        } else {
+            let yi = y.trunc() as i64;
+            if (0..=99).contains(&yi) { 1900.0 + yi as f64 } else { y }
+        };
+        date_set(i, &this, 0, full)
+    });
     it.def_method(&proto, "setMonth", 2, |i, this, a| {
         let v = ab(i.to_number(&arg(a, 0)))?;
         date_set(i, &this, 1, v)
@@ -2245,7 +2313,8 @@ fn install_date(it: &mut Interp) {
     it.def_method(&ctor, "now", 0, |_i, _t, _a| Ok(Value::Num(now_ms())));
     it.def_method(&ctor, "parse", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
-        Ok(Value::Num(parse_iso(&s)))
+        let v = parse_iso(&s);
+        Ok(Value::Num(if v.is_nan() { parse_rfc(&s) } else { v }))
     });
     it.def_method(&ctor, "UTC", 7, |i, _t, a| {
         let mut y = ab(i.to_number(&arg(a, 0)))? as i64;

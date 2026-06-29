@@ -2068,3 +2068,21 @@ fn array_concat_slice_holes() {
     assert_eq!(run("var a=[1,2];a[Symbol.isConcatSpreadable]=false;[].concat(a).length"), "1");
     assert_eq!(run("[1,2,3].slice(1).join(',')"), "2,3");
 }
+#[test]
+fn date_parse_rfc() {
+    assert_eq!(run("Date.parse('Thu, 01 Jan 1970 00:00:00 GMT')"), "0");
+    assert_eq!(run("Date.parse('Thu Jan 01 1970 00:00:00 GMT+0000')"), "0");
+    assert_eq!(run("var d=new Date(Date.UTC(1993,6,28,14,39,7)); Date.parse(d.toUTCString())===d.getTime()-d.getMilliseconds()"), "true");
+    assert_eq!(run("Date.parse('Mon, 25 Dec 1995 13:30:00 GMT')"), "819898200000");
+    assert_eq!(run("Date.parse('2020-01-01T00:00:00Z')"), "1577836800000"); // ISO still works
+    assert_eq!(run("isNaN(Date.parse('garbage'))"), "true");
+}
+#[test]
+fn date_get_set_year() {
+    assert_eq!(run("new Date(Date.UTC(1970,0,1)).getYear()"), "70");
+    assert_eq!(run("new Date(Date.UTC(2020,0,1)).getYear()"), "120");
+    assert_eq!(run("var d=new Date(0); d.setYear(99); d.getFullYear()"), "1999");
+    assert_eq!(run("var d=new Date(0); d.setYear(2020); d.getFullYear()"), "2020");
+    assert_eq!(run("isNaN(new Date(NaN).getYear())"), "true");
+    assert_eq!(run("typeof Date.prototype.getYear"), "function");
+}
