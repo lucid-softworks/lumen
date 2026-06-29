@@ -1604,3 +1604,13 @@ fn promise_all_user_then() {
     e3.eval("var r3; Promise.race([Promise.resolve('a'),Promise.resolve('b')]).then(v=>r3=v)", false).unwrap();
     assert_eq!(match e3.eval("r3",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "a");
 }
+#[test]
+fn async_label_dup_param() {
+    assert!(Engine::new().eval("async function f(){ await: 1; }", false).is_err());
+    assert!(Engine::new().eval("function* g(){ yield: 1; }", false).is_err());
+    assert!(Engine::new().eval("var f = (a,a)=>1", false).is_err());
+    assert!(Engine::new().eval("var f = (a,b,a)=>1", false).is_err());
+    assert_eq!(run("var f = (a,b)=>a+b; f(1,2)"), "3");
+    assert_eq!(run("function f(){ foo: 1; return 2 } f()"), "2"); // normal label ok
+    assert_eq!(run("async function f(){ x: 1; return 5 } typeof f"), "function"); // non-await label ok in async
+}

@@ -400,6 +400,9 @@ impl Parser {
             // Labeled statement: `ident :` with the ident not being a known expression start that
             // would otherwise consume the colon.
             Tok::Ident(name) if matches!(self.peek_kind(1), Tok::Punct(":")) => {
+                if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+                    return self.err(format!("'{name}' cannot be used as a label here"));
+                }
                 self.advance();
                 self.advance();
                 if self.labels.contains(&name) {
@@ -1838,6 +1841,10 @@ impl Parser {
     }
 
     fn finish_arrow(&mut self, params: Vec<Param>, is_async: bool) -> Result<Expr, ParseError> {
+        // Arrow parameters must always be unique (the list is treated as if it had a `[+Strict]`).
+        if let Some(dup) = duplicate_name(&param_names(&params)) {
+            return self.err(format!("duplicate parameter name '{dup}'"));
+        }
         let sa = self.in_async;
         self.in_async = is_async;
         let result = if self.is_punct("{") {
