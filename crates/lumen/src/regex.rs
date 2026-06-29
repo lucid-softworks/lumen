@@ -282,7 +282,6 @@ impl Regex {
                 return None;
             }
             let mut m = Matcher {
-                re: self,
                 input,
                 caps: vec![None; 2 * (self.ngroups + 1)],
                 steps: 0,
@@ -501,7 +500,7 @@ impl Parser {
                         }
                     }
                 }
-                Some(c) if matches!(c, 'i' | 'm' | 's' | '-') => self.parse_modifier_group(),
+                Some('i' | 'm' | 's' | '-') => self.parse_modifier_group(),
                 _ => Err("unsupported group".into()),
             }
         } else {
@@ -958,7 +957,6 @@ fn clone_class(cc: &CharClass) -> CharClass {
 const MAX_MATCH_DEPTH: u32 = 3000;
 
 struct Matcher<'a> {
-    re: &'a Regex,
     input: &'a [char],
     caps: Vec<Option<usize>>,
     steps: u64,
