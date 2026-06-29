@@ -92,18 +92,17 @@ impl CharClass {
         let u = c as u32;
         for &(neg, ranges) in &self.props {
             // Ranges are sorted and disjoint: binary-search for the one that could contain `u`.
-            let in_range = match ranges.binary_search_by(|&(lo, hi)| {
-                if u < lo {
-                    std::cmp::Ordering::Greater
-                } else if u > hi {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            }) {
-                Ok(_) => true,
-                Err(_) => false,
-            };
+            let in_range = ranges
+                .binary_search_by(|&(lo, hi)| {
+                    if u < lo {
+                        std::cmp::Ordering::Greater
+                    } else if u > hi {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok();
             if in_range ^ neg {
                 return true;
             }
