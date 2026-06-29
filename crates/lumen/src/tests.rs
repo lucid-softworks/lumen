@@ -1911,3 +1911,12 @@ fn number_tostring_spec() {
         assert_eq!(run(&format!("({src})+''")), want, "({src})+''");
     }
 }
+#[test]
+fn number_methods_fixed() {
+    let cases = [("(123.456).toFixed(2)","123.46"),("(0).toFixed(2)","0.00"),("(1e21).toFixed(2)","1e+21"),
+      ("(-0).toFixed(0)","0"),("(-1.5).toFixed(0)","-2"),("(123.456).toPrecision(4)","123.5"),
+      ("(12345).toPrecision(2)","1.2e+4"),("(0.0001).toPrecision(1)","0.0001"),("(5).toPrecision(1)","5"),
+      ("(0).toPrecision(3)","0.00"),("(123.456).toPrecision()","123.456"),("(1).toPrecision(5)","1.0000"),
+      ("(255).toString(16)","ff"),("(123.456).toExponential(2)","1.23e+2")];
+    for (src,want) in cases { assert_eq!(run(src), want, "{src}"); }
+}

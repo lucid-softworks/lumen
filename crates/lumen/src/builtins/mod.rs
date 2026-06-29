@@ -4607,6 +4607,41 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
     Ok(PartialDesc { value, get, set, writable, enumerable, configurable })
 }
 
+/// `Number.prototype.toPrecision(p)`: `p` significant digits, fixed or exponential per the exponent.
+fn to_precision(n: f64, p: usize) -> String {
+    if n == 0.0 {
+        return if p == 1 { "0".to_string() } else { format!("0.{}", "0".repeat(p - 1)) };
+    }
+    let neg = n < 0.0;
+    // `p` significant digits via scientific notation (`d.ddde±E`, the mantissa has exactly `p` digits).
+    let sci = format!("{:.*e}", p - 1, n.abs());
+    let (mantissa, exp_str) = sci.split_once('e').unwrap();
+    let e: i32 = exp_str.parse().unwrap();
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let body = if e < -6 || e >= p as i32 {
+        let sign = if e >= 0 { "+" } else { "-" };
+        if p == 1 {
+            format!("{}e{}{}", digits, sign, e.abs())
+        } else {
+            format!("{}.{}e{}{}", &digits[..1], &digits[1..], sign, e.abs())
+        }
+    } else if e >= 0 {
+        let ip = (e + 1) as usize;
+        if ip >= p {
+            digits
+        } else {
+            format!("{}.{}", &digits[..ip], &digits[ip..])
+        }
+    } else {
+        format!("0.{}{}", "0".repeat((-e - 1) as usize), digits)
+    };
+    if neg {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
 fn opt_norm(v: Option<Value>) -> Option<Value> {
     v.filter(|x| !matches!(x, Value::Undefined))
 }
@@ -6484,13 +6519,20 @@ fn install_number(it: &mut Interp) {
     });
     it.def_method(&np, "toPrecision", 1, |i, this, args| {
         let n = this_number(i, &this)?;
-        match arg(args, 0) {
-            Value::Undefined => Ok(Value::from_string(i.num_to_str(n))),
-            v => {
-                let p = ab(i.to_number(&v))? as usize;
-                Ok(Value::from_string(format!("{n:.*}", p.saturating_sub(1).min(100))))
-            }
+        if matches!(arg(args, 0), Value::Undefined) {
+            return Ok(Value::from_string(i.num_to_str(n)));
         }
+        let p = ab(i.to_number(&arg(args, 0)))?;
+        if n.is_nan() {
+            return Ok(Value::str("NaN"));
+        }
+        if n.is_infinite() {
+            return Ok(Value::from_string(i.num_to_str(n)));
+        }
+        if !(1.0..=100.0).contains(&p) {
+            return Err(i.make_error("RangeError", "toPrecision() argument must be between 1 and 100"));
+        }
+        Ok(Value::from_string(to_precision(n, p as usize)))
     });
     it.def_method(&np, "toFixed", 1, |i, this, args| {
         let n = this_number(i, &this)?;
@@ -6499,8 +6541,17 @@ fn install_number(it: &mut Interp) {
         if !(0.0..=100.0).contains(&d) {
             return Err(i.make_error("RangeError", "toFixed() digits argument must be between 0 and 100"));
         }
+        if n.is_nan() {
+            return Ok(Value::str("NaN"));
+        }
+        // For magnitudes ≥ 1e21 toFixed falls back to Number::toString.
+        if n.abs() >= 1e21 {
+            return Ok(Value::from_string(i.num_to_str(n)));
+        }
         let digits = d as usize;
-        Ok(Value::from_string(format!("{n:.digits$}")))
+        // The sign is `-` only for a strictly-negative value (not -0), and the magnitude is rounded.
+        let body = format!("{:.*}", digits, n.abs());
+        Ok(Value::from_string(if n < 0.0 { format!("-{body}") } else { body }))
     });
 
     let ctor = it.make_native("Number", 1, |i, _this, args| {
