@@ -1739,26 +1739,47 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         .typed_arrays
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
-    let offset = match arg(args, 1) {
-        Value::Undefined => 0,
-        v => ab(i.to_number(&v))? as usize,
-    };
-    let source = arg(args, 0);
-    let items = if matches!(source, Value::Str(_)) || i.has_iterator(&source) {
-        ab(i.iterate(&source))?
-    } else if matches!(source, Value::Obj(_)) {
-        let lenv = ab(i.get_member(&source, "length"))?;
-        let n = ab(i.to_number(&lenv))?.max(0.0) as usize;
-        let mut v = Vec::with_capacity(n.min(1024));
-        for k in 0..n {
-            v.push(ab(i.get_member(&source, &k.to_string()))?);
+    // targetOffset = ToIntegerOrInfinity(offset); a negative offset is a RangeError.
+    let offset_n = match arg(args, 1) {
+        Value::Undefined => 0.0,
+        v => {
+            let n = ab(i.to_number(&v))?;
+            if n.is_nan() {
+                0.0
+            } else {
+                n.trunc()
+            }
         }
-        v
-    } else {
-        Vec::new()
     };
-    for (k, item) in items.iter().enumerate() {
-        ab(i.ta_store(&info, offset + k, item))?;
+    if offset_n < 0.0 {
+        return Err(i.make_error("RangeError", "TypedArray.prototype.set offset is negative"));
+    }
+    // Coercing the offset can run user code that detaches the target — re-validate.
+    if !i.array_buffers.contains_key(&info.buffer) {
+        return Err(i.make_error("TypeError", "detached buffer"));
+    }
+    let offset = offset_n as usize;
+    let source = arg(args, 0);
+    // The source is array-like (or another TypedArray): read its length, bounds-check, then copy
+    // element by element (so a throwing getter leaves earlier elements written).
+    let src_len = match &source {
+        Value::Obj(_) => {
+            let lenv = ab(i.get_member(&source, "length"))?;
+            let n = ab(i.to_number(&lenv))?;
+            if n.is_nan() || n < 0.0 {
+                0
+            } else {
+                n.min(9007199254740991.0) as usize
+            }
+        }
+        _ => 0,
+    };
+    if offset + src_len > info.len {
+        return Err(i.make_error("RangeError", "source is too large for the target at offset"));
+    }
+    for k in 0..src_len {
+        let item = ab(i.get_member(&source, &k.to_string()))?;
+        ab(i.ta_store(&info, offset + k, &item))?;
     }
     Ok(Value::Undefined)
 }
