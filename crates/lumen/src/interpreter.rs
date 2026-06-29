@@ -238,7 +238,6 @@ pub struct Interp {
 pub struct Disposable {
     pub value: Value,
     pub method: Value,
-    pub is_async: bool,
 }
 
 /// A queued microtask: running one promise reaction.

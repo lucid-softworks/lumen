@@ -204,7 +204,6 @@ impl Interp {
         self.using_stack.last_mut().unwrap().push(Disposable {
             value: value.clone(),
             method,
-            is_async,
         });
         Ok(())
     }
