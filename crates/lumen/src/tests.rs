@@ -2086,3 +2086,14 @@ fn date_get_set_year() {
     assert_eq!(run("isNaN(new Date(NaN).getYear())"), "true");
     assert_eq!(run("typeof Date.prototype.getYear"), "function");
 }
+#[test]
+fn promise_combinator_this_check() {
+    for m in ["all","race","allSettled","any"] {
+        assert!(matches!(Engine::new().eval(&format!("Promise.{m}.call(undefined,[])"), false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"), "{m} undefined");
+        assert!(matches!(Engine::new().eval(&format!("Promise.{m}.call({{}},[])"), false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"), "{m} obj");
+        assert!(matches!(Engine::new().eval(&format!("Promise.{m}.call(()=>{{}},[])"), false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"), "{m} arrow");
+    }
+    // normal use still works (returns a promise)
+    assert_eq!(run("typeof Promise.all([])"), "object");
+    assert_eq!(run("typeof Promise.race([Promise.resolve(1)])"), "object");
+}

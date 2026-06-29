@@ -3289,7 +3289,8 @@ fn install_promise(it: &mut Interp) {
         i.reject_promise(&p, arg(a, 0));
         Ok(p)
     });
-    it.def_method(&ctor, "all", 1, |i, _t, a| {
+    it.def_method(&ctor, "all", 1, |i, t, a| {
+        require_constructor(i, &t)?;
         let result = i.new_promise();
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
@@ -3318,7 +3319,8 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
-    it.def_method(&ctor, "race", 1, |i, _t, a| {
+    it.def_method(&ctor, "race", 1, |i, t, a| {
+        require_constructor(i, &t)?;
         let result = i.new_promise();
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
@@ -3339,7 +3341,8 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
-    it.def_method(&ctor, "allSettled", 1, |i, _t, a| {
+    it.def_method(&ctor, "allSettled", 1, |i, t, a| {
+        require_constructor(i, &t)?;
         let result = i.new_promise();
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
@@ -3368,7 +3371,8 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
-    it.def_method(&ctor, "any", 1, |i, _t, a| {
+    it.def_method(&ctor, "any", 1, |i, t, a| {
+        require_constructor(i, &t)?;
         let result = i.new_promise();
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
@@ -3921,6 +3925,18 @@ fn to_object_arg(i: &mut Interp, v: Value, method: &str) -> Result<Gc, Value> {
             Value::Obj(o) => Ok(o),
             _ => Err(i.make_error("TypeError", "ToObject failed")),
         },
+    }
+}
+
+/// A Promise combinator (`Promise.all`/`race`/…) requires `this` to be a constructor.
+fn require_constructor(i: &mut Interp, this: &Value) -> Result<(), Value> {
+    let ok = matches!(this, Value::Obj(o)
+        if !matches!(o.borrow().call, Callable::None)
+        && (o.borrow().is_constructor || o.borrow().props.contains("prototype")));
+    if ok {
+        Ok(())
+    } else {
+        Err(i.make_error("TypeError", "Promise combinator called on a non-constructor"))
     }
 }
 
