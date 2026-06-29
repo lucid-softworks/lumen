@@ -925,7 +925,7 @@ impl Interp {
             Expr::Await(e) => {
                 let v = self.eval(e, env)?;
                 if crate::coroutine::in_coroutine() {
-                    match crate::coroutine::coroutine_yield(self, v) {
+                    match crate::coroutine::coroutine_await(self, v) {
                         crate::coroutine::Resume::Next(settled) => Ok(settled),
                         crate::coroutine::Resume::Throw(err) => Err(Abrupt::Throw(err)),
                         crate::coroutine::Resume::Return(rv) => Err(Abrupt::Return(rv)),

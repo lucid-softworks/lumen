@@ -6145,6 +6145,7 @@ fn drive_generator(i: &mut Interp, this: &Value, signal: crate::coroutine::Resum
         Suspend::Yield(v) => Ok(iter_result(i, v, false)),
         Suspend::Done(v) => Ok(iter_result(i, v, true)),
         Suspend::Throw(e) => Err(e),
+        Suspend::Await(_) => Err(i.make_error("TypeError", "await in a non-async generator")),
     }
 }
 
@@ -6177,26 +6178,37 @@ pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> R
 pub(crate) fn generator_throw(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     drive_generator(i, &this, crate::coroutine::Resume::Throw(arg(args, 0)))
 }
+fn async_gen_drive(i: &mut Interp, this: &Value, signal: crate::coroutine::Resume) -> Result<Value, Value> {
+    let r = i.new_promise();
+    match this {
+        Value::Obj(o) => i.drive_async_gen(Rc::as_ptr(o) as usize, r.clone(), signal),
+        _ => {
+            let e = i.make_error("TypeError", "AsyncGenerator method called on a non-object");
+            i.reject_promise(&r, e);
+        }
+    }
+    Ok(r)
+}
 pub(crate) fn async_generator_next(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let r = generator_next(i, this, a);
-    Ok(settle_into_promise(i, r))
+    async_gen_drive(i, &this, crate::coroutine::Resume::Next(arg(a, 0)))
 }
 pub(crate) fn async_generator_return(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let r = generator_return(i, this, a);
-    Ok(settle_into_promise(i, r))
+    async_gen_drive(i, &this, crate::coroutine::Resume::Return(arg(a, 0)))
 }
 pub(crate) fn async_generator_throw(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let r = generator_throw(i, this, a);
-    Ok(settle_into_promise(i, r))
+    async_gen_drive(i, &this, crate::coroutine::Resume::Throw(arg(a, 0)))
 }
-/// Wrap a synchronous generator step result into a settled promise (async-generator semantics).
-fn settle_into_promise(i: &mut Interp, r: Result<Value, Value>) -> Value {
-    let p = i.new_promise();
-    match r {
-        Ok(v) => i.resolve_promise(&p, v),
-        Err(e) => i.reject_promise(&p, e),
-    }
-    p
+/// Microtask reactions that re-drive an async generator when an awaited value settles. `args` is
+/// `[keyMarker, resultPromise, settledValue]`.
+pub(crate) fn async_gen_react_fulfil(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let key = match arg(a, 0) { Value::Num(n) => n as usize, _ => return Ok(Value::Undefined) };
+    i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Next(arg(a, 2)));
+    Ok(Value::Undefined)
+}
+pub(crate) fn async_gen_react_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let key = match arg(a, 0) { Value::Num(n) => n as usize, _ => return Ok(Value::Undefined) };
+    i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
+    Ok(Value::Undefined)
 }
 pub(crate) fn return_this_pub(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     return_this(i, this, a)

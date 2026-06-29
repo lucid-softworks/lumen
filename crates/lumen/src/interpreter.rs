@@ -1232,16 +1232,97 @@ impl Interp {
         };
         let suspend = coro.resume(self, signal);
         match suspend {
-            Suspend::Yield(awaited) => {
+            Suspend::Await(awaited) => {
                 self.generators.insert(key, coro); // still running
                 let px = self.promise_resolve_value(awaited);
                 let on_f = self.make_async_reaction(&promise, true);
                 let on_r = self.make_async_reaction(&promise, false);
                 self.promise_then(&px, on_f, on_r);
             }
+            Suspend::Yield(v) => self.resolve_promise(&promise, v),
             Suspend::Done(v) => self.resolve_promise(&promise, v),
             Suspend::Throw(e) => self.reject_promise(&promise, e),
         }
+    }
+
+    /// Drive an async generator's coroutine, settling the `next()`/`return()`/`throw()` result
+    /// promise `r` with `{value, done}`. An `await` parks the generator (the promise stays pending
+    /// until a later `yield`/return); a `yield` fulfils the promise.
+    pub(crate) fn drive_async_gen(&mut self, key: usize, r: Value, signal: crate::coroutine::Resume) {
+        use crate::coroutine::{Resume, Suspend};
+        let mut coro = match self.generators.remove(&key) {
+            Some(c) => c,
+            None => {
+                let res = self.iter_result_obj(Value::Undefined, true);
+                self.resolve_promise(&r, res);
+                return;
+            }
+        };
+        if coro.done {
+            self.generators.insert(key, coro);
+            match signal {
+                Resume::Throw(e) => self.reject_promise(&r, e),
+                Resume::Return(v) => {
+                    let res = self.iter_result_obj(v, true);
+                    self.resolve_promise(&r, res);
+                }
+                Resume::Next(_) => {
+                    let res = self.iter_result_obj(Value::Undefined, true);
+                    self.resolve_promise(&r, res);
+                }
+            }
+            return;
+        }
+        let suspend = coro.resume(self, signal);
+        self.generators.insert(key, coro);
+        match suspend {
+            Suspend::Yield(v) => {
+                let res = self.iter_result_obj(v, false);
+                self.resolve_promise(&r, res);
+            }
+            Suspend::Await(x) => {
+                let px = self.promise_resolve_value(x);
+                let on_f = self.make_async_gen_reaction(key, &r, true);
+                let on_r = self.make_async_gen_reaction(key, &r, false);
+                self.promise_then(&px, on_f, on_r);
+            }
+            Suspend::Done(v) => {
+                let res = self.iter_result_obj(v, true);
+                self.resolve_promise(&r, res);
+            }
+            Suspend::Throw(e) => self.reject_promise(&r, e),
+        }
+    }
+
+    /// A `{ value, done }` iterator-result object.
+    pub(crate) fn iter_result_obj(&mut self, value: Value, done: bool) -> Value {
+        let o = self.new_object();
+        {
+            let mut b = o.borrow_mut();
+            b.props.insert("value", Property::data(value, true, true, true));
+            b.props.insert("done", Property::data(Value::Bool(done), true, true, true));
+        }
+        Value::Obj(o)
+    }
+
+    fn make_async_gen_reaction(&mut self, key: usize, r: &Value, fulfil: bool) -> Value {
+        let target = self.make_native(
+            "",
+            1,
+            if fulfil {
+                crate::builtins::async_gen_react_fulfil
+            } else {
+                crate::builtins::async_gen_react_reject
+            },
+        );
+        let bound = Object::new(Some(self.function_proto.clone()));
+        // `args` carries the generator key (as a number marker) and the result promise.
+        bound.borrow_mut().call = Callable::Bound {
+            target,
+            this: r.clone(),
+            args: vec![Value::Num(key as f64), r.clone()],
+        };
+        Value::Obj(bound)
     }
 
     /// PromiseResolve: a promise stays itself; any other value is wrapped in a resolved promise.

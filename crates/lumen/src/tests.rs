@@ -2229,3 +2229,18 @@ fn async_coroutine() {
     assert_eq!(two("globalThis.r='';async function f(){for(var i=0;i<3;i++){await 0;globalThis.r+=i}}f()", "r"), "012");
     assert_eq!(two("globalThis.r=0;async function f(){return await Promise.resolve(42)}f().then(v=>globalThis.r=v)", "r"), "42");
 }
+#[test]
+fn async_generator_coroutine() {
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) { Ok(Completion::Value(v)) => v, Ok(Completion::Throw{name,..}) => format!("T:{name}"), Err(_) => "P".into() }
+    }
+    // async generator yields, consumed via for-await collected into a global
+    assert_eq!(two("globalThis.r='';async function* g(){yield 1;yield 2;yield 3}(async()=>{for await(const x of g())globalThis.r+=x})()", "r"), "123");
+    // await inside async generator
+    assert_eq!(two("globalThis.r='';async function* g(){yield await Promise.resolve('a');yield 'b'}(async()=>{for await(const x of g())globalThis.r+=x})()", "r"), "ab");
+    // next() returns a promise of {value,done}
+    assert_eq!(two("globalThis.r=0;async function* g(){yield 5}g().next().then(o=>globalThis.r=o.value+(o.done?'D':'N'))", "r"), "5N");
+    assert_eq!(two("globalThis.r=0;async function* g(){}g().next().then(o=>globalThis.r=(o.done?'D':'N'))", "r"), "D");
+}

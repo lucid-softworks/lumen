@@ -39,8 +39,10 @@ unsafe impl Send for Suspend {}
 
 /// Generator → driver: the body parked or finished.
 pub enum Suspend {
-    /// `yield v` — parked, produced `v`.
+    /// `yield v` — parked, produced `v` (a generator value).
     Yield(Value),
+    /// `await v` — parked waiting for `v` to settle (async functions/generators).
+    Await(Value),
     /// The body ran to completion / `return v`.
     Done(Value),
     /// The body threw `e` and it escaped.
@@ -111,19 +113,29 @@ impl Coroutine {
     }
 }
 
-/// Park the running generator at a `yield`, hand `value` to the driver, and block until resumed.
-/// Restores the body's scalar context (which the driver mutated while it ran).
-pub fn coroutine_yield(i: &mut Interp, value: Value) -> Resume {
+/// Park the running coroutine, hand `msg` (a `Yield` or `Await`) to the driver, and block until
+/// resumed. Restores the body's scalar context (which the driver mutated while it ran).
+fn park(i: &mut Interp, msg: Suspend) -> Resume {
     let (gen_strict, gen_depth) = (i.strict, i.depth);
     let resumed = YIELDER.with(|y| {
         let b = y.borrow();
-        let yl = b.as_ref().expect("yield outside a coroutine");
-        let _ = yl.suspend_tx.send(Suspend::Yield(value));
+        let yl = b.as_ref().expect("suspend outside a coroutine");
+        let _ = yl.suspend_tx.send(msg);
         yl.resume_rx.recv()
     });
     i.strict = gen_strict;
     i.depth = gen_depth;
     resumed.unwrap_or(Resume::Return(Value::Undefined))
+}
+
+/// `yield value` — park producing a generator value.
+pub fn coroutine_yield(i: &mut Interp, value: Value) -> Resume {
+    park(i, Suspend::Yield(value))
+}
+
+/// `await value` — park waiting for `value` to settle.
+pub fn coroutine_await(i: &mut Interp, value: Value) -> Resume {
+    park(i, Suspend::Await(value))
 }
 
 /// Spawn a generator coroutine over `body`, parked until its first [`Coroutine::resume`].
