@@ -1719,3 +1719,15 @@ fn escaped_reserved_words() {
     // a normal escaped identifier is fine
     assert_eq!(run("var \\u0041bc = 7; Abc"), "7");
 }
+#[test]
+fn named_backreferences() {
+    assert_eq!(run(r"/(?<a>x)\k<a>/u.test('xx')"), "true");
+    assert_eq!(run(r"/(?<a>x)\k<a>/u.test('xy')"), "false");
+    assert_eq!(run(r"/\k<a>(?<a>x)/u.source"), r"\k<a>(?<a>x)"); // forward ref compiles
+    assert_eq!(run(r"'abcabc'.replace(/(?<g>abc)\k<g>/, 'Z')"), "Z");
+    // undefined named backref -> SyntaxError
+    assert!(Engine::new().eval(r"/(?<a>x)\k<b>/u", false).is_err());
+    assert!(Engine::new().eval(r"/\k<a>/u", false).is_err());
+    // non-unicode, no named groups: \k is literal 'k'
+    assert_eq!(run(r"/\k/.test('k')"), "true");
+}

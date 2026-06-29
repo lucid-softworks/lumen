@@ -144,6 +144,8 @@ enum Node {
     End,
     WordB(bool),
     Backref(usize),
+    /// `\k<name>` — resolved to a group index after the whole pattern is parsed.
+    NamedBackref(String),
     Look(bool, Box<Node>),
 }
 
@@ -154,6 +156,27 @@ struct Parser {
     names: Vec<(String, usize)>,
     /// `u` or `v` flag: enables Unicode mode (notably `\p{…}` property escapes).
     unicode: bool,
+    /// Whether `\k` is a named back-reference here: true in Unicode mode, or when the pattern
+    /// contains a named group (`(?<name>…)`). Otherwise `\k` is the literal character `k` (Annex B).
+    named_mode: bool,
+    /// `\k<name>` references collected during parsing, validated against `names` afterwards.
+    name_refs: Vec<String>,
+}
+
+/// Whether `pattern` contains a named capture group `(?<name>…)` (not a lookbehind `(?<=`/`(?<!`).
+fn has_named_group(pattern: &str) -> bool {
+    let b: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == '(' && b[i + 1] == '?' && b[i + 2] == '<' {
+            let after = b.get(i + 3).copied();
+            if after != Some('=') && after != Some('!') {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 impl Regex {
@@ -172,11 +195,27 @@ impl Regex {
             return Err("the u and v regular expression flags are mutually exclusive".into());
         }
         let unicode = flags.contains('u') || flags.contains('v');
-        let mut p = Parser { chars: pattern.chars().collect(), pos: 0, ngroups: 0, names: Vec::new(), unicode };
-        let ast = p.parse_alt()?;
+        let named_mode = unicode || has_named_group(pattern);
+        let mut p = Parser {
+            chars: pattern.chars().collect(),
+            pos: 0,
+            ngroups: 0,
+            names: Vec::new(),
+            unicode,
+            named_mode,
+            name_refs: Vec::new(),
+        };
+        let mut ast = p.parse_alt()?;
         if p.pos != p.chars.len() {
             return Err("unexpected character in pattern".into());
         }
+        // Resolve `\k<name>` references now that every group name is known.
+        for name in &p.name_refs {
+            if !p.names.iter().any(|(n, _)| n == name) {
+                return Err(format!("invalid named back reference <{name}>"));
+            }
+        }
+        resolve_named_backrefs(&mut ast, &p.names);
         // Wrap the whole match in group-0 saves.
         let mut prog = vec![Inst::Save(0)];
         compile(&ast, &mut prog)?;
@@ -523,6 +562,23 @@ impl Parser {
             }
             Some('b') => Ok(Node::WordB(true)),
             Some('B') => Ok(Node::WordB(false)),
+            Some('k') if self.named_mode => {
+                // `\k<name>` — a named back-reference (resolved after the full parse).
+                if self.peek() != Some('<') {
+                    return Err("expected '<' in named back reference".into());
+                }
+                self.bump();
+                let mut name = String::new();
+                loop {
+                    match self.bump() {
+                        Some('>') => break,
+                        Some(c) => name.push(c),
+                        None => return Err("unterminated named back reference".into()),
+                    }
+                }
+                self.name_refs.push(name.clone());
+                Ok(Node::NamedBackref(name))
+            }
             Some('n') => Ok(Node::Char('\n')),
             Some('t') => Ok(Node::Char('\t')),
             Some('r') => Ok(Node::Char('\r')),
@@ -639,6 +695,8 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
         Node::End => prog.push(Inst::AssertEnd),
         Node::WordB(b) => prog.push(Inst::WordBoundary(*b)),
         Node::Backref(n) => prog.push(Inst::Backref(*n)),
+        // Resolved to `Backref` before compile; treat any stray one as group 0 (never matches).
+        Node::NamedBackref(_) => prog.push(Inst::Backref(0)),
         Node::Concat(v) => {
             for n in v {
                 compile(n, prog)?;
@@ -732,6 +790,22 @@ fn compile_repeat(
         }
     }
     Ok(())
+}
+
+/// Replace each `\k<name>` (`Node::NamedBackref`) with the numeric `Backref` of its group. Names are
+/// validated before this runs, so an unknown name resolves to group 0 (never matches), harmlessly.
+fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
+    match node {
+        Node::NamedBackref(name) => {
+            let idx = names.iter().find(|(n, _)| n == name).map(|(_, i)| *i).unwrap_or(0);
+            *node = Node::Backref(idx);
+        }
+        Node::Concat(v) | Node::Alt(v) => v.iter_mut().for_each(|n| resolve_named_backrefs(n, names)),
+        Node::Group(_, inner) | Node::Repeat(inner, ..) | Node::Look(_, inner) => {
+            resolve_named_backrefs(inner, names)
+        }
+        _ => {}
+    }
 }
 
 /// If `node` matches exactly one code point, return it as a `Rep` (for the `Inst::Many` fast path).
