@@ -1614,3 +1614,13 @@ fn async_label_dup_param() {
     assert_eq!(run("function f(){ foo: 1; return 2 } f()"), "2"); // normal label ok
     assert_eq!(run("async function f(){ x: 1; return 5 } typeof f"), "function"); // non-await label ok in async
 }
+#[test]
+fn update_target_errors() {
+    assert!(Engine::new().eval("0++", false).is_err());
+    assert!(Engine::new().eval("++0", false).is_err());
+    assert!(Engine::new().eval("(a+b)++", false).is_err());
+    assert!(Engine::new().eval("'x'--", false).is_err());
+    assert_eq!(run("var a=5; a++; a"), "6");
+    assert_eq!(run("var o={x:1}; o.x++; o.x"), "2");
+    assert_eq!(run("var a=[1]; a[0]++; a[0]"), "2");
+}

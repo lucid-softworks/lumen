@@ -1160,12 +1160,15 @@ impl Parser {
     }
 
     fn check_strict_update_target(&self, arg: &Expr) -> Result<(), ParseError> {
-        if self.strict {
-            if let Expr::Ident(n) = arg {
-                if n == "eval" || n == "arguments" {
+        // The operand of `++`/`--` must be a simple assignment target (Identifier or member access).
+        match arg {
+            Expr::Ident(n) => {
+                if self.strict && (n == "eval" || n == "arguments") {
                     return self.err("cannot increment/decrement 'eval' or 'arguments' in strict mode");
                 }
             }
+            Expr::Member { .. } | Expr::Index { .. } => {}
+            _ => return self.err("invalid increment/decrement operand"),
         }
         Ok(())
     }
