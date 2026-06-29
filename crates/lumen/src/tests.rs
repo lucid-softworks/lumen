@@ -1742,3 +1742,14 @@ fn catch_param_lexical_redecl() {
     // a different lexical name is fine
     assert_eq!(run("try{throw 1}catch(e){ let f = 2; } 'ok'"), "ok");
 }
+#[test]
+fn numeric_separators() {
+    let bad = ["1_","1__2","1_.5","1._5","0x_1","0x1_","1_e5","1e_5","1e5_","0_1","0b_1","0b1_","1_n","123_"];
+    for src in bad { assert!(Engine::new().eval(src, false).is_err(), "{src} should be invalid"); }
+    assert_eq!(run("1_000"), "1000");
+    assert_eq!(run("0x1_0"), "16");
+    assert_eq!(run("1_0.0_1"), "10.01");
+    assert_eq!(run("1_0e1_0"), "100000000000");
+    assert_eq!(run("0b1_0"), "2");
+    assert_eq!(run("123_456n"), "123456");
+}

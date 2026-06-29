@@ -529,6 +529,22 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// A numeric separator `_` is only legal immediately between two digits of the given radix.
+    fn validate_seps(&self, lo: usize, hi: usize, radix: u32) -> Result<(), LexError> {
+        let s = &self.chars[lo..hi];
+        for (i, &c) in s.iter().enumerate() {
+            if c == '_' {
+                let prev = i.checked_sub(1).and_then(|j| s.get(j));
+                let next = s.get(i + 1);
+                let ok = prev.is_some_and(|p| p.is_digit(radix)) && next.is_some_and(|n| n.is_digit(radix));
+                if !ok {
+                    return Err(self.err("invalid use of numeric separator"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn read_number(&mut self) -> Result<(), LexError> {
         let start = self.pos;
         let mut radix = 10u32;
@@ -551,6 +567,7 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            self.validate_seps(digits_start, self.pos, radix)?;
             let digits: String =
                 self.chars[digits_start..self.pos].iter().filter(|c| **c != '_').collect();
             if self.peek() == Some('n') {
@@ -575,6 +592,10 @@ impl<'a> Lexer<'a> {
             && self.pos - start > 1
             && !matches!(self.peek(), Some('.' | 'e' | 'E' | 'n' | '_'))
         {
+            // A leading-zero integer (legacy octal / non-octal decimal) admits no separators.
+            if self.chars[start..self.pos].contains(&'_') {
+                return Err(self.err("numeric separator not allowed in legacy literal"));
+            }
             let text: String = self.chars[start..self.pos].iter().collect();
             if text.chars().all(|c| ('0'..='7').contains(&c)) {
                 let n = i64::from_str_radix(&text, 8).unwrap_or(0);
@@ -590,6 +611,7 @@ impl<'a> Lexer<'a> {
         }
         // A BigInt literal is an integer immediately followed by `n` (no fraction/exponent).
         if self.peek() == Some('n') {
+            self.validate_seps(start, self.pos, 10)?;
             let text: String = self.chars[start..self.pos].iter().filter(|c| **c != '_').collect();
             self.bump(); // n
             let n: i128 = text.parse().map_err(|_| self.err("invalid BigInt literal"))?;
@@ -607,10 +629,11 @@ impl<'a> Lexer<'a> {
             if matches!(self.peek(), Some('+' | '-')) {
                 self.bump();
             }
-            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
                 self.bump();
             }
         }
+        self.validate_seps(start, self.pos, 10)?;
         let text: String = self.chars[start..self.pos].iter().filter(|c| **c != '_').collect();
         let n: f64 = text.parse().map_err(|_| self.err("invalid numeric literal"))?;
         self.push(Tok::Num(n));
