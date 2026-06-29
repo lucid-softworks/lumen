@@ -1324,9 +1324,9 @@ fn opt_num(i: &mut Interp, opts: &Value, key: &str, default: i64) -> Result<i64,
         _ => Err(i.make_error("TypeError", "options must be an object")),
     }
 }
-/// Nanoseconds per time unit, or None for calendar units.
+/// Nanoseconds per time unit, or None for calendar units. Accepts singular and plural unit names.
 fn unit_ns(u: &str) -> Option<i128> {
-    Some(match u {
+    Some(match sing(u) {
         "hour" => 3_600_000_000_000,
         "minute" => 60_000_000_000,
         "second" => 1_000_000_000,
@@ -1419,6 +1419,75 @@ fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
 fn sing(u: &str) -> &str {
     u.strip_suffix('s').unwrap_or(u)
 }
+/// Rank of a pure *time* unit (hour=5 … nanosecond=0), or None if it isn't one.
+fn time_unit_rank(u: &str) -> Option<i32> {
+    match unit_rank(u) {
+        Some(r) if r <= 5 => Some(r),
+        _ => None,
+    }
+}
+/// The unit name for a rank (inverse of [`unit_rank`]).
+fn rank_unit(r: i32) -> &'static str {
+    match r {
+        9 => "year",
+        8 => "month",
+        7 => "week",
+        6 => "day",
+        5 => "hour",
+        4 => "minute",
+        3 => "second",
+        2 => "millisecond",
+        1 => "microsecond",
+        _ => "nanosecond",
+    }
+}
+/// Negate a roundingMode (for `since`, which mirrors `until`): ceil↔floor, halfCeil↔halfFloor.
+fn negate_mode(mode: &str) -> &str {
+    match mode {
+        "ceil" => "floor",
+        "floor" => "ceil",
+        "halfCeil" => "halfFloor",
+        "halfFloor" => "halfCeil",
+        other => other,
+    }
+}
+
+/// Resolve `until`/`since` options for a pure-time difference and produce the rounded, balanced
+/// duration. `diff_ns` is `other - this` in nanoseconds; `since` negates the rounding mode and the
+/// result. Validates that both units are time units with `largestUnit >= smallestUnit`.
+fn time_diff(
+    i: &mut Interp,
+    diff_ns: i128,
+    opts: &Value,
+    since: bool,
+    auto_rank: i32,
+) -> Result<IsoDuration, Value> {
+    let largest_raw = opt_str(i, opts, "smallestUnit", "nanosecond")?;
+    let smallest = sing(&largest_raw).to_string();
+    let srank = time_unit_rank(&smallest)
+        .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a time unit"))?;
+    let largest_opt = opt_str(i, opts, "largestUnit", "auto")?;
+    let largest_name = sing(&largest_opt).to_string();
+    let lrank = if largest_name == "auto" {
+        srank.max(auto_rank) // auto ⇒ the type default, but never narrower than smallestUnit
+    } else {
+        time_unit_rank(&largest_name)
+            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a time unit"))?
+    };
+    if lrank < srank {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    check_increment(i, &smallest, incr)?;
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let mode = if since { negate_mode(&mode) } else { &mode }.to_string();
+    let unit_size = unit_ns(&smallest).unwrap();
+    let rounded = round_ns(diff_ns, unit_size * incr as i128, &mode);
+    let bal = balance_ns(rounded, rank_unit(lrank));
+    Ok(if since { neg_duration(bal) } else { bal })
+}
+
 /// Rank of a temporal unit (years highest), or None if not a unit name.
 fn unit_rank(u: &str) -> Option<i32> {
     Some(match sing(u) {
@@ -2083,24 +2152,16 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let y = to_time(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         let diff = (time_to_ns(y) - time_to_ns(x)) as i128;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(diff, &largest)),
-        ))
+        let dur = time_diff(i, diff, &arg(a, 1), false, 5)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let y = to_time(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
-        let diff = (time_to_ns(x) - time_to_ns(y)) as i128;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(diff, &largest)),
-        ))
+        let diff = (time_to_ns(y) - time_to_ns(x)) as i128;
+        let dur = time_diff(i, diff, &arg(a, 1), true, 5)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_time(i, &t)?;
@@ -3523,22 +3584,14 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(y - x, &largest)),
-        ))
+        let dur = time_diff(i, y - x, &arg(a, 1), false, 3)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let y = to_instant(i, &arg(a, 0))?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "second")?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(x - y, &largest)),
-        ))
+        let dur = time_diff(i, y - x, &arg(a, 1), true, 3)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     let ctor = add_ctor(it, ns, "Instant", 1, proto, |i, _t, a| {
         require_new(i)?;
