@@ -1833,3 +1833,13 @@ fn block_async_fn_redecl() {
     // async function redeclaration at TOP level is allowed
     assert_eq!(run("async function f(){} async function f(){} 'ok'"), "ok");
 }
+#[test]
+fn new_import_nested() {
+    assert!(Engine::new().eval("new import('')", false).is_err());
+    assert!(Engine::new().eval("new import('').then()", false).is_err());
+    assert!(Engine::new().eval("new import('').foo", false).is_err());
+    assert!(Engine::new().eval("() => new import('').then()", false).is_err());
+    // legitimate: new on a call result is fine
+    assert_eq!(run("function mk(){ return function(){this.x=4} } new (mk())().x"), "4");
+    assert_eq!(run("function F(){this.y=2} new F().y"), "2");
+}

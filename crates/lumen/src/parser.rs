@@ -1316,8 +1316,9 @@ impl Parser {
                 Expr::Undefined
             } else {
                 let callee = self.parse_member_expr()?;
-                // `new import(...)` is a SyntaxError — `import()` is not a constructable callee.
-                if matches!(callee, Expr::ImportCall(_)) {
+                // `new import(...)` is a SyntaxError — an ImportCall (`import()`) is a CallExpression,
+                // so it can't be the MemberExpression base of `new` (even under property access).
+                if callee_has_import_call(&callee) {
                     return self.err("'import(...)' cannot be used with 'new'");
                 }
                 let args = if self.is_punct("(") { self.parse_args()? } else { Vec::new() };
@@ -2326,6 +2327,16 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// Whether `new`'s callee chain bottoms out in an `import(...)` call (peeling member/index access),
+/// which makes it a CallExpression and thus an invalid `new` operand.
+fn callee_has_import_call(e: &Expr) -> bool {
+    match e {
+        Expr::ImportCall(_) => true,
+        Expr::Member { obj, .. } | Expr::Index { obj, .. } => callee_has_import_call(obj),
+        _ => false,
+    }
 }
 
 /// Whether `delete <arg>` targets a private member (`obj.#x`), which is a SyntaxError.
