@@ -1155,13 +1155,15 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let nd = add_to_date(i, d, dur, 1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let nd = add_to_date(i, d, dur, 1, ovf)?;
         Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let nd = add_to_date(i, d, dur, -1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let nd = add_to_date(i, d, dur, -1, ovf)?;
         Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
@@ -1980,11 +1982,21 @@ fn field_month(i: &mut Interp, o: &Value) -> Result<i64, Value> {
     Err(i.make_error("TypeError", "missing 'month' or 'monthCode'"))
 }
 
-fn add_to_date(i: &mut Interp, d: IsoDate, dur: IsoDuration, sign: i64) -> Result<IsoDate, Value> {
+fn add_to_date(
+    i: &mut Interp,
+    d: IsoDate,
+    dur: IsoDuration,
+    sign: i64,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     // Add years & months first (constraining the day), then weeks & days.
     let total_months = d.year * 12 + (d.month as i64 - 1) + sign * (dur.years * 12 + dur.months);
     let (y, m) = balance_year_month(total_months / 12, total_months % 12 + 1);
     let dim = days_in_month(y, m);
+    // `reject` overflow throws when the source day doesn't exist in the target month.
+    if ovf == Overflow::Reject && d.day as i64 > dim as i64 {
+        return Err(i.make_error("RangeError", "date day out of range"));
+    }
     let day = (d.day as i64).min(dim as i64);
     let z = days_from_civil(y, m as i64, day) + sign * (dur.weeks * 7 + dur.days);
     let (ny, nm, nd) = civil_from_days(z);
@@ -2056,8 +2068,9 @@ fn dt_add(
     t: IsoTime,
     dur: IsoDuration,
     sign: i64,
+    ovf: Overflow,
 ) -> Result<(IsoDate, IsoTime), Value> {
-    let nd = add_to_date(i, d, dur, sign)?;
+    let nd = add_to_date(i, d, dur, sign, ovf)?;
     let total = time_to_ns(t) as i128 + sign as i128 * duration_time_ns(dur);
     let carry = total.div_euclid(86_400_000_000_000);
     let tns = total.rem_euclid(86_400_000_000_000);
@@ -2460,7 +2473,8 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf)?;
         Ok(make(
             i,
             "Temporal.PlainDateTime",
@@ -2470,7 +2484,8 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf)?;
         Ok(make(
             i,
             "Temporal.PlainDateTime",
@@ -4124,7 +4139,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
-        let (nd, ntm) = dt_add(i, d, tm, dur, 1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf)?;
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
@@ -4142,7 +4158,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
-        let (nd, ntm) = dt_add(i, d, tm, dur, -1)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf)?;
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
