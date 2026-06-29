@@ -8640,6 +8640,43 @@ fn install_errors(it: &mut Interp) {
         Property::builtin(Value::Obj(agg_ctor.clone())),
     );
     set_builtin(&it.global, "AggregateError", Value::Obj(agg_ctor));
+
+    // SuppressedError(error, suppressed, message): an Error subclass carrying `error` and
+    // `suppressed` (the error thrown during disposal and the one it superseded).
+    let sup_proto = Object::new(Some(error_proto.clone()));
+    set_builtin(&sup_proto, "name", Value::str("SuppressedError"));
+    set_builtin(&sup_proto, "message", Value::str(""));
+    it.error_protos.insert("SuppressedError", sup_proto.clone());
+    let sup_ctor = it.make_native("SuppressedError", 3, |i, _t, a| {
+        let err = i.make_error("SuppressedError", "");
+        if let Some(o) = err.as_obj() {
+            o.borrow_mut().proto = i.error_protos.get("SuppressedError").cloned();
+        }
+        if !matches!(arg(a, 2), Value::Undefined) {
+            let s = ab(i.to_string(&arg(a, 2)))?;
+            ab(i.set_member(&err, "message", Value::Str(s)))?;
+        }
+        // `error` and `suppressed` are non-enumerable, writable, configurable data properties.
+        if let Some(o) = err.as_obj() {
+            o.borrow_mut()
+                .props
+                .insert("error", Property::builtin(arg(a, 0)));
+            o.borrow_mut()
+                .props
+                .insert("suppressed", Property::builtin(arg(a, 1)));
+        }
+        install_error_cause(i, &err, a.get(3));
+        Ok(err)
+    });
+    sup_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(sup_proto.clone()), false, false, false),
+    );
+    sup_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::builtin(Value::Obj(sup_ctor.clone())),
+    );
+    set_builtin(&it.global, "SuppressedError", Value::Obj(sup_ctor));
 }
 
 fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
