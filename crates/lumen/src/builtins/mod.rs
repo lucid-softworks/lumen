@@ -1454,11 +1454,11 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     let obj = Object::new(i.extra_protos.get(kind.name()).cloned());
     let p = Rc::as_ptr(&obj) as usize;
     i.typed_arrays.insert(p, TaInfo { buffer: buf_ptr, offset, len, kind });
-    set_internal(&obj, "length", Value::Num(len as f64));
-    set_internal(&obj, "byteLength", Value::Num((len * es) as f64));
-    set_internal(&obj, "byteOffset", Value::Num(offset as f64));
-    set_internal(&obj, "buffer", buf_val);
-    set_internal(&obj, "BYTES_PER_ELEMENT", Value::Num(es as f64));
+    // length / byteLength / byteOffset / buffer / BYTES_PER_ELEMENT are inherited accessors+constants,
+    // not own properties: length/byteLength/byteOffset are computed in get_member, the buffer object
+    // is kept in a side table, and BYTES_PER_ELEMENT lives on the prototype.
+    let _ = es;
+    i.ta_buffer.insert(p, buf_val);
     Ok(Value::Obj(obj))
 }
 

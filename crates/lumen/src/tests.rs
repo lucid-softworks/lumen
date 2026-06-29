@@ -1877,3 +1877,16 @@ fn private_names_not_observable() {
     // normal props still enumerable
     assert_eq!(run("class C{ a=1 } var c=new C(); Object.keys(c).join(',')"), "a");
 }
+#[test]
+fn ta_meta_not_own() {
+    assert_eq!(run("Object.getOwnPropertyNames(new Int8Array(2)).join(',')"), "0,1");
+    assert_eq!(run("new Int8Array(2).hasOwnProperty('byteLength')"), "false");
+    assert_eq!(run("new Int8Array(2).hasOwnProperty('buffer')"), "false");
+    assert_eq!(run("Object.getOwnPropertyDescriptor(new Int8Array(2),'length')"), "undefined");
+    // meta still readable (inherited/computed)
+    assert_eq!(run("new Int32Array(4).length"), "4");
+    assert_eq!(run("new Int32Array(4).byteLength"), "16");
+    assert_eq!(run("new Float64Array(3).BYTES_PER_ELEMENT"), "8");
+    assert_eq!(run("var b=new ArrayBuffer(8); new Int8Array(b).buffer===b"), "true");
+    assert_eq!(run("var a=new Int8Array(new ArrayBuffer(8),2,3); a.byteOffset"), "2");
+}

@@ -182,6 +182,9 @@ pub struct Interp {
     pub array_buffers: HashMap<usize, Vec<u8>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
     pub typed_arrays: HashMap<usize, TaInfo>,
+    /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
+    /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
+    pub ta_buffer: HashMap<usize, Value>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
     pub data_views: HashMap<usize, (usize, usize, usize)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
@@ -298,6 +301,7 @@ impl Interp {
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
             typed_arrays: HashMap::new(),
+            ta_buffer: HashMap::new(),
             data_views: HashMap::new(),
             regexps: HashMap::new(),
             proxies: HashMap::new(),
@@ -626,6 +630,12 @@ impl Interp {
                         "byteOffset" => {
                             return Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
                         }
+                        "BYTES_PER_ELEMENT" => {
+                            return Ok(Value::Num(info.kind.elsize() as f64))
+                        }
+                        "buffer" => {
+                            return Ok(self.ta_buffer.get(&ptr).cloned().unwrap_or(Value::Undefined))
+                        }
                         _ => {}
                     }
                 }
@@ -804,6 +814,10 @@ impl Interp {
     }
 
     pub fn array_length(&self, obj: &Gc) -> usize {
+        // A TypedArray's length lives in its info slot, not an own `length` property.
+        if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
+            return if self.array_buffers.contains_key(&info.buffer) { info.len } else { 0 };
+        }
         match obj.borrow().props.get("length").map(|p| p.value.clone()) {
             Some(Value::Num(n)) => n as usize,
             _ => 0,
