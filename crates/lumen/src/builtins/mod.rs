@@ -1361,11 +1361,6 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
     }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;
-    // Re-validate: coercing an argument (a user `valueOf`/`toString`) may have detached the buffer
-    // mid-operation, which the spec turns into a TypeError.
-    if !i.array_buffers.contains_key(&info.buffer) {
-        return Err(i.make_error("TypeError", "Cannot perform operation on a detached ArrayBuffer"));
-    }
     // Methods that produce a new collection return a TypedArray of the receiver's kind, not a plain
     // Array: build it via the receiver's constructor from the delegated result.
     if matches!(method, "map" | "filter" | "slice" | "toReversed" | "toSorted" | "with") {

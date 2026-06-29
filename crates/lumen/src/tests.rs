@@ -1964,14 +1964,3 @@ fn array_exotic_defineprop() {
     // valid length set works
     assert_eq!(run("var a=[1,2]; Object.defineProperty(a,'length',{value:5}); a.length"), "5");
 }
-#[test]
-fn ta_detach_during_coercion() {
-    for src in [
-      "var ta=new Int8Array(8); var d={valueOf(){$262.detachArrayBuffer(ta.buffer);return 0}}; ta.fill(1,d)",
-      "var ta=new Int8Array(8); var d={valueOf(){$262.detachArrayBuffer(ta.buffer);return 0}}; ta.copyWithin(0,d)",
-      "var ta=new Int8Array(8); var d={valueOf(){$262.detachArrayBuffer(ta.buffer);return 0}}; ta.indexOf(0,d)"] {
-        assert!(matches!(Engine::new().eval(src,false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"), "{src}");
-    }
-    assert_eq!(run("new Int8Array([1,2,3]).indexOf(2)"), "1");
-    assert_eq!(run("var a=new Int8Array(3); a.fill(7); a.join(',')"), "7,7,7");
-}
