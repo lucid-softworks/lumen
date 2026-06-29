@@ -235,6 +235,9 @@ pub struct Interp {
     /// Monotonic counter minting globally-unique private backing keys for auto-accessors (so a
     /// subclass's accessor never collides with a superclass's on the same instance).
     pub accessor_seq: u64,
+    /// Scratch collector for `context.addInitializer(fn)` calls during decorator application; drained
+    /// after each decorator runs.
+    pub decorator_initializers: Vec<Value>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -262,12 +265,23 @@ pub struct PromiseState {
 
 /// Engine-side metadata for a class constructor (see [`Interp::class_info`]).
 pub struct ClassInfo {
-    /// Instance fields: `(property key, optional initializer)`, in declaration order.
-    pub fields: Vec<(String, Option<Expr>)>,
+    /// Instance fields (and auto-accessor backing fields), in declaration order.
+    pub fields: Vec<FieldInit>,
     /// The environment field initializers evaluate in (carries the class's super bindings).
     pub field_env: Env,
     /// True if the class has an `extends` clause (derived: `this` is set up by `super()`).
     pub derived: bool,
+    /// Instance initializers registered by decorators via `context.addInitializer`, run on each new
+    /// instance after its fields are set, with `this` = the instance.
+    pub instance_initializers: Vec<Value>,
+}
+
+/// One instance field: its key, optional initializer expression, and any decorator-supplied
+/// initializer functions (each maps the current value to a new one during construction).
+pub struct FieldInit {
+    pub key: String,
+    pub init: Option<Expr>,
+    pub transforms: Vec<Value>,
 }
 
 /// Recursion ceiling for the interpreter. Paired with the large worker-thread stacks the runner
@@ -350,6 +364,7 @@ impl Interp {
             super_call_ok: false,
             using_stack: Vec::new(),
             accessor_seq: 0,
+            decorator_initializers: Vec::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1140,6 +1155,16 @@ impl Interp {
             Callable::AccessorSet(key) => {
                 self.accessor_store(&this, &key, args.first().cloned().unwrap_or(Value::Undefined))
             }
+            // Decorator `context.access` get/set: read/write a named property on the first argument.
+            Callable::PropGet(key) => {
+                let recv = args.first().cloned().unwrap_or(Value::Undefined);
+                self.get_member(&recv, &key)
+            }
+            Callable::PropSet(key) => {
+                let recv = args.first().cloned().unwrap_or(Value::Undefined);
+                let val = args.get(1).cloned().unwrap_or(Value::Undefined);
+                self.set_member(&recv, &key, val).map(|_| Value::Undefined)
+            }
         };
         self.constructing = saved_ctor;
         r
@@ -1679,7 +1704,9 @@ impl Interp {
             Callable::None
             | Callable::WrappedShadow { .. }
             | Callable::AccessorGet(_)
-            | Callable::AccessorSet(_) => {
+            | Callable::AccessorSet(_)
+            | Callable::PropGet(_)
+            | Callable::PropSet(_) => {
                 Err(self.throw("TypeError", "value is not a constructor"))
             }
         }

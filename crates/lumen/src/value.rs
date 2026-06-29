@@ -96,6 +96,10 @@ pub enum Callable {
     AccessorGet(Rc<str>),
     /// An auto-accessor's synthesized setter: writes the private backing field (brand-checked).
     AccessorSet(Rc<str>),
+    /// A decorator `context.access.get`: returns `args[0][name]`.
+    PropGet(Rc<str>),
+    /// A decorator `context.access.set`: performs `args[0][name] = args[1]`.
+    PropSet(Rc<str>),
 }
 
 /// Exotic internal data for built-in object kinds (arrays, primitive wrappers). The wrapper

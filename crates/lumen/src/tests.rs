@@ -3818,3 +3818,64 @@ fn async_generator_coroutine() {
     );
 }
 
+
+#[test]
+fn decorators_runtime() {
+    // Method decorator replaces the method.
+    assert_eq!(
+        run(r#"
+            function double(fn, ctx) { return function(...a){ return fn.apply(this,a)*2; }; }
+            class C { @double m(){ return 5; } }
+            String(new C().m())
+        "#),
+        "10"
+    );
+    // Context shape for a method decorator.
+    assert_eq!(
+        run(r#"
+            let info;
+            function probe(fn, ctx){ info = ctx.kind+","+ctx.name+","+ctx.static+","+ctx.private; }
+            class C { @probe static foo(){} }
+            info
+        "#),
+        "method,foo,true,false"
+    );
+    // Field decorator initializer transforms the value.
+    assert_eq!(
+        run(r#"
+            function plus1(v, ctx){ return function(init){ return init + 1; }; }
+            class C { @plus1 x = 10; }
+            String(new C().x)
+        "#),
+        "11"
+    );
+    // addInitializer runs with this = instance.
+    assert_eq!(
+        run(r#"
+            function init(v, ctx){ ctx.addInitializer(function(){ this.ran = true; }); }
+            class C { @init m(){} }
+            String(new C().ran)
+        "#),
+        "true"
+    );
+    // Class decorator replaces the class.
+    assert_eq!(
+        run(r#"
+            function tag(cls, ctx){ cls.tagged = ctx.name; return cls; }
+            @tag class C {}
+            C.tagged
+        "#),
+        "C"
+    );
+    // Accessor decorator can wrap get and add init.
+    assert_eq!(
+        run(r#"
+            function dec(t, ctx){
+                return { get(){ return t.get.call(this) + 100; }, init(v){ return 5; } };
+            }
+            class C { @dec accessor x = 1; }
+            String(new C().x)
+        "#),
+        "105"
+    );
+}

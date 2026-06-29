@@ -1963,14 +1963,22 @@ impl Interp {
             .props
             .insert("constructor", Property::builtin(ctor_val.clone()));
         bind(&inst_env, "%thisctor%", ctor_val.clone());
+        // A named class binds its own name (initialized) in the class scope, so methods, static
+        // blocks, field initializers and decorators can reference the class itself.
+        if let Some(n) = &class.name {
+            bind(&class_env, n, ctor_val.clone());
+        }
 
         // Methods, accessors and fields.
-        let mut inst_fields: Vec<(String, Option<Expr>)> = Vec::new();
+        let mut inst_fields: Vec<FieldInit> = Vec::new();
+        let mut instance_inits: Vec<Value> = Vec::new();
+        let mut static_inits: Vec<Value> = Vec::new();
         for m in &class.members {
             if m.kind == MemberKind::Constructor {
                 continue;
             }
             let key = self.eval_prop_key(&m.key, env)?;
+            let is_private = key.starts_with('#');
             let menv = if m.is_static { &static_env } else { &inst_env };
             let target = if m.is_static {
                 ctor_obj.clone()
@@ -1985,54 +1993,107 @@ impl Interp {
                     self.accessor_seq += 1;
                     let backing: Rc<str> =
                         Rc::from(format!("#\u{0}acc{}", self.accessor_seq).as_str());
-                    let getter = self.make_accessor_fn(&key, &backing, true);
-                    let setter = self.make_accessor_fn(&key, &backing, false);
+                    let mut getter = self.make_accessor_fn(&key, &backing, true);
+                    let mut setter = self.make_accessor_fn(&key, &backing, false);
+                    let mut transforms = Vec::new();
+                    if !m.decorators.is_empty() {
+                        let sink = if m.is_static {
+                            &mut static_inits
+                        } else {
+                            &mut instance_inits
+                        };
+                        let (g, s, t) = self
+                            .decorate_accessor(&m.decorators, env, &key, m.is_static, getter, setter, sink)?;
+                        getter = g;
+                        setter = s;
+                        transforms = t;
+                    }
                     self.define_class_accessor(&target, &key, Some(getter), Some(setter));
                     if m.is_static {
                         let scope = new_scope(Some(static_env.clone()));
                         bind(&scope, "this", ctor_val.clone());
-                        let v = match &m.value {
+                        let mut v = match &m.value {
                             Some(e) => self.eval(e, &scope)?,
                             None => Value::Undefined,
                         };
+                        for tr in &transforms {
+                            v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
+                        }
                         ctor_obj
                             .borrow_mut()
                             .props
                             .insert(backing.to_string(), Property::plain(v));
                     } else {
-                        inst_fields.push((backing.to_string(), m.value.clone()));
+                        inst_fields.push(FieldInit {
+                            key: backing.to_string(),
+                            init: m.value.clone(),
+                            transforms,
+                        });
                     }
                 }
                 MemberKind::Method => {
-                    let f = self.make_function(m.func.clone().unwrap(), menv.clone());
+                    let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
                     if let Value::Obj(fo) = &f {
                         fo.borrow_mut().props.insert(
                             "name",
                             Property::data(Value::from_string(key.clone()), false, false, true),
                         );
                     }
+                    if !m.decorators.is_empty() {
+                        let sink = if m.is_static {
+                            &mut static_inits
+                        } else {
+                            &mut instance_inits
+                        };
+                        f = self
+                            .decorate_callable(&m.decorators, env, f, "method", &key, m.is_static, is_private, sink)?;
+                    }
                     target.borrow_mut().props.insert(key, Property::builtin(f));
                 }
                 MemberKind::Get | MemberKind::Set => {
-                    let f = self.make_function(m.func.clone().unwrap(), menv.clone());
-                    let (get, set) = if m.kind == MemberKind::Get {
-                        (Some(f), None)
-                    } else {
-                        (None, Some(f))
-                    };
+                    let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
+                    let is_get = m.kind == MemberKind::Get;
+                    if !m.decorators.is_empty() {
+                        let sink = if m.is_static {
+                            &mut static_inits
+                        } else {
+                            &mut instance_inits
+                        };
+                        let kind = if is_get { "getter" } else { "setter" };
+                        f = self
+                            .decorate_callable(&m.decorators, env, f, kind, &key, m.is_static, is_private, sink)?;
+                    }
+                    let (get, set) = if is_get { (Some(f), None) } else { (None, Some(f)) };
                     self.define_class_accessor(&target, &key, get, set);
                 }
                 MemberKind::Field => {
+                    let transforms = if m.decorators.is_empty() {
+                        Vec::new()
+                    } else {
+                        let sink = if m.is_static {
+                            &mut static_inits
+                        } else {
+                            &mut instance_inits
+                        };
+                        self.decorate_field(&m.decorators, env, &key, m.is_static, is_private, sink)?
+                    };
                     if m.is_static {
                         let scope = new_scope(Some(static_env.clone()));
                         bind(&scope, "this", ctor_val.clone());
-                        let v = match &m.value {
+                        let mut v = match &m.value {
                             Some(e) => self.eval(e, &scope)?,
                             None => Value::Undefined,
                         };
+                        for tr in &transforms {
+                            v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
+                        }
                         ctor_obj.borrow_mut().props.insert(key, Property::plain(v));
                     } else {
-                        inst_fields.push((key, m.value.clone()));
+                        inst_fields.push(FieldInit {
+                            key,
+                            init: m.value.clone(),
+                            transforms,
+                        });
                     }
                 }
                 MemberKind::StaticBlock => {
@@ -2054,9 +2115,22 @@ impl Interp {
                 fields: inst_fields,
                 field_env: inst_env,
                 derived,
+                instance_initializers: instance_inits,
             },
         );
-        Ok(ctor_val)
+
+        // Class decorators apply after the body is built; a callable return replaces the class.
+        let mut class_value = ctor_val;
+        if !class.decorators.is_empty() {
+            let name = class.name.clone().unwrap_or_default();
+            class_value = self
+                .decorate_callable(&class.decorators, env, class_value, "class", &name, false, false, &mut static_inits)?;
+        }
+        // Static element initializers and class initializers run with `this` = the class.
+        for init in &static_inits {
+            self.call(init.clone(), class_value.clone(), &[])?;
+        }
+        Ok(class_value)
     }
 
     /// Build an auto-accessor's getter (`is_get`) or setter as a function object backed by the
@@ -2119,6 +2193,192 @@ impl Interp {
                 configurable: true,
             },
         );
+    }
+
+    /// A function object wrapping an internal [`Callable`] (used for accessor get/set and decorator
+    /// `access` helpers), with a spec-shaped `name`/`length`.
+    fn make_callable(&self, call: Callable, name: &str, len: f64) -> Value {
+        let o = Object::new(Some(self.function_proto.clone()));
+        {
+            let mut b = o.borrow_mut();
+            b.call = call;
+            b.props.insert(
+                "name",
+                Property::data(Value::from_string(name.to_string()), false, false, true),
+            );
+            b.props
+                .insert("length", Property::data(Value::Num(len), false, false, true));
+        }
+        Value::Obj(o)
+    }
+
+    /// Build a decorator context object: `{ kind, name, static, private, access, addInitializer,
+    /// metadata }`. `access.get/set` read/write the element's property on a receiver.
+    fn make_decorator_context(
+        &mut self,
+        kind: &str,
+        key: &str,
+        is_static: bool,
+        is_private: bool,
+    ) -> Value {
+        let ctx = self.new_object();
+        let cv = Value::Obj(ctx.clone());
+        let key_rc: Rc<str> = Rc::from(key);
+        let name = if !is_private && Self::is_sym_key(key) {
+            self.sym_from_key(key).unwrap_or(Value::Undefined)
+        } else {
+            Value::from_string(key.to_string())
+        };
+        let access = self.new_object();
+        if matches!(kind, "method" | "getter" | "field" | "accessor") {
+            let g = self.make_callable(Callable::PropGet(key_rc.clone()), "get", 1.0);
+            access.borrow_mut().props.insert("get", Property::plain(g));
+        }
+        if matches!(kind, "setter" | "field" | "accessor") {
+            let s = self.make_callable(Callable::PropSet(key_rc.clone()), "set", 2.0);
+            access.borrow_mut().props.insert("set", Property::plain(s));
+        }
+        let add_init = self.make_native("addInitializer", 1, dec_add_initializer);
+        {
+            let mut b = ctx.borrow_mut();
+            b.props.insert("kind", Property::plain(Value::str(kind)));
+            b.props.insert("name", Property::plain(name));
+            b.props
+                .insert("static", Property::plain(Value::Bool(is_static)));
+            b.props
+                .insert("private", Property::plain(Value::Bool(is_private)));
+            b.props
+                .insert("access", Property::plain(Value::Obj(access)));
+            b.props
+                .insert("addInitializer", Property::plain(Value::Obj(add_init)));
+            b.props
+                .insert("metadata", Property::plain(Value::Undefined));
+        }
+        cv
+    }
+
+    /// Apply a list of decorators (innermost/last first) to a callable element (method/getter/setter
+    /// or whole class), folding each non-undefined callable return in as the replacement.
+    fn decorate_callable(
+        &mut self,
+        decorators: &[Expr],
+        env: &Env,
+        mut value: Value,
+        kind: &str,
+        key: &str,
+        is_static: bool,
+        is_private: bool,
+        inits: &mut Vec<Value>,
+    ) -> Result<Value, Abrupt> {
+        for d in decorators.iter().rev() {
+            let dec = self.eval(d, env)?;
+            if !dec.is_callable() {
+                return Err(self.throw("TypeError", "decorator is not callable"));
+            }
+            let ctx = self.make_decorator_context(kind, key, is_static, is_private);
+            let r = self.call(dec, Value::Undefined, &[value.clone(), ctx])?;
+            inits.append(&mut std::mem::take(&mut self.decorator_initializers));
+            match r {
+                Value::Undefined => {}
+                v if v.is_callable() => value = v,
+                _ => {
+                    return Err(self.throw(
+                        "TypeError",
+                        "decorator must return a function or undefined",
+                    ))
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    /// Apply field decorators, returning the initializer transforms they contribute.
+    fn decorate_field(
+        &mut self,
+        decorators: &[Expr],
+        env: &Env,
+        key: &str,
+        is_static: bool,
+        is_private: bool,
+        inits: &mut Vec<Value>,
+    ) -> Result<Vec<Value>, Abrupt> {
+        let mut transforms = Vec::new();
+        for d in decorators.iter().rev() {
+            let dec = self.eval(d, env)?;
+            if !dec.is_callable() {
+                return Err(self.throw("TypeError", "decorator is not callable"));
+            }
+            let ctx = self.make_decorator_context("field", key, is_static, is_private);
+            let r = self.call(dec, Value::Undefined, &[Value::Undefined, ctx])?;
+            inits.append(&mut std::mem::take(&mut self.decorator_initializers));
+            match r {
+                Value::Undefined => {}
+                v if v.is_callable() => transforms.push(v),
+                _ => {
+                    return Err(self.throw(
+                        "TypeError",
+                        "field decorator must return a function or undefined",
+                    ))
+                }
+            }
+        }
+        Ok(transforms)
+    }
+
+    /// Apply accessor decorators, threading the `{get, set}` pair and collecting `init` transforms.
+    #[allow(clippy::type_complexity)]
+    fn decorate_accessor(
+        &mut self,
+        decorators: &[Expr],
+        env: &Env,
+        key: &str,
+        is_static: bool,
+        mut get: Value,
+        mut set: Value,
+        inits: &mut Vec<Value>,
+    ) -> Result<(Value, Value, Vec<Value>), Abrupt> {
+        let is_private = key.starts_with('#');
+        let mut transforms = Vec::new();
+        for d in decorators.iter().rev() {
+            let dec = self.eval(d, env)?;
+            if !dec.is_callable() {
+                return Err(self.throw("TypeError", "decorator is not callable"));
+            }
+            let ctx = self.make_decorator_context("accessor", key, is_static, is_private);
+            let pair = self.new_object();
+            pair.borrow_mut()
+                .props
+                .insert("get", Property::plain(get.clone()));
+            pair.borrow_mut()
+                .props
+                .insert("set", Property::plain(set.clone()));
+            let r = self.call(dec, Value::Undefined, &[Value::Obj(pair), ctx])?;
+            inits.append(&mut std::mem::take(&mut self.decorator_initializers));
+            match r {
+                Value::Undefined => {}
+                Value::Obj(_) => {
+                    let ng = self.get_member(&r, "get")?;
+                    if ng.is_callable() {
+                        get = ng;
+                    }
+                    let ns = self.get_member(&r, "set")?;
+                    if ns.is_callable() {
+                        set = ns;
+                    }
+                    let init = self.get_member(&r, "init")?;
+                    if init.is_callable() {
+                        transforms.push(init);
+                    }
+                }
+                _ => {
+                    return Err(self.throw(
+                        "TypeError",
+                        "accessor decorator must return an object or undefined",
+                    ))
+                }
+            }
+        }
+        Ok((get, set, transforms))
     }
 
     /// Run a constructor's body against an already-allocated `this`, used by both `construct` and
@@ -2215,8 +2475,15 @@ impl Interp {
             _ => return Ok(()),
         };
         let ptr = Rc::as_ptr(&obj) as usize;
-        let (fields, field_env) = match self.class_info.get(&ptr) {
-            Some(i) => (i.fields.clone(), i.field_env.clone()),
+        let (fields, field_env, initializers) = match self.class_info.get(&ptr) {
+            Some(i) => (
+                i.fields
+                    .iter()
+                    .map(|f| (f.key.clone(), f.init.clone(), f.transforms.clone()))
+                    .collect::<Vec<_>>(),
+                i.field_env.clone(),
+                i.instance_initializers.clone(),
+            ),
             None => return Ok(()),
         };
         // A field initializer is not a constructor: a `super(...)` reached from here (e.g. through a
@@ -2224,10 +2491,10 @@ impl Interp {
         let saved_super = self.super_call_ok;
         self.super_call_ok = false;
         let result = (|me: &mut Self| -> Result<(), Abrupt> {
-            for (key, init) in fields {
+            for (key, init, transforms) in fields {
                 let scope = new_scope(Some(field_env.clone()));
                 bind(&scope, "this", this.clone());
-                let v = match init {
+                let mut v = match init {
                     Some(e) => {
                         let v = me.eval(&e, &scope)?;
                         if is_anonymous_fn(&e) {
@@ -2237,7 +2504,15 @@ impl Interp {
                     }
                     None => Value::Undefined,
                 };
+                // Decorator-supplied field initializers transform the value in turn.
+                for t in &transforms {
+                    v = me.call(t.clone(), this.clone(), &[v])?;
+                }
                 me.set_member(this, &key, v)?;
+            }
+            // Decorator addInitializer callbacks run after the fields, with `this` = the instance.
+            for init in &initializers {
+                me.call(init.clone(), this.clone(), &[])?;
             }
             Ok(())
         })(self);
@@ -3446,6 +3721,17 @@ fn fi_stmt(s: &Stmt, args: bool) -> Option<&'static str> {
         Stmt::Labeled { body, .. } | Stmt::With { body, .. } => fi_stmt(body, args),
         _ => None,
     }
+}
+
+/// A decorator context's `addInitializer(fn)`: records `fn` to run when the element is installed
+/// (collected per-decorator in `Interp.decorator_initializers`).
+fn dec_add_initializer(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let f = args.first().cloned().unwrap_or(Value::Undefined);
+    if !f.is_callable() {
+        return Err(i.make_error("TypeError", "addInitializer expects a callable"));
+    }
+    i.decorator_initializers.push(f);
+    Ok(Value::Undefined)
 }
 
 fn promise_resolve_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
