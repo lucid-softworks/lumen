@@ -24,6 +24,7 @@
 
 mod ast;
 mod builtins;
+mod coroutine;
 mod eval;
 mod interpreter;
 mod lexer;

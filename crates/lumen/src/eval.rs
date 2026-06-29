@@ -514,6 +514,63 @@ impl Interp {
         })
     }
 
+    /// `yield value`: park the coroutine, then resume per the driver's signal.
+    fn yield_one(&mut self, value: Value) -> Completion {
+        match crate::coroutine::coroutine_yield(self, value) {
+            crate::coroutine::Resume::Next(v) => Ok(v),
+            crate::coroutine::Resume::Return(v) => Err(Abrupt::Return(v)),
+            crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
+        }
+    }
+
+    /// `yield* iterable`: delegate to the inner iterator, forwarding next/return/throw (14.4.14).
+    fn yield_delegate(&mut self, value: &Value) -> Completion {
+        use crate::coroutine::Resume;
+        let (iterator, next) = self.get_iterator(value)?;
+        let mut received = Resume::Next(Value::Undefined);
+        loop {
+            match received {
+                Resume::Next(v) => {
+                    let result = self.call(next.clone(), iterator.clone(), &[v])?;
+                    let done = self.get_member(&result, "done")?;
+                        if self.to_boolean(&done) {
+                            return self.get_member(&result, "value");
+                        }
+                    let inner = self.get_member(&result, "value")?;
+                    received = crate::coroutine::coroutine_yield(self, inner);
+                }
+                Resume::Throw(e) => {
+                    let throw = self.get_member(&iterator, "throw")?;
+                    if !throw.is_callable() {
+                        self.iterator_close(&iterator);
+                        return Err(self.throw("TypeError", "the delegated iterator has no 'throw' method"));
+                    }
+                    let result = self.call(throw, iterator.clone(), &[e])?;
+                    let done = self.get_member(&result, "done")?;
+                        if self.to_boolean(&done) {
+                            return self.get_member(&result, "value");
+                        }
+                    let inner = self.get_member(&result, "value")?;
+                    received = crate::coroutine::coroutine_yield(self, inner);
+                }
+                Resume::Return(v) => {
+                    let ret = self.get_member(&iterator, "return")?;
+                    if !ret.is_callable() {
+                        return Err(Abrupt::Return(v));
+                    }
+                    let result = self.call(ret, iterator.clone(), &[v])?;
+                    let done = self.get_member(&result, "done")?;
+                        if self.to_boolean(&done) {
+                            let v = self.get_member(&result, "value")?;
+                            return Err(Abrupt::Return(v));
+                        }
+                    let inner = self.get_member(&result, "value")?;
+                    received = crate::coroutine::coroutine_yield(self, inner);
+                }
+            }
+        }
+    }
+
     /// GetIterator: returns (iterator, next-method).
     pub(crate) fn get_iterator(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
         // A primitive string iterates by code point (it has no own @@iterator method here).
@@ -856,23 +913,14 @@ impl Interp {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Undefined,
                 };
-                if self.yield_buffer.is_none() {
+                if !crate::coroutine::in_coroutine() {
                     return Err(self.throw("SyntaxError", "yield outside a generator"));
                 }
-                // Past the buffer cap, abort the body (an infinite generator can't be modeled
-                // eagerly). The thrown error stops execution and surfaces from the generator.
-                if self.yield_buffer.as_ref().map(|b| b.len()).unwrap_or(0) >= 5_000 {
-                    return Err(self.throw("RangeError", "generator produced too many values"));
-                }
                 if *delegate {
-                    let items = self.iterate(&value)?;
-                    if let Some(buf) = &mut self.yield_buffer {
-                        buf.extend(items.into_iter().take(5_000 - buf.len()));
-                    }
-                } else if let Some(buf) = &mut self.yield_buffer {
-                    buf.push(value);
+                    self.yield_delegate(&value)
+                } else {
+                    self.yield_one(value)
                 }
-                Ok(Value::Undefined)
             }
             Expr::Await(e) => {
                 let v = self.eval(e, env)?;

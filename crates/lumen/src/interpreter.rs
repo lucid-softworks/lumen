@@ -200,9 +200,9 @@ pub struct Interp {
     pub temporal: HashMap<usize, crate::temporal::Temporal>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
     pub microtasks: std::collections::VecDeque<Job>,
-    /// When a generator body is being run eagerly, `yield`ed values are collected here instead of
-    /// suspending (lumen has no coroutine support — see `run_generator`).
-    pub yield_buffer: Option<Vec<Value>>,
+    /// Live generator coroutines, keyed by the generator object's pointer. Each owns an OS thread
+    /// that runs the body and parks at every `yield` (see [`crate::coroutine`]).
+    pub generators: HashMap<usize, crate::coroutine::Coroutine>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub gc_next: i64,
     /// True while a native constructor is being invoked via `new` (lets e.g. `Number`/`String`
@@ -312,7 +312,7 @@ impl Interp {
             promises: HashMap::new(),
             temporal: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
-            yield_buffer: None,
+            generators: HashMap::new(),
             gc_next: GC_TRIGGER,
             constructing: false,
         };
@@ -459,26 +459,15 @@ impl Interp {
         Value::Obj(obj)
     }
 
-    /// Build a generator object (an iterator) over an eagerly-collected `buffer`, ending with the
-    /// `return` value, or throwing `thrown` once the buffer is exhausted.
-    fn make_generator(&mut self, buffer: Vec<Value>, ret: Value, thrown: Option<Value>, is_async: bool) -> Value {
-        let arr = self.make_array(buffer);
+    /// Build the generator/iterator object whose `next`/`return`/`throw` drive its coroutine (stored
+    /// separately in `self.generators`).
+    fn make_generator(&mut self, is_async: bool) -> Value {
         let proto = self
             .extra_protos
             .get("%IteratorPrototype%")
             .cloned()
             .or_else(|| Some(self.object_proto.clone()));
         let obj = Object::new(proto);
-        {
-            let mut b = obj.borrow_mut();
-            let ro = |v: Value| Property::data(v, true, false, false);
-            b.props.insert("__gen_arr", ro(arr));
-            b.props.insert("__gen_idx", ro(Value::Num(0.0)));
-            b.props.insert("__gen_ret", ro(ret));
-            b.props.insert("__gen_haserr", ro(Value::Bool(thrown.is_some())));
-            b.props.insert("__gen_err", ro(thrown.unwrap_or(Value::Undefined)));
-            b.props.insert("__gen_async", ro(Value::Bool(is_async)));
-        }
         if is_async {
             // Async generator: next/return/throw return promises, and it's an async-iterable.
             self.def_method(&obj, "next", 0, crate::builtins::async_generator_next);
@@ -1157,32 +1146,42 @@ impl Interp {
         result
     }
 
-    /// Run a generator body eagerly, collecting all `yield`ed values, and return a generator object
-    /// (an iterator) over them ending with the `return` value. This is an approximation — side
-    /// effects happen up-front and `next(v)` arguments are ignored — but covers many simple cases.
+    /// Start a generator: spawn its coroutine (parked until the first `next`) and return the
+    /// generator object. The body runs lazily on its own thread, suspending at each `yield`.
     fn run_generator(&mut self, func: &Rc<Function>, scope: &Env) -> Result<Value, Abrupt> {
-        let saved = self.yield_buffer.take();
-        self.yield_buffer = Some(Vec::new());
-        self.hoist(&func.body, scope, true);
-        let mut ret = Value::Undefined;
-        let mut thrown: Option<Value> = None;
-        for stmt in &func.body {
-            match self.exec_stmt(stmt, scope) {
-                Ok(_) => {}
-                Err(Abrupt::Return(v)) => {
-                    ret = v;
-                    break;
+        let func = func.clone();
+        let scope = scope.clone();
+        let is_async = func.is_async;
+        let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
+            let saved_strict = i.strict;
+            i.strict = func.is_strict;
+            i.hoist(&func.body, &scope, true);
+            i.declare_block_lexicals(&func.body, &scope, false);
+            let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
+            for stmt in &func.body {
+                match i.exec_stmt(stmt, &scope) {
+                    Ok(_) => {}
+                    Err(Abrupt::Return(v)) => {
+                        outcome = crate::coroutine::Suspend::Done(v);
+                        break;
+                    }
+                    Err(Abrupt::Throw(e)) => {
+                        outcome = crate::coroutine::Suspend::Throw(e);
+                        break;
+                    }
+                    Err(_) => break,
                 }
-                Err(Abrupt::Throw(e)) => {
-                    thrown = Some(e);
-                    break;
-                }
-                Err(_) => break,
             }
+            i.strict = saved_strict;
+            outcome
+        });
+        let ptr = self as *mut Interp;
+        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
+        let obj = self.make_generator(is_async);
+        if let Value::Obj(o) = &obj {
+            self.generators.insert(Rc::as_ptr(o) as usize, coro);
         }
-        let buffer = self.yield_buffer.take().unwrap_or_default();
-        self.yield_buffer = saved;
-        Ok(self.make_generator(buffer, ret, thrown, func.is_async))
+        Ok(obj)
     }
 
     fn bind_params(&mut self, params: &[Param], args: &[Value], scope: &Env) -> Result<(), Abrupt> {

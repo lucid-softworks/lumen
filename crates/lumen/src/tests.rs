@@ -2184,3 +2184,27 @@ fn sloppy_this_boxing() {
     // object this passes through
     assert_eq!(run("var o={};function f(){return this===o}; f.call(o)"), "true");
 }
+#[test]
+fn generator_coroutine() {
+    // lazy: body doesn't run until next()
+    assert_eq!(run("var log='';function* g(){log+='a';yield 1;log+='b';yield 2}var it=g();log"), "");
+    assert_eq!(run("function* g(){yield 1;yield 2}var it=g();it.next().value+','+it.next().value"), "1,2");
+    assert_eq!(run("function* g(){yield 1}var it=g();it.next();it.next().done"), "true");
+    // yield expression value injection
+    assert_eq!(run("function* g(){var x=yield 1;yield x}var it=g();it.next();it.next(10).value"), "10");
+    // return value
+    assert_eq!(run("function* g(){yield 1;return 9}var it=g();it.next();var r=it.next();r.value+','+r.done"), "9,true");
+    // return() method
+    assert_eq!(run("function* g(){yield 1;yield 2}var it=g();it.next();it.return(5).value"), "5");
+    // throw() into a try/catch
+    assert_eq!(run("function* g(){try{yield 1}catch(e){yield e}}var it=g();it.next();it.throw('X').value"), "X");
+    // yield* delegation
+    assert_eq!(run("function* a(){yield 1;yield 2}function* g(){yield* a();yield 3}[...g()].join(',')"), "1,2,3");
+    // spread + for-of
+    assert_eq!(run("function* g(){yield 1;yield 2}[...g()].length"), "2");
+    assert_eq!(run("var s=0;function* g(){yield 1;yield 2;yield 3}for(var x of g())s+=x;s"), "6");
+    // infinite generator, taken lazily
+    assert_eq!(run("function* nat(){var i=0;while(true)yield i++}var it=nat();it.next();it.next();it.next().value"), "2");
+    // side-effect ordering
+    assert_eq!(run("var log='';function* g(){log+='1';yield;log+='2';yield;log+='3'}var it=g();it.next();it.next();log"), "12");
+}

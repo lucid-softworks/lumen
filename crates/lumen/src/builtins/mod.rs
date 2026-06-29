@@ -6119,57 +6119,47 @@ fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
 
 /// `next()` for a generator object built by `make_generator`: walk the buffered values, then throw
 /// any stored error, then return `{ value: <return>, done: true }`.
-pub(crate) fn generator_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
-    let arr = ab(i.get_member(&this, "__gen_arr"))?;
-    let idx_v = ab(i.get_member(&this, "__gen_idx"))?;
-    let idx = ab(i.to_number(&idx_v))? as usize;
-    let len = match &arr {
-        Value::Obj(o) => i.array_length(o),
-        _ => 0,
+/// Drive a generator's coroutine with a resume signal, returning its `{value, done}` (or propagating
+/// a throw). The generators map doubles as the brand check.
+fn drive_generator(i: &mut Interp, this: &Value, signal: crate::coroutine::Resume) -> Result<Value, Value> {
+    use crate::coroutine::{Resume, Suspend};
+    let key = match this {
+        Value::Obj(o) => Rc::as_ptr(o) as usize,
+        _ => return Err(i.make_error("TypeError", "Generator method called on a non-generator")),
     };
-    let result = i.new_object();
-    if idx < len {
-        let v = ab(i.get_member(&arr, &idx.to_string()))?;
-        ab(i.set_member(&this, "__gen_idx", Value::Num((idx + 1) as f64)))?;
-        set_data(&result, "value", v);
-        set_data(&result, "done", Value::Bool(false));
-        return Ok(Value::Obj(result));
+    let mut coro = match i.generators.remove(&key) {
+        Some(c) => c,
+        None => return Err(i.make_error("TypeError", "Generator method called on a non-generator")),
+    };
+    if coro.done {
+        i.generators.insert(key, coro);
+        return match signal {
+            Resume::Throw(e) => Err(e),
+            Resume::Return(v) => Ok(iter_result(i, v, true)),
+            Resume::Next(_) => Ok(iter_result(i, Value::Undefined, true)),
+        };
     }
-    let has_err = ab(i.get_member(&this, "__gen_haserr"))?;
-    if i.to_boolean(&has_err) {
-        ab(i.set_member(&this, "__gen_haserr", Value::Bool(false)))?;
-        return Err(ab(i.get_member(&this, "__gen_err"))?);
+    let suspend = coro.resume(i, signal);
+    i.generators.insert(key, coro);
+    match suspend {
+        Suspend::Yield(v) => Ok(iter_result(i, v, false)),
+        Suspend::Done(v) => Ok(iter_result(i, v, true)),
+        Suspend::Throw(e) => Err(e),
     }
-    let ret = ab(i.get_member(&this, "__gen_ret"))?;
-    set_data(&result, "value", ret);
-    set_data(&result, "done", Value::Bool(true));
-    Ok(Value::Obj(result))
 }
 
-/// `gen.return(v)`: finish the generator and yield `{ value: v, done: true }`.
-pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    let arr = ab(i.get_member(&this, "__gen_arr"))?;
-    let len = match &arr {
-        Value::Obj(o) => i.array_length(o),
-        _ => 0,
-    };
-    ab(i.set_member(&this, "__gen_idx", Value::Num(len as f64)))?;
-    ab(i.set_member(&this, "__gen_haserr", Value::Bool(false)))?;
-    ab(i.set_member(&this, "__gen_ret", Value::Undefined))?;
-    let result = i.new_object();
-    set_data(&result, "value", arg(args, 0));
-    set_data(&result, "done", Value::Bool(true));
-    Ok(Value::Obj(result))
+pub(crate) fn generator_next(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    drive_generator(i, &this, crate::coroutine::Resume::Next(arg(args, 0)))
 }
-/// `gen.throw(e)`: a completed eager generator simply propagates the thrown value.
+
+/// `gen.return(v)`: inject a return completion at the suspended `yield` (runs any `finally`).
+pub(crate) fn generator_return(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    drive_generator(i, &this, crate::coroutine::Resume::Return(arg(args, 0)))
+}
+
+/// `gen.throw(e)`: inject a throw at the suspended `yield`.
 pub(crate) fn generator_throw(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    let arr = ab(i.get_member(&this, "__gen_arr"))?;
-    let len = match &arr {
-        Value::Obj(o) => i.array_length(o),
-        _ => 0,
-    };
-    ab(i.set_member(&this, "__gen_idx", Value::Num(len as f64)))?;
-    Err(arg(args, 0))
+    drive_generator(i, &this, crate::coroutine::Resume::Throw(arg(args, 0)))
 }
 pub(crate) fn async_generator_next(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     let r = generator_next(i, this, a);
