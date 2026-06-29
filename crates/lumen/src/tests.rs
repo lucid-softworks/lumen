@@ -1581,3 +1581,14 @@ fn for_await_of() {
     e2.eval("(async()=>{ var s=''; for await (const x of [Promise.resolve('a'),'b']) s+=x; globalThis.R2=s; })()", false).unwrap();
     assert_eq!(match e2.eval("globalThis.R2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "ab");
 }
+#[test]
+fn promise_combinator_reject_noniterable() {
+    for m in ["all","race","allSettled","any"] {
+        let mut e = Engine::new();
+        e.eval(&format!("var r; Promise.{m}(false).then(()=>r='F', e=>r=e.constructor.name)"), false).unwrap();
+        assert_eq!(match e.eval("r",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "TypeError", "Promise.{} should reject", m);
+    }
+    let mut e2 = Engine::new();
+    e2.eval("var r2; Promise.all([1,2,3]).then(a=>r2=a.join(','))", false).unwrap();
+    assert_eq!(match e2.eval("r2",false).unwrap(){Completion::Value(v)=>v,_=>String::new()}, "1,2,3");
+}

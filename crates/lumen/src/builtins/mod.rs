@@ -3170,8 +3170,16 @@ fn install_promise(it: &mut Interp) {
         Ok(p)
     });
     it.def_method(&ctor, "all", 1, |i, _t, a| {
-        let items = ab(i.iterate(&arg(a, 0)))?;
         let result = i.new_promise();
+        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let items = match i.iterate(&arg(a, 0)) {
+            Ok(items) => items,
+            Err(e) => {
+                let reason = crate::interpreter::abrupt_value(e);
+                i.reject_promise(&result, reason);
+                return Ok(result);
+            }
+        };
         let n = items.len();
         let results = i.make_array(vec![Value::Undefined; n]);
         set_internal_obj(&result, "__results", results.clone());
@@ -3189,8 +3197,16 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "race", 1, |i, _t, a| {
-        let items = ab(i.iterate(&arg(a, 0)))?;
         let result = i.new_promise();
+        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let items = match i.iterate(&arg(a, 0)) {
+            Ok(items) => items,
+            Err(e) => {
+                let reason = crate::interpreter::abrupt_value(e);
+                i.reject_promise(&result, reason);
+                return Ok(result);
+            }
+        };
         for item in items {
             let p = promise_resolve_value(i, item);
             let on_f = i.make_resolver(&result, true);
@@ -3200,8 +3216,16 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allSettled", 1, |i, _t, a| {
-        let items = ab(i.iterate(&arg(a, 0)))?;
         let result = i.new_promise();
+        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let items = match i.iterate(&arg(a, 0)) {
+            Ok(items) => items,
+            Err(e) => {
+                let reason = crate::interpreter::abrupt_value(e);
+                i.reject_promise(&result, reason);
+                return Ok(result);
+            }
+        };
         let n = items.len();
         let results = i.make_array(vec![Value::Undefined; n]);
         set_internal_obj(&result, "__results", results.clone());
@@ -3219,8 +3243,16 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "any", 1, |i, _t, a| {
-        let items = ab(i.iterate(&arg(a, 0)))?;
         let result = i.new_promise();
+        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let items = match i.iterate(&arg(a, 0)) {
+            Ok(items) => items,
+            Err(e) => {
+                let reason = crate::interpreter::abrupt_value(e);
+                i.reject_promise(&result, reason);
+                return Ok(result);
+            }
+        };
         let n = items.len();
         let errors = i.make_array(vec![Value::Undefined; n]);
         set_internal_obj(&result, "__errors", errors.clone());
