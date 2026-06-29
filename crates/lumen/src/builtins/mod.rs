@@ -4887,6 +4887,7 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
     Ok(true)
 }
 
+pub(crate) fn same_value_pub(a: &Value, b: &Value) -> bool { same_value(a, b) }
 fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Num(x), Value::Num(y)) => {

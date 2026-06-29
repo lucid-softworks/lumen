@@ -1998,3 +1998,17 @@ fn regex_inline_modifiers() {
     assert!(Engine::new().eval(r"/(?-:a)/", false).is_err());
     assert!(Engine::new().eval(r"/(?ii:a)/", false).is_err());
 }
+#[test]
+fn proxy_get_invariant() {
+    assert!(matches!(Engine::new().eval("var t={};Object.defineProperty(t,'x',{value:1,writable:false,configurable:false});var p=new Proxy(t,{get(){return 2}});p.x", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert!(matches!(Engine::new().eval("var t={};Object.defineProperty(t,'x',{get:undefined,configurable:false});var p=new Proxy(t,{get(){return 2}});p.x", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    // returning the same value is fine
+    assert_eq!(run("var t={};Object.defineProperty(t,'x',{value:1,writable:false,configurable:false});var p=new Proxy(t,{get(){return 1}});p.x"), "1");
+    // configurable property: trap can return anything
+    assert_eq!(run("var t={x:1};var p=new Proxy(t,{get(){return 9}});p.x"), "9");
+}
+#[test]
+fn proxy_set_invariant() {
+    assert!(matches!(Engine::new().eval("var t={};Object.defineProperty(t,'x',{value:1,writable:false,configurable:false});var p=new Proxy(t,{set(){return true}});p.x=2", false), Ok(Completion::Throw{ref name,..}) if name=="TypeError"));
+    assert_eq!(run("var t={x:1};var p=new Proxy(t,{set(o,k,v){o[k]=v;return true}});p.x=5; t.x"), "5");
+}

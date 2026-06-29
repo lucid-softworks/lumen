@@ -610,7 +610,9 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "get")?;
                         if trap.is_callable() {
-                            return self.call(trap, handler, &[target, Value::str(key), base.clone()]);
+                            let res = self.call(trap, handler, &[target.clone(), Value::str(key), base.clone()])?;
+                            self.proxy_get_invariant(&target, key, &res)?;
+                            return Ok(res);
                         }
                         return self.get_member(&target, key);
                     }
@@ -685,7 +687,11 @@ impl Interp {
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                 let trap = self.get_member(&handler, "set")?;
                 if trap.is_callable() {
-                    self.call(trap, handler, &[target, Value::str(key), value, base.clone()])?;
+                    let ok = self.call(trap, handler, &[target.clone(), Value::str(key), value.clone(), base.clone()])?;
+                    // A successful `set` can't contradict a non-configurable property on the target.
+                    if self.to_boolean(&ok) {
+                        self.proxy_set_invariant(&target, key, &value)?;
+                    }
                     return Ok(());
                 }
                 return self.set_member(&target, key, value);
@@ -1295,6 +1301,57 @@ impl Interp {
         self.drain_microtasks();
         self.strict = saved;
         r
+    }
+
+    /// Proxy `[[Get]]` invariant: a non-configurable non-writable data property on the target must be
+    /// reported with its actual value; a non-configurable accessor with no getter must report
+    /// undefined. (`Abrupt` carries the thrown TypeError.)
+    fn proxy_get_invariant(&mut self, target: &Value, key: &str, result: &Value) -> Result<(), Abrupt> {
+        let prop = match target {
+            Value::Obj(t) => t.borrow().props.get(key).cloned(),
+            _ => None,
+        };
+        if let Some(p) = prop {
+            if !p.configurable {
+                let bad = if p.accessor {
+                    matches!(&p.get, None | Some(Value::Undefined)) && !matches!(result, Value::Undefined)
+                } else {
+                    !p.writable && !crate::builtins::same_value_pub(result, &p.value)
+                };
+                if bad {
+                    return Err(self.throw(
+                        "TypeError",
+                        "proxy 'get' trap violated an invariant for a non-configurable property",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Proxy `[[Set]]` invariant: a `true` result can't contradict a non-configurable non-writable
+    /// data property (value must match) or a non-configurable accessor with no setter.
+    fn proxy_set_invariant(&mut self, target: &Value, key: &str, value: &Value) -> Result<(), Abrupt> {
+        let prop = match target {
+            Value::Obj(t) => t.borrow().props.get(key).cloned(),
+            _ => None,
+        };
+        if let Some(p) = prop {
+            if !p.configurable {
+                let bad = if p.accessor {
+                    matches!(&p.set, None | Some(Value::Undefined))
+                } else {
+                    !p.writable && !crate::builtins::same_value_pub(value, &p.value)
+                };
+                if bad {
+                    return Err(self.throw(
+                        "TypeError",
+                        "proxy 'set' trap violated an invariant for a non-configurable property",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
