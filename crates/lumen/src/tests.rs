@@ -1950,3 +1950,19 @@ fn shadow_realm_wrapped_fn() {
     // returned function from a wrapped call is itself wrapped
     assert_eq!(run("var r=new ShadowRealm(); var f=r.evaluate('a=>b=>a+b'); typeof f(1)"), "function");
 }
+#[test]
+fn create_realm() {
+    assert_eq!(run("typeof $262.createRealm"), "function");
+    assert_eq!(run("var r=$262.createRealm(); r.evalScript('1+2')"), "3");
+    assert_eq!(run("var r=$262.createRealm(); typeof r.global"), "object");
+    // cross-realm constructor identity
+    assert_eq!(run("var r=$262.createRealm(); r.global.Array !== Array"), "true");
+    assert_eq!(run("var r=$262.createRealm(); typeof r.global.Object"), "function");
+    // isolation: realm has its own globals
+    assert_eq!(run("globalThis.zz=1; var r=$262.createRealm(); r.evalScript('typeof zz')"), "undefined");
+    // an array created in the realm still works cross-realm
+    assert_eq!(run("var r=$262.createRealm(); var a=r.evalScript('[1,2,3]'); a.length"), "3");
+    assert_eq!(run("var r=$262.createRealm(); var a=r.evalScript('[1,2]'); a.push(3); a.join(',')"), "1,2,3");
+    // nested realms
+    assert_eq!(run("var r=$262.createRealm(); var r2=r.createRealm(); r2.evalScript('40+2')"), "42");
+}

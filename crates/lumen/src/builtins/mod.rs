@@ -509,7 +509,44 @@ fn install_host(it: &mut Interp) {
         }
         Ok(Value::Undefined)
     });
+    it.def_method(&host, "createRealm", 0, realm_create);
     set_builtin(&it.global, "$262", Value::Obj(host));
+}
+
+/// `$262.createRealm()`: a fresh realm (its own sub-interpreter) exposed as a `{ global, evalScript,
+/// createRealm }` object. Unlike ShadowRealm, `evalScript` returns the raw completion (objects cross
+/// too — they share the heap), so cross-realm identity (`realm.global.Array !== Array`) works.
+fn realm_create(i: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    let sub = Box::new(Interp::new());
+    let realm_global = Value::Obj(sub.global.clone());
+    let r = Object::new(Some(i.object_proto.clone()));
+    i.shadow_realms.insert(Rc::as_ptr(&r) as usize, sub);
+    set_builtin(&r, "global", realm_global);
+    i.def_method(&r, "evalScript", 1, realm_eval_script);
+    i.def_method(&r, "createRealm", 0, realm_create);
+    i.def_method(&r, "detachArrayBuffer", 1, |i, _t, a| {
+        if let Value::Obj(o) = arg(a, 0) {
+            i.array_buffers.remove(&(Rc::as_ptr(&o) as usize));
+        }
+        Ok(Value::Undefined)
+    });
+    Ok(Value::Obj(r))
+}
+
+fn realm_eval_script(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let ptr = map_ptr(&this)
+        .filter(|p| i.shadow_realms.contains_key(p))
+        .ok_or_else(|| i.make_error("TypeError", "evalScript called on a non-realm object"))?;
+    let code = match arg(args, 0) {
+        Value::Str(s) => s.to_string(),
+        other => return Ok(other),
+    };
+    let body = crate::parser::parse_script(&code, false)
+        .map_err(|e| i.make_error("SyntaxError", e.message))?;
+    let mut sub = i.shadow_realms.remove(&ptr).unwrap();
+    let result = sub.run_body(&body, false);
+    i.shadow_realms.insert(ptr, sub);
+    result
 }
 
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
