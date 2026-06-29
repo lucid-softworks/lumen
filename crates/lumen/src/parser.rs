@@ -867,6 +867,12 @@ impl Parser {
             let param = if self.eat_punct("(") {
                 let p = self.parse_binding_pattern()?;
                 self.expect_punct(")")?;
+                // A destructuring catch parameter must bind each name only once.
+                let mut names = Vec::new();
+                pattern_names(&p, &mut names);
+                if let Some(dup) = duplicate_name(&names) {
+                    return self.err(format!("duplicate binding '{dup}' in catch parameter"));
+                }
                 Some(p)
             } else {
                 None

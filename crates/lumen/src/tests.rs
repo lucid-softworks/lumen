@@ -1631,3 +1631,10 @@ fn new_target_context() {
     assert_eq!(run("function f(){ return typeof new.target } f()"), "undefined");
     assert_eq!(run("var o={m(){return typeof new.target}}; o.m()"), "undefined");
 }
+#[test]
+fn catch_dup_binding() {
+    assert!(Engine::new().eval("try{}catch([e,e]){}", false).is_err());
+    assert!(Engine::new().eval("try{}catch({a:x,b:x}){}", false).is_err());
+    assert_eq!(run("try{throw [1,2]}catch([a,b]){} 'ok'"), "ok");
+    assert_eq!(run("try{throw 5}catch(e){} 'ok'"), "ok");
+}
