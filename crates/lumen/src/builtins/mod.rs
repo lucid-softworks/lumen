@@ -1553,6 +1553,28 @@ fn install_typed_arrays(it: &mut Interp) {
     it.def_method(&ta_proto, "toLocaleString", 0, |i, this, a| {
         ta_delegate(i, &this, "join", a)
     });
+    // length / byteLength / byteOffset / buffer are accessor getters on %TypedArray.prototype% that
+    // brand-check the receiver (calling one on a non-TypedArray is a TypeError).
+    for (name, getter) in [
+        ("length", ta_length_get as fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>),
+        ("byteLength", ta_bytelength_get),
+        ("byteOffset", ta_byteoffset_get),
+        ("buffer", ta_buffer_get),
+    ] {
+        let g = it.make_native(name, 0, getter);
+        ta_proto.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
 
     // The abstract %TypedArray% intrinsic: each concrete TypedArray constructor inherits from it,
     // and its `.prototype` is the shared `ta_proto`. Tests reach it via Object.getPrototypeOf(Int8Array).
@@ -3812,6 +3834,35 @@ fn install_function_proto(it: &mut Interp) {
 /// TypedArray info for `o`, if it is one.
 fn ta_info(i: &Interp, o: &Gc) -> Option<crate::value::TaInfo> {
     i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied()
+}
+
+/// `(info, detached)` for a TypedArray receiver, or a TypeError (brand check for the meta getters).
+fn ta_receiver(i: &mut Interp, this: &Value) -> Result<(crate::value::TaInfo, bool), Value> {
+    let ptr = map_ptr(this).filter(|p| i.typed_arrays.contains_key(p));
+    match ptr {
+        Some(p) => {
+            let info = i.typed_arrays[&p];
+            Ok((info, !i.array_buffers.contains_key(&info.buffer)))
+        }
+        None => Err(i.make_error("TypeError", "TypedArray.prototype accessor called on a non-TypedArray")),
+    }
+}
+fn ta_length_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let (info, detached) = ta_receiver(i, &this)?;
+    Ok(Value::Num(if detached { 0.0 } else { info.len as f64 }))
+}
+fn ta_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let (info, detached) = ta_receiver(i, &this)?;
+    Ok(Value::Num(if detached { 0.0 } else { (info.len * info.kind.elsize()) as f64 }))
+}
+fn ta_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let (info, detached) = ta_receiver(i, &this)?;
+    Ok(Value::Num(if detached { 0.0 } else { info.offset as f64 }))
+}
+fn ta_buffer_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let _ = ta_receiver(i, &this)?;
+    let ptr = map_ptr(&this).unwrap();
+    Ok(i.ta_buffer.get(&ptr).cloned().unwrap_or(Value::Undefined))
 }
 const TA_META_KEYS: [&str; 5] = ["length", "byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"];
 

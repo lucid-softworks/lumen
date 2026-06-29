@@ -1890,3 +1890,13 @@ fn ta_meta_not_own() {
     assert_eq!(run("var b=new ArrayBuffer(8); new Int8Array(b).buffer===b"), "true");
     assert_eq!(run("var a=new Int8Array(new ArrayBuffer(8),2,3); a.byteOffset"), "2");
 }
+#[test]
+fn ta_prototype_accessors() {
+    // the accessors exist on %TypedArray.prototype% and brand-check
+    assert_eq!(run("var p=Object.getPrototypeOf(Int8Array.prototype); typeof Object.getOwnPropertyDescriptor(p,'byteLength').get"), "function");
+    assert_eq!(run("var g=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype),'length').get; try{g.call({});'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("var g=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),'byteOffset').get; g.call(new Uint8Array(new ArrayBuffer(8),2,3))"), "2");
+    // normal instance reads still work
+    assert_eq!(run("new Float64Array(3).byteLength"), "24");
+    assert_eq!(run("var b=new ArrayBuffer(4); new Int8Array(b).buffer===b"), "true");
+}
