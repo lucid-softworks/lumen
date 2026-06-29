@@ -2594,6 +2594,21 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         return Ok(Value::Bool(self.proxy_delete(target, handler, &key)?));
                     }
+                    // A TypedArray integer index can't be deleted ([[Delete]] → false; strict throws);
+                    // a canonical-numeric non-index reports success.
+                    if let Some(info) = self.typed_arrays.get(&ptr).copied() {
+                        match self.ta_index_kind(&info, &key) {
+                            TaIndex::Element(_) => {
+                                if self.strict {
+                                    return Err(self
+                                        .throw("TypeError", "cannot delete a TypedArray index"));
+                                }
+                                return Ok(Value::Bool(false));
+                            }
+                            TaIndex::Exotic => return Ok(Value::Bool(true)),
+                            TaIndex::Ordinary => {}
+                        }
+                    }
                     let configurable = o
                         .borrow()
                         .props

@@ -3600,6 +3600,14 @@ fn install_reflect(it: &mut Interp) {
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                 return Ok(Value::Bool(ab(i.proxy_delete(target, handler, &key))?));
             }
+            // A TypedArray integer index can't be deleted; a canonical-numeric non-index reports true.
+            if let Some(info) = ta_info(i, &o) {
+                match i.ta_index_kind(&info, &key) {
+                    crate::value::TaIndex::Element(_) => return Ok(Value::Bool(false)),
+                    crate::value::TaIndex::Exotic => return Ok(Value::Bool(true)),
+                    crate::value::TaIndex::Ordinary => {}
+                }
+            }
             let configurable = o
                 .borrow()
                 .props
