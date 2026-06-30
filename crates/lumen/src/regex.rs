@@ -263,6 +263,8 @@ impl Regex {
                 return Err(format!("invalid named back reference <{name}>"));
             }
         }
+        // Duplicate group names are allowed only across distinct alternation branches.
+        validate_group_names(&ast, &p.names)?;
         resolve_named_backrefs(&mut ast, &p.names);
         // Wrap the whole match in group-0 saves.
         let mut prog = vec![Inst::Save(0)];
@@ -506,9 +508,8 @@ impl Parser {
                             let name = self.parse_group_name()?;
                             self.ngroups += 1;
                             let idx = self.ngroups;
-                            if self.names.iter().any(|(n, _)| *n == name) {
-                                return Err(format!("duplicate group name {name}"));
-                            }
+                            // Duplicate names are allowed (ES2025) — they're distinct capture groups
+                            // in different alternatives; the `groups` object reports whichever matched.
                             self.names.push((name, idx));
                             let inner = self.parse_alt()?;
                             self.expect(')')?;
@@ -976,6 +977,54 @@ fn compile_repeat(
 
 /// Replace each `\k<name>` (`Node::NamedBackref`) with the numeric `Backref` of its group. Names are
 /// validated before this runs, so an unknown name resolves to group 0 (never matches), harmlessly.
+/// Reject same-name capture groups that could both match (i.e. live in the same concatenation);
+/// duplicates spread across different alternation branches are allowed (ES2025).
+fn validate_group_names(node: &Node, names: &[(String, usize)]) -> Result<(), String> {
+    collect_group_names(node, names)?;
+    Ok(())
+}
+
+fn collect_group_names(
+    node: &Node,
+    names: &[(String, usize)],
+) -> Result<std::collections::HashSet<String>, String> {
+    use std::collections::HashSet;
+    match node {
+        Node::Group(idx, inner) => {
+            let mut s = collect_group_names(inner, names)?;
+            if let Some(idx) = idx {
+                if let Some((name, _)) = names.iter().find(|(_, i)| i == idx) {
+                    if !s.insert(name.clone()) {
+                        return Err(format!("duplicate group name {name}"));
+                    }
+                }
+            }
+            Ok(s)
+        }
+        Node::Look(_, inner) | Node::Repeat(inner, _, _, _) => collect_group_names(inner, names),
+        Node::Modifier { inner, .. } => collect_group_names(inner, names),
+        Node::Concat(children) => {
+            let mut all = HashSet::new();
+            for c in children {
+                for n in collect_group_names(c, names)? {
+                    if !all.insert(n.clone()) {
+                        return Err(format!("duplicate group name {n}"));
+                    }
+                }
+            }
+            Ok(all)
+        }
+        Node::Alt(branches) => {
+            let mut union = HashSet::new();
+            for b in branches {
+                union.extend(collect_group_names(b, names)?);
+            }
+            Ok(union)
+        }
+        _ => Ok(std::collections::HashSet::new()),
+    }
+}
+
 fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
     match node {
         Node::NamedBackref(name) => {

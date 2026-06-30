@@ -1144,11 +1144,21 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
             } else {
                 let g = i.new_object();
                 g.borrow_mut().proto = None;
-                for (name, idx) in &re.names {
-                    let v = match caps.get(*idx).copied().flatten() {
-                        Some((a, b)) => Value::from_string(chars[a..b].iter().collect::<String>()),
-                        None => Value::Undefined,
-                    };
+                // One property per name, in first-occurrence order; for duplicate names the value
+                // comes from whichever same-named group actually matched (else undefined).
+                let mut seen: Vec<&str> = Vec::new();
+                for (name, _) in &re.names {
+                    if seen.contains(&name.as_str()) {
+                        continue;
+                    }
+                    seen.push(name.as_str());
+                    let v = re
+                        .names
+                        .iter()
+                        .filter(|(n, _)| n == name)
+                        .find_map(|(_, idx)| caps.get(*idx).copied().flatten())
+                        .map(|(a, b)| Value::from_string(chars[a..b].iter().collect::<String>()))
+                        .unwrap_or(Value::Undefined);
                     set_data(&g, name, v);
                 }
                 Value::Obj(g)
