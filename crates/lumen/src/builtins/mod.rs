@@ -12244,15 +12244,18 @@ fn install_errors(it: &mut Interp) {
     });
     // Error.prototype.stack accessor (error-stack-accessor proposal). lumen captures no stack trace,
     // so the getter yields "" for an Error receiver (undefined otherwise); the setter shadows it.
-    let get_stack = it.make_native("get stack", 0, |_i, this, _| {
-        Ok(match &this {
-            Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error) => Value::str(""),
-            _ => Value::Undefined,
-        })
+    // get stack: non-object → TypeError; an object without [[ErrorData]] → undefined; an Error
+    // instance → an implementation-defined stack string (lumen captures no trace, so "").
+    let get_stack = it.make_native("get stack", 0, |i, this, _| match &this {
+        Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error) => Ok(Value::str("")),
+        Value::Obj(_) => Ok(Value::Undefined),
+        _ => Err(i.make_error(
+            "TypeError",
+            "Error.prototype.stack getter called on a non-object",
+        )),
     });
+    // set stack: SetterThatIgnoresPrototypeProperties(this, %Error.prototype%, "stack", v).
     let set_stack = it.make_native("set stack", 1, |i, this, a| {
-        // The setter requires an object receiver and installs an own data `stack` property via
-        // CreateDataPropertyOrThrow (so a non-configurable existing property makes it throw).
         let o = match &this {
             Value::Obj(o) => o.clone(),
             _ => {
@@ -12262,13 +12265,35 @@ fn install_errors(it: &mut Interp) {
                 ))
             }
         };
-        let desc = i.new_object();
-        set_data(&desc, "value", arg(a, 0));
-        set_data(&desc, "writable", Value::Bool(true));
-        set_data(&desc, "enumerable", Value::Bool(true));
-        set_data(&desc, "configurable", Value::Bool(true));
-        if !ab(define_own_property(i, &o, "stack", &Value::Obj(desc)))? {
-            return Err(i.make_error("TypeError", "cannot redefine stack"));
+        // Setting on %Error.prototype% itself is ignored.
+        if Rc::ptr_eq(&o, &i.error_protos["Error"]) {
+            return Ok(Value::Undefined);
+        }
+        let v = arg(a, 0);
+        // [[GetOwnProperty]]("stack") (proxy-aware): does the receiver already have its own stack?
+        let has_own = if let Some((t, h)) = proxy_pair(i, &this) {
+            !matches!(proxy_gopd_value(i, &t, &h, "stack")?, Value::Undefined)
+        } else {
+            o.borrow().props.contains("stack")
+        };
+        if has_own {
+            // Set(this, "stack", v) with Throw=true.
+            assign_set(i, &this, "stack", v)?;
+        } else {
+            // CreateDataPropertyOrThrow(this, "stack", v).
+            let desc = i.new_object();
+            set_data(&desc, "value", v);
+            set_data(&desc, "writable", Value::Bool(true));
+            set_data(&desc, "enumerable", Value::Bool(true));
+            set_data(&desc, "configurable", Value::Bool(true));
+            let ok = if let Some((t, h)) = proxy_pair(i, &this) {
+                ab(proxy_define_property(i, &t, &h, "stack", &Value::Obj(desc)))?
+            } else {
+                ab(define_own_property(i, &o, "stack", &Value::Obj(desc)))?
+            };
+            if !ok {
+                return Err(i.make_error("TypeError", "cannot define stack"));
+            }
         }
         Ok(Value::Undefined)
     });
