@@ -8103,20 +8103,25 @@ fn install_array(it: &mut Interp) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        let snapshot: Vec<Value> = {
-            let mut s = Vec::new();
-            let mut k = start;
-            while k < end {
-                s.push(ab(i.get_member(&this, &k.to_string()))?);
-                k += 1;
+        // count = min(end - start, len - target); a source hole deletes the target index.
+        let count = (end - start).min(len - target).max(0);
+        let mut snapshot: Vec<Option<Value>> = Vec::with_capacity(count as usize);
+        for off in 0..count {
+            let k = (start + off).to_string();
+            if i.has_property(&o, &k) {
+                snapshot.push(Some(ab(i.get_member(&this, &k))?));
+            } else {
+                snapshot.push(None);
             }
-            s
-        };
-        for (off, v) in snapshot.into_iter().enumerate() {
-            if target + off as i64 >= len {
-                break;
+        }
+        for (off, slot) in snapshot.into_iter().enumerate() {
+            let ti = (target + off as i64).to_string();
+            match slot {
+                Some(v) => ab(i.set_member(&this, &ti, v))?,
+                None => {
+                    o.borrow_mut().props.remove(ti.as_str());
+                }
             }
-            ab(i.set_member(&this, &(target + off as i64).to_string(), v))?;
         }
         Ok(this)
     });

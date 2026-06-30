@@ -4612,3 +4612,13 @@ fn array_of_constructor() {
         "true,a,2"
     );
 }
+
+#[test]
+fn array_copy_within_holes() {
+    assert_eq!(run("[1,2,3,4,5].copyWithin(0,3).join(',')"), "4,5,3,4,5");
+    // Copying from a hole deletes the destination index.
+    assert_eq!(
+        run("var a=[1,2,3]; delete a[1]; a.copyWithin(0,1); [a.hasOwnProperty(0), a[1]].join(',')"),
+        "false,3"
+    );
+}
