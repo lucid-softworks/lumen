@@ -1794,18 +1794,45 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
         Some(Value::Obj(o)) if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)) => {
             let bp = Rc::as_ptr(o) as usize;
             let bv = Value::Obj(o.clone());
+            // byteOffset is a ToIndex value and must be a multiple of the element size.
             let offset = match args.get(1) {
-                Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))? as usize,
+                Some(v) if !matches!(v, Value::Undefined) => to_index(i, v)?,
                 _ => 0,
             };
-            let buflen = i.array_buffers[&bp].len();
-            // No explicit length on a resizable buffer ⇒ a length-tracking view.
+            if offset % es != 0 {
+                return Err(i.make_error("RangeError", "byteOffset is not aligned to the element size"));
+            }
             let explicit = matches!(args.get(2), Some(v) if !matches!(v, Value::Undefined));
+            let len_arg = match args.get(2) {
+                Some(v) if !matches!(v, Value::Undefined) => Some(to_index(i, v)?),
+                _ => None,
+            };
+            // Coercing byteOffset/length above may have detached the buffer.
+            if !i.array_buffers.contains_key(&bp) {
+                return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+            }
+            let buflen = i.array_buffers[&bp].len();
             let rv = ab(i.get_member(&bv, "resizable"))?;
             let resizable = i.to_boolean(&rv);
-            let len = match args.get(2) {
-                Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))? as usize,
-                _ => buflen.saturating_sub(offset) / es,
+            let len = match len_arg {
+                Some(l) => {
+                    if offset + l * es > buflen {
+                        return Err(i.make_error("RangeError", "invalid typed array length"));
+                    }
+                    l
+                }
+                None => {
+                    if buflen % es != 0 {
+                        return Err(i.make_error(
+                            "RangeError",
+                            "buffer length is not a multiple of the element size",
+                        ));
+                    }
+                    if offset > buflen {
+                        return Err(i.make_error("RangeError", "byteOffset is out of bounds"));
+                    }
+                    buflen.saturating_sub(offset) / es
+                }
             };
             (bv, bp, offset, len, !explicit && resizable)
         }
