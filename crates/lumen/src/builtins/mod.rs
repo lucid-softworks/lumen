@@ -2395,24 +2395,46 @@ fn date_get(i: &mut Interp, this: &Value, sel: u8) -> Result<Value, Value> {
     Ok(Value::Num(v as f64))
 }
 
-fn date_set(i: &mut Interp, this: &Value, sel: u8, nv: f64) -> Result<Value, Value> {
-    let t = date_ms(i, this)?;
-    let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = if t.is_nan() {
-        (1970, 0, 1, 0, 0, 0, 0, 0)
-    } else {
-        ms_to_parts(t)
-    };
-    let n = nv as i64;
-    match sel {
-        0 => y = n,
-        1 => mo = n,
-        2 => d = n,
-        4 => h = n,
-        5 => mi = n,
-        6 => s = n,
-        _ => ml = n,
+/// A multi-argument Date setter (setHours, setFullYear, …). Per spec, ALL provided arguments are
+/// ToNumber-coerced first, in order, before any field is applied; `start_sel` is the field of the
+/// first argument (the field order skips the unused selector 3). `setFullYear`/`setUTCFullYear`
+/// (start 0) treat a NaN receiver as the epoch; the time setters leave it NaN.
+fn date_set_multi(
+    i: &mut Interp,
+    this: &Value,
+    start_sel: u8,
+    args: &[Value],
+    n_max: usize,
+) -> Result<Value, Value> {
+    const ORDER: [u8; 7] = [0, 1, 2, 4, 5, 6, 7];
+    let start_idx = ORDER.iter().position(|&f| f == start_sel).unwrap();
+    let count = args.len().clamp(1, n_max);
+    // Coerce every read argument up front, in order.
+    let mut vals = Vec::with_capacity(count);
+    for k in 0..count {
+        vals.push(ab(i.to_number(&arg(args, k)))?);
     }
-    let ms = if nv.is_nan() {
+    let t = date_ms(i, this)?;
+    let nan_to_zero = start_sel == 0;
+    let mut any_nan = t.is_nan() && !nan_to_zero;
+    let base = if t.is_nan() { 0.0 } else { t };
+    let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = ms_to_parts(base);
+    for (k, &v) in vals.iter().enumerate() {
+        if v.is_nan() {
+            any_nan = true;
+        }
+        let n = v as i64;
+        match ORDER[start_idx + k] {
+            0 => y = n,
+            1 => mo = n,
+            2 => d = n,
+            4 => h = n,
+            5 => mi = n,
+            6 => s = n,
+            _ => ml = n,
+        }
+    }
+    let ms = if any_nan {
         f64::NAN
     } else {
         parts_to_ms(y, mo, d, h, mi, s, ml)
@@ -2640,8 +2662,7 @@ fn install_date(it: &mut Interp) {
         }
     }
     it.def_method(&proto, "setFullYear", 3, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 0, v)
+        date_set_multi(i, &this, 0, a, 3)
     });
     // Annex B legacy getYear/setYear (years offset from 1900).
     it.def_method(&proto, "getYear", 0, |i, this, _| {
@@ -2662,60 +2683,47 @@ fn install_date(it: &mut Interp) {
                 y
             }
         };
-        date_set(i, &this, 0, full)
+        date_set_multi(i, &this, 0, &[Value::Num(full)], 1)
     });
     it.def_method(&proto, "setMonth", 2, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 1, v)
+        date_set_multi(i, &this, 1, a, 2)
     });
     it.def_method(&proto, "setDate", 1, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 2, v)
+        date_set_multi(i, &this, 2, a, 1)
     });
     it.def_method(&proto, "setHours", 4, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 4, v)
+        date_set_multi(i, &this, 4, a, 4)
     });
     it.def_method(&proto, "setMinutes", 3, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 5, v)
+        date_set_multi(i, &this, 5, a, 3)
     });
     it.def_method(&proto, "setSeconds", 2, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 6, v)
+        date_set_multi(i, &this, 6, a, 2)
     });
     it.def_method(&proto, "setMilliseconds", 1, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 7, v)
+        date_set_multi(i, &this, 7, a, 1)
     });
     // UTC setters mirror the local ones (offset 0).
     it.def_method(&proto, "setUTCFullYear", 3, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 0, v)
+        date_set_multi(i, &this, 0, a, 3)
     });
     it.def_method(&proto, "setUTCMonth", 2, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 1, v)
+        date_set_multi(i, &this, 1, a, 2)
     });
     it.def_method(&proto, "setUTCDate", 1, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 2, v)
+        date_set_multi(i, &this, 2, a, 1)
     });
     it.def_method(&proto, "setUTCHours", 4, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 4, v)
+        date_set_multi(i, &this, 4, a, 4)
     });
     it.def_method(&proto, "setUTCMinutes", 3, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 5, v)
+        date_set_multi(i, &this, 5, a, 3)
     });
     it.def_method(&proto, "setUTCSeconds", 2, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 6, v)
+        date_set_multi(i, &this, 6, a, 2)
     });
     it.def_method(&proto, "setUTCMilliseconds", 1, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?;
-        date_set(i, &this, 7, v)
+        date_set_multi(i, &this, 7, a, 1)
     });
     it.def_method(&proto, "toISOString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
