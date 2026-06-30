@@ -3487,14 +3487,30 @@ fn collection_ctor(
     if let Some(src) = args.first() {
         if !matches!(src, Value::Undefined | Value::Null) {
             let add_fn = ab(i.get_member(&mv, if is_set { "add" } else { "set" }))?;
-            let items = ab(i.iterate(src))?;
-            for item in items {
-                if is_set {
-                    ab(i.call(add_fn.clone(), mv.clone(), &[item]))?;
+            if !add_fn.is_callable() {
+                return Err(i.make_error("TypeError", "adder is not callable"));
+            }
+            // Step the source lazily: an error while processing an entry closes the iterator.
+            let (iter, next) = ab(i.get_iterator(src))?;
+            loop {
+                let item = match step_iter_with(i, &iter, &next)? {
+                    Some(v) => v,
+                    None => break,
+                };
+                let step = if is_set {
+                    i.call(add_fn.clone(), mv.clone(), &[item])
+                } else if !matches!(item, Value::Obj(_)) {
+                    Err(crate::interpreter::Abrupt::Throw(
+                        i.make_error("TypeError", "iterator value is not an entry object"),
+                    ))
                 } else {
-                    let k = ab(i.get_member(&item, "0"))?;
-                    let v = ab(i.get_member(&item, "1"))?;
-                    ab(i.call(add_fn.clone(), mv.clone(), &[k, v]))?;
+                    i.get_member(&item, "0")
+                        .and_then(|k| i.get_member(&item, "1").map(|v| (k, v)))
+                        .and_then(|(k, v)| i.call(add_fn.clone(), mv.clone(), &[k, v]))
+                };
+                if let Err(e) = step {
+                    i.iterator_close(&iter);
+                    return Err(crate::interpreter::abrupt_value(e));
                 }
             }
         }
