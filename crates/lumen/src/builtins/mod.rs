@@ -8597,7 +8597,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
             let n = ab(i.to_number(&nv))?;
             if count >= n {
                 set_internal(this.as_obj().unwrap(), "__ih_done", Value::Bool(true));
-                i.iterator_close(&src);
+                ab(i.iterator_close_normal(&src))?;
                 return Ok(iter_result(i, Value::Undefined, true));
             }
             set_internal(

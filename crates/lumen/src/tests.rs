@@ -4085,3 +4085,19 @@ fn iterator_helper_return_propagates() {
         "TypeError"
     );
 }
+
+#[test]
+fn iterator_take_exhaustion_closes() {
+    // take(0) closes the source immediately, propagating its return() error.
+    assert_eq!(
+        run(r#"
+            var src={ next(){return{done:false,value:1};}, return(){ throw new RangeError('r'); } };
+            var caught='no';
+            try { Iterator.from(src).take(0).next(); } catch(e){ caught=e.constructor.name; }
+            caught
+        "#),
+        "RangeError"
+    );
+    // A normal take stops at the limit.
+    assert_eq!(run("[1,2,3].values().take(2).toArray().length"), "2");
+}
