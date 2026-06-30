@@ -2136,6 +2136,20 @@ impl Parser {
         self.in_generator = sg;
         self.in_async = sa;
         let strict = is_strict || self.strict;
+        // A function whose own body is strict ("use strict") also subjects its name and parameters
+        // to the strict reserved-word rules (eval/arguments/yield/…), even in non-strict surroundings.
+        if strict {
+            if let Some(n) = &name {
+                if is_strict_reserved_binding(n) {
+                    return self.err(format!("'{n}' can't be a function name in strict mode"));
+                }
+            }
+            for pn in param_names(&params) {
+                if is_strict_reserved_binding(&pn) {
+                    return self.err(format!("'{pn}' can't be a parameter name in strict mode"));
+                }
+            }
+        }
         // Duplicate parameters are an error in strict mode, or whenever the list is non-simple
         // (defaults / rest / destructuring).
         if strict || params_complex(&params) {
