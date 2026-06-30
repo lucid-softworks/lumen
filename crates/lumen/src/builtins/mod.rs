@@ -10437,7 +10437,9 @@ fn install_number(it: &mut Interp) {
     });
     it.def_method(&np, "toFixed", 1, |i, this, args| {
         let n = this_number(i, &this)?;
-        let d = ab(i.to_number(&arg(args, 0)))?;
+        // ToIntegerOrInfinity(fractionDigits): undefined/NaN → 0, otherwise truncate toward zero.
+        let raw = ab(i.to_number(&arg(args, 0)))?;
+        let d = if raw.is_nan() { 0.0 } else { raw.trunc() };
         // Spec: fractionDigits in 0..=100, else RangeError (also guards a giant `format!`).
         if !(0.0..=100.0).contains(&d) {
             return Err(i.make_error(
@@ -10478,14 +10480,21 @@ fn install_number(it: &mut Interp) {
     np.borrow_mut()
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-    set_builtin(&ctor, "MAX_SAFE_INTEGER", Value::Num(9007199254740991.0));
-    set_builtin(&ctor, "MIN_SAFE_INTEGER", Value::Num(-9007199254740991.0));
-    set_builtin(&ctor, "MAX_VALUE", Value::Num(f64::MAX));
-    set_builtin(&ctor, "MIN_VALUE", Value::Num(f64::MIN_POSITIVE));
-    set_builtin(&ctor, "POSITIVE_INFINITY", Value::Num(f64::INFINITY));
-    set_builtin(&ctor, "NEGATIVE_INFINITY", Value::Num(f64::NEG_INFINITY));
-    set_builtin(&ctor, "NaN", Value::Num(f64::NAN));
-    set_builtin(&ctor, "EPSILON", Value::Num(f64::EPSILON));
+    // The numeric constants are { writable:false, enumerable:false, configurable:false }.
+    for (name, val) in [
+        ("MAX_SAFE_INTEGER", 9007199254740991.0),
+        ("MIN_SAFE_INTEGER", -9007199254740991.0),
+        ("MAX_VALUE", f64::MAX),
+        ("MIN_VALUE", f64::MIN_POSITIVE),
+        ("POSITIVE_INFINITY", f64::INFINITY),
+        ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+        ("NaN", f64::NAN),
+        ("EPSILON", f64::EPSILON),
+    ] {
+        ctor.borrow_mut()
+            .props
+            .insert(name, Property::data(Value::Num(val), false, false, false));
+    }
     it.def_method(&ctor, "isNaN", 1, |_i, _this, args| {
         Ok(Value::Bool(
             matches!(arg(args, 0), Value::Num(n) if n.is_nan()),

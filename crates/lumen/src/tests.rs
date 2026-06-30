@@ -4460,3 +4460,18 @@ fn set_operations_spec() {
         "RangeError"
     );
 }
+
+#[test]
+fn number_constants_and_tofixed() {
+    // The numeric constants are non-writable/enumerable/configurable.
+    assert_eq!(
+        run("var d=Object.getOwnPropertyDescriptor(Number,'MAX_VALUE'); [d.writable,d.enumerable,d.configurable].join(',')"),
+        "false,false,false"
+    );
+    assert_eq!(run("Number.MAX_VALUE = 1; Number.MAX_VALUE === 1"), "false");
+    // toFixed() defaults its argument to 0 (ToIntegerOrInfinity of undefined).
+    assert_eq!(run("(3.14159).toFixed()"), "3");
+    assert_eq!(run("(3.14159).toFixed(2)"), "3.14");
+    // Out-of-range still throws RangeError.
+    assert_eq!(throws("(1).toFixed(101)"), "RangeError");
+}
