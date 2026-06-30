@@ -5417,6 +5417,26 @@ fn reflect_define_on_receiver(
     }
 }
 
+/// EnumerableOwnPropertyNames (string keys): proxy-aware own enumerable property names in order.
+fn enumerable_own_string_keys(i: &mut Interp, o: &Value) -> Result<Vec<String>, Value> {
+    if proxy_pair(i, o).is_some() {
+        return Ok(proxy_enum_string_keys(i, o)?
+            .into_iter()
+            .filter_map(|k| match k {
+                Value::Str(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect());
+    }
+    match o.as_obj() {
+        Some(obj) => Ok(ordered_enum_keys(obj)
+            .iter()
+            .map(|k| k.to_string())
+            .collect()),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).
 fn json_is_array(i: &mut Interp, v: &Value) -> Result<bool, Value> {
     if let Some((target, handler)) = proxy_pair(i, v) {
@@ -7086,20 +7106,22 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "values", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.values")?;
-        let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
+        let ov = Value::Obj(o);
+        let keys = enumerable_own_string_keys(i, &ov)?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            out.push(ab(i.get_member(&Value::Obj(o.clone()), &k))?);
+            out.push(ab(i.get_member(&ov, &k))?);
         }
         Ok(i.make_array(out))
     });
     it.def_method(&ctor, "entries", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.entries")?;
-        let keys: Vec<Rc<str>> = ordered_enum_keys(&o);
+        let ov = Value::Obj(o);
+        let keys = enumerable_own_string_keys(i, &ov)?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
-            let v = ab(i.get_member(&Value::Obj(o.clone()), &k))?;
-            out.push(i.make_array(vec![Value::Str(k), v]));
+            let v = ab(i.get_member(&ov, &k))?;
+            out.push(i.make_array(vec![Value::from_string(k.clone()), v]));
         }
         Ok(i.make_array(out))
     });
