@@ -2948,8 +2948,20 @@ fn install_date(it: &mut Interp) {
         }
     });
     it.def_method(&proto, "toJSON", 1, |i, this, _| {
-        let t = date_ms(i, &this)?;
-        Ok(iso_string(t).map(Value::from_string).unwrap_or(Value::Null))
+        // Generic: ToObject, ToPrimitive(number); a non-finite time is null; else Invoke toISOString.
+        let o = to_object_arg(i, this.clone(), "Date.prototype.toJSON")?;
+        let ov = Value::Obj(o);
+        let tv = ab(i.to_primitive(&ov, crate::eval::Hint::Number))?;
+        if let Value::Num(n) = &tv {
+            if !n.is_finite() {
+                return Ok(Value::Null);
+            }
+        }
+        let iso = ab(i.get_member(&ov, "toISOString"))?;
+        if !iso.is_callable() {
+            return Err(i.make_error("TypeError", "toISOString is not callable"));
+        }
+        ab(i.call(iso, ov, &[]))
     });
     it.def_method(&proto, "toString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;

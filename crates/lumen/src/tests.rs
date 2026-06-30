@@ -4666,3 +4666,18 @@ fn array_splice_holes_and_shift() {
         "false|3,4"
     );
 }
+
+#[test]
+fn date_to_json_generic() {
+    // toJSON is generic: it invokes the receiver's toISOString after a finite ToPrimitive(number).
+    assert_eq!(
+        run("Date.prototype.toJSON.call({toISOString(){return 'ISO';}, valueOf(){return 1;}})"),
+        "ISO"
+    );
+    // A non-finite time value yields null without invoking toISOString.
+    assert_eq!(
+        run("Date.prototype.toJSON.call({valueOf(){return NaN;}, toISOString(){return 'x';}})"),
+        "null"
+    );
+    assert_eq!(run("typeof new Date(0).toJSON()"), "string");
+}
