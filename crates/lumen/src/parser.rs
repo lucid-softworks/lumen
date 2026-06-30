@@ -253,6 +253,10 @@ impl Parser {
     fn nl_before(&self) -> bool {
         self.toks[self.pos].nl_before
     }
+    /// Whether the current token contained a `\u` escape (so it can't be a contextual keyword).
+    fn cur_escaped(&self) -> bool {
+        self.toks[self.pos].escaped
+    }
     fn at_eof(&self) -> bool {
         matches!(self.cur(), Tok::Eof)
     }
@@ -444,7 +448,7 @@ impl Parser {
             }
             // `async function f(){}` declaration (async is a contextual keyword).
             Tok::Ident(w)
-                if w == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                if w == "async" && !self.cur_escaped() && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
                 let f = self.parse_function(true)?;
@@ -879,8 +883,8 @@ impl Parser {
 
         if let Some(kind) = decl_kind {
             let first = self.parse_binding_pattern()?;
-            if self.is_kw("in") || self.is_ident_word("of") {
-                let of = self.is_ident_word("of");
+            if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
+                let of = self.is_ident_word("of") && !self.cur_escaped();
                 self.advance();
                 let right = self.parse_assign()?;
                 self.expect_punct(")")?;
@@ -919,8 +923,8 @@ impl Parser {
             return self.finish_c_for(None);
         }
         let init_expr = self.parse_expr_no_in()?;
-        if self.is_kw("in") || self.is_ident_word("of") {
-            let of = self.is_ident_word("of");
+        if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
+            let of = self.is_ident_word("of") && !self.cur_escaped();
             self.advance();
             let right = self.parse_assign()?;
             self.expect_punct(")")?;
@@ -1792,7 +1796,7 @@ impl Parser {
                 }
             }
             Tok::Ident(name)
-                if name == "async" && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                if name == "async" && !self.cur_escaped() && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
                 let f = self.parse_function(true)?;
@@ -1956,6 +1960,7 @@ impl Parser {
             }
             // get/set accessors
             if (self.is_ident_word("get") || self.is_ident_word("set"))
+                && !self.cur_escaped()
                 && !matches!(
                     self.peek_kind(1),
                     Tok::Punct(":") | Tok::Punct(",") | Tok::Punct("}") | Tok::Punct("(")
@@ -2234,7 +2239,7 @@ impl Parser {
         }
         let decorators = self.parse_decorators()?;
         let mut is_static = false;
-        if self.is_ident_word("static") && !self.next_is_member_terminator(1) {
+        if self.is_ident_word("static") && !self.cur_escaped() && !self.next_is_member_terminator(1) {
             self.advance();
             is_static = true;
         }
@@ -2286,6 +2291,7 @@ impl Parser {
         }
         let mut kind = MemberKind::Method;
         if (self.is_ident_word("get") || self.is_ident_word("set"))
+            && !self.cur_escaped()
             && !self.next_is_member_terminator(1)
         {
             kind = if self.is_ident_word("get") {

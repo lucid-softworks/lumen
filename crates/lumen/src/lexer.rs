@@ -83,7 +83,14 @@ impl<'a> Lexer<'a> {
             line: self.line,
             nl_before: nl,
             legacy_octal: false,
+            escaped: false,
         });
+    }
+    /// Flag the most recently pushed token as having contained a `\u` escape.
+    fn mark_escaped(&mut self) {
+        if let Some(t) = self.out.last_mut() {
+            t.escaped = true;
+        }
     }
     /// Flag the most recently pushed token as a legacy-octal construct.
     fn mark_legacy_octal(&mut self) {
@@ -205,10 +212,15 @@ impl<'a> Lexer<'a> {
         // property name (keywords are accepted in those positions).
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
             self.push(Tok::Keyword(kw));
+            if had_escape {
+                self.mark_escaped();
+            }
             return Ok(());
         }
-        let _ = had_escape;
         self.push(Tok::Ident(s));
+        if had_escape {
+            self.mark_escaped();
+        }
         Ok(())
     }
 

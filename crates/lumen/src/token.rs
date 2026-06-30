@@ -11,6 +11,9 @@ pub struct Token {
     /// A legacy-octal number (`010`) or a string with a legacy octal/`\8`/`\9` escape — a
     /// SyntaxError in strict mode.
     pub legacy_octal: bool,
+    /// The identifier contained a `\u` escape — so it can't be recognized as a contextual keyword
+    /// (`async`/`get`/`set`/`of`/`static`/…).
+    pub escaped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
