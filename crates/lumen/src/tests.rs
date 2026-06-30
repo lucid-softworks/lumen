@@ -4955,3 +4955,29 @@ fn object_define_properties_spec() {
         "false"
     );
 }
+
+#[test]
+fn get_prototype_of_and_error_subclassing() {
+    // getPrototypeOf coerces all primitive types.
+    assert_eq!(
+        run("Object.getPrototypeOf(Symbol()) === Symbol.prototype"),
+        "true"
+    );
+    assert_eq!(
+        run("Object.getPrototypeOf(1n) === Object.getPrototypeOf(2n)"),
+        "true"
+    );
+    assert_eq!(throws("Object.getPrototypeOf(null)"), "TypeError");
+    // Native error subtypes have [[Prototype]] === Error.
+    assert_eq!(run("Object.getPrototypeOf(TypeError) === Error"), "true");
+    assert_eq!(run("Object.getPrototypeOf(RangeError) === Error"), "true");
+    assert_eq!(
+        run("Object.getPrototypeOf(AggregateError) === Error"),
+        "true"
+    );
+    assert_eq!(
+        run("Object.getPrototypeOf(Error) === Function.prototype"),
+        "true"
+    );
+    assert_eq!(run("new TypeError() instanceof Error"), "true");
+}

@@ -7351,18 +7351,13 @@ fn install_object(it: &mut Interp) {
             Value::Str(_) => Ok(Value::Obj(i.string_proto.clone())),
             Value::Num(_) => Ok(Value::Obj(i.number_proto.clone())),
             Value::Bool(_) => Ok(Value::Obj(i.boolean_proto.clone())),
-            other => {
-                let boxed = maybe_box(i, other);
-                match boxed {
-                    Value::Obj(o) => Ok(o
-                        .borrow()
-                        .proto
-                        .clone()
-                        .map(Value::Obj)
-                        .unwrap_or(Value::Null)),
-                    _ => Ok(Value::Null),
-                }
-            }
+            Value::Sym(_) => Ok(Value::Obj(i.symbol_proto.clone())),
+            Value::BigInt(_) => Ok(i
+                .extra_protos
+                .get("BigInt")
+                .cloned()
+                .map(Value::Obj)
+                .unwrap_or(Value::Null)),
         }
     });
     it.def_method(&ctor, "setPrototypeOf", 2, |i, _this, args| {
@@ -11986,6 +11981,7 @@ fn install_errors(it: &mut Interp) {
     );
     it.error_protos.insert("Error", error_proto.clone());
 
+    let mut error_ctor: Option<Gc> = None;
     for name in names {
         let proto = if name == "Error" {
             error_proto.clone()
@@ -12014,6 +12010,10 @@ fn install_errors(it: &mut Interp) {
                     matches!(arg(a, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error)),
                 ))
             });
+            error_ctor = Some(ctor.clone());
+        } else if let Some(ec) = &error_ctor {
+            // A native error subtype's [[Prototype]] is the Error constructor (it subclasses Error).
+            ctor.borrow_mut().proto = Some(ec.clone());
         }
         ctor.borrow_mut().props.insert(
             "prototype",
@@ -12046,6 +12046,9 @@ fn install_errors(it: &mut Interp) {
         install_error_cause(i, &err, a.get(2));
         Ok(err)
     });
+    if let Some(ec) = &error_ctor {
+        agg_ctor.borrow_mut().proto = Some(ec.clone());
+    }
     agg_ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(agg_proto.clone()), false, false, false),
@@ -12091,6 +12094,9 @@ fn install_errors(it: &mut Interp) {
         "constructor",
         Property::builtin(Value::Obj(sup_ctor.clone())),
     );
+    if let Some(ec) = &error_ctor {
+        sup_ctor.borrow_mut().proto = Some(ec.clone());
+    }
     set_builtin(&it.global, "SuppressedError", Value::Obj(sup_ctor));
 }
 
