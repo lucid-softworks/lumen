@@ -891,6 +891,15 @@ impl Parser {
             if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
                 let of = self.is_ident_word("of") && !self.cur_escaped();
                 self.advance();
+                // A let/const for-in/of head binds into the shared loop scope: its bound names must
+                // be unique and must not clash with a `var` in the body.
+                if matches!(kind, DeclKind::Let | DeclKind::Const) {
+                    let mut names = Vec::new();
+                    pattern_names(&first, &mut names);
+                    for n in &names {
+                        self.declare_lexical(n)?;
+                    }
+                }
                 let right = self.parse_assign()?;
                 self.expect_punct(")")?;
                 let body = Box::new(self.parse_loop_body()?);
