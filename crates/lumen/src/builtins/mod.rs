@@ -2052,6 +2052,26 @@ fn can_be_held_weakly(i: &Interp, v: &Value) -> bool {
     }
 }
 
+/// CreateListFromArrayLike: the object must be array-like (TypeError otherwise); reads `length`
+/// (ToLength) then the indexed elements in order. Used by Reflect.apply/construct.
+fn create_list_from_array_like(i: &mut Interp, v: &Value) -> Result<Vec<Value>, Value> {
+    let o = match v {
+        Value::Obj(o) => o.clone(),
+        _ => {
+            return Err(i.make_error(
+                "TypeError",
+                "CreateListFromArrayLike called on a non-object",
+            ))
+        }
+    };
+    let len = ab(i.to_length(&o))?;
+    let mut out = Vec::with_capacity(len.min(1024));
+    for k in 0..len {
+        out.push(ab(i.get_member(v, &k.to_string()))?);
+    }
+    Ok(out)
+}
+
 fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
@@ -4235,11 +4255,18 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
 fn install_reflect(it: &mut Interp) {
     let r = it.new_object();
     it.def_method(&r, "get", 2, |i, _t, a| {
-        if !matches!(arg(a, 0), Value::Obj(_)) {
+        let target = arg(a, 0);
+        if !matches!(target, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "Reflect.get called on non-object"));
         }
         let key = ab(i.to_property_key(&arg(a, 1)))?;
-        ab(i.get_member(&arg(a, 0), &key))
+        // Reflect.get(target, key, receiver) — the receiver is the third argument.
+        let receiver = if a.len() > 2 {
+            arg(a, 2)
+        } else {
+            target.clone()
+        };
+        reflect_ordinary_get(i, &target, &key, &receiver)
     });
     it.def_method(&r, "set", 3, |i, _t, a| {
         let target = arg(a, 0);
@@ -4290,11 +4317,13 @@ fn install_reflect(it: &mut Interp) {
         )?))
     });
     it.def_method(&r, "has", 2, |i, _t, a| {
-        let key = ab(i.to_property_key(&arg(a, 1)))?;
-        match arg(a, 0) {
-            Value::Obj(o) => Ok(Value::Bool(i.has_property(&o, &key))),
-            _ => Err(i.make_error("TypeError", "Reflect.has called on non-object")),
+        let target = arg(a, 0);
+        if !matches!(target, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.has called on non-object"));
         }
+        let key = ab(i.to_property_key(&arg(a, 1)))?;
+        // Trap-aware [[HasProperty]] so a proxy's `has` trap (and its throws) are honored.
+        Ok(Value::Bool(ab(i.js_has_property(&target, &key))?))
     });
     it.def_method(&r, "getOwnPropertyDescriptor", 2, |i, _t, a| {
         let o = match arg(a, 0) {
@@ -4309,6 +4338,10 @@ fn install_reflect(it: &mut Interp) {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
+        }
+        // A proxy's [[GetOwnProperty]] goes through its getOwnPropertyDescriptor trap.
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            return proxy_gopd_value(i, &target, &handler, &key);
         }
         let prop = o.borrow().props.get(&key).cloned();
         Ok(prop
@@ -4360,23 +4393,18 @@ fn install_reflect(it: &mut Interp) {
         } else {
             Vec::new()
         };
-        out.extend(
-            o.borrow()
-                .props
-                .keys()
-                .into_iter()
-                .filter(|k| !Interp::is_sym_key(k))
-                .map(Value::Str),
-        );
-        let syms: Vec<Value> = o
-            .borrow()
-            .props
-            .keys()
-            .into_iter()
-            .filter(|k| Interp::is_sym_key(k))
-            .filter_map(|k| i.sym_from_key(&k))
-            .collect();
-        out.extend(syms);
+        // Spec [[OwnPropertyKeys]] order: array-index keys ascending, then string keys (insertion
+        // order), then symbol keys (insertion order) — exactly what `ordered_keys` produces.
+        let ordered = o.borrow().props.ordered_keys();
+        for k in ordered {
+            if Interp::is_sym_key(&k) {
+                if let Some(s) = i.sym_from_key(&k) {
+                    out.push(s);
+                }
+            } else {
+                out.push(Value::Str(k));
+            }
+        }
         Ok(i.make_array(out))
     });
     it.def_method(&r, "getPrototypeOf", 1, |i, _t, a| match arg(a, 0) {
@@ -4422,10 +4450,7 @@ fn install_reflect(it: &mut Interp) {
         Ok(Value::Bool(ok))
     });
     it.def_method(&r, "apply", 3, |i, _t, a| {
-        let args = match arg(a, 2) {
-            Value::Undefined | Value::Null => Vec::new(),
-            list => ab(i.iterate(&list))?,
-        };
+        let args = create_list_from_array_like(i, &arg(a, 2))?;
         ab(i.call(arg(a, 0), arg(a, 1), &args))
     });
     it.def_method(&r, "construct", 2, |i, _t, a| {
@@ -4440,10 +4465,7 @@ fn install_reflect(it: &mut Interp) {
                 "Reflect.construct newTarget is not a constructor",
             ));
         }
-        let args = match arg(a, 1) {
-            Value::Undefined | Value::Null => Vec::new(),
-            list => ab(i.iterate(&list))?,
-        };
+        let args = create_list_from_array_like(i, &arg(a, 1))?;
         let new_target = if a.len() >= 3 {
             arg(a, 2)
         } else {
@@ -5547,6 +5569,44 @@ fn assign_set(i: &mut Interp, to: &Value, key: &str, value: Value) -> Result<(),
     ab(i.set_member(to, key, value))
 }
 
+/// OrdinaryGet(target, key, receiver): walk target's chain; a data property returns its value, an
+/// accessor invokes its getter with `receiver` as `this`. Proxies on the chain fall back to the
+/// receiver-less [[Get]].
+fn reflect_ordinary_get(
+    i: &mut Interp,
+    target: &Value,
+    key: &str,
+    receiver: &Value,
+) -> Result<Value, Value> {
+    let mut current = target.clone();
+    loop {
+        if proxy_pair(i, &current).is_some() {
+            return ab(i.get_member(&current, key));
+        }
+        let obj = match &current {
+            Value::Obj(o) => o.clone(),
+            _ => return Ok(Value::Undefined),
+        };
+        let own = obj.borrow().props.get(key).cloned();
+        match own {
+            Some(p) if p.accessor => {
+                return match p.get {
+                    Some(g) if g.is_callable() => ab(i.call(g, receiver.clone(), &[])),
+                    _ => Ok(Value::Undefined),
+                };
+            }
+            Some(p) => return Ok(p.value),
+            None => {
+                let proto = obj.borrow().proto.clone();
+                match proto {
+                    Some(pp) => current = Value::Obj(pp),
+                    None => return Ok(Value::Undefined),
+                }
+            }
+        }
+    }
+}
+
 /// OrdinarySet(target, key, value, receiver): walks target's prototype chain to find the controlling
 /// descriptor, then applies the result on `receiver` (which may differ from `target`). Returns the
 /// success boolean. Proxies on the chain fall back to the receiver-less [[Set]].
@@ -6455,6 +6515,22 @@ fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<boo
     }
     if !o.borrow().extensible {
         return Ok(false);
+    }
+    // Cycle check: refuse if `o` already lies on the candidate prototype's chain (walking stops at
+    // any proxy, whose [[GetPrototypeOf]] may be non-deterministic).
+    let mut p = proto.clone();
+    while let Value::Obj(po) = &p {
+        if Rc::ptr_eq(po, &o) {
+            return Ok(false);
+        }
+        if proxy_pair(i, &p).is_some() {
+            break;
+        }
+        let next = po.borrow().proto.clone();
+        p = match next {
+            Some(n) => Value::Obj(n),
+            None => break,
+        };
     }
     o.borrow_mut().proto = match proto {
         Value::Obj(p) => Some(p.clone()),

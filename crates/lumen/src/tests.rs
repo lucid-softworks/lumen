@@ -4878,3 +4878,36 @@ fn promise_resolving_function_shape() {
         "1|1||"
     );
 }
+
+#[test]
+fn reflect_completeness() {
+    // apply/construct use CreateListFromArrayLike (array-like, not iteration).
+    assert_eq!(
+        run("Reflect.apply(Math.max, null, {length:2, 0:3, 1:9})"),
+        "9"
+    );
+    assert_eq!(throws("Reflect.apply(Math.max, null, 5)"), "TypeError");
+    // ownKeys order: integer indices ascending, then strings, then symbols.
+    assert_eq!(
+        run("var s=Symbol(); var o={}; o.b=1;o[2]=1;o.a=1;o[0]=1;o[1]=1;o[s]=1; var k=Reflect.ownKeys(o); k.slice(0,5).join(',')"),
+        "0,1,2,b,a"
+    );
+    // get honors the receiver for accessors; setPrototypeOf detects cycles.
+    assert_eq!(
+        run("Reflect.get({get x(){return this.v;}}, 'x', {v:42})"),
+        "42"
+    );
+    assert_eq!(
+        run("var a={},b=Object.create(a); Reflect.setPrototypeOf(a,b)"),
+        "false"
+    );
+    // has/getOwnPropertyDescriptor go through proxy traps.
+    assert_eq!(
+        run("var t=false; try{Reflect.has(new Proxy({},{has(){throw new TypeError();}}),'x');}catch(e){t=e instanceof TypeError;} t"),
+        "true"
+    );
+    assert_eq!(
+        run("Reflect.getOwnPropertyDescriptor(new Proxy({a:1},{}), 'a').value"),
+        "1"
+    );
+}
