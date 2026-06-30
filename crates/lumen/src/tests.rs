@@ -4829,3 +4829,32 @@ fn promise_resolve_reject_this() {
         "true"
     );
 }
+
+#[test]
+fn finalization_registry_validation() {
+    assert_eq!(
+        run("var f=new FinalizationRegistry(()=>{}); f.register({},'h'); true"),
+        "true"
+    );
+    // Non-registerable target, target===held, bad token, and brand mismatch all throw.
+    assert_eq!(
+        throws("new FinalizationRegistry(()=>{}).register(5,'h')"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("var t={}; new FinalizationRegistry(()=>{}).register(t,t)"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("new FinalizationRegistry(()=>{}).register({},'h',5)"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("FinalizationRegistry.prototype.register.call({}, {}, 'h')"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("Object.prototype.toString.call(new FinalizationRegistry(()=>{}))"),
+        "[object FinalizationRegistry]"
+    );
+}

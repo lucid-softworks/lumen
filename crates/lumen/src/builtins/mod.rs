@@ -410,13 +410,35 @@ fn install_weak_refs(it: &mut Interp) {
     set_builtin(&it.global, "WeakRef", Value::Obj(wr_ctor));
 
     let fr_proto = Object::new(Some(it.object_proto.clone()));
-    it.def_method(&fr_proto, "register", 2, |i, _this, a| {
-        if matches!(arg(a, 0), Value::Undefined) {
-            return Err(i.make_error("TypeError", "target must be an object"));
+    it.def_method(&fr_proto, "register", 2, |i, this, a| {
+        // Brand check, then: target must be registerable, distinct from its held value, and any
+        // unregister token must itself be registerable.
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__fr")) {
+            return Err(i.make_error("TypeError", "register called on a non-FinalizationRegistry"));
+        }
+        let target = arg(a, 0);
+        if !can_be_held_weakly(i, &target) {
+            return Err(i.make_error("TypeError", "target cannot be held weakly"));
+        }
+        if same_value(&target, &arg(a, 1)) {
+            return Err(i.make_error("TypeError", "target and held value must not be the same"));
+        }
+        let token = arg(a, 2);
+        if !matches!(token, Value::Undefined) && !can_be_held_weakly(i, &token) {
+            return Err(i.make_error("TypeError", "unregister token cannot be held weakly"));
         }
         Ok(Value::Undefined)
     });
-    it.def_method(&fr_proto, "unregister", 1, |_i, _this, _a| {
+    it.def_method(&fr_proto, "unregister", 1, |i, this, a| {
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__fr")) {
+            return Err(i.make_error(
+                "TypeError",
+                "unregister called on a non-FinalizationRegistry",
+            ));
+        }
+        if !can_be_held_weakly(i, &arg(a, 0)) {
+            return Err(i.make_error("TypeError", "unregister token cannot be held weakly"));
+        }
         Ok(Value::Bool(false))
     });
     let fr_ctor = it.make_native("FinalizationRegistry", 1, |i, _t, a| {
@@ -426,9 +448,10 @@ fn install_weak_refs(it: &mut Interp) {
         if !arg(a, 0).is_callable() {
             return Err(i.make_error("TypeError", "cleanup callback must be callable"));
         }
-        Ok(Value::Obj(Object::new(
-            i.extra_protos.get("FinalizationRegistry").cloned(),
-        )))
+        let obj = new_from_ctor(i, "FinalizationRegistry")
+            .unwrap_or_else(|_| Object::new(i.extra_protos.get("FinalizationRegistry").cloned()));
+        set_internal(&obj, "__fr", Value::Bool(true));
+        Ok(Value::Obj(obj))
     });
     it.extra_protos
         .insert("FinalizationRegistry", fr_proto.clone());
@@ -440,6 +463,12 @@ fn install_weak_refs(it: &mut Interp) {
         "constructor",
         Property::builtin(Value::Obj(fr_ctor.clone())),
     );
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        fr_proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("FinalizationRegistry"), false, false, true),
+        );
+    }
     set_builtin(&it.global, "FinalizationRegistry", Value::Obj(fr_ctor));
 }
 
