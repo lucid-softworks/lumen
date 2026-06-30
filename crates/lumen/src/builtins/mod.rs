@@ -389,7 +389,7 @@ fn install_weak_refs(it: &mut Interp) {
         if !matches!(target, Value::Obj(_) | Value::Sym(_)) {
             return Err(i.make_error("TypeError", "WeakRef target must be an object or symbol"));
         }
-        let obj = Object::new(i.extra_protos.get("WeakRef").cloned());
+        let obj = new_from_ctor(i, "WeakRef")?;
         set_internal(&obj, "__target", target);
         Ok(Value::Obj(obj))
     });
@@ -846,7 +846,7 @@ fn install_dataview(it: &mut Interp) {
                 l
             }
         };
-        let obj = Object::new(i.extra_protos.get("DataView").cloned());
+        let obj = new_from_ctor(i, "DataView")?;
         let p = Rc::as_ptr(&obj) as usize;
         i.data_views.insert(p, (bp, offset, len));
         // buffer/byteOffset/byteLength are accessor getters on the prototype, not own properties;
@@ -1793,6 +1793,20 @@ ta_methods! {
     "slice" => tad_slice, "at" => tad_at, "keys" => tad_keys, "values" => tad_values,
     "entries" => tad_entries, "toString" => tad_tostring, "copyWithin" => tad_copywithin,
     "toReversed" => tad_toreversed, "toSorted" => tad_tosorted, "with" => tad_with,
+}
+
+/// OrdinaryCreateFromConstructor: a new object whose [[Prototype]] is `new.target.prototype` when
+/// that's an object (subclassing / Reflect.construct), else the named intrinsic prototype. Safe to
+/// call from any native constructor: outside a `new`, `new_target` is Undefined so the default wins.
+fn new_from_ctor(i: &mut Interp, default_proto: &'static str) -> Result<Gc, Value> {
+    let proto = match &i.new_target {
+        nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
+            Value::Obj(p) => Some(p),
+            _ => i.extra_protos.get(default_proto).cloned(),
+        },
+        _ => i.extra_protos.get(default_proto).cloned(),
+    };
+    Ok(Object::new(proto))
 }
 
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
@@ -2747,7 +2761,7 @@ fn date_ctor(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> 
             parts_to_ms(y, mo, d, h, mi, s, ml)
         }
     };
-    let obj = Object::new(i.extra_protos.get("Date").cloned());
+    let obj = new_from_ctor(i, "Date")?;
     set_internal(&obj, "__date_ms", Value::Num(ms));
     Ok(Value::Obj(obj))
 }
