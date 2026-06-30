@@ -10930,11 +10930,27 @@ fn install_bigint(it: &mut Interp) {
 
 fn install_math(it: &mut Interp) {
     let math = it.new_object();
-    set_builtin(&math, "PI", Value::Num(std::f64::consts::PI));
-    set_builtin(&math, "E", Value::Num(std::f64::consts::E));
-    set_builtin(&math, "LN2", Value::Num(std::f64::consts::LN_2));
-    set_builtin(&math, "LN10", Value::Num(std::f64::consts::LN_10));
-    set_builtin(&math, "SQRT2", Value::Num(std::f64::consts::SQRT_2));
+    // The Math constants are { writable:false, enumerable:false, configurable:false }.
+    for (name, val) in [
+        ("E", std::f64::consts::E),
+        ("LN10", std::f64::consts::LN_10),
+        ("LN2", std::f64::consts::LN_2),
+        ("LOG10E", std::f64::consts::LOG10_E),
+        ("LOG2E", std::f64::consts::LOG2_E),
+        ("PI", std::f64::consts::PI),
+        ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+        ("SQRT2", std::f64::consts::SQRT_2),
+    ] {
+        math.borrow_mut()
+            .props
+            .insert(name, Property::data(Value::Num(val), false, false, false));
+    }
+    // Math[@@toStringTag] = "Math" (non-writable, non-enumerable, configurable).
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        math.borrow_mut()
+            .props
+            .insert(key, Property::data(Value::str("Math"), false, false, true));
+    }
     macro_rules! unary {
         ($name:expr, $f:expr) => {
             it.def_method(&math, $name, 1, |i, _t, a| {
@@ -10970,12 +10986,28 @@ fn install_math(it: &mut Interp) {
     );
     unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
     it.def_method(&math, "hypot", 2, |i, _t, a| {
+        // Coerce every argument (in order), then: any infinite operand yields +Infinity (even
+        // alongside a NaN), otherwise any NaN yields NaN, otherwise the Euclidean norm.
         let mut sum = 0.0;
+        let mut any_inf = false;
+        let mut any_nan = false;
         for v in a {
             let n = ab(i.to_number(v))?;
-            sum += n * n;
+            if n.is_infinite() {
+                any_inf = true;
+            } else if n.is_nan() {
+                any_nan = true;
+            } else {
+                sum += n * n;
+            }
         }
-        Ok(Value::Num(sum.sqrt()))
+        Ok(Value::Num(if any_inf {
+            f64::INFINITY
+        } else if any_nan {
+            f64::NAN
+        } else {
+            sum.sqrt()
+        }))
     });
     it.def_method(&math, "imul", 2, |i, _t, a| {
         let x = to_uint32(ab(i.to_number(&arg(a, 0)))?) as i32;

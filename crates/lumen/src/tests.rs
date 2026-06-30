@@ -4499,3 +4499,22 @@ fn date_setter_order_and_invalid() {
         "true,0"
     );
 }
+
+#[test]
+fn math_constants_and_hypot() {
+    // All Math constants exist and are non-writable/enumerable/configurable.
+    assert_eq!(
+        run("typeof Math.LOG2E + ',' + typeof Math.LOG10E + ',' + typeof Math.SQRT1_2"),
+        "number,number,number"
+    );
+    assert_eq!(
+        run("var d=Object.getOwnPropertyDescriptor(Math,'PI'); [d.writable,d.enumerable,d.configurable].join(',')"),
+        "false,false,false"
+    );
+    assert_eq!(run("Math.PI = 3; Math.PI === 3"), "false");
+    assert_eq!(run("Math[Symbol.toStringTag]"), "Math");
+    // hypot: an infinite operand wins over NaN.
+    assert_eq!(run("Math.hypot(Infinity, NaN)"), "Infinity");
+    assert_eq!(run("Math.hypot(3, 4)"), "5");
+    assert_eq!(run("Number.isNaN(Math.hypot(NaN, 2))"), "true");
+}
