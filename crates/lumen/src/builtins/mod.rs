@@ -12356,13 +12356,13 @@ fn install_errors(it: &mut Interp) {
         };
         // A distinct native constructor per error kind (fn pointers can't capture the name).
         let ctor_fn: NativeFn = match name {
-            "Error" => |i, _t, a| Ok(make_err(i, "Error", a)),
-            "TypeError" => |i, _t, a| Ok(make_err(i, "TypeError", a)),
-            "RangeError" => |i, _t, a| Ok(make_err(i, "RangeError", a)),
-            "ReferenceError" => |i, _t, a| Ok(make_err(i, "ReferenceError", a)),
-            "SyntaxError" => |i, _t, a| Ok(make_err(i, "SyntaxError", a)),
-            "EvalError" => |i, _t, a| Ok(make_err(i, "EvalError", a)),
-            "URIError" => |i, _t, a| Ok(make_err(i, "URIError", a)),
+            "Error" => |i, _t, a| make_err(i, "Error", a),
+            "TypeError" => |i, _t, a| make_err(i, "TypeError", a),
+            "RangeError" => |i, _t, a| make_err(i, "RangeError", a),
+            "ReferenceError" => |i, _t, a| make_err(i, "ReferenceError", a),
+            "SyntaxError" => |i, _t, a| make_err(i, "SyntaxError", a),
+            "EvalError" => |i, _t, a| make_err(i, "EvalError", a),
+            "URIError" => |i, _t, a| make_err(i, "URIError", a),
             _ => unreachable!(),
         };
         let ctor = it.make_native(name, 1, ctor_fn);
@@ -12462,7 +12462,7 @@ fn install_errors(it: &mut Interp) {
     set_builtin(&it.global, "SuppressedError", Value::Obj(sup_ctor));
 }
 
-fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
+fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Result<Value, Value> {
     let err = i.make_error(kind, "");
     // OrdinaryCreateFromConstructor: a subclass / Reflect.construct new.target sets the prototype.
     if matches!(i.new_target, Value::Obj(_)) {
@@ -12477,18 +12477,18 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
     }
     if let Some(msg) = args.first() {
         if !matches!(msg, Value::Undefined) {
-            if let Ok(s) = i.to_string(msg) {
-                // The own `message` is { writable:true, enumerable:false, configurable:true }.
-                if let Some(e) = err.as_obj() {
-                    e.borrow_mut()
-                        .props
-                        .insert("message", Property::builtin(Value::Str(s)));
-                }
+            // ToString(message) may throw (e.g. a Symbol, or a throwing toString) — propagate it.
+            let s = ab(i.to_string(msg))?;
+            // The own `message` is { writable:true, enumerable:false, configurable:true }.
+            if let Some(e) = err.as_obj() {
+                e.borrow_mut()
+                    .props
+                    .insert("message", Property::builtin(Value::Str(s)));
             }
         }
     }
     install_error_cause(i, &err, args.get(1));
-    err
+    Ok(err)
 }
 
 /// InstallErrorCause: when the options bag has a `cause` property, copy it to a non-enumerable own
