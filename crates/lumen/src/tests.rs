@@ -4141,3 +4141,60 @@ fn iterator_zip_modes() {
         "true"
     );
 }
+
+#[test]
+fn boxed_symbol_wrapper() {
+    // Object(symbol) yields a Symbol wrapper object whose prototype methods unwrap it.
+    assert_eq!(run("typeof Object(Symbol('z'))"), "object");
+    assert_eq!(
+        run("Symbol.prototype.toString.call(Object(Symbol('z')))"),
+        "Symbol(z)"
+    );
+    assert_eq!(
+        run("var s=Symbol('q'); Symbol.prototype.valueOf.call(Object(s))===s"),
+        "true"
+    );
+    assert_eq!(
+        run("Object.getOwnPropertyDescriptor(Symbol.prototype,'description').get.call(Object(Symbol('d')))"),
+        "d"
+    );
+}
+
+#[test]
+fn boxed_bigint_wrapper() {
+    // Object(bigint) yields a BigInt wrapper object whose prototype methods unwrap it.
+    assert_eq!(run("typeof Object(10n)"), "object");
+    assert_eq!(
+        run("BigInt.prototype.toString.call(Object(255n), 16)"),
+        "ff"
+    );
+    assert_eq!(
+        run("BigInt.prototype.valueOf.call(Object(42n)) === 42n"),
+        "true"
+    );
+}
+
+#[test]
+fn iterator_concat_return_closes_inner() {
+    // The concat result iterator's return() closes the currently-open inner iterator.
+    assert_eq!(
+        run(r#"
+            var closed=false;
+            var inner={ next(){ return {done:false, value:1}; }, return(){ closed=true; return {}; }, [Symbol.iterator](){ return this; } };
+            var it=Iterator.concat(inner);
+            it.next();
+            it.return();
+            closed
+        "#),
+        "true"
+    );
+    // After return(), subsequent next() reports done without re-opening.
+    assert_eq!(
+        run(r#"
+            var it=Iterator.concat([1,2,3]);
+            it.next(); it.return();
+            it.next().done
+        "#),
+        "true"
+    );
+}

@@ -113,6 +113,8 @@ pub enum Exotic {
     BoolWrap(bool),
     NumWrap(f64),
     StrWrap(Rc<str>),
+    SymWrap(Rc<SymbolData>),
+    BigIntWrap(i128),
     /// An error object — carries no extra data (name/message live as ordinary properties) but the
     /// tag lets `Error.prototype.toString` and the test262 runner recognise it cheaply.
     Error,

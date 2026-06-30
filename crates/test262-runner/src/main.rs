@@ -473,11 +473,14 @@ fn report_results(results: &[(String, Outcome)], targets: &[String]) {
     }
 
     if std::env::var("T262_SAMPLES").is_ok() {
+        let grep = std::env::var("T262_GREP").ok();
+        let cap: usize = std::env::var("T262_CAP").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
         println!("\nsample failures:");
         for (rel, outcome) in results
             .iter()
             .filter(|(_, o)| matches!(o, Outcome::Fail(_)))
-            .take(40)
+            .filter(|(_, o)| match (&grep, o) { (Some(g), Outcome::Fail(why)) => why.contains(g.as_str()), _ => true })
+            .take(cap)
         {
             if let Outcome::Fail(why) = outcome {
                 println!("  {rel}\n      {why}");

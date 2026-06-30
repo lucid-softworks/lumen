@@ -8025,7 +8025,20 @@ fn install_iterator(it: &mut Interp) {
         set_builtin(&obj, "__cc_idx", Value::Num(0.0));
         set_builtin(&obj, "__cc_cur", Value::Undefined);
         set_builtin(&obj, "__cc_curnext", Value::Undefined);
+        set_builtin(&obj, "__cc_done", Value::Bool(false));
         i.def_method(&obj, "next", 0, concat_next);
+        // return() closes the currently-open inner iterator (once), then reports done.
+        i.def_method(&obj, "return", 0, |i, this, _a| {
+            let done = ab(i.get_member(&this, "__cc_done"))?;
+            if !i.to_boolean(&done) {
+                set_internal(this.as_obj().unwrap(), "__cc_done", Value::Bool(true));
+                let cur = ab(i.get_member(&this, "__cc_cur"))?;
+                if matches!(cur, Value::Obj(_)) {
+                    ab(i.iterator_close_normal(&cur))?;
+                }
+            }
+            Ok(iter_result(i, Value::Undefined, true))
+        });
         if let Some(sym) = i.iterator_sym.clone() {
             let itf = i.make_native("[Symbol.iterator]", 0, return_this);
             obj.borrow_mut()
@@ -8511,6 +8524,10 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
 
 /// `Iterator.concat`'s iterator: opens each captured iterable in order and yields its values.
 fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let done = ab(i.get_member(&this, "__cc_done"))?;
+    if i.to_boolean(&done) {
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
     loop {
         let cur = ab(i.get_member(&this, "__cc_cur"))?;
         if matches!(cur, Value::Undefined) {
@@ -9652,6 +9669,11 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
         Value::Num(n) => (i.number_proto.clone(), Exotic::NumWrap(*n)),
         Value::Bool(b) => (i.boolean_proto.clone(), Exotic::BoolWrap(*b)),
         Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone())),
+        Value::Sym(s) => (i.symbol_proto.clone(), Exotic::SymWrap(s.clone())),
+        Value::BigInt(n) => match i.extra_protos.get("BigInt").cloned() {
+            Some(p) => (p, Exotic::BigIntWrap(*n)),
+            None => return v,
+        },
         _ => return v,
     };
     let obj = Object::new(Some(proto));
@@ -10037,30 +10059,48 @@ fn this_boolean(i: &mut Interp, this: &Value) -> Result<bool, Value> {
     }
 }
 
+/// thisSymbolValue: a Symbol primitive or Symbol wrapper object, else TypeError.
+fn this_symbol(i: &mut Interp, this: &Value) -> Result<Rc<SymbolData>, Value> {
+    match this {
+        Value::Sym(s) => Ok(s.clone()),
+        Value::Obj(o) => match &o.borrow().exotic {
+            Exotic::SymWrap(s) => Ok(s.clone()),
+            _ => Err(i.make_error("TypeError", "Symbol method called on incompatible receiver")),
+        },
+        _ => Err(i.make_error("TypeError", "Symbol method called on incompatible receiver")),
+    }
+}
+
 fn install_symbol(it: &mut Interp) {
     let sp = it.symbol_proto.clone();
-    it.def_method(&sp, "toString", 0, |i, this, _| match &this {
-        Value::Sym(s) => Ok(Value::from_string(format!(
-            "Symbol({})",
-            s.description.as_deref().unwrap_or("")
-        ))),
-        _ => Err(i.make_error("TypeError", "Symbol.prototype.toString requires a symbol")),
+    it.def_method(&sp, "toString", 0, |i, this, _| {
+        match this_symbol(i, &this) {
+            Ok(s) => Ok(Value::from_string(format!(
+                "Symbol({})",
+                s.description.as_deref().unwrap_or("")
+            ))),
+            Err(e) => Err(e),
+        }
     });
-    it.def_method(&sp, "valueOf", 0, |i, this, _| match this {
-        Value::Sym(_) => Ok(this),
-        _ => Err(i.make_error("TypeError", "Symbol.prototype.valueOf requires a symbol")),
+    it.def_method(&sp, "valueOf", 0, |i, this, _| {
+        match this_symbol(i, &this) {
+            Ok(s) => Ok(Value::Sym(s)),
+            Err(e) => Err(e),
+        }
     });
 
-    let desc_getter = it.make_native("get description", 0, |i, this, _| match &this {
-        Value::Sym(s) => Ok(s
-            .description
-            .as_deref()
-            .map(|d| Value::from_string(d.to_string()))
-            .unwrap_or(Value::Undefined)),
-        _ => Err(i.make_error(
-            "TypeError",
-            "Symbol.prototype.description requires a symbol",
-        )),
+    let desc_getter = it.make_native("get description", 0, |i, this, _| {
+        match this_symbol(i, &this) {
+            Ok(s) => Ok(s
+                .description
+                .as_deref()
+                .map(|d| Value::from_string(d.to_string()))
+                .unwrap_or(Value::Undefined)),
+            _ => Err(i.make_error(
+                "TypeError",
+                "Symbol.prototype.description requires a symbol",
+            )),
+        }
     });
     sp.borrow_mut().props.insert(
         "description",
@@ -10170,32 +10210,37 @@ fn bigint_to_radix(mut n: i128, radix: u32) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// thisBigIntValue: a BigInt primitive or BigInt wrapper object, else TypeError.
+fn this_bigint(i: &mut Interp, this: &Value) -> Result<i128, Value> {
+    match this {
+        Value::BigInt(n) => Ok(*n),
+        Value::Obj(o) => match o.borrow().exotic {
+            Exotic::BigIntWrap(n) => Ok(n),
+            _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),
+        },
+        _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),
+    }
+}
+
 fn install_bigint(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("BigInt", proto.clone());
     it.def_method(&proto, "toString", 1, |i, this, a| {
-        let n = match this {
-            Value::BigInt(n) => n,
-            _ => {
-                return Err(i.make_error("TypeError", "BigInt.prototype.toString requires a BigInt"))
-            }
-        };
+        let n = this_bigint(i, &this)?;
         let radix = match arg(a, 0) {
             Value::Undefined => 10,
             v => ab(i.to_number(&v))? as u32,
         };
         Ok(Value::from_string(bigint_to_radix(n, radix)))
     });
-    it.def_method(&proto, "valueOf", 0, |i, this, _| match this {
-        Value::BigInt(_) => Ok(this),
-        _ => Err(i.make_error("TypeError", "BigInt.prototype.valueOf requires a BigInt")),
+    it.def_method(&proto, "valueOf", 0, |i, this, _| {
+        Ok(Value::BigInt(this_bigint(i, &this)?))
     });
-    it.def_method(&proto, "toLocaleString", 0, |i, this, _| match this {
-        Value::BigInt(n) => Ok(Value::from_string(bigint_to_radix(n, 10))),
-        _ => Err(i.make_error(
-            "TypeError",
-            "BigInt.prototype.toLocaleString requires a BigInt",
-        )),
+    it.def_method(&proto, "toLocaleString", 0, |i, this, _| {
+        Ok(Value::from_string(bigint_to_radix(
+            this_bigint(i, &this)?,
+            10,
+        )))
     });
     let ctor = it.make_native("BigInt", 1, |i, _t, a| {
         if i.constructing {
