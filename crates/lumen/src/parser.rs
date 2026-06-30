@@ -2180,6 +2180,10 @@ impl Parser {
         self.eat_kw("class");
         let name = if let Tok::Ident(n) = self.cur().clone() {
             self.advance();
+            // A class definition is always strict, so its name can't be a reserved word.
+            if is_strict_reserved_binding(&n) {
+                return self.err(format!("'{n}' cannot be used as a class name"));
+            }
             Some(n)
         } else {
             None
