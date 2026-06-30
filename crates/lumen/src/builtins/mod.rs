@@ -10150,7 +10150,7 @@ fn install_console(it: &mut Interp) {
 }
 
 fn parse_int(s: &str, mut radix: u32) -> f64 {
-    let t = s.trim();
+    let t = s.trim_matches(is_js_ws);
     let (neg, mut body) = match t.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, t.strip_prefix('+').unwrap_or(t)),
@@ -10192,7 +10192,7 @@ fn parse_int(s: &str, mut radix: u32) -> f64 {
 }
 
 fn parse_float(s: &str) -> f64 {
-    let t = s.trim();
+    let t = s.trim_matches(is_js_ws);
     // Take the longest leading prefix that parses as a float.
     let mut end = 0;
     let bytes = t.as_bytes();

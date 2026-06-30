@@ -3922,7 +3922,8 @@ fn to_int32(n: f64) -> i32 {
 /// Parse a string to a Number per the (simplified) StringToNumber grammar: trimmed, empty → 0,
 /// supports decimals, `Infinity`, and `0x`/`0o`/`0b` radix prefixes.
 fn parse_number(s: &str) -> f64 {
-    let t = s.trim();
+    // StrWhiteSpace includes U+FEFF (which Rust's char::is_whitespace omits).
+    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
     if t.is_empty() {
         return 0.0;
     }
