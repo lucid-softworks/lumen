@@ -5312,6 +5312,19 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
 /// own keys.
 fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec<Value>, Value> {
     let trap = ab(i.get_member(handler, "ownKeys"))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+        // Forward to the target's [[OwnPropertyKeys]] (recursing for a proxy target).
+        if let Some((t2, h2)) = proxy_pair(i, target) {
+            return proxy_own_keys(i, &t2, &h2);
+        }
+        return Ok(match target {
+            Value::Obj(t) => t.borrow().props.keys().into_iter().map(Value::Str).collect(),
+            _ => Vec::new(),
+        });
+    }
+    if !trap.is_callable() {
+        return Err(i.make_error("TypeError", "proxy 'ownKeys' trap is not callable"));
+    }
     if trap.is_callable() {
         let res = ab(i.call(trap, handler.clone(), std::slice::from_ref(target)))?;
         if !matches!(res, Value::Obj(_)) {
@@ -5394,21 +5407,64 @@ fn proxy_define_property(
     desc: &Value,
 ) -> Result<bool, Abrupt> {
     let trap = i.get_member(handler, "defineProperty")?;
-    if trap.is_callable() {
-        let key_val = i
-            .sym_from_key(key)
-            .unwrap_or_else(|| Value::from_string(key.to_string()));
-        let res = i.call(
-            trap,
-            handler.clone(),
-            &[target.clone(), key_val, desc.clone()],
-        )?;
-        Ok(i.to_boolean(&res))
-    } else if let Value::Obj(t) = target {
-        define_own_property(i, t, key, desc)
-    } else {
-        Ok(false)
+    if matches!(trap, Value::Undefined | Value::Null) {
+        if let Some((t2, h2)) = proxy_pair(i, target) {
+            return proxy_define_property(i, &t2, &h2, key, desc);
+        }
+        return if let Value::Obj(t) = target {
+            define_own_property(i, t, key, desc)
+        } else {
+            Ok(false)
+        };
     }
+    if !trap.is_callable() {
+        return Err(i.throw("TypeError", "proxy 'defineProperty' trap is not callable"));
+    }
+    let key_val = i
+        .sym_from_key(key)
+        .unwrap_or_else(|| Value::from_string(key.to_string()));
+    let res = i.call(trap, handler.clone(), &[target.clone(), key_val, desc.clone()])?;
+    if !i.to_boolean(&res) {
+        return Ok(false);
+    }
+    // Invariants relative to the target's existing property and extensibility.
+    let pd = build_partial(i, desc)?;
+    let setting_config_false = matches!(pd.configurable, Some(false));
+    if let Value::Obj(t) = target {
+        let tprop = t.borrow().props.get(key).cloned();
+        let extensible = t.borrow().extensible;
+        match tprop {
+            None => {
+                if !extensible {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' added a property to a non-extensible target",
+                    ));
+                }
+                if setting_config_false {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' defined a non-configurable property the target lacks",
+                    ));
+                }
+            }
+            Some(p) => {
+                if setting_config_false && p.configurable {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' made a configurable target property non-configurable",
+                    ));
+                }
+                if !p.configurable && !p.accessor && !p.writable && matches!(pd.writable, Some(true)) {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' made a non-writable property writable",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// A proxy's own enumerable string keys (for Object.keys/values/entries): the ownKeys trap result
