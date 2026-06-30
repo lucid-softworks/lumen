@@ -8063,6 +8063,17 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
     }
 }
 
+/// CreateHTML (Annex B): wrap the coerced `this` string in `<tag attr="value">…</tag>`.
+fn create_html(i: &mut Interp, this: Value, tag: &str, attr: &str, value: &Value) -> Result<Value, Value> {
+    let s = this_string(i, &this)?;
+    let mut p = format!("<{tag}");
+    if !attr.is_empty() {
+        let v = ab(i.to_string(value))?;
+        p.push_str(&format!(" {attr}=\"{}\"", v.replace('"', "&quot;")));
+    }
+    Ok(Value::from_string(format!("{p}>{s}</{tag}>")))
+}
+
 fn install_string(it: &mut Interp) {
     let sp = it.string_proto.clone();
     // String.prototype[@@iterator]: iterate by code point (via an array iterator over the chars).
@@ -8192,6 +8203,57 @@ fn install_string(it: &mut Interp) {
             chars[a as usize..b as usize].iter().collect::<String>(),
         ))
     });
+    // Annex B B.2.3.1 String.prototype.substr(start, length).
+    it.def_method(&sp, "substr", 2, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let chars: Vec<char> = s.chars().collect();
+        let size = chars.len() as i64;
+        let n = ab(i.to_number(&arg(args, 0)))?;
+        let mut start = if n.is_nan() {
+            0
+        } else if n < 0.0 {
+            (size + n as i64).max(0)
+        } else {
+            (n as i64).min(size)
+        };
+        let len = match arg(args, 1) {
+            Value::Undefined => size,
+            v => {
+                let l = ab(i.to_number(&v))?;
+                if l.is_nan() {
+                    0
+                } else {
+                    (l as i64).max(0)
+                }
+            }
+        };
+        let count = len.min(size - start).max(0);
+        if count <= 0 {
+            return Ok(Value::from_string(String::new()));
+        }
+        if start < 0 {
+            start = 0;
+        }
+        Ok(Value::from_string(
+            chars[start as usize..(start + count) as usize]
+                .iter()
+                .collect::<String>(),
+        ))
+    });
+    // Annex B B.2.3 HTML-wrapper methods (CreateHTML): each wraps the string in a tag.
+    it.def_method(&sp, "anchor", 1, |i, t, a| create_html(i, t, "a", "name", &arg(a, 0)));
+    it.def_method(&sp, "link", 1, |i, t, a| create_html(i, t, "a", "href", &arg(a, 0)));
+    it.def_method(&sp, "fontcolor", 1, |i, t, a| create_html(i, t, "font", "color", &arg(a, 0)));
+    it.def_method(&sp, "fontsize", 1, |i, t, a| create_html(i, t, "font", "size", &arg(a, 0)));
+    it.def_method(&sp, "big", 0, |i, t, _| create_html(i, t, "big", "", &Value::Undefined));
+    it.def_method(&sp, "blink", 0, |i, t, _| create_html(i, t, "blink", "", &Value::Undefined));
+    it.def_method(&sp, "bold", 0, |i, t, _| create_html(i, t, "b", "", &Value::Undefined));
+    it.def_method(&sp, "fixed", 0, |i, t, _| create_html(i, t, "tt", "", &Value::Undefined));
+    it.def_method(&sp, "italics", 0, |i, t, _| create_html(i, t, "i", "", &Value::Undefined));
+    it.def_method(&sp, "small", 0, |i, t, _| create_html(i, t, "small", "", &Value::Undefined));
+    it.def_method(&sp, "strike", 0, |i, t, _| create_html(i, t, "strike", "", &Value::Undefined));
+    it.def_method(&sp, "sub", 0, |i, t, _| create_html(i, t, "sub", "", &Value::Undefined));
+    it.def_method(&sp, "sup", 0, |i, t, _| create_html(i, t, "sup", "", &Value::Undefined));
     it.def_method(&sp, "toUpperCase", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.to_uppercase()))
     });
