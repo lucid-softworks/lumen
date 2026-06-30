@@ -7037,6 +7037,8 @@ fn install_iterator(it: &mut Interp) {
         let (iter, _next) = ab(i.get_iterator(&v))?;
         Ok(iter)
     });
+    it.def_method(&ctor, "zip", 1, |i, _t, a| iterator_zip(i, a, false));
+    it.def_method(&ctor, "zipKeyed", 1, |i, _t, a| iterator_zip(i, a, true));
     it.def_method(&ctor, "concat", 0, |i, _t, a| {
         // Each argument must be an object; capture its @@iterator method now, in order.
         let iter_key = i
@@ -7239,6 +7241,164 @@ fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
     set_data(&o, "value", value);
     set_data(&o, "done", Value::Bool(done));
     Value::Obj(o)
+}
+
+/// `Iterator.zip` (keyed = `Iterator.zipKeyed`): open every input iterator eagerly and step them in
+/// lockstep, combining the values per the `mode` (shortest/longest/strict) and `padding`.
+fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value> {
+    let input = arg(a, 0);
+    if !matches!(input, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "Iterator.zip input is not an object"));
+    }
+    let options = arg(a, 1);
+    let mode = match &options {
+        Value::Undefined => "shortest".to_string(),
+        Value::Obj(_) => {
+            let m = ab(i.get_member(&options, "mode"))?;
+            match m {
+                Value::Undefined => "shortest".to_string(),
+                _ => ab(i.to_string(&m))?.to_string(),
+            }
+        }
+        _ => return Err(i.make_error("TypeError", "Iterator.zip options is not an object")),
+    };
+    if !matches!(mode.as_str(), "shortest" | "longest" | "strict") {
+        return Err(i.make_error("RangeError", "invalid Iterator.zip mode"));
+    }
+    // Collect the input iterables (and their keys, for zipKeyed) in order.
+    let (keys, iterables): (Vec<String>, Vec<Value>) = if keyed {
+        let mut ks = Vec::new();
+        let mut vs = Vec::new();
+        if let Value::Obj(o) = &input {
+            for k in ordered_enum_keys(o) {
+                vs.push(ab(i.get_member(&input, &k))?);
+                ks.push(k.to_string());
+            }
+        }
+        (ks, vs)
+    } else {
+        (Vec::new(), ab(i.iterate(&input))?)
+    };
+    // Open every iterator now.
+    let mut iters = Vec::new();
+    let mut nexts = Vec::new();
+    for v in &iterables {
+        let (iter, next) = ab(i.get_iterator(v))?;
+        iters.push(iter);
+        nexts.push(next);
+    }
+    // `longest` padding: an array aligned with the iterators.
+    let padding = if mode == "longest" {
+        let mut pad = vec![Value::Undefined; iterables.len()];
+        if let Value::Obj(_) = &options {
+            let p = ab(i.get_member(&options, "padding"))?;
+            if !matches!(p, Value::Undefined) {
+                let vals = ab(i.iterate(&p))?;
+                for (j, v) in vals.into_iter().enumerate().take(iters.len()) {
+                    pad[j] = v;
+                }
+            }
+        }
+        pad
+    } else {
+        Vec::new()
+    };
+
+    let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
+    set_builtin(&obj, "__zip_iters", i.make_array(iters));
+    set_builtin(&obj, "__zip_nexts", i.make_array(nexts));
+    set_builtin(&obj, "__zip_done", i.make_array(vec![Value::Bool(false); iterables.len()]));
+    set_builtin(&obj, "__zip_mode", Value::from_string(mode.clone()));
+    set_builtin(&obj, "__zip_pad", i.make_array(padding));
+    set_builtin(&obj, "__zip_finished", Value::Bool(false));
+    if keyed {
+        let karr = i.make_array(keys.into_iter().map(Value::from_string).collect());
+        set_builtin(&obj, "__zip_keys", karr);
+    }
+    i.def_method(&obj, "next", 0, zip_next);
+    if let Some(sym) = i.iterator_sym.clone() {
+        let itf = i.make_native("[Symbol.iterator]", 0, return_this);
+        obj.borrow_mut()
+            .props
+            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
+    }
+    Ok(Value::Obj(obj))
+}
+
+fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let finished = ab(i.get_member(&this, "__zip_finished"))?;
+    if i.to_boolean(&finished) {
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
+    let iters = ab(i.get_member(&this, "__zip_iters"))?;
+    let nexts = ab(i.get_member(&this, "__zip_nexts"))?;
+    let done = ab(i.get_member(&this, "__zip_done"))?;
+    let pad = ab(i.get_member(&this, "__zip_pad"))?;
+    let mode_v = ab(i.get_member(&this, "__zip_mode"))?;
+    let mode = ab(i.to_string(&mode_v))?.to_string();
+    let n = match &iters {
+        Value::Obj(o) => i.array_length(o),
+        _ => 0,
+    };
+    if n == 0 {
+        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
+    let mut values = vec![Value::Undefined; n];
+    let mut any_done = false;
+    let mut any_live = false;
+    for j in 0..n {
+        let dj = ab(i.get_member(&done, &j.to_string()))?;
+        if i.to_boolean(&dj) {
+            any_done = true;
+            values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+            continue;
+        }
+        let it = ab(i.get_member(&iters, &j.to_string()))?;
+        let nx = ab(i.get_member(&nexts, &j.to_string()))?;
+        match step_iter_with(i, &it, &nx)? {
+            Some(v) => {
+                any_live = true;
+                values[j] = v;
+            }
+            None => {
+                any_done = true;
+                ab(i.set_member(&done, &j.to_string(), Value::Bool(true)))?;
+                values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+            }
+        }
+    }
+    let finish = match mode.as_str() {
+        "shortest" => any_done,
+        "longest" => !any_live,
+        "strict" => {
+            if any_done && any_live {
+                set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+                return Err(i.make_error("TypeError", "Iterator.zip strict: length mismatch"));
+            }
+            any_done
+        }
+        _ => any_done,
+    };
+    if finish {
+        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
+    let result = if ab(i.get_member(&this, "__zip_keys")).is_ok()
+        && !matches!(ab(i.get_member(&this, "__zip_keys"))?, Value::Undefined)
+    {
+        let keys = ab(i.get_member(&this, "__zip_keys"))?;
+        let o = i.new_object();
+        for j in 0..n {
+            let k = ab(i.get_member(&keys, &j.to_string()))?;
+            let k = ab(i.to_string(&k))?.to_string();
+            set_data(&o, &k, values[j].clone());
+        }
+        Value::Obj(o)
+    } else {
+        i.make_array(values)
+    };
+    Ok(iter_result(i, result, false))
 }
 
 /// `Iterator.concat`'s iterator: opens each captured iterable in order and yields its values.
