@@ -1988,6 +1988,7 @@ impl Parser {
             }
             // `async` / generator `*` method prefixes (async only when followed by a key start).
             let is_async = self.is_ident_word("async")
+                && !self.cur_escaped()
                 && !matches!(
                     self.peek_kind(1),
                     Tok::Punct(":")
@@ -2301,7 +2302,8 @@ impl Parser {
             };
             self.advance();
         }
-        let is_async = self.is_ident_word("async") && !self.next_is_member_terminator(1);
+        let is_async =
+            self.is_ident_word("async") && !self.cur_escaped() && !self.next_is_member_terminator(1);
         if is_async {
             self.advance();
         }
