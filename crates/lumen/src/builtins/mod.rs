@@ -6787,20 +6787,34 @@ fn install_object(it: &mut Interp) {
                 "Object.fromEntries called on null or undefined",
             ));
         }
-        let pairs = ab(i.iterate(&iterable))?;
         let obj = i.new_object();
-        for pair in pairs {
-            // Each entry must be an Object; keys/values are added via CreateDataPropertyOnObject,
-            // which defines a plain data property and never invokes inherited setters.
-            if !matches!(pair, Value::Obj(_)) {
-                return Err(i.make_error("TypeError", "Object.fromEntries entry is not an object"));
+        // Lazily step the iterator; an abrupt completion while processing an entry closes it.
+        let (iter, next) = ab(i.get_iterator(&iterable))?;
+        loop {
+            let entry = match ab(i.iterator_step(&iter, &next))? {
+                Some(v) => v,
+                None => break,
+            };
+            let processed = (|i: &mut Interp| -> Result<(), Value> {
+                // Each entry must be an Object; keys/values are added via CreateDataPropertyOnObject,
+                // which defines a plain data property and never invokes inherited setters.
+                if !matches!(entry, Value::Obj(_)) {
+                    return Err(
+                        i.make_error("TypeError", "Object.fromEntries entry is not an object")
+                    );
+                }
+                let k = ab(i.get_member(&entry, "0"))?;
+                let v = ab(i.get_member(&entry, "1"))?;
+                let key = ab(i.to_property_key(&k))?;
+                obj.borrow_mut()
+                    .props
+                    .insert(key.as_str(), Property::data(v, true, true, true));
+                Ok(())
+            })(i);
+            if let Err(e) = processed {
+                i.iterator_close(&iter);
+                return Err(e);
             }
-            let k = ab(i.get_member(&pair, "0"))?;
-            let v = ab(i.get_member(&pair, "1"))?;
-            let key = ab(i.to_property_key(&k))?;
-            obj.borrow_mut()
-                .props
-                .insert(key.as_str(), Property::data(v, true, true, true));
         }
         Ok(Value::Obj(obj))
     });
