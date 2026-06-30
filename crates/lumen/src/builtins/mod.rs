@@ -384,6 +384,9 @@ fn install_async_disposable_stack(it: &mut Interp) {
 fn install_weak_refs(it: &mut Interp) {
     let wr_proto = Object::new(Some(it.object_proto.clone()));
     it.def_method(&wr_proto, "deref", 0, |i, this, _| {
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__target")) {
+            return Err(i.make_error("TypeError", "deref called on a non-WeakRef"));
+        }
         ab(i.get_member(&this, "__target"))
     });
     let wr_ctor = it.make_native("WeakRef", 1, |i, _t, a| {
@@ -407,6 +410,12 @@ fn install_weak_refs(it: &mut Interp) {
         "constructor",
         Property::builtin(Value::Obj(wr_ctor.clone())),
     );
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        wr_proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("WeakRef"), false, false, true),
+        );
+    }
     set_builtin(&it.global, "WeakRef", Value::Obj(wr_ctor));
 
     let fr_proto = Object::new(Some(it.object_proto.clone()));

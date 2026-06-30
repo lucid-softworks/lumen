@@ -4858,3 +4858,14 @@ fn finalization_registry_validation() {
         "[object FinalizationRegistry]"
     );
 }
+
+#[test]
+fn weakref_brand_and_tag() {
+    assert_eq!(run("var o={}; new WeakRef(o).deref()===o"), "true");
+    assert_eq!(throws("WeakRef.prototype.deref.call({})"), "TypeError");
+    assert_eq!(throws("new WeakRef(5)"), "TypeError");
+    assert_eq!(
+        run("Object.prototype.toString.call(new WeakRef({}))"),
+        "[object WeakRef]"
+    );
+}
