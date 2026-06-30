@@ -7523,12 +7523,14 @@ fn install_object(it: &mut Interp) {
                 continue;
             }
             let from = Value::Obj(to_object_arg(i, src.clone(), "Object.assign")?);
-            if proxy_pair(i, &from).is_some() {
-                // Proxy source: enumerate via [[OwnPropertyKeys]]/[[GetOwnProperty]] traps.
-                for key in proxy_enum_string_keys(i, &from)? {
-                    if let Value::Str(k) = key {
-                        let v = ab(i.get_member(&from, &k))?;
-                        assign_set(i, &to_val, &k, v)?;
+            if let Some((t, h)) = proxy_pair(i, &from) {
+                // Proxy source: enumerate all own keys (string + symbol) via the traps, copying each
+                // enumerable one.
+                for key in proxy_own_keys(i, &t, &h)? {
+                    let pk = ab(i.to_property_key(&key))?;
+                    if proxy_key_enumerable(i, &t, &h, &pk)? {
+                        let v = ab(i.get_member(&from, &pk))?;
+                        assign_set(i, &to_val, &pk, v)?;
                     }
                 }
                 continue;
