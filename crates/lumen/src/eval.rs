@@ -1024,9 +1024,10 @@ impl Interp {
                 }
                 (b.with_obj.clone(), b.parent.clone())
             };
-            // `with (obj)`: resolve against the object's properties if it has the name.
-            if let Some(obj @ Value::Obj(o)) = &with_obj {
-                if self.has_property(o, name) {
+            // `with (obj)`: resolve against the object's properties if it has the name (the proxy
+            // `has` trap participates here).
+            if let Some(obj @ Value::Obj(_)) = &with_obj {
+                if self.js_has_property(obj, name)? {
                     return self.get_member(obj, name);
                 }
             }
@@ -1084,8 +1085,8 @@ impl Interp {
                 }
                 (b.with_obj.clone(), b.parent.clone())
             };
-            if let Some(obj @ Value::Obj(o)) = &with_obj {
-                if self.has_property(o, name) {
+            if let Some(obj @ Value::Obj(_)) = &with_obj {
+                if self.js_has_property(obj, name)? {
                     return self.set_member(obj, name, value);
                 }
             }
@@ -1114,6 +1115,64 @@ impl Interp {
             out.push(self.get_member(obj, &k.to_string())?);
         }
         Ok(out)
+    }
+
+    /// `[[HasProperty]]`: the trap-aware `in` check. Handles a proxy anywhere on the chain (its `has`
+    /// trap, or forwarding to the target's own `[[HasProperty]]`), TypedArray index slots, then the
+    /// ordinary own-property + prototype walk.
+    pub(crate) fn js_has_property(&mut self, obj: &Value, key: &str) -> Result<bool, Abrupt> {
+        let o = match obj {
+            Value::Obj(o) => o.clone(),
+            _ => return Ok(false),
+        };
+        let ptr = Rc::as_ptr(&o) as usize;
+        if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+            if matches!(handler, Value::Null) {
+                return Err(self.throw("TypeError", "cannot perform 'has' on a revoked proxy"));
+            }
+            let trap = self.get_member(&handler, "has")?;
+            if matches!(trap, Value::Undefined | Value::Null) {
+                return self.js_has_property(&target, key);
+            }
+            if !trap.is_callable() {
+                return Err(self.throw("TypeError", "proxy 'has' trap is not callable"));
+            }
+            let res = self.call(
+                trap,
+                handler,
+                &[target.clone(), Value::from_string(key.to_string())],
+            )?;
+            let present = self.to_boolean(&res);
+            if !present {
+                if let Value::Obj(t) = &target {
+                    let p = t.borrow().props.get(key).cloned();
+                    if let Some(p) = p {
+                        if !p.configurable || !t.borrow().extensible {
+                            return Err(self.throw(
+                                "TypeError",
+                                "proxy 'has' trap hid a non-configurable property",
+                            ));
+                        }
+                    }
+                }
+            }
+            return Ok(present);
+        }
+        if let Some(info) = self.typed_arrays.get(&ptr).copied() {
+            match self.ta_index_kind(&info, key) {
+                TaIndex::Element(_) => return Ok(true),
+                TaIndex::Exotic => return Ok(false),
+                TaIndex::Ordinary => {}
+            }
+        }
+        if o.borrow().props.contains(key) {
+            return Ok(true);
+        }
+        let proto = o.borrow().proto.clone();
+        match proto {
+            Some(p) => self.js_has_property(&Value::Obj(p), key),
+            None => Ok(false),
+        }
     }
 
     pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
@@ -2988,40 +3047,9 @@ impl Interp {
             }
             "instanceof" => self.instanceof(&l, &r),
             "in" => {
-                if let Value::Obj(o) = &r {
+                if matches!(&r, Value::Obj(_)) {
                     let key = self.to_property_key(&l)?;
-                    let ptr = Rc::as_ptr(o) as usize;
-                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
-                        let trap = self.get_member(&handler, "has")?;
-                        if trap.is_callable() {
-                            let res = self.call(
-                                trap,
-                                handler,
-                                &[target.clone(), Value::str(key.as_str())],
-                            )?;
-                            let present = self.to_boolean(&res);
-                            // Invariant: can't hide a non-configurable own property, nor any own
-                            // property of a non-extensible target.
-                            if !present {
-                                if let Value::Obj(t) = &target {
-                                    let p = t.borrow().props.get(&key).cloned();
-                                    if let Some(p) = p {
-                                        if !p.configurable || !t.borrow().extensible {
-                                            return Err(self.throw(
-                                                "TypeError",
-                                                "proxy 'has' trap hid a non-configurable property",
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            return Ok(Value::Bool(present));
-                        }
-                        if let Value::Obj(to) = &target {
-                            return Ok(Value::Bool(self.has_property(to, &key)));
-                        }
-                    }
-                    Ok(Value::Bool(self.has_property(o, &key)))
+                    Ok(Value::Bool(self.js_has_property(&r, &key)?))
                 } else {
                     Err(self.throw("TypeError", "'in' requires an object on the right"))
                 }
