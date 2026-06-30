@@ -2170,7 +2170,7 @@ fn proxy_misc_traps() {
         "TypeError"
     );
     assert_eq!(run("var t={};Object.preventExtensions(t);var p=new Proxy(t,{isExtensible(){return false}}); Object.isExtensible(p)"), "false");
-    assert_eq!(run("var log=''; var p=new Proxy({},{preventExtensions(t){log+='pe';return true}}); Object.preventExtensions(p); log"), "pe");
+    assert_eq!(run("var log=''; var p=new Proxy({},{preventExtensions(t){log+='pe';Object.preventExtensions(t);return true}}); Object.preventExtensions(p); log"), "pe");
     assert_eq!(
         throws(
             "var p=new Proxy({},{preventExtensions(){return false}}); Object.preventExtensions(p)"

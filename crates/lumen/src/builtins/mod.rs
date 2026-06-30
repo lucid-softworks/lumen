@@ -3845,8 +3845,8 @@ fn install_reflect(it: &mut Interp) {
     });
     it.def_method(&r, "getPrototypeOf", 1, |i, _t, a| match arg(a, 0) {
         Value::Obj(o) => {
-            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-                return proxy_get_prototype(i, &target, &handler);
+            if proxy_pair(i, &Value::Obj(o.clone())).is_some() {
+                return js_get_prototype_of(i, &Value::Obj(o.clone()));
             }
             Ok(o.borrow()
                 .proto
@@ -3910,16 +3910,19 @@ fn install_reflect(it: &mut Interp) {
         };
         ab(i.construct(target, &args))
     });
-    it.def_method(&r, "isExtensible", 1, |_i, _t, a| {
-        Ok(Value::Bool(
-            matches!(arg(a, 0), Value::Obj(o) if o.borrow().extensible),
-        ))
-    });
-    it.def_method(&r, "preventExtensions", 1, |_i, _t, a| {
-        if let Value::Obj(o) = arg(a, 0) {
-            o.borrow_mut().extensible = false;
+    it.def_method(&r, "isExtensible", 1, |i, _t, a| {
+        let obj = arg(a, 0);
+        if !matches!(obj, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.isExtensible called on non-object"));
         }
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(js_is_extensible(i, &obj)?))
+    });
+    it.def_method(&r, "preventExtensions", 1, |i, _t, a| {
+        let obj = arg(a, 0);
+        if !matches!(obj, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.preventExtensions called on non-object"));
+        }
+        Ok(Value::Bool(js_prevent_extensions(i, &obj)?))
     });
     set_to_string_tag(it, &r, "Reflect");
     set_builtin(&it.global, "Reflect", Value::Obj(r));
@@ -5242,6 +5245,36 @@ fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<boo
     Ok(true)
 }
 
+/// `[[PreventExtensions]]`, proxy-aware. Returns whether it succeeded.
+fn js_prevent_extensions(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
+    if let Some((target, handler)) = proxy_pair(i, obj) {
+        if matches!(handler, Value::Null) {
+            return Err(i.make_error("TypeError", "proxy is revoked"));
+        }
+        let trap = ab(i.get_member(&handler, "preventExtensions"))?;
+        if matches!(trap, Value::Undefined | Value::Null) {
+            return js_prevent_extensions(i, &target);
+        }
+        if !trap.is_callable() {
+            return Err(i.make_error("TypeError", "proxy 'preventExtensions' trap is not callable"));
+        }
+        let res = ab(i.call(trap, handler, std::slice::from_ref(&target)))?;
+        let ok = i.to_boolean(&res);
+        // Invariant: a true result requires the target to actually be non-extensible.
+        if ok && js_is_extensible(i, &target)? {
+            return Err(i.make_error(
+                "TypeError",
+                "proxy 'preventExtensions' reported success but the target is extensible",
+            ));
+        }
+        return Ok(ok);
+    }
+    if let Value::Obj(o) = obj {
+        o.borrow_mut().extensible = false;
+    }
+    Ok(true)
+}
+
 fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Result<Value, Value> {
     let trap = ab(i.get_member(handler, "getPrototypeOf"))?;
     if trap.is_callable() {
@@ -5880,53 +5913,19 @@ fn install_object(it: &mut Interp) {
         Ok(arg(args, 0))
     });
     it.def_method(&ctor, "preventExtensions", 1, |i, _this, args| {
-        if let Value::Obj(o) = arg(args, 0) {
-            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-                let trap = ab(i.get_member(&handler, "preventExtensions"))?;
-                if trap.is_callable() {
-                    let res = ab(i.call(trap, handler, &[target]))?;
-                    if !i.to_boolean(&res) {
-                        return Err(i.make_error(
-                            "TypeError",
-                            "preventExtensions trap returned a falsish value",
-                        ));
-                    }
-                    return Ok(arg(args, 0));
-                }
-                if let Value::Obj(t) = &target {
-                    t.borrow_mut().extensible = false;
-                }
-                return Ok(arg(args, 0));
-            }
-            o.borrow_mut().extensible = false;
+        let obj = arg(args, 0);
+        if matches!(obj, Value::Obj(_)) && !js_prevent_extensions(i, &obj)? {
+            return Err(i.make_error("TypeError", "could not prevent extensions"));
         }
-        Ok(arg(args, 0))
+        Ok(obj)
     });
     it.def_method(&ctor, "isExtensible", 1, |i, _this, args| {
-        if let Value::Obj(o) = arg(args, 0) {
-            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-                let trap = ab(i.get_member(&handler, "isExtensible"))?;
-                if trap.is_callable() {
-                    let res = ab(i.call(trap, handler, std::slice::from_ref(&target)))?;
-                    let result = i.to_boolean(&res);
-                    // Invariant: the trap result must equal the target's extensibility.
-                    let target_ext = matches!(&target, Value::Obj(t) if t.borrow().extensible);
-                    if result != target_ext {
-                        return Err(i.make_error(
-                            "TypeError",
-                            "proxy 'isExtensible' must match the target",
-                        ));
-                    }
-                    return Ok(Value::Bool(result));
-                }
-                return Ok(Value::Bool(
-                    matches!(&target, Value::Obj(t) if t.borrow().extensible),
-                ));
-            }
+        let obj = arg(args, 0);
+        // Object.isExtensible returns false for a non-object (ES2015+).
+        if !matches!(obj, Value::Obj(_)) {
+            return Ok(Value::Bool(false));
         }
-        Ok(Value::Bool(
-            matches!(arg(args, 0), Value::Obj(o) if o.borrow().extensible),
-        ))
+        Ok(Value::Bool(js_is_extensible(i, &obj)?))
     });
     it.def_method(&ctor, "assign", 2, |i, _this, args| {
         let target = arg(args, 0);

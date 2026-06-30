@@ -690,16 +690,19 @@ impl Interp {
                 if !self.proxies.is_empty() {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "get")?;
-                        if trap.is_callable() {
-                            let res = self.call(
-                                trap,
-                                handler,
-                                &[target.clone(), Value::str(key), base.clone()],
-                            )?;
-                            self.proxy_get_invariant(&target, key, &res)?;
-                            return Ok(res);
+                        if matches!(trap, Value::Undefined | Value::Null) {
+                            return self.get_member(&target, key);
                         }
-                        return self.get_member(&target, key);
+                        if !trap.is_callable() {
+                            return Err(self.throw("TypeError", "proxy 'get' trap is not callable"));
+                        }
+                        let res = self.call(
+                            trap,
+                            handler,
+                            &[target.clone(), Value::str(key), base.clone()],
+                        )?;
+                        self.proxy_get_invariant(&target, key, &res)?;
+                        return Ok(res);
                     }
                 }
                 // TypedArray integer-index reads come from the backing buffer, not the property map.
