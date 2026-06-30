@@ -8280,7 +8280,17 @@ fn install_array(it: &mut Interp) {
             let ctor_args: &[Value] = if from_iterable { &[] } else { &[Value::Num(len as f64)] };
             let res = ab(i.construct(this, ctor_args))?;
             for (k, v) in out.into_iter().enumerate() {
-                ab(i.set_member(&res, &k.to_string(), v))?;
+                // CreateDataPropertyOrThrow: a non-configurable existing index makes this throw.
+                if let Value::Obj(o) = &res {
+                    let desc = i.new_object();
+                    set_data(&desc, "value", v);
+                    set_data(&desc, "writable", Value::Bool(true));
+                    set_data(&desc, "enumerable", Value::Bool(true));
+                    set_data(&desc, "configurable", Value::Bool(true));
+                    if !ab(define_own_property(i, o, &k.to_string(), &Value::Obj(desc)))? {
+                        return Err(i.make_error("TypeError", "Array.from: cannot define property"));
+                    }
+                }
             }
             ab(i.set_member(&res, "length", Value::Num(len as f64)))?;
             Ok(res)
