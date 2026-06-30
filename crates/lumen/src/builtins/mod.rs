@@ -5562,11 +5562,22 @@ fn proxy_define_property(
                         "proxy 'defineProperty' made a configurable target property non-configurable",
                     ));
                 }
-                if !p.configurable && !p.accessor && !p.writable && matches!(pd.writable, Some(true)) {
-                    return Err(i.throw(
-                        "TypeError",
-                        "proxy 'defineProperty' made a non-writable property writable",
-                    ));
+                if !p.configurable && !p.accessor && !p.writable {
+                    if matches!(pd.writable, Some(true)) {
+                        return Err(i.throw(
+                            "TypeError",
+                            "proxy 'defineProperty' made a non-writable property writable",
+                        ));
+                    }
+                    // A non-configurable, non-writable data property's value can't be changed.
+                    if let Some(v) = &pd.value {
+                        if !i.strict_equals(v, &p.value) {
+                            return Err(i.throw(
+                                "TypeError",
+                                "proxy 'defineProperty' changed a non-configurable non-writable value",
+                            ));
+                        }
+                    }
                 }
             }
         }
