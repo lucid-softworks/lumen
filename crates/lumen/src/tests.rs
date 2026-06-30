@@ -4391,3 +4391,44 @@ fn object_from_entries() {
         "1,false"
     );
 }
+
+#[test]
+fn collection_brand_checks() {
+    // A prototype method rejects a receiver of a different collection brand.
+    assert_eq!(
+        throws("Map.prototype.set.call(new Set(), 1, 2)"),
+        "TypeError"
+    );
+    assert_eq!(throws("Set.prototype.add.call(new Map(), 1)"), "TypeError");
+    assert_eq!(
+        throws("WeakMap.prototype.set.call(new Map(), {}, 1)"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("Map.prototype.get.call(new WeakMap(), {})"),
+        "TypeError"
+    );
+    assert_eq!(throws("WeakMap.prototype.get.call({}, {})"), "TypeError");
+    // Same-brand calls still work.
+    assert_eq!(run("var m=new Map(); m.set(1,2); m.get(1)"), "2");
+    assert_eq!(
+        run("var s=new Set([1,2,3]); s.union(new Set([3,4])).size"),
+        "4"
+    );
+}
+
+#[test]
+fn weakmap_get_or_insert() {
+    // getOrInsert returns the existing value, or inserts and returns the supplied value.
+    assert_eq!(
+        run("var k={}; var w=new WeakMap(); [w.getOrInsert(k, 1), w.getOrInsert(k, 2)].join(',')"),
+        "1,1"
+    );
+    // getOrInsertComputed calls the callback only when the key is absent.
+    assert_eq!(
+        run("var k={}; var w=new WeakMap([[k, 9]]); w.getOrInsertComputed(k, ()=>{throw 'no';})"),
+        "9"
+    );
+    // A non-registerable key throws.
+    assert_eq!(throws("new WeakMap().getOrInsert(5, 1)"), "TypeError");
+}

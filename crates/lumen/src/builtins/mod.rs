@@ -3245,17 +3245,29 @@ fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
 /// Brand-check a Map/Set receiver: it must be an object carrying a collection data slot (every
 /// Map/Set/WeakMap/WeakSet gets one at construction), else TypeError.
 fn coll_ptr(i: &Interp, this: &Value) -> Result<usize, Value> {
-    match this.as_obj() {
-        Some(o) => {
-            let ptr = Rc::as_ptr(o) as usize;
-            if i.map_data.contains_key(&ptr) {
-                Ok(ptr)
-            } else {
-                Err(i.make_error("TypeError", "method called on an incompatible receiver"))
-            }
-        }
-        None => Err(i.make_error("TypeError", "method called on an incompatible receiver")),
+    coll_ptr_kind(i, this, None)
+}
+
+/// Resolve a Map/Set backing pointer with a brand check. `want = Some("Map"|"Set")` requires that
+/// exact kind; `None` accepts either strong collection but still rejects WeakMap/WeakSet and plain
+/// objects (which lack a strong `[[MapData]]`/`[[SetData]]` slot).
+fn coll_ptr_kind(i: &Interp, this: &Value, want: Option<&str>) -> Result<usize, Value> {
+    let err = || i.make_error("TypeError", "method called on an incompatible receiver");
+    let o = this.as_obj().ok_or_else(err)?;
+    let ptr = Rc::as_ptr(o) as usize;
+    if !i.map_data.contains_key(&ptr) {
+        return Err(err());
     }
+    let kind = o.borrow().props.get("__ck").map(|p| p.value.clone());
+    let ok = match (&kind, want) {
+        (Some(Value::Str(s)), Some(w)) => &**s == w,
+        (Some(Value::Str(s)), None) => &**s == "Map" || &**s == "Set",
+        _ => false,
+    };
+    if !ok {
+        return Err(err());
+    }
+    Ok(ptr)
 }
 
 /// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
@@ -3363,6 +3375,7 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
         }
     }
     i.map_data.insert(ptr, entries);
+    set_internal(&obj, "__ck", Value::str("Set"));
     Value::Obj(obj)
 }
 /// GetSetRecord: a set-like `other` exposes a numeric `size`, and callable `has` and `keys`.
@@ -3500,6 +3513,8 @@ fn collection_ctor(
     let obj = new_from_ctor(i, name)?;
     let ptr = Rc::as_ptr(&obj) as usize;
     i.map_data.insert(ptr, Vec::new());
+    // Brand the instance so prototype methods can reject cross-collection receivers.
+    set_internal(&obj, "__ck", Value::str(name));
     let mv = Value::Obj(obj);
     if let Some(src) = args.first() {
         if !matches!(src, Value::Undefined | Value::Null) {
@@ -3543,7 +3558,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
 
     let adder: NativeFn = if is_set {
         |i, this, a| {
-            let ptr = coll_ptr(i, &this)?;
+            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
             let key = arg(a, 0);
             let e = i.map_data.entry(ptr).or_default();
             if !e.iter().any(|(k, _)| same_value_zero(k, &key)) {
@@ -3553,7 +3568,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         }
     } else {
         |i, this, a| {
-            let ptr = coll_ptr(i, &this)?;
+            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
             let (key, val) = (arg(a, 0), arg(a, 1));
             let e = i.map_data.entry(ptr).or_default();
             if let Some(slot) = e.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
@@ -3700,6 +3715,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
                 .map(|(k, v)| (k, i.make_array(v)))
                 .collect();
             i.map_data.insert(ptr, entries);
+            set_internal(&m, "__ck", Value::str("Map"));
             Ok(Value::Obj(m))
         });
     }
@@ -3709,13 +3725,33 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
 
 /// WeakMap/WeakSet: like Map/Set but keys must be objects and there is no iteration/size (we do not
 /// model weakness — entries simply persist, which is unobservable to non-GC tests).
+/// Resolve the backing-store pointer for a weak-collection receiver, enforcing its brand: `want` is
+/// the exact kind ("WeakMap"/"WeakSet") for kind-specific methods, or "Weak" to accept either for
+/// the methods (has/delete) shared by both.
+fn weak_brand_ptr(i: &mut Interp, this: &Value, want: &str) -> Result<usize, Value> {
+    let ptr = map_ptr(this)
+        .filter(|p| i.map_data.contains_key(p))
+        .ok_or_else(|| i.make_error("TypeError", "method called on incompatible receiver"))?;
+    let kind = this
+        .as_obj()
+        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value.clone()));
+    let ok = match &kind {
+        Some(Value::Str(s)) if want == "Weak" => s.starts_with("Weak"),
+        Some(Value::Str(s)) => &**s == want,
+        _ => false,
+    };
+    if !ok {
+        return Err(i.make_error("TypeError", "method called on incompatible receiver"));
+    }
+    Ok(ptr)
+}
+
 fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert(name, proto.clone());
     let adder: NativeFn = if is_set {
         |i, this, a| {
-            let ptr =
-                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-WeakSet"))?;
+            let ptr = weak_brand_ptr(i, &this, "WeakSet")?;
             let key = arg(a, 0);
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used in weak set"));
@@ -3728,8 +3764,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         }
     } else {
         |i, this, a| {
-            let ptr =
-                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-WeakMap"))?;
+            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
             let (key, val) = (arg(a, 0), arg(a, 1));
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
@@ -3751,8 +3786,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
     );
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr =
-                map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "get on non-WeakMap"))?;
+            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
@@ -3763,9 +3797,59 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
                 })
                 .unwrap_or(Value::Undefined))
         });
+        // Upsert proposal: getOrInsert(key, value) / getOrInsertComputed(key, callbackfn).
+        it.def_method(&proto, "getOrInsert", 2, |i, this, a| {
+            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let key = arg(a, 0);
+            if !can_be_held_weakly(i, &key) {
+                return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
+            }
+            if let Some((_, v)) = i.map_data[&ptr]
+                .iter()
+                .find(|(k, _)| same_value_zero(k, &key))
+            {
+                return Ok(v.clone());
+            }
+            let value = arg(a, 1);
+            i.map_data
+                .entry(ptr)
+                .or_default()
+                .push((key, value.clone()));
+            Ok(value)
+        });
+        it.def_method(&proto, "getOrInsertComputed", 2, |i, this, a| {
+            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let key = arg(a, 0);
+            if !can_be_held_weakly(i, &key) {
+                return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
+            }
+            let cb = arg(a, 1);
+            if !cb.is_callable() {
+                return Err(i.make_error("TypeError", "callback is not callable"));
+            }
+            if let Some((_, v)) = i.map_data[&ptr]
+                .iter()
+                .find(|(k, _)| same_value_zero(k, &key))
+            {
+                return Ok(v.clone());
+            }
+            let value = ab(i.call(cb, Value::Undefined, std::slice::from_ref(&key)))?;
+            // The callback may have mutated the map; re-check before inserting.
+            if let Some((_, v)) = i.map_data[&ptr]
+                .iter()
+                .find(|(k, _)| same_value_zero(k, &key))
+            {
+                return Ok(v.clone());
+            }
+            i.map_data
+                .entry(ptr)
+                .or_default()
+                .push((key, value.clone()));
+            Ok(value)
+        });
     }
     it.def_method(&proto, "has", 1, |i, this, a| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "has on non-weak"))?;
+        let ptr = weak_brand_ptr(i, &this, "Weak")?;
         let key = arg(a, 0);
         Ok(Value::Bool(
             i.map_data
@@ -3775,7 +3859,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         ))
     });
     it.def_method(&proto, "delete", 1, |i, this, a| {
-        let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "delete on non-weak"))?;
+        let ptr = weak_brand_ptr(i, &this, "Weak")?;
         let key = arg(a, 0);
         let mut removed = false;
         if let Some(e) = i.map_data.get_mut(&ptr) {
