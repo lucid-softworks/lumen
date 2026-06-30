@@ -7942,19 +7942,31 @@ fn install_array(it: &mut Interp) {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error(
+                "TypeError",
+                "Array.prototype.flatMap mapper is not callable",
+            ));
+        }
         let cb_this = arg(args, 1);
-        let mut mapped = Vec::with_capacity(len);
+        // The mapper runs only on present indices; its result is then flattened one level.
+        let mut out = Vec::new();
         for k in 0..len {
+            if !ab(i.js_has_property(&this, &k.to_string()))? {
+                continue;
+            }
             let v = ab(i.get_member(&this, &k.to_string()))?;
-            mapped.push(ab(i.call(
+            let mapped = ab(i.call(
                 cb.clone(),
                 cb_this.clone(),
                 &[v, Value::Num(k as f64), this.clone()],
-            ))?);
+            ))?;
+            if json_is_array(i, &mapped)? {
+                array_flatten(i, &mapped, 0, &mut out)?;
+            } else {
+                out.push(mapped);
+            }
         }
-        let arr = i.make_array(mapped);
-        let mut out = Vec::new();
-        array_flatten(i, &arr, 1, &mut out)?;
         Ok(i.make_array(out))
     });
     it.def_method(&ap, "splice", 2, array_splice);
@@ -8292,8 +8304,12 @@ fn array_flatten(
     };
     let len = ab(i.checked_array_len(&o))?;
     for k in 0..len {
+        // FlattenIntoArray skips holes (HasProperty), recursing into nested arrays.
+        if !ab(i.js_has_property(arr, &k.to_string()))? {
+            continue;
+        }
         let v = ab(i.get_member(arr, &k.to_string()))?;
-        let is_arr = matches!(&v, Value::Obj(vo) if matches!(vo.borrow().exotic, Exotic::Array));
+        let is_arr = json_is_array(i, &v)?;
         if depth > 0 && is_arr {
             array_flatten(i, &v, depth - 1, out)?;
         } else {

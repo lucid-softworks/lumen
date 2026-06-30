@@ -4574,3 +4574,16 @@ fn array_sort_holes_and_delete() {
     // A non-callable, non-undefined comparator throws.
     assert_eq!(throws("[1,2].sort({})"), "TypeError");
 }
+
+#[test]
+fn array_flat_flatmap_holes() {
+    // flatMap validates the callback and skips holes; flat skips holes too.
+    assert_eq!(
+        run("[1,2,3].flatMap(x=>[x,x*10]).join(',')"),
+        "1,10,2,20,3,30"
+    );
+    assert_eq!(throws("[1].flatMap(5)"), "TypeError");
+    assert_eq!(run("var c=0; [1,,3].flatMap(x=>{c++;return x;}); c"), "2");
+    assert_eq!(run("[1,[2,[3]]].flat().join(',')"), "1,2,3");
+    assert_eq!(run("[1,[2,[3]]].flat(2).join(',')"), "1,2,3");
+}
