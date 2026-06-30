@@ -3721,11 +3721,36 @@ fn install_reflect(it: &mut Interp) {
         ab(i.get_member(&arg(a, 0), &key))
     });
     it.def_method(&r, "set", 3, |i, _t, a| {
-        if !matches!(arg(a, 0), Value::Obj(_)) {
+        let target = arg(a, 0);
+        if !matches!(target, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "Reflect.set called on non-object"));
         }
         let key = ab(i.to_property_key(&arg(a, 1)))?;
-        ab(i.set_member(&arg(a, 0), &key, arg(a, 2)))?;
+        let value = arg(a, 2);
+        // A proxy's [[Set]] returns the ToBoolean of its trap result; surface that as Reflect.set's
+        // own boolean rather than always reporting success.
+        if let Some((ptarget, handler)) = proxy_pair(i, &target) {
+            if matches!(handler, Value::Null) {
+                return Err(i.make_error("TypeError", "proxy is revoked"));
+            }
+            let trap = ab(i.get_member(&handler, "set"))?;
+            if trap.is_callable() {
+                let receiver = if a.len() > 3 { arg(a, 3) } else { target.clone() };
+                let res = ab(i.call(
+                    trap,
+                    handler,
+                    &[ptarget.clone(), Value::from_string(key.clone()), value.clone(), receiver],
+                ))?;
+                let ok = i.to_boolean(&res);
+                if ok {
+                    ab(i.proxy_set_invariant(&ptarget, &key, &value))?;
+                }
+                return Ok(Value::Bool(ok));
+            }
+            ab(i.set_member(&ptarget, &key, value))?;
+            return Ok(Value::Bool(true));
+        }
+        ab(i.set_member(&target, &key, value))?;
         Ok(Value::Bool(true))
     });
     it.def_method(&r, "has", 2, |i, _t, a| {

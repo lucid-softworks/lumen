@@ -1831,7 +1831,7 @@ impl Interp {
 
     /// Proxy `[[Set]]` invariant: a `true` result can't contradict a non-configurable non-writable
     /// data property (value must match) or a non-configurable accessor with no setter.
-    fn proxy_set_invariant(
+    pub(crate) fn proxy_set_invariant(
         &mut self,
         target: &Value,
         key: &str,
