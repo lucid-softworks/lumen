@@ -4475,3 +4475,27 @@ fn number_constants_and_tofixed() {
     // Out-of-range still throws RangeError.
     assert_eq!(throws("(1).toFixed(101)"), "RangeError");
 }
+
+#[test]
+fn date_setter_order_and_invalid() {
+    // thisTimeValue validation precedes argument coercion: a non-Date receiver throws
+    // before the argument's valueOf runs.
+    assert_eq!(
+        run(r#"
+            var called=false;
+            try { Date.prototype.setHours.call({}, {valueOf(){called=true;return 0;}}); } catch(e){}
+            called
+        "#),
+        "false"
+    );
+    // An invalid (NaN) date: the setter returns NaN and leaves [[DateValue]] untouched, so a
+    // valueOf side-effect on the receiver persists.
+    assert_eq!(
+        run(r#"
+            var dt=new Date(NaN);
+            var r=dt.setHours({valueOf(){ dt.setTime(0); return 1; }});
+            [Number.isNaN(r), dt.getTime()].join(',')
+        "#),
+        "true,0"
+    );
+}

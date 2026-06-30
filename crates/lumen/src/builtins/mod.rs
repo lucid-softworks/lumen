@@ -2613,13 +2613,19 @@ fn date_set_multi(
     const ORDER: [u8; 7] = [0, 1, 2, 4, 5, 6, 7];
     let start_idx = ORDER.iter().position(|&f| f == start_sel).unwrap();
     let count = args.len().clamp(1, n_max);
-    // Coerce every read argument up front, in order.
+    // thisTimeValue validation precedes argument coercion (a non-Date receiver throws before any
+    // argument's valueOf runs); then coerce every read argument up front, in order.
+    let t = date_ms(i, this)?;
     let mut vals = Vec::with_capacity(count);
     for k in 0..count {
         vals.push(ab(i.to_number(&arg(args, k)))?);
     }
-    let t = date_ms(i, this)?;
     let nan_to_zero = start_sel == 0;
+    // A NaN stored time (for setters that don't zero it) yields NaN and leaves [[DateValue]]
+    // untouched — so an argument's valueOf side-effect on the receiver persists.
+    if t.is_nan() && !nan_to_zero {
+        return Ok(Value::Num(f64::NAN));
+    }
     let mut any_nan = t.is_nan() && !nan_to_zero;
     let base = if t.is_nan() { 0.0 } else { t };
     let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = ms_to_parts(base);
