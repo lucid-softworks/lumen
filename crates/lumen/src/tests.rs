@@ -4284,3 +4284,53 @@ fn json_stringify_space_and_replacer_tostring() {
         r#""big""#
     );
 }
+
+#[test]
+fn json_parse_reviver() {
+    // The reviver transforms values bottom-up; returning undefined deletes the key.
+    assert_eq!(
+        run("JSON.parse('{\"a\":1,\"b\":2}', (k,v)=> typeof v==='number'? v*10 : v).a"),
+        "10"
+    );
+    assert_eq!(
+        run("var o=JSON.parse('{\"x\":1,\"y\":2}', (k,v)=> k==='y'? undefined : v); 'y' in o"),
+        "false"
+    );
+    // The reviver is called with keys bottom-up then the root "".
+    assert_eq!(
+        run("var ks=[]; JSON.parse('{\"a\":[1,2]}', function(k,v){ks.push(k);return v;}); ks.join(',')"),
+        "0,1,a,"
+    );
+}
+
+#[test]
+fn json_parse_reviver_context_source() {
+    // A primitive leaf exposes its exact source text via the context's `source` property.
+    assert_eq!(run("JSON.parse('1.50', (k,v,ctx)=> ctx.source)"), "1.50");
+    // A forward-modified element reports no source (the value is no longer the parsed one).
+    assert_eq!(
+        run(r#"
+            (function(){
+                var seen = 'unset';
+                JSON.parse('[1,2]', function(k,v,ctx){
+                    if (k==='0') this[1] = 99;
+                    if (k==='1') seen = ctx.source;
+                    return this[k];
+                });
+                return String(seen);
+            })()
+        "#),
+        "undefined"
+    );
+    // CreateDataProperty during revival respects a non-configurable existing property (no throw).
+    assert_eq!(
+        run(r#"
+            var o=JSON.parse('{"a":1,"b":2}', function(k,v){
+                if (k==='a') Object.defineProperty(this,'b',{configurable:false});
+                return k==='b'? 42 : v;
+            });
+            o.b
+        "#),
+        "2"
+    );
+}

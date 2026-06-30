@@ -4851,6 +4851,19 @@ fn install_json(it: &mut Interp) {
         let text = ab(i.to_string(&arg(args, 0)))?;
         let chars: Vec<char> = text.chars().collect();
         let mut pos = 0;
+        let reviver = arg(args, 1);
+        // A callable reviver walks the result via InternalizeJSONProperty from a `{ "": v }` root,
+        // recording primitive source spans for its `context` argument.
+        if reviver.is_callable() {
+            let (v, record) = json_parse_recorded(i, &chars, &mut pos)?;
+            json_skip_ws(&chars, &mut pos);
+            if pos != chars.len() {
+                return Err(i.make_error("SyntaxError", "Unexpected non-whitespace after JSON"));
+            }
+            let root = i.new_object();
+            set_data(&root, "", v);
+            return internalize_json_property(i, &Value::Obj(root), "", &reviver, Some(&record));
+        }
         let v = json_parse_value(i, &chars, &mut pos)?;
         json_skip_ws(&chars, &mut pos);
         if pos != chars.len() {
@@ -4917,6 +4930,130 @@ fn json_quote(s: &str) -> String {
 struct JsonOpts {
     func: Option<Value>,
     keys: Option<Vec<String>>,
+}
+
+/// [[Delete]] for the JSON reviver: trap-aware, discarding the boolean status (per `Perform ?`).
+fn json_delete_prop(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Value> {
+    if let Some((target, handler)) = proxy_pair(i, holder) {
+        ab(i.proxy_delete(target, handler, key))?;
+        return Ok(());
+    }
+    if let Value::Obj(o) = holder {
+        let configurable = o
+            .borrow()
+            .props
+            .get(key)
+            .map(|p| p.configurable)
+            .unwrap_or(true);
+        if configurable {
+            o.borrow_mut().props.remove(key);
+        }
+    }
+    Ok(())
+}
+
+/// CreateDataProperty for the JSON reviver: a { value, writable, enumerable, configurable: true }
+/// data property, trap-aware for proxy holders.
+fn json_create_data_prop(i: &mut Interp, holder: &Value, key: &str, v: Value) -> Result<(), Value> {
+    // CreateDataProperty defines a fully-permissive data descriptor via [[DefineOwnProperty]], which
+    // validates against any existing (e.g. non-configurable) property; a false result is not an error.
+    let desc = i.new_object();
+    set_data(&desc, "value", v);
+    set_data(&desc, "writable", Value::Bool(true));
+    set_data(&desc, "enumerable", Value::Bool(true));
+    set_data(&desc, "configurable", Value::Bool(true));
+    if let Some((target, handler)) = proxy_pair(i, holder) {
+        ab(proxy_define_property(
+            i,
+            &target,
+            &handler,
+            key,
+            &Value::Obj(desc),
+        ))?;
+        return Ok(());
+    }
+    if let Value::Obj(o) = holder {
+        ab(define_own_property(i, o, key, &Value::Obj(desc)))?;
+    }
+    Ok(())
+}
+
+/// InternalizeJSONProperty: recursively walk the parsed value, applying the reviver bottom-up. The
+/// optional record carries primitive source text for the reviver's `context.source`.
+fn internalize_json_property(
+    i: &mut Interp,
+    holder: &Value,
+    name: &str,
+    reviver: &Value,
+    record: Option<&JsonRecord>,
+) -> Result<Value, Value> {
+    let val = ab(i.get_member(holder, name))?;
+    if matches!(val, Value::Obj(_)) {
+        if json_is_array(i, &val)? {
+            let len = match val.as_obj() {
+                Some(o) => ab(i.to_length(o))?,
+                None => 0,
+            };
+            for idx in 0..len {
+                let k = idx.to_string();
+                let child = match record {
+                    Some(JsonRecord::Arr(elems)) => elems.get(idx),
+                    _ => None,
+                };
+                let new_el = internalize_json_property(i, &val, &k, reviver, child)?;
+                if matches!(new_el, Value::Undefined) {
+                    json_delete_prop(i, &val, &k)?;
+                } else {
+                    json_create_data_prop(i, &val, &k, new_el)?;
+                }
+            }
+        } else {
+            let keys: Vec<String> = if proxy_pair(i, &val).is_some() {
+                proxy_enum_string_keys(i, &val)?
+                    .iter()
+                    .filter_map(|k| match k {
+                        Value::Str(s) => Some(s.to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                val.as_obj()
+                    .map(|o| ordered_enum_keys(o).iter().map(|k| k.to_string()).collect())
+                    .unwrap_or_default()
+            };
+            for k in keys {
+                let child = match record {
+                    Some(JsonRecord::Obj(entries)) => {
+                        entries.iter().find(|(key, _)| key == &k).map(|(_, r)| r)
+                    }
+                    _ => None,
+                };
+                let new_el = internalize_json_property(i, &val, &k, reviver, child)?;
+                if matches!(new_el, Value::Undefined) {
+                    json_delete_prop(i, &val, &k)?;
+                } else {
+                    json_create_data_prop(i, &val, &k, new_el)?;
+                }
+            }
+        }
+    }
+    // The `context` argument: a primitive leaf whose value is still the originally-parsed one (i.e.
+    // not forward-modified by the reviver) exposes its exact source text.
+    let context = i.new_object();
+    if let Some(JsonRecord::Prim(src, parsed)) = record {
+        if !matches!(val, Value::Obj(_)) && same_value(&val, parsed) {
+            set_data(&context, "source", Value::from_string(src.clone()));
+        }
+    }
+    ab(i.call(
+        reviver.clone(),
+        holder.clone(),
+        &[
+            Value::from_string(name.to_string()),
+            val,
+            Value::Obj(context),
+        ],
+    ))
 }
 
 /// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).
@@ -5161,6 +5298,102 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
                 .map_err(|_| i.make_error("SyntaxError", "Invalid number in JSON"))
         }
         _ => Err(i.make_error("SyntaxError", "Unexpected token in JSON")),
+    }
+}
+
+/// A parallel parse tree recording the source text of every primitive leaf, so the JSON.parse
+/// reviver can receive a `context` argument with a `source` property (ES2025 source-text access).
+enum JsonRecord {
+    Prim(String, Value),
+    Arr(Vec<JsonRecord>),
+    Obj(Vec<(String, JsonRecord)>),
+}
+
+/// Mirror of `json_parse_value` that also returns a `JsonRecord`. Containers are framed inline;
+/// primitive leaves delegate to `json_parse_value` and capture their exact source span.
+fn json_parse_recorded(
+    i: &mut Interp,
+    chars: &[char],
+    pos: &mut usize,
+) -> Result<(Value, JsonRecord), Value> {
+    json_skip_ws(chars, pos);
+    let c = *chars
+        .get(*pos)
+        .ok_or_else(|| i.make_error("SyntaxError", "Unexpected end of JSON input"))?;
+    match c {
+        '{' => {
+            *pos += 1;
+            let obj = i.new_object();
+            let mut rec: Vec<(String, JsonRecord)> = Vec::new();
+            json_skip_ws(chars, pos);
+            if chars.get(*pos) == Some(&'}') {
+                *pos += 1;
+                return Ok((Value::Obj(obj), JsonRecord::Obj(rec)));
+            }
+            loop {
+                json_skip_ws(chars, pos);
+                if chars.get(*pos) != Some(&'"') {
+                    return Err(i.make_error("SyntaxError", "Expected string key in JSON object"));
+                }
+                let key = json_parse_string(i, chars, pos)?;
+                json_skip_ws(chars, pos);
+                if chars.get(*pos) != Some(&':') {
+                    return Err(i.make_error("SyntaxError", "Expected ':' in JSON object"));
+                }
+                *pos += 1;
+                let (v, vr) = json_parse_recorded(i, chars, pos)?;
+                set_data(&obj, &key, v);
+                rec.retain(|(k, _)| k != &key);
+                rec.push((key, vr));
+                json_skip_ws(chars, pos);
+                match chars.get(*pos) {
+                    Some(',') => *pos += 1,
+                    Some('}') => {
+                        *pos += 1;
+                        break;
+                    }
+                    _ => {
+                        return Err(
+                            i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")
+                        )
+                    }
+                }
+            }
+            Ok((Value::Obj(obj), JsonRecord::Obj(rec)))
+        }
+        '[' => {
+            *pos += 1;
+            let mut items = Vec::new();
+            let mut rec = Vec::new();
+            json_skip_ws(chars, pos);
+            if chars.get(*pos) == Some(&']') {
+                *pos += 1;
+                return Ok((i.make_array(items), JsonRecord::Arr(rec)));
+            }
+            loop {
+                let (v, vr) = json_parse_recorded(i, chars, pos)?;
+                items.push(v);
+                rec.push(vr);
+                json_skip_ws(chars, pos);
+                match chars.get(*pos) {
+                    Some(',') => *pos += 1,
+                    Some(']') => {
+                        *pos += 1;
+                        break;
+                    }
+                    _ => {
+                        return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array"))
+                    }
+                }
+            }
+            Ok((i.make_array(items), JsonRecord::Arr(rec)))
+        }
+        _ => {
+            let start = *pos;
+            let v = json_parse_value(i, chars, pos)?;
+            let src: String = chars[start..*pos].iter().collect();
+            Ok((v.clone(), JsonRecord::Prim(src, v)))
+        }
     }
 }
 
