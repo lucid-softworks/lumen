@@ -4533,6 +4533,15 @@ fn install_proxy(it: &mut Interp) {
     it.def_method(&ctor, "revocable", 2, |i, _t, a| {
         let proxy = make_proxy(i, arg(a, 0), arg(a, 1))?;
         let revoke = make_bound(i, revoke_proxy, vec![proxy.clone()]);
+        // The revocation function has own `length` (0) then `name` ("") like a built-in function.
+        if let Value::Obj(ro) = &revoke {
+            ro.borrow_mut()
+                .props
+                .insert("length", Property::data(Value::Num(0.0), false, false, true));
+            ro.borrow_mut()
+                .props
+                .insert("name", Property::data(Value::str(""), false, false, true));
+        }
         let result = i.new_object();
         set_data(&result, "proxy", proxy);
         set_data(&result, "revoke", revoke);
