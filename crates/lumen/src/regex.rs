@@ -559,9 +559,15 @@ impl Parser {
             }
         }
         self.bump(); // ':'
-                     // At least one flag, and a lone `(?-:` (negation with nothing) is invalid.
-        if !seen_any || (neg && remove == (false, false, false)) {
+        let _ = seen_any;
+        // Only a wholly-empty modifier list (`(?:` is handled elsewhere; `(?-:` reaches here) is
+        // invalid — `(?s-:…)` (add some, remove none) is fine.
+        if add == (false, false, false) && remove == (false, false, false) {
             return Err("empty inline modifier".into());
+        }
+        // A flag may not be both added and removed.
+        if (add.0 && remove.0) || (add.1 && remove.1) || (add.2 && remove.2) {
+            return Err("inline modifier flag added and removed".into());
         }
         let inner = self.parse_alt()?;
         self.expect(')')?;
