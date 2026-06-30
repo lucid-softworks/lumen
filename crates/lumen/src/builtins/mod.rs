@@ -2232,7 +2232,8 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         }
         _ => 0,
     };
-    if offset + src_len > i.ta_len(&info).unwrap_or(0) {
+    // Compare in f64 so an Infinity offset can't overflow the usize addition.
+    if offset_n + src_len as f64 > i.ta_len(&info).unwrap_or(0) as f64 {
         return Err(i.make_error("RangeError", "source is too large for the target at offset"));
     }
     for k in 0..src_len {
