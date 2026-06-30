@@ -9874,6 +9874,32 @@ fn install_errors(it: &mut Interp) {
             format!("{name}: {msg}")
         }))
     });
+    // Error.prototype.stack accessor (error-stack-accessor proposal). lumen captures no stack trace,
+    // so the getter yields "" for an Error receiver (undefined otherwise); the setter shadows it.
+    let get_stack = it.make_native("get stack", 0, |_i, this, _| {
+        Ok(match &this {
+            Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error) => Value::str(""),
+            _ => Value::Undefined,
+        })
+    });
+    let set_stack = it.make_native("set stack", 1, |_i, this, a| {
+        if let Value::Obj(o) = &this {
+            crate::value::set_data(o, "stack", arg(a, 0));
+        }
+        Ok(Value::Undefined)
+    });
+    error_proto.borrow_mut().props.insert(
+        "stack",
+        Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(get_stack)),
+            set: Some(Value::Obj(set_stack)),
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
     it.error_protos.insert("Error", error_proto.clone());
 
     for name in names {
@@ -9898,6 +9924,13 @@ fn install_errors(it: &mut Interp) {
             _ => unreachable!(),
         };
         let ctor = it.make_native(name, 1, ctor_fn);
+        if name == "Error" {
+            it.def_method(&ctor, "isError", 1, |_i, _t, a| {
+                Ok(Value::Bool(
+                    matches!(arg(a, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error)),
+                ))
+            });
+        }
         ctor.borrow_mut().props.insert(
             "prototype",
             Property::data(Value::Obj(proto.clone()), false, false, false),
