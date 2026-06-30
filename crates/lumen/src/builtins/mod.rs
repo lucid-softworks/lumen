@@ -12226,6 +12226,12 @@ fn install_errors(it: &mut Interp) {
     set_builtin(&error_proto, "name", Value::str("Error"));
     set_builtin(&error_proto, "message", Value::str(""));
     it.def_method(&error_proto, "toString", 0, |i, this, _| {
+        if !matches!(this, Value::Obj(_)) {
+            return Err(i.make_error(
+                "TypeError",
+                "Error.prototype.toString called on a non-object",
+            ));
+        }
         let name = match ab(i.get_member(&this, "name"))? {
             Value::Undefined => "Error".to_string(),
             v => ab(i.to_string(&v))?.to_string(),
@@ -12265,11 +12271,18 @@ fn install_errors(it: &mut Interp) {
                 ))
             }
         };
-        // Setting on %Error.prototype% itself is ignored.
-        if Rc::ptr_eq(&o, &i.error_protos["Error"]) {
-            return Ok(Value::Undefined);
-        }
+        // The value must be a String.
         let v = arg(a, 0);
+        if !matches!(v, Value::Str(_)) {
+            return Err(i.make_error(
+                "TypeError",
+                "Error.prototype.stack setter requires a string value",
+            ));
+        }
+        // Setting on %Error.prototype% itself throws (it emulates a non-writable home property).
+        if Rc::ptr_eq(&o, &i.error_protos["Error"]) {
+            return Err(i.make_error("TypeError", "cannot set stack on %Error.prototype%"));
+        }
         // [[GetOwnProperty]]("stack") (proxy-aware): does the receiver already have its own stack?
         let has_own = if let Some((t, h)) = proxy_pair(i, &this) {
             !matches!(proxy_gopd_value(i, &t, &h, "stack")?, Value::Undefined)
@@ -12278,7 +12291,26 @@ fn install_errors(it: &mut Interp) {
         };
         if has_own {
             // Set(this, "stack", v) with Throw=true.
-            assign_set(i, &this, "stack", v)?;
+            if let Some((t, h)) = proxy_pair(i, &this) {
+                // Surface the proxy [[Set]] result: a falsy trap return throws under Throw=true.
+                let trap = ab(i.get_member(&h, "set"))?;
+                if trap.is_callable() {
+                    let res = ab(i.call(
+                        trap,
+                        h.clone(),
+                        &[t.clone(), Value::str("stack"), v.clone(), this.clone()],
+                    ))?;
+                    if !i.to_boolean(&res) {
+                        return Err(
+                            i.make_error("TypeError", "proxy set of 'stack' returned false")
+                        );
+                    }
+                } else {
+                    ab(i.set_member(&t, "stack", v))?;
+                }
+            } else {
+                assign_set(i, &this, "stack", v)?;
+            }
         } else {
             // CreateDataPropertyOrThrow(this, "stack", v).
             let desc = i.new_object();
