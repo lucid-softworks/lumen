@@ -3856,14 +3856,16 @@ fn install_reflect(it: &mut Interp) {
         }
         _ => Err(i.make_error("TypeError", "Reflect.getPrototypeOf called on non-object")),
     });
-    it.def_method(&r, "setPrototypeOf", 2, |_i, _t, a| {
-        if let Value::Obj(o) = arg(a, 0) {
-            o.borrow_mut().proto = match arg(a, 1) {
-                Value::Obj(p) => Some(p),
-                _ => None,
-            };
+    it.def_method(&r, "setPrototypeOf", 2, |i, _t, a| {
+        let obj = arg(a, 0);
+        if !matches!(obj, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Reflect.setPrototypeOf called on non-object"));
         }
-        Ok(Value::Bool(true))
+        let proto = arg(a, 1);
+        if !matches!(proto, Value::Obj(_) | Value::Null) {
+            return Err(i.make_error("TypeError", "prototype must be an object or null"));
+        }
+        Ok(Value::Bool(js_set_prototype_of(i, &obj, &proto)?))
     });
     it.def_method(&r, "defineProperty", 3, |i, _t, a| {
         let o = match arg(a, 0) {
@@ -5155,6 +5157,91 @@ fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
     }
 }
 /// Proxy `[[GetPrototypeOf]]`: call the trap or forward to the target.
+/// `[[IsExtensible]]`, proxy-aware (recurses into a proxy target, enforcing the trap invariant).
+fn js_is_extensible(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
+    if let Some((target, handler)) = proxy_pair(i, obj) {
+        if matches!(handler, Value::Null) {
+            return Err(i.make_error("TypeError", "proxy is revoked"));
+        }
+        let trap = ab(i.get_member(&handler, "isExtensible"))?;
+        if matches!(trap, Value::Undefined | Value::Null) {
+            return js_is_extensible(i, &target);
+        }
+        if !trap.is_callable() {
+            return Err(i.make_error("TypeError", "proxy 'isExtensible' trap is not callable"));
+        }
+        let res = ab(i.call(trap, handler, std::slice::from_ref(&target)))?;
+        let result = i.to_boolean(&res);
+        if result != js_is_extensible(i, &target)? {
+            return Err(i.make_error("TypeError", "proxy 'isExtensible' must match the target"));
+        }
+        return Ok(result);
+    }
+    Ok(matches!(obj, Value::Obj(o) if o.borrow().extensible))
+}
+
+/// `[[GetPrototypeOf]]`, proxy-aware.
+fn js_get_prototype_of(i: &mut Interp, obj: &Value) -> Result<Value, Value> {
+    if let Some((target, handler)) = proxy_pair(i, obj) {
+        if matches!(handler, Value::Null) {
+            return Err(i.make_error("TypeError", "proxy is revoked"));
+        }
+        return proxy_get_prototype(i, &target, &handler);
+    }
+    Ok(match obj {
+        Value::Obj(o) => o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null),
+        _ => Value::Null,
+    })
+}
+
+/// `[[SetPrototypeOf]]`, proxy-aware. Returns whether the operation succeeded (Reflect-style).
+fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<bool, Value> {
+    let o = match obj {
+        Value::Obj(o) => o.clone(),
+        _ => return Ok(true),
+    };
+    if let Some((target, handler)) = proxy_pair(i, obj) {
+        if matches!(handler, Value::Null) {
+            return Err(i.make_error("TypeError", "proxy is revoked"));
+        }
+        let trap = ab(i.get_member(&handler, "setPrototypeOf"))?;
+        if matches!(trap, Value::Undefined | Value::Null) {
+            return js_set_prototype_of(i, &target, proto);
+        }
+        if !trap.is_callable() {
+            return Err(i.make_error("TypeError", "proxy 'setPrototypeOf' trap is not callable"));
+        }
+        let res = ab(i.call(trap, handler, &[target.clone(), proto.clone()]))?;
+        if !i.to_boolean(&res) {
+            return Ok(false);
+        }
+        // Invariant: a non-extensible target's prototype can't be changed.
+        if !js_is_extensible(i, &target)? {
+            let cur = js_get_prototype_of(i, &target)?;
+            if !i.strict_equals(proto, &cur) {
+                return Err(i.make_error(
+                    "TypeError",
+                    "proxy 'setPrototypeOf' changed a non-extensible target's prototype",
+                ));
+            }
+        }
+        return Ok(true);
+    }
+    // Ordinary [[SetPrototypeOf]].
+    let cur = o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null);
+    if i.strict_equals(proto, &cur) {
+        return Ok(true);
+    }
+    if !o.borrow().extensible {
+        return Ok(false);
+    }
+    o.borrow_mut().proto = match proto {
+        Value::Obj(p) => Some(p.clone()),
+        _ => None,
+    };
+    Ok(true)
+}
+
 fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Result<Value, Value> {
     let trap = ab(i.get_member(handler, "getPrototypeOf"))?;
     if trap.is_callable() {
@@ -5626,33 +5713,12 @@ fn install_object(it: &mut Interp) {
                 "Object.setPrototypeOf called on null or undefined",
             ));
         }
-        if let Value::Obj(o) = arg(args, 0) {
-            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-                let trap = ab(i.get_member(&handler, "setPrototypeOf"))?;
-                if trap.is_callable() {
-                    let res = ab(i.call(trap, handler, &[target, proto.clone()]))?;
-                    if !i.to_boolean(&res) {
-                        return Err(i.make_error(
-                            "TypeError",
-                            "setPrototypeOf trap returned a falsish value",
-                        ));
-                    }
-                    return Ok(arg(args, 0));
-                }
-                if let Value::Obj(t) = &target {
-                    t.borrow_mut().proto = match &proto {
-                        Value::Obj(p) => Some(p.clone()),
-                        _ => None,
-                    };
-                }
-                return Ok(arg(args, 0));
-            }
-            o.borrow_mut().proto = match proto {
-                Value::Obj(p) => Some(p),
-                _ => None,
-            };
+        let obj = arg(args, 0);
+        // Object.setPrototypeOf throws if [[SetPrototypeOf]] returns false.
+        if !js_set_prototype_of(i, &obj, &proto)? {
+            return Err(i.make_error("TypeError", "could not set prototype"));
         }
-        Ok(arg(args, 0))
+        Ok(obj)
     });
     it.def_method(&ctor, "create", 2, |i, _this, args| {
         let proto = match arg(args, 0) {
