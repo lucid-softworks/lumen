@@ -7658,9 +7658,7 @@ fn install_array(it: &mut Interp) {
                     None => Value::Undefined,
                 };
                 match flag {
-                    Value::Undefined => {
-                        matches!(v, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array))
-                    }
+                    Value::Undefined => json_is_array(i, v)?,
                     other => i.to_boolean(&other),
                 }
             } else {
@@ -7681,12 +7679,12 @@ fn install_array(it: &mut Interp) {
                         &key,
                     ) {
                         let elem = ab(i.get_member(v, &key))?;
-                        ab(i.set_member(&result, &n.to_string(), elem))?;
+                        json_create_data_prop(i, &result, &n.to_string(), elem)?;
                     }
                     n += 1; // increment for holes too, preserving their position
                 }
             } else {
-                ab(i.set_member(&result, &n.to_string(), v.clone()))?;
+                json_create_data_prop(i, &result, &n.to_string(), v.clone())?;
                 n += 1;
             }
         }

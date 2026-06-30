@@ -4622,3 +4622,19 @@ fn array_copy_within_holes() {
         "false,3"
     );
 }
+
+#[test]
+fn array_concat_spreadable_and_proxy() {
+    assert_eq!(run("[1,2].concat([3,4],5).join(',')"), "1,2,3,4,5");
+    // IsArray sees through a proxy, so a proxied array is spread.
+    assert_eq!(run("[1].concat(new Proxy([2,3],{})).length"), "3");
+    // @@isConcatSpreadable forces (or suppresses) spreading.
+    assert_eq!(
+        run("var o={length:2,0:'a',1:'b'}; o[Symbol.isConcatSpreadable]=true; [].concat(o).join(',')"),
+        "a,b"
+    );
+    assert_eq!(
+        run("var a=[1,2]; a[Symbol.isConcatSpreadable]=false; [].concat(a).length"),
+        "1"
+    );
+}
