@@ -8358,6 +8358,29 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
     Ok(Value::Obj(obj))
 }
 
+/// Close every still-open zip iterator except `except`, marking them done (used when the zip finishes
+/// or errors mid-round).
+fn zip_close_others(
+    i: &mut Interp,
+    iters: &Value,
+    done: &Value,
+    n: usize,
+    except: usize,
+) -> Result<(), Value> {
+    for k in 0..n {
+        if k == except {
+            continue;
+        }
+        let dk = ab(i.get_member(done, &k.to_string()))?;
+        if !i.to_boolean(&dk) {
+            let it = ab(i.get_member(iters, &k.to_string()))?;
+            i.iterator_close(&it);
+            ab(i.set_member(done, &k.to_string(), Value::Bool(true)))?;
+        }
+    }
+    Ok(())
+}
+
 fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let finished = ab(i.get_member(&this, "__zip_finished"))?;
     if i.to_boolean(&finished) {
@@ -8378,42 +8401,72 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
         return Ok(iter_result(i, Value::Undefined, true));
     }
     let mut values = vec![Value::Undefined; n];
-    let mut any_done = false;
-    let mut any_live = false;
+    let mut all_done = true;
+    // `first_live` records the first iterator's outcome (for strict-mode mismatch detection).
+    let mut first_live: Option<bool> = None;
     for j in 0..n {
         let dj = ab(i.get_member(&done, &j.to_string()))?;
         if i.to_boolean(&dj) {
-            any_done = true;
             values[j] = ab(i.get_member(&pad, &j.to_string()))?;
             continue;
         }
         let it = ab(i.get_member(&iters, &j.to_string()))?;
         let nx = ab(i.get_member(&nexts, &j.to_string()))?;
-        match step_iter_with(i, &it, &nx)? {
-            Some(v) => {
-                any_live = true;
+        let stepped = step_iter_with(i, &it, &nx);
+        match stepped {
+            Ok(Some(v)) => {
+                all_done = false;
                 values[j] = v;
+                if first_live.is_none() {
+                    first_live = Some(true);
+                }
+                // strict: a live value after a finished iterator is a length mismatch.
+                if mode == "strict" && first_live == Some(false) {
+                    zip_close_others(i, &iters, &done, n, j)?;
+                    set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+                    return Err(i.make_error("TypeError", "Iterator.zip strict: length mismatch"));
+                }
             }
-            None => {
-                any_done = true;
+            Ok(None) => {
                 ab(i.set_member(&done, &j.to_string(), Value::Bool(true)))?;
-                values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+                if first_live.is_none() {
+                    first_live = Some(false);
+                }
+                match mode.as_str() {
+                    "shortest" => {
+                        zip_close_others(i, &iters, &done, n, j)?;
+                        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+                        return Ok(iter_result(i, Value::Undefined, true));
+                    }
+                    "strict" => {
+                        // A finished iterator after a live one is a mismatch.
+                        if first_live == Some(true) {
+                            zip_close_others(i, &iters, &done, n, j)?;
+                            set_internal(
+                                this.as_obj().unwrap(),
+                                "__zip_finished",
+                                Value::Bool(true),
+                            );
+                            return Err(
+                                i.make_error("TypeError", "Iterator.zip strict: length mismatch")
+                            );
+                        }
+                        values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+                    }
+                    _ => {
+                        values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+                    }
+                }
+            }
+            Err(e) => {
+                zip_close_others(i, &iters, &done, n, j)?;
+                set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+                return Err(e);
             }
         }
     }
-    let finish = match mode.as_str() {
-        "shortest" => any_done,
-        "longest" => !any_live,
-        "strict" => {
-            if any_done && any_live {
-                set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
-                return Err(i.make_error("TypeError", "Iterator.zip strict: length mismatch"));
-            }
-            any_done
-        }
-        _ => any_done,
-    };
-    if finish {
+    // In longest/strict, the round is over only when every iterator is exhausted.
+    if all_done {
         set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
         return Ok(iter_result(i, Value::Undefined, true));
     }

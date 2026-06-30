@@ -4117,3 +4117,27 @@ fn iterator_eager_close_on_found_propagates() {
     assert_eq!(run("[1,2,3,4].values().some(x=>x===3)"), "true");
     assert_eq!(run("[1,2,3,4].values().find(x=>x>2)"), "3");
 }
+
+#[test]
+fn iterator_zip_modes() {
+    // strict mode throws on a length mismatch.
+    assert_eq!(
+        throws("Iterator.zip([[1,2],[3]], {mode:'strict'}).toArray()"),
+        "TypeError"
+    );
+    // equal-length strict succeeds.
+    assert_eq!(
+        run("Iterator.zip([[1,2],[3,4]], {mode:'strict'}).toArray().length"),
+        "2"
+    );
+    // shortest closes the longer iterator when the shorter finishes.
+    assert_eq!(
+        run(r#"
+            var closed=false;
+            var long={ i:0, next(){ return {done:false, value:++this.i}; }, return(){ closed=true; return {}; } };
+            Iterator.zip([[1], long]).toArray();
+            closed
+        "#),
+        "true"
+    );
+}
