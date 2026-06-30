@@ -4247,3 +4247,40 @@ fn bigint_asintn_uintn_coercion() {
         "[object BigInt]"
     );
 }
+
+#[test]
+fn json_stringify_proxy_and_wrappers() {
+    // Proxies serialize via their ownKeys/get traps (and IsArray sees through them).
+    assert_eq!(run("JSON.stringify(new Proxy({a:1}, {}))"), r#"{"a":1}"#);
+    assert_eq!(run("JSON.stringify(new Proxy([1,2], {}))"), "[1,2]");
+    // Primitive wrappers unwrap to their primitive.
+    assert_eq!(
+        run("JSON.stringify({n:Object(5), s:Object('x'), b:Object(true)})"),
+        r#"{"n":5,"s":"x","b":true}"#
+    );
+    // A BigInt wrapper (or primitive) still throws when serialized without toJSON.
+    assert_eq!(throws("JSON.stringify(Object(1n))"), "TypeError");
+    assert_eq!(throws("JSON.stringify(1n)"), "TypeError");
+}
+
+#[test]
+fn json_stringify_space_and_replacer_tostring() {
+    // A Number-wrapper space arg is unwrapped via ToNumber.
+    assert_eq!(
+        run("JSON.stringify({a:1}, null, Object(2))"),
+        "{\n  \"a\": 1\n}"
+    );
+    // A replacer-array entry that is a String wrapper contributes ToString(entry) as the key.
+    assert_eq!(
+        run(r#"
+            var s=new String('x'); s.toString=function(){return 'k';};
+            JSON.stringify({k:1, x:2}, [s])
+        "#),
+        r#"{"k":1}"#
+    );
+    // BigInt with a toJSON serializes the toJSON result instead of throwing.
+    assert_eq!(
+        run("BigInt.prototype.toJSON=function(){return 'big';}; var r=JSON.stringify(5n); delete BigInt.prototype.toJSON; r"),
+        r#""big""#
+    );
+}

@@ -4783,22 +4783,24 @@ fn install_json(it: &mut Interp) {
                 func: Some(replacer),
                 keys: None,
             }
-        } else if matches!(&replacer, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)) {
+        } else if json_is_array(i, &replacer)? {
             let len = match &replacer {
-                Value::Obj(o) => i.array_length(o),
+                Value::Obj(o) if proxy_pair(i, &replacer).is_none() => i.array_length(o),
+                Value::Obj(o) => ab(i.to_length(o))?,
                 _ => 0,
             };
             let mut list: Vec<String> = Vec::new();
             for k in 0..len {
                 let item = ab(i.get_member(&replacer, &k.to_string()))?;
+                // String/Number primitives and their wrappers contribute a key via ToString.
                 let key = match &item {
                     Value::Str(s) => Some(s.to_string()),
                     Value::Num(n) => Some(i.num_to_str(*n)),
-                    Value::Obj(o) => match &o.borrow().exotic {
-                        Exotic::StrWrap(s) => Some(s.to_string()),
-                        Exotic::NumWrap(n) => Some(i.num_to_str(*n)),
-                        _ => None,
-                    },
+                    Value::Obj(o)
+                        if matches!(o.borrow().exotic, Exotic::StrWrap(_) | Exotic::NumWrap(_)) =>
+                    {
+                        Some(ab(i.to_string(&item))?.to_string())
+                    }
                     _ => None,
                 };
                 if let Some(key) = key {
@@ -4817,8 +4819,22 @@ fn install_json(it: &mut Interp) {
                 keys: None,
             }
         };
-        let gap = match arg(args, 2) {
-            Value::Num(n) => " ".repeat((n.max(0.0) as usize).min(10)),
+        // The `space` argument: a Number/String wrapper is unwrapped first; then a Number becomes
+        // that many spaces (clamped 0..10), a String its first 10 code units, else no indentation.
+        let mut space = arg(args, 2);
+        if let Value::Obj(o) = &space {
+            let exotic = o.borrow().exotic.clone();
+            match exotic {
+                Exotic::NumWrap(_) => space = Value::Num(ab(i.to_number(&space))?),
+                Exotic::StrWrap(_) => space = Value::Str(ab(i.to_string(&space))?),
+                _ => {}
+            }
+        }
+        let gap = match space {
+            Value::Num(n) => {
+                let n = if n.is_nan() { 0.0 } else { n.trunc() };
+                " ".repeat(n.clamp(0.0, 10.0) as usize)
+            }
             Value::Str(s) => s.chars().take(10).collect(),
             _ => String::new(),
         };
@@ -4903,6 +4919,17 @@ struct JsonOpts {
     keys: Option<Vec<String>>,
 }
 
+/// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).
+fn json_is_array(i: &mut Interp, v: &Value) -> Result<bool, Value> {
+    if let Some((target, handler)) = proxy_pair(i, v) {
+        if matches!(handler, Value::Null) {
+            return Err(i.make_error("TypeError", "Cannot perform IsArray on a revoked Proxy"));
+        }
+        return json_is_array(i, &target);
+    }
+    Ok(matches!(v, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)))
+}
+
 fn json_str(
     i: &mut Interp,
     holder: &Value,
@@ -4914,7 +4941,7 @@ fn json_str(
 ) -> Result<Option<String>, Value> {
     // SerializeJSONProperty: fetch the value, then apply toJSON, then the function replacer.
     let mut value = ab(i.get_member(holder, key))?;
-    if matches!(value, Value::Obj(_)) {
+    if matches!(value, Value::Obj(_) | Value::BigInt(_)) {
         let tojson = ab(i.get_member(&value, "toJSON"))?;
         if tojson.is_callable() {
             value = ab(i.call(
@@ -4935,6 +4962,19 @@ fn json_str(
     if let Value::Obj(o) = &value {
         if let Some(Value::Str(raw)) = o.borrow().props.get("__raw_json").map(|p| p.value.clone()) {
             return Ok(Some(raw.to_string()));
+        }
+    }
+    // A primitive-wrapper object is unwrapped to its primitive (Number/String/Boolean/BigInt data).
+    if let Value::Obj(o) = &value {
+        let exotic = o.borrow().exotic.clone();
+        match exotic {
+            Exotic::NumWrap(n) => value = Value::Num(n),
+            Exotic::StrWrap(s) => value = Value::Str(s),
+            Exotic::BoolWrap(b) => value = Value::Bool(b),
+            Exotic::BigIntWrap(_) => {
+                return Err(i.make_error("TypeError", "Do not know how to serialize a BigInt"))
+            }
+            _ => {}
         }
     }
     match &value {
@@ -4959,9 +4999,15 @@ fn json_str(
             }
             seen.push(ptr);
             let new_indent = format!("{indent}{gap}");
-            let is_array = matches!(o.borrow().exotic, Exotic::Array);
+            // IsArray sees through proxies; key enumeration / length use proxy-aware operations.
+            let is_array = json_is_array(i, &value)?;
+            let is_proxy = proxy_pair(i, &value).is_some();
             let result = if is_array {
-                let len = i.array_length(o);
+                let len = if is_proxy {
+                    ab(i.to_length(o))?
+                } else {
+                    i.array_length(o)
+                };
                 let mut items = Vec::with_capacity(len);
                 for k in 0..len {
                     items.push(
@@ -4974,6 +5020,13 @@ fn json_str(
                 // An array replacer restricts the keys (in its order); else all enumerable keys.
                 let keys: Vec<String> = match &opts.keys {
                     Some(list) => list.clone(),
+                    None if is_proxy => proxy_enum_string_keys(i, &value)?
+                        .iter()
+                        .filter_map(|k| match k {
+                            Value::Str(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
                     None => ordered_enum_keys(o).iter().map(|k| k.to_string()).collect(),
                 };
                 let mut parts = Vec::new();
