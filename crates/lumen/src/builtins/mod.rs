@@ -852,7 +852,7 @@ fn install_agent(it: &mut Interp, host: &Gc) {
         // Block briefly for the next report (the producing agent typically reports very soon).
         if let Some(ag) = &i.agent {
             if let Some(rx) = &ag.report_rx {
-                return Ok(match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                return Ok(match rx.recv_timeout(std::time::Duration::from_secs(4)) {
                     Ok(s) => Value::from_string(s),
                     Err(_) => Value::Null,
                 });

@@ -1946,7 +1946,7 @@ impl Interp {
             } else {
                 spins += 1;
                 // A safety bound (~30s at 1ms) so a never-completing wait can't hang the process.
-                if spins > 30_000 {
+                if spins > 4_000 {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
