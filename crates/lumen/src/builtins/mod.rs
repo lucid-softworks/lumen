@@ -4897,6 +4897,18 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
                 "getPrototypeOf trap must return an object or null",
             ));
         }
+        // Invariant: for a non-extensible target the reported prototype must be the real one.
+        if let Value::Obj(t) = target {
+            if !t.borrow().extensible {
+                let actual = t.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null);
+                if !i.strict_equals(&res, &actual) {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "getPrototypeOf trap result differs from a non-extensible target's prototype",
+                    ));
+                }
+            }
+        }
         Ok(res)
     } else if let Value::Obj(t) = target {
         Ok(t.borrow()
@@ -5448,8 +5460,26 @@ fn install_object(it: &mut Interp) {
                 let key_val = i
                     .sym_from_key(&key)
                     .unwrap_or_else(|| Value::from_string(key.clone()));
-                let res = ab(i.call(trap, handler, &[target, key_val]))?;
+                let res = ab(i.call(trap, handler, &[target.clone(), key_val]))?;
                 if matches!(res, Value::Undefined) {
+                    // The trap may report a property absent only if the target permits it.
+                    if let Value::Obj(t) = &target {
+                        let tprop = t.borrow().props.get(&key).cloned();
+                        if let Some(p) = tprop {
+                            if !p.configurable {
+                                return Err(i.make_error(
+                                    "TypeError",
+                                    "gOPD trap reported undefined for a non-configurable property",
+                                ));
+                            }
+                            if !t.borrow().extensible {
+                                return Err(i.make_error(
+                                    "TypeError",
+                                    "gOPD trap reported undefined for a non-extensible target's property",
+                                ));
+                            }
+                        }
+                    }
                     return Ok(Value::Undefined);
                 }
                 if !matches!(res, Value::Obj(_)) {
