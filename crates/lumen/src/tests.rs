@@ -2235,7 +2235,7 @@ fn iterator_flatmap() {
         "1,2"
     );
     assert_eq!(
-        run("['a','b'].values().flatMap(s=>s).toArray().join(',')"),
+        run("['a','b'].values().flatMap(s=>[s]).toArray().join(',')"),
         "a,b"
     );
     assert_eq!(run("[1,2,3].values().flatMap(x=>[]).toArray().length"), "0");

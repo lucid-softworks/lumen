@@ -8248,6 +8248,36 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
     }
 }
 
+/// GetIteratorFlattenable(obj, reject-primitives) then drain it: a primitive is a TypeError; an
+/// object's @@iterator is used if present, else the object itself is treated as the iterator.
+fn flatmap_flatten(i: &mut Interp, mapped: &Value) -> Result<Vec<Value>, Value> {
+    if !matches!(mapped, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "flatMap mapper must return an object"));
+    }
+    let iter_key = i
+        .iterator_sym
+        .clone()
+        .map(|s| Interp::sym_key(&s))
+        .unwrap_or_default();
+    let itf = ab(i.get_member(mapped, &iter_key))?;
+    let iter = if matches!(itf, Value::Undefined | Value::Null) {
+        mapped.clone() // already an iterator
+    } else if itf.is_callable() {
+        ab(i.call(itf, mapped.clone(), &[]))?
+    } else {
+        return Err(i.make_error("TypeError", "@@iterator is not callable"));
+    };
+    let next = ab(i.get_member(&iter, "next"))?;
+    if !next.is_callable() {
+        return Err(i.make_error("TypeError", "iterator has no next method"));
+    }
+    let mut out = Vec::new();
+    while let Some(v) = step_iter_with(i, &iter, &next)? {
+        out.push(v);
+    }
+    Ok(out)
+}
+
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     // A helper that has already finished stays done (and never re-touches the source).
     let done = ab(i.get_member(&this, "__ih_done"))?;
@@ -8362,10 +8392,24 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
-                        let mapped = ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)]))?;
+                        let mapped = match i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)]) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                i.iterator_close(&src);
+                                return Err(crate::interpreter::abrupt_value(e));
+                            }
+                        };
                         c += 1.0;
                         set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(c));
-                        let inner = ab(i.iterate(&mapped))?;
+                        // GetIteratorFlattenable (reject primitives): an @@iterator-bearing iterable,
+                        // or the object itself if it's already an iterator.
+                        let inner = match flatmap_flatten(i, &mapped) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                i.iterator_close(&src);
+                                return Err(e);
+                            }
+                        };
                         let arr = i.make_array(inner);
                         set_internal(this.as_obj().unwrap(), "__ih_buf", arr);
                         set_internal(this.as_obj().unwrap(), "__ih_bi", Value::Num(0.0));
