@@ -4334,3 +4334,41 @@ fn json_parse_reviver_context_source() {
         "2"
     );
 }
+
+#[test]
+fn object_assign_semantics() {
+    // ToObject(target) throws for null/undefined.
+    assert_eq!(throws("Object.assign(null, {})"), "TypeError");
+    // Symbol-keyed and string-keyed enumerable own properties are copied; result is the target.
+    assert_eq!(
+        run("var s=Symbol(); var t={}; var r=Object.assign(t, {a:1}, (function(){var o={};o[s]=2;return o;})()); [r===t, r.a, r[s]].join(',')"),
+        "true,1,2"
+    );
+    // Assigning to a non-writable target property throws.
+    assert_eq!(
+        throws("var t=Object.defineProperty({}, 'x', {value:1, writable:false}); Object.assign(t, {x:2})"),
+        "TypeError"
+    );
+    // null/undefined sources are skipped.
+    assert_eq!(
+        run("Object.keys(Object.assign({}, null, undefined, {a:1})).join(',')"),
+        "a"
+    );
+    // A Proxy source is read through its ownKeys/get traps.
+    assert_eq!(run("Object.assign({}, new Proxy({a:5}, {})).a"), "5");
+}
+
+#[test]
+fn object_descriptors_coercion() {
+    // getOwnPropertyDescriptors / getOwnPropertySymbols coerce primitives via ToObject.
+    assert_eq!(run("Object.getOwnPropertyDescriptors('ab')[0].value"), "a");
+    assert_eq!(run("Object.getOwnPropertySymbols('x').length"), "0");
+    assert_eq!(
+        throws("Object.getOwnPropertyDescriptors(null)"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("Object.getOwnPropertySymbols(undefined)"),
+        "TypeError"
+    );
+}

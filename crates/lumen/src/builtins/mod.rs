@@ -5056,6 +5056,42 @@ fn internalize_json_property(
     ))
 }
 
+/// Set(to, key, value) with Throw=true, for Object.assign: a non-writable data property or a
+/// setter-less accessor (own or inherited along the chain) makes the assignment throw a TypeError.
+fn assign_set(i: &mut Interp, to: &Value, key: &str, value: Value) -> Result<(), Value> {
+    if let Value::Obj(o) = to {
+        if proxy_pair(i, to).is_none() && ta_info(i, o).is_none() {
+            let mut cur = Some(o.clone());
+            while let Some(c) = cur {
+                let blocking = {
+                    let b = c.borrow();
+                    b.props.get(key).map(|p| {
+                        if p.accessor {
+                            (true, p.set.is_none())
+                        } else {
+                            (true, !p.writable)
+                        }
+                    })
+                };
+                match blocking {
+                    Some((_, true)) => {
+                        return Err(i.make_error(
+                            "TypeError",
+                            format!("Cannot assign to read-only property '{key}'"),
+                        ))
+                    }
+                    Some((_, false)) => break,
+                    None => {
+                        let next = c.borrow().proto.clone();
+                        cur = next;
+                    }
+                }
+            }
+        }
+    }
+    ab(i.set_member(to, key, value))
+}
+
 /// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).
 fn json_is_array(i: &mut Interp, v: &Value) -> Result<bool, Value> {
     if let Some((target, handler)) = proxy_pair(i, v) {
@@ -6488,10 +6524,8 @@ fn install_object(it: &mut Interp) {
         Ok(i.make_array(keys))
     });
     it.def_method(&ctor, "getOwnPropertySymbols", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "called on non-object")),
-        };
+        // ToObject coerces primitives (and throws for null/undefined).
+        let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertySymbols")?;
         let syms: Vec<Value> = o
             .borrow()
             .props
@@ -6634,10 +6668,8 @@ fn install_object(it: &mut Interp) {
         }
     });
     it.def_method(&ctor, "getOwnPropertyDescriptors", 1, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "called on non-object")),
-        };
+        // ToObject coerces primitives (and throws for null/undefined).
+        let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyDescriptors")?;
         let result = i.new_object();
         let keys = o.borrow().props.keys();
         for key in keys {
@@ -6690,24 +6722,39 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Bool(js_is_extensible(i, &obj)?))
     });
     it.def_method(&ctor, "assign", 2, |i, _this, args| {
-        let target = arg(args, 0);
-        for src in &args[1.min(args.len())..] {
-            if let Value::Obj(o) = src {
-                let keys: Vec<Rc<str>> = {
-                    let b = o.borrow();
-                    b.props
-                        .ordered_keys()
-                        .into_iter()
-                        .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
-                        .collect()
-                };
-                for k in keys {
-                    let v = ab(i.get_member(src, &k))?;
-                    ab(i.set_member(&target, &k, v))?;
+        // ToObject(target) — throws a TypeError for null/undefined.
+        let to = to_object_arg(i, arg(args, 0), "Object.assign")?;
+        let to_val = Value::Obj(to);
+        for src in args.iter().skip(1) {
+            if matches!(src, Value::Undefined | Value::Null) {
+                continue;
+            }
+            let from = Value::Obj(to_object_arg(i, src.clone(), "Object.assign")?);
+            if proxy_pair(i, &from).is_some() {
+                // Proxy source: enumerate via [[OwnPropertyKeys]]/[[GetOwnProperty]] traps.
+                for key in proxy_enum_string_keys(i, &from)? {
+                    if let Value::Str(k) = key {
+                        let v = ab(i.get_member(&from, &k))?;
+                        assign_set(i, &to_val, &k, v)?;
+                    }
                 }
+                continue;
+            }
+            let o = from.as_obj().unwrap();
+            let keys: Vec<Rc<str>> = {
+                let b = o.borrow();
+                b.props
+                    .ordered_keys()
+                    .into_iter()
+                    .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+                    .collect()
+            };
+            for k in keys {
+                let v = ab(i.get_member(&from, &k))?;
+                assign_set(i, &to_val, &k, v)?;
             }
         }
-        Ok(target)
+        Ok(to_val)
     });
     it.def_method(&ctor, "is", 2, |_i, _this, args| {
         Ok(Value::Bool(same_value(&arg(args, 0), &arg(args, 1))))
