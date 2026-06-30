@@ -8366,6 +8366,7 @@ fn zip_close_others(
     done: &Value,
     n: usize,
     except: usize,
+    propagate: bool,
 ) -> Result<(), Value> {
     for k in 0..n {
         if k == except {
@@ -8374,8 +8375,14 @@ fn zip_close_others(
         let dk = ab(i.get_member(done, &k.to_string()))?;
         if !i.to_boolean(&dk) {
             let it = ab(i.get_member(iters, &k.to_string()))?;
-            i.iterator_close(&it);
             ab(i.set_member(done, &k.to_string(), Value::Bool(true)))?;
+            // On a normal completion the first close error propagates; on a throw completion (an
+            // earlier error already pending) close errors are swallowed.
+            if propagate {
+                ab(i.iterator_close_normal(&it))?;
+            } else {
+                i.iterator_close(&it);
+            }
         }
     }
     Ok(())
@@ -8422,7 +8429,7 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
                 }
                 // strict: a live value after a finished iterator is a length mismatch.
                 if mode == "strict" && first_live == Some(false) {
-                    zip_close_others(i, &iters, &done, n, j)?;
+                    zip_close_others(i, &iters, &done, n, j, true)?;
                     set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
                     return Err(i.make_error("TypeError", "Iterator.zip strict: length mismatch"));
                 }
@@ -8434,14 +8441,14 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
                 }
                 match mode.as_str() {
                     "shortest" => {
-                        zip_close_others(i, &iters, &done, n, j)?;
+                        zip_close_others(i, &iters, &done, n, j, true)?;
                         set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
                         return Ok(iter_result(i, Value::Undefined, true));
                     }
                     "strict" => {
                         // A finished iterator after a live one is a mismatch.
                         if first_live == Some(true) {
-                            zip_close_others(i, &iters, &done, n, j)?;
+                            zip_close_others(i, &iters, &done, n, j, true)?;
                             set_internal(
                                 this.as_obj().unwrap(),
                                 "__zip_finished",
@@ -8459,7 +8466,7 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
                 }
             }
             Err(e) => {
-                zip_close_others(i, &iters, &done, n, j)?;
+                zip_close_others(i, &iters, &done, n, j, false)?;
                 set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
                 return Err(e);
             }
