@@ -7802,6 +7802,18 @@ fn install_iterator(it: &mut Interp) {
         Ok(Value::Undefined)
     });
 
+    // Iterator.prototype[@@dispose]: close the iterator (calls its return method).
+    if let Some(key) = well_known_key(it, "dispose") {
+        let disp = it.make_native("[Symbol.dispose]", 0, |i, this, _a| {
+            i.iterator_close(&this);
+            Ok(Value::Undefined)
+        });
+        proto
+            .borrow_mut()
+            .props
+            .insert(key, Property::builtin(Value::Obj(disp)));
+    }
+
     let ctor = it.make_native("Iterator", 0, |i, t, _a| {
         // Abstract: `new Iterator()` (this === undefined) throws, but `super()` from a subclass
         // (this is the instance) is allowed.
@@ -7816,9 +7828,39 @@ fn install_iterator(it: &mut Interp) {
     ctor.borrow_mut().is_constructor = true;
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let v = arg(a, 0);
-        // Already an iterator (has a `next`)? wrap so it inherits the helpers; else get its iterator.
-        let (iter, _next) = ab(i.get_iterator(&v))?;
-        Ok(iter)
+        // GetIteratorFlattenable (strings allowed): a string/iterable via @@iterator, or an iterator
+        // used directly. If the result already inherits %Iterator.prototype%, return it; else wrap it.
+        let iter = get_iterator_flattenable(i, &v, true)?;
+        let iter_proto = i.extra_protos.get("%IteratorPrototype%").cloned();
+        let inherits = matches!(&iter, Value::Obj(o) if {
+            let mut p = o.borrow().proto.clone();
+            let mut found = false;
+            while let Some(pp) = p {
+                if iter_proto.as_ref().is_some_and(|ip| Rc::ptr_eq(&pp, ip)) { found = true; break; }
+                p = pp.borrow().proto.clone();
+            }
+            found
+        });
+        if inherits {
+            return Ok(iter);
+        }
+        // Wrap: a fresh iterator-helper-bearing object that forwards next/return to `iter`.
+        let next = ab(i.get_member(&iter, "next"))?;
+        let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
+        set_builtin(&obj, "__wrap_iter", iter);
+        set_builtin(&obj, "__wrap_next", next);
+        i.def_method(&obj, "next", 0, |i, this, _a| {
+            let it = ab(i.get_member(&this, "__wrap_iter"))?;
+            let nx = ab(i.get_member(&this, "__wrap_next"))?;
+            let res = ab(i.call(nx, it, &[]))?;
+            Ok(res)
+        });
+        i.def_method(&obj, "return", 0, |i, this, _a| {
+            let it = ab(i.get_member(&this, "__wrap_iter"))?;
+            i.iterator_close(&it);
+            Ok(iter_result(i, Value::Undefined, true))
+        });
+        Ok(Value::Obj(obj))
     });
     it.def_method(&ctor, "zip", 1, |i, _t, a| iterator_zip(i, a, false));
     it.def_method(&ctor, "zipKeyed", 1, |i, _t, a| iterator_zip(i, a, true));
@@ -8246,6 +8288,31 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
             None => set_internal(this.as_obj().unwrap(), "__cc_cur", Value::Undefined),
         }
     }
+}
+
+/// GetIteratorFlattenable returning the iterator object: a string (when allowed) or an object's
+/// @@iterator, or the object itself when it has no @@iterator (it's already an iterator).
+fn get_iterator_flattenable(i: &mut Interp, v: &Value, allow_strings: bool) -> Result<Value, Value> {
+    if !matches!(v, Value::Obj(_)) && !(allow_strings && matches!(v, Value::Str(_))) {
+        return Err(i.make_error("TypeError", "value is not iterable"));
+    }
+    let iter_key = i
+        .iterator_sym
+        .clone()
+        .map(|s| Interp::sym_key(&s))
+        .unwrap_or_default();
+    let itf = ab(i.get_member(v, &iter_key))?;
+    let iter = if matches!(itf, Value::Undefined | Value::Null) {
+        v.clone()
+    } else if itf.is_callable() {
+        ab(i.call(itf, v.clone(), &[]))?
+    } else {
+        return Err(i.make_error("TypeError", "@@iterator is not callable"));
+    };
+    if !matches!(iter, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "iterator is not an object"));
+    }
+    Ok(iter)
 }
 
 /// GetIteratorFlattenable(obj, reject-primitives) then drain it: a primitive is a TypeError; an
