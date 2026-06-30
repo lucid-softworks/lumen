@@ -4784,3 +4784,30 @@ fn shared_array_buffer_getters() {
         "[object SharedArrayBuffer]"
     );
 }
+
+#[test]
+fn atomics_index_and_ops() {
+    assert_eq!(
+        run("var ta=new Int32Array(new SharedArrayBuffer(8)); Atomics.store(ta,0,42); Atomics.load(ta,0)"),
+        "42"
+    );
+    // A fractional access index is truncated (ToIndex), not rejected.
+    assert_eq!(
+        run("var ta=new Int32Array(new SharedArrayBuffer(8)); Atomics.store(ta,1.9,7); Atomics.load(ta,1)"),
+        "7"
+    );
+    assert_eq!(
+        run("var ta=new Int32Array(new SharedArrayBuffer(8)); ta[0]=5; Atomics.add(ta,0,3); ta[0]"),
+        "8"
+    );
+    // A non-integer TypedArray is rejected.
+    assert_eq!(
+        throws("Atomics.add(new Float64Array(2), 0, 1)"),
+        "TypeError"
+    );
+    // Out-of-bounds index is a RangeError.
+    assert_eq!(
+        throws("Atomics.load(new Int32Array(new SharedArrayBuffer(8)), 5)"),
+        "RangeError"
+    );
+}

@@ -458,8 +458,11 @@ fn install_atomics(it: &mut Interp) {
         if matches!(info.kind, TaKind::F32 | TaKind::F64 | TaKind::U8Clamped) {
             return Err(i.make_error("TypeError", "Atomics requires an integer TypedArray"));
         }
-        let idx = ab(i.to_number(&arg(args, 1)))?;
-        if !idx.is_finite() || idx.fract() != 0.0 || idx < 0.0 || idx as usize >= info.len {
+        // ValidateAtomicAccess: ToIndex truncates toward zero (NaN→0); a negative or out-of-bounds
+        // result is a RangeError, but a fractional request index is simply truncated.
+        let raw = ab(i.to_number(&arg(args, 1)))?;
+        let idx = if raw.is_nan() { 0.0 } else { raw.trunc() };
+        if idx < 0.0 || !idx.is_finite() || idx as usize >= info.len {
             return Err(i.make_error("RangeError", "Atomics: index out of range"));
         }
         Ok((info, idx as usize))
