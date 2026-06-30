@@ -2706,29 +2706,57 @@ impl Interp {
         handler: Value,
         key: &str,
     ) -> Result<bool, Abrupt> {
-        let trap = self.get_member(&handler, "deleteProperty")?;
-        if trap.is_callable() {
-            let kv = self
-                .sym_from_key(key)
-                .unwrap_or_else(|| Value::from_string(key.to_string()));
-            let res = self.call(trap, handler, &[target, kv])?;
-            Ok(self.to_boolean(&res))
-        } else if let Value::Obj(t) = &target {
-            let configurable = t
-                .borrow()
-                .props
-                .get(key)
-                .map(|p| p.configurable)
-                .unwrap_or(true);
-            if configurable {
-                t.borrow_mut().props.remove(key);
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        } else {
-            Ok(true)
+        if matches!(handler, Value::Null) {
+            return Err(self.throw("TypeError", "cannot delete on a revoked proxy"));
         }
+        let trap = self.get_member(&handler, "deleteProperty")?;
+        if matches!(trap, Value::Undefined | Value::Null) {
+            // Forward to the target's [[Delete]] (recursing if the target is itself a proxy).
+            if let Value::Obj(t) = &target {
+                let tptr = Rc::as_ptr(t) as usize;
+                if let Some((t2, h2)) = self.proxies.get(&tptr).cloned() {
+                    return self.proxy_delete(t2, h2, key);
+                }
+                let configurable =
+                    t.borrow().props.get(key).map(|p| p.configurable).unwrap_or(true);
+                if configurable {
+                    t.borrow_mut().props.remove(key);
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        if !trap.is_callable() {
+            return Err(self.throw("TypeError", "proxy 'deleteProperty' trap is not callable"));
+        }
+        let kv = self
+            .sym_from_key(key)
+            .unwrap_or_else(|| Value::from_string(key.to_string()));
+        let res = self.call(trap, handler, &[target.clone(), kv])?;
+        if !self.to_boolean(&res) {
+            return Ok(false);
+        }
+        // Invariant: a non-configurable property, or any property of a non-extensible target,
+        // can't be reported as deleted.
+        if let Value::Obj(t) = &target {
+            let p = t.borrow().props.get(key).cloned();
+            if let Some(p) = p {
+                if !p.configurable {
+                    return Err(self.throw(
+                        "TypeError",
+                        "proxy 'deleteProperty' removed a non-configurable property",
+                    ));
+                }
+                if !t.borrow().extensible {
+                    return Err(self.throw(
+                        "TypeError",
+                        "proxy 'deleteProperty' removed a non-extensible target's property",
+                    ));
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn eval_update(
