@@ -2010,10 +2010,15 @@ impl Interp {
                 }
                 // Built-in constructors build and return their own object. The `constructing` flag
                 // lets wrapper constructors (Number/String/...) distinguish `new X()` from `X()`.
+                // `new_target` is exposed so a native constructor can derive the instance prototype
+                // from it (OrdinaryCreateFromConstructor / subclassing / Reflect.construct).
                 let saved = self.constructing;
+                let saved_nt = self.new_target.clone();
                 self.constructing = true;
+                self.new_target = new_target;
                 let r = f(self, Value::Undefined, args).map_err(Abrupt::Throw);
                 self.constructing = saved;
+                self.new_target = saved_nt;
                 r
             }
             Callable::User(func, env) => {

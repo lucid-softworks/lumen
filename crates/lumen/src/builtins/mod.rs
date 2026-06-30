@@ -1891,7 +1891,16 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             (bv, bp, 0, len, false)
         }
     };
-    let obj = Object::new(i.extra_protos.get(kind.name()).cloned());
+    // The instance prototype comes from new.target.prototype when it's an object (subclassing /
+    // Reflect.construct), else the intrinsic %TypedArray.prototype% for this element type.
+    let proto = match &i.new_target {
+        nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
+            Value::Obj(p) => Some(p),
+            _ => i.extra_protos.get(kind.name()).cloned(),
+        },
+        _ => i.extra_protos.get(kind.name()).cloned(),
+    };
+    let obj = Object::new(proto);
     let p = Rc::as_ptr(&obj) as usize;
     i.typed_arrays.insert(
         p,
