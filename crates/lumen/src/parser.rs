@@ -812,7 +812,8 @@ impl Parser {
         let s = self.parse_stmt()?;
         match &s {
             Stmt::VarDecl {
-                kind: DeclKind::Let | DeclKind::Const,
+                kind:
+                    DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                 ..
             }
             | Stmt::ClassDecl(_) => {
