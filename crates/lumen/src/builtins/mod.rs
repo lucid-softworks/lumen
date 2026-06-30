@@ -880,6 +880,14 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
     ))
 }
 
+/// The second (flags) argument to RegExp / RegExp.prototype.compile: undefined → "", else ToString.
+fn regexp_flags_arg(i: &mut Interp, a: &[Value]) -> Result<String, Value> {
+    match arg(a, 1) {
+        Value::Undefined => Ok(String::new()),
+        v => Ok(ab(i.to_string(&v))?.to_string()),
+    }
+}
+
 fn install_regexp(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("RegExp", proto.clone());
@@ -924,6 +932,31 @@ fn install_regexp(it: &mut Interp) {
     });
     add_getter(it, &proto, "unicodeSets", |i, t, _| {
         re_flag_get(i, &t, Some('v'))
+    });
+    // Annex B B.2.5 RegExp.prototype.compile(pattern, flags): recompile this regex in place.
+    it.def_method(&proto, "compile", 2, |i, this, a| {
+        let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
+        let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "compile called on non-RegExp"))?;
+        let (source, flags) = match arg(a, 0) {
+            Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(&o) as usize)) => {
+                // A RegExp pattern copies its source/flags; a second flags argument is then an error.
+                if !matches!(arg(a, 1), Value::Undefined) {
+                    return Err(i.make_error("TypeError", "cannot supply flags when compiling a RegExp"));
+                }
+                let re = i.regexps[&(Rc::as_ptr(&o) as usize)].clone();
+                (re.source.clone(), re.flags.clone())
+            }
+            Value::Undefined => (String::new(), regexp_flags_arg(i, a)?),
+            v => {
+                let src = ab(i.to_string(&v))?.to_string();
+                (src, regexp_flags_arg(i, a)?)
+            }
+        };
+        let re = crate::regex::Regex::new(&source, &flags)
+            .map_err(|e| i.make_error("SyntaxError", &e))?;
+        i.regexps.insert(ptr, Rc::new(re));
+        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+        Ok(this)
     });
     it.def_method(&proto, "exec", 1, regexp_exec);
     it.def_method(&proto, "test", 1, |i, this, a| {
