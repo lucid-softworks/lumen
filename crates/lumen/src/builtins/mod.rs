@@ -7143,10 +7143,16 @@ fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Resu
 /// Step an iterator object (`this`) once: `Some(value)` or `None` when done.
 fn step_iter(i: &mut Interp, src: &Value) -> Result<Option<Value>, Value> {
     let next = ab(i.get_member(src, "next"))?;
+    step_iter_with(i, src, &next)
+}
+
+/// Advance an iterator using an already-captured `next` method (iterator helpers read `next` exactly
+/// once at creation per GetIteratorDirect, then reuse it).
+fn step_iter_with(i: &mut Interp, src: &Value, next: &Value) -> Result<Option<Value>, Value> {
     if !next.is_callable() {
         return Err(i.make_error("TypeError", "iterator.next is not a function"));
     }
-    let res = ab(i.call(next, src.clone(), &[]))?;
+    let res = ab(i.call(next.clone(), src.clone(), &[]))?;
     if !matches!(res, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "iterator result is not an object"));
     }
@@ -7165,6 +7171,9 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     }
     let proto = i.extra_protos.get("%IteratorPrototype%").cloned();
     let obj = Object::new(proto);
+    // GetIteratorDirect: read the source's `next` method exactly once, now.
+    let next = ab(i.get_member(&source, "next"))?;
+    set_builtin(&obj, "__ih_next", next);
     set_builtin(&obj, "__ih_src", source);
     set_builtin(&obj, "__ih_kind", Value::str(kind));
     set_builtin(&obj, "__ih_fn", f.clone());
@@ -7197,13 +7206,14 @@ fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
 
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let src = ab(i.get_member(&this, "__ih_src"))?;
+    let inext = ab(i.get_member(&this, "__ih_next"))?;
     let kind_v = ab(i.get_member(&this, "__ih_kind"))?;
     let kind = ab(i.to_string(&kind_v))?;
     let f = ab(i.get_member(&this, "__ih_fn"))?;
     let count_v = ab(i.get_member(&this, "__ih_count"))?;
     let count = ab(i.to_number(&count_v))?;
     match &*kind {
-        "map" => match step_iter(i, &src)? {
+        "map" => match step_iter_with(i, &src, &inext)? {
             None => Ok(iter_result(i, Value::Undefined, true)),
             Some(v) => {
                 let mv = ab(i.call(f, Value::Undefined, &[v, Value::Num(count)]))?;
@@ -7218,7 +7228,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         "filter" => {
             let mut k = count;
             loop {
-                match step_iter(i, &src)? {
+                match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
                         let r =
@@ -7244,7 +7254,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 "__ih_count",
                 Value::Num(count + 1.0),
             );
-            match step_iter(i, &src)? {
+            match step_iter_with(i, &src, &inext)? {
                 None => Ok(iter_result(i, Value::Undefined, true)),
                 Some(v) => Ok(iter_result(i, v, false)),
             }
@@ -7256,13 +7266,13 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 let nv = ab(i.get_member(&this, "__ih_n"))?;
                 let n = ab(i.to_number(&nv))? as usize;
                 for _ in 0..n {
-                    if step_iter(i, &src)?.is_none() {
+                    if step_iter_with(i, &src, &inext)?.is_none() {
                         break;
                     }
                 }
                 set_internal(this.as_obj().unwrap(), "__ih_started", Value::Bool(true));
             }
-            match step_iter(i, &src)? {
+            match step_iter_with(i, &src, &inext)? {
                 None => Ok(iter_result(i, Value::Undefined, true)),
                 Some(v) => Ok(iter_result(i, v, false)),
             }
@@ -7288,7 +7298,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                     }
                 }
                 // Refill from the source: map a value to an iterable and flatten it.
-                match step_iter(i, &src)? {
+                match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
                         let mapped = ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)]))?;
