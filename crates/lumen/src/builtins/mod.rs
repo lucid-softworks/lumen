@@ -7997,6 +7997,8 @@ fn step_iter_with(i: &mut Interp, src: &Value, next: &Value) -> Result<Option<Va
 /// Build a lazy iterator-helper (map/filter/take/drop/flatMap) wrapping `source`.
 fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Result<Value, Value> {
     if matches!(kind, "map" | "filter" | "flatMap") && !f.is_callable() {
+        // A non-callable mapper/predicate still closes the underlying iterator.
+        i.iterator_close(&source);
         return Err(i.make_error("TypeError", "Iterator helper argument is not callable"));
     }
     let proto = i.extra_protos.get("%IteratorPrototype%").cloned();
@@ -8241,7 +8243,13 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         "map" => match step_iter_with(i, &src, &inext)? {
             None => Ok(iter_result(i, Value::Undefined, true)),
             Some(v) => {
-                let mv = ab(i.call(f, Value::Undefined, &[v, Value::Num(count)]))?;
+                let mv = match i.call(f, Value::Undefined, &[v, Value::Num(count)]) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        i.iterator_close(&src);
+                        return Err(crate::interpreter::abrupt_value(e));
+                    }
+                };
                 set_internal(
                     this.as_obj().unwrap(),
                     "__ih_count",
@@ -8256,8 +8264,13 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
-                        let r =
-                            ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
+                        let r = match i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                i.iterator_close(&src);
+                                return Err(crate::interpreter::abrupt_value(e));
+                            }
+                        };
                         k += 1.0;
                         if i.to_boolean(&r) {
                             set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(k));
