@@ -5039,3 +5039,35 @@ fn shared_array_buffer_aliasing() {
         "0"
     );
 }
+
+#[test]
+fn atomics_wait_async() {
+    // A value mismatch resolves synchronously (not async).
+    assert_eq!(
+        run("var a=new Int32Array(new SharedArrayBuffer(8)); a[0]=9; var r=Atomics.waitAsync(a,0,0); [r.async, r.value].join(',')"),
+        "false,not-equal"
+    );
+    // A zero timeout times out synchronously.
+    assert_eq!(
+        run("var a=new Int32Array(new SharedArrayBuffer(8)); var r=Atomics.waitAsync(a,0,0,0); [r.async, r.value].join(',')"),
+        "false,timed-out"
+    );
+    // Otherwise it returns a pending promise that resolves once notified (driven by the event loop).
+    assert_eq!(
+        run("var a=new Int32Array(new SharedArrayBuffer(8)); var out='?'; var r=Atomics.waitAsync(a,0,0,2000); r.value.then(function(v){out=v;}); Atomics.notify(a,0,1); out"),
+        "?"
+    );
+    assert_eq!(
+        run(r#"
+            var a=new Int32Array(new SharedArrayBuffer(8));
+            var out='pending';
+            var r=Atomics.waitAsync(a,0,0,2000);
+            r.value.then(function(v){ out=v; });
+            Atomics.notify(a,0,1);
+            // The event loop resolves the promise after the script; capture via a second microtask.
+            Promise.resolve().then(function(){});
+            r.async
+        "#),
+        "true"
+    );
+}

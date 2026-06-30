@@ -656,32 +656,48 @@ fn install_atomics(it: &mut Interp) {
                 "Atomics.waitAsync requires an Int32 or BigInt64 array",
             ));
         }
-        if !i.shared_buffers.contains_key(&info.buffer) {
-            return Err(i.make_error(
-                "TypeError",
-                "Atomics.waitAsync requires a SharedArrayBuffer-backed array",
-            ));
-        }
-        let expected = operand(i, &info, &arg(a, 2))?;
-        // Coerce the timeout for its observable side effects (NaN → +Infinity).
-        let _timeout = {
-            let t = ab(i.to_number(&arg(a, 3)))?;
-            if t.is_nan() {
-                f64::INFINITY
-            } else {
-                t
+        let id = match i.shared_buffers.get(&info.buffer) {
+            Some(&id) => id,
+            None => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Atomics.waitAsync requires a SharedArrayBuffer-backed array",
+                ))
             }
         };
-        // Single-threaded: the wait completes synchronously — either the value already differs, or
-        // (since no agent can ever notify) it is treated as immediately timed out.
-        let result = i.new_object();
-        set_data(&result, "async", Value::Bool(false));
-        let v = if read_i128(i, &info, idx) != expected {
-            "not-equal"
+        let expected = operand(i, &info, &arg(a, 2))?;
+        // timeout: ToNumber (NaN → +Infinity); None means "no timeout".
+        let q = ab(i.to_number(&arg(a, 3)))?;
+        let timeout = if q.is_nan() || q == f64::INFINITY {
+            None
         } else {
-            "timed-out"
+            Some(std::time::Duration::from_millis(q.max(0.0) as u64))
         };
-        set_data(&result, "value", Value::str(v));
+        let result = i.new_object();
+        // The value already differs ⇒ resolved synchronously (not async).
+        if read_i128(i, &info, idx) != expected {
+            set_data(&result, "async", Value::Bool(false));
+            set_data(&result, "value", Value::str("not-equal"));
+            return Ok(Value::Obj(result));
+        }
+        // A zero timeout times out immediately (still synchronous).
+        if matches!(timeout, Some(d) if d.is_zero()) {
+            set_data(&result, "async", Value::Bool(false));
+            set_data(&result, "value", Value::str("timed-out"));
+            return Ok(Value::Obj(result));
+        }
+        // Otherwise wait asynchronously: a waiter thread reports the outcome, which the event loop
+        // uses to resolve the returned promise.
+        let byte_index = info.offset + idx * info.kind.elsize();
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        std::thread::spawn(move || {
+            let woken = crate::interpreter::futex_wait(id, byte_index, timeout);
+            let _ = tx.send(if woken { "ok" } else { "timed-out" });
+        });
+        let promise = i.new_promise();
+        i.pending_async_waits.push((promise.clone(), rx));
+        set_data(&result, "async", Value::Bool(true));
+        set_data(&result, "value", promise);
         Ok(Value::Obj(result))
     });
     it.def_method(&atomics, "pause", 0, |i, _t, a| {

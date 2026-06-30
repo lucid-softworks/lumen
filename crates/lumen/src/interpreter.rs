@@ -322,6 +322,9 @@ pub struct Interp {
     /// Whether this agent may block in `Atomics.wait` (false for the main agent, true for the
     /// worker agents spawned by `$262.agent.start`).
     pub can_block: bool,
+    /// Pending `Atomics.waitAsync` operations: each carries the result promise and a channel that a
+    /// waiter thread sends "ok"/"timed-out" on. The event loop resolves them as they complete.
+    pub pending_async_waits: Vec<(Value, std::sync::mpsc::Receiver<&'static str>)>,
     /// Agent-harness wiring (present only in spawned agents / a main with agents).
     pub agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
@@ -669,6 +672,7 @@ impl Interp {
             array_buffers: HashMap::new(),
             shared_buffers: HashMap::new(),
             can_block: true,
+            pending_async_waits: Vec::new(),
             agent: None,
             typed_arrays: HashMap::new(),
             ta_buffer: HashMap::new(),

@@ -1923,6 +1923,37 @@ impl Interp {
     }
 
     /// Drain the microtask queue (called after the main script). Bounded to avoid an unbounded loop.
+    /// Drive microtasks plus any pending `Atomics.waitAsync` operations to completion: resolve each
+    /// async wait as its waiter thread reports, running the scheduled reactions in between.
+    pub(crate) fn run_agent_event_loop(&mut self) {
+        self.drain_microtasks();
+        let mut spins = 0u32;
+        while !self.pending_async_waits.is_empty() {
+            let mut resolved_any = false;
+            let mut i = 0;
+            while i < self.pending_async_waits.len() {
+                if let Ok(res) = self.pending_async_waits[i].1.try_recv() {
+                    let (promise, _) = self.pending_async_waits.remove(i);
+                    self.resolve_promise(&promise, Value::str(res));
+                    resolved_any = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if resolved_any {
+                self.drain_microtasks();
+                spins = 0;
+            } else {
+                spins += 1;
+                // A safety bound (~30s at 1ms) so a never-completing wait can't hang the process.
+                if spins > 30_000 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
     pub(crate) fn drain_microtasks(&mut self) {
         let mut budget = 100_000u32;
         while let Some(job) = self.microtasks.pop_front() {

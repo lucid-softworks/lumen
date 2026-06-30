@@ -107,7 +107,7 @@ impl Engine {
         self.interp.strict = strict || directive_strict;
         let result = self.interp.run_program(&body);
         // Run queued promise reactions (the microtask checkpoint after the script).
-        self.interp.drain_microtasks();
+        self.interp.run_agent_event_loop();
         match result {
             Ok(v) => Ok(Completion::Value(self.render(&v))),
             Err(thrown) => Ok(self.describe_throw(thrown)),
@@ -138,7 +138,7 @@ impl Engine {
     ) -> Result<Completion, ParseError> {
         self.interp.module_loader = Some(std::rc::Rc::new(loader));
         let result = self.interp.load_module(key, src);
-        self.interp.drain_microtasks();
+        self.interp.run_agent_event_loop();
         Ok(match result {
             Ok(_) => Completion::Value(String::new()),
             Err(a) => self.describe_throw(interpreter::abrupt_value(a)),
