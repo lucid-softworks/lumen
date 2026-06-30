@@ -7910,6 +7910,12 @@ fn install_iterator(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Iterator", Value::Obj(ctor));
+
+    // %ArrayIteratorPrototype%: the intermediate prototype of Array iterators (its own [[Prototype]]
+    // is %IteratorPrototype%), so getPrototypeOf(getPrototypeOf(arrIter)) lands on %IteratorPrototype%.
+    let arr_iter_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
+    set_to_string_tag(it, &arr_iter_proto, "Array Iterator");
+    it.extra_protos.insert("%ArrayIteratorPrototype%", arr_iter_proto);
 }
 
 /// `Array.fromAsync(source, mapFn?, thisArg?)`: build an array from a sync/async iterable or an
@@ -8495,9 +8501,9 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
 fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
     let proto = i
         .extra_protos
-        .get("%IteratorPrototype%")
+        .get("%ArrayIteratorPrototype%")
         .cloned()
-        .or_else(|| Some(i.object_proto.clone()));
+        .or_else(|| i.extra_protos.get("%IteratorPrototype%").cloned());
     let obj = Object::new(proto);
     set_builtin(&obj, "__ai_target", target);
     set_builtin(&obj, "__ai_index", Value::Num(0.0));
