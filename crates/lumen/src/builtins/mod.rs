@@ -530,11 +530,6 @@ fn install_atomics(it: &mut Interp) {
             i.ta_write(info, idx, n as f64);
         }
     }
-    fn wrap(i: &mut Interp, info: &TaInfo, idx: usize, n: i128) -> Value {
-        // Read back so the value reflects the element type's wrapping.
-        write_i128(i, info, idx, n);
-        i.ta_read(info, idx)
-    }
     fn rmw(i: &mut Interp, args: &[Value], f: fn(i128, i128) -> i128) -> Result<Value, Value> {
         let (info, idx) = target(i, args)?;
         let val = operand(i, &info, &arg(args, 2))?;
@@ -557,7 +552,13 @@ fn install_atomics(it: &mut Interp) {
     it.def_method(&atomics, "store", 3, |i, _t, a| {
         let (info, idx) = target(i, a)?;
         let val = operand(i, &info, &arg(a, 2))?;
-        Ok(wrap(i, &info, idx, val))
+        write_i128(i, &info, idx, val);
+        // store returns the coerced value itself, not the (possibly wrapped) stored representation.
+        Ok(if info.kind.is_bigint() {
+            Value::BigInt(val)
+        } else {
+            Value::Num(val as f64)
+        })
     });
     it.def_method(&atomics, "compareExchange", 4, |i, _t, a| {
         let (info, idx) = target(i, a)?;

@@ -4984,15 +4984,24 @@ fn get_prototype_of_and_error_subclassing() {
 
 #[test]
 fn atomics_methods_and_validation() {
-    assert_eq!(run("typeof Atomics.waitAsync + ',' + typeof Atomics.pause"), "function,function");
+    assert_eq!(
+        run("typeof Atomics.waitAsync + ',' + typeof Atomics.pause"),
+        "function,function"
+    );
     // wait requires a shared buffer; a non-shared one throws.
     assert_eq!(
         run("var ta=new Int32Array(new SharedArrayBuffer(8)); Atomics.wait(ta,0,999)"),
         "not-equal"
     );
-    assert_eq!(throws("Atomics.wait(new Int32Array(new ArrayBuffer(8)),0,0)"), "TypeError");
+    assert_eq!(
+        throws("Atomics.wait(new Int32Array(new ArrayBuffer(8)),0,0)"),
+        "TypeError"
+    );
     // Float (incl. Float16) typed arrays are rejected.
-    assert_eq!(throws("Atomics.add(new Float64Array(new SharedArrayBuffer(8)),0,1)"), "TypeError");
+    assert_eq!(
+        throws("Atomics.add(new Float64Array(new SharedArrayBuffer(8)),0,1)"),
+        "TypeError"
+    );
     // waitAsync returns a { async, value } record synchronously here.
     assert_eq!(
         run("var w=Atomics.waitAsync(new Int32Array(new SharedArrayBuffer(8)),0,999); [w.async,w.value].join(',')"),
