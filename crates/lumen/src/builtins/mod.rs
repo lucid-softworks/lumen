@@ -4754,8 +4754,11 @@ fn install_promise(it: &mut Interp) {
         .borrow_mut()
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-    it.def_method(&ctor, "withResolvers", 0, |i, _t, _a| {
-        let promise = i.new_promise();
+    it.def_method(&ctor, "withResolvers", 0, |i, t, _a| {
+        if !matches!(t, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Promise.withResolvers called on a non-object"));
+        }
+        let promise = new_promise_capability(i, &t)?;
         let resolve = i.make_resolver(&promise, true);
         let reject = i.make_resolver(&promise, false);
         let obj = i.new_object();
