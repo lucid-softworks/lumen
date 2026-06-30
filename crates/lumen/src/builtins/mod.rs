@@ -3781,6 +3781,15 @@ fn capability_executor(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// GetPromiseResolve(C): read `C.resolve` once, requiring it to be callable.
+fn get_promise_resolve(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
+    let r = ab(i.get_member(ctor, "resolve"))?;
+    if !r.is_callable() {
+        return Err(i.make_error("TypeError", "Promise combinator: this.resolve is not callable"));
+    }
+    Ok(r)
+}
+
 /// NewPromiseCapability(C): `new C(executor)`, capturing the resolve/reject functions the executor is
 /// called with (and validating they're callable). Returns the result promise built by `C`.
 fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
@@ -4008,7 +4017,14 @@ fn install_promise(it: &mut Interp) {
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
         let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        // A synchronous iteration error rejects the returned promise rather than throwing.
+        // GetPromiseResolve and the iteration may throw — those reject the result promise.
+        let promise_resolve = match get_promise_resolve(i, &t) {
+            Ok(r) => r,
+            Err(e) => {
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4026,7 +4042,13 @@ fn install_promise(it: &mut Interp) {
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
-            let p = promise_resolve_value(i, item);
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    return Ok(result);
+                }
+            };
             let on_f = make_bound(
                 i,
                 promise_all_element,
@@ -4041,7 +4063,7 @@ fn install_promise(it: &mut Interp) {
     });
     it.def_method(&ctor, "race", 1, |i, t, a| {
         let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4051,7 +4073,13 @@ fn install_promise(it: &mut Interp) {
             }
         };
         for item in items {
-            let p = promise_resolve_value(i, item);
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    return Ok(result);
+                }
+            };
             let on_f = i.make_resolver(&result, true);
             let on_r = i.make_resolver(&result, false);
             if !combinator_then(i, &result, p, on_f, on_r) {
@@ -4062,7 +4090,7 @@ fn install_promise(it: &mut Interp) {
     });
     it.def_method(&ctor, "allSettled", 1, |i, t, a| {
         let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4080,7 +4108,13 @@ fn install_promise(it: &mut Interp) {
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
-            let p = promise_resolve_value(i, item);
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    return Ok(result);
+                }
+            };
             let on_f = make_bound(
                 i,
                 promise_settled_fulfill,
@@ -4099,7 +4133,7 @@ fn install_promise(it: &mut Interp) {
     });
     it.def_method(&ctor, "any", 1, |i, t, a| {
         let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        // A synchronous iteration error rejects the returned promise rather than throwing.
+        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4118,7 +4152,13 @@ fn install_promise(it: &mut Interp) {
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
-            let p = promise_resolve_value(i, item);
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    return Ok(result);
+                }
+            };
             let on_f = i.make_resolver(&result, true);
             let on_r = make_bound(
                 i,
