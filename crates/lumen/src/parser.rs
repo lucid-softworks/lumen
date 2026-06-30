@@ -25,6 +25,7 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
         depth: 0,
         in_generator: false,
         in_async: false,
+            in_params: false,
         no_in: false,
         module: false,
         fn_depth: 0,
@@ -58,6 +59,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         depth: 0,
         in_generator: false,
         in_async: true,
+            in_params: false,
         no_in: false,
         module: true,
         fn_depth: 0,
@@ -216,6 +218,9 @@ struct Parser {
     /// `yield` / `await` are keywords here.
     in_generator: bool,
     in_async: bool,
+    /// Set while parsing a formal-parameter list: an `await` (async) or `yield` (generator)
+    /// expression is not allowed in a parameter default, so this poisons those expressions.
+    in_params: bool,
     /// Suppress `in` as a binary operator (the `[NoIn]` grammar productions in a `for` head, before
     /// `in`/`of` is reached). Reset inside any bracketed/parenthesized sub-expression.
     no_in: bool,
@@ -1350,6 +1355,9 @@ impl Parser {
     }
 
     fn parse_yield(&mut self) -> Result<Expr, ParseError> {
+        if self.in_params {
+            return self.err("yield expression is not allowed in formal parameters");
+        }
         self.advance(); // yield
         let delegate = self.eat_punct("*");
         // A bare `yield` has no argument (before a line terminator or a token that can't start one).
@@ -1471,6 +1479,9 @@ impl Parser {
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
         // `await expr` (only a keyword inside an async function body).
         if self.in_async && self.is_ident_word("await") {
+            if self.in_params {
+                return self.err("await expression is not allowed in formal parameters");
+            }
             self.advance();
             let arg = self.parse_unary()?;
             return Ok(Expr::Await(Box::new(arg)));
@@ -1847,6 +1858,7 @@ impl Parser {
                         depth: self.depth,
                         in_generator: self.in_generator,
                         in_async: self.in_async,
+                        in_params: self.in_params,
                         no_in: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
@@ -1896,6 +1908,7 @@ impl Parser {
                         depth: self.depth,
                         in_generator: self.in_generator,
                         in_async: self.in_async,
+                        in_params: self.in_params,
                         no_in: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
@@ -2106,10 +2119,10 @@ impl Parser {
         } else {
             None
         };
-        let params = self.parse_params()?;
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
+        let params = self.parse_params()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.in_generator = sg;
         self.in_async = sa;
@@ -2360,14 +2373,16 @@ impl Parser {
         is_generator: bool,
         is_async: bool,
     ) -> Result<Function, ParseError> {
-        let params = self.parse_params()?;
-        // A method has UniqueFormalParameters: duplicate parameter names are always an error.
-        if let Some(dup) = duplicate_name(&param_names(&params)) {
-            return self.err(format!("duplicate parameter name '{dup}'"));
-        }
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
+        let params = self.parse_params()?;
+        // A method has UniqueFormalParameters: duplicate parameter names are always an error.
+        if let Some(dup) = duplicate_name(&param_names(&params)) {
+            self.in_generator = sg;
+            self.in_async = sa;
+            return self.err(format!("duplicate parameter name '{dup}'"));
+        }
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.in_generator = sg;
         self.in_async = sa;
@@ -2394,6 +2409,14 @@ impl Parser {
 
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         self.expect_punct("(")?;
+        let saved_in_params = self.in_params;
+        self.in_params = true;
+        let result = self.parse_params_inner();
+        self.in_params = saved_in_params;
+        result
+    }
+
+    fn parse_params_inner(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
         while !self.is_punct(")") {
             let rest = self.eat_punct("...");
@@ -2436,6 +2459,8 @@ impl Parser {
         // A function body is a fresh context for return/break/continue and labels.
         let (siter, sswitch) = (self.iter_depth, self.switch_depth);
         let slabels = std::mem::take(&mut self.labels);
+        let saved_in_params = self.in_params;
+        self.in_params = false;
         self.fn_depth += 1;
         self.iter_depth = 0;
         self.switch_depth = 0;
@@ -2445,6 +2470,7 @@ impl Parser {
         self.iter_depth = siter;
         self.switch_depth = sswitch;
         self.labels = slabels;
+        self.in_params = saved_in_params;
         let body = body?;
         let result_strict = self.strict;
         self.strict = saved_strict;
