@@ -10933,6 +10933,57 @@ fn install_bigint(it: &mut Interp) {
     }
 }
 
+/// Correctly-rounded sum of finite f64s, via Shewchuk's nonoverlapping-partials algorithm with
+/// CPython's final round-half-to-even step (the `math.fsum` algorithm).
+fn fsum_exact(values: &[f64]) -> f64 {
+    let mut partials: Vec<f64> = Vec::new();
+    for &xi in values {
+        let mut x = xi;
+        let mut i = 0;
+        for j in 0..partials.len() {
+            let mut y = partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        partials.truncate(i);
+        partials.push(x);
+    }
+    let n = partials.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut hi = partials[n - 1];
+    let mut lo = 0.0;
+    let mut idx = n - 1;
+    while idx > 0 {
+        idx -= 1;
+        let x = hi;
+        let y = partials[idx];
+        hi = x + y;
+        lo = y - (hi - x);
+        if lo != 0.0 {
+            break;
+        }
+    }
+    // Round half to even: nudge when the residual and the next partial agree in sign.
+    if idx > 0 && ((lo < 0.0 && partials[idx - 1] < 0.0) || (lo > 0.0 && partials[idx - 1] > 0.0)) {
+        let y = lo * 2.0;
+        let x = hi + y;
+        if y == x - hi {
+            hi = x;
+        }
+    }
+    hi
+}
+
 fn install_math(it: &mut Interp) {
     let math = it.new_object();
     // The Math constants are { writable:false, enumerable:false, configurable:false }.
@@ -10990,6 +11041,50 @@ fn install_math(it: &mut Interp) {
         |x: f64| crate::value::f16_to_f32(crate::value::f32_to_f16(x as f32)) as f64
     );
     unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
+    it.def_method(&math, "sumPrecise", 1, |i, _t, a| {
+        // Iterate the argument, requiring every element to be a Number; compute the correctly
+        // rounded sum. Infinities dominate (mixed signs → NaN), any NaN → NaN, empty → -0.
+        let (iter, next) = ab(i.get_iterator(&arg(a, 0)))?;
+        let mut finite: Vec<f64> = Vec::new();
+        let (mut pos_inf, mut neg_inf, mut nan) = (false, false, false);
+        loop {
+            let item = match ab(i.iterator_step(&iter, &next))? {
+                Some(v) => v,
+                None => break,
+            };
+            match item {
+                Value::Num(n) => {
+                    if n.is_nan() {
+                        nan = true;
+                    } else if n.is_infinite() {
+                        if n > 0.0 {
+                            pos_inf = true;
+                        } else {
+                            neg_inf = true;
+                        }
+                    } else {
+                        finite.push(n);
+                    }
+                }
+                _ => {
+                    i.iterator_close(&iter);
+                    return Err(i.make_error("TypeError", "Math.sumPrecise: not a number"));
+                }
+            }
+        }
+        let result = if pos_inf && neg_inf || nan {
+            f64::NAN
+        } else if pos_inf {
+            f64::INFINITY
+        } else if neg_inf {
+            f64::NEG_INFINITY
+        } else if finite.is_empty() {
+            -0.0
+        } else {
+            fsum_exact(&finite)
+        };
+        Ok(Value::Num(result))
+    });
     it.def_method(&math, "hypot", 2, |i, _t, a| {
         // Coerce every argument (in order), then: any infinite operand yields +Infinity (even
         // alongside a NaN), otherwise any NaN yields NaN, otherwise the Euclidean norm.

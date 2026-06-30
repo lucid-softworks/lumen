@@ -4530,3 +4530,19 @@ fn global_value_property_descriptors() {
     assert_eq!(run("typeof undefined"), "undefined");
     assert_eq!(run("Number.isNaN(NaN)"), "true");
 }
+
+#[test]
+fn math_sum_precise() {
+    assert_eq!(run("Math.sumPrecise([1,2,3])"), "6");
+    // Exactly rounded despite catastrophic cancellation.
+    assert_eq!(run("Math.sumPrecise([1, 1e100, 1, -1e100])"), "2");
+    // Empty input is -0; mixed infinities are NaN.
+    assert_eq!(run("1/Math.sumPrecise([])"), "-Infinity");
+    assert_eq!(
+        run("Number.isNaN(Math.sumPrecise([Infinity, -Infinity]))"),
+        "true"
+    );
+    assert_eq!(run("Math.sumPrecise([Infinity, 5])"), "Infinity");
+    // A non-number element throws.
+    assert_eq!(throws("Math.sumPrecise([1, '2'])"), "TypeError");
+}
