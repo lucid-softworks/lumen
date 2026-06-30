@@ -8180,8 +8180,29 @@ fn install_array(it: &mut Interp) {
             }
         }
     });
-    it.def_method(&ctor, "of", 0, |i, _this, args| {
-        Ok(i.make_array(args.to_vec()))
+    it.def_method(&ctor, "of", 0, |i, this, args| {
+        // If `this` is a constructor, build the result via `new this(len)`; else a plain Array.
+        let len = args.len();
+        let arr = if is_constructor_value(&this) {
+            ab(i.construct(this.clone(), &[Value::Num(len as f64)]))?
+        } else {
+            i.make_array(Vec::new())
+        };
+        for (k, v) in args.iter().enumerate() {
+            // CreateDataPropertyOrThrow(A, k, v).
+            if let Value::Obj(o) = &arr {
+                let desc = i.new_object();
+                set_data(&desc, "value", v.clone());
+                set_data(&desc, "writable", Value::Bool(true));
+                set_data(&desc, "enumerable", Value::Bool(true));
+                set_data(&desc, "configurable", Value::Bool(true));
+                if !ab(define_own_property(i, o, &k.to_string(), &Value::Obj(desc)))? {
+                    return Err(i.make_error("TypeError", "Array.of: cannot define property"));
+                }
+            }
+        }
+        ab(i.set_member(&arr, "length", Value::Num(len as f64)))?;
+        Ok(arr)
     });
     it.def_method(&ctor, "from", 1, |i, this, args| {
         let source = arg(args, 0);

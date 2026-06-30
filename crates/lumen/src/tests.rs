@@ -4601,3 +4601,14 @@ fn array_reduce_right_holes_and_callable() {
     // Empty array with no initial value throws.
     assert_eq!(throws("[].reduceRight((a,b)=>a)"), "TypeError");
 }
+
+#[test]
+fn array_of_constructor() {
+    assert_eq!(run("Array.of(1,2,3).join(',')"), "1,2,3");
+    assert_eq!(run("Array.isArray(Array.of(7))"), "true");
+    // Honors a custom `this` constructor.
+    assert_eq!(
+        run("function C(n){this.n=n;} var r=Array.of.call(C,'a','b'); [r instanceof C, r[0], r.length].join(',')"),
+        "true,a,2"
+    );
+}
