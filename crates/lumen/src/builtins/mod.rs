@@ -4070,8 +4070,14 @@ fn install_reflect(it: &mut Interp) {
             ab(i.set_member(&ptarget, &key, value))?;
             return Ok(Value::Bool(true));
         }
-        ab(i.set_member(&target, &key, value))?;
-        Ok(Value::Bool(true))
+        let receiver = if a.len() > 3 {
+            arg(a, 3)
+        } else {
+            target.clone()
+        };
+        Ok(Value::Bool(reflect_ordinary_set(
+            i, &target, &key, value, &receiver,
+        )?))
     });
     it.def_method(&r, "has", 2, |i, _t, a| {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
@@ -5315,6 +5321,100 @@ fn assign_set(i: &mut Interp, to: &Value, key: &str, value: Value) -> Result<(),
         }
     }
     ab(i.set_member(to, key, value))
+}
+
+/// OrdinarySet(target, key, value, receiver): walks target's prototype chain to find the controlling
+/// descriptor, then applies the result on `receiver` (which may differ from `target`). Returns the
+/// success boolean. Proxies on the chain fall back to the receiver-less [[Set]].
+fn reflect_ordinary_set(
+    i: &mut Interp,
+    target: &Value,
+    key: &str,
+    value: Value,
+    receiver: &Value,
+) -> Result<bool, Value> {
+    let mut current = target.clone();
+    loop {
+        if proxy_pair(i, &current).is_some() {
+            ab(i.set_member(&current, key, value))?;
+            return Ok(true);
+        }
+        let obj = match &current {
+            Value::Obj(o) => o.clone(),
+            _ => return Ok(false),
+        };
+        let own = obj.borrow().props.get(key).cloned();
+        match own {
+            Some(p) if p.accessor => {
+                return match p.set {
+                    Some(setter) if setter.is_callable() => {
+                        ab(i.call(setter, receiver.clone(), &[value]))?;
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                };
+            }
+            Some(p) => {
+                if !p.writable {
+                    return Ok(false);
+                }
+                return reflect_define_on_receiver(i, receiver, key, value);
+            }
+            None => {
+                let proto = obj.borrow().proto.clone();
+                match proto {
+                    Some(pp) => current = Value::Obj(pp),
+                    None => return reflect_define_on_receiver(i, receiver, key, value),
+                }
+            }
+        }
+    }
+}
+
+/// Apply a writable data assignment to `receiver`: update an existing writable data property, or
+/// CreateDataProperty when absent (respecting extensibility); accessor/non-writable existing → false.
+fn reflect_define_on_receiver(
+    i: &mut Interp,
+    receiver: &Value,
+    key: &str,
+    value: Value,
+) -> Result<bool, Value> {
+    if proxy_pair(i, receiver).is_some() {
+        let (target, handler) = proxy_pair(i, receiver).unwrap();
+        let desc = i.new_object();
+        set_data(&desc, "value", value);
+        set_data(&desc, "writable", Value::Bool(true));
+        set_data(&desc, "enumerable", Value::Bool(true));
+        set_data(&desc, "configurable", Value::Bool(true));
+        return ab(proxy_define_property(
+            i,
+            &target,
+            &handler,
+            key,
+            &Value::Obj(desc),
+        ));
+    }
+    let ro = match receiver {
+        Value::Obj(o) => o.clone(),
+        _ => return Ok(false),
+    };
+    let existing = ro.borrow().props.get(key).cloned();
+    match existing {
+        Some(ep) if ep.accessor || !ep.writable => Ok(false),
+        Some(_) => {
+            ro.borrow_mut().props.get_mut(key).unwrap().value = value;
+            Ok(true)
+        }
+        None => {
+            if !ro.borrow().extensible {
+                return Ok(false);
+            }
+            ro.borrow_mut()
+                .props
+                .insert(key, Property::data(value, true, true, true));
+            Ok(true)
+        }
+    }
 }
 
 /// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).

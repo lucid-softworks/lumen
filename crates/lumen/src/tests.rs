@@ -4712,3 +4712,24 @@ fn string_matchall_replaceall_regexp_rules() {
     assert_eq!(run("'aaa'.replaceAll('a', '$$')"), "$$$");
     assert_eq!(run("'aaa'.replaceAll('a', '[$&]')"), "[a][a][a]");
 }
+
+#[test]
+fn reflect_set_receiver() {
+    // With a distinct receiver, the assignment lands on the receiver, not the target.
+    assert_eq!(
+        run("var t={}, r={}; Reflect.set(t,'x',5,r); [t.hasOwnProperty('x'), r.x].join(',')"),
+        "false,5"
+    );
+    // A non-writable data property on the target makes the set fail (returns false).
+    assert_eq!(
+        run(
+            "var t=Object.defineProperty({}, 'x', {value:1, writable:false}); Reflect.set(t,'x',2)"
+        ),
+        "false"
+    );
+    // An inherited setter is invoked with the receiver as `this`.
+    assert_eq!(
+        run("var got; var proto={set p(v){got=this;}}; var r=Object.create(proto); Reflect.set(r,'p',1,r); got===r"),
+        "true"
+    );
+}
