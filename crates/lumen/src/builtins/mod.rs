@@ -584,29 +584,69 @@ fn install_atomics(it: &mut Interp) {
                 "Atomics.wait requires an Int32 or BigInt64 array",
             ));
         }
-        if !i.shared_buffers.contains(&info.buffer) {
+        let id = match i.shared_buffers.get(&info.buffer) {
+            Some(&id) => id,
+            None => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Atomics.wait requires a SharedArrayBuffer-backed array",
+                ))
+            }
+        };
+        let expected = operand(i, &info, &arg(a, 2))?;
+        // timeout: ToNumber (NaN → +Infinity), clamped at 0.
+        let q = ab(i.to_number(&arg(a, 3)))?;
+        let timeout = if q.is_nan() || q == f64::INFINITY {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(q.max(0.0) as u64))
+        };
+        // Only an agent with [[CanBlock]] may suspend (the main agent cannot).
+        if !i.can_block {
             return Err(i.make_error(
                 "TypeError",
-                "Atomics.wait requires a SharedArrayBuffer-backed array",
+                "Atomics.wait: the calling agent cannot be suspended",
             ));
         }
-        let expected = operand(i, &info, &arg(a, 2))?;
-        // Single-threaded: never blocks; report whether the value already differs.
-        Ok(Value::str(if read_i128(i, &info, idx) == expected {
-            "timed-out"
-        } else {
-            "not-equal"
-        }))
+        if read_i128(i, &info, idx) != expected {
+            return Ok(Value::str("not-equal"));
+        }
+        let byte_index = info.offset + idx * info.kind.elsize();
+        let woken = crate::interpreter::futex_wait(id, byte_index, timeout);
+        Ok(Value::str(if woken { "ok" } else { "timed-out" }))
     });
     it.def_method(&atomics, "notify", 3, |i, _t, a| {
-        let (info, _idx) = target(i, a)?;
+        let (info, idx) = target(i, a)?;
         if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
             return Err(i.make_error(
                 "TypeError",
                 "Atomics.notify requires an Int32 or BigInt64 array",
             ));
         }
-        Ok(Value::Num(0.0)) // no agents are waiting
+        // count = ToIntegerOrInfinity(arg2), default +Infinity (= all); negative clamps to 0.
+        let count: i64 = match arg(a, 2) {
+            Value::Undefined => -1,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                if n.is_nan() || n < 0.0 {
+                    0
+                } else if n == f64::INFINITY {
+                    -1
+                } else {
+                    n as i64
+                }
+            }
+        };
+        // notify is a no-op (returns 0) on a non-shared buffer.
+        match i.shared_buffers.get(&info.buffer) {
+            Some(&id) => {
+                let byte_index = info.offset + idx * info.kind.elsize();
+                Ok(Value::Num(
+                    crate::interpreter::futex_notify(id, byte_index, count) as f64,
+                ))
+            }
+            None => Ok(Value::Num(0.0)),
+        }
     });
     it.def_method(&atomics, "waitAsync", 4, |i, _t, a| {
         let (info, idx) = target(i, a)?;
@@ -616,7 +656,7 @@ fn install_atomics(it: &mut Interp) {
                 "Atomics.waitAsync requires an Int32 or BigInt64 array",
             ));
         }
-        if !i.shared_buffers.contains(&info.buffer) {
+        if !i.shared_buffers.contains_key(&info.buffer) {
             return Err(i.make_error(
                 "TypeError",
                 "Atomics.waitAsync requires a SharedArrayBuffer-backed array",
@@ -724,7 +764,119 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
         }
         Ok(Value::Undefined)
     });
+    install_agent(it, &host);
     Value::Obj(host)
+}
+
+/// Reconstruct a SharedArrayBuffer object in this agent that aliases the global shared block `id`.
+fn agent_make_shared(i: &mut Interp, id: u64, len: usize) -> Value {
+    let obj = Object::new(i.extra_protos.get("SharedArrayBuffer").cloned());
+    let p = Rc::as_ptr(&obj) as usize;
+    i.array_buffers.insert(p, vec![0u8; len]); // length placeholder; bytes live in the registry
+    set_internal(&obj, "__abMaxByteLength", Value::Num(len as f64));
+    set_internal(&obj, "__abResizable", Value::Bool(false));
+    set_internal(&obj, "__sab_id", Value::Num(id as f64));
+    i.shared_buffers.insert(p, id);
+    Value::Obj(obj)
+}
+
+/// `$262.agent`: the multi-agent harness (real OS threads sharing SharedArrayBuffer memory).
+fn install_agent(it: &mut Interp, host: &Gc) {
+    let agent = Object::new(Some(it.object_proto.clone()));
+    it.def_method(&agent, "start", 1, |i, _t, a| {
+        let src = ab(i.to_string(&arg(a, 0)))?.to_string();
+        // Lazily create the main agent's report channel.
+        if i.agent.is_none() {
+            let (report_tx, report_rx) = std::sync::mpsc::channel();
+            i.agent = Some(Box::new(crate::interpreter::AgentChannels {
+                agent_broadcast_txs: Vec::new(),
+                report_rx: Some(report_rx),
+                report_tx,
+                broadcast_rx: None,
+            }));
+        }
+        let (bcast_tx, bcast_rx) = std::sync::mpsc::channel();
+        let report_tx = i.agent.as_ref().unwrap().report_tx.clone();
+        i.agent.as_mut().unwrap().agent_broadcast_txs.push(bcast_tx);
+        std::thread::spawn(move || {
+            let mut eng = crate::Engine::new();
+            eng.run_as_agent(&src, bcast_rx, report_tx);
+        });
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "broadcast", 2, |i, _t, a| {
+        let sab = arg(a, 0);
+        // Accept a SharedArrayBuffer directly, or a TypedArray view over one.
+        let p = match sab.as_obj() {
+            Some(o) => {
+                let p = Rc::as_ptr(o) as usize;
+                if i.shared_buffers.contains_key(&p) {
+                    p
+                } else if let Some(info) = i.typed_arrays.get(&p) {
+                    info.buffer
+                } else {
+                    return Err(i.make_error("TypeError", "broadcast requires a SharedArrayBuffer"));
+                }
+            }
+            None => return Err(i.make_error("TypeError", "broadcast requires a SharedArrayBuffer")),
+        };
+        let id = *i
+            .shared_buffers
+            .get(&p)
+            .ok_or_else(|| i.make_error("TypeError", "broadcast requires a SharedArrayBuffer"))?;
+        let len = i.array_buffers.get(&p).map(|b| b.len()).unwrap_or(0);
+        if let Some(ag) = &i.agent {
+            for tx in &ag.agent_broadcast_txs {
+                let _ = tx.send((id, len));
+            }
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "getReport", 0, |i, _t, _a| {
+        // Block briefly for the next report (the producing agent typically reports very soon).
+        if let Some(ag) = &i.agent {
+            if let Some(rx) = &ag.report_rx {
+                return Ok(match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                    Ok(s) => Value::from_string(s),
+                    Err(_) => Value::Null,
+                });
+            }
+        }
+        Ok(Value::Null)
+    });
+    it.def_method(&agent, "sleep", 1, |i, _t, a| {
+        let ms = ab(i.to_number(&arg(a, 0)))?;
+        if ms.is_finite() && ms > 0.0 {
+            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "monotonicNow", 0, |_i, _t, _a| {
+        Ok(Value::Num(crate::interpreter::monotonic_now_ms()))
+    });
+    it.def_method(&agent, "receiveBroadcast", 1, |i, _t, a| {
+        let cb = arg(a, 0);
+        let received = {
+            match i.agent.as_ref().and_then(|ag| ag.broadcast_rx.as_ref()) {
+                Some(rx) => rx.recv().ok(),
+                None => None,
+            }
+        };
+        if let Some((id, len)) = received {
+            let sab = agent_make_shared(i, id, len);
+            ab(i.call(cb, Value::Undefined, &[sab]))?;
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "report", 1, |i, _t, a| {
+        let s = ab(i.to_string(&arg(a, 0)))?.to_string();
+        if let Some(ag) = &i.agent {
+            let _ = ag.report_tx.send(s);
+        }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "leaving", 0, |_i, _t, _a| Ok(Value::Undefined));
+    set_data(host, "agent", Value::Obj(agent));
 }
 
 fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value> {
@@ -1713,12 +1865,19 @@ fn install_shared_array_buffer(it: &mut Interp) {
             return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
         }
         let len = n as usize;
-        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's, and mark it shared.
+        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's, and back it with a
+        // process-global shared-memory block (so agent threads see the same bytes).
         let (bv, bp) = make_array_buffer(i, len);
         if let Value::Obj(o) = &bv {
             o.borrow_mut().proto = i.extra_protos.get("SharedArrayBuffer").cloned();
         }
-        i.shared_buffers.insert(bp);
+        let id = crate::interpreter::alloc_shared_mem(len);
+        i.shared_buffers.insert(bp, id);
+        set_internal(
+            &bv.as_obj().cloned().unwrap(),
+            "__sab_id",
+            Value::Num(id as f64),
+        );
         // The options bag's maxByteLength makes the buffer growable.
         if let Value::Obj(_) = arg(a, 1) {
             let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;

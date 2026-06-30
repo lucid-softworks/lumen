@@ -74,6 +74,24 @@ impl Engine {
         }
     }
 
+    /// Run `src` as a spawned `$262.agent`: the agent may block in `Atomics.wait`, receives
+    /// SharedArrayBuffer broadcasts on `broadcast_rx`, and reports back via `report_tx`.
+    pub fn run_as_agent(
+        &mut self,
+        src: &str,
+        broadcast_rx: std::sync::mpsc::Receiver<(u64, usize)>,
+        report_tx: std::sync::mpsc::Sender<String>,
+    ) {
+        self.interp.can_block = true;
+        self.interp.agent = Some(Box::new(interpreter::AgentChannels {
+            agent_broadcast_txs: Vec::new(),
+            report_rx: None,
+            report_tx,
+            broadcast_rx: Some(broadcast_rx),
+        }));
+        let _ = self.eval(src, false);
+    }
+
     /// Parse and run `src`. `strict` forces strict mode (used for the test262 strict variant); a
     /// `"use strict"` directive in the source also enables it.
     pub fn eval(&mut self, src: &str, strict: bool) -> Result<Completion, ParseError> {

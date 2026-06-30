@@ -9,6 +9,126 @@ use crate::value::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+/// `$262.agent` wiring. The main agent holds a broadcast sender per spawned agent plus the report
+/// receiver; a spawned agent holds its broadcast receiver and a clone of the report sender.
+pub struct AgentChannels {
+    pub agent_broadcast_txs: Vec<std::sync::mpsc::Sender<(u64, usize)>>,
+    pub report_rx: Option<std::sync::mpsc::Receiver<String>>,
+    pub report_tx: std::sync::mpsc::Sender<String>,
+    pub broadcast_rx: Option<std::sync::mpsc::Receiver<(u64, usize)>>,
+}
+
+/// Process-global backing store for SharedArrayBuffer memory, keyed by a unique id so it can be
+/// shared across agent threads (each agent runs its own single-threaded `Interp`).
+pub type SharedMem = Arc<Mutex<Vec<u8>>>;
+pub fn shared_mem_registry() -> &'static Mutex<HashMap<u64, SharedMem>> {
+    static R: OnceLock<Mutex<HashMap<u64, SharedMem>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub fn next_shared_id() -> u64 {
+    static N: AtomicU64 = AtomicU64::new(1);
+    N.fetch_add(1, AtomicOrdering::SeqCst)
+}
+/// Allocate a fresh shared-memory block of `len` zero bytes; returns its global id.
+pub fn alloc_shared_mem(len: usize) -> u64 {
+    let id = next_shared_id();
+    shared_mem_registry()
+        .lock()
+        .unwrap()
+        .insert(id, Arc::new(Mutex::new(vec![0u8; len])));
+    id
+}
+pub fn shared_mem_get(id: u64) -> Option<SharedMem> {
+    shared_mem_registry().lock().unwrap().get(&id).cloned()
+}
+/// Milliseconds since a fixed process-global instant (for `$262.agent.monotonicNow`).
+pub fn monotonic_now_ms() -> f64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
+/// A futex-like wait table for `Atomics.wait`/`notify`, keyed by `(shared-memory id, byte index)`.
+/// Each blocked waiter registers an individual wake handle so `notify` can wake an exact count.
+type Waiter = Arc<(Mutex<bool>, Condvar)>;
+fn wait_table() -> &'static Mutex<HashMap<(u64, usize), Vec<Waiter>>> {
+    static T: OnceLock<Mutex<HashMap<(u64, usize), Vec<Waiter>>>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// Block on `(id, index)` until notified or `timeout` elapses. Returns `true` if notified (woken),
+/// `false` if it timed out.
+pub fn futex_wait(id: u64, index: usize, timeout: Option<std::time::Duration>) -> bool {
+    let waiter: Waiter = Arc::new((Mutex::new(false), Condvar::new()));
+    wait_table()
+        .lock()
+        .unwrap()
+        .entry((id, index))
+        .or_default()
+        .push(waiter.clone());
+    let (lock, cvar) = &*waiter;
+    let mut woken = lock.lock().unwrap();
+    let result = match timeout {
+        Some(dur) => {
+            let deadline = std::time::Instant::now() + dur;
+            loop {
+                if *woken {
+                    break true;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break false;
+                }
+                let (g, res) = cvar.wait_timeout(woken, deadline - now).unwrap();
+                woken = g;
+                if *woken {
+                    break true;
+                }
+                if res.timed_out() {
+                    break false;
+                }
+            }
+        }
+        None => loop {
+            if *woken {
+                break true;
+            }
+            woken = cvar.wait(woken).unwrap();
+        },
+    };
+    // On timeout, remove ourselves from the table (a notify may have already pulled us out).
+    if !result {
+        if let Some(v) = wait_table().lock().unwrap().get_mut(&(id, index)) {
+            v.retain(|w| !Arc::ptr_eq(w, &waiter));
+        }
+    }
+    result
+}
+/// Wake up to `max` (`<0` ⇒ all) waiters on `(id, index)`, returning how many were woken.
+pub fn futex_notify(id: u64, index: usize, max: i64) -> u64 {
+    let to_wake: Vec<Waiter> = {
+        let mut t = wait_table().lock().unwrap();
+        if let Some(v) = t.get_mut(&(id, index)) {
+            let n = if max < 0 {
+                v.len()
+            } else {
+                (max as usize).min(v.len())
+            };
+            v.drain(0..n).collect()
+        } else {
+            Vec::new()
+        }
+    };
+    let count = to_wake.len() as u64;
+    for w in to_wake {
+        let (lock, cvar) = &*w;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    count
+}
 
 pub type Env = Rc<RefCell<Scope>>;
 
@@ -196,8 +316,14 @@ pub struct Interp {
     pub extra_protos: HashMap<&'static str, Gc>,
     /// ArrayBuffer byte storage, keyed by the ArrayBuffer object's pointer.
     pub array_buffers: HashMap<usize, Vec<u8>>,
-    /// Pointers of buffers that are SharedArrayBuffers (a subset of `array_buffers`).
-    pub shared_buffers: std::collections::HashSet<usize>,
+    /// SharedArrayBuffer pointers → their global shared-memory id (`array_buffers` keeps a
+    /// same-length placeholder so detach/length checks still work; the bytes live in the registry).
+    pub shared_buffers: HashMap<usize, u64>,
+    /// Whether this agent may block in `Atomics.wait` (false for the main agent, true for the
+    /// worker agents spawned by `$262.agent.start`).
+    pub can_block: bool,
+    /// Agent-harness wiring (present only in spawned agents / a main with agents).
+    pub agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
     pub typed_arrays: HashMap<usize, TaInfo>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
@@ -541,7 +667,9 @@ impl Interp {
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
-            shared_buffers: std::collections::HashSet::new(),
+            shared_buffers: HashMap::new(),
+            can_block: true,
+            agent: None,
             typed_arrays: HashMap::new(),
             ta_buffer: HashMap::new(),
             shadow_realms: HashMap::new(),
@@ -612,15 +740,26 @@ impl Interp {
         }
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
-        match self.array_buffers.get(&info.buffer) {
-            Some(buf) if start + es <= buf.len() => {
+        let decode = |buf: &[u8]| -> Value {
+            if start + es <= buf.len() {
                 let bytes = &buf[start..start + es];
                 if info.kind.is_bigint() {
                     Value::BigInt(info.kind.read_bigint(bytes))
                 } else {
                     Value::Num(info.kind.read(bytes))
                 }
+            } else {
+                Value::Undefined
             }
+        };
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            if let Some(mem) = shared_mem_get(id) {
+                return decode(&mem.lock().unwrap());
+            }
+            return Value::Undefined;
+        }
+        match self.array_buffers.get(&info.buffer) {
+            Some(buf) => decode(buf),
             _ => Value::Undefined,
         }
     }
@@ -646,6 +785,15 @@ impl Interp {
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
         let bytes = info.kind.write_bigint(n);
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            if let Some(mem) = shared_mem_get(id) {
+                let mut buf = mem.lock().unwrap();
+                if start + es <= buf.len() {
+                    buf[start..start + es].copy_from_slice(&bytes);
+                }
+            }
+            return;
+        }
         if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
             if start + es <= buf.len() {
                 buf[start..start + es].copy_from_slice(&bytes);
@@ -661,6 +809,15 @@ impl Interp {
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
         let bytes = info.kind.write(n);
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            if let Some(mem) = shared_mem_get(id) {
+                let mut buf = mem.lock().unwrap();
+                if start + es <= buf.len() {
+                    buf[start..start + es].copy_from_slice(&bytes);
+                }
+            }
+            return;
+        }
         if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
             if start + es <= buf.len() {
                 buf[start..start + es].copy_from_slice(&bytes);

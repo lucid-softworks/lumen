@@ -5011,3 +5011,31 @@ fn atomics_methods_and_validation() {
     assert_eq!(run("Atomics.pause(); Atomics.pause(3); 'ok'"), "ok");
     assert_eq!(throws("Atomics.pause(1.5)"), "TypeError");
 }
+
+#[test]
+fn shared_array_buffer_aliasing() {
+    // Two TypedArrays over the same SharedArrayBuffer alias the same (registry-backed) memory.
+    assert_eq!(
+        run("var s=new SharedArrayBuffer(16); var a=new Int32Array(s); var b=new Int32Array(s); a[0]=42; b[0]"),
+        "42"
+    );
+    assert_eq!(
+        run("var s=new SharedArrayBuffer(16); var a=new Int32Array(s); var b=new Int32Array(s); Atomics.store(a,1,99); Atomics.load(b,1)"),
+        "99"
+    );
+    // wait returns 'not-equal' immediately when the value already differs.
+    assert_eq!(
+        run("var a=new Int32Array(new SharedArrayBuffer(8)); a[0]=5; Atomics.wait(a,0,0)"),
+        "not-equal"
+    );
+    // wait with timeout 0 times out immediately when the value matches.
+    assert_eq!(
+        run("var a=new Int32Array(new SharedArrayBuffer(8)); Atomics.wait(a,0,0,0)"),
+        "timed-out"
+    );
+    // notify with no waiters returns 0.
+    assert_eq!(
+        run("Atomics.notify(new Int32Array(new SharedArrayBuffer(8)),0)"),
+        "0"
+    );
+}
