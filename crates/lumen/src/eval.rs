@@ -1844,9 +1844,22 @@ impl Interp {
     /// The `then` operation: register reactions, returning a new dependent promise.
     pub(crate) fn promise_then(&mut self, promise: &Value, on_f: Value, on_r: Value) -> Value {
         let result = self.new_promise();
+        self.promise_then_into(promise, on_f, on_r, result.clone());
+        result
+    }
+
+    /// PerformPromiseThen with a caller-supplied result promise (so `Promise.prototype.then` can
+    /// route through SpeciesConstructor + NewPromiseCapability).
+    pub(crate) fn promise_then_into(
+        &mut self,
+        promise: &Value,
+        on_f: Value,
+        on_r: Value,
+        result: Value,
+    ) {
         let ptr = match promise {
             Value::Obj(o) => Rc::as_ptr(o) as usize,
-            _ => return result,
+            _ => return,
         };
         let status = self.promises.get(&ptr).map(|s| s.status).unwrap_or(0);
         match status {
@@ -1874,7 +1887,6 @@ impl Interp {
                 });
             }
         }
-        result
     }
 
     /// Drain the microtask queue (called after the main script). Bounded to avoid an unbounded loop.

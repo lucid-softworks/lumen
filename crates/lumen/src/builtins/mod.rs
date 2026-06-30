@@ -4030,6 +4030,28 @@ fn capability_executor(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// SpeciesConstructor(O, defaultCtor): O.constructor[@@species], or the default.
+fn species_constructor(i: &mut Interp, obj: &Value, default_ctor: &Value) -> Result<Value, Value> {
+    let c = ab(i.get_member(obj, "constructor"))?;
+    if matches!(c, Value::Undefined) {
+        return Ok(default_ctor.clone());
+    }
+    if !matches!(c, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "constructor is not an object"));
+    }
+    let species = match well_known_key(i, "species") {
+        Some(k) => ab(i.get_member(&c, &k))?,
+        None => Value::Undefined,
+    };
+    if matches!(species, Value::Undefined | Value::Null) {
+        return Ok(default_ctor.clone());
+    }
+    if !is_constructor_value(&species) {
+        return Err(i.make_error("TypeError", "@@species is not a constructor"));
+    }
+    Ok(species)
+}
+
 /// GetPromiseResolve(C): read `C.resolve` once, requiring it to be callable.
 fn get_promise_resolve(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
     let r = ab(i.get_member(ctor, "resolve"))?;
@@ -4202,16 +4224,30 @@ fn install_promise(it: &mut Interp) {
                 "Promise.prototype.then called on a non-Promise",
             ));
         }
-        Ok(i.promise_then(&this, arg(a, 0), arg(a, 1)))
+        // The result promise is built by SpeciesConstructor(this, %Promise%) via NewPromiseCapability.
+        let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "Promise"))?;
+        let c = species_constructor(i, &this, &default_ctor)?;
+        let result = new_promise_capability(i, &c)?;
+        i.promise_then_into(&this, arg(a, 0), arg(a, 1), result.clone());
+        Ok(result)
     });
     it.def_method(&proto, "catch", 1, |i, this, a| {
-        Ok(i.promise_then(&this, Value::Undefined, arg(a, 0)))
+        // Catch is `this.then(undefined, onRejected)` through the actual then method.
+        let then = ab(i.get_member(&this, "then"))?;
+        ab(i.call(then, this.clone(), &[Value::Undefined, arg(a, 0)]))
     });
     it.def_method(&proto, "finally", 1, |i, this, a| {
-        // Approximation: run the callback on both settlement paths (does not perfectly pass the
-        // original value/reason through, but covers the common case).
+        if !matches!(this, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Promise.prototype.finally on non-object"));
+        }
+        // Invoke the real `then` once with the finally callback on both paths (approximate
+        // value-passthrough, but observably routes through `then`).
+        let then = ab(i.get_member(&this, "then"))?;
+        if !then.is_callable() {
+            return Err(i.make_error("TypeError", "then is not callable"));
+        }
         let cb = arg(a, 0);
-        Ok(i.promise_then(&this, cb.clone(), cb))
+        ab(i.call(then, this.clone(), &[cb.clone(), cb]))
     });
 
     let ctor = it.make_native("Promise", 1, |i, _t, a| {
