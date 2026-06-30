@@ -9178,8 +9178,43 @@ fn string_replacement(
         Ok(ab(i.to_string(&r))?.to_string())
     } else {
         let template = ab(i.to_string(repl))?;
-        // Support the common `$&` (matched substring) and `$$` (literal $) patterns.
-        Ok(template.replace("$&", matched).replace("$$", "$"))
+        // GetSubstitution for a string match: $$ → $, $& → match, $` → preceding, $' → following.
+        // (No captures, so $n and $<name> stay literal.)
+        let before = &whole[..pos.min(whole.len())];
+        let after = whole.get(pos + matched.len()..).unwrap_or("");
+        let tchars: Vec<char> = template.chars().collect();
+        let mut out = String::new();
+        let mut k = 0;
+        while k < tchars.len() {
+            if tchars[k] == '$' && k + 1 < tchars.len() {
+                match tchars[k + 1] {
+                    '$' => {
+                        out.push('$');
+                        k += 2;
+                        continue;
+                    }
+                    '&' => {
+                        out.push_str(matched);
+                        k += 2;
+                        continue;
+                    }
+                    '`' => {
+                        out.push_str(before);
+                        k += 2;
+                        continue;
+                    }
+                    '\'' => {
+                        out.push_str(after);
+                        k += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(tchars[k]);
+            k += 1;
+        }
+        Ok(out)
     }
 }
 
