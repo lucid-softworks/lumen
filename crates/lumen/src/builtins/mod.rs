@@ -7832,6 +7832,27 @@ fn install_array(it: &mut Interp) {
             Ok(Value::str("[object Array]"))
         }
     });
+    it.def_method(&ap, "toLocaleString", 0, |i, this, _args| {
+        let o = arr_to_object(i, &this)?;
+        let len = ab(i.checked_array_len(&o))?;
+        let mut out = String::new();
+        for k in 0..len {
+            if k > 0 {
+                out.push(',');
+            }
+            let el = ab(i.get_member(&this, &k.to_string()))?;
+            if !matches!(el, Value::Undefined | Value::Null) {
+                // ToString(? Invoke(element, "toLocaleString")).
+                let tls = ab(i.get_member(&el, "toLocaleString"))?;
+                if !tls.is_callable() {
+                    return Err(i.make_error("TypeError", "toLocaleString is not a function"));
+                }
+                let s = ab(i.call(tls, el, &[]))?;
+                out.push_str(&ab(i.to_string(&s))?);
+            }
+        }
+        Ok(Value::from_string(out))
+    });
     it.def_method(&ap, "at", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))? as i64;

@@ -4546,3 +4546,15 @@ fn math_sum_precise() {
     // A non-number element throws.
     assert_eq!(throws("Math.sumPrecise([1, '2'])"), "TypeError");
 }
+
+#[test]
+fn array_to_locale_string() {
+    assert_eq!(run("[1,2,3].toLocaleString()"), "1,2,3");
+    // null/undefined elements contribute empty strings.
+    assert_eq!(run("[1,null,undefined,2].toLocaleString()"), "1,,,2");
+    // Each element's own toLocaleString is invoked.
+    assert_eq!(
+        run("[{toLocaleString(){return 'X';}}, {toLocaleString(){return 'Y';}}].toLocaleString()"),
+        "X,Y"
+    );
+}
