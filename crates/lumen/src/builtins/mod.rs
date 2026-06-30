@@ -5277,6 +5277,13 @@ fn js_prevent_extensions(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
 
 fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Result<Value, Value> {
     let trap = ab(i.get_member(handler, "getPrototypeOf"))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+        // Forward to the target's [[GetPrototypeOf]] (recursing for a proxy target).
+        return js_get_prototype_of(i, target);
+    }
+    if !trap.is_callable() {
+        return Err(i.make_error("TypeError", "proxy 'getPrototypeOf' trap is not callable"));
+    }
     if trap.is_callable() {
         let res = ab(i.call(trap, handler.clone(), std::slice::from_ref(target)))?;
         if !matches!(res, Value::Obj(_) | Value::Null) {

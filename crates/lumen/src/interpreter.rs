@@ -1187,11 +1187,14 @@ impl Interp {
             if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned()
             {
                 let trap = self.get_member(&handler, "apply")?;
-                let arr = self.make_array(args.to_vec());
-                if trap.is_callable() {
-                    return self.call(trap, handler, &[target, this, arr]);
+                if matches!(trap, Value::Undefined | Value::Null) {
+                    return self.call(target, this, args);
                 }
-                return self.call(target, this, args);
+                if !trap.is_callable() {
+                    return Err(self.throw("TypeError", "proxy 'apply' trap is not callable"));
+                }
+                let arr = self.make_array(args.to_vec());
+                return self.call(trap, handler, &[target, this, arr]);
             }
         }
         let call = obj.borrow().call.clone();
@@ -1710,18 +1713,21 @@ impl Interp {
             if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&obj) as usize)).cloned()
             {
                 let trap = self.get_member(&handler, "construct")?;
-                let arr = self.make_array(args.to_vec());
-                if trap.is_callable() {
-                    let result = self.call(trap, handler, &[target, arr, callee.clone()])?;
-                    // [[Construct]] invariant: the trap must return an Object.
-                    if !matches!(result, Value::Obj(_)) {
-                        return Err(
-                            self.throw("TypeError", "proxy construct trap returned a non-object")
-                        );
-                    }
-                    return Ok(result);
+                if matches!(trap, Value::Undefined | Value::Null) {
+                    return self.construct(target, args);
                 }
-                return self.construct(target, args);
+                if !trap.is_callable() {
+                    return Err(self.throw("TypeError", "proxy 'construct' trap is not callable"));
+                }
+                let arr = self.make_array(args.to_vec());
+                let result = self.call(trap, handler, &[target, arr, callee.clone()])?;
+                // [[Construct]] invariant: the trap must return an Object.
+                if !matches!(result, Value::Obj(_)) {
+                    return Err(
+                        self.throw("TypeError", "proxy construct trap returned a non-object")
+                    );
+                }
+                return Ok(result);
             }
         }
         let call = obj.borrow().call.clone();
