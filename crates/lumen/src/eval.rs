@@ -1810,6 +1810,15 @@ impl Interp {
             this: promise.clone(),
             args: Vec::new(),
         };
+        // A promise resolving function has `length` 1 and an empty `name`.
+        bound.borrow_mut().props.insert(
+            "length",
+            crate::value::Property::data(Value::Num(1.0), false, false, true),
+        );
+        bound.borrow_mut().props.insert(
+            "name",
+            crate::value::Property::data(Value::str(""), false, false, true),
+        );
         Value::Obj(bound)
     }
 

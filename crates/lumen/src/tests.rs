@@ -4869,3 +4869,12 @@ fn weakref_brand_and_tag() {
         "[object WeakRef]"
     );
 }
+
+#[test]
+fn promise_resolving_function_shape() {
+    // The executor's resolve/reject functions have length 1 and an empty name.
+    assert_eq!(
+        run("var o; new Promise((res,rej)=>{o=[res.length,rej.length,res.name,rej.name];}); o.join('|')"),
+        "1|1||"
+    );
+}
