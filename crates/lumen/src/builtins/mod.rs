@@ -7037,6 +7037,43 @@ fn install_iterator(it: &mut Interp) {
         let (iter, _next) = ab(i.get_iterator(&v))?;
         Ok(iter)
     });
+    it.def_method(&ctor, "concat", 0, |i, _t, a| {
+        // Each argument must be an object; capture its @@iterator method now, in order.
+        let iter_key = i
+            .iterator_sym
+            .clone()
+            .map(|s| Interp::sym_key(&s))
+            .unwrap_or_default();
+        let mut items = Vec::new();
+        let mut methods = Vec::new();
+        for v in a {
+            if !matches!(v, Value::Obj(_)) {
+                return Err(i.make_error("TypeError", "Iterator.concat argument is not an object"));
+            }
+            let m = ab(i.get_member(v, &iter_key))?;
+            if !m.is_callable() {
+                return Err(i.make_error("TypeError", "Iterator.concat argument is not iterable"));
+            }
+            items.push(v.clone());
+            methods.push(m);
+        }
+        let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
+        let items_arr = i.make_array(items);
+        let methods_arr = i.make_array(methods);
+        set_builtin(&obj, "__cc_items", items_arr);
+        set_builtin(&obj, "__cc_methods", methods_arr);
+        set_builtin(&obj, "__cc_idx", Value::Num(0.0));
+        set_builtin(&obj, "__cc_cur", Value::Undefined);
+        set_builtin(&obj, "__cc_curnext", Value::Undefined);
+        i.def_method(&obj, "next", 0, concat_next);
+        if let Some(sym) = i.iterator_sym.clone() {
+            let itf = i.make_native("[Symbol.iterator]", 0, return_this);
+            obj.borrow_mut()
+                .props
+                .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
+        }
+        Ok(Value::Obj(obj))
+    });
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(proto.clone()), false, false, false),
@@ -7202,6 +7239,43 @@ fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
     set_data(&o, "value", value);
     set_data(&o, "done", Value::Bool(done));
     Value::Obj(o)
+}
+
+/// `Iterator.concat`'s iterator: opens each captured iterable in order and yields its values.
+fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    loop {
+        let cur = ab(i.get_member(&this, "__cc_cur"))?;
+        if matches!(cur, Value::Undefined) {
+            // Open the next item's iterator (or finish).
+            let idx = ab(i.get_member(&this, "__cc_idx"))?;
+            let idx = ab(i.to_number(&idx))? as usize;
+            let methods = ab(i.get_member(&this, "__cc_methods"))?;
+            let mlen = match &methods {
+                Value::Obj(o) => i.array_length(o),
+                _ => 0,
+            };
+            if idx >= mlen {
+                return Ok(iter_result(i, Value::Undefined, true));
+            }
+            let items = ab(i.get_member(&this, "__cc_items"))?;
+            let item = ab(i.get_member(&items, &idx.to_string()))?;
+            let method = ab(i.get_member(&methods, &idx.to_string()))?;
+            let iter = ab(i.call(method, item, &[]))?;
+            if !matches!(iter, Value::Obj(_)) {
+                return Err(i.make_error("TypeError", "@@iterator did not return an object"));
+            }
+            let next = ab(i.get_member(&iter, "next"))?;
+            set_internal(this.as_obj().unwrap(), "__cc_cur", iter);
+            set_internal(this.as_obj().unwrap(), "__cc_curnext", next);
+            set_internal(this.as_obj().unwrap(), "__cc_idx", Value::Num((idx + 1) as f64));
+        }
+        let cur = ab(i.get_member(&this, "__cc_cur"))?;
+        let next = ab(i.get_member(&this, "__cc_curnext"))?;
+        match step_iter_with(i, &cur, &next)? {
+            Some(v) => return Ok(iter_result(i, v, false)),
+            None => set_internal(this.as_obj().unwrap(), "__cc_cur", Value::Undefined),
+        }
+    }
 }
 
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
