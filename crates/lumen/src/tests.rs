@@ -4198,3 +4198,23 @@ fn iterator_concat_return_closes_inner() {
         "true"
     );
 }
+
+#[test]
+fn symbol_proto_to_primitive_and_tag() {
+    // Symbol.prototype[@@toPrimitive] unwraps a Symbol wrapper.
+    assert_eq!(
+        run("Object(Symbol.toPrimitive)[Symbol.toPrimitive]() === Symbol.toPrimitive"),
+        "true"
+    );
+    // @@toStringTag is "Symbol" and drives Object.prototype.toString.
+    assert_eq!(run("Symbol.prototype[Symbol.toStringTag]"), "Symbol");
+    assert_eq!(
+        run("Object.prototype.toString.call(Object(Symbol()))"),
+        "[object Symbol]"
+    );
+    // The @@toPrimitive property is non-writable, non-enumerable, configurable.
+    assert_eq!(
+        run("var d=Object.getOwnPropertyDescriptor(Symbol.prototype, Symbol.toPrimitive); [d.writable,d.enumerable,d.configurable].join(',')"),
+        "false,false,true"
+    );
+}

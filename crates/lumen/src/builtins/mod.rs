@@ -10185,6 +10185,24 @@ fn install_symbol(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     set_builtin(&it.global, "Symbol", Value::Obj(ctor));
+
+    // These need the well-known symbols, which are only reachable via the global Symbol now installed.
+    // Symbol.prototype[@@toPrimitive](hint) returns thisSymbolValue; { writable:false }.
+    let to_prim = it.make_native("[Symbol.toPrimitive]", 1, |i, this, _| {
+        Ok(Value::Sym(this_symbol(i, &this)?))
+    });
+    if let Some(key) = well_known_key(it, "toPrimitive") {
+        sp.borrow_mut()
+            .props
+            .insert(key, Property::data(Value::Obj(to_prim), false, false, true));
+    }
+    // Symbol.prototype[@@toStringTag] = "Symbol"; { writable:false }.
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        sp.borrow_mut().props.insert(
+            key,
+            Property::data(Value::from_string("Symbol".to_string()), false, false, true),
+        );
+    }
 }
 
 fn bigint_to_radix(mut n: i128, radix: u32) -> String {
