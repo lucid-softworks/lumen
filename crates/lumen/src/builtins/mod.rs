@@ -12198,9 +12198,25 @@ fn install_errors(it: &mut Interp) {
             _ => Value::Undefined,
         })
     });
-    let set_stack = it.make_native("set stack", 1, |_i, this, a| {
-        if let Value::Obj(o) = &this {
-            crate::value::set_data(o, "stack", arg(a, 0));
+    let set_stack = it.make_native("set stack", 1, |i, this, a| {
+        // The setter requires an object receiver and installs an own data `stack` property via
+        // CreateDataPropertyOrThrow (so a non-configurable existing property makes it throw).
+        let o = match &this {
+            Value::Obj(o) => o.clone(),
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Error.prototype.stack setter requires an object",
+                ))
+            }
+        };
+        let desc = i.new_object();
+        set_data(&desc, "value", arg(a, 0));
+        set_data(&desc, "writable", Value::Bool(true));
+        set_data(&desc, "enumerable", Value::Bool(true));
+        set_data(&desc, "configurable", Value::Bool(true));
+        if !ab(define_own_property(i, &o, "stack", &Value::Obj(desc)))? {
+            return Err(i.make_error("TypeError", "cannot redefine stack"));
         }
         Ok(Value::Undefined)
     });
