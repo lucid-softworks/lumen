@@ -4171,8 +4171,8 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
-    it.def_method(&ctor, "allKeyed", 1, |i, _t, a| {
-        let result = i.new_promise();
+    it.def_method(&ctor, "allKeyed", 1, |i, t, a| {
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         let dict = match arg(a, 0) {
             Value::Obj(o) => o,
             _ => {
@@ -4219,8 +4219,8 @@ fn install_promise(it: &mut Interp) {
         }
         Ok(result)
     });
-    it.def_method(&ctor, "allSettledKeyed", 1, |i, _t, a| {
-        let result = i.new_promise();
+    it.def_method(&ctor, "allSettledKeyed", 1, |i, t, a| {
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         let dict = match arg(a, 0) {
             Value::Obj(o) => o,
             _ => {
