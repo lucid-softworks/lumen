@@ -634,6 +634,10 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
+    // Coercing the index/value can detach the buffer.
+    if !i.array_buffers.contains_key(&buf) {
+        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    }
     let es = kind.elsize();
     if byte_off.checked_add(es).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
@@ -697,6 +701,9 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
+    if !i.array_buffers.contains_key(&buf) {
+        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    }
     if byte_off.checked_add(8).is_none_or(|e| e > len) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
