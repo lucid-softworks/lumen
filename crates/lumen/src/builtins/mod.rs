@@ -10247,6 +10247,17 @@ fn install_string(it: &mut Interp) {
         })
     });
     it.def_method(&sp, "matchAll", 1, |i, this, a| {
+        // If the argument is a RegExp, its flags must include "g" (else TypeError).
+        if let Value::Obj(o) = &arg(a, 0) {
+            if let Some(re) = i.regexps.get(&(Rc::as_ptr(o) as usize)) {
+                if !re.flags.contains('g') {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "String.prototype.matchAll called with a non-global RegExp",
+                    ));
+                }
+            }
+        }
         let s = this_string(i, &this)?;
         let re_obj = coerce_regexp(i, arg(a, 0))?;
         let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
@@ -10298,20 +10309,30 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "replaceAll", 2, |i, this, args| {
         let s = this_string(i, &this)?.to_string();
-        // A RegExp search value must be global, and replaces every match via the regex machinery.
-        let regex_global = match &arg(args, 0) {
-            Value::Obj(o) => i.regexps.get(&(Rc::as_ptr(o) as usize)).map(|re| re.global),
-            _ => None,
-        };
-        match regex_global {
-            Some(true) => return regex_replace(i, &s, &arg(args, 0), &arg(args, 1)),
-            Some(false) => {
-                return Err(i.make_error(
-                    "TypeError",
-                    "replaceAll must be called with a global RegExp",
-                ));
+        let search = arg(args, 0);
+        if let Value::Obj(_) = &search {
+            // A RegExp search value must be global.
+            if let Value::Obj(o) = &search {
+                if let Some(re) = i.regexps.get(&(Rc::as_ptr(o) as usize)) {
+                    if !re.global {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "replaceAll must be called with a global RegExp",
+                        ));
+                    }
+                }
             }
-            None => {}
+            // Delegate to the search value's @@replace method when present (handles custom objects).
+            if let Some(key) = well_known_key(i, "replace") {
+                let replacer = ab(i.get_member(&search, &key))?;
+                if replacer.is_callable() {
+                    return ab(i.call(
+                        replacer,
+                        search.clone(),
+                        &[Value::from_string(s.clone()), arg(args, 1)],
+                    ));
+                }
+            }
         }
         let pat = ab(i.to_string(&arg(args, 0)))?;
         let repl = arg(args, 1);

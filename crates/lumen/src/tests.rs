@@ -4694,3 +4694,21 @@ fn regexp_flags_getter_generic() {
     // RegExp.prototype itself yields empty flags.
     assert_eq!(run("RegExp.prototype.flags"), "");
 }
+
+#[test]
+fn string_matchall_replaceall_regexp_rules() {
+    // matchAll/replaceAll throw for a non-global RegExp argument.
+    assert_eq!(throws("'abc'.matchAll(/a/)"), "TypeError");
+    assert_eq!(throws("'abc'.replaceAll(/a/, 'x')"), "TypeError");
+    // A global RegExp works.
+    assert_eq!(run("[...'aba'.matchAll(/a/g)].length"), "2");
+    assert_eq!(run("'aba'.replaceAll(/a/g, 'x')"), "xbx");
+    // replaceAll delegates to a custom @@replace on the search value.
+    assert_eq!(
+        run("var o={ [Symbol.replace](s,r){ return 'CUSTOM'; } }; 'hello'.replaceAll(o, 'x')"),
+        "CUSTOM"
+    );
+    // String search with $$ / $& substitution.
+    assert_eq!(run("'aaa'.replaceAll('a', '$$')"), "$$$");
+    assert_eq!(run("'aaa'.replaceAll('a', '[$&]')"), "[a][a][a]");
+}
