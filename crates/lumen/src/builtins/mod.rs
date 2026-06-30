@@ -8257,40 +8257,73 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
     if !matches!(mode.as_str(), "shortest" | "longest" | "strict") {
         return Err(i.make_error("RangeError", "invalid Iterator.zip mode"));
     }
-    // Collect the input iterables (and their keys, for zipKeyed) in order.
-    let (keys, iterables): (Vec<String>, Vec<Value>) = if keyed {
-        let mut ks = Vec::new();
-        let mut vs = Vec::new();
-        if let Value::Obj(o) = &input {
-            for k in ordered_enum_keys(o) {
-                vs.push(ab(i.get_member(&input, &k))?);
-                ks.push(k.to_string());
-            }
-        }
-        (ks, vs)
+    // The padding option is read (but not yet iterated) before the inputs are opened.
+    let padding_value = if mode == "longest" && matches!(&options, Value::Obj(_)) {
+        ab(i.get_member(&options, "padding"))?
     } else {
-        (Vec::new(), ab(i.iterate(&input))?)
+        Value::Undefined
     };
-    // Open every iterator now.
-    let mut iters = Vec::new();
-    let mut nexts = Vec::new();
-    for v in &iterables {
-        // GetIteratorFlattenable (reject strings): each input may be an iterable or an iterator.
+    // Open the inputs in order, GetIteratorFlattenable each as it is read. An error opening one
+    // closes the input iterator and every iterator already opened.
+    let mut keys: Vec<String> = Vec::new();
+    let mut iters: Vec<Value> = Vec::new();
+    let mut nexts: Vec<Value> = Vec::new();
+    let open_one = |i: &mut Interp,
+                    v: &Value,
+                    iters: &mut Vec<Value>,
+                    nexts: &mut Vec<Value>|
+     -> Result<(), Value> {
         let iter = get_iterator_flattenable(i, v, false)?;
         let next = ab(i.get_member(&iter, "next"))?;
         iters.push(iter);
         nexts.push(next);
-    }
-    // `longest` padding: an array aligned with the iterators.
-    let padding = if mode == "longest" {
-        let mut pad = vec![Value::Undefined; iterables.len()];
-        if let Value::Obj(_) = &options {
-            let p = ab(i.get_member(&options, "padding"))?;
-            if !matches!(p, Value::Undefined) {
-                let vals = ab(i.iterate(&p))?;
-                for (j, v) in vals.into_iter().enumerate().take(iters.len()) {
-                    pad[j] = v;
+        Ok(())
+    };
+    if keyed {
+        // zipKeyed: each own enumerable key's value is an input iterable.
+        if let Value::Obj(o) = &input {
+            for k in ordered_enum_keys(o) {
+                let v = ab(i.get_member(&input, &k))?;
+                if let Err(e) = open_one(i, &v, &mut iters, &mut nexts) {
+                    for it in &iters {
+                        i.iterator_close(it);
+                    }
+                    return Err(e);
                 }
+                keys.push(k.to_string());
+            }
+        }
+    } else {
+        // zip: step the iterable-of-iterables lazily, opening each input as it is produced.
+        let (input_iter, input_next) = ab(i.get_iterator(&input))?;
+        loop {
+            match step_iter_with(i, &input_iter, &input_next) {
+                Ok(None) => break,
+                Ok(Some(v)) => {
+                    if let Err(e) = open_one(i, &v, &mut iters, &mut nexts) {
+                        i.iterator_close(&input_iter);
+                        for it in &iters {
+                            i.iterator_close(it);
+                        }
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    for it in &iters {
+                        i.iterator_close(it);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+    // `longest` padding: an array aligned with the iterators, filled from the pre-read padding value.
+    let padding = if mode == "longest" {
+        let mut pad = vec![Value::Undefined; iters.len()];
+        if !matches!(padding_value, Value::Undefined) {
+            let vals = ab(i.iterate(&padding_value))?;
+            for (j, v) in vals.into_iter().enumerate().take(iters.len()) {
+                pad[j] = v;
             }
         }
         pad
@@ -8298,13 +8331,14 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
         Vec::new()
     };
 
+    let n_iters = iters.len();
     let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
     set_builtin(&obj, "__zip_iters", i.make_array(iters));
     set_builtin(&obj, "__zip_nexts", i.make_array(nexts));
     set_builtin(
         &obj,
         "__zip_done",
-        i.make_array(vec![Value::Bool(false); iterables.len()]),
+        i.make_array(vec![Value::Bool(false); n_iters]),
     );
     set_builtin(&obj, "__zip_mode", Value::from_string(mode.clone()));
     set_builtin(&obj, "__zip_pad", i.make_array(padding));

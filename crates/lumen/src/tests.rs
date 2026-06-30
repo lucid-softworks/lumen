@@ -4047,3 +4047,25 @@ fn iterator_take_drop() {
         "1,2,3"
     );
 }
+
+#[test]
+fn iterator_zip_basics() {
+    assert_eq!(
+        run("Iterator.zip([[1,2],[3,4]]).map(p=>p.join('')).toArray().join(',')"),
+        "13,24"
+    );
+    // shortest mode (default) stops at the shortest input.
+    assert_eq!(run("Iterator.zip([[1,2,3],[4,5]]).toArray().length"), "2");
+    // longest mode pads the missing values.
+    assert_eq!(
+        run("Iterator.zip([[1],[2,3]], {mode:'longest'}).toArray().map(p=>p.join('|')).join(',')"),
+        "1|2,|3"
+    );
+    // zipKeyed pairs object keys.
+    assert_eq!(
+        run("var z=Iterator.zipKeyed({a:[1,2],b:[3,4]}).toArray(); z[0].a+''+z[0].b"),
+        "13"
+    );
+    // An invalid mode is a RangeError.
+    assert_eq!(throws("Iterator.zip([[1]], {mode:'bogus'})"), "RangeError");
+}
