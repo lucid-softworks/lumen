@@ -3040,10 +3040,16 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
         Expr::Ident(name) => Some(Pattern::Ident(name.clone())),
         Expr::Array(elems) => {
             let mut out = Vec::new();
-            for el in elems {
+            for (idx, el) in elems.iter().enumerate() {
                 match el {
                     ArrayElem::Hole => out.push(ArrayPatElem::Hole),
-                    ArrayElem::Spread(t) => out.push(ArrayPatElem::Rest(expr_to_pattern(t)?)),
+                    ArrayElem::Spread(t) => {
+                        // A rest element must be last and can't carry a default.
+                        if idx != elems.len() - 1 || matches!(t, Expr::Assign { op: "=", .. }) {
+                            return None;
+                        }
+                        out.push(ArrayPatElem::Rest(expr_to_pattern(t)?));
+                    }
                     ArrayElem::Item(Expr::Assign {
                         op: "=",
                         target,
