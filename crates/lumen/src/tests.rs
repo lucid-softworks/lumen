@@ -3986,3 +3986,64 @@ fn weak_collections_symbol_keys() {
     // A registered symbol is not collectable, so it can't be a weak key.
     assert_eq!(throws("new WeakMap().set(Symbol.for('x'), 1)"), "TypeError");
 }
+
+#[test]
+fn iterator_helpers_close_and_from() {
+    // Eager helpers close the underlying iterator when the callback throws.
+    assert_eq!(
+        run(r#"
+            var closed = false;
+            var iter = { next(){ return {done:false, value:1}; }, return(){ closed=true; return {}; } };
+            try { Iterator.from(iter).forEach(()=>{ throw 0; }); } catch(e) {}
+            closed
+        "#),
+        "true"
+    );
+    // A non-callable predicate is a TypeError that still closes the source.
+    assert_eq!(
+        run(r#"
+            var closed=false;
+            var iter={ next(){return{done:false,value:1};}, return(){closed=true;return{};} };
+            try { Iterator.from(iter).every(5); } catch(e) {}
+            closed
+        "#),
+        "true"
+    );
+    // Iterator.from accepts a bare iterator (no @@iterator) and exposes the helpers.
+    assert_eq!(
+        run(r#"
+            var i=0;
+            var bare={ next(){ return i<3?{done:false,value:++i}:{done:true}; } };
+            Iterator.from(bare).map(x=>x*2).toArray().join(',')
+        "#),
+        "2,4,6"
+    );
+    // Iterator.from on a string iterates its characters.
+    assert_eq!(run("Iterator.from('abc').toArray().join('-')"), "a-b-c");
+    // flatMap rejects a primitive mapper result.
+    assert_eq!(throws("[1].values().flatMap(x=>x).toArray()"), "TypeError");
+    // flatMap flattens an iterator result.
+    assert_eq!(
+        run("[1,2].values().flatMap(x=>[x,x].values()).toArray().join(',')"),
+        "1,1,2,2"
+    );
+    // take validates its limit (RangeError) and closes once on return().
+    assert_eq!(throws("[1,2].values().take(-1)"), "RangeError");
+    assert_eq!(throws("[1,2].values().take(NaN)"), "RangeError");
+}
+
+#[test]
+fn iterator_take_drop() {
+    assert_eq!(
+        run("[1,2,3,4,5].values().take(2).toArray().join(',')"),
+        "1,2"
+    );
+    assert_eq!(
+        run("[1,2,3,4,5].values().drop(2).toArray().join(',')"),
+        "3,4,5"
+    );
+    assert_eq!(
+        run("[1,2,3].values().take(10).toArray().join(',')"),
+        "1,2,3"
+    );
+}

@@ -418,9 +418,7 @@ impl Interp {
             },
         );
         // Share the well-known symbols: overwrite the realm's freshly-minted ones with the originals.
-        if let Ok(Value::Obj(rs)) =
-            self.get_member(&Value::Obj(self.global.clone()), "Symbol")
-        {
+        if let Ok(Value::Obj(rs)) = self.get_member(&Value::Obj(self.global.clone()), "Symbol") {
             for (name, sym) in &well_known {
                 rs.borrow_mut()
                     .props

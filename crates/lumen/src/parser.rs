@@ -2688,13 +2688,14 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 }
             }
             // The constructor can't be a generator, async, getter, or setter.
-            if !m.is_static && key_is(&m.key, "constructor")
+            if !m.is_static
+                && key_is(&m.key, "constructor")
                 && (matches!(m.kind, MemberKind::Get | MemberKind::Set)
                     || func.is_generator
                     || func.is_async)
-                {
-                    return Err("class constructor can't be a generator, async, or accessor".into());
-                }
+            {
+                return Err("class constructor can't be a generator, async, or accessor".into());
+            }
             // A static method (any kind) may not be named "prototype".
             if m.is_static && key_is(&m.key, "prototype") {
                 return Err("classes may not have a static method named 'prototype'".into());
