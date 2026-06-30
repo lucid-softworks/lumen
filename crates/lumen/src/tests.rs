@@ -4681,3 +4681,16 @@ fn date_to_json_generic() {
     );
     assert_eq!(run("typeof new Date(0).toJSON()"), "string");
 }
+
+#[test]
+fn regexp_flags_getter_generic() {
+    assert_eq!(run("/abc/gi.flags"), "gi");
+    assert_eq!(run("/x/dgimsy.flags"), "dgimsy");
+    // The flags getter is generic — it reads each component accessor from the receiver.
+    assert_eq!(
+        run("Object.getOwnPropertyDescriptor(RegExp.prototype,'flags').get.call({global:true, sticky:true, hasIndices:true})"),
+        "dgy"
+    );
+    // RegExp.prototype itself yields empty flags.
+    assert_eq!(run("RegExp.prototype.flags"), "");
+}

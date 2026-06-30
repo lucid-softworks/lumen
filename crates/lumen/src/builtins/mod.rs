@@ -938,7 +938,32 @@ fn install_regexp(it: &mut Interp) {
         );
     };
     add_getter(it, &proto, "source", re_source_get);
-    add_getter(it, &proto, "flags", |i, t, _| re_flag_get(i, &t, None));
+    // `get flags` is generic: it reads each component flag accessor via [[Get]] on the receiver.
+    add_getter(it, &proto, "flags", |i, t, _| {
+        if !matches!(t, Value::Obj(_)) {
+            return Err(i.make_error(
+                "TypeError",
+                "RegExp.prototype.flags getter called on non-object",
+            ));
+        }
+        let mut out = String::new();
+        for (prop, ch) in [
+            ("hasIndices", 'd'),
+            ("global", 'g'),
+            ("ignoreCase", 'i'),
+            ("multiline", 'm'),
+            ("dotAll", 's'),
+            ("unicode", 'u'),
+            ("unicodeSets", 'v'),
+            ("sticky", 'y'),
+        ] {
+            let v = ab(i.get_member(&t, prop))?;
+            if i.to_boolean(&v) {
+                out.push(ch);
+            }
+        }
+        Ok(Value::from_string(out))
+    });
     add_getter(it, &proto, "global", |i, t, _| {
         re_flag_get(i, &t, Some('g'))
     });
