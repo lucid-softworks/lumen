@@ -4927,20 +4927,6 @@ fn to_object_arg(i: &mut Interp, v: Value, method: &str) -> Result<Gc, Value> {
 }
 
 /// A Promise combinator (`Promise.all`/`race`/…) requires `this` to be a constructor.
-fn require_constructor(i: &mut Interp, this: &Value) -> Result<(), Value> {
-    let ok = matches!(this, Value::Obj(o)
-        if !matches!(o.borrow().call, Callable::None)
-        && (o.borrow().is_constructor || o.borrow().props.contains("prototype")));
-    if ok {
-        Ok(())
-    } else {
-        Err(i.make_error(
-            "TypeError",
-            "Promise combinator called on a non-constructor",
-        ))
-    }
-}
-
 /// ToObject for a generic `Array.prototype` method receiver: primitives are boxed (so the method
 /// reads the inherited array-like properties), null/undefined throw.
 fn arr_to_object(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
