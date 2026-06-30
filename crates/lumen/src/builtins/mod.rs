@@ -5399,6 +5399,69 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
 }
 
 /// Proxy `[[DefineOwnProperty]]`: call the trap (ToBoolean its result) or forward to the target.
+/// Proxy `[[GetOwnProperty]]`: the trap result as a descriptor object (or undefined), enforcing the
+/// absent-property invariant; a missing trap forwards to the target (recursing for a proxy target).
+fn proxy_gopd_value(
+    i: &mut Interp,
+    target: &Value,
+    handler: &Value,
+    key: &str,
+) -> Result<Value, Value> {
+    if matches!(handler, Value::Null) {
+        return Err(i.make_error("TypeError", "proxy is revoked"));
+    }
+    let trap = ab(i.get_member(handler, "getOwnPropertyDescriptor"))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+        if let Some((t2, h2)) = proxy_pair(i, target) {
+            return proxy_gopd_value(i, &t2, &h2, key);
+        }
+        if let Value::Obj(t) = target {
+            let prop = t.borrow().props.get(key).cloned();
+            return Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined));
+        }
+        return Ok(Value::Undefined);
+    }
+    if !trap.is_callable() {
+        return Err(i.make_error(
+            "TypeError",
+            "proxy 'getOwnPropertyDescriptor' trap is not callable",
+        ));
+    }
+    let key_val = i
+        .sym_from_key(key)
+        .unwrap_or_else(|| Value::from_string(key.to_string()));
+    let res = ab(i.call(trap, handler.clone(), &[target.clone(), key_val]))?;
+    if matches!(res, Value::Undefined) {
+        // The trap may report a property absent only if the target permits it.
+        if let Value::Obj(t) = target {
+            let tprop = t.borrow().props.get(key).cloned();
+            if let Some(p) = tprop {
+                if !p.configurable {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "gOPD trap reported undefined for a non-configurable property",
+                    ));
+                }
+                if !t.borrow().extensible {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "gOPD trap reported undefined for a non-extensible target's property",
+                    ));
+                }
+            }
+        }
+        return Ok(Value::Undefined);
+    }
+    if !matches!(res, Value::Obj(_)) {
+        return Err(i.make_error(
+            "TypeError",
+            "getOwnPropertyDescriptor trap must return an object or undefined",
+        ));
+    }
+    let pd = ab(build_partial(i, &res))?;
+    Ok(descriptor_from_prop(i, complete_descriptor(pd)))
+}
+
 fn proxy_define_property(
     i: &mut Interp,
     target: &Value,
@@ -5878,48 +5941,7 @@ fn install_object(it: &mut Interp) {
             }
         }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-            let trap = ab(i.get_member(&handler, "getOwnPropertyDescriptor"))?;
-            if trap.is_callable() {
-                let key_val = i
-                    .sym_from_key(&key)
-                    .unwrap_or_else(|| Value::from_string(key.clone()));
-                let res = ab(i.call(trap, handler, &[target.clone(), key_val]))?;
-                if matches!(res, Value::Undefined) {
-                    // The trap may report a property absent only if the target permits it.
-                    if let Value::Obj(t) = &target {
-                        let tprop = t.borrow().props.get(&key).cloned();
-                        if let Some(p) = tprop {
-                            if !p.configurable {
-                                return Err(i.make_error(
-                                    "TypeError",
-                                    "gOPD trap reported undefined for a non-configurable property",
-                                ));
-                            }
-                            if !t.borrow().extensible {
-                                return Err(i.make_error(
-                                    "TypeError",
-                                    "gOPD trap reported undefined for a non-extensible target's property",
-                                ));
-                            }
-                        }
-                    }
-                    return Ok(Value::Undefined);
-                }
-                if !matches!(res, Value::Obj(_)) {
-                    return Err(i.make_error(
-                        "TypeError",
-                        "getOwnPropertyDescriptor trap must return an object or undefined",
-                    ));
-                }
-                let pd = ab(build_partial(i, &res))?;
-                return Ok(descriptor_from_prop(i, complete_descriptor(pd)));
-            }
-            if let Value::Obj(t) = &target {
-                let prop = t.borrow().props.get(&key).cloned();
-                return Ok(prop
-                    .map(|p| descriptor_from_prop(i, p))
-                    .unwrap_or(Value::Undefined));
-            }
+            return proxy_gopd_value(i, &target, &handler, &key);
         }
         let prop = o.borrow().props.get(&key).cloned();
         match prop {
