@@ -5072,6 +5072,17 @@ fn install_function_proto(it: &mut Interp) {
         } else {
             args[1..].to_vec()
         };
+        // length = max(0, ToInteger(target.length) - boundArgs); name = "bound " + target.name.
+        let target_len = ab(i.get_member(&this, "length"))?;
+        let l = match target_len {
+            Value::Num(n) if n.is_finite() => (n.trunc() as i64 - bound_args.len() as i64).max(0),
+            _ => 0,
+        };
+        let target_name = ab(i.get_member(&this, "name"))?;
+        let name = match &target_name {
+            Value::Str(s) => format!("bound {s}"),
+            _ => "bound ".to_string(),
+        };
         let obj = Object::new(Some(i.function_proto.clone()));
         obj.borrow_mut().call = Callable::Bound {
             target,
@@ -5079,7 +5090,14 @@ fn install_function_proto(it: &mut Interp) {
             args: bound_args,
         };
         obj.borrow_mut().is_constructor = true;
-        set_builtin(&obj, "name", Value::str("bound"));
+        obj.borrow_mut().props.insert(
+            "length",
+            Property::data(Value::Num(l as f64), false, false, true),
+        );
+        obj.borrow_mut().props.insert(
+            "name",
+            Property::data(Value::from_string(name), false, false, true),
+        );
         Ok(Value::Obj(obj))
     });
     it.def_method(&fp, "toString", 0, |_i, _this, _args| {
