@@ -575,6 +575,32 @@ fn install_host(it: &mut Interp) {
     set_builtin(&it.global, "$262", Value::Obj(host));
 }
 
+fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value> {
+    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))?;
+    i.data_views
+        .get(&ptr)
+        .copied()
+        .ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))
+}
+fn dv_buffer_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    dv_info(i, &this)?;
+    ab(i.get_member(&this, "__dv_buffer"))
+}
+fn dv_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let (buf, _off, len) = dv_info(i, &this)?;
+    if !i.array_buffers.contains_key(&buf) {
+        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    }
+    Ok(Value::Num(len as f64))
+}
+fn dv_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let (buf, off, _len) = dv_info(i, &this)?;
+    if !i.array_buffers.contains_key(&buf) {
+        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    }
+    Ok(Value::Num(off as f64))
+}
+
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let (buf, off, len) = *i
@@ -690,6 +716,30 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
 fn install_dataview(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("DataView", proto.clone());
+    // buffer / byteLength / byteOffset are brand-checked accessor getters; byteLength/byteOffset
+    // additionally throw if the backing buffer has been detached.
+    for (name, getter) in [
+        (
+            "buffer",
+            dv_buffer_get as fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>,
+        ),
+        ("byteLength", dv_bytelength_get),
+        ("byteOffset", dv_byteoffset_get),
+    ] {
+        let g = it.make_native(name, 0, getter);
+        proto.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
     macro_rules! dvm {
         ($getname:expr, $setname:expr, $kind:expr) => {
             it.def_method(&proto, $getname, 1, |i, this, a| dv_get(i, &this, a, $kind));
@@ -759,9 +809,9 @@ fn install_dataview(it: &mut Interp) {
         let obj = Object::new(i.extra_protos.get("DataView").cloned());
         let p = Rc::as_ptr(&obj) as usize;
         i.data_views.insert(p, (bp, offset, len));
-        set_internal(&obj, "buffer", arg(a, 0));
-        set_internal(&obj, "byteOffset", Value::Num(offset as f64));
-        set_internal(&obj, "byteLength", Value::Num(len as f64));
+        // buffer/byteOffset/byteLength are accessor getters on the prototype, not own properties;
+        // only the buffer object itself is kept (hidden) for the `buffer` getter.
+        set_internal(&obj, "__dv_buffer", arg(a, 0));
         Ok(Value::Obj(obj))
     });
     ctor.borrow_mut().props.insert(
