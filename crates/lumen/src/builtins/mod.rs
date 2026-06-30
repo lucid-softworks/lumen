@@ -4398,6 +4398,36 @@ fn install_json(it: &mut Interp) {
         }
         Ok(v)
     });
+    it.def_method(&j, "rawJSON", 1, |i, _t, args| {
+        let text = ab(i.to_string(&arg(args, 0)))?.to_string();
+        let bytes: Vec<char> = text.chars().collect();
+        if bytes.is_empty() {
+            return Err(i.make_error("SyntaxError", "JSON.rawJSON: empty string"));
+        }
+        let is_ws = |c: char| matches!(c, '\t' | '\n' | '\r' | ' ');
+        if is_ws(bytes[0]) || is_ws(*bytes.last().unwrap()) {
+            return Err(i.make_error("SyntaxError", "JSON.rawJSON: leading/trailing whitespace"));
+        }
+        if bytes[0] == '{' || bytes[0] == '[' {
+            return Err(i.make_error("SyntaxError", "JSON.rawJSON value must be a primitive"));
+        }
+        // Validate it is exactly one JSON value.
+        let mut pos = 0;
+        json_parse_value(i, &bytes, &mut pos)?;
+        json_skip_ws(&bytes, &mut pos);
+        if pos != bytes.len() {
+            return Err(i.make_error("SyntaxError", "JSON.rawJSON: invalid JSON text"));
+        }
+        let o = i.new_object();
+        o.borrow_mut().proto = None;
+        set_data(&o, "rawJSON", Value::from_string(text.clone()));
+        set_internal(&o, "__raw_json", Value::from_string(text));
+        i.freeze_object(&Value::Obj(o.clone()));
+        Ok(Value::Obj(o))
+    });
+    it.def_method(&j, "isRawJSON", 1, |_i, _t, args| {
+        Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if o.borrow().props.contains("__raw_json"))))
+    });
     set_to_string_tag(it, &j, "JSON");
     set_builtin(&it.global, "JSON", Value::Obj(j));
 }
@@ -4439,6 +4469,12 @@ fn json_str(
     } else {
         value.clone()
     };
+    // A JSON.rawJSON object serializes as its stored raw text, verbatim.
+    if let Value::Obj(o) = &value {
+        if let Some(Value::Str(raw)) = o.borrow().props.get("__raw_json").map(|p| p.value.clone()) {
+            return Ok(Some(raw.to_string()));
+        }
+    }
     match &value {
         Value::Undefined | Value::Sym(_) => Ok(None),
         Value::Null => Ok(Some("null".to_string())),
@@ -4660,6 +4696,10 @@ fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<
                     }
                     _ => return Err(i.make_error("SyntaxError", "Bad escape in JSON")),
                 }
+            }
+            // Unescaped control characters (U+0000–U+001F) are not allowed in JSON strings.
+            c if (c as u32) < 0x20 => {
+                return Err(i.make_error("SyntaxError", "Unescaped control character in JSON string"))
             }
             c => s.push(c),
         }
