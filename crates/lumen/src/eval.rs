@@ -1103,6 +1103,19 @@ impl Interp {
         self.set_member(&g, name, value)
     }
 
+    /// CreateListFromArrayLike: read `obj.length` then elements `0..length` into a Vec (used by the
+    /// Proxy `ownKeys` trap, which returns an array-like, not an iterable).
+    pub(crate) fn create_list_from_arraylike(&mut self, obj: &Value) -> Result<Vec<Value>, Abrupt> {
+        let len_v = self.get_member(obj, "length")?;
+        let len = self.to_number(&len_v)?;
+        let len = if len.is_nan() || len < 0.0 { 0 } else { len as usize };
+        let mut out = Vec::with_capacity(len.min(1024));
+        for k in 0..len {
+            out.push(self.get_member(obj, &k.to_string())?);
+        }
+        Ok(out)
+    }
+
     pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
         // A TypedArray's [[HasProperty]] resolves integer-index slots itself and never consults the
         // prototype for a canonical-numeric key (valid index → present; otherwise absent).

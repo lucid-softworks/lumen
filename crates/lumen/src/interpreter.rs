@@ -1709,7 +1709,14 @@ impl Interp {
                 let trap = self.get_member(&handler, "construct")?;
                 let arr = self.make_array(args.to_vec());
                 if trap.is_callable() {
-                    return self.call(trap, handler, &[target, arr, callee.clone()]);
+                    let result = self.call(trap, handler, &[target, arr, callee.clone()])?;
+                    // [[Construct]] invariant: the trap must return an Object.
+                    if !matches!(result, Value::Obj(_)) {
+                        return Err(
+                            self.throw("TypeError", "proxy construct trap returned a non-object")
+                        );
+                    }
+                    return Ok(result);
                 }
                 return self.construct(target, args);
             }

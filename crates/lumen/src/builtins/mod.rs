@@ -4912,13 +4912,59 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
         if !matches!(res, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "ownKeys trap must return an array-like object"));
         }
-        let keys = ab(i.iterate(&res))?;
+        let keys = ab(i.create_list_from_arraylike(&res))?;
+        let mut key_strs: Vec<String> = Vec::with_capacity(keys.len());
         for k in &keys {
             if !matches!(k, Value::Str(_) | Value::Sym(_)) {
                 return Err(i.make_error(
                     "TypeError",
                     "ownKeys trap result must contain only strings and symbols",
                 ));
+            }
+            key_strs.push(ab(i.to_property_key(k))?);
+        }
+        // No duplicate keys.
+        let result_set: std::collections::HashSet<&str> =
+            key_strs.iter().map(|s| s.as_str()).collect();
+        if result_set.len() != key_strs.len() {
+            return Err(i.make_error("TypeError", "ownKeys trap result has duplicate keys"));
+        }
+        // Invariants relative to the target's own keys / extensibility.
+        if let Value::Obj(t) = target {
+            let extensible = t.borrow().extensible;
+            let target_keys: Vec<(String, bool)> = t
+                .borrow()
+                .props
+                .keys()
+                .into_iter()
+                .map(|k| {
+                    let conf = t.borrow().props.get(&k).map(|p| p.configurable).unwrap_or(true);
+                    (k.to_string(), conf)
+                })
+                .collect();
+            for (tk, conf) in &target_keys {
+                if !conf && !result_set.contains(tk.as_str()) {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "ownKeys trap omitted a non-configurable target key",
+                    ));
+                }
+            }
+            if !extensible {
+                for (tk, _) in &target_keys {
+                    if !result_set.contains(tk.as_str()) {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "ownKeys trap omitted a key of a non-extensible target",
+                        ));
+                    }
+                }
+                if key_strs.len() != target_keys.len() {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "ownKeys trap added a key to a non-extensible target",
+                    ));
+                }
             }
         }
         Ok(keys)
