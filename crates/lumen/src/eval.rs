@@ -3225,14 +3225,20 @@ impl Interp {
             Value::Obj(p) => p,
             _ => return Err(self.throw("TypeError", "prototype property is not an object")),
         };
-        let mut cur = o_obj.borrow().proto.clone();
-        while let Some(x) = cur {
-            if Rc::ptr_eq(&x, &proto) {
-                return Ok(true);
+        // Walk O's prototype chain via [[GetPrototypeOf]] (so a proxy's trap participates).
+        let mut cur = Value::Obj(o_obj);
+        loop {
+            let next = crate::builtins::js_get_prototype_of(self, &cur).map_err(Abrupt::Throw)?;
+            match next {
+                Value::Obj(x) => {
+                    if Rc::ptr_eq(&x, &proto) {
+                        return Ok(true);
+                    }
+                    cur = Value::Obj(x);
+                }
+                _ => return Ok(false),
             }
-            cur = x.borrow().proto.clone();
         }
-        Ok(false)
     }
 
     // ----- abstract operations ----------------------------------------------------------------

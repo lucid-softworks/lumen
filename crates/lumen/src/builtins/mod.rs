@@ -5216,7 +5216,7 @@ fn js_is_extensible(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
 }
 
 /// `[[GetPrototypeOf]]`, proxy-aware.
-fn js_get_prototype_of(i: &mut Interp, obj: &Value) -> Result<Value, Value> {
+pub(crate) fn js_get_prototype_of(i: &mut Interp, obj: &Value) -> Result<Value, Value> {
     if let Some((target, handler)) = proxy_pair(i, obj) {
         if matches!(handler, Value::Null) {
             return Err(i.make_error("TypeError", "proxy is revoked"));
