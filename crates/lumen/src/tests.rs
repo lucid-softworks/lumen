@@ -4648,3 +4648,21 @@ fn array_reverse_holes() {
         "3,false,1"
     );
 }
+
+#[test]
+fn array_splice_holes_and_shift() {
+    assert_eq!(
+        run("var a=[1,2,3,4,5]; var r=a.splice(1,2,'x'); a.join(',')+'|'+r.join(',')"),
+        "1,x,4,5|2,3"
+    );
+    // Growing shifts the tail right correctly.
+    assert_eq!(
+        run("var c=[1,2,3]; c.splice(1,0,'a','b'); c.join(',')"),
+        "1,a,b,2,3"
+    );
+    // Removed array preserves holes.
+    assert_eq!(
+        run("var b=[1,,3,4]; var r=b.splice(0,2); [r.hasOwnProperty(1), b.join(',')].join('|')"),
+        "false|3,4"
+    );
+}

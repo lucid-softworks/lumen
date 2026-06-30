@@ -8398,7 +8398,9 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     let o = arr_to_object(i, &this)?;
     let len = ab(i.checked_array_len(&o))? as i64;
     let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
-    let delete_count = if args.len() < 2 {
+    let delete_count = if args.is_empty() {
+        0
+    } else if args.len() < 2 {
         len - start
     } else {
         (ab(i.to_number(&arg(args, 1)))? as i64).clamp(0, len - start)
@@ -8408,21 +8410,53 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     } else {
         Vec::new()
     };
-    let mut removed = Vec::with_capacity(delete_count.max(0) as usize);
+    // The removed array (ArraySpeciesCreate) preserves holes via HasProperty.
+    let removed = array_species_create(i, &this, delete_count.max(0) as usize)?;
     for k in 0..delete_count {
-        removed.push(ab(i.get_member(&this, &(start + k).to_string()))?);
+        let from = (start + k).to_string();
+        if i.has_property(&o, &from) {
+            let v = ab(i.get_member(&this, &from))?;
+            json_create_data_prop(i, &removed, &k.to_string(), v)?;
+        }
     }
-    let mut tail = Vec::new();
-    for k in (start + delete_count)..len {
-        tail.push(ab(i.get_member(&this, &k.to_string()))?);
+    ab(i.set_member(&removed, "length", Value::Num(delete_count as f64)))?;
+    let item_count = items.len() as i64;
+    // Shift the trailing elements (preserving holes) to open or close the gap.
+    if item_count < delete_count {
+        for k in start..(len - delete_count) {
+            let from = (k + delete_count).to_string();
+            let to = (k + item_count).to_string();
+            if i.has_property(&o, &from) {
+                let v = ab(i.get_member(&this, &from))?;
+                ab(i.set_member(&this, &to, v))?;
+            } else {
+                json_delete_prop(i, &this, &to)?;
+            }
+        }
+        for k in ((len - delete_count + item_count)..len).rev() {
+            json_delete_prop(i, &this, &k.to_string())?;
+        }
+    } else if item_count > delete_count {
+        for k in ((start + 1)..=(len - delete_count)).rev() {
+            let from = (k + delete_count - 1).to_string();
+            let to = (k + item_count - 1).to_string();
+            if i.has_property(&o, &from) {
+                let v = ab(i.get_member(&this, &from))?;
+                ab(i.set_member(&this, &to, v))?;
+            } else {
+                json_delete_prop(i, &this, &to)?;
+            }
+        }
     }
-    let mut idx = start;
-    for v in items.iter().chain(tail.iter()) {
-        ab(i.set_member(&this, &idx.to_string(), v.clone()))?;
-        idx += 1;
+    for (off, v) in items.iter().enumerate() {
+        ab(i.set_member(&this, &(start + off as i64).to_string(), v.clone()))?;
     }
-    ab(i.set_member(&this, "length", Value::Num(idx as f64)))?;
-    Ok(i.make_array(removed))
+    ab(i.set_member(
+        &this,
+        "length",
+        Value::Num((len - delete_count + item_count) as f64),
+    ))?;
+    Ok(removed)
 }
 
 fn merge_sort(i: &mut Interp, items: &mut [Value], cmp: &Value) -> Result<(), Value> {
