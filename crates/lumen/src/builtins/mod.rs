@@ -7990,7 +7990,7 @@ fn install_iterator(it: &mut Interp) {
         });
         i.def_method(&obj, "return", 0, |i, this, _a| {
             let it = ab(i.get_member(&this, "__wrap_iter"))?;
-            i.iterator_close(&it);
+            ab(i.iterator_close_normal(&it))?;
             Ok(iter_result(i, Value::Undefined, true))
         });
         Ok(Value::Obj(obj))
