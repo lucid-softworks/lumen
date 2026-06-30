@@ -3299,13 +3299,7 @@ fn install_map_methods(it: &mut Interp) {
     let mp = it.extra_protos.get("Map").cloned().unwrap();
     // getOrInsert(key, value): return the existing value, or insert and return `value`.
     it.def_method(&mp, "getOrInsert", 2, |i, this, a| {
-        let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
-        let ptr = ptr.ok_or_else(|| {
-            i.make_error(
-                "TypeError",
-                "Map.prototype.getOrInsert called on incompatible receiver",
-            )
-        })?;
+        let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
         let key = arg(a, 0);
         if let Some((_, v)) = i.map_data[&ptr]
             .iter()
@@ -3321,13 +3315,7 @@ fn install_map_methods(it: &mut Interp) {
         Ok(value)
     });
     it.def_method(&mp, "getOrInsertComputed", 2, |i, this, a| {
-        let ptr = map_ptr(&this).filter(|p| i.map_data.contains_key(p));
-        let ptr = ptr.ok_or_else(|| {
-            i.make_error(
-                "TypeError",
-                "Map.prototype.getOrInsertComputed called on incompatible receiver",
-            )
-        })?;
+        let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
         let key = arg(a, 0);
         let cb = arg(a, 1);
         if !cb.is_callable() {
@@ -3587,7 +3575,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     );
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr = coll_ptr(i, &this)?;
+            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
@@ -3599,27 +3587,57 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
                 .unwrap_or(Value::Undefined))
         });
     }
-    it.def_method(&proto, "has", 1, |i, this, a| {
-        let ptr = coll_ptr(i, &this)?;
-        let key = arg(a, 0);
-        Ok(Value::Bool(
-            i.map_data
-                .get(&ptr)
-                .map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key)))
-                .unwrap_or(false),
-        ))
-    });
-    it.def_method(&proto, "delete", 1, |i, this, a| {
-        let ptr = coll_ptr(i, &this)?;
-        let key = arg(a, 0);
-        let mut removed = false;
-        if let Some(e) = i.map_data.get_mut(&ptr) {
-            let before = e.len();
-            e.retain(|(k, _)| !same_value_zero(k, &key));
-            removed = e.len() < before;
+    // has/delete are shared but brand-check the exact kind via kind-specific fn pointers.
+    let has_fn: NativeFn = if is_set {
+        |i, this, a| {
+            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
+            let key = arg(a, 0);
+            Ok(Value::Bool(
+                i.map_data
+                    .get(&ptr)
+                    .map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key)))
+                    .unwrap_or(false),
+            ))
         }
-        Ok(Value::Bool(removed))
-    });
+    } else {
+        |i, this, a| {
+            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
+            let key = arg(a, 0);
+            Ok(Value::Bool(
+                i.map_data
+                    .get(&ptr)
+                    .map(|e| e.iter().any(|(k, _)| same_value_zero(k, &key)))
+                    .unwrap_or(false),
+            ))
+        }
+    };
+    it.def_method(&proto, "has", 1, has_fn);
+    let delete_fn: NativeFn = if is_set {
+        |i, this, a| {
+            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
+            let key = arg(a, 0);
+            let mut removed = false;
+            if let Some(e) = i.map_data.get_mut(&ptr) {
+                let before = e.len();
+                e.retain(|(k, _)| !same_value_zero(k, &key));
+                removed = e.len() < before;
+            }
+            Ok(Value::Bool(removed))
+        }
+    } else {
+        |i, this, a| {
+            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
+            let key = arg(a, 0);
+            let mut removed = false;
+            if let Some(e) = i.map_data.get_mut(&ptr) {
+                let before = e.len();
+                e.retain(|(k, _)| !same_value_zero(k, &key));
+                removed = e.len() < before;
+            }
+            Ok(Value::Bool(removed))
+        }
+    };
+    it.def_method(&proto, "delete", 1, delete_fn);
     it.def_method(&proto, "clear", 0, |i, this, _| {
         let ptr = coll_ptr(i, &this)?;
         if let Some(e) = i.map_data.get_mut(&ptr) {
