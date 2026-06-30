@@ -28,11 +28,16 @@ fn this_obj(this: &Value) -> Option<Gc> {
 pub fn install(it: &mut Interp) {
     // Primitive globals.
     let g = it.global.clone();
-    set_builtin(&g, "undefined", Value::Undefined);
-    set_data(&g, "NaN", Value::Num(f64::NAN));
-    set_data(&g, "Infinity", Value::Num(f64::INFINITY));
-    g.borrow_mut().props.get_mut("NaN").unwrap().writable = false;
-    g.borrow_mut().props.get_mut("Infinity").unwrap().writable = false;
+    // The global value properties are { writable:false, enumerable:false, configurable:false }.
+    for (name, val) in [
+        ("undefined", Value::Undefined),
+        ("NaN", Value::Num(f64::NAN)),
+        ("Infinity", Value::Num(f64::INFINITY)),
+    ] {
+        g.borrow_mut()
+            .props
+            .insert(name, Property::data(val, false, false, false));
+    }
     set_builtin(&g, "globalThis", Value::Obj(g.clone()));
 
     install_function_proto(it);

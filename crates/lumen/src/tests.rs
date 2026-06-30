@@ -4518,3 +4518,15 @@ fn math_constants_and_hypot() {
     assert_eq!(run("Math.hypot(3, 4)"), "5");
     assert_eq!(run("Number.isNaN(Math.hypot(NaN, 2))"), "true");
 }
+
+#[test]
+fn global_value_property_descriptors() {
+    for name in ["undefined", "NaN", "Infinity"] {
+        let src = format!(
+            "var d=Object.getOwnPropertyDescriptor(globalThis,'{name}'); [d.writable,d.enumerable,d.configurable].join(',')"
+        );
+        assert_eq!(run(&src), "false,false,false", "descriptor for {name}");
+    }
+    assert_eq!(run("typeof undefined"), "undefined");
+    assert_eq!(run("Number.isNaN(NaN)"), "true");
+}
