@@ -1800,6 +1800,12 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.advance();
+                // A strict-mode future-reserved word (yield, let, static, implements, …) cannot be
+                // used as an identifier reference — but eval/arguments are only restricted as
+                // assignment/binding targets, so they remain valid references.
+                if self.strict && is_strict_reserved_word(&name) {
+                    return self.err(format!("'{name}' is a reserved word in strict mode"));
+                }
                 match name.as_str() {
                     "undefined" => Ok(Expr::Undefined),
                     _ => Ok(Expr::Ident(name)),
@@ -3015,6 +3021,23 @@ fn duplicate_name(names: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Future-reserved words that may not appear as an identifier *reference* in strict mode (unlike
+/// eval/arguments, which are only restricted as assignment/binding targets).
+fn is_strict_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+            | "yield"
+    )
 }
 
 /// Identifiers that may not be bound (or assigned) in strict mode.
