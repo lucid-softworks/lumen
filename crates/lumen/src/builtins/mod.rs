@@ -1805,14 +1805,6 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             let (bv, bp) = make_array_buffer(i, 0);
             (bv, bp, 0, 0, false)
         }
-        Some(Value::Num(n)) => {
-            let len = n.max(0.0) as usize;
-            if len > MAX_ARRAY_OP_LEN {
-                return Err(i.make_error("RangeError", "Invalid typed array length"));
-            }
-            let (bv, bp) = make_array_buffer(i, len * es);
-            (bv, bp, 0, len, false)
-        }
         Some(Value::Obj(o)) if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)) => {
             let bp = Rc::as_ptr(o) as usize;
             let bv = Value::Obj(o.clone());
@@ -1858,11 +1850,21 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             };
             (bv, bp, offset, len, !explicit && resizable)
         }
+        // A non-object first argument is a length (ToIndex): NaN→0, negative/too-large→RangeError,
+        // a Symbol/BigInt → TypeError via ToNumber.
+        Some(v) if !matches!(v, Value::Obj(_)) => {
+            let len = to_index(i, v)?;
+            if len > MAX_ARRAY_OP_LEN {
+                return Err(i.make_error("RangeError", "Invalid typed array length"));
+            }
+            let (bv, bp) = make_array_buffer(i, len * es);
+            (bv, bp, 0, len, false)
+        }
         Some(other) => {
-            // TypedArray / array-like / iterable: copy element values into a fresh buffer.
-            let items = if matches!(other, Value::Str(_)) || i.has_iterator(other) {
+            // TypedArray / array-like / iterable object: copy element values into a fresh buffer.
+            let items = if i.has_iterator(other) {
                 ab(i.iterate(other))?
-            } else if matches!(other, Value::Obj(_)) {
+            } else {
                 let lenv = ab(i.get_member(other, "length"))?;
                 let n = ab(i.to_number(&lenv))?.max(0.0) as usize;
                 if n > MAX_ARRAY_OP_LEN {
@@ -1873,8 +1875,6 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                     v.push(ab(i.get_member(other, &k.to_string()))?);
                 }
                 v
-            } else {
-                Vec::new()
             };
             let len = items.len();
             let (bv, bp) = make_array_buffer(i, len * es);
