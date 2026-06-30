@@ -535,6 +535,10 @@ fn install_atomics(it: &mut Interp) {
     });
     it.def_method(&atomics, "wait", 4, |i, _t, a| {
         let (info, idx) = target(i, a)?;
+        // Waitable types are only Int32Array and BigInt64Array.
+        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
+            return Err(i.make_error("TypeError", "Atomics.wait requires an Int32 or BigInt64 array"));
+        }
         let expected = operand(i, &info, &arg(a, 2))?;
         // Single-threaded: never blocks; report whether the value already differs.
         Ok(Value::str(if read_i128(i, &info, idx) == expected {
@@ -544,7 +548,13 @@ fn install_atomics(it: &mut Interp) {
         }))
     });
     it.def_method(&atomics, "notify", 3, |i, _t, a| {
-        target(i, a)?;
+        let (info, _idx) = target(i, a)?;
+        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics.notify requires an Int32 or BigInt64 array",
+            ));
+        }
         Ok(Value::Num(0.0)) // no agents are waiting
     });
     set_to_string_tag(it, &atomics, "Atomics");
