@@ -2836,14 +2836,27 @@ fn install_date(it: &mut Interp) {
                 "Date.prototype[Symbol.toPrimitive] on non-object",
             ));
         }
-        let hint = ab(i.to_string(&arg(a, 0)))?;
-        let method = match &*hint {
-            "number" => "valueOf",
-            "string" | "default" => "toString",
-            _ => return Err(i.make_error("TypeError", "invalid hint")),
+        // The hint must be a primitive String; OrdinaryToPrimitive then tries the two methods in
+        // order, returning the first non-object result.
+        let hint = match arg(a, 0) {
+            Value::Str(s) => s.to_string(),
+            _ => return Err(i.make_error("TypeError", "invalid Symbol.toPrimitive hint")),
         };
-        let f = ab(i.get_member(&this, method))?;
-        ab(i.call(f, this.clone(), &[]))
+        let methods: &[&str] = match hint.as_str() {
+            "number" => &["valueOf", "toString"],
+            "string" | "default" => &["toString", "valueOf"],
+            _ => return Err(i.make_error("TypeError", "invalid Symbol.toPrimitive hint")),
+        };
+        for m in methods {
+            let f = ab(i.get_member(&this, m))?;
+            if f.is_callable() {
+                let r = ab(i.call(f, this.clone(), &[]))?;
+                if !matches!(r, Value::Obj(_)) {
+                    return Ok(r);
+                }
+            }
+        }
+        Err(i.make_error("TypeError", "cannot convert Date to a primitive value"))
     });
     if let Some(key) = well_known_key(it, "toPrimitive") {
         proto
