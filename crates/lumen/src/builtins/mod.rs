@@ -8215,7 +8215,8 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
         if !i.to_boolean(&done) {
             set_internal(this.as_obj().unwrap(), "__ih_done", Value::Bool(true));
             let src = ab(i.get_member(&this, "__ih_src"))?;
-            i.iterator_close(&src);
+            // A normal return() propagates an error from the source's return method.
+            ab(i.iterator_close_normal(&src))?;
         }
         Ok(iter_result(i, Value::Undefined, true))
     });

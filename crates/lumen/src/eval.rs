@@ -814,6 +814,22 @@ impl Interp {
         }
     }
 
+    /// IteratorClose for a *normal* completion: errors from reading or calling `return` propagate
+    /// (unlike the throw-completion `iterator_close`, which swallows them).
+    pub(crate) fn iterator_close_normal(&mut self, iter: &Value) -> Result<(), Abrupt> {
+        let ret = self.get_member(iter, "return")?;
+        if !matches!(ret, Value::Undefined | Value::Null) {
+            if !ret.is_callable() {
+                return Err(self.throw("TypeError", "iterator 'return' is not callable"));
+            }
+            let r = self.call(ret, iter.clone(), &[])?;
+            if !matches!(r, Value::Obj(_)) {
+                return Err(self.throw("TypeError", "iterator 'return' must return an object"));
+            }
+        }
+        Ok(())
+    }
+
     /// Collect every value an iterable yields. Strings and plain arrays use a fast path; everything
     /// else goes through the `Symbol.iterator` protocol (call `@@iterator`, then drain `.next()`).
     pub(crate) fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Abrupt> {

@@ -4069,3 +4069,19 @@ fn iterator_zip_basics() {
     // An invalid mode is a RangeError.
     assert_eq!(throws("Iterator.zip([[1]], {mode:'bogus'})"), "RangeError");
 }
+
+#[test]
+fn iterator_helper_return_propagates() {
+    // A helper's return() propagates an error thrown by the source's return method.
+    assert_eq!(
+        run(r#"
+            var src={ next(){return{done:false,value:1};}, return(){ throw new TypeError('x'); } };
+            var h=Iterator.from(src).map(x=>x);
+            h.next();
+            var caught='no';
+            try { h.return(); } catch(e) { caught=e.constructor.name; }
+            caught
+        "#),
+        "TypeError"
+    );
+}
