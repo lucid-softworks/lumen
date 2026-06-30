@@ -8055,26 +8055,41 @@ fn install_array(it: &mut Interp) {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         let cb = arg(args, 0);
+        if !cb.is_callable() {
+            return Err(i.make_error(
+                "TypeError",
+                "Array.prototype.reduceRight callback is not callable",
+            ));
+        }
         let mut acc;
         let mut k = len as i64 - 1;
         if args.len() >= 2 {
             acc = arg(args, 1);
         } else {
-            if len == 0 {
-                return Err(
-                    i.make_error("TypeError", "reduce of empty array with no initial value")
-                );
+            // Seed with the last present element (holes are skipped).
+            loop {
+                if k < 0 {
+                    return Err(
+                        i.make_error("TypeError", "Reduce of empty array with no initial value")
+                    );
+                }
+                if i.has_property(&o, &k.to_string()) {
+                    acc = ab(i.get_member(&this, &k.to_string()))?;
+                    k -= 1;
+                    break;
+                }
+                k -= 1;
             }
-            acc = ab(i.get_member(&this, &k.to_string()))?;
-            k -= 1;
         }
         while k >= 0 {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            acc = ab(i.call(
-                cb.clone(),
-                Value::Undefined,
-                &[acc, v, Value::Num(k as f64), this.clone()],
-            ))?;
+            if i.has_property(&o, &k.to_string()) {
+                let v = ab(i.get_member(&this, &k.to_string()))?;
+                acc = ab(i.call(
+                    cb.clone(),
+                    Value::Undefined,
+                    &[acc, v, Value::Num(k as f64), this.clone()],
+                ))?;
+            }
             k -= 1;
         }
         Ok(acc)

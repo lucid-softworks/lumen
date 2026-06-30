@@ -4587,3 +4587,17 @@ fn array_flat_flatmap_holes() {
     assert_eq!(run("[1,[2,[3]]].flat().join(',')"), "1,2,3");
     assert_eq!(run("[1,[2,[3]]].flat(2).join(',')"), "1,2,3");
 }
+
+#[test]
+fn array_reduce_right_holes_and_callable() {
+    assert_eq!(run("[1,2,3].reduceRight((a,b)=>a+'-'+b)"), "3-2-1");
+    // Holes are skipped.
+    assert_eq!(
+        run("var c=0; [1,,3].reduceRight((a,b)=>{c++;return a;}, 0); c"),
+        "2"
+    );
+    // A non-callable callback throws TypeError.
+    assert_eq!(throws("[1,2].reduceRight(5)"), "TypeError");
+    // Empty array with no initial value throws.
+    assert_eq!(throws("[].reduceRight((a,b)=>a)"), "TypeError");
+}
