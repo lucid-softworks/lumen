@@ -1798,7 +1798,7 @@ ta_methods! {
 /// OrdinaryCreateFromConstructor: a new object whose [[Prototype]] is `new.target.prototype` when
 /// that's an object (subclassing / Reflect.construct), else the named intrinsic prototype. Safe to
 /// call from any native constructor: outside a `new`, `new_target` is Undefined so the default wins.
-fn new_from_ctor(i: &mut Interp, default_proto: &'static str) -> Result<Gc, Value> {
+fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
@@ -3328,8 +3328,7 @@ fn set_values(i: &mut Interp, this: &Value) -> Result<Vec<Value>, Value> {
 }
 /// Build a fresh Set from `values` (deduped via SameValueZero).
 fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
-    let proto = i.extra_protos.get("Set").cloned();
-    let obj = Object::new(proto);
+    let obj = new_from_ctor(i, "Set").unwrap_or_else(|_| Object::new(i.extra_protos.get("Set").cloned()));
     let ptr = Rc::as_ptr(&obj) as usize;
     let mut entries: Vec<(Value, Value)> = Vec::new();
     for v in values {
@@ -3472,8 +3471,7 @@ fn collection_ctor(
     if !i.constructing {
         return Err(i.make_error("TypeError", "Constructor requires 'new'"));
     }
-    let proto = i.extra_protos.get(name).cloned();
-    let obj = Object::new(proto);
+    let obj = new_from_ctor(i, name)?;
     let ptr = Rc::as_ptr(&obj) as usize;
     i.map_data.insert(ptr, Vec::new());
     let mv = Value::Obj(obj);
