@@ -4069,6 +4069,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         });
     }
     install_species(it, &ctor); // Map/Set carry @@species
+    set_to_string_tag(it, &proto, name);
     set_builtin(&it.global, name, Value::Obj(ctor));
 }
 
@@ -4227,6 +4228,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
         .borrow_mut()
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    set_to_string_tag(it, &proto, name);
     set_builtin(&it.global, name, Value::Obj(ctor));
 }
 
