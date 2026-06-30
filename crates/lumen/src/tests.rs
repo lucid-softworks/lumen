@@ -4914,8 +4914,14 @@ fn reflect_completeness() {
 
 #[test]
 fn object_freeze_seal_integrity() {
-    assert_eq!(run("var o=Object.freeze({a:1}); [Object.isFrozen(o), Object.isExtensible(o)].join(',')"), "true,false");
-    assert_eq!(run("var s=Object.seal({a:1}); [Object.isSealed(s), Object.isFrozen(s)].join(',')"), "true,false");
+    assert_eq!(
+        run("var o=Object.freeze({a:1}); [Object.isFrozen(o), Object.isExtensible(o)].join(',')"),
+        "true,false"
+    );
+    assert_eq!(
+        run("var s=Object.seal({a:1}); [Object.isSealed(s), Object.isFrozen(s)].join(',')"),
+        "true,false"
+    );
     // freeze/seal invoke a proxy's traps (preventExtensions, ownKeys, defineProperty).
     assert_eq!(
         run(r#"
@@ -4930,5 +4936,22 @@ fn object_freeze_seal_integrity() {
             log.join(',')
         "#),
         "pe,ok,dp"
+    );
+}
+
+#[test]
+fn object_define_properties_spec() {
+    // create/defineProperties handle symbol-keyed descriptors and ToObject(Properties).
+    assert_eq!(
+        run("var s=Symbol.for('s'); var o=Object.create(null,{x:{value:5,enumerable:true},[s]:{value:9}}); [o.x, o[s]].join(',')"),
+        "5,9"
+    );
+    // A null Properties argument throws (ToObject(null)).
+    assert_eq!(throws("Object.create({}, null)"), "TypeError");
+    assert_eq!(throws("Object.defineProperties({}, null)"), "TypeError");
+    // Only enumerable descriptor entries are applied.
+    assert_eq!(
+        run("Object.defineProperties({}, Object.defineProperty({}, 'skip', {value:{value:1}, enumerable:false})).hasOwnProperty('skip')"),
+        "false"
     );
 }

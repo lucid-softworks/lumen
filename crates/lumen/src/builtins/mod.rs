@@ -2072,6 +2072,74 @@ fn create_list_from_array_like(i: &mut Interp, v: &Value) -> Result<Vec<Value>, 
     Ok(out)
 }
 
+/// ObjectDefineProperties(O, Properties): ToObject(Properties), then for each *enumerable* own key
+/// (string or symbol, proxy-aware) collect its descriptor object, then DefinePropertyOrThrow each on
+/// O (which may itself be a proxy).
+fn object_define_properties(
+    i: &mut Interp,
+    o: &Value,
+    props_arg: Value,
+    who: &str,
+) -> Result<(), Value> {
+    let props = Value::Obj(to_object_arg(i, props_arg, who)?);
+    let keys: Vec<String> = if let Some((t, h)) = proxy_pair(i, &props) {
+        let mut ks = Vec::new();
+        for k in proxy_own_keys(i, &t, &h)? {
+            ks.push(ab(i.to_property_key(&k))?);
+        }
+        ks
+    } else {
+        props
+            .as_obj()
+            .unwrap()
+            .borrow()
+            .props
+            .ordered_keys()
+            .iter()
+            .filter(|k| !k.starts_with('#'))
+            .map(|k| k.to_string())
+            .collect()
+    };
+    // Collect descriptor objects for enumerable own keys first (so all Gets precede any Defines).
+    let mut descs: Vec<(String, Value)> = Vec::new();
+    for key in keys {
+        let enumerable = if let Some((t, h)) = proxy_pair(i, &props) {
+            let d = proxy_gopd_value(i, &t, &h, &key)?;
+            match &d {
+                Value::Obj(_) => {
+                    let e = ab(i.get_member(&d, "enumerable"))?;
+                    i.to_boolean(&e)
+                }
+                _ => false,
+            }
+        } else {
+            props
+                .as_obj()
+                .unwrap()
+                .borrow()
+                .props
+                .get(&key)
+                .map(|p| p.enumerable)
+                .unwrap_or(false)
+        };
+        if enumerable {
+            let desc_obj = ab(i.get_member(&props, &key))?;
+            descs.push((key, desc_obj));
+        }
+    }
+    for (key, desc_obj) in descs {
+        let ok = if let Some((t, h)) = proxy_pair(i, o) {
+            ab(proxy_define_property(i, &t, &h, &key, &desc_obj))?
+        } else {
+            ab(define_own_property(i, o.as_obj().unwrap(), &key, &desc_obj))?
+        };
+        if !ok {
+            return Err(i.make_error("TypeError", "cannot define property"));
+        }
+    }
+    Ok(())
+}
+
 /// SetIntegrityLevel(obj, frozen?): PreventExtensions then make every own property non-configurable
 /// (and, when freezing, non-writable for data properties), all through trap-aware operations.
 fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool, Value> {
@@ -7315,13 +7383,10 @@ fn install_object(it: &mut Interp) {
             }
         };
         let obj = Object::new(proto);
-        if let Value::Obj(descs) = arg(args, 1) {
-            for k in ordered_enum_keys(&descs) {
-                let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
-                if !ab(define_own_property(i, &obj, &k, &d))? {
-                    return Err(i.make_error("TypeError", "Cannot define property"));
-                }
-            }
+        // Object.create(O, Properties): when Properties is not undefined, ObjectDefineProperties.
+        let props_arg = arg(args, 1);
+        if !matches!(props_arg, Value::Undefined) {
+            object_define_properties(i, &Value::Obj(obj.clone()), props_arg, "Object.create")?;
         }
         Ok(Value::Obj(obj))
     });
@@ -7539,19 +7604,12 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Obj(obj))
     });
     it.def_method(&ctor, "defineProperties", 2, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.defineProperties on non-object")),
-        };
-        if let Value::Obj(descs) = arg(args, 1) {
-            for k in ordered_enum_keys(&descs) {
-                let d = ab(i.get_member(&Value::Obj(descs.clone()), &k))?;
-                if !ab(define_own_property(i, &o, &k, &d))? {
-                    return Err(i.make_error("TypeError", "Cannot define property"));
-                }
-            }
+        let o = arg(args, 0);
+        if !matches!(o, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Object.defineProperties on non-object"));
         }
-        Ok(Value::Obj(o))
+        object_define_properties(i, &o, arg(args, 1), "Object.defineProperties")?;
+        Ok(o)
     });
     it.def_method(&ctor, "seal", 1, |i, _this, args| {
         let o = arg(args, 0);
