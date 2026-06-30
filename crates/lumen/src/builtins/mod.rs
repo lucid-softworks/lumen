@@ -8497,6 +8497,11 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
     }
 }
 
+/// JS WhiteSpace + LineTerminator (includes U+FEFF, which Rust's char::is_whitespace omits).
+fn is_js_ws(c: char) -> bool {
+    c.is_whitespace() || c == '\u{FEFF}'
+}
+
 /// IsRegExp(arg): true if it has a truthy `@@match`, or (fallback) is a compiled RegExp object.
 fn arg_is_regexp(i: &mut Interp, v: &Value) -> Result<bool, Value> {
     if let Value::Obj(o) = v {
@@ -8757,7 +8762,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "trim", 0, |i, this, _| {
         Ok(Value::from_string(
-            this_string(i, &this)?.trim().to_string(),
+            this_string(i, &this)?.trim_matches(is_js_ws).to_string(),
         ))
     });
     it.def_method(&sp, "localeCompare", 1, |i, this, args| {
@@ -8891,12 +8896,12 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "trimStart", 0, |i, this, _| {
         Ok(Value::from_string(
-            this_string(i, &this)?.trim_start().to_string(),
+            this_string(i, &this)?.trim_start_matches(is_js_ws).to_string(),
         ))
     });
     it.def_method(&sp, "trimEnd", 0, |i, this, _| {
         Ok(Value::from_string(
-            this_string(i, &this)?.trim_end().to_string(),
+            this_string(i, &this)?.trim_end_matches(is_js_ws).to_string(),
         ))
     });
     it.def_method(&sp, "padStart", 1, |i, this, args| {
