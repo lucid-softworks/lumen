@@ -12405,7 +12405,7 @@ fn install_errors(it: &mut Interp) {
             let s = ab(i.to_string(&arg(a, 1)))?;
             ab(i.set_member(&err, "message", Value::Str(s)))?;
         }
-        install_error_cause(i, &err, a.get(2));
+        install_error_cause(i, &err, a.get(2))?;
         Ok(err)
     });
     if let Some(ec) = &error_ctor {
@@ -12445,7 +12445,7 @@ fn install_errors(it: &mut Interp) {
                 .props
                 .insert("suppressed", Property::builtin(arg(a, 1)));
         }
-        install_error_cause(i, &err, a.get(3));
+        install_error_cause(i, &err, a.get(3))?;
         Ok(err)
     });
     sup_ctor.borrow_mut().props.insert(
@@ -12487,24 +12487,25 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Result<Value, Value> 
             }
         }
     }
-    install_error_cause(i, &err, args.get(1));
+    install_error_cause(i, &err, args.get(1))?;
     Ok(err)
 }
 
-/// InstallErrorCause: when the options bag has a `cause` property, copy it to a non-enumerable own
-/// `cause` data property on the error.
-fn install_error_cause(i: &mut Interp, err: &Value, options: Option<&Value>) {
-    if let Some(opts @ Value::Obj(o)) = options {
-        if i.has_property(o, "cause") {
-            if let Ok(cause) = i.get_member(opts, "cause") {
-                if let Some(e) = err.as_obj() {
-                    e.borrow_mut()
-                        .props
-                        .insert("cause", Property::data(cause, true, false, true));
-                }
+/// InstallErrorCause: when `options` is an object with a `cause` property, copy it to a
+/// non-enumerable own `cause` data property. Both HasProperty and Get are observable (proxy traps)
+/// and propagate their throws.
+fn install_error_cause(i: &mut Interp, err: &Value, options: Option<&Value>) -> Result<(), Value> {
+    if let Some(opts @ Value::Obj(_)) = options {
+        if ab(i.js_has_property(opts, "cause"))? {
+            let cause = ab(i.get_member(opts, "cause"))?;
+            if let Some(e) = err.as_obj() {
+                e.borrow_mut()
+                    .props
+                    .insert("cause", Property::data(cause, true, false, true));
             }
         }
     }
+    Ok(())
 }
 
 fn install_globals(it: &mut Interp) {
