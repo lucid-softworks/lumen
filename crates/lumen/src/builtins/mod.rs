@@ -6375,11 +6375,17 @@ fn install_array(it: &mut Interp) {
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let mut len = ab(i.checked_array_len(&o))?;
+        let mut len = ab(i.checked_array_len(&o))? as u64;
+        // The resulting length may not exceed 2^53-1.
+        if len + args.len() as u64 > 9007199254740991 {
+            return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
+        }
         for a in args {
             ab(i.set_member(&this, &len.to_string(), a.clone()))?;
             len += 1;
         }
+        // Generic objects don't auto-track length the way arrays do, so set it explicitly.
+        ab(i.set_member(&this, "length", Value::Num(len as f64)))?;
         Ok(Value::Num(len as f64))
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
