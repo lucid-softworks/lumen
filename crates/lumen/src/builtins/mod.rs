@@ -386,7 +386,7 @@ fn install_weak_refs(it: &mut Interp) {
             return Err(i.make_error("TypeError", "WeakRef requires 'new'"));
         }
         let target = arg(a, 0);
-        if !matches!(target, Value::Obj(_) | Value::Sym(_)) {
+        if !can_be_held_weakly(i, &target) {
             return Err(i.make_error("TypeError", "WeakRef target must be an object or symbol"));
         }
         let obj = new_from_ctor(i, "WeakRef")?;
@@ -1798,6 +1798,15 @@ ta_methods! {
 /// OrdinaryCreateFromConstructor: a new object whose [[Prototype]] is `new.target.prototype` when
 /// that's an object (subclassing / Reflect.construct), else the named intrinsic prototype. Safe to
 /// call from any native constructor: outside a `new`, `new_target` is Undefined so the default wins.
+/// CanBeHeldWeakly: an object, or a non-registered (collectable) symbol.
+fn can_be_held_weakly(i: &Interp, v: &Value) -> bool {
+    match v {
+        Value::Obj(_) => true,
+        Value::Sym(s) => !i.sym_for.values().any(|r| Rc::ptr_eq(r, s)),
+        _ => false,
+    }
+}
+
 fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
@@ -3674,7 +3683,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
             let ptr =
                 map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "add on non-WeakSet"))?;
             let key = arg(a, 0);
-            if !matches!(key, Value::Obj(_)) {
+            if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used in weak set"));
             }
             let e = i.map_data.entry(ptr).or_default();
@@ -3688,7 +3697,7 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
             let ptr =
                 map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "set on non-WeakMap"))?;
             let (key, val) = (arg(a, 0), arg(a, 1));
-            if !matches!(key, Value::Obj(_)) {
+            if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
             }
             let e = i.map_data.entry(ptr).or_default();
