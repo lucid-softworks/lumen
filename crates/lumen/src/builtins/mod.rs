@@ -7300,12 +7300,13 @@ fn install_object(it: &mut Interp) {
             }
             return Ok(i.make_array(keys));
         }
+        // Spec order: array-index keys ascending, then other string keys in insertion order.
         let keys: Vec<Value> = o
             .borrow()
             .props
-            .keys()
+            .ordered_keys()
             .into_iter()
-            .filter(|k| !Interp::is_sym_key(k))
+            .filter(|k| !Interp::is_sym_key(k) && !k.starts_with('#'))
             .map(Value::Str)
             .collect();
         Ok(i.make_array(keys))
