@@ -8576,10 +8576,14 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "indexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        Ok(match s.find(needle.as_ref()) {
-            Some(byte) => Value::Num(s[..byte].chars().count() as f64),
-            None => Value::Num(-1.0),
-        })
+        let chars: Vec<char> = s.chars().collect();
+        let nchars: Vec<char> = needle.chars().collect();
+        let len = chars.len() as i64;
+        let pos = str_clamp_pos(i, args.get(1), len)?;
+        let nlen = nchars.len();
+        let result = (pos..=chars.len())
+            .find(|&start| start + nlen <= chars.len() && chars[start..start + nlen] == nchars[..]);
+        Ok(Value::Num(result.map(|r| r as f64).unwrap_or(-1.0)))
     });
     it.def_method(&sp, "lastIndexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
