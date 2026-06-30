@@ -304,6 +304,8 @@ pub enum Expr {
     },
     /// `import.meta`.
     ImportMeta,
+    /// `new.target`.
+    NewTarget,
 }
 
 /// The phase of a dynamic `import()` call: plain evaluation, `import.source(...)` (source-phase),

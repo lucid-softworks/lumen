@@ -3908,7 +3908,8 @@ fn install_reflect(it: &mut Interp) {
             Value::Undefined | Value::Null => Vec::new(),
             list => ab(i.iterate(&list))?,
         };
-        ab(i.construct(target, &args))
+        let new_target = if a.len() >= 3 { arg(a, 2) } else { target.clone() };
+        ab(i.construct_nt(target, &args, new_target))
     });
     it.def_method(&r, "isExtensible", 1, |i, _t, a| {
         let obj = arg(a, 0);

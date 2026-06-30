@@ -210,6 +210,10 @@ pub struct Interp {
     pub regexps: HashMap<usize, Rc<crate::regex::Regex>>,
     /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
     pub proxies: HashMap<usize, (Value, Value)>,
+    /// The active `new.target` for the function currently executing (Undefined outside a `new`).
+    pub new_target: Value,
+    /// The `new.target` to install for the next constructor invocation (set by `construct`).
+    pub pending_new_target: Value,
     /// Promise state keyed by the promise object's pointer.
     pub promises: HashMap<usize, PromiseState>,
     /// Temporal object internal slots, keyed by the object's pointer.
@@ -355,6 +359,8 @@ impl Interp {
             data_views: HashMap::new(),
             regexps: HashMap::new(),
             proxies: HashMap::new(),
+            new_target: Value::Undefined,
+            pending_new_target: Value::Undefined,
             promises: HashMap::new(),
             temporal: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
@@ -1335,6 +1341,17 @@ impl Interp {
     ) -> Result<Value, Abrupt> {
         let scope = new_scope(Some(closure));
 
+        // `new.target`: an ordinary call clears it, a construct installs the pending target; an arrow
+        // inherits the enclosing value. Saved and restored around the body.
+        let saved_new_target = self.new_target.clone();
+        if !func.is_arrow {
+            self.new_target = if is_construct {
+                std::mem::replace(&mut self.pending_new_target, Value::Undefined)
+            } else {
+                Value::Undefined
+            };
+        }
+
         if !func.is_arrow {
             // `this` binding. Strict: pass through. Sloppy: undefined/null → global; primitive → box.
             let this_val = if func.is_strict || is_construct {
@@ -1392,12 +1409,14 @@ impl Interp {
         if func.is_generator {
             let gen = self.run_generator(func, &scope);
             self.strict = saved_strict;
+            self.new_target = saved_new_target;
             return gen;
         }
         // Async functions run on a coroutine too, parking at each `await`; see run_async.
         if func.is_async {
             let r = self.run_async(func, &scope);
             self.strict = saved_strict;
+            self.new_target = saved_new_target;
             return r;
         }
 
@@ -1430,6 +1449,7 @@ impl Interp {
             result = self.dispose_frame(frame, result);
         }
         self.strict = saved_strict;
+        self.new_target = saved_new_target;
         result
     }
 
@@ -1693,17 +1713,34 @@ impl Interp {
     }
 
     pub fn construct(&mut self, callee: Value, args: &[Value]) -> Result<Value, Abrupt> {
+        let nt = callee.clone();
+        self.construct_nt(callee, args, nt)
+    }
+
+    /// Like `construct`, but with an explicit `new.target` (for `Reflect.construct`'s third argument
+    /// and a proxy's `[[Construct]]` forwarding, where new.target differs from the callee).
+    pub fn construct_nt(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        new_target: Value,
+    ) -> Result<Value, Abrupt> {
         self.depth += 1;
         if self.depth > MAX_EVAL_DEPTH {
             self.depth -= 1;
             return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
         }
-        let r = self.construct_inner(callee, args);
+        let r = self.construct_inner(callee, args, new_target);
         self.depth -= 1;
         r
     }
 
-    fn construct_inner(&mut self, callee: Value, args: &[Value]) -> Result<Value, Abrupt> {
+    fn construct_inner(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        new_target: Value,
+    ) -> Result<Value, Abrupt> {
         let obj = match &callee {
             Value::Obj(o) => o.clone(),
             _ => return Err(self.throw("TypeError", "value is not a constructor")),
@@ -1714,13 +1751,14 @@ impl Interp {
             {
                 let trap = self.get_member(&handler, "construct")?;
                 if matches!(trap, Value::Undefined | Value::Null) {
-                    return self.construct(target, args);
+                    // Forward to the target's [[Construct]] with the original new.target.
+                    return self.construct_inner(target, args, new_target);
                 }
                 if !trap.is_callable() {
                     return Err(self.throw("TypeError", "proxy 'construct' trap is not callable"));
                 }
                 let arr = self.make_array(args.to_vec());
-                let result = self.call(trap, handler, &[target, arr, callee.clone()])?;
+                let result = self.call(trap, handler, &[target, arr, new_target.clone()])?;
                 // [[Construct]] invariant: the trap must return an Object.
                 if !matches!(result, Value::Obj(_)) {
                     return Err(
@@ -1752,12 +1790,14 @@ impl Interp {
                 if func.is_arrow {
                     return Err(self.throw("TypeError", "arrow functions are not constructors"));
                 }
-                let proto = match obj.borrow().props.get("prototype").map(|p| p.value.clone()) {
-                    Some(Value::Obj(p)) => Some(p),
+                // OrdinaryCreateFromConstructor: the new instance's prototype comes from new.target.
+                let proto = match self.get_member(&new_target, "prototype")? {
+                    Value::Obj(p) => Some(p),
                     _ => Some(self.object_proto.clone()),
                 };
                 let this = Object::new(proto);
                 let this_val = Value::Obj(this);
+                self.pending_new_target = new_target.clone();
                 // Class constructors run field initializers (and, when derived, defer `this` setup
                 // to `super()`); plain function constructors just run their body.
                 if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
@@ -1778,7 +1818,14 @@ impl Interp {
             } => {
                 let mut all = bargs.clone();
                 all.extend_from_slice(args);
-                self.construct(Value::Obj(target), &all)
+                // BoundFunction [[Construct]]: if new.target is the bound function itself, use the
+                // bound target as new.target instead.
+                let nt = if self.strict_equals(&new_target, &callee) {
+                    Value::Obj(target.clone())
+                } else {
+                    new_target
+                };
+                self.construct_nt(Value::Obj(target), &all, nt)
             }
             Callable::None
             | Callable::WrappedShadow { .. }

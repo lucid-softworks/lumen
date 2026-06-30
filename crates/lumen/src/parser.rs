@@ -1658,7 +1658,7 @@ impl Parser {
                 if self.fn_depth == 0 {
                     return self.err("new.target is only valid inside a function");
                 }
-                Expr::Undefined
+                Expr::NewTarget
             } else {
                 let callee = self.parse_member_expr()?;
                 // `new import(...)` is a SyntaxError — an ImportCall (`import()`) is a CallExpression,

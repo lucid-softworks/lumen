@@ -1290,6 +1290,7 @@ impl Interp {
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
             Expr::ImportMeta => Ok(self.import_meta.clone().unwrap_or(Value::Undefined)),
+            Expr::NewTarget => Ok(self.new_target.clone()),
             Expr::ImportCall { spec, phase } => {
                 let specifier = self.eval(spec, env)?;
                 // ToString abruptness rejects the promise (IfAbruptRejectPromise), not a sync throw.
