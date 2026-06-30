@@ -8349,6 +8349,21 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
         set_builtin(&obj, "__zip_keys", karr);
     }
     i.def_method(&obj, "next", 0, zip_next);
+    // The zip iterator's return() closes every still-open underlying iterator (first error wins).
+    i.def_method(&obj, "return", 0, |i, this, _a| {
+        let finished = ab(i.get_member(&this, "__zip_finished"))?;
+        if !i.to_boolean(&finished) {
+            set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+            let iters = ab(i.get_member(&this, "__zip_iters"))?;
+            let done = ab(i.get_member(&this, "__zip_done"))?;
+            let n = match &iters {
+                Value::Obj(o) => i.array_length(o),
+                _ => 0,
+            };
+            zip_close_others(i, &iters, &done, n, usize::MAX, true)?;
+        }
+        Ok(iter_result(i, Value::Undefined, true))
+    });
     if let Some(sym) = i.iterator_sym.clone() {
         let itf = i.make_native("[Symbol.iterator]", 0, return_this);
         obj.borrow_mut()
