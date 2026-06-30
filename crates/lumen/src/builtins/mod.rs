@@ -10228,6 +10228,52 @@ fn bigint_to_radix(mut n: i128, radix: u32) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// StringToBigInt: parse a StringIntegerLiteral (decimal with optional sign, or 0x/0o/0b radix
+/// prefixes), with leading/trailing whitespace trimmed. Returns None when the string is not a valid
+/// literal (the caller raises SyntaxError).
+fn string_to_bigint(s: &str) -> Option<i128> {
+    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
+    if t.is_empty() {
+        return Some(0);
+    }
+    let (radix, body) = if let Some(r) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (16, r)
+    } else if let Some(r) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        (8, r)
+    } else if let Some(r) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (2, r)
+    } else {
+        // Decimal, with an optional single leading sign.
+        let (neg, digits) = match t.strip_prefix('-') {
+            Some(d) => (true, d),
+            None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let v = digits.parse::<i128>().ok()?;
+        return Some(if neg { -v } else { v });
+    };
+    if body.is_empty() || !body.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    i128::from_str_radix(body, radix).ok()
+}
+
+/// ToBigInt: coerce a value to a BigInt primitive (i128), following the spec's allowed conversions.
+fn to_bigint(i: &mut Interp, v: &Value) -> Result<i128, Value> {
+    let prim = ab(i.to_primitive(v, crate::eval::Hint::Number))?;
+    match prim {
+        Value::BigInt(n) => Ok(n),
+        Value::Bool(b) => Ok(if b { 1 } else { 0 }),
+        Value::Str(ref s) => string_to_bigint(s)
+            .ok_or_else(|| i.make_error("SyntaxError", "Cannot convert string to a BigInt")),
+        Value::Num(_) => Err(i.make_error("TypeError", "Cannot convert a Number to a BigInt")),
+        Value::Sym(_) => Err(i.make_error("TypeError", "Cannot convert a Symbol to a BigInt")),
+        _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
+    }
+}
+
 /// thisBigIntValue: a BigInt primitive or BigInt wrapper object, else TypeError.
 fn this_bigint(i: &mut Interp, this: &Value) -> Result<i128, Value> {
     match this {
@@ -10274,13 +10320,11 @@ fn install_bigint(it: &mut Interp) {
                 }
             }
             Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
-            Value::Str(s) => {
-                let t = s.trim();
-                let t = if t.is_empty() { "0" } else { t };
-                t.parse::<i128>()
-                    .map(Value::BigInt)
-                    .map_err(|_| i.make_error("SyntaxError", "Cannot convert string to a BigInt"))
-            }
+            Value::Str(s) => string_to_bigint(&s)
+                .map(Value::BigInt)
+                .ok_or_else(|| i.make_error("SyntaxError", "Cannot convert string to a BigInt")),
+            // BigInt(obj): ToPrimitive(number) then ToBigInt of the primitive.
+            v @ Value::Obj(_) => Ok(Value::BigInt(to_bigint(i, &v)?)),
             _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
         }
     });
@@ -10293,11 +10337,8 @@ fn install_bigint(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "asIntN", 2, |i, _t, a| {
-        let bits = ab(i.to_number(&arg(a, 0)))? as u32;
-        let n = match arg(a, 1) {
-            Value::BigInt(n) => n,
-            _ => return Err(i.make_error("TypeError", "asIntN requires a BigInt")),
-        };
+        let bits = to_index(i, &arg(a, 0))? as u32;
+        let n = to_bigint(i, &arg(a, 1))?;
         if bits == 0 {
             return Ok(Value::BigInt(0));
         }
@@ -10312,11 +10353,8 @@ fn install_bigint(it: &mut Interp) {
         Ok(Value::BigInt(r))
     });
     it.def_method(&ctor, "asUintN", 2, |i, _t, a| {
-        let bits = ab(i.to_number(&arg(a, 0)))? as u32;
-        let n = match arg(a, 1) {
-            Value::BigInt(n) => n,
-            _ => return Err(i.make_error("TypeError", "asUintN requires a BigInt")),
-        };
+        let bits = to_index(i, &arg(a, 0))? as u32;
+        let n = to_bigint(i, &arg(a, 1))?;
         if bits == 0 {
             return Ok(Value::BigInt(0));
         }
@@ -10326,6 +10364,14 @@ fn install_bigint(it: &mut Interp) {
         Ok(Value::BigInt(n.rem_euclid(1i128 << bits)))
     });
     set_builtin(&it.global, "BigInt", Value::Obj(ctor));
+
+    // BigInt.prototype[@@toStringTag] = "BigInt"; { writable:false, enumerable:false, configurable:true }.
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::from_string("BigInt".to_string()), false, false, true),
+        );
+    }
 }
 
 fn install_math(it: &mut Interp) {

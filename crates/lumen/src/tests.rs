@@ -4218,3 +4218,32 @@ fn symbol_proto_to_primitive_and_tag() {
         "false,false,true"
     );
 }
+
+#[test]
+fn bigint_constructor_string_radix() {
+    // Radix prefixes, sign, empty, and whitespace trimming in BigInt(string).
+    assert_eq!(run("BigInt('0x10') === 16n"), "true");
+    assert_eq!(run("BigInt('0o17') === 15n"), "true");
+    assert_eq!(run("BigInt('0b101') === 5n"), "true");
+    assert_eq!(run("BigInt('  -42  ') === -42n"), "true");
+    assert_eq!(run("BigInt('') === 0n"), "true");
+    assert_eq!(throws("BigInt('0x')"), "SyntaxError");
+    assert_eq!(throws("BigInt('1.5')"), "SyntaxError");
+    // BigInt(object) coerces via ToPrimitive(number) then ToBigInt.
+    assert_eq!(run("BigInt({valueOf(){return 7n;}}) === 7n"), "true");
+}
+
+#[test]
+fn bigint_asintn_uintn_coercion() {
+    // bits via ToIndex, value via ToBigInt (booleans, strings, objects accepted).
+    assert_eq!(run("BigInt.asUintN(8, 258n)"), "2");
+    assert_eq!(run("BigInt.asIntN(8, 255n)"), "-1");
+    assert_eq!(run("BigInt.asUintN(4, true)"), "1");
+    assert_eq!(run("BigInt.asUintN('8', '258')"), "2");
+    // @@toStringTag drives Object.prototype.toString for BigInt wrappers.
+    assert_eq!(run("BigInt.prototype[Symbol.toStringTag]"), "BigInt");
+    assert_eq!(
+        run("Object.prototype.toString.call(Object(1n))"),
+        "[object BigInt]"
+    );
+}
