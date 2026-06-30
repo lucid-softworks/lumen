@@ -158,6 +158,20 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// A function body's top-level lexically-declared name may not also be a formal parameter.
+fn params_body_lexical_clash(params: &[Param], body: &[Stmt]) -> Option<String> {
+    let mut lexical = Vec::new();
+    let mut vars = Vec::new();
+    for stmt in body {
+        collect_top_decl(stmt, &mut lexical, &mut vars);
+    }
+    if lexical.is_empty() {
+        return None;
+    }
+    let pnames = param_names(params);
+    lexical.into_iter().find(|l| pnames.iter().any(|p| p == l))
+}
+
 fn first_duplicate(names: &[String]) -> Option<String> {
     let mut seen = Vec::new();
     for n in names {
@@ -2157,6 +2171,9 @@ impl Parser {
                 return self.err(format!("duplicate parameter name '{dup}'"));
             }
         }
+        if let Some(dup) = params_body_lexical_clash(&params, &body) {
+            return self.err(format!("Identifier '{dup}' has already been declared"));
+        }
         Ok(Function {
             name,
             params,
@@ -2409,6 +2426,9 @@ impl Parser {
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.in_generator = sg;
         self.in_async = sa;
+        if let Some(dup) = params_body_lexical_clash(&params, &body) {
+            return self.err(format!("Identifier '{dup}' has already been declared"));
+        }
         Ok(Function {
             name: None,
             params,
