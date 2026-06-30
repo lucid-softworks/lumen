@@ -3767,6 +3767,37 @@ fn make_bound(i: &Interp, target: NativeFn, bound_args: Vec<Value>) -> Value {
     Value::Obj(obj)
 }
 
+/// The executor passed to `new C(executor)` inside NewPromiseCapability: capture the resolve/reject
+/// functions (and reject a second invocation). `args = [cap, resolve, reject]`.
+fn capability_executor(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let cap = arg(args, 0);
+    let already = !matches!(ab(i.get_member(&cap, "__resolve"))?, Value::Undefined)
+        || !matches!(ab(i.get_member(&cap, "__reject"))?, Value::Undefined);
+    if already {
+        return Err(i.make_error("TypeError", "promise capability executor already invoked"));
+    }
+    set_internal_obj(&cap, "__resolve", arg(args, 1));
+    set_internal_obj(&cap, "__reject", arg(args, 2));
+    Ok(Value::Undefined)
+}
+
+/// NewPromiseCapability(C): `new C(executor)`, capturing the resolve/reject functions the executor is
+/// called with (and validating they're callable). Returns the result promise built by `C`.
+fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
+    if !ctor.is_callable() {
+        return Err(i.make_error("TypeError", "NewPromiseCapability: receiver is not a constructor"));
+    }
+    let cap = i.new_object();
+    let executor = make_bound(i, capability_executor, vec![Value::Obj(cap.clone())]);
+    let promise = ab(i.construct(ctor.clone(), &[executor]))?;
+    let resolve = ab(i.get_member(&Value::Obj(cap.clone()), "__resolve"))?;
+    let reject = ab(i.get_member(&Value::Obj(cap.clone()), "__reject"))?;
+    if !resolve.is_callable() || !reject.is_callable() {
+        return Err(i.make_error("TypeError", "promise capability functions are not callable"));
+    }
+    Ok(promise)
+}
+
 /// `Promise.all` per-element fulfill reaction. `args = [resultPromise, index, value]`.
 fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let result = arg(args, 0);
@@ -3976,8 +4007,7 @@ fn install_promise(it: &mut Interp) {
         Ok(p)
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
-        require_constructor(i, &t)?;
-        let result = i.new_promise();
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
@@ -4010,8 +4040,7 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "race", 1, |i, t, a| {
-        require_constructor(i, &t)?;
-        let result = i.new_promise();
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
@@ -4032,8 +4061,7 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allSettled", 1, |i, t, a| {
-        require_constructor(i, &t)?;
-        let result = i.new_promise();
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
@@ -4070,8 +4098,7 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "any", 1, |i, t, a| {
-        require_constructor(i, &t)?;
-        let result = i.new_promise();
+        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
         // A synchronous iteration error rejects the returned promise rather than throwing.
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
