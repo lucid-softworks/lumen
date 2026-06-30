@@ -1423,6 +1423,40 @@ fn uri_decode(s: &str) -> Option<String> {
 // metadata (length/byteLength/byteOffset/buffer/BYTES_PER_ELEMENT) is stored as real own props.
 // ---------------------------------------------------------------------------------------------
 
+/// ArrayBuffer.prototype.transfer / transferToFixedLength: move the bytes into a fresh fixed-length
+/// buffer and detach the source (a TypeError if it's already detached).
+fn ab_transfer(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    let o = this
+        .as_obj()
+        .cloned()
+        .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+    let ptr = Rc::as_ptr(&o) as usize;
+    if !i.array_buffers.contains_key(&ptr) {
+        return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+    }
+    let new_len = match arg(a, 0) {
+        Value::Undefined => i.array_buffers[&ptr].len(),
+        v => {
+            let n = ab(i.to_number(&v))?;
+            if n.is_nan() || n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
+                return Err(i.make_error("RangeError", "invalid transfer length"));
+            }
+            n as usize
+        }
+    };
+    let bytes = i.array_buffers[&ptr].clone();
+    let (bv, bp) = make_array_buffer(i, new_len);
+    if let Some(buf) = i.array_buffers.get_mut(&bp) {
+        let n = bytes.len().min(new_len);
+        buf[..n].copy_from_slice(&bytes[..n]);
+    }
+    // Detach the source (drop its backing store).
+    i.array_buffers.remove(&ptr);
+    set_internal(&o, "byteLength", Value::Num(0.0));
+    set_internal(&o, "detached", Value::Bool(true));
+    Ok(bv)
+}
+
 fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
     let obj = Object::new(i.extra_protos.get("ArrayBuffer").cloned());
     let p = Rc::as_ptr(&obj) as usize;
@@ -1482,31 +1516,8 @@ fn install_array_buffer(it: &mut Interp) {
         set_internal(&o, "byteLength", Value::Num(n as f64));
         Ok(Value::Undefined)
     });
-    it.def_method(&proto, "transfer", 1, |i, this, a| {
-        let o = this
-            .as_obj()
-            .cloned()
-            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
-        let bytes = i
-            .array_buffers
-            .get(&(Rc::as_ptr(&o) as usize))
-            .cloned()
-            .unwrap_or_default();
-        let new_len = match arg(a, 0) {
-            Value::Undefined => bytes.len(),
-            v => ab(i.to_number(&v))?.max(0.0) as usize,
-        };
-        let (bv, bp) = make_array_buffer(i, new_len);
-        if let Some(buf) = i.array_buffers.get_mut(&bp) {
-            let n = bytes.len().min(new_len);
-            buf[..n].copy_from_slice(&bytes[..n]);
-        }
-        // Detach the source.
-        i.array_buffers.insert(Rc::as_ptr(&o) as usize, Vec::new());
-        set_internal(&o, "byteLength", Value::Num(0.0));
-        set_internal(&o, "detached", Value::Bool(true));
-        Ok(bv)
-    });
+    it.def_method(&proto, "transfer", 1, ab_transfer);
+    it.def_method(&proto, "transferToFixedLength", 1, ab_transfer);
     let ctor = it.make_native("ArrayBuffer", 1, |i, _t, a| {
         if !i.constructing {
             return Err(i.make_error("TypeError", "ArrayBuffer constructor requires 'new'"));
