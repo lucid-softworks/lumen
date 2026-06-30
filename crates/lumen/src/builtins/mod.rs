@@ -12446,7 +12446,12 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
     if let Some(msg) = args.first() {
         if !matches!(msg, Value::Undefined) {
             if let Ok(s) = i.to_string(msg) {
-                let _ = i.set_member(&err, "message", Value::Str(s));
+                // The own `message` is { writable:true, enumerable:false, configurable:true }.
+                if let Some(e) = err.as_obj() {
+                    e.borrow_mut()
+                        .props
+                        .insert("message", Property::builtin(Value::Str(s)));
+                }
             }
         }
     }
