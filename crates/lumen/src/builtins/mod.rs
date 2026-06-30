@@ -596,8 +596,6 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
             let p = Rc::as_ptr(&o) as usize;
             // Truly detach: drop the backing store (so views see it as detached) and zero the views.
             i.array_buffers.remove(&p);
-            set_internal(&o, "byteLength", Value::Num(0.0));
-            set_internal(&o, "detached", Value::Bool(true));
             let views: Vec<usize> = i
                 .typed_arrays
                 .iter()
@@ -1608,10 +1606,9 @@ fn ab_transfer(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value>
         let n = bytes.len().min(new_len);
         buf[..n].copy_from_slice(&bytes[..n]);
     }
-    // Detach the source (drop its backing store).
+    // Detach the source (drop its backing store; detached/byteLength derive from the side table).
     i.array_buffers.remove(&ptr);
-    set_internal(&o, "byteLength", Value::Num(0.0));
-    set_internal(&o, "detached", Value::Bool(true));
+    let _ = &o;
     Ok(bv)
 }
 
@@ -1619,16 +1616,81 @@ fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
     let obj = Object::new(i.extra_protos.get("ArrayBuffer").cloned());
     let p = Rc::as_ptr(&obj) as usize;
     i.array_buffers.insert(p, vec![0u8; byte_len]);
-    set_internal(&obj, "byteLength", Value::Num(byte_len as f64));
-    set_internal(&obj, "maxByteLength", Value::Num(byte_len as f64));
-    set_internal(&obj, "resizable", Value::Bool(false));
-    set_internal(&obj, "detached", Value::Bool(false));
+    // byteLength/detached derive from the side table; only max/resizable need stored slots, hidden
+    // behind the `__ab*` prefix and surfaced through prototype accessor getters.
+    set_internal(&obj, "__abMaxByteLength", Value::Num(byte_len as f64));
+    set_internal(&obj, "__abResizable", Value::Bool(false));
     (Value::Obj(obj), p)
 }
 
 fn install_array_buffer(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("ArrayBuffer", proto.clone());
+    // byteLength/maxByteLength/resizable/detached are accessor getters on the prototype.
+    let ab_getter = |it: &mut Interp, proto: &Gc, name: &str, f: NativeFn| {
+        let g = it.make_native(&format!("get {name}"), 0, f);
+        proto.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    };
+    ab_getter(it, &proto, "byteLength", |i, this, _| {
+        let p = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .map(|o| Rc::as_ptr(o) as usize)
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        // Detached (absent from the side table) → 0.
+        Ok(Value::Num(
+            i.array_buffers.get(&p).map(|b| b.len()).unwrap_or(0) as f64,
+        ))
+    });
+    ab_getter(it, &proto, "maxByteLength", |i, this, _| {
+        match this.as_obj().and_then(|o| {
+            o.borrow()
+                .props
+                .get("__abMaxByteLength")
+                .map(|pr| pr.value.clone())
+        }) {
+            Some(v) => {
+                // A detached buffer reports 0.
+                let detached = this
+                    .as_obj()
+                    .map(|o| !i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)))
+                    .unwrap_or(true);
+                Ok(if detached { Value::Num(0.0) } else { v })
+            }
+            None => Err(i.make_error("TypeError", "not an ArrayBuffer")),
+        }
+    });
+    ab_getter(it, &proto, "resizable", |i, this, _| {
+        match this.as_obj().and_then(|o| {
+            o.borrow()
+                .props
+                .get("__abResizable")
+                .map(|pr| pr.value.clone())
+        }) {
+            Some(v) => Ok(v),
+            None => Err(i.make_error("TypeError", "not an ArrayBuffer")),
+        }
+    });
+    ab_getter(it, &proto, "detached", |i, this, _| {
+        let o = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        Ok(Value::Bool(
+            !i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)),
+        ))
+    });
     it.def_method(&proto, "slice", 2, |i, this, a| {
         let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
         let bytes = ptr
@@ -1671,7 +1733,7 @@ fn install_array_buffer(it: &mut Interp) {
         if let Some(buf) = i.array_buffers.get_mut(&(Rc::as_ptr(&o) as usize)) {
             buf.resize(n, 0);
         }
-        set_internal(&o, "byteLength", Value::Num(n as f64));
+        // byteLength derives from the backing store length, which the resize above updated.
         Ok(Value::Undefined)
     });
     it.def_method(&proto, "transfer", 1, ab_transfer);
@@ -1697,8 +1759,8 @@ fn install_array_buffer(it: &mut Interp) {
                     return Err(i.make_error("RangeError", "Invalid maxByteLength"));
                 }
                 if let Value::Obj(o) = &bv {
-                    set_internal(o, "maxByteLength", Value::Num(m));
-                    set_internal(o, "resizable", Value::Bool(true));
+                    set_internal(o, "__abMaxByteLength", Value::Num(m));
+                    set_internal(o, "__abResizable", Value::Bool(true));
                 }
             }
         }

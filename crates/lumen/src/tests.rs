@@ -4733,3 +4733,32 @@ fn reflect_set_receiver() {
         "true"
     );
 }
+
+#[test]
+fn arraybuffer_accessor_getters() {
+    // byteLength/maxByteLength/resizable are accessor getters on the prototype, not own props.
+    assert_eq!(run("new ArrayBuffer(8).byteLength"), "8");
+    assert_eq!(
+        run("new ArrayBuffer(8).hasOwnProperty('byteLength')"),
+        "false"
+    );
+    assert_eq!(
+        run("typeof Object.getOwnPropertyDescriptor(ArrayBuffer.prototype,'byteLength').get"),
+        "function"
+    );
+    // A resizable buffer reports its max and resizes.
+    assert_eq!(
+        run("var b=new ArrayBuffer(4, {maxByteLength:16}); [b.resizable, b.maxByteLength].join(',')"),
+        "true,16"
+    );
+    assert_eq!(
+        run("var b=new ArrayBuffer(4, {maxByteLength:16}); b.resize(10); b.byteLength"),
+        "10"
+    );
+    assert_eq!(run("new ArrayBuffer(8).resizable"), "false");
+    // A detached buffer reports 0 byteLength and detached=true.
+    assert_eq!(
+        run("var b=new ArrayBuffer(8); b.transfer(); [b.byteLength, b.detached].join(',')"),
+        "0,true"
+    );
+}
