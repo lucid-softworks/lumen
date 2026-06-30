@@ -196,6 +196,8 @@ pub struct Interp {
     pub extra_protos: HashMap<&'static str, Gc>,
     /// ArrayBuffer byte storage, keyed by the ArrayBuffer object's pointer.
     pub array_buffers: HashMap<usize, Vec<u8>>,
+    /// Pointers of buffers that are SharedArrayBuffers (a subset of `array_buffers`).
+    pub shared_buffers: std::collections::HashSet<usize>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
     pub typed_arrays: HashMap<usize, TaInfo>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
@@ -539,6 +541,7 @@ impl Interp {
             map_data: HashMap::new(),
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
+            shared_buffers: std::collections::HashSet::new(),
             typed_arrays: HashMap::new(),
             ta_buffer: HashMap::new(),
             shadow_realms: HashMap::new(),

@@ -493,7 +493,10 @@ fn install_atomics(it: &mut Interp) {
             .typed_arrays
             .get(&ptr)
             .ok_or_else(|| i.make_error("TypeError", "Atomics: not an integer TypedArray"))?;
-        if matches!(info.kind, TaKind::F32 | TaKind::F64 | TaKind::U8Clamped) {
+        if matches!(
+            info.kind,
+            TaKind::F16 | TaKind::F32 | TaKind::F64 | TaKind::U8Clamped
+        ) {
             return Err(i.make_error("TypeError", "Atomics requires an integer TypedArray"));
         }
         // ValidateAtomicAccess: ToIndex truncates toward zero (NaN→0); a negative or out-of-bounds
@@ -573,11 +576,17 @@ fn install_atomics(it: &mut Interp) {
     });
     it.def_method(&atomics, "wait", 4, |i, _t, a| {
         let (info, idx) = target(i, a)?;
-        // Waitable types are only Int32Array and BigInt64Array.
+        // Waitable types are only Int32Array and BigInt64Array, over a *shared* buffer.
         if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
             return Err(i.make_error(
                 "TypeError",
                 "Atomics.wait requires an Int32 or BigInt64 array",
+            ));
+        }
+        if !i.shared_buffers.contains(&info.buffer) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics.wait requires a SharedArrayBuffer-backed array",
             ));
         }
         let expected = operand(i, &info, &arg(a, 2))?;
@@ -597,6 +606,56 @@ fn install_atomics(it: &mut Interp) {
             ));
         }
         Ok(Value::Num(0.0)) // no agents are waiting
+    });
+    it.def_method(&atomics, "waitAsync", 4, |i, _t, a| {
+        let (info, idx) = target(i, a)?;
+        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics.waitAsync requires an Int32 or BigInt64 array",
+            ));
+        }
+        if !i.shared_buffers.contains(&info.buffer) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics.waitAsync requires a SharedArrayBuffer-backed array",
+            ));
+        }
+        let expected = operand(i, &info, &arg(a, 2))?;
+        // Coerce the timeout for its observable side effects (NaN → +Infinity).
+        let _timeout = {
+            let t = ab(i.to_number(&arg(a, 3)))?;
+            if t.is_nan() {
+                f64::INFINITY
+            } else {
+                t
+            }
+        };
+        // Single-threaded: the wait completes synchronously — either the value already differs, or
+        // (since no agent can ever notify) it is treated as immediately timed out.
+        let result = i.new_object();
+        set_data(&result, "async", Value::Bool(false));
+        let v = if read_i128(i, &info, idx) != expected {
+            "not-equal"
+        } else {
+            "timed-out"
+        };
+        set_data(&result, "value", Value::str(v));
+        Ok(Value::Obj(result))
+    });
+    it.def_method(&atomics, "pause", 0, |i, _t, a| {
+        // The optional iterationNumber, if present, must be an integral Number.
+        match arg(a, 0) {
+            Value::Undefined => {}
+            Value::Num(n) if n.fract() == 0.0 && n.is_finite() => {}
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Atomics.pause iterationNumber must be an integer",
+                ))
+            }
+        }
+        Ok(Value::Undefined)
     });
     set_to_string_tag(it, &atomics, "Atomics");
     set_builtin(&it.global, "Atomics", Value::Obj(atomics));
@@ -1653,11 +1712,12 @@ fn install_shared_array_buffer(it: &mut Interp) {
             return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
         }
         let len = n as usize;
-        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's.
-        let (bv, _) = make_array_buffer(i, len);
+        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's, and mark it shared.
+        let (bv, bp) = make_array_buffer(i, len);
         if let Value::Obj(o) = &bv {
             o.borrow_mut().proto = i.extra_protos.get("SharedArrayBuffer").cloned();
         }
+        i.shared_buffers.insert(bp);
         // The options bag's maxByteLength makes the buffer growable.
         if let Value::Obj(_) = arg(a, 1) {
             let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;
