@@ -4432,3 +4432,31 @@ fn weakmap_get_or_insert() {
     // A non-registerable key throws.
     assert_eq!(throws("new WeakMap().getOrInsert(5, 1)"), "TypeError");
 }
+
+#[test]
+fn set_operations_spec() {
+    assert_eq!(
+        run("[...new Set([1,2,3]).union(new Set([3,4]))].join(',')"),
+        "1,2,3,4"
+    );
+    assert_eq!(
+        run("[...new Set([1,2,3]).intersection(new Set([2,3,4]))].join(',')"),
+        "2,3"
+    );
+    assert_eq!(
+        run("[...new Set([1,2,3]).difference(new Set([2]))].join(',')"),
+        "1,3"
+    );
+    assert_eq!(
+        run("[...new Set([1,2]).symmetricDifference(new Set([2,3]))].join(',')"),
+        "1,3"
+    );
+    assert_eq!(run("new Set([1,2]).isSubsetOf(new Set([1,2,3]))"), "true");
+    assert_eq!(run("new Set([1,2,3]).isSubsetOf(new Set([1,2]))"), "false");
+    assert_eq!(run("new Set([1,2]).isDisjointFrom(new Set([3,4]))"), "true");
+    // A negative set-like size throws RangeError.
+    assert_eq!(
+        throws("new Set([1]).union({size:-1, has(){}, keys(){}})"),
+        "RangeError"
+    );
+}

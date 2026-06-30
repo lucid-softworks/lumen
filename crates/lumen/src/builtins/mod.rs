@@ -3367,14 +3367,24 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
     Value::Obj(obj)
 }
 /// GetSetRecord: a set-like `other` exposes a numeric `size`, and callable `has` and `keys`.
-fn set_record(i: &mut Interp, other: &Value) -> Result<(Value, Value), Value> {
+fn set_record(i: &mut Interp, other: &Value) -> Result<(Value, Value, f64), Value> {
     if !matches!(other, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "argument is not an object"));
     }
+    // GetSetRecord: size → ToNumber (NaN throws TypeError), ToIntegerOrInfinity (negative throws
+    // RangeError); then `has` and `keys` must be callable.
     let size_v = ab(i.get_member(other, "size"))?;
     let size = ab(i.to_number(&size_v))?;
     if size.is_nan() {
         return Err(i.make_error("TypeError", "set-like size is NaN"));
+    }
+    let int_size = if size.is_infinite() {
+        size
+    } else {
+        size.trunc()
+    };
+    if int_size < 0.0 {
+        return Err(i.make_error("RangeError", "set-like size is negative"));
     }
     let has = ab(i.get_member(other, "has"))?;
     if !has.is_callable() {
@@ -3384,60 +3394,107 @@ fn set_record(i: &mut Interp, other: &Value) -> Result<(Value, Value), Value> {
     if !keys.is_callable() {
         return Err(i.make_error("TypeError", "set-like keys is not callable"));
     }
-    Ok((has, keys))
+    Ok((has, keys, int_size))
 }
 fn set_like_has(i: &mut Interp, has: &Value, other: &Value, v: &Value) -> Result<bool, Value> {
     let r = ab(i.call(has.clone(), other.clone(), std::slice::from_ref(v)))?;
     Ok(i.to_boolean(&r))
 }
 fn set_like_keys(i: &mut Interp, keys: &Value, other: &Value) -> Result<Vec<Value>, Value> {
+    // `keys` returns an iterator *record*: step its `next` directly rather than calling GetIterator
+    // (the result need not be iterable itself).
     let iter = ab(i.call(keys.clone(), other.clone(), &[]))?;
-    ab(i.iterate(&iter))
+    let next = ab(i.get_member(&iter, "next"))?;
+    if !next.is_callable() {
+        return Err(i.make_error("TypeError", "set-like keys iterator has no next method"));
+    }
+    let mut out = Vec::new();
+    loop {
+        let r = ab(i.call(next.clone(), iter.clone(), &[]))?;
+        if !matches!(r, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "iterator result is not an object"));
+        }
+        let done = ab(i.get_member(&r, "done"))?;
+        if i.to_boolean(&done) {
+            break;
+        }
+        out.push(ab(i.get_member(&r, "value"))?);
+    }
+    Ok(out)
 }
 
 fn install_set_methods(it: &mut Interp) {
     let sp = it.extra_protos.get("Set").cloned().unwrap();
     it.def_method(&sp, "union", 1, |i, this, a| {
         let mut vals = set_values(i, &this)?;
-        let (_has, keys) = set_record(i, &arg(a, 0))?;
+        let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
         for k in set_like_keys(i, &keys, &arg(a, 0))? {
-            vals.push(k);
+            if !vals.iter().any(|v| same_value_zero(v, &k)) {
+                vals.push(k);
+            }
         }
         Ok(new_set(i, vals))
     });
     it.def_method(&sp, "intersection", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
         let mut out = Vec::new();
-        for v in vals {
-            if set_like_has(i, &has, &arg(a, 0), &v)? {
-                out.push(v);
+        if (vals.len() as f64) <= other_size {
+            // Iterate this Set, probing the other's `has`.
+            for v in vals {
+                if set_like_has(i, &has, &arg(a, 0), &v)?
+                    && !out.iter().any(|o| same_value_zero(o, &v))
+                {
+                    out.push(v);
+                }
+            }
+        } else {
+            // Iterate the other's keys, probing this Set directly (no `has` calls on the other).
+            for k in set_like_keys(i, &keys, &arg(a, 0))? {
+                if vals.iter().any(|v| same_value_zero(v, &k))
+                    && !out.iter().any(|o| same_value_zero(o, &k))
+                {
+                    out.push(k);
+                }
             }
         }
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "difference", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (has, _keys) = set_record(i, &arg(a, 0))?;
-        let mut out = Vec::new();
-        for v in vals {
-            if !set_like_has(i, &has, &arg(a, 0), &v)? {
-                out.push(v);
+        let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        if (vals.len() as f64) <= other_size {
+            // Iterate this Set, dropping elements the other's `has` reports.
+            let mut out = Vec::new();
+            for v in vals {
+                if !set_like_has(i, &has, &arg(a, 0), &v)? {
+                    out.push(v);
+                }
             }
+            Ok(new_set(i, out))
+        } else {
+            // Start from this Set and remove each of the other's keys.
+            let mut out = vals;
+            for k in set_like_keys(i, &keys, &arg(a, 0))? {
+                out.retain(|v| !same_value_zero(v, &k));
+            }
+            Ok(new_set(i, out))
         }
-        Ok(new_set(i, out))
     });
     it.def_method(&sp, "symmetricDifference", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (has, keys) = set_record(i, &arg(a, 0))?;
-        let mut out = Vec::new();
-        for v in &vals {
-            if !set_like_has(i, &has, &arg(a, 0), v)? {
-                out.push(v.clone());
-            }
-        }
+        // Start from this Set; toggle each of the other's keys (remove if present, else append).
+        let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
+        let mut out = vals;
+        let mut seen_other: Vec<Value> = Vec::new();
         for k in set_like_keys(i, &keys, &arg(a, 0))? {
-            if !vals.iter().any(|v| same_value_zero(v, &k)) {
+            if seen_other.iter().any(|v| same_value_zero(v, &k)) {
+                continue;
+            }
+            seen_other.push(k.clone());
+            if let Some(pos) = out.iter().position(|v| same_value_zero(v, &k)) {
+                out.remove(pos);
+            } else {
                 out.push(k);
             }
         }
@@ -3445,7 +3502,11 @@ fn install_set_methods(it: &mut Interp) {
     });
     it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (has, _keys) = set_record(i, &arg(a, 0))?;
+        let (has, _keys, other_size) = set_record(i, &arg(a, 0))?;
+        // A larger set cannot be a subset; otherwise every element must be in the other.
+        if (vals.len() as f64) > other_size {
+            return Ok(Value::Bool(false));
+        }
         for v in vals {
             if !set_like_has(i, &has, &arg(a, 0), &v)? {
                 return Ok(Value::Bool(false));
@@ -3455,7 +3516,11 @@ fn install_set_methods(it: &mut Interp) {
     });
     it.def_method(&sp, "isSupersetOf", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (_has, keys) = set_record(i, &arg(a, 0))?;
+        let (_has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        // A smaller set cannot be a superset; otherwise every other key must be in this.
+        if (vals.len() as f64) < other_size {
+            return Ok(Value::Bool(false));
+        }
         for k in set_like_keys(i, &keys, &arg(a, 0))? {
             if !vals.iter().any(|v| same_value_zero(v, &k)) {
                 return Ok(Value::Bool(false));
@@ -3465,10 +3530,20 @@ fn install_set_methods(it: &mut Interp) {
     });
     it.def_method(&sp, "isDisjointFrom", 1, |i, this, a| {
         let vals = set_values(i, &this)?;
-        let (has, _keys) = set_record(i, &arg(a, 0))?;
-        for v in vals {
-            if set_like_has(i, &has, &arg(a, 0), &v)? {
-                return Ok(Value::Bool(false));
+        let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        if (vals.len() as f64) <= other_size {
+            // Iterate this Set, probing the other's `has`.
+            for v in vals {
+                if set_like_has(i, &has, &arg(a, 0), &v)? {
+                    return Ok(Value::Bool(false));
+                }
+            }
+        } else {
+            // Iterate the other's keys, probing this Set directly.
+            for k in set_like_keys(i, &keys, &arg(a, 0))? {
+                if vals.iter().any(|v| same_value_zero(v, &k)) {
+                    return Ok(Value::Bool(false));
+                }
             }
         }
         Ok(Value::Bool(true))
