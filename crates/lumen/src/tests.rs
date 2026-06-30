@@ -4638,3 +4638,13 @@ fn array_concat_spreadable_and_proxy() {
         "1"
     );
 }
+
+#[test]
+fn array_reverse_holes() {
+    assert_eq!(run("[1,2,3].reverse().join(',')"), "3,2,1");
+    // A hole reverses as a hole (moved by delete), not as own undefined.
+    assert_eq!(
+        run("var a=[1,,3]; a.reverse(); [a[0], a.hasOwnProperty(1), a[2]].join(',')"),
+        "3,false,1"
+    );
+}

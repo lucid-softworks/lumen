@@ -7815,10 +7815,36 @@ fn install_array(it: &mut Interp) {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
         for k in 0..len / 2 {
-            let a = ab(i.get_member(&this, &k.to_string()))?;
-            let b = ab(i.get_member(&this, &(len - 1 - k).to_string()))?;
-            ab(i.set_member(&this, &k.to_string(), b))?;
-            ab(i.set_member(&this, &(len - 1 - k).to_string(), a))?;
+            let lower = k.to_string();
+            let upper = (len - 1 - k).to_string();
+            // HasProperty/Get the two ends, then swap — preserving holes (a hole moves as a delete).
+            let lower_exists = i.has_property(&o, &lower);
+            let lower_val = if lower_exists {
+                Some(ab(i.get_member(&this, &lower))?)
+            } else {
+                None
+            };
+            let upper_exists = i.has_property(&o, &upper);
+            let upper_val = if upper_exists {
+                Some(ab(i.get_member(&this, &upper))?)
+            } else {
+                None
+            };
+            match (lower_val, upper_val) {
+                (Some(lv), Some(uv)) => {
+                    ab(i.set_member(&this, &lower, uv))?;
+                    ab(i.set_member(&this, &upper, lv))?;
+                }
+                (None, Some(uv)) => {
+                    ab(i.set_member(&this, &lower, uv))?;
+                    json_delete_prop(i, &this, &upper)?;
+                }
+                (Some(lv), None) => {
+                    json_delete_prop(i, &this, &lower)?;
+                    ab(i.set_member(&this, &upper, lv))?;
+                }
+                (None, None) => {}
+            }
         }
         Ok(this)
     });
