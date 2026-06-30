@@ -2420,7 +2420,7 @@ fn date_set_multi(
     let base = if t.is_nan() { 0.0 } else { t };
     let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = ms_to_parts(base);
     for (k, &v) in vals.iter().enumerate() {
-        if v.is_nan() {
+        if !v.is_finite() {
             any_nan = true;
         }
         let n = v as i64;
@@ -2802,41 +2802,31 @@ fn install_date(it: &mut Interp) {
         Ok(Value::Num(if v.is_nan() { parse_rfc(&s) } else { v }))
     });
     it.def_method(&ctor, "UTC", 7, |i, _t, a| {
-        let mut y = ab(i.to_number(&arg(a, 0)))? as i64;
+        // The year is always read; later components only if supplied. Coerce all reads first; any
+        // non-finite component makes the whole result NaN.
+        let count = a.len().clamp(1, 7);
+        let defaults = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let mut vals = defaults;
+        let mut nan = false;
+        for k in 0..count {
+            let v = ab(i.to_number(&arg(a, k)))?;
+            if !v.is_finite() {
+                nan = true;
+            } else {
+                vals[k] = v.trunc();
+            }
+        }
+        if nan {
+            return Ok(Value::Num(f64::NAN));
+        }
+        let mut y = vals[0] as i64;
         if (0..=99).contains(&y) {
             y += 1900;
         }
-        let mo = if a.len() > 1 {
-            ab(i.to_number(&a[1]))? as i64
-        } else {
-            0
-        };
-        let d = if a.len() > 2 {
-            ab(i.to_number(&a[2]))? as i64
-        } else {
-            1
-        };
-        let h = if a.len() > 3 {
-            ab(i.to_number(&a[3]))? as i64
-        } else {
-            0
-        };
-        let mi = if a.len() > 4 {
-            ab(i.to_number(&a[4]))? as i64
-        } else {
-            0
-        };
-        let s = if a.len() > 5 {
-            ab(i.to_number(&a[5]))? as i64
-        } else {
-            0
-        };
-        let ml = if a.len() > 6 {
-            ab(i.to_number(&a[6]))? as i64
-        } else {
-            0
-        };
-        Ok(Value::Num(parts_to_ms(y, mo, d, h, mi, s, ml)))
+        Ok(Value::Num(parts_to_ms(
+            y, vals[1] as i64, vals[2] as i64, vals[3] as i64, vals[4] as i64, vals[5] as i64,
+            vals[6] as i64,
+        )))
     });
     // Date.prototype[@@toPrimitive]: "number" hint uses valueOf, "string"/"default" use toString.
     let prim = it.make_native("[Symbol.toPrimitive]", 1, |i, this, a| {
