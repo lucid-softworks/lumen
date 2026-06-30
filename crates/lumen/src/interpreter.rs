@@ -784,19 +784,23 @@ impl Interp {
         if !self.proxies.is_empty() {
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                 let trap = self.get_member(&handler, "set")?;
-                if trap.is_callable() {
-                    let ok = self.call(
-                        trap,
-                        handler,
-                        &[target.clone(), Value::str(key), value.clone(), base.clone()],
-                    )?;
-                    // A successful `set` can't contradict a non-configurable property on the target.
-                    if self.to_boolean(&ok) {
-                        self.proxy_set_invariant(&target, key, &value)?;
-                    }
-                    return Ok(());
+                if matches!(trap, Value::Undefined | Value::Null) {
+                    // Forward to the target's [[Set]] (recursing for a proxy target).
+                    return self.set_member(&target, key, value);
                 }
-                return self.set_member(&target, key, value);
+                if !trap.is_callable() {
+                    return Err(self.throw("TypeError", "proxy 'set' trap is not callable"));
+                }
+                let ok = self.call(
+                    trap,
+                    handler,
+                    &[target.clone(), Value::str(key), value.clone(), base.clone()],
+                )?;
+                // A successful `set` can't contradict a non-configurable property on the target.
+                if self.to_boolean(&ok) {
+                    self.proxy_set_invariant(&target, key, &value)?;
+                }
+                return Ok(());
             }
         }
         // TypedArray integer-index writes go straight to the backing buffer; a canonical-numeric key
