@@ -7724,6 +7724,7 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&proto, "forEach", 1, |i, this, a| {
         let f = arg(a, 0);
         if !f.is_callable() {
+            i.iterator_close(&this);
             return Err(i.make_error(
                 "TypeError",
                 "Iterator.prototype.forEach argument is not callable",
@@ -7731,7 +7732,10 @@ fn install_iterator(it: &mut Interp) {
         }
         let mut k = 0.0;
         while let Some(v) = step_iter(i, &this)? {
-            ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]))?;
+            if let Err(e) = i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]) {
+                i.iterator_close(&this);
+                return Err(crate::interpreter::abrupt_value(e));
+            }
             k += 1.0;
         }
         Ok(Value::Undefined)
@@ -7739,6 +7743,7 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&proto, "reduce", 1, |i, this, a| {
         let f = arg(a, 0);
         if !f.is_callable() {
+            i.iterator_close(&this);
             return Err(i.make_error("TypeError", "reducer is not callable"));
         }
         let mut acc;
@@ -7758,7 +7763,13 @@ fn install_iterator(it: &mut Interp) {
             k = 1.0;
         }
         while let Some(v) = step_iter(i, &this)? {
-            acc = ab(i.call(f.clone(), Value::Undefined, &[acc, v, Value::Num(k)]))?;
+            acc = match i.call(f.clone(), Value::Undefined, &[acc, v, Value::Num(k)]) {
+                Ok(r) => r,
+                Err(e) => {
+                    i.iterator_close(&this);
+                    return Err(crate::interpreter::abrupt_value(e));
+                }
+            };
             k += 1.0;
         }
         Ok(acc)
@@ -7770,11 +7781,18 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&proto, "find", 1, |i, this, a| {
         let f = arg(a, 0);
         if !f.is_callable() {
+            i.iterator_close(&this);
             return Err(i.make_error("TypeError", "predicate is not callable"));
         }
         let mut k = 0.0;
         while let Some(v) = step_iter(i, &this)? {
-            let r = ab(i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]))?;
+            let r = match i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]) {
+                Ok(r) => r,
+                Err(e) => {
+                    i.iterator_close(&this);
+                    return Err(crate::interpreter::abrupt_value(e));
+                }
+            };
             if i.to_boolean(&r) {
                 i.iterator_close(&this);
                 return Ok(v);
@@ -7930,11 +7948,19 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
 fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Result<Value, Value> {
     let f = arg(a, 0);
     if !f.is_callable() {
+        // A non-callable predicate still closes the underlying iterator.
+        i.iterator_close(&this);
         return Err(i.make_error("TypeError", "predicate is not callable"));
     }
     let mut k = 0.0;
     while let Some(v) = step_iter(i, &this)? {
-        let r = ab(i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]))?;
+        let r = match i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]) {
+            Ok(r) => r,
+            Err(e) => {
+                i.iterator_close(&this);
+                return Err(crate::interpreter::abrupt_value(e));
+            }
+        };
         if i.to_boolean(&r) == want {
             i.iterator_close(&this);
             return Ok(Value::Bool(want));
