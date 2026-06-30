@@ -4372,3 +4372,22 @@ fn object_descriptors_coercion() {
         "TypeError"
     );
 }
+
+#[test]
+fn object_from_entries() {
+    assert_eq!(run("Object.fromEntries([['a',1],['b',2]]).b"), "2");
+    // null/undefined input throws; a non-object entry throws.
+    assert_eq!(throws("Object.fromEntries(null)"), "TypeError");
+    assert_eq!(throws("Object.fromEntries([1,2])"), "TypeError");
+    // Uses CreateDataProperty: an inherited setter on the key is not triggered.
+    assert_eq!(
+        run(r#"
+            var triggered=false;
+            Object.defineProperty(Object.prototype, 'p', {configurable:true, set(){triggered=true;}});
+            var o=Object.fromEntries([['p', 1]]);
+            delete Object.prototype.p;
+            [o.p, triggered].join(',')
+        "#),
+        "1,false"
+    );
+}

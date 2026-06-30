@@ -6779,13 +6779,28 @@ fn install_object(it: &mut Interp) {
         Ok(i.make_array(out))
     });
     it.def_method(&ctor, "fromEntries", 1, |i, _this, args| {
-        let pairs = ab(i.iterate(&arg(args, 0)))?;
+        // RequireObjectCoercible(iterable).
+        let iterable = arg(args, 0);
+        if matches!(iterable, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "Object.fromEntries called on null or undefined",
+            ));
+        }
+        let pairs = ab(i.iterate(&iterable))?;
         let obj = i.new_object();
         for pair in pairs {
+            // Each entry must be an Object; keys/values are added via CreateDataPropertyOnObject,
+            // which defines a plain data property and never invokes inherited setters.
+            if !matches!(pair, Value::Obj(_)) {
+                return Err(i.make_error("TypeError", "Object.fromEntries entry is not an object"));
+            }
             let k = ab(i.get_member(&pair, "0"))?;
             let v = ab(i.get_member(&pair, "1"))?;
             let key = ab(i.to_property_key(&k))?;
-            ab(i.set_member(&Value::Obj(obj.clone()), &key, v))?;
+            obj.borrow_mut()
+                .props
+                .insert(key.as_str(), Property::data(v, true, true, true));
         }
         Ok(Value::Obj(obj))
     });
