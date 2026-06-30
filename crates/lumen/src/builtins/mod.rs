@@ -8497,6 +8497,30 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
     }
 }
 
+/// IsRegExp(arg): true if it has a truthy `@@match`, or (fallback) is a compiled RegExp object.
+fn arg_is_regexp(i: &mut Interp, v: &Value) -> Result<bool, Value> {
+    if let Value::Obj(o) = v {
+        if let Some(k) = well_known_key(i, "match") {
+            let m = ab(i.get_member(v, &k))?;
+            if !matches!(m, Value::Undefined | Value::Null) {
+                return Ok(i.to_boolean(&m));
+            }
+        }
+        return Ok(i.regexps.contains_key(&(Rc::as_ptr(o) as usize)));
+    }
+    Ok(false)
+}
+
+/// ToIntegerOrInfinity of an optional position argument, clamped to `[0, len]`.
+fn str_clamp_pos(i: &mut Interp, v: Option<&Value>, len: i64) -> Result<usize, Value> {
+    let n = match v {
+        Some(v) if !matches!(v, Value::Undefined) => ab(i.to_number(v))?,
+        _ => 0.0,
+    };
+    let n = if n.is_nan() { 0 } else { n.trunc() as i64 };
+    Ok(n.clamp(0, len) as usize)
+}
+
 /// CreateHTML (Annex B): wrap the coerced `this` string in `<tag attr="value">…</tag>`.
 fn create_html(i: &mut Interp, this: Value, tag: &str, attr: &str, value: &Value) -> Result<Value, Value> {
     let s = this_string(i, &this)?;
@@ -8592,18 +8616,43 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "includes", 1, |i, this, args| {
         let s = this_string(i, &this)?;
+        if arg_is_regexp(i, &arg(args, 0))? {
+            return Err(i.make_error("TypeError", "argument must not be a regular expression"));
+        }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        Ok(Value::Bool(s.contains(needle.as_ref())))
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        let pos = str_clamp_pos(i, args.get(1), len)?;
+        let hay: String = chars[pos..].iter().collect();
+        Ok(Value::Bool(hay.contains(needle.as_ref())))
     });
     it.def_method(&sp, "startsWith", 1, |i, this, args| {
         let s = this_string(i, &this)?;
+        if arg_is_regexp(i, &arg(args, 0))? {
+            return Err(i.make_error("TypeError", "argument must not be a regular expression"));
+        }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        Ok(Value::Bool(s.starts_with(needle.as_ref())))
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        let pos = str_clamp_pos(i, args.get(1), len)?;
+        let hay: String = chars[pos..].iter().collect();
+        Ok(Value::Bool(hay.starts_with(needle.as_ref())))
     });
     it.def_method(&sp, "endsWith", 1, |i, this, args| {
         let s = this_string(i, &this)?;
+        if arg_is_regexp(i, &arg(args, 0))? {
+            return Err(i.make_error("TypeError", "argument must not be a regular expression"));
+        }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        Ok(Value::Bool(s.ends_with(needle.as_ref())))
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len() as i64;
+        // endsWith's optional argument is the END position (default = length).
+        let end = match args.get(1) {
+            Some(v) if !matches!(v, Value::Undefined) => str_clamp_pos(i, Some(v), len)?,
+            _ => len as usize,
+        };
+        let hay: String = chars[..end].iter().collect();
+        Ok(Value::Bool(hay.ends_with(needle.as_ref())))
     });
     it.def_method(&sp, "slice", 2, |i, this, args| {
         let s = this_string(i, &this)?;
