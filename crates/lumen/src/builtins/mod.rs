@@ -39,6 +39,17 @@ pub fn install(it: &mut Interp) {
     install_object(it);
     // Symbol before Array/String so `Symbol.iterator` exists when they define `@@iterator`.
     install_symbol(it);
+    // Function.prototype[@@hasInstance] (default OrdinaryHasInstance) — installed after Symbol so the
+    // well-known key exists; non-writable/non-configurable.
+    if let Some(key) = well_known_key(it, "hasInstance") {
+        let f = it.make_native("[Symbol.hasInstance]", 1, |i, this, a| {
+            Ok(Value::Bool(ab(i.ordinary_has_instance(&this, &arg(a, 0)))?))
+        });
+        it.function_proto
+            .borrow_mut()
+            .props
+            .insert(key, Property::data(Value::Obj(f), false, false, false));
+    }
     install_iterator(it);
     install_array(it);
     install_string(it);

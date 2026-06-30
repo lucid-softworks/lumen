@@ -3132,32 +3132,50 @@ impl Interp {
     }
 
     fn instanceof(&mut self, l: &Value, r: &Value) -> Result<Value, Abrupt> {
-        let ctor = match r {
-            Value::Obj(o) if !matches!(o.borrow().call, Callable::None) => o.clone(),
-            _ => {
-                return Err(self.throw("TypeError", "right-hand side of instanceof is not callable"))
-            }
-        };
-        let proto = match ctor
-            .borrow()
-            .props
-            .get("prototype")
-            .map(|p| p.value.clone())
-        {
-            Some(Value::Obj(p)) => p,
-            _ => return Ok(Value::Bool(false)),
-        };
-        let mut cur = match l {
-            Value::Obj(o) => o.borrow().proto.clone(),
-            _ => return Ok(Value::Bool(false)),
-        };
-        while let Some(o) = cur {
-            if Rc::ptr_eq(&o, &proto) {
-                return Ok(Value::Bool(true));
-            }
-            cur = o.borrow().proto.clone();
+        if !matches!(r, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "right-hand side of instanceof is not an object"));
         }
-        Ok(Value::Bool(false))
+        // Defer to a `@@hasInstance` method if the RHS has one.
+        if let Some(key) = crate::builtins::well_known_key(self, "hasInstance") {
+            let handler = self.get_member(r, &key)?;
+            if handler.is_callable() {
+                let res = self.call(handler, r.clone(), &[l.clone()])?;
+                return Ok(Value::Bool(self.to_boolean(&res)));
+            }
+        }
+        if !r.is_callable() {
+            return Err(self.throw("TypeError", "right-hand side of instanceof is not callable"));
+        }
+        Ok(Value::Bool(self.ordinary_has_instance(r, l)?))
+    }
+
+    /// OrdinaryHasInstance(C, O): unwrap bound functions to their target, then test whether `C`'s
+    /// `prototype` appears on `O`'s prototype chain.
+    pub fn ordinary_has_instance(&mut self, c: &Value, o: &Value) -> Result<bool, Abrupt> {
+        let co = match c {
+            Value::Obj(x) if !matches!(x.borrow().call, Callable::None) => x.clone(),
+            _ => return Ok(false),
+        };
+        if let Callable::Bound { target, .. } = &co.borrow().call {
+            let target = Value::Obj(target.clone());
+            return self.ordinary_has_instance(&target, o);
+        }
+        let o_obj = match o {
+            Value::Obj(x) => x.clone(),
+            _ => return Ok(false),
+        };
+        let proto = match self.get_member(c, "prototype")? {
+            Value::Obj(p) => p,
+            _ => return Err(self.throw("TypeError", "prototype property is not an object")),
+        };
+        let mut cur = o_obj.borrow().proto.clone();
+        while let Some(x) = cur {
+            if Rc::ptr_eq(&x, &proto) {
+                return Ok(true);
+            }
+            cur = x.borrow().proto.clone();
+        }
+        Ok(false)
     }
 
     // ----- abstract operations ----------------------------------------------------------------
