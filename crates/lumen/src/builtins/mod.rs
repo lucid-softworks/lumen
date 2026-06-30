@@ -2438,11 +2438,52 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
     Ok(true)
 }
 
+/// GetFunctionRealm-style lookup: when `new.target`'s `prototype` isn't an object, the instance's
+/// [[Prototype]] is `new.target`'s realm's intrinsic. The realm is identified by which registered
+/// realm's `Function.prototype` lies on `new.target`'s own prototype chain.
+fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
+    let ntobj = nt.as_obj()?;
+    let mut chain: Vec<Gc> = Vec::new();
+    let mut cur = ntobj.borrow().proto.clone();
+    while let Some(p) = cur {
+        let next = p.borrow().proto.clone();
+        chain.push(p);
+        if chain.len() > 64 {
+            break;
+        }
+        cur = next;
+    }
+    for p in &chain {
+        for rs in i.realms.values() {
+            if Rc::ptr_eq(&rs.function_proto, p) {
+                // Core intrinsics live in named fields; errors in error_protos; the rest in extra_protos.
+                return match default_proto {
+                    "Object" => Some(rs.object_proto.clone()),
+                    "Array" => Some(rs.array_proto.clone()),
+                    "Function" => Some(rs.function_proto.clone()),
+                    "String" => Some(rs.string_proto.clone()),
+                    "Number" => Some(rs.number_proto.clone()),
+                    "Boolean" => Some(rs.boolean_proto.clone()),
+                    "Symbol" => Some(rs.symbol_proto.clone()),
+                    other => rs
+                        .error_protos
+                        .get(other)
+                        .cloned()
+                        .or_else(|| rs.extra_protos.get(other).cloned()),
+                };
+            }
+        }
+    }
+    None
+}
+
 fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
-            _ => i.extra_protos.get(default_proto).cloned(),
+            // The constructor's `prototype` isn't an object — use its realm's intrinsic.
+            _ => ctor_realm_proto(i, &i.new_target.clone(), default_proto)
+                .or_else(|| i.extra_protos.get(default_proto).cloned()),
         },
         _ => i.extra_protos.get(default_proto).cloned(),
     };
@@ -6618,7 +6659,18 @@ fn install_function_proto(it: &mut Interp) {
         match program.into_iter().next() {
             Some(crate::ast::Stmt::FuncDecl(f)) => {
                 let env = i.global_env.clone();
-                Ok(i.make_function(f, env))
+                let func = i.make_function(f, env);
+                // GetPrototypeFromConstructor(new.target, %Function.prototype%): a cross-realm
+                // `new other.Function()` gets other realm's Function.prototype as its [[Prototype]].
+                let nt = i.new_target.clone();
+                if matches!(nt, Value::Obj(_)) {
+                    if let Value::Obj(p) = ab(i.get_member(&nt, "prototype"))? {
+                        if let Value::Obj(fo) = &func {
+                            fo.borrow_mut().proto = Some(p);
+                        }
+                    }
+                }
+                Ok(func)
             }
             _ => Err(i.make_error("SyntaxError", "Function constructor: invalid body")),
         }
@@ -12355,6 +12407,17 @@ fn install_errors(it: &mut Interp) {
 
 fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Value {
     let err = i.make_error(kind, "");
+    // OrdinaryCreateFromConstructor: a subclass / Reflect.construct new.target sets the prototype.
+    if matches!(i.new_target, Value::Obj(_)) {
+        let nt = i.new_target.clone();
+        let proto = match i.get_member(&nt, "prototype") {
+            Ok(Value::Obj(p)) => Some(p),
+            _ => ctor_realm_proto(i, &nt, kind).or_else(|| i.error_protos.get(kind).cloned()),
+        };
+        if let (Value::Obj(o), Some(p)) = (&err, proto) {
+            o.borrow_mut().proto = Some(p);
+        }
+    }
     if let Some(msg) = args.first() {
         if !matches!(msg, Value::Undefined) {
             if let Ok(s) = i.to_string(msg) {
