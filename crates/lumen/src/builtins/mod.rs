@@ -4112,7 +4112,10 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     let idx = ab(i.to_number(&arg(args, 1)))? as usize;
     let value = arg(args, 2);
     let results = ab(i.get_member(&result, "__results"))?;
-    ab(i.set_member(&results, &idx.to_string(), value))?;
+    // CreateDataProperty: a direct own data property, so Array.prototype index setters aren't invoked.
+    if let Value::Obj(o) = &results {
+        crate::value::set_data(o, &idx.to_string(), value);
+    }
     let rem_v = ab(i.get_member(&result, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
     ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
@@ -4207,7 +4210,9 @@ fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Va
     );
     set_data(&status, if fulfilled { "value" } else { "reason" }, value);
     let results = ab(i.get_member(&result, "__results"))?;
-    ab(i.set_member(&results, &idx.to_string(), Value::Obj(status)))?;
+    if let Value::Obj(o) = &results {
+        crate::value::set_data(o, &idx.to_string(), Value::Obj(status));
+    }
     let rem_v = ab(i.get_member(&result, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
     ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
