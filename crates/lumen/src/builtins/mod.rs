@@ -4030,6 +4030,34 @@ fn capability_executor(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// `Promise.prototype.finally` helpers: the value/reason pass-through thunks and the then/catch
+/// reactions that run `onFinally` then forward the original settlement.
+fn pf_return(_i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    Ok(arg(a, 0))
+}
+fn pf_throw(_i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    Err(arg(a, 0))
+}
+fn pf_then_finally(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    // bound args [onFinally, C]; called with (value)
+    let (on_finally, c, value) = (arg(a, 0), arg(a, 1), arg(a, 2));
+    let result = ab(i.call(on_finally, Value::Undefined, &[]))?;
+    let resolve = ab(i.get_member(&c, "resolve"))?;
+    let p = ab(i.call(resolve, c.clone(), &[result]))?;
+    let thunk = make_bound(i, pf_return, vec![value]);
+    let then = ab(i.get_member(&p, "then"))?;
+    ab(i.call(then, p, &[thunk]))
+}
+fn pf_catch_finally(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (on_finally, c, reason) = (arg(a, 0), arg(a, 1), arg(a, 2));
+    let result = ab(i.call(on_finally, Value::Undefined, &[]))?;
+    let resolve = ab(i.get_member(&c, "resolve"))?;
+    let p = ab(i.call(resolve, c.clone(), &[result]))?;
+    let thrower = make_bound(i, pf_throw, vec![reason]);
+    let then = ab(i.get_member(&p, "then"))?;
+    ab(i.call(then, p, &[thrower]))
+}
+
 /// SpeciesConstructor(O, defaultCtor): O.constructor[@@species], or the default.
 fn species_constructor(i: &mut Interp, obj: &Value, default_ctor: &Value) -> Result<Value, Value> {
     let c = ab(i.get_member(obj, "constructor"))?;
@@ -4240,14 +4268,21 @@ fn install_promise(it: &mut Interp) {
         if !matches!(this, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "Promise.prototype.finally on non-object"));
         }
-        // Invoke the real `then` once with the finally callback on both paths (approximate
-        // value-passthrough, but observably routes through `then`).
+        let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "Promise"))?;
+        let c = species_constructor(i, &this, &default_ctor)?;
         let then = ab(i.get_member(&this, "then"))?;
         if !then.is_callable() {
             return Err(i.make_error("TypeError", "then is not callable"));
         }
-        let cb = arg(a, 0);
-        ab(i.call(then, this.clone(), &[cb.clone(), cb]))
+        let on_finally = arg(a, 0);
+        // A non-callable onFinally is passed to `then` on both paths unchanged.
+        if !on_finally.is_callable() {
+            return ab(i.call(then, this.clone(), &[on_finally.clone(), on_finally]));
+        }
+        // Otherwise wrap it so the original value/reason passes through after onFinally runs.
+        let then_finally = make_bound(i, pf_then_finally, vec![on_finally.clone(), c.clone()]);
+        let catch_finally = make_bound(i, pf_catch_finally, vec![on_finally, c]);
+        ab(i.call(then, this.clone(), &[then_finally, catch_finally]))
     });
 
     let ctor = it.make_native("Promise", 1, |i, _t, a| {
