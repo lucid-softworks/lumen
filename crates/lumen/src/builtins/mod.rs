@@ -555,7 +555,9 @@ fn install_host(it: &mut Interp) {
 /// current realm).
 fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
     let host = Object::new(Some(it.object_proto.clone()));
-    let global = realm_global.clone().unwrap_or_else(|| Value::Obj(it.global.clone()));
+    let global = realm_global
+        .clone()
+        .unwrap_or_else(|| Value::Obj(it.global.clone()));
     set_builtin(&host, "global", global.clone());
     it.def_method(&host, "gc", 0, |i, _t, _a| {
         i.gc_collect();
@@ -609,7 +611,8 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
 }
 
 fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value> {
-    let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))?;
+    let ptr =
+        map_ptr(this).ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))?;
     i.data_views
         .get(&ptr)
         .copied()
@@ -963,7 +966,9 @@ fn install_regexp(it: &mut Interp) {
             Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(&o) as usize)) => {
                 // A RegExp pattern copies its source/flags; a second flags argument is then an error.
                 if !matches!(arg(a, 1), Value::Undefined) {
-                    return Err(i.make_error("TypeError", "cannot supply flags when compiling a RegExp"));
+                    return Err(
+                        i.make_error("TypeError", "cannot supply flags when compiling a RegExp")
+                    );
                 }
                 let re = i.regexps[&(Rc::as_ptr(&o) as usize)].clone();
                 (re.source.clone(), re.flags.clone())
@@ -1751,7 +1756,10 @@ fn ta_species_create(
             species
         }
     } else {
-        return Err(i.make_error("TypeError", "TypedArray constructor property is not an object"));
+        return Err(i.make_error(
+            "TypeError",
+            "TypedArray constructor property is not an object",
+        ));
     };
     if !chosen.is_callable() {
         return Err(i.make_error("TypeError", "TypedArray species is not a constructor"));
@@ -1837,7 +1845,10 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 _ => 0,
             };
             if offset % es != 0 {
-                return Err(i.make_error("RangeError", "byteOffset is not aligned to the element size"));
+                return Err(i.make_error(
+                    "RangeError",
+                    "byteOffset is not aligned to the element size",
+                ));
             }
             let explicit = matches!(args.get(2), Some(v) if !matches!(v, Value::Undefined));
             let len_arg = match args.get(2) {
@@ -1859,7 +1870,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                     l
                 }
                 None => {
-                    if buflen % es != 0 {
+                    if !buflen.is_multiple_of(es) {
                         return Err(i.make_error(
                             "RangeError",
                             "buffer length is not a multiple of the element size",
@@ -3017,7 +3028,12 @@ fn install_date(it: &mut Interp) {
             y += 1900;
         }
         Ok(Value::Num(parts_to_ms(
-            y, vals[1] as i64, vals[2] as i64, vals[3] as i64, vals[4] as i64, vals[5] as i64,
+            y,
+            vals[1] as i64,
+            vals[2] as i64,
+            vals[3] as i64,
+            vals[4] as i64,
+            vals[5] as i64,
             vals[6] as i64,
         )))
     });
@@ -3337,7 +3353,8 @@ fn set_values(i: &mut Interp, this: &Value) -> Result<Vec<Value>, Value> {
 }
 /// Build a fresh Set from `values` (deduped via SameValueZero).
 fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
-    let obj = new_from_ctor(i, "Set").unwrap_or_else(|_| Object::new(i.extra_protos.get("Set").cloned()));
+    let obj =
+        new_from_ctor(i, "Set").unwrap_or_else(|_| Object::new(i.extra_protos.get("Set").cloned()));
     let ptr = Rc::as_ptr(&obj) as usize;
     let mut entries: Vec<(Value, Value)> = Vec::new();
     for v in values {
@@ -3500,9 +3517,10 @@ fn collection_ctor(
                 let step = if is_set {
                     i.call(add_fn.clone(), mv.clone(), &[item])
                 } else if !matches!(item, Value::Obj(_)) {
-                    Err(crate::interpreter::Abrupt::Throw(
-                        i.make_error("TypeError", "iterator value is not an entry object"),
-                    ))
+                    Err(crate::interpreter::Abrupt::Throw(i.make_error(
+                        "TypeError",
+                        "iterator value is not an entry object",
+                    )))
                 } else {
                     i.get_member(&item, "0")
                         .and_then(|k| i.get_member(&item, "1").map(|v| (k, v)))
@@ -3803,11 +3821,20 @@ fn install_reflect(it: &mut Interp) {
             }
             let trap = ab(i.get_member(&handler, "set"))?;
             if trap.is_callable() {
-                let receiver = if a.len() > 3 { arg(a, 3) } else { target.clone() };
+                let receiver = if a.len() > 3 {
+                    arg(a, 3)
+                } else {
+                    target.clone()
+                };
                 let res = ab(i.call(
                     trap,
                     handler,
-                    &[ptarget.clone(), Value::from_string(key.clone()), value.clone(), receiver],
+                    &[
+                        ptarget.clone(),
+                        Value::from_string(key.clone()),
+                        value.clone(),
+                        receiver,
+                    ],
                 ))?;
                 let ok = i.to_boolean(&res);
                 if ok {
@@ -3976,7 +4003,11 @@ fn install_reflect(it: &mut Interp) {
             Value::Undefined | Value::Null => Vec::new(),
             list => ab(i.iterate(&list))?,
         };
-        let new_target = if a.len() >= 3 { arg(a, 2) } else { target.clone() };
+        let new_target = if a.len() >= 3 {
+            arg(a, 2)
+        } else {
+            target.clone()
+        };
         ab(i.construct_nt(target, &args, new_target))
     });
     it.def_method(&r, "isExtensible", 1, |i, _t, a| {
@@ -3989,7 +4020,10 @@ fn install_reflect(it: &mut Interp) {
     it.def_method(&r, "preventExtensions", 1, |i, _t, a| {
         let obj = arg(a, 0);
         if !matches!(obj, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "Reflect.preventExtensions called on non-object"));
+            return Err(i.make_error(
+                "TypeError",
+                "Reflect.preventExtensions called on non-object",
+            ));
         }
         Ok(Value::Bool(js_prevent_extensions(i, &obj)?))
     });
@@ -4084,7 +4118,10 @@ fn species_constructor(i: &mut Interp, obj: &Value, default_ctor: &Value) -> Res
 fn get_promise_resolve(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
     let r = ab(i.get_member(ctor, "resolve"))?;
     if !r.is_callable() {
-        return Err(i.make_error("TypeError", "Promise combinator: this.resolve is not callable"));
+        return Err(i.make_error(
+            "TypeError",
+            "Promise combinator: this.resolve is not callable",
+        ));
     }
     Ok(r)
 }
@@ -4093,7 +4130,10 @@ fn get_promise_resolve(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
 /// called with (and validating they're callable). Returns the result promise built by `C`.
 fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
     if !ctor.is_callable() {
-        return Err(i.make_error("TypeError", "NewPromiseCapability: receiver is not a constructor"));
+        return Err(i.make_error(
+            "TypeError",
+            "NewPromiseCapability: receiver is not a constructor",
+        ));
     }
     let cap = i.new_object();
     let executor = make_bound(i, capability_executor, vec![Value::Obj(cap.clone())]);
@@ -4341,7 +4381,10 @@ fn install_promise(it: &mut Interp) {
         Ok(p)
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
         // GetPromiseResolve and the iteration may throw — those reject the result promise.
         let promise_resolve = match get_promise_resolve(i, &t) {
             Ok(r) => r,
@@ -4387,8 +4430,17 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "race", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let promise_resolve = match get_promise_resolve(i, &t) {
+            Ok(r) => r,
+            Err(e) => {
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4414,8 +4466,17 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allSettled", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let promise_resolve = match get_promise_resolve(i, &t) {
+            Ok(r) => r,
+            Err(e) => {
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4457,8 +4518,17 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "any", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
-        let promise_resolve = match get_promise_resolve(i, &t) { Ok(r) => r, Err(e) => { i.reject_promise(&result, e); return Ok(result); } };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let promise_resolve = match get_promise_resolve(i, &t) {
+            Ok(r) => r,
+            Err(e) => {
+                i.reject_promise(&result, e);
+                return Ok(result);
+            }
+        };
         let items = match i.iterate(&arg(a, 0)) {
             Ok(items) => items,
             Err(e) => {
@@ -4497,7 +4567,10 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allKeyed", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
         let dict = match arg(a, 0) {
             Value::Obj(o) => o,
             _ => {
@@ -4545,7 +4618,10 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allSettledKeyed", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) { Ok(p) => p, Err(e) => return Err(e) };
+        let result = match new_promise_capability(i, &t) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
         let dict = match arg(a, 0) {
             Value::Obj(o) => o,
             _ => {
@@ -4680,9 +4756,10 @@ fn install_proxy(it: &mut Interp) {
         let revoke = make_bound(i, revoke_proxy, vec![proxy.clone()]);
         // The revocation function has own `length` (0) then `name` ("") like a built-in function.
         if let Value::Obj(ro) = &revoke {
-            ro.borrow_mut()
-                .props
-                .insert("length", Property::data(Value::Num(0.0), false, false, true));
+            ro.borrow_mut().props.insert(
+                "length",
+                Property::data(Value::Num(0.0), false, false, true),
+            );
             ro.borrow_mut()
                 .props
                 .insert("name", Property::data(Value::str(""), false, false, true));
@@ -4702,7 +4779,10 @@ fn install_json(it: &mut Interp) {
         let replacer = arg(args, 1);
         // The replacer is either a function, or an array PropertyList of keys (strings/numbers).
         let opts = if replacer.is_callable() {
-            JsonOpts { func: Some(replacer), keys: None }
+            JsonOpts {
+                func: Some(replacer),
+                keys: None,
+            }
         } else if matches!(&replacer, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)) {
             let len = match &replacer {
                 Value::Obj(o) => i.array_length(o),
@@ -4727,9 +4807,15 @@ fn install_json(it: &mut Interp) {
                     }
                 }
             }
-            JsonOpts { func: None, keys: Some(list) }
+            JsonOpts {
+                func: None,
+                keys: Some(list),
+            }
         } else {
-            JsonOpts { func: None, keys: None }
+            JsonOpts {
+                func: None,
+                keys: None,
+            }
         };
         let gap = match arg(args, 2) {
             Value::Num(n) => " ".repeat((n.max(0.0) as usize).min(10)),
@@ -4784,7 +4870,9 @@ fn install_json(it: &mut Interp) {
         Ok(Value::Obj(o))
     });
     it.def_method(&j, "isRawJSON", 1, |_i, _t, args| {
-        Ok(Value::Bool(matches!(arg(args, 0), Value::Obj(o) if o.borrow().props.contains("__raw_json"))))
+        Ok(Value::Bool(
+            matches!(arg(args, 0), Value::Obj(o) if o.borrow().props.contains("__raw_json")),
+        ))
     });
     set_to_string_tag(it, &j, "JSON");
     set_builtin(&it.global, "JSON", Value::Obj(j));
@@ -4829,7 +4917,11 @@ fn json_str(
     if matches!(value, Value::Obj(_)) {
         let tojson = ab(i.get_member(&value, "toJSON"))?;
         if tojson.is_callable() {
-            value = ab(i.call(tojson, value.clone(), &[Value::from_string(key.to_string())]))?;
+            value = ab(i.call(
+                tojson,
+                value.clone(),
+                &[Value::from_string(key.to_string())],
+            ))?;
         }
     }
     if let Some(func) = &opts.func {
@@ -5071,7 +5163,9 @@ fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<
             }
             // Unescaped control characters (U+0000–U+001F) are not allowed in JSON strings.
             c if (c as u32) < 0x20 => {
-                return Err(i.make_error("SyntaxError", "Unescaped control character in JSON string"))
+                return Err(
+                    i.make_error("SyntaxError", "Unescaped control character in JSON string")
+                )
             }
             c => s.push(c),
         }
@@ -5349,7 +5443,9 @@ fn ta_length_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
 }
 fn ta_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let (info, _) = ta_receiver(i, &this)?;
-    Ok(Value::Num((i.ta_len(&info).unwrap_or(0) * info.kind.elsize()) as f64))
+    Ok(Value::Num(
+        (i.ta_len(&info).unwrap_or(0) * info.kind.elsize()) as f64,
+    ))
 }
 fn ta_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let (info, _) = ta_receiver(i, &this)?;
@@ -5413,7 +5509,12 @@ pub(crate) fn js_get_prototype_of(i: &mut Interp, obj: &Value) -> Result<Value, 
         return proxy_get_prototype(i, &target, &handler);
     }
     Ok(match obj {
-        Value::Obj(o) => o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null),
+        Value::Obj(o) => o
+            .borrow()
+            .proto
+            .clone()
+            .map(Value::Obj)
+            .unwrap_or(Value::Null),
         _ => Value::Null,
     })
 }
@@ -5452,7 +5553,12 @@ fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<boo
         return Ok(true);
     }
     // Ordinary [[SetPrototypeOf]].
-    let cur = o.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null);
+    let cur = o
+        .borrow()
+        .proto
+        .clone()
+        .map(Value::Obj)
+        .unwrap_or(Value::Null);
     if i.strict_equals(proto, &cur) {
         return Ok(true);
     }
@@ -5477,7 +5583,10 @@ fn js_prevent_extensions(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
             return js_prevent_extensions(i, &target);
         }
         if !trap.is_callable() {
-            return Err(i.make_error("TypeError", "proxy 'preventExtensions' trap is not callable"));
+            return Err(i.make_error(
+                "TypeError",
+                "proxy 'preventExtensions' trap is not callable",
+            ));
         }
         let res = ab(i.call(trap, handler, std::slice::from_ref(&target)))?;
         let ok = i.to_boolean(&res);
@@ -5516,7 +5625,12 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
         // Invariant: for a non-extensible target the reported prototype must be the real one.
         if let Value::Obj(t) = target {
             if !t.borrow().extensible {
-                let actual = t.borrow().proto.clone().map(Value::Obj).unwrap_or(Value::Null);
+                let actual = t
+                    .borrow()
+                    .proto
+                    .clone()
+                    .map(Value::Obj)
+                    .unwrap_or(Value::Null);
                 if !i.strict_equals(&res, &actual) {
                     return Err(i.make_error(
                         "TypeError",
@@ -5546,7 +5660,13 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
             return proxy_own_keys(i, &t2, &h2);
         }
         return Ok(match target {
-            Value::Obj(t) => t.borrow().props.keys().into_iter().map(Value::Str).collect(),
+            Value::Obj(t) => t
+                .borrow()
+                .props
+                .keys()
+                .into_iter()
+                .map(Value::Str)
+                .collect(),
             _ => Vec::new(),
         });
     }
@@ -5584,7 +5704,12 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
                 .keys()
                 .into_iter()
                 .map(|k| {
-                    let conf = t.borrow().props.get(&k).map(|p| p.configurable).unwrap_or(true);
+                    let conf = t
+                        .borrow()
+                        .props
+                        .get(&k)
+                        .map(|p| p.configurable)
+                        .unwrap_or(true);
                     (k.to_string(), conf)
                 })
                 .collect();
@@ -5645,7 +5770,9 @@ fn proxy_gopd_value(
         }
         if let Value::Obj(t) = target {
             let prop = t.borrow().props.get(key).cloned();
-            return Ok(prop.map(|p| descriptor_from_prop(i, p)).unwrap_or(Value::Undefined));
+            return Ok(prop
+                .map(|p| descriptor_from_prop(i, p))
+                .unwrap_or(Value::Undefined));
         }
         return Ok(Value::Undefined);
     }
@@ -5742,7 +5869,11 @@ fn proxy_define_property(
     let key_val = i
         .sym_from_key(key)
         .unwrap_or_else(|| Value::from_string(key.to_string()));
-    let res = i.call(trap, handler.clone(), &[target.clone(), key_val, desc.clone()])?;
+    let res = i.call(
+        trap,
+        handler.clone(),
+        &[target.clone(), key_val, desc.clone()],
+    )?;
     if !i.to_boolean(&res) {
         return Ok(false);
     }
@@ -6791,6 +6922,8 @@ fn same_value(a: &Value, b: &Value) -> bool {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::Sym(x), Value::Sym(y)) => Rc::ptr_eq(x, y),
         (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
@@ -7915,7 +8048,8 @@ fn install_iterator(it: &mut Interp) {
     // is %IteratorPrototype%), so getPrototypeOf(getPrototypeOf(arrIter)) lands on %IteratorPrototype%.
     let arr_iter_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
     set_to_string_tag(it, &arr_iter_proto, "Array Iterator");
-    it.extra_protos.insert("%ArrayIteratorPrototype%", arr_iter_proto);
+    it.extra_protos
+        .insert("%ArrayIteratorPrototype%", arr_iter_proto);
 }
 
 /// `Array.fromAsync(source, mapFn?, thisArg?)`: build an array from a sync/async iterable or an
@@ -8167,7 +8301,11 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
     let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
     set_builtin(&obj, "__zip_iters", i.make_array(iters));
     set_builtin(&obj, "__zip_nexts", i.make_array(nexts));
-    set_builtin(&obj, "__zip_done", i.make_array(vec![Value::Bool(false); iterables.len()]));
+    set_builtin(
+        &obj,
+        "__zip_done",
+        i.make_array(vec![Value::Bool(false); iterables.len()]),
+    );
     set_builtin(&obj, "__zip_mode", Value::from_string(mode.clone()));
     set_builtin(&obj, "__zip_pad", i.make_array(padding));
     set_builtin(&obj, "__zip_finished", Value::Bool(false));
@@ -8287,7 +8425,11 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
             let next = ab(i.get_member(&iter, "next"))?;
             set_internal(this.as_obj().unwrap(), "__cc_cur", iter);
             set_internal(this.as_obj().unwrap(), "__cc_curnext", next);
-            set_internal(this.as_obj().unwrap(), "__cc_idx", Value::Num((idx + 1) as f64));
+            set_internal(
+                this.as_obj().unwrap(),
+                "__cc_idx",
+                Value::Num((idx + 1) as f64),
+            );
         }
         let cur = ab(i.get_member(&this, "__cc_cur"))?;
         let next = ab(i.get_member(&this, "__cc_curnext"))?;
@@ -8300,8 +8442,12 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
 
 /// GetIteratorFlattenable returning the iterator object: a string (when allowed) or an object's
 /// @@iterator, or the object itself when it has no @@iterator (it's already an iterator).
-fn get_iterator_flattenable(i: &mut Interp, v: &Value, allow_strings: bool) -> Result<Value, Value> {
-    if !matches!(v, Value::Obj(_)) && !(allow_strings && matches!(v, Value::Str(_))) {
+fn get_iterator_flattenable(
+    i: &mut Interp,
+    v: &Value,
+    allow_strings: bool,
+) -> Result<Value, Value> {
+    if !(matches!(v, Value::Obj(_)) || (allow_strings && matches!(v, Value::Str(_)))) {
         return Err(i.make_error("TypeError", "value is not iterable"));
     }
     let iter_key = i
@@ -8391,7 +8537,11 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
-                        let r = match i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]) {
+                        let r = match i.call(
+                            f.clone(),
+                            Value::Undefined,
+                            &[v.clone(), Value::Num(k)],
+                        ) {
                             Ok(r) => r,
                             Err(e) => {
                                 i.iterator_close(&src);
@@ -8467,7 +8617,8 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                 match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
-                        let mapped = match i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)]) {
+                        let mapped = match i.call(f.clone(), Value::Undefined, &[v, Value::Num(c)])
+                        {
                             Ok(m) => m,
                             Err(e) => {
                                 i.iterator_close(&src);
@@ -8775,7 +8926,13 @@ fn str_clamp_pos(i: &mut Interp, v: Option<&Value>, len: i64) -> Result<usize, V
 }
 
 /// CreateHTML (Annex B): wrap the coerced `this` string in `<tag attr="value">…</tag>`.
-fn create_html(i: &mut Interp, this: Value, tag: &str, attr: &str, value: &Value) -> Result<Value, Value> {
+fn create_html(
+    i: &mut Interp,
+    this: Value,
+    tag: &str,
+    attr: &str,
+    value: &Value,
+) -> Result<Value, Value> {
     let s = this_string(i, &this)?;
     let mut p = format!("<{tag}");
     if !attr.is_empty() {
@@ -8981,19 +9138,45 @@ fn install_string(it: &mut Interp) {
         ))
     });
     // Annex B B.2.3 HTML-wrapper methods (CreateHTML): each wraps the string in a tag.
-    it.def_method(&sp, "anchor", 1, |i, t, a| create_html(i, t, "a", "name", &arg(a, 0)));
-    it.def_method(&sp, "link", 1, |i, t, a| create_html(i, t, "a", "href", &arg(a, 0)));
-    it.def_method(&sp, "fontcolor", 1, |i, t, a| create_html(i, t, "font", "color", &arg(a, 0)));
-    it.def_method(&sp, "fontsize", 1, |i, t, a| create_html(i, t, "font", "size", &arg(a, 0)));
-    it.def_method(&sp, "big", 0, |i, t, _| create_html(i, t, "big", "", &Value::Undefined));
-    it.def_method(&sp, "blink", 0, |i, t, _| create_html(i, t, "blink", "", &Value::Undefined));
-    it.def_method(&sp, "bold", 0, |i, t, _| create_html(i, t, "b", "", &Value::Undefined));
-    it.def_method(&sp, "fixed", 0, |i, t, _| create_html(i, t, "tt", "", &Value::Undefined));
-    it.def_method(&sp, "italics", 0, |i, t, _| create_html(i, t, "i", "", &Value::Undefined));
-    it.def_method(&sp, "small", 0, |i, t, _| create_html(i, t, "small", "", &Value::Undefined));
-    it.def_method(&sp, "strike", 0, |i, t, _| create_html(i, t, "strike", "", &Value::Undefined));
-    it.def_method(&sp, "sub", 0, |i, t, _| create_html(i, t, "sub", "", &Value::Undefined));
-    it.def_method(&sp, "sup", 0, |i, t, _| create_html(i, t, "sup", "", &Value::Undefined));
+    it.def_method(&sp, "anchor", 1, |i, t, a| {
+        create_html(i, t, "a", "name", &arg(a, 0))
+    });
+    it.def_method(&sp, "link", 1, |i, t, a| {
+        create_html(i, t, "a", "href", &arg(a, 0))
+    });
+    it.def_method(&sp, "fontcolor", 1, |i, t, a| {
+        create_html(i, t, "font", "color", &arg(a, 0))
+    });
+    it.def_method(&sp, "fontsize", 1, |i, t, a| {
+        create_html(i, t, "font", "size", &arg(a, 0))
+    });
+    it.def_method(&sp, "big", 0, |i, t, _| {
+        create_html(i, t, "big", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "blink", 0, |i, t, _| {
+        create_html(i, t, "blink", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "bold", 0, |i, t, _| {
+        create_html(i, t, "b", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "fixed", 0, |i, t, _| {
+        create_html(i, t, "tt", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "italics", 0, |i, t, _| {
+        create_html(i, t, "i", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "small", 0, |i, t, _| {
+        create_html(i, t, "small", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "strike", 0, |i, t, _| {
+        create_html(i, t, "strike", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "sub", 0, |i, t, _| {
+        create_html(i, t, "sub", "", &Value::Undefined)
+    });
+    it.def_method(&sp, "sup", 0, |i, t, _| {
+        create_html(i, t, "sup", "", &Value::Undefined)
+    });
     it.def_method(&sp, "toUpperCase", 0, |i, this, _| {
         Ok(Value::from_string(this_string(i, &this)?.to_uppercase()))
     });
@@ -9144,12 +9327,16 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "trimStart", 0, |i, this, _| {
         Ok(Value::from_string(
-            this_string(i, &this)?.trim_start_matches(is_js_ws).to_string(),
+            this_string(i, &this)?
+                .trim_start_matches(is_js_ws)
+                .to_string(),
         ))
     });
     it.def_method(&sp, "trimEnd", 0, |i, this, _| {
         Ok(Value::from_string(
-            this_string(i, &this)?.trim_end_matches(is_js_ws).to_string(),
+            this_string(i, &this)?
+                .trim_end_matches(is_js_ws)
+                .to_string(),
         ))
     });
     it.def_method(&sp, "padStart", 1, |i, this, args| {
@@ -9895,7 +10082,10 @@ fn install_bigint(it: &mut Interp) {
     });
     it.def_method(&proto, "toLocaleString", 0, |i, this, _| match this {
         Value::BigInt(n) => Ok(Value::from_string(bigint_to_radix(n, 10))),
-        _ => Err(i.make_error("TypeError", "BigInt.prototype.toLocaleString requires a BigInt")),
+        _ => Err(i.make_error(
+            "TypeError",
+            "BigInt.prototype.toLocaleString requires a BigInt",
+        )),
     });
     let ctor = it.make_native("BigInt", 1, |i, _t, a| {
         if i.constructing {

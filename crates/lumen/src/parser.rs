@@ -25,7 +25,7 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
         depth: 0,
         in_generator: false,
         in_async: false,
-            in_params: false,
+        in_params: false,
         no_in: false,
         module: false,
         fn_depth: 0,
@@ -59,7 +59,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         depth: 0,
         in_generator: false,
         in_async: true,
-            in_params: false,
+        in_params: false,
         no_in: false,
         module: true,
         fn_depth: 0,
@@ -467,7 +467,9 @@ impl Parser {
             }
             // `async function f(){}` declaration (async is a contextual keyword).
             Tok::Ident(w)
-                if w == "async" && !self.cur_escaped() && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                if w == "async"
+                    && !self.cur_escaped()
+                    && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
                 let f = self.parse_function(true)?;
@@ -812,8 +814,7 @@ impl Parser {
         let s = self.parse_stmt()?;
         match &s {
             Stmt::VarDecl {
-                kind:
-                    DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
+                kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                 ..
             }
             | Stmt::ClassDecl(_) => {
@@ -1814,7 +1815,10 @@ impl Parser {
                             }
                             return Ok(Expr::ImportMeta);
                         }
-                        _ => return self.err("expected 'meta', 'source', or 'defer' after 'import.'"),
+                        _ => {
+                            return self
+                                .err("expected 'meta', 'source', or 'defer' after 'import.'")
+                        }
                     };
                     self.advance(); // 'source' / 'defer'
                     let spec = self.parse_import_call_args()?;
@@ -1831,7 +1835,9 @@ impl Parser {
                 }
             }
             Tok::Ident(name)
-                if name == "async" && !self.cur_escaped() && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                if name == "async"
+                    && !self.cur_escaped()
+                    && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
                 let f = self.parse_function(true)?;
@@ -2294,7 +2300,8 @@ impl Parser {
         }
         let decorators = self.parse_decorators()?;
         let mut is_static = false;
-        if self.is_ident_word("static") && !self.cur_escaped() && !self.next_is_member_terminator(1) {
+        if self.is_ident_word("static") && !self.cur_escaped() && !self.next_is_member_terminator(1)
+        {
             self.advance();
             is_static = true;
         }
@@ -2323,10 +2330,7 @@ impl Parser {
         }
         // `accessor x = init;` (auto-accessor): desugar to a private backing field plus a getter and
         // setter that read/write it, reusing the ordinary class-element machinery.
-        if self.is_ident_word("accessor")
-            && !self.next_is_member_terminator(1)
-            && !self.nl_at(1)
-        {
+        if self.is_ident_word("accessor") && !self.next_is_member_terminator(1) && !self.nl_at(1) {
             self.advance(); // `accessor`
             let key = self.parse_prop_key()?;
             let init = if self.eat_punct("=") {
@@ -2356,8 +2360,9 @@ impl Parser {
             };
             self.advance();
         }
-        let is_async =
-            self.is_ident_word("async") && !self.cur_escaped() && !self.next_is_member_terminator(1);
+        let is_async = self.is_ident_word("async")
+            && !self.cur_escaped()
+            && !self.next_is_member_terminator(1);
         if is_async {
             self.advance();
         }
@@ -2683,14 +2688,13 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 }
             }
             // The constructor can't be a generator, async, getter, or setter.
-            if !m.is_static && key_is(&m.key, "constructor") {
-                if matches!(m.kind, MemberKind::Get | MemberKind::Set)
+            if !m.is_static && key_is(&m.key, "constructor")
+                && (matches!(m.kind, MemberKind::Get | MemberKind::Set)
                     || func.is_generator
-                    || func.is_async
+                    || func.is_async)
                 {
                     return Err("class constructor can't be a generator, async, or accessor".into());
                 }
-            }
             // A static method (any kind) may not be named "prototype".
             if m.is_static && key_is(&m.key, "prototype") {
                 return Err("classes may not have a static method named 'prototype'".into());

@@ -1492,7 +1492,10 @@ fn date_largest_unit(i: &mut Interp, opts: &Value) -> Result<String, Value> {
             .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
     };
     if lrank < srank {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     Ok(rank_unit(lrank).to_string())
 }
@@ -1515,7 +1518,10 @@ fn any_largest_unit(
         unit_rank(&largest).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
     };
     if lrank < srank {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     Ok(rank_unit(lrank).to_string())
 }
@@ -1568,7 +1574,10 @@ fn time_diff(
             .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a time unit"))?
     };
     if lrank < srank {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     check_increment(i, &smallest, incr)?;

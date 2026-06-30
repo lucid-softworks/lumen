@@ -1018,7 +1018,9 @@ fn collect_group_names(
             }
             Ok(s)
         }
-        Node::Look(_, inner) | Node::LookBehind(_, inner) | Node::Repeat(inner, _, _, _) => collect_group_names(inner, names),
+        Node::Look(_, inner) | Node::LookBehind(_, inner) | Node::Repeat(inner, _, _, _) => {
+            collect_group_names(inner, names)
+        }
         Node::Modifier { inner, .. } => collect_group_names(inner, names),
         Node::Concat(children) => {
             let mut all = HashSet::new();

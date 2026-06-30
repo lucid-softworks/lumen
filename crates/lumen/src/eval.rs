@@ -230,7 +230,11 @@ impl Interp {
 
     /// Dispose a frame's resources in reverse order. An error thrown while disposing either becomes
     /// the completion (if it was previously normal) or is folded into a `SuppressedError` chain.
-    pub(crate) fn dispose_frame(&mut self, mut frame: Vec<Disposable>, result: Completion) -> Completion {
+    pub(crate) fn dispose_frame(
+        &mut self,
+        mut frame: Vec<Disposable>,
+        result: Completion,
+    ) -> Completion {
         let mut completion = result;
         while let Some(r) = frame.pop() {
             match self.call(r.method.clone(), r.value.clone(), &[]) {
@@ -1109,7 +1113,11 @@ impl Interp {
     pub(crate) fn create_list_from_arraylike(&mut self, obj: &Value) -> Result<Vec<Value>, Abrupt> {
         let len_v = self.get_member(obj, "length")?;
         let len = self.to_number(&len_v)?;
-        let len = if len.is_nan() || len < 0.0 { 0 } else { len as usize };
+        let len = if len.is_nan() || len < 0.0 {
+            0
+        } else {
+            len as usize
+        };
         let mut out = Vec::with_capacity(len.min(1024));
         for k in 0..len {
             out.push(self.get_member(obj, &k.to_string())?);
@@ -2090,8 +2098,15 @@ impl Interp {
                         } else {
                             &mut instance_inits
                         };
-                        let (g, s, t) = self
-                            .decorate_accessor(&m.decorators, env, &key, m.is_static, getter, setter, sink)?;
+                        let (g, s, t) = self.decorate_accessor(
+                            &m.decorators,
+                            env,
+                            &key,
+                            m.is_static,
+                            getter,
+                            setter,
+                            sink,
+                        )?;
                         getter = g;
                         setter = s;
                         transforms = t;
@@ -2133,8 +2148,16 @@ impl Interp {
                         } else {
                             &mut instance_inits
                         };
-                        f = self
-                            .decorate_callable(&m.decorators, env, f, "method", &key, m.is_static, is_private, sink)?;
+                        f = self.decorate_callable(
+                            &m.decorators,
+                            env,
+                            f,
+                            "method",
+                            &key,
+                            m.is_static,
+                            is_private,
+                            sink,
+                        )?;
                     }
                     target.borrow_mut().props.insert(key, Property::builtin(f));
                 }
@@ -2148,10 +2171,22 @@ impl Interp {
                             &mut instance_inits
                         };
                         let kind = if is_get { "getter" } else { "setter" };
-                        f = self
-                            .decorate_callable(&m.decorators, env, f, kind, &key, m.is_static, is_private, sink)?;
+                        f = self.decorate_callable(
+                            &m.decorators,
+                            env,
+                            f,
+                            kind,
+                            &key,
+                            m.is_static,
+                            is_private,
+                            sink,
+                        )?;
                     }
-                    let (get, set) = if is_get { (Some(f), None) } else { (None, Some(f)) };
+                    let (get, set) = if is_get {
+                        (Some(f), None)
+                    } else {
+                        (None, Some(f))
+                    };
                     self.define_class_accessor(&target, &key, get, set);
                 }
                 MemberKind::Field => {
@@ -2163,7 +2198,14 @@ impl Interp {
                         } else {
                             &mut instance_inits
                         };
-                        self.decorate_field(&m.decorators, env, &key, m.is_static, is_private, sink)?
+                        self.decorate_field(
+                            &m.decorators,
+                            env,
+                            &key,
+                            m.is_static,
+                            is_private,
+                            sink,
+                        )?
                     };
                     if m.is_static {
                         let scope = new_scope(Some(static_env.clone()));
@@ -2211,8 +2253,16 @@ impl Interp {
         let mut class_value = ctor_val;
         if !class.decorators.is_empty() {
             let name = class.name.clone().unwrap_or_default();
-            class_value = self
-                .decorate_callable(&class.decorators, env, class_value, "class", &name, false, false, &mut static_inits)?;
+            class_value = self.decorate_callable(
+                &class.decorators,
+                env,
+                class_value,
+                "class",
+                &name,
+                false,
+                false,
+                &mut static_inits,
+            )?;
         }
         // Static element initializers and class initializers run with `this` = the class.
         for init in &static_inits {
@@ -2244,7 +2294,12 @@ impl Interp {
             );
             b.props.insert(
                 "length",
-                Property::data(Value::Num(if is_get { 0.0 } else { 1.0 }), false, false, true),
+                Property::data(
+                    Value::Num(if is_get { 0.0 } else { 1.0 }),
+                    false,
+                    false,
+                    true,
+                ),
             );
         }
         Value::Obj(o)
@@ -2294,8 +2349,10 @@ impl Interp {
                 "name",
                 Property::data(Value::from_string(name.to_string()), false, false, true),
             );
-            b.props
-                .insert("length", Property::data(Value::Num(len), false, false, true));
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(len), false, false, true),
+            );
         }
         Value::Obj(o)
     }
@@ -2370,10 +2427,9 @@ impl Interp {
                 Value::Undefined => {}
                 v if v.is_callable() => value = v,
                 _ => {
-                    return Err(self.throw(
-                        "TypeError",
-                        "decorator must return a function or undefined",
-                    ))
+                    return Err(
+                        self.throw("TypeError", "decorator must return a function or undefined")
+                    )
                 }
             }
         }
@@ -2685,8 +2741,9 @@ impl Interp {
                         match self.ta_index_kind(&info, &key) {
                             TaIndex::Element(_) => {
                                 if self.strict {
-                                    return Err(self
-                                        .throw("TypeError", "cannot delete a TypedArray index"));
+                                    return Err(
+                                        self.throw("TypeError", "cannot delete a TypedArray index")
+                                    );
                                 }
                                 return Ok(Value::Bool(false));
                             }
@@ -2730,8 +2787,12 @@ impl Interp {
                 if let Some((t2, h2)) = self.proxies.get(&tptr).cloned() {
                     return self.proxy_delete(t2, h2, key);
                 }
-                let configurable =
-                    t.borrow().props.get(key).map(|p| p.configurable).unwrap_or(true);
+                let configurable = t
+                    .borrow()
+                    .props
+                    .get(key)
+                    .map(|p| p.configurable)
+                    .unwrap_or(true);
                 if configurable {
                     t.borrow_mut().props.remove(key);
                     return Ok(true);
@@ -3202,13 +3263,16 @@ impl Interp {
 
     fn instanceof(&mut self, l: &Value, r: &Value) -> Result<Value, Abrupt> {
         if !matches!(r, Value::Obj(_)) {
-            return Err(self.throw("TypeError", "right-hand side of instanceof is not an object"));
+            return Err(self.throw(
+                "TypeError",
+                "right-hand side of instanceof is not an object",
+            ));
         }
         // Defer to a `@@hasInstance` method if the RHS has one.
         if let Some(key) = crate::builtins::well_known_key(self, "hasInstance") {
             let handler = self.get_member(r, &key)?;
             if handler.is_callable() {
-                let res = self.call(handler, r.clone(), &[l.clone()])?;
+                let res = self.call(handler, r.clone(), std::slice::from_ref(l))?;
                 return Ok(Value::Bool(self.to_boolean(&res)));
             }
         }
@@ -3675,9 +3739,7 @@ fn expr_has_super_call(e: &Expr) -> bool {
             expr_has_super_call(test) || expr_has_super_call(cons) || expr_has_super_call(alt)
         }
         Expr::Member { obj, .. } | Expr::OptionalChain(obj) => expr_has_super_call(obj),
-        Expr::Index { obj, index, .. } => {
-            expr_has_super_call(obj) || expr_has_super_call(index)
-        }
+        Expr::Index { obj, index, .. } => expr_has_super_call(obj) || expr_has_super_call(index),
         Expr::Seq(v) => v.iter().any(expr_has_super_call),
         Expr::Array(elems) => arr_elems_have_super_call(elems),
         Expr::Yield { arg, .. } => arg.as_deref().is_some_and(expr_has_super_call),
@@ -3736,7 +3798,9 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
         Expr::Ident(n) if args && n == "arguments" => {
             Some("'arguments' is not allowed in a class field initializer")
         }
-        Expr::Call { callee, args: a, .. } => {
+        Expr::Call {
+            callee, args: a, ..
+        } => {
             if matches!(**callee, Expr::Super) {
                 return Some("a super call is not allowed here");
             }
@@ -3747,7 +3811,9 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
         Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
             fi_expr(left, args).or_else(|| fi_expr(right, args))
         }
-        Expr::Assign { target, value, .. } => fi_expr(target, args).or_else(|| fi_expr(value, args)),
+        Expr::Assign { target, value, .. } => {
+            fi_expr(target, args).or_else(|| fi_expr(value, args))
+        }
         Expr::Cond { test, cons, alt } => fi_expr(test, args)
             .or_else(|| fi_expr(cons, args))
             .or_else(|| fi_expr(alt, args)),
@@ -3765,9 +3831,9 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
             PropDef::KeyValue { key, value } => fi_key(key, args).or_else(|| fi_expr(value, args)),
             PropDef::Spread(e) => fi_expr(e, args),
             // Methods/getters/setters open their own context (only their computed key inherits).
-            PropDef::Method { key, .. } | PropDef::Getter { key, .. } | PropDef::Setter { key, .. } => {
-                fi_key(key, args)
-            }
+            PropDef::Method { key, .. }
+            | PropDef::Getter { key, .. }
+            | PropDef::Setter { key, .. } => fi_key(key, args),
         }),
         // Arrow functions inherit the surrounding context: descend into params and body.
         Expr::Func(f) if f.is_arrow => {
@@ -3832,9 +3898,7 @@ fn fi_stmt(s: &Stmt, args: bool) -> Option<&'static str> {
             .or_else(|| test.as_ref().and_then(|e| fi_expr(e, args)))
             .or_else(|| update.as_ref().and_then(|e| fi_expr(e, args)))
             .or_else(|| fi_stmt(body, args)),
-        Stmt::ForInOf { right, body, .. } => {
-            fi_expr(right, args).or_else(|| fi_stmt(body, args))
-        }
+        Stmt::ForInOf { right, body, .. } => fi_expr(right, args).or_else(|| fi_stmt(body, args)),
         Stmt::Try {
             block,
             handler,

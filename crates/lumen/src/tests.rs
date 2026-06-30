@@ -3818,7 +3818,6 @@ fn async_generator_coroutine() {
     );
 }
 
-
 #[test]
 fn decorators_runtime() {
     // Method decorator replaces the method.
@@ -3880,6 +3879,110 @@ fn decorators_runtime() {
     );
 }
 
+#[test]
+fn string_search_position_and_regexp() {
+    // includes/startsWith/endsWith honor the position argument.
+    assert_eq!(run("'word'.includes('o', 3)"), "false");
+    assert_eq!(run("'word'.includes('d', 3)"), "true");
+    assert_eq!(run("'abcabc'.startsWith('abc', 3)"), "true");
+    assert_eq!(run("'abcabc'.startsWith('abc', 1)"), "false");
+    assert_eq!(run("'hello'.endsWith('ell', 4)"), "true");
+    // true coerces to position 1.
+    assert_eq!(run("'word'.includes('w', true)"), "false");
+    // A RegExp search argument is a TypeError.
+    assert_eq!(throws("'abc'.includes(/a/)"), "TypeError");
+    assert_eq!(throws("'abc'.startsWith(/a/)"), "TypeError");
+    // indexOf honors the position.
+    assert_eq!(run("'ABABAB'.indexOf('AB', 1)"), "2");
+    assert_eq!(run("'abc'.indexOf('', 2)"), "2");
+}
 
+#[test]
+fn string_trim_feff() {
+    // U+FEFF (ZWNBSP) is whitespace for trim and ToNumber.
+    assert_eq!(run("'\\uFEFF abc \\uFEFF'.trim()"), "abc");
+    assert_eq!(run("'\\uFEFF5'.trimStart()"), "5");
+    assert_eq!(run("Number('\\uFEFF42')"), "42");
+    assert_eq!(run("parseInt('\\uFEFF10')"), "10");
+}
 
+#[test]
+fn string_replace_substitution() {
+    assert_eq!(run("'abc'.replace('b', '[$`]')"), "a[a]c");
+    assert_eq!(run("'abc'.replace('b', \"[$']\")"), "a[c]c");
+    assert_eq!(run("'aaa'.replaceAll('a', '$&$&')"), "aaaaaa");
+    // An empty search inserts between every character.
+    assert_eq!(run("'ab'.replaceAll('', '-')"), "-a-b-");
+}
 
+#[test]
+fn json_stringify_replacer() {
+    // Array replacer restricts (and orders) the keys.
+    assert_eq!(
+        run("JSON.stringify({a:1,b:2,c:3}, ['c','a'])"),
+        r#"{"c":3,"a":1}"#
+    );
+    assert_eq!(run("JSON.stringify({a:1,b:2}, [])"), "{}");
+    // Function replacer transforms values.
+    assert_eq!(
+        run("JSON.stringify({a:1,b:2}, (k,v)=>typeof v==='number'?v*10:v)"),
+        r#"{"a":10,"b":20}"#
+    );
+}
+
+#[test]
+fn error_is_error_and_stack() {
+    assert_eq!(run("Error.isError(new TypeError())"), "true");
+    assert_eq!(run("Error.isError({})"), "false");
+    assert_eq!(run("Error.isError(null)"), "false");
+    // stack is an accessor; the setter shadows it with an own data property.
+    assert_eq!(
+        run("typeof Object.getOwnPropertyDescriptor(Error.prototype,'stack').get"),
+        "function"
+    );
+    assert_eq!(run("var e=new Error(); e.stack='x'; e.stack"), "x");
+}
+
+#[test]
+fn bound_function_length_name() {
+    assert_eq!(run("function f(a,b,c){} f.bind(null).length"), "3");
+    assert_eq!(run("function f(a,b,c){} f.bind(null, 1).length"), "2");
+    assert_eq!(run("function f(a,b){} f.bind(null,1,2,3).length"), "0");
+    assert_eq!(run("function foo(){} foo.bind(null).name"), "bound foo");
+    assert_eq!(
+        run("function foo(){} foo.bind(null).bind(null).name"),
+        "bound bound foo"
+    );
+}
+
+#[test]
+fn new_target_basics() {
+    // A constructor's new.target is the constructor; a plain call's is undefined.
+    assert_eq!(
+        run("var t; function F(){ t = new.target; } new F(); t === F"),
+        "true"
+    );
+    assert_eq!(
+        run("var t='x'; function F(){ t = new.target; } F(); t"),
+        "undefined"
+    );
+    // Reflect.construct honors its newTarget argument's prototype.
+    assert_eq!(
+        run("function A(){} function B(){} var o=Reflect.construct(A,[],B); Object.getPrototypeOf(o)===B.prototype"),
+        "true"
+    );
+}
+
+#[test]
+fn weak_collections_symbol_keys() {
+    assert_eq!(
+        run("var s=Symbol(); var m=new WeakMap(); m.set(s,1); m.get(s)"),
+        "1"
+    );
+    assert_eq!(
+        run("var s=Symbol(); var w=new WeakSet(); w.add(s); w.has(s)"),
+        "true"
+    );
+    // A registered symbol is not collectable, so it can't be a weak key.
+    assert_eq!(throws("new WeakMap().set(Symbol.for('x'), 1)"), "TypeError");
+}

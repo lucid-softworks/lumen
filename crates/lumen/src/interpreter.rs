@@ -373,7 +373,9 @@ impl Interp {
         let well_known: Vec<(&'static str, Value)> = WELL_KNOWN_SYMBOLS
             .iter()
             .filter_map(|name| {
-                let sym = self.get_member(&Value::Obj(saved.global.clone()), "Symbol").ok()?;
+                let sym = self
+                    .get_member(&Value::Obj(saved.global.clone()), "Symbol")
+                    .ok()?;
                 let v = self.get_member(&sym, name).ok()?;
                 Some((*name, v))
             })
@@ -416,11 +418,13 @@ impl Interp {
             },
         );
         // Share the well-known symbols: overwrite the realm's freshly-minted ones with the originals.
-        if let Ok(realm_symbol) = self.get_member(&Value::Obj(self.global.clone()), "Symbol") {
-            if let Value::Obj(rs) = &realm_symbol {
-                for (name, sym) in &well_known {
-                    rs.borrow_mut().props.insert(*name, Property::data(sym.clone(), false, false, false));
-                }
+        if let Ok(Value::Obj(rs)) =
+            self.get_member(&Value::Obj(self.global.clone()), "Symbol")
+        {
+            for (name, sym) in &well_known {
+                rs.borrow_mut()
+                    .props
+                    .insert(*name, Property::data(sym.clone(), false, false, false));
             }
         }
         self.iterator_sym = saved_iter;
@@ -912,7 +916,11 @@ impl Interp {
                             return Ok(Value::Num((cur.unwrap_or(0) * info.kind.elsize()) as f64))
                         }
                         "byteOffset" => {
-                            return Ok(Value::Num(if cur.is_none() { 0.0 } else { info.offset as f64 }))
+                            return Ok(Value::Num(if cur.is_none() {
+                                0.0
+                            } else {
+                                info.offset as f64
+                            }))
                         }
                         "BYTES_PER_ELEMENT" => return Ok(Value::Num(info.kind.elsize() as f64)),
                         "buffer" => {
@@ -946,8 +954,11 @@ impl Interp {
                 if !trap.is_callable() {
                     return Err(self.throw("TypeError", "proxy 'get' trap is not callable"));
                 }
-                let res =
-                    self.call(trap, handler, &[target.clone(), Value::str(key), receiver.clone()])?;
+                let res = self.call(
+                    trap,
+                    handler,
+                    &[target.clone(), Value::str(key), receiver.clone()],
+                )?;
                 self.proxy_get_invariant(&target, key, &res)?;
                 return Ok(res);
             }
@@ -1457,9 +1468,11 @@ impl Interp {
             // Auto-accessor get/set: the receiver must *own* the private backing field (so a static
             // accessor reached through a subclass, which doesn't carry the slot, throws).
             Callable::AccessorGet(key) => self.accessor_load(&this, &key),
-            Callable::AccessorSet(key) => {
-                self.accessor_store(&this, &key, args.first().cloned().unwrap_or(Value::Undefined))
-            }
+            Callable::AccessorSet(key) => self.accessor_store(
+                &this,
+                &key,
+                args.first().cloned().unwrap_or(Value::Undefined),
+            ),
             // Decorator `context.access` get/set: read/write a named property on the first argument.
             Callable::PropGet(key) => {
                 let recv = args.first().cloned().unwrap_or(Value::Undefined);
@@ -2067,9 +2080,7 @@ impl Interp {
             | Callable::AccessorGet(_)
             | Callable::AccessorSet(_)
             | Callable::PropGet(_)
-            | Callable::PropSet(_) => {
-                Err(self.throw("TypeError", "value is not a constructor"))
-            }
+            | Callable::PropSet(_) => Err(self.throw("TypeError", "value is not a constructor")),
         }
     }
 
