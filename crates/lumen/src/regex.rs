@@ -44,6 +44,11 @@ enum Inst {
         negate: bool,
         prog: Rc<Vec<Inst>>,
     },
+    /// `(?<=…)` / `(?<!…)`: the body must match text ending at the current position.
+    LookBehind {
+        negate: bool,
+        prog: Rc<Vec<Inst>>,
+    },
     /// A repeated single-character matcher (`a*`, `\w+`, `.{2,5}`, `\p{L}+`). Consumed iteratively so
     /// a long run doesn't recurse once per character (which overflows the backtracking depth limit).
     Many {
@@ -189,6 +194,8 @@ enum Node {
     /// `\k<name>` — resolved to a group index after the whole pattern is parsed.
     NamedBackref(String),
     Look(bool, Box<Node>),
+    /// `(?<=…)` / `(?<!…)` lookbehind: assert the body matches text *ending* at the current position.
+    LookBehind(bool, Box<Node>),
     /// `(?ims-ims:…)` inline-modifier group: `(add, remove)` flag deltas over `(i, m, s)`.
     Modifier {
         add: (bool, bool, bool),
@@ -304,6 +311,7 @@ impl Regex {
                 caps: vec![None; 2 * (self.ngroups + 1)],
                 steps: 0,
                 depth: 0,
+                lb_end: None,
                 flags: vec![(self.ignore_case, self.multiline, self.dotall)],
             };
             if m.run(&self.prog, 0, from) {
@@ -498,11 +506,11 @@ impl Parser {
                     // Named group (?<name>...) -> treat as a normal capturing group; lookbehind
                     // (?<= / (?<! is approximated as a non-capturing group (best effort).
                     match self.peek() {
-                        Some('=') | Some('!') => {
+                        Some(c @ ('=' | '!')) => {
                             self.bump();
                             let inner = self.parse_alt()?;
                             self.expect(')')?;
-                            Ok(Node::Group(None, Box::new(inner)))
+                            Ok(Node::LookBehind(c == '!', Box::new(inner)))
                         }
                         _ => {
                             let name = self.parse_group_name()?;
@@ -908,6 +916,15 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
                 prog: Rc::new(sub),
             });
         }
+        Node::LookBehind(negate, inner) => {
+            let mut sub = Vec::new();
+            compile(inner, &mut sub)?;
+            sub.push(Inst::Match);
+            prog.push(Inst::LookBehind {
+                negate: *negate,
+                prog: Rc::new(sub),
+            });
+        }
         Node::Repeat(inner, min, max, greedy) => compile_repeat(inner, *min, *max, *greedy, prog)?,
     }
     Ok(())
@@ -1001,7 +1018,7 @@ fn collect_group_names(
             }
             Ok(s)
         }
-        Node::Look(_, inner) | Node::Repeat(inner, _, _, _) => collect_group_names(inner, names),
+        Node::Look(_, inner) | Node::LookBehind(_, inner) | Node::Repeat(inner, _, _, _) => collect_group_names(inner, names),
         Node::Modifier { inner, .. } => collect_group_names(inner, names),
         Node::Concat(children) => {
             let mut all = HashSet::new();
@@ -1041,6 +1058,7 @@ fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
         Node::Group(_, inner)
         | Node::Repeat(inner, ..)
         | Node::Look(_, inner)
+        | Node::LookBehind(_, inner)
         | Node::Modifier { inner, .. } => resolve_named_backrefs(inner, names),
         _ => {}
     }
@@ -1079,6 +1097,9 @@ struct Matcher<'a> {
     caps: Vec<Option<usize>>,
     steps: u64,
     depth: u32,
+    /// When matching a lookbehind body, the position its terminal `Match` must land on (so the body
+    /// is anchored to end exactly at the lookbehind point).
+    lb_end: Option<usize>,
     /// `(icase, multiline, dotall)` stack — the base flags, plus an entry per active `(?ims-ims:…)`
     /// inline-modifier group. Reads use the top; the group's Push/Pop instructions undo on backtrack.
     flags: Vec<(bool, bool, bool)>,
@@ -1125,7 +1146,9 @@ impl Matcher<'_> {
 
     fn run_inner(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
         match &prog[pc] {
-            Inst::Match => true,
+            // A normal terminal match succeeds anywhere; inside a lookbehind body it must land on
+            // the anchored end position.
+            Inst::Match => self.lb_end.map(|e| e == pos).unwrap_or(true),
             Inst::Char(c) => {
                 if pos < self.input.len() && self.eqc(self.input[pos], *c) {
                     self.run(prog, pc + 1, pos + 1)
@@ -1265,9 +1288,44 @@ impl Matcher<'_> {
                 let negate = *negate;
                 let sub = sub.clone();
                 let saved = self.caps.clone();
+                // A nested lookahead is its own assertion: its terminal Match isn't anchored to an
+                // enclosing lookbehind's end.
+                let saved_end = self.lb_end.take();
                 let matched = self.run(&sub, 0, pos);
+                self.lb_end = saved_end;
                 if negate {
                     self.caps = saved; // negative lookahead: discard captures
+                    if matched {
+                        false
+                    } else {
+                        self.run(prog, pc + 1, pos)
+                    }
+                } else if matched {
+                    self.run(prog, pc + 1, pos)
+                } else {
+                    self.caps = saved;
+                    false
+                }
+            }
+            Inst::LookBehind { negate, prog: sub } => {
+                let negate = *negate;
+                let sub = sub.clone();
+                let saved = self.caps.clone();
+                // The body must match some span ending exactly at `pos`. Try start positions from the
+                // earliest (longest span) so greedy captures behave like a right-anchored match.
+                let saved_end = self.lb_end;
+                self.lb_end = Some(pos);
+                let mut matched = false;
+                for start in 0..=pos {
+                    self.caps = saved.clone();
+                    if self.run(&sub, 0, start) {
+                        matched = true;
+                        break;
+                    }
+                }
+                self.lb_end = saved_end;
+                if negate {
+                    self.caps = saved; // negative lookbehind: discard captures
                     if matched {
                         false
                     } else {
