@@ -5459,6 +5459,34 @@ fn proxy_gopd_value(
         ));
     }
     let pd = ab(build_partial(i, &res))?;
+    // A reported non-configurable descriptor must be backed by the target.
+    if matches!(pd.configurable, Some(false)) {
+        if let Value::Obj(t) = target {
+            let tprop = t.borrow().props.get(key).cloned();
+            match tprop {
+                None => {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "gOPD trap reported a non-configurable descriptor the target lacks",
+                    ));
+                }
+                Some(p) => {
+                    if p.configurable {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "gOPD trap reported non-configurable for a configurable target property",
+                        ));
+                    }
+                    if matches!(pd.writable, Some(false)) && !p.accessor && p.writable {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "gOPD trap reported non-writable for a writable target property",
+                        ));
+                    }
+                }
+            }
+        }
+    }
     Ok(descriptor_from_prop(i, complete_descriptor(pd)))
 }
 
