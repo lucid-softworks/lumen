@@ -5981,10 +5981,10 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
         Value::Obj(o) => o.clone(),
         _ => return Err(i.throw("TypeError", "Property description must be an object")),
     };
-    let has = |k: &str| o.borrow().props.contains(k);
+    // ToPropertyDescriptor reads each field with HasProperty/Get, so inherited fields count.
     let base = Value::Obj(o.clone());
     let bool_field = |i: &mut Interp, k: &str| -> Result<Option<bool>, Abrupt> {
-        if has(k) {
+        if i.has_property(&o, k) {
             let v = i.get_member(&base, k)?;
             Ok(Some(i.to_boolean(&v)))
         } else {
@@ -5994,17 +5994,17 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
     let enumerable = bool_field(i, "enumerable")?;
     let configurable = bool_field(i, "configurable")?;
     let writable = bool_field(i, "writable")?;
-    let value = if has("value") {
+    let value = if i.has_property(&o, "value") {
         Some(i.get_member(&base, "value")?)
     } else {
         None
     };
-    let get = if has("get") {
+    let get = if i.has_property(&o, "get") {
         Some(i.get_member(&base, "get")?)
     } else {
         None
     };
-    let set = if has("set") {
+    let set = if i.has_property(&o, "set") {
         Some(i.get_member(&base, "set")?)
     } else {
         None
