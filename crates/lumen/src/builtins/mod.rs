@@ -12395,17 +12395,36 @@ fn install_errors(it: &mut Interp) {
     it.error_protos.insert("AggregateError", agg_proto.clone());
     let agg_ctor = it.make_native("AggregateError", 2, |i, _t, a| {
         let err = i.make_error("AggregateError", "");
-        if let Some(o) = err.as_obj() {
-            o.borrow_mut().proto = i.error_protos.get("AggregateError").cloned();
+        // OrdinaryCreateFromConstructor: prototype from new.target (cross-realm aware).
+        if matches!(i.new_target, Value::Obj(_)) {
+            let nt = i.new_target.clone();
+            let proto = match i.get_member(&nt, "prototype") {
+                Ok(Value::Obj(p)) => Some(p),
+                _ => ctor_realm_proto(i, &nt, "AggregateError")
+                    .or_else(|| i.error_protos.get("AggregateError").cloned()),
+            };
+            if let (Value::Obj(o), Some(p)) = (&err, proto) {
+                o.borrow_mut().proto = Some(p);
+            }
         }
-        let errors = ab(i.iterate(&arg(a, 0)))?;
-        let arr = i.make_array(errors);
-        ab(i.set_member(&err, "errors", arr))?;
+        // The spec order is: message, then cause, then the (iterated) errors list — last.
         if !matches!(arg(a, 1), Value::Undefined) {
             let s = ab(i.to_string(&arg(a, 1)))?;
-            ab(i.set_member(&err, "message", Value::Str(s)))?;
+            if let Some(o) = err.as_obj() {
+                o.borrow_mut()
+                    .props
+                    .insert("message", Property::builtin(Value::Str(s)));
+            }
         }
         install_error_cause(i, &err, a.get(2))?;
+        let errors = ab(i.iterate(&arg(a, 0)))?;
+        let arr = i.make_array(errors);
+        // `errors` is { writable:true, enumerable:false, configurable:true }.
+        if let Some(o) = err.as_obj() {
+            o.borrow_mut()
+                .props
+                .insert("errors", Property::data(arr, true, false, true));
+        }
         Ok(err)
     });
     if let Some(ec) = &error_ctor {
@@ -12429,12 +12448,25 @@ fn install_errors(it: &mut Interp) {
     it.error_protos.insert("SuppressedError", sup_proto.clone());
     let sup_ctor = it.make_native("SuppressedError", 3, |i, _t, a| {
         let err = i.make_error("SuppressedError", "");
-        if let Some(o) = err.as_obj() {
-            o.borrow_mut().proto = i.error_protos.get("SuppressedError").cloned();
+        // OrdinaryCreateFromConstructor: prototype from new.target (cross-realm aware).
+        if matches!(i.new_target, Value::Obj(_)) {
+            let nt = i.new_target.clone();
+            let proto = match i.get_member(&nt, "prototype") {
+                Ok(Value::Obj(p)) => Some(p),
+                _ => ctor_realm_proto(i, &nt, "SuppressedError")
+                    .or_else(|| i.error_protos.get("SuppressedError").cloned()),
+            };
+            if let (Value::Obj(o), Some(p)) = (&err, proto) {
+                o.borrow_mut().proto = Some(p);
+            }
         }
         if !matches!(arg(a, 2), Value::Undefined) {
             let s = ab(i.to_string(&arg(a, 2)))?;
-            ab(i.set_member(&err, "message", Value::Str(s)))?;
+            if let Some(o) = err.as_obj() {
+                o.borrow_mut()
+                    .props
+                    .insert("message", Property::builtin(Value::Str(s)));
+            }
         }
         // `error` and `suppressed` are non-enumerable, writable, configurable data properties.
         if let Some(o) = err.as_obj() {
