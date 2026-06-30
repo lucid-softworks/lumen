@@ -7418,10 +7418,8 @@ fn install_object(it: &mut Interp) {
         Ok(Value::Obj(o))
     });
     it.def_method(&ctor, "getOwnPropertyDescriptor", 2, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "called on non-object")),
-        };
+        // ToObject coerces a primitive target (and throws for null/undefined).
+        let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyDescriptor")?;
         let key = ab(i.to_property_key(&arg(args, 1)))?;
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
