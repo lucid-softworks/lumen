@@ -4762,3 +4762,25 @@ fn arraybuffer_accessor_getters() {
         "0,true"
     );
 }
+
+#[test]
+fn shared_array_buffer_getters() {
+    assert_eq!(run("new SharedArrayBuffer(8).byteLength"), "8");
+    assert_eq!(
+        run("new SharedArrayBuffer(8).hasOwnProperty('byteLength')"),
+        "false"
+    );
+    assert_eq!(run("new SharedArrayBuffer(8).growable"), "false");
+    assert_eq!(
+        run("var s=new SharedArrayBuffer(4,{maxByteLength:16}); [s.growable, s.maxByteLength].join(',')"),
+        "true,16"
+    );
+    assert_eq!(
+        run("var s=new SharedArrayBuffer(4,{maxByteLength:16}); s.grow(12); s.byteLength"),
+        "12"
+    );
+    assert_eq!(
+        run("Object.prototype.toString.call(new SharedArrayBuffer(1))"),
+        "[object SharedArrayBuffer]"
+    );
+}

@@ -1491,6 +1491,81 @@ fn install_shared_array_buffer(it: &mut Interp) {
     // Modeled as a plain ArrayBuffer (no real sharing) — enough for tests that just need the type.
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("SharedArrayBuffer", proto.clone());
+    // byteLength/maxByteLength/growable accessor getters on the prototype.
+    let sab_getter = |it: &mut Interp, proto: &Gc, name: &str, f: NativeFn| {
+        let g = it.make_native(&format!("get {name}"), 0, f);
+        proto.borrow_mut().props.insert(
+            name,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(g)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    };
+    sab_getter(it, &proto, "byteLength", |i, this, _| {
+        let p = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .map(|o| Rc::as_ptr(o) as usize)
+            .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))?;
+        Ok(Value::Num(
+            i.array_buffers.get(&p).map(|b| b.len()).unwrap_or(0) as f64,
+        ))
+    });
+    sab_getter(it, &proto, "maxByteLength", |i, this, _| {
+        this.as_obj()
+            .and_then(|o| {
+                o.borrow()
+                    .props
+                    .get("__abMaxByteLength")
+                    .map(|p| p.value.clone())
+            })
+            .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))
+    });
+    sab_getter(it, &proto, "growable", |i, this, _| {
+        this.as_obj()
+            .and_then(|o| {
+                o.borrow()
+                    .props
+                    .get("__abResizable")
+                    .map(|p| p.value.clone())
+            })
+            .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))
+    });
+    // grow(newLength): only allowed for a growable buffer and only to a larger size.
+    it.def_method(&proto, "grow", 1, |i, this, a| {
+        let o = this
+            .as_obj()
+            .cloned()
+            .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))?;
+        let growable = ab(i.get_member(&this, "growable"))?;
+        if !i.to_boolean(&growable) {
+            return Err(i.make_error("TypeError", "SharedArrayBuffer is not growable"));
+        }
+        let mv = ab(i.get_member(&this, "maxByteLength"))?;
+        let max = ab(i.to_number(&mv))? as usize;
+        let new_len = ab(i.to_number(&arg(a, 0)))?;
+        let ptr = Rc::as_ptr(&o) as usize;
+        let cur = i.array_buffers.get(&ptr).map(|b| b.len()).unwrap_or(0);
+        if !new_len.is_finite() || new_len < cur as f64 || new_len as usize > max {
+            return Err(i.make_error("RangeError", "SharedArrayBuffer grow out of range"));
+        }
+        if let Some(buf) = i.array_buffers.get_mut(&ptr) {
+            buf.resize(new_len as usize, 0);
+        }
+        Ok(Value::Undefined)
+    });
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("SharedArrayBuffer"), false, false, true),
+        );
+    }
     it.def_method(&proto, "slice", 2, |i, this, a| {
         let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
         let bytes = ptr
@@ -1518,14 +1593,30 @@ fn install_shared_array_buffer(it: &mut Interp) {
         if !i.constructing {
             return Err(i.make_error("TypeError", "SharedArrayBuffer constructor requires 'new'"));
         }
-        let len = ab(i.to_number(&arg(a, 0)))?.max(0.0) as usize;
-        if len > MAX_ARRAY_OP_LEN {
+        let nraw = ab(i.to_number(&arg(a, 0)))?;
+        let n = if nraw.is_nan() { 0.0 } else { nraw.trunc() };
+        if n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
         }
+        let len = n as usize;
         // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's.
         let (bv, _) = make_array_buffer(i, len);
         if let Value::Obj(o) = &bv {
             o.borrow_mut().proto = i.extra_protos.get("SharedArrayBuffer").cloned();
+        }
+        // The options bag's maxByteLength makes the buffer growable.
+        if let Value::Obj(_) = arg(a, 1) {
+            let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;
+            if !matches!(mbl, Value::Undefined) {
+                let m = ab(i.to_number(&mbl))?;
+                if !m.is_finite() || (m as usize) < len || m as usize > MAX_ARRAY_OP_LEN {
+                    return Err(i.make_error("RangeError", "Invalid maxByteLength"));
+                }
+                if let Value::Obj(o) = &bv {
+                    set_internal(o, "__abMaxByteLength", Value::Num(m));
+                    set_internal(o, "__abResizable", Value::Bool(true));
+                }
+            }
         }
         Ok(bv)
     });
