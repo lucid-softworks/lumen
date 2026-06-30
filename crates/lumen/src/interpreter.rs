@@ -1029,6 +1029,29 @@ impl Interp {
         // Walk the chain for an accessor or read-only data property.
         let mut cur = Some(obj.clone());
         while let Some(o) = cur {
+            // A proxy on the chain handles the write itself (with the original receiver).
+            let optr = Rc::as_ptr(&o) as usize;
+            if let Some((target, handler)) = self.proxies.get(&optr).cloned() {
+                if matches!(handler, Value::Null) {
+                    return Err(self.throw("TypeError", "cannot perform 'set' on a revoked proxy"));
+                }
+                let trap = self.get_member(&handler, "set")?;
+                if matches!(trap, Value::Undefined | Value::Null) {
+                    return self.set_member(&target, key, value);
+                }
+                if !trap.is_callable() {
+                    return Err(self.throw("TypeError", "proxy 'set' trap is not callable"));
+                }
+                let ok = self.call(
+                    trap,
+                    handler,
+                    &[target.clone(), Value::str(key), value.clone(), base.clone()],
+                )?;
+                if self.to_boolean(&ok) {
+                    self.proxy_set_invariant(&target, key, &value)?;
+                }
+                return Ok(());
+            }
             let prop = o.borrow().props.get(key).cloned();
             if let Some(p) = prop {
                 if p.accessor {
