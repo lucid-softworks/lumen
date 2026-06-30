@@ -2181,6 +2181,39 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
             "Cannot perform operation on a detached or out-of-bounds TypedArray",
         ));
     }
+    // %TypedArray%.prototype.with has TypedArray-specific semantics (value coerced to the element
+    // type *before* the index bounds check) that the generic Array delegation can't reproduce.
+    if method == "with" {
+        let len = i.ta_len(&info).unwrap_or(0);
+        let rel = ab(i.to_number(&arg(args, 0)))?;
+        let rel = if rel.is_nan() { 0.0 } else { rel.trunc() };
+        let actual = if rel >= 0.0 { rel } else { len as f64 + rel };
+        // Coerce the value to the element type (this can run user code).
+        let coerced = if info.kind.is_bigint() {
+            Value::BigInt(ab(i.to_bigint(&arg(args, 1)))?)
+        } else {
+            Value::Num(ab(i.to_number(&arg(args, 1)))?)
+        };
+        if actual < 0.0 || actual >= len as f64 {
+            return Err(i.make_error("RangeError", "invalid TypedArray index"));
+        }
+        let actual = actual as usize;
+        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+        let new_info = map_ptr(&new_ta)
+            .and_then(|p| i.typed_arrays.get(&p).copied())
+            .ok_or_else(|| {
+                i.make_error("TypeError", "with: species did not return a TypedArray")
+            })?;
+        for k in 0..len {
+            let val = if k == actual {
+                coerced.clone()
+            } else {
+                i.ta_read(&info, k)
+            };
+            ab(i.ta_store(&new_info, k, &val))?;
+        }
+        return Ok(new_ta);
+    }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;
     // Methods that produce a new collection return a TypedArray built via TypedArraySpeciesCreate
