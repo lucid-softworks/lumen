@@ -537,7 +537,10 @@ fn install_atomics(it: &mut Interp) {
         let (info, idx) = target(i, a)?;
         // Waitable types are only Int32Array and BigInt64Array.
         if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
-            return Err(i.make_error("TypeError", "Atomics.wait requires an Int32 or BigInt64 array"));
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics.wait requires an Int32 or BigInt64 array",
+            ));
         }
         let expected = operand(i, &info, &arg(a, 2))?;
         // Single-threaded: never blocks; report whether the value already differs.
@@ -4761,21 +4764,32 @@ fn install_promise(it: &mut Interp) {
         set_data(&obj, "reject", reject);
         Ok(Value::Obj(obj))
     });
-    it.def_method(&ctor, "resolve", 1, |i, _t, a| {
+    it.def_method(&ctor, "resolve", 1, |i, t, a| {
+        // `this` must be a constructor object; PromiseResolve(this, v).
+        if !matches!(t, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Promise.resolve called on a non-object"));
+        }
         let v = arg(a, 0);
+        // A promise whose own `constructor` is `this` is returned unchanged.
         if let Value::Obj(o) = &v {
             if i.promises.contains_key(&(Rc::as_ptr(o) as usize)) {
-                return Ok(v);
+                let c = ab(i.get_member(&v, "constructor"))?;
+                if same_value(&c, &t) {
+                    return Ok(v);
+                }
             }
         }
-        let p = i.new_promise();
-        i.resolve_promise(&p, v);
-        Ok(p)
+        let cap = new_promise_capability(i, &t)?;
+        i.resolve_promise(&cap, v);
+        Ok(cap)
     });
-    it.def_method(&ctor, "reject", 1, |i, _t, a| {
-        let p = i.new_promise();
-        i.reject_promise(&p, arg(a, 0));
-        Ok(p)
+    it.def_method(&ctor, "reject", 1, |i, t, a| {
+        if !matches!(t, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Promise.reject called on a non-object"));
+        }
+        let cap = new_promise_capability(i, &t)?;
+        i.reject_promise(&cap, arg(a, 0));
+        Ok(cap)
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
         let result = match new_promise_capability(i, &t) {

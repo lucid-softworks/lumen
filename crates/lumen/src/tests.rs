@@ -4811,3 +4811,21 @@ fn atomics_index_and_ops() {
         "RangeError"
     );
 }
+
+#[test]
+fn promise_resolve_reject_this() {
+    // Promise.resolve returns an existing promise whose constructor is the receiver.
+    assert_eq!(
+        run("var p=Promise.resolve(1); Promise.resolve(p)===p"),
+        "true"
+    );
+    // A non-object receiver throws TypeError.
+    assert_eq!(throws("Promise.resolve.call(undefined, 1)"), "TypeError");
+    assert_eq!(throws("Promise.reject.call(null, 1)"), "TypeError");
+    // Resolve/reject still produce promises.
+    assert_eq!(run("Promise.resolve(1) instanceof Promise"), "true");
+    assert_eq!(
+        run("Promise.reject(1).catch(()=>{}) instanceof Promise"),
+        "true"
+    );
+}
