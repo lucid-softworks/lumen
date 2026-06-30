@@ -4699,13 +4699,48 @@ fn install_json(it: &mut Interp) {
     let j = it.new_object();
     it.def_method(&j, "stringify", 3, |i, _t, args| {
         let value = arg(args, 0);
+        let replacer = arg(args, 1);
+        // The replacer is either a function, or an array PropertyList of keys (strings/numbers).
+        let opts = if replacer.is_callable() {
+            JsonOpts { func: Some(replacer), keys: None }
+        } else if matches!(&replacer, Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array)) {
+            let len = match &replacer {
+                Value::Obj(o) => i.array_length(o),
+                _ => 0,
+            };
+            let mut list: Vec<String> = Vec::new();
+            for k in 0..len {
+                let item = ab(i.get_member(&replacer, &k.to_string()))?;
+                let key = match &item {
+                    Value::Str(s) => Some(s.to_string()),
+                    Value::Num(n) => Some(i.num_to_str(*n)),
+                    Value::Obj(o) => match &o.borrow().exotic {
+                        Exotic::StrWrap(s) => Some(s.to_string()),
+                        Exotic::NumWrap(n) => Some(i.num_to_str(*n)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    if !list.contains(&key) {
+                        list.push(key);
+                    }
+                }
+            }
+            JsonOpts { func: None, keys: Some(list) }
+        } else {
+            JsonOpts { func: None, keys: None }
+        };
         let gap = match arg(args, 2) {
             Value::Num(n) => " ".repeat((n.max(0.0) as usize).min(10)),
             Value::Str(s) => s.chars().take(10).collect(),
             _ => String::new(),
         };
+        // SerializeJSONProperty starts from a wrapper holder `{ "": value }`.
+        let wrapper = i.new_object();
+        set_data(&wrapper, "", value);
         let mut seen = Vec::new();
-        match json_str(i, &value, &gap, "", &mut seen)? {
+        match json_str(i, &Value::Obj(wrapper), "", &opts, &gap, "", &mut seen)? {
             Some(s) => Ok(Value::from_string(s)),
             None => Ok(Value::Undefined),
         }
@@ -4774,24 +4809,36 @@ fn json_quote(s: &str) -> String {
     out
 }
 
+/// JSON.stringify options: an optional function replacer and/or an array PropertyList of keys.
+struct JsonOpts {
+    func: Option<Value>,
+    keys: Option<Vec<String>>,
+}
+
 fn json_str(
     i: &mut Interp,
-    value: &Value,
+    holder: &Value,
+    key: &str,
+    opts: &JsonOpts,
     gap: &str,
     indent: &str,
     seen: &mut Vec<usize>,
 ) -> Result<Option<String>, Value> {
-    // Honor a `toJSON` method.
-    let value = if matches!(value, Value::Obj(_)) {
-        let tojson = ab(i.get_member(value, "toJSON"))?;
+    // SerializeJSONProperty: fetch the value, then apply toJSON, then the function replacer.
+    let mut value = ab(i.get_member(holder, key))?;
+    if matches!(value, Value::Obj(_)) {
+        let tojson = ab(i.get_member(&value, "toJSON"))?;
         if tojson.is_callable() {
-            ab(i.call(tojson, value.clone(), &[]))?
-        } else {
-            value.clone()
+            value = ab(i.call(tojson, value.clone(), &[Value::from_string(key.to_string())]))?;
         }
-    } else {
-        value.clone()
-    };
+    }
+    if let Some(func) = &opts.func {
+        value = ab(i.call(
+            func.clone(),
+            holder.clone(),
+            &[Value::from_string(key.to_string()), value],
+        ))?;
+    }
     // A JSON.rawJSON object serializes as its stored raw text, verbatim.
     if let Value::Obj(o) = &value {
         if let Some(Value::Str(raw)) = o.borrow().props.get("__raw_json").map(|p| p.value.clone()) {
@@ -4825,21 +4872,23 @@ fn json_str(
                 let len = i.array_length(o);
                 let mut items = Vec::with_capacity(len);
                 for k in 0..len {
-                    let elem = ab(i.get_member(&value, &k.to_string()))?;
                     items.push(
-                        json_str(i, &elem, gap, &new_indent, seen)?
+                        json_str(i, &value, &k.to_string(), opts, gap, &new_indent, seen)?
                             .unwrap_or_else(|| "null".to_string()),
                     );
                 }
                 join_json("[", "]", items, gap, &new_indent, indent)
             } else {
-                let keys: Vec<Rc<str>> = ordered_enum_keys(o);
+                // An array replacer restricts the keys (in its order); else all enumerable keys.
+                let keys: Vec<String> = match &opts.keys {
+                    Some(list) => list.clone(),
+                    None => ordered_enum_keys(o).iter().map(|k| k.to_string()).collect(),
+                };
                 let mut parts = Vec::new();
-                for k in keys {
-                    let v = ab(i.get_member(&value, &k))?;
-                    if let Some(vs) = json_str(i, &v, gap, &new_indent, seen)? {
+                for k in &keys {
+                    if let Some(vs) = json_str(i, &value, k, opts, gap, &new_indent, seen)? {
                         let colon = if gap.is_empty() { ":" } else { ": " };
-                        parts.push(format!("{}{colon}{vs}", json_quote(&k)));
+                        parts.push(format!("{}{colon}{vs}", json_quote(k)));
                     }
                 }
                 join_json("{", "}", parts, gap, &new_indent, indent)
