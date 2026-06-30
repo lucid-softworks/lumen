@@ -9008,7 +9008,16 @@ fn install_string(it: &mut Interp) {
         let pat = ab(i.to_string(&arg(args, 0)))?;
         let repl = arg(args, 1);
         if pat.is_empty() {
-            return Ok(Value::from_string(s));
+            // An empty search matches at every position: insert the replacement between each char.
+            let mut out = String::new();
+            let mut byte = 0usize;
+            for ch in s.chars() {
+                out.push_str(&string_replacement(i, &repl, "", &s, byte)?);
+                out.push(ch);
+                byte += ch.len_utf8();
+            }
+            out.push_str(&string_replacement(i, &repl, "", &s, byte)?);
+            return Ok(Value::from_string(out));
         }
         let mut out = String::new();
         let mut rest = s.as_str();
