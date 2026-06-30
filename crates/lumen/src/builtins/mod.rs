@@ -546,17 +546,39 @@ fn install_atomics(it: &mut Interp) {
 /// The test262 `$262` host object. Only the portions lumen can support are provided (`global`,
 /// `gc`, `evalScript`, best-effort `detachArrayBuffer`); `agent`/`createRealm` are omitted.
 fn install_host(it: &mut Interp) {
+    let host = make_262(it, None);
+    set_builtin(&it.global, "$262", host);
+}
+
+/// Build a `$262` host object. `realm_global` is the global of the realm this `$262` controls
+/// (None for the main realm, in which case the live `it.global` is used and `evalScript` runs in the
+/// current realm).
+fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
     let host = Object::new(Some(it.object_proto.clone()));
-    set_builtin(&host, "global", Value::Obj(it.global.clone()));
+    let global = realm_global.clone().unwrap_or_else(|| Value::Obj(it.global.clone()));
+    set_builtin(&host, "global", global.clone());
     it.def_method(&host, "gc", 0, |i, _t, _a| {
         i.gc_collect();
         Ok(Value::Undefined)
     });
-    it.def_method(&host, "evalScript", 1, |i, _t, args| {
+    it.def_method(&host, "createRealm", 0, |i, _t, _a| {
+        let g = i.create_realm();
+        Ok(make_262(i, Some(g)))
+    });
+    // evalScript runs in this $262's realm (the main realm's $262 keeps using the current global).
+    let rg = realm_global.clone();
+    if let Some(rg) = rg {
+        set_internal(&host, "__realm_global", rg);
+    }
+    it.def_method(&host, "evalScript", 1, |i, this, args| {
         let code = match arg(args, 0) {
             Value::Str(s) => s,
             other => return Ok(other),
         };
+        let rg = ab(i.get_member(&this, "__realm_global"))?;
+        if let Value::Obj(_) = &rg {
+            return ab(i.eval_in_realm(&rg, &code));
+        }
         let body = crate::parser::parse_script(&code, false)
             .map_err(|e| i.make_error("SyntaxError", e.message))?;
         let env = i.global_env.clone();
@@ -583,7 +605,7 @@ fn install_host(it: &mut Interp) {
         }
         Ok(Value::Undefined)
     });
-    set_builtin(&it.global, "$262", Value::Obj(host));
+    Value::Obj(host)
 }
 
 fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value> {

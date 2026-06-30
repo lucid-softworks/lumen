@@ -214,6 +214,10 @@ pub struct Interp {
     pub new_target: Value,
     /// The `new.target` to install for the next constructor invocation (set by `construct`).
     pub pending_new_target: Value,
+    /// Additional realms created via `$262.createRealm()`, keyed by the realm's global-object pointer.
+    /// Each holds its own intrinsics; the shared side tables (proxies, buffers, …) and well-known
+    /// symbols are common, so objects cross realm boundaries freely.
+    pub realms: HashMap<usize, RealmState>,
     /// Promise state keyed by the promise object's pointer.
     pub promises: HashMap<usize, PromiseState>,
     /// Temporal object internal slots, keyed by the object's pointer.
@@ -308,6 +312,186 @@ pub const GC_TRIGGER: i64 = 200_000;
 pub const MAX_ARRAY_OP_LEN: usize = 1 << 20; // ~1M elements
 pub const MAX_STR_LEN: usize = 1 << 24; // ~16M bytes
 
+/// A realm's intrinsics: the global object, its environment, and the per-realm prototypes/constructors
+/// installed by `builtins::install`. Well-known symbols and the engine side tables are shared, not here.
+pub struct RealmState {
+    pub global: Gc,
+    pub global_env: Env,
+    pub object_proto: Gc,
+    pub function_proto: Gc,
+    pub array_proto: Gc,
+    pub string_proto: Gc,
+    pub number_proto: Gc,
+    pub boolean_proto: Gc,
+    pub symbol_proto: Gc,
+    pub error_protos: HashMap<&'static str, Gc>,
+    pub eval_fn: Option<Gc>,
+    pub extra_protos: HashMap<&'static str, Gc>,
+}
+
+impl Interp {
+    /// Snapshot the current realm's intrinsics so they can be swapped out and back.
+    fn snapshot_realm(&self) -> RealmState {
+        RealmState {
+            global: self.global.clone(),
+            global_env: self.global_env.clone(),
+            object_proto: self.object_proto.clone(),
+            function_proto: self.function_proto.clone(),
+            array_proto: self.array_proto.clone(),
+            string_proto: self.string_proto.clone(),
+            number_proto: self.number_proto.clone(),
+            boolean_proto: self.boolean_proto.clone(),
+            symbol_proto: self.symbol_proto.clone(),
+            error_protos: self.error_protos.clone(),
+            eval_fn: self.eval_fn.clone(),
+            extra_protos: self.extra_protos.clone(),
+        }
+    }
+
+    /// Install a realm's intrinsics as the active ones.
+    fn restore_realm(&mut self, r: &RealmState) {
+        self.global = r.global.clone();
+        self.global_env = r.global_env.clone();
+        self.object_proto = r.object_proto.clone();
+        self.function_proto = r.function_proto.clone();
+        self.array_proto = r.array_proto.clone();
+        self.string_proto = r.string_proto.clone();
+        self.number_proto = r.number_proto.clone();
+        self.boolean_proto = r.boolean_proto.clone();
+        self.symbol_proto = r.symbol_proto.clone();
+        self.error_protos = r.error_protos.clone();
+        self.eval_fn = r.eval_fn.clone();
+        self.extra_protos = r.extra_protos.clone();
+    }
+
+    /// `$262.createRealm()`: build a fresh realm (its own global + intrinsics) and register it. The
+    /// well-known symbols are shared with the creating realm so `@@iterator` etc. match cross-realm.
+    pub fn create_realm(&mut self) -> Value {
+        let saved = self.snapshot_realm();
+        let saved_iter = self.iterator_sym.clone();
+        // The main realm's well-known symbols, to graft onto the new realm's Symbol constructor.
+        let well_known: Vec<(&'static str, Value)> = WELL_KNOWN_SYMBOLS
+            .iter()
+            .filter_map(|name| {
+                let sym = self.get_member(&Value::Obj(saved.global.clone()), "Symbol").ok()?;
+                let v = self.get_member(&sym, name).ok()?;
+                Some((*name, v))
+            })
+            .collect();
+
+        // Fresh intrinsics, mirroring `Interp::new`.
+        let object_proto = Object::new(None);
+        let function_proto = Object::new(Some(object_proto.clone()));
+        let array_proto = Object::new(Some(object_proto.clone()));
+        let string_proto = Object::new(Some(object_proto.clone()));
+        let number_proto = Object::new(Some(object_proto.clone()));
+        let boolean_proto = Object::new(Some(object_proto.clone()));
+        string_proto.borrow_mut().exotic = Exotic::StrWrap(Rc::from(""));
+        number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
+        boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
+        let symbol_proto = Object::new(Some(object_proto.clone()));
+        let global = Object::new(Some(object_proto.clone()));
+        self.object_proto = object_proto;
+        self.function_proto = function_proto;
+        self.array_proto = array_proto;
+        self.string_proto = string_proto;
+        self.number_proto = number_proto;
+        self.boolean_proto = boolean_proto;
+        self.symbol_proto = symbol_proto;
+        self.global = global.clone();
+        self.global_env = new_scope(None);
+        self.error_protos = HashMap::new();
+        self.extra_protos = HashMap::new();
+        self.eval_fn = None;
+        crate::builtins::install(self);
+        // Top-level `this` is the new global.
+        let g = Value::Obj(self.global.clone());
+        self.global_env.borrow_mut().vars.insert(
+            "this".to_string(),
+            Binding {
+                value: g,
+                mutable: false,
+                initialized: true,
+                import_ref: None,
+            },
+        );
+        // Share the well-known symbols: overwrite the realm's freshly-minted ones with the originals.
+        if let Ok(realm_symbol) = self.get_member(&Value::Obj(self.global.clone()), "Symbol") {
+            if let Value::Obj(rs) = &realm_symbol {
+                for (name, sym) in &well_known {
+                    rs.borrow_mut().props.insert(*name, Property::data(sym.clone(), false, false, false));
+                }
+            }
+        }
+        self.iterator_sym = saved_iter;
+
+        let realm_state = self.snapshot_realm();
+        let ptr = Rc::as_ptr(&global) as usize;
+        self.realms.insert(ptr, realm_state);
+        self.restore_realm(&saved);
+        Value::Obj(global)
+    }
+
+    /// Run `src` as a script in the realm whose global is `realm_global`.
+    pub fn eval_in_realm(&mut self, realm_global: &Value, src: &str) -> Result<Value, Abrupt> {
+        let ptr = match realm_global {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => return Err(self.throw("TypeError", "not a realm global")),
+        };
+        let realm = match self.realms.get(&ptr) {
+            Some(r) => r.snapshot_clone(),
+            None => return Err(self.throw("TypeError", "unknown realm")),
+        };
+        let body = crate::parser::parse_script(src, false)
+            .map_err(|e| self.throw("SyntaxError", e.message))?;
+        let saved = self.snapshot_realm();
+        self.restore_realm(&realm);
+        let env = self.global_env.clone();
+        let result = self.eval_in_scope(&body, &env);
+        self.restore_realm(&saved);
+        result
+    }
+}
+
+impl RealmState {
+    fn snapshot_clone(&self) -> RealmState {
+        RealmState {
+            global: self.global.clone(),
+            global_env: self.global_env.clone(),
+            object_proto: self.object_proto.clone(),
+            function_proto: self.function_proto.clone(),
+            array_proto: self.array_proto.clone(),
+            string_proto: self.string_proto.clone(),
+            number_proto: self.number_proto.clone(),
+            boolean_proto: self.boolean_proto.clone(),
+            symbol_proto: self.symbol_proto.clone(),
+            error_protos: self.error_protos.clone(),
+            eval_fn: self.eval_fn.clone(),
+            extra_protos: self.extra_protos.clone(),
+        }
+    }
+}
+
+/// The well-known symbol names that are shared across all realms.
+const WELL_KNOWN_SYMBOLS: &[&str] = &[
+    "iterator",
+    "asyncIterator",
+    "hasInstance",
+    "isConcatSpreadable",
+    "match",
+    "matchAll",
+    "replace",
+    "search",
+    "species",
+    "split",
+    "toPrimitive",
+    "toStringTag",
+    "unscopables",
+    "dispose",
+    "asyncDispose",
+    "metadata",
+];
+
 impl Interp {
     pub fn new() -> Interp {
         let object_proto = Object::new(None);
@@ -361,6 +545,7 @@ impl Interp {
             proxies: HashMap::new(),
             new_target: Value::Undefined,
             pending_new_target: Value::Undefined,
+            realms: HashMap::new(),
             promises: HashMap::new(),
             temporal: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
