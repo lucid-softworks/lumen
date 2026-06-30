@@ -8135,7 +8135,9 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
     let mut iters = Vec::new();
     let mut nexts = Vec::new();
     for v in &iterables {
-        let (iter, next) = ab(i.get_iterator(v))?;
+        // GetIteratorFlattenable (reject strings): each input may be an iterable or an iterator.
+        let iter = get_iterator_flattenable(i, v, false)?;
+        let next = ab(i.get_member(&iter, "next"))?;
         iters.push(iter);
         nexts.push(next);
     }
