@@ -5831,24 +5831,36 @@ fn reflect_define_on_receiver(
     }
 }
 
-/// EnumerableOwnPropertyNames (string keys): proxy-aware own enumerable property names in order.
-fn enumerable_own_string_keys(i: &mut Interp, o: &Value) -> Result<Vec<String>, Value> {
-    if proxy_pair(i, o).is_some() {
-        return Ok(proxy_enum_string_keys(i, o)?
-            .into_iter()
-            .filter_map(|k| match k {
-                Value::Str(s) => Some(s.to_string()),
-                _ => None,
-            })
-            .collect());
+/// EnumerableOwnProperties for Object.values/entries: for each own string key (in order), do
+/// [[GetOwnProperty]] then — if enumerable — [[Get]] the value, interleaved per key (matters for the
+/// observable trap order on proxies). `entries` controls value vs `[key, value]` output.
+fn enumerable_own_value_list(i: &mut Interp, o: &Value, entries: bool) -> Result<Value, Value> {
+    let mut out = Vec::new();
+    if let Some((t, h)) = proxy_pair(i, o) {
+        for k in proxy_own_keys(i, &t, &h)? {
+            if let Value::Str(ks) = &k {
+                if proxy_key_enumerable(i, &t, &h, ks)? {
+                    let v = ab(i.get_member(o, ks))?;
+                    out.push(if entries {
+                        i.make_array(vec![Value::Str(ks.clone()), v])
+                    } else {
+                        v
+                    });
+                }
+            }
+        }
+    } else {
+        let keys: Vec<Rc<str>> = o.as_obj().map(ordered_enum_keys).unwrap_or_default();
+        for k in keys {
+            let v = ab(i.get_member(o, &k))?;
+            out.push(if entries {
+                i.make_array(vec![Value::Str(k), v])
+            } else {
+                v
+            });
+        }
     }
-    match o.as_obj() {
-        Some(obj) => Ok(ordered_enum_keys(obj)
-            .iter()
-            .map(|k| k.to_string())
-            .collect()),
-        None => Ok(Vec::new()),
-    }
+    Ok(i.make_array(out))
 }
 
 /// IsArray, seeing through proxies (a Proxy whose target is an Array is itself an Array).
@@ -7542,24 +7554,11 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "values", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.values")?;
-        let ov = Value::Obj(o);
-        let keys = enumerable_own_string_keys(i, &ov)?;
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            out.push(ab(i.get_member(&ov, &k))?);
-        }
-        Ok(i.make_array(out))
+        enumerable_own_value_list(i, &Value::Obj(o), false)
     });
     it.def_method(&ctor, "entries", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.entries")?;
-        let ov = Value::Obj(o);
-        let keys = enumerable_own_string_keys(i, &ov)?;
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            let v = ab(i.get_member(&ov, &k))?;
-            out.push(i.make_array(vec![Value::from_string(k.clone()), v]));
-        }
-        Ok(i.make_array(out))
+        enumerable_own_value_list(i, &Value::Obj(o), true)
     });
     it.def_method(&ctor, "fromEntries", 1, |i, _this, args| {
         // RequireObjectCoercible(iterable).
