@@ -2072,6 +2072,68 @@ fn create_list_from_array_like(i: &mut Interp, v: &Value) -> Result<Vec<Value>, 
     Ok(out)
 }
 
+/// SetIntegrityLevel(obj, frozen?): PreventExtensions then make every own property non-configurable
+/// (and, when freezing, non-writable for data properties), all through trap-aware operations.
+fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool, Value> {
+    if !matches!(obj, Value::Obj(_)) {
+        return Ok(true);
+    }
+    if !js_prevent_extensions(i, obj)? {
+        return Ok(false);
+    }
+    let proxy = proxy_pair(i, obj);
+    let keys: Vec<String> = if let Some((t, h)) = &proxy {
+        let mut ks = Vec::new();
+        for k in proxy_own_keys(i, t, h)? {
+            ks.push(ab(i.to_property_key(&k))?);
+        }
+        ks
+    } else {
+        obj.as_obj()
+            .unwrap()
+            .borrow()
+            .props
+            .ordered_keys()
+            .iter()
+            .filter(|k| !k.starts_with('#'))
+            .map(|k| k.to_string())
+            .collect()
+    };
+    for key in keys {
+        let is_accessor = if let Some((t, h)) = &proxy {
+            let d = proxy_gopd_value(i, t, h, &key)?;
+            matches!(&d, Value::Obj(o) if o.borrow().props.contains("get") || o.borrow().props.contains("set"))
+        } else {
+            obj.as_obj()
+                .unwrap()
+                .borrow()
+                .props
+                .get(&key)
+                .map(|p| p.accessor)
+                .unwrap_or(false)
+        };
+        let desc = i.new_object();
+        set_data(&desc, "configurable", Value::Bool(false));
+        if freeze && !is_accessor {
+            set_data(&desc, "writable", Value::Bool(false));
+        }
+        let ok = if let Some((t, h)) = &proxy {
+            ab(proxy_define_property(i, t, h, &key, &Value::Obj(desc)))?
+        } else {
+            ab(define_own_property(
+                i,
+                obj.as_obj().unwrap(),
+                &key,
+                &Value::Obj(desc),
+            ))?
+        };
+        if !ok {
+            return Err(i.make_error("TypeError", "could not set the object's integrity level"));
+        }
+    }
+    Ok(true)
+}
+
 fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
@@ -7355,18 +7417,12 @@ fn install_object(it: &mut Interp) {
         }
         Ok(Value::Obj(result))
     });
-    it.def_method(&ctor, "freeze", 1, |_i, _this, args| {
-        if let Value::Obj(o) = arg(args, 0) {
-            o.borrow_mut().extensible = false;
-            let keys = o.borrow().props.keys();
-            for k in keys {
-                if let Some(p) = o.borrow_mut().props.get_mut(&k) {
-                    p.writable = false;
-                    p.configurable = false;
-                }
-            }
+    it.def_method(&ctor, "freeze", 1, |i, _this, args| {
+        let o = arg(args, 0);
+        if matches!(o, Value::Obj(_)) && !set_integrity_level(i, &o, true)? {
+            return Err(i.make_error("TypeError", "Object.freeze could not freeze the object"));
         }
-        Ok(arg(args, 0))
+        Ok(o)
     });
     it.def_method(&ctor, "preventExtensions", 1, |i, _this, args| {
         let obj = arg(args, 0);
@@ -7497,17 +7553,12 @@ fn install_object(it: &mut Interp) {
         }
         Ok(Value::Obj(o))
     });
-    it.def_method(&ctor, "seal", 1, |_i, _this, args| {
-        if let Value::Obj(o) = arg(args, 0) {
-            o.borrow_mut().extensible = false;
-            let keys = o.borrow().props.keys();
-            for k in keys {
-                if let Some(p) = o.borrow_mut().props.get_mut(&k) {
-                    p.configurable = false;
-                }
-            }
+    it.def_method(&ctor, "seal", 1, |i, _this, args| {
+        let o = arg(args, 0);
+        if matches!(o, Value::Obj(_)) && !set_integrity_level(i, &o, false)? {
+            return Err(i.make_error("TypeError", "Object.seal could not seal the object"));
         }
-        Ok(arg(args, 0))
+        Ok(o)
     });
     it.def_method(&ctor, "isSealed", 1, |_i, _this, args| {
         let sealed = match arg(args, 0) {

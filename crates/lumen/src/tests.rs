@@ -4911,3 +4911,24 @@ fn reflect_completeness() {
         "1"
     );
 }
+
+#[test]
+fn object_freeze_seal_integrity() {
+    assert_eq!(run("var o=Object.freeze({a:1}); [Object.isFrozen(o), Object.isExtensible(o)].join(',')"), "true,false");
+    assert_eq!(run("var s=Object.seal({a:1}); [Object.isSealed(s), Object.isFrozen(s)].join(',')"), "true,false");
+    // freeze/seal invoke a proxy's traps (preventExtensions, ownKeys, defineProperty).
+    assert_eq!(
+        run(r#"
+            var log=[];
+            var p=new Proxy({a:1}, {
+                preventExtensions(t){log.push('pe');Object.preventExtensions(t);return true;},
+                ownKeys(t){log.push('ok');return Reflect.ownKeys(t);},
+                defineProperty(t,k,d){log.push('dp');return Reflect.defineProperty(t,k,d);},
+                getOwnPropertyDescriptor(t,k){return Reflect.getOwnPropertyDescriptor(t,k);}
+            });
+            Object.freeze(p);
+            log.join(',')
+        "#),
+        "pe,ok,dp"
+    );
+}
