@@ -7171,10 +7171,19 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "getOwnPropertySymbols", 1, |i, _this, args| {
         // ToObject coerces primitives (and throws for null/undefined).
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertySymbols")?;
+        let ov = Value::Obj(o.clone());
+        // A proxy's symbol keys come from its [[OwnPropertyKeys]] trap.
+        if let Some((target, handler)) = proxy_pair(i, &ov) {
+            let syms: Vec<Value> = proxy_own_keys(i, &target, &handler)?
+                .into_iter()
+                .filter(|k| matches!(k, Value::Sym(_)))
+                .collect();
+            return Ok(i.make_array(syms));
+        }
         let syms: Vec<Value> = o
             .borrow()
             .props
-            .keys()
+            .ordered_keys()
             .into_iter()
             .filter(|k| Interp::is_sym_key(k))
             .filter_map(|k| i.sym_from_key(&k))
@@ -7315,25 +7324,33 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "getOwnPropertyDescriptors", 1, |i, _this, args| {
         // ToObject coerces primitives (and throws for null/undefined).
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyDescriptors")?;
+        let ov = Value::Obj(o.clone());
         let result = i.new_object();
-        let keys = o.borrow().props.keys();
-        for key in keys {
+        // A proxy goes through its [[OwnPropertyKeys]]/[[GetOwnProperty]] traps, in order.
+        if let Some((target, handler)) = proxy_pair(i, &ov) {
+            for k in proxy_own_keys(i, &target, &handler)? {
+                let key = ab(i.to_property_key(&k))?;
+                let desc = proxy_gopd_value(i, &target, &handler, &key)?;
+                if !matches!(desc, Value::Undefined) {
+                    result
+                        .borrow_mut()
+                        .props
+                        .insert(key.as_str(), Property::plain(desc));
+                }
+            }
+            return Ok(Value::Obj(result));
+        }
+        for key in o.borrow().props.ordered_keys() {
+            if key.starts_with('#') {
+                continue;
+            }
             let prop = o.borrow().props.get(&key).cloned();
             if let Some(p) = prop {
-                let d = i.new_object();
-                if p.accessor {
-                    set_data(&d, "get", p.get.unwrap_or(Value::Undefined));
-                    set_data(&d, "set", p.set.unwrap_or(Value::Undefined));
-                } else {
-                    set_data(&d, "value", p.value);
-                    set_data(&d, "writable", Value::Bool(p.writable));
-                }
-                set_data(&d, "enumerable", Value::Bool(p.enumerable));
-                set_data(&d, "configurable", Value::Bool(p.configurable));
+                let d = descriptor_from_prop(i, p);
                 result
                     .borrow_mut()
                     .props
-                    .insert(key, Property::plain(Value::Obj(d)));
+                    .insert(key.as_ref(), Property::plain(d));
             }
         }
         Ok(Value::Obj(result))
