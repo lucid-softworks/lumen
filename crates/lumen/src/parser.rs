@@ -2003,6 +2003,10 @@ impl Parser {
                 } else {
                     self.parse_method_function()?
                 };
+                // An object-literal method is never a derived constructor, so `super(...)` is illegal.
+                if let Some(msg) = crate::eval::method_super_call_error_full(&func) {
+                    return self.err(msg);
+                }
                 props.push(PropDef::Method {
                     key,
                     func: Rc::new(func),
@@ -2596,7 +2600,7 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
         // A non-constructor method body may not contain a `super(...)` call.
         if let Some(func) = &m.func {
             if !matches!(m.kind, MemberKind::Constructor) {
-                if let Some(msg) = crate::eval::method_super_call_error(&func.body) {
+                if let Some(msg) = crate::eval::method_super_call_error_full(func) {
                     return Err(msg.into());
                 }
             }

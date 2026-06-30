@@ -3643,8 +3643,16 @@ pub(crate) fn field_init_error(e: &Expr) -> Option<&'static str> {
 
 /// A non-constructor method body may not contain a `super(...)` call (only a derived constructor
 /// can). Descends into arrow functions (which inherit the method's super context).
-pub(crate) fn method_super_call_error(body: &[Stmt]) -> Option<&'static str> {
-    fi_stmts(body, false)
+/// A non-constructor method may not contain a `super(...)` call in its parameter list *or* its body.
+pub(crate) fn method_super_call_error_full(func: &crate::ast::Function) -> Option<&'static str> {
+    for p in &func.params {
+        if let Some(d) = &p.default {
+            if let Some(msg) = fi_expr(d, false) {
+                return Some(msg);
+            }
+        }
+    }
+    fi_stmts(&func.body, false)
 }
 
 /// `args` also flags `arguments` (a field-initializer rule); methods omit it since they may use it.
