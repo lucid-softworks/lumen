@@ -933,6 +933,24 @@ impl Interp {
     fn get_from_chain(&mut self, start: &Gc, key: &str, receiver: &Value) -> Result<Value, Abrupt> {
         let mut cur = Some(start.clone());
         while let Some(obj) = cur {
+            // A proxy anywhere on the chain handles the read itself (with the original receiver).
+            let ptr = Rc::as_ptr(&obj) as usize;
+            if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                if matches!(handler, Value::Null) {
+                    return Err(self.throw("TypeError", "cannot perform 'get' on a revoked proxy"));
+                }
+                let trap = self.get_member(&handler, "get")?;
+                if matches!(trap, Value::Undefined | Value::Null) {
+                    return self.get_member(&target, key);
+                }
+                if !trap.is_callable() {
+                    return Err(self.throw("TypeError", "proxy 'get' trap is not callable"));
+                }
+                let res =
+                    self.call(trap, handler, &[target.clone(), Value::str(key), receiver.clone()])?;
+                self.proxy_get_invariant(&target, key, &res)?;
+                return Ok(res);
+            }
             let prop = obj.borrow().props.get(key).cloned();
             if let Some(p) = prop {
                 if p.accessor {
