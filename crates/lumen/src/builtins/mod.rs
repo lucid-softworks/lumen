@@ -7968,13 +7968,21 @@ fn install_array(it: &mut Interp) {
         }
         let o = arr_to_object(i, &this)?;
         let len = ab(i.checked_array_len(&o))?;
-        let mut items = Vec::with_capacity(len);
+        // SortIndexedProperties: read only the present indices (holes are skipped, not read).
+        let mut items = Vec::new();
         for k in 0..len {
-            items.push(ab(i.get_member(&this, &k.to_string()))?);
+            if ab(i.js_has_property(&this, &k.to_string()))? {
+                items.push(ab(i.get_member(&this, &k.to_string()))?);
+            }
         }
+        let item_count = items.len();
         merge_sort(i, &mut items, &cmp)?;
         for (k, v) in items.into_iter().enumerate() {
             ab(i.set_member(&this, &k.to_string(), v))?;
+        }
+        // Vacated trailing indices (originally holes, or beyond the present count) are deleted.
+        for k in item_count..len {
+            o.borrow_mut().props.remove(k.to_string().as_str());
         }
         Ok(this)
     });

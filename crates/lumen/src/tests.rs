@@ -4558,3 +4558,19 @@ fn array_to_locale_string() {
         "X,Y"
     );
 }
+
+#[test]
+fn array_sort_holes_and_delete() {
+    // Holes sort to the very end and remain holes (not own undefined properties).
+    assert_eq!(
+        run("var a=[3,,1,undefined]; a.sort(); [a.join(','), a.length, a.hasOwnProperty(3)].join('|')"),
+        "1,3,,|4|false"
+    );
+    // Present undefined sorts after defined values but before holes.
+    assert_eq!(
+        run("var a=[3,undefined,1]; a.sort((x,y)=>x-y); a.join(',')"),
+        "1,3,"
+    );
+    // A non-callable, non-undefined comparator throws.
+    assert_eq!(throws("[1,2].sort({})"), "TypeError");
+}
