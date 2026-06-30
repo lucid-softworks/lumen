@@ -8001,6 +8001,17 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
         i.iterator_close(&source);
         return Err(i.make_error("TypeError", "Iterator helper argument is not callable"));
     }
+    // take/drop validate the limit (ToNumber → NaN or negative is a RangeError) BEFORE
+    // GetIteratorDirect, per the spec's operation order.
+    let limit = if matches!(kind, "take" | "drop") {
+        let raw = ab(i.to_number(&f))?;
+        if raw.is_nan() || raw < 0.0 {
+            return Err(i.make_error("RangeError", "limit must be a non-negative number"));
+        }
+        Some(raw.trunc())
+    } else {
+        None
+    };
     let proto = i.extra_protos.get("%IteratorPrototype%").cloned();
     let obj = Object::new(proto);
     // GetIteratorDirect: read the source's `next` method exactly once, now.
@@ -8009,17 +8020,23 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     set_builtin(&obj, "__ih_src", source);
     set_builtin(&obj, "__ih_kind", Value::str(kind));
     set_builtin(&obj, "__ih_fn", f.clone());
-    if matches!(kind, "take" | "drop") {
-        let raw = ab(i.to_number(&f))?;
-        let n = if raw.is_nan() { 0.0 } else { raw.trunc() };
-        if n < 0.0 {
-            return Err(i.make_error("RangeError", "limit must be a non-negative number"));
-        }
+    if let Some(n) = limit {
         set_builtin(&obj, "__ih_n", Value::Num(n));
         set_builtin(&obj, "__ih_started", Value::Bool(false));
     }
     set_builtin(&obj, "__ih_count", Value::Num(0.0));
+    set_builtin(&obj, "__ih_done", Value::Bool(false));
     i.def_method(&obj, "next", 0, iter_helper_next);
+    // The helper's `return` closes the underlying iterator once (IteratorHelperPrototype %return%).
+    i.def_method(&obj, "return", 0, |i, this, _a| {
+        let done = ab(i.get_member(&this, "__ih_done"))?;
+        if !i.to_boolean(&done) {
+            set_internal(this.as_obj().unwrap(), "__ih_done", Value::Bool(true));
+            let src = ab(i.get_member(&this, "__ih_src"))?;
+            i.iterator_close(&src);
+        }
+        Ok(iter_result(i, Value::Undefined, true))
+    });
     if let Some(sym) = i.iterator_sym.clone() {
         let itf = i.make_native("[Symbol.iterator]", 0, return_this);
         obj.borrow_mut()
@@ -8232,6 +8249,11 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
 }
 
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // A helper that has already finished stays done (and never re-touches the source).
+    let done = ab(i.get_member(&this, "__ih_done"))?;
+    if i.to_boolean(&done) {
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
     let src = ab(i.get_member(&this, "__ih_src"))?;
     let inext = ab(i.get_member(&this, "__ih_next"))?;
     let kind_v = ab(i.get_member(&this, "__ih_kind"))?;
@@ -8284,6 +8306,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
             let nv = ab(i.get_member(&this, "__ih_n"))?;
             let n = ab(i.to_number(&nv))?;
             if count >= n {
+                set_internal(this.as_obj().unwrap(), "__ih_done", Value::Bool(true));
                 i.iterator_close(&src);
                 return Ok(iter_result(i, Value::Undefined, true));
             }
