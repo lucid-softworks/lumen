@@ -7927,7 +7927,7 @@ fn install_iterator(it: &mut Interp) {
                 }
             };
             if i.to_boolean(&r) {
-                i.iterator_close(&this);
+                ab(i.iterator_close_normal(&this))?;
                 return Ok(v);
             }
             k += 1.0;
@@ -8144,7 +8144,7 @@ fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Resu
             }
         };
         if i.to_boolean(&r) == want {
-            i.iterator_close(&this);
+            ab(i.iterator_close_normal(&this))?;
             return Ok(Value::Bool(want));
         }
         k += 1.0;

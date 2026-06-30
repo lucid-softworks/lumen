@@ -4101,3 +4101,19 @@ fn iterator_take_exhaustion_closes() {
     // A normal take stops at the limit.
     assert_eq!(run("[1,2,3].values().take(2).toArray().length"), "2");
 }
+
+#[test]
+fn iterator_eager_close_on_found_propagates() {
+    // some/find close the source when a match is found, propagating its return() error.
+    assert_eq!(
+        run(r#"
+            var src={ i:0, next(){ return {done:false, value:++this.i}; }, return(){ throw new RangeError(); } };
+            var caught='no';
+            try { Iterator.from(src).some(x=>x===2); } catch(e){ caught=e.constructor.name; }
+            caught
+        "#),
+        "RangeError"
+    );
+    assert_eq!(run("[1,2,3,4].values().some(x=>x===3)"), "true");
+    assert_eq!(run("[1,2,3,4].values().find(x=>x>2)"), "3");
+}
