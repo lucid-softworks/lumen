@@ -6633,13 +6633,12 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
+        // Two ZonedDateTimes are equal iff same instant, same (canonical) time zone, same calendar.
         let (e, _, tz) = as_zoned(i, &t)?;
-        match get(i, &arg(a, 0)) {
-            Some(Temporal::Zoned {
-                epoch_ns, tz: otz, ..
-            }) => Ok(Value::Bool(e == epoch_ns && tz == otz)),
-            _ => Ok(Value::Bool(false)),
-        }
+        let tcal = cal_of(i, &t);
+        let (oe, _, otz) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
+        let ocal = input_cal(i, &arg(a, 0))?;
+        Ok(Value::Bool(e == oe && tz == otz && tcal == ocal))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error(
