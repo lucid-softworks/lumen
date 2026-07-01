@@ -58,9 +58,10 @@ fn format_range(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Va
 
 fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Value, Value> {
     let (o, a, b) = range_endpoints(i, this, x, y)?;
+    let stype = suffix_type_of(&o);
     let mut out: Vec<Value> = Vec::new();
     let mut push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
-        for (t, v) in decompose_parts(whole) {
+        for (t, v) in decompose_parts(whole, &stype) {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
             set_data(&ob, "value", Value::from_string(v));
@@ -860,6 +861,15 @@ fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value
     Ok(Value::from_string(assemble_number(i, &o, n)))
 }
 
+/// The trailing-affix classification for this formatter's parts (compact suffix vs plain).
+fn suffix_type_of(o: &Gc) -> String {
+    if get_str(o, "__nf_notation") == "compact" {
+        "compact".to_string()
+    } else {
+        "literal".to_string()
+    }
+}
+
 fn to_intl_number(i: &mut Interp, x: &Value) -> Result<f64, Value> {
     // ToIntlMathematicalValue — we approximate with ToNumber (BigInt handled as its value).
     match x {
@@ -872,7 +882,7 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
     let o = instance(i, this)?;
     let n = to_intl_number(i, x)?;
     let whole = assemble_number(i, &o, n);
-    let parts = decompose_parts(&whole);
+    let parts = decompose_parts(&whole, &suffix_type_of(&o));
     let arr: Vec<Value> = parts
         .into_iter()
         .map(|(t, v)| {
@@ -886,8 +896,9 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
 }
 
 /// Break an assembled number string into typed parts (minusSign/plusSign, currency/percentSign/
-/// literal affixes, grouped integer, decimal, fraction, and the exponent group).
-fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
+/// literal affixes, grouped integer, decimal, fraction, and the exponent group). `suffix_type`
+/// classifies the trailing affix ("compact" for compact notation, else percent/literal by content).
+fn decompose_parts(s: &str, suffix_type: &str) -> Vec<(&'static str, String)> {
     let mut parts: Vec<(&'static str, String)> = Vec::new();
     // Split off the exponent tail, if any.
     let (main, exp) = match s.split_once('E') {
@@ -950,11 +961,25 @@ fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
         }
         parts.push(("fraction", bytes[frac_start..idx].iter().collect()));
     }
-    // Trailing affix (percent sign, unit, or literal).
+    // Trailing affix (percent sign, unit, compact suffix, or literal).
     let suffix: String = bytes[idx..].iter().collect();
     if !suffix.is_empty() {
-        let t = if suffix.contains('%') { "percentSign" } else { "literal" };
-        parts.push((t, suffix));
+        if suffix.contains('%') {
+            parts.push(("percentSign", suffix));
+        } else if suffix_type == "compact" {
+            // A leading space separates the number from the compact word; it is its own literal.
+            let trimmed = suffix.trim_start_matches(' ');
+            if trimmed.len() < suffix.len() {
+                parts.push(("literal", " ".to_string()));
+            }
+            if trimmed == ")" {
+                parts.push(("literal", ")".to_string()));
+            } else if !trimmed.is_empty() {
+                parts.push(("compact", trimmed.to_string()));
+            }
+        } else {
+            parts.push(("literal", suffix));
+        }
     }
     // Exponent group.
     if let Some(e) = exp {
