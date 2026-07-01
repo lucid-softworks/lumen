@@ -27,6 +27,7 @@ mod builtins;
 mod coroutine;
 mod eval;
 mod interpreter;
+mod intl;
 mod lexer;
 mod modules;
 mod parser;

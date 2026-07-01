@@ -81,6 +81,7 @@ pub fn install(it: &mut Interp) {
     install_disposable_stack(it);
     install_shadow_realm(it);
     crate::temporal::install(it);
+    crate::intl::install(it);
 }
 
 /// `DisposableStack` (explicit resource management). Disposers are stored as `[fn, thisArg]` pairs
