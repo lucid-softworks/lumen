@@ -1042,8 +1042,9 @@ fn resolve_code_ord(cal: &str, year: i64, code: &str) -> (i64, bool) {
         if let Some(o) = hebrew_ord_from_code(year, code) {
             return (o, true);
         }
-        let plain = code.strip_suffix('L').unwrap_or(code);
-        (hebrew_ord_from_code(year, plain).unwrap(), false)
+        // The only absent code is "M05L" (Adar I) in a common year — it collapses to Adar, which is
+        // "M06" (not "M05" = Shevat).
+        (hebrew_ord_from_code(year, "M06").unwrap(), false)
     } else {
         let body = code.strip_prefix('M').unwrap();
         let (digits, leap) = match body.strip_suffix('L') {
