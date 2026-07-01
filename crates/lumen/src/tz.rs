@@ -22,6 +22,22 @@ pub fn canonicalize(name: &str) -> Option<&'static str> {
         .map(|(_, canon)| *canon)
 }
 
+/// The registry name for a case-insensitive zone id, PRESERVING aliases (an input of "Asia/Calcutta"
+/// stays "Asia/Calcutta", not the canonical "Asia/Kolkata"). Temporal keeps the identifier as given;
+/// only `equals`/`compare` canonicalize. `None` if the id is unknown.
+pub fn registry_name(name: &str) -> Option<&'static str> {
+    if name.eq_ignore_ascii_case("UTC") {
+        return Some("UTC");
+    }
+    if let Some(z) = ZONES.iter().find(|z| z.name.eq_ignore_ascii_case(name)) {
+        return Some(z.name);
+    }
+    LINKS
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(name))
+        .map(|(a, _)| *a)
+}
+
 /// Every canonical IANA zone name in the registry (for `Intl.supportedValuesOf("timeZone")`).
 pub fn canonical_zone_names() -> Vec<&'static str> {
     ZONES.iter().map(|z| z.name).collect()

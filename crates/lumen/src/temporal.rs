@@ -6325,14 +6325,16 @@ fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
     if is_pure_offset(t) {
         return Ok(Rc::from(offset_string(tz_offset_ns(t)).as_str()));
     }
-    if let Some(canon) = crate::tz::canonicalize(t) {
-        return Ok(Rc::from(canon));
+    // A named zone keeps its identifier as given (only case-normalized) — Temporal does not
+    // canonicalize aliases on construction; `equals`/`compare` do that.
+    if let Some(name) = crate::tz::registry_name(t) {
+        return Ok(Rc::from(name));
     }
     // A full ISO date/time string: its `[tz]` annotation names the zone; otherwise a `Z`/offset does.
     if let Some(p) = parse_iso(t) {
         if let Some(tzname) = p.tz {
-            if let Some(canon) = crate::tz::canonicalize(&tzname) {
-                return Ok(Rc::from(canon));
+            if let Some(name) = crate::tz::registry_name(&tzname) {
+                return Ok(Rc::from(name));
             }
             if is_pure_offset(&tzname) {
                 return Ok(Rc::from(offset_string(tz_offset_ns(&tzname)).as_str()));
@@ -6717,12 +6719,13 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
-        // Two ZonedDateTimes are equal iff same instant, same (canonical) time zone, same calendar.
+        // Two ZonedDateTimes are equal iff same instant, same *canonicalized* time zone, same calendar.
         let (e, _, tz) = as_zoned(i, &t)?;
         let tcal = cal_of(i, &t);
         let (oe, _, otz) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
         let ocal = input_cal(i, &arg(a, 0))?;
-        Ok(Value::Bool(e == oe && tz == otz && tcal == ocal))
+        let same_tz = crate::tz::canonicalize(&tz) == crate::tz::canonicalize(&otz);
+        Ok(Value::Bool(e == oe && same_tz && tcal == ocal))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error(
