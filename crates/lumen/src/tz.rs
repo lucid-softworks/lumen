@@ -4,6 +4,16 @@ use crate::tzdata::{Zone, LINKS, ZONES};
 
 /// The canonical registry name for a case-insensitive IANA zone id (`None` if unknown).
 pub fn canonicalize(name: &str) -> Option<&'static str> {
+    // Temporal canonicalizes every zero-offset GMT/UTC alias to "UTC" (Etc/GMT+N stay distinct).
+    let lc = name.to_ascii_lowercase();
+    if matches!(
+        lc.as_str(),
+        "utc" | "gmt" | "gmt0" | "gmt+0" | "gmt-0" | "etc/gmt" | "etc/gmt0" | "etc/gmt+0"
+            | "etc/gmt-0" | "etc/utc" | "etc/uct" | "uct" | "universal" | "etc/universal"
+            | "zulu" | "etc/zulu" | "greenwich" | "etc/greenwich"
+    ) {
+        return Some("UTC");
+    }
     if let Some(z) = ZONES.iter().find(|z| z.name.eq_ignore_ascii_case(name)) {
         return Some(z.name);
     }
