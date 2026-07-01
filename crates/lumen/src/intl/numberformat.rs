@@ -328,8 +328,13 @@ fn read_digit_options(i: &mut Interp, options: &Value, style: &str, cur_digits: 
     let min_int = read_range(i, options, "minimumIntegerDigits", 1, 21, 1)?;
     let mnfd = read_range_opt(i, options, "minimumFractionDigits", 0, 100)?;
     let mxfd = read_range_opt(i, options, "maximumFractionDigits", 0, 100)?;
-    let min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
-    let max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
+    let mut min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
+    let mut max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
+    // When only one significant-digit bound is given, the other defaults (min→1, max→21).
+    if min_sig.is_some() || max_sig.is_some() {
+        min_sig = Some(min_sig.unwrap_or(1));
+        max_sig = Some(max_sig.unwrap_or(21));
+    }
 
     let (default_min_frac, default_max_frac) = if style == "currency" {
         (cur_digits, cur_digits)
