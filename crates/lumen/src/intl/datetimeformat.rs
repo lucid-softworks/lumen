@@ -459,6 +459,16 @@ fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) 
         T::Time(_) => &["hour", "minute", "second", "fracsec", "dayperiod"],
         _ => return Ok(()), // DateTime / Instant / Zoned overlap everything
     };
+    // A date-only receiver rejects timeStyle, and a time-only receiver rejects dateStyle (the
+    // `required` vs dateStyle/timeStyle mismatch in CreateDateTimeFormat).
+    let has_style = |k: &str| o.borrow().props.contains(&format!("__dtf_{k}"));
+    let date_like = matches!(t, T::Date(_) | T::YearMonth(_) | T::MonthDay(_));
+    if date_like && has_style("timestyle") {
+        return Err(i.make_error("TypeError", "timeStyle cannot format a date-only Temporal value"));
+    }
+    if matches!(t, T::Time(_)) && has_style("datestyle") {
+        return Err(i.make_error("TypeError", "dateStyle cannot format a time-only Temporal value"));
+    }
     // A fully-defaulted formatter adapts its fields to the receiver, so it always overlaps.
     if o.borrow().props.contains("__dtf_defaults") {
         return Ok(());
