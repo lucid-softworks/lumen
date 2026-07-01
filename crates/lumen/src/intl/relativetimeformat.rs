@@ -4,7 +4,7 @@ use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
+use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
 use crate::value::{set_data, set_builtin, Value};
 
@@ -32,9 +32,17 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
-    let numeric = get_option(i, &options, "numeric", &["always", "auto"], Some("always"))?.unwrap();
+    // Read order: numberingSystem, style, numeric.
+    let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
+    if let Some(ns) = &numbering {
+        if !ns.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())) {
+            return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
+        }
+    }
+    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
     let style = get_option(i, &options, "style", &["long", "short", "narrow"], Some("long"))?
         .unwrap();
+    let numeric = get_option(i, &options, "numeric", &["always", "auto"], Some("always"))?.unwrap();
     let resolved = resolve_locale(i, &requested, &["nu"]);
 
     let obj = i.new_object();
@@ -45,7 +53,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__rtf_locale", Value::from_string(resolved.locale));
     set_builtin(&obj, "__rtf_numeric", Value::from_string(numeric));
     set_builtin(&obj, "__rtf_style", Value::from_string(style));
-    set_builtin(&obj, "__rtf_nu", Value::str("latn"));
+    set_builtin(&obj, "__rtf_nu", Value::from_string(numbering));
     Ok(Value::Obj(obj))
 }
 
