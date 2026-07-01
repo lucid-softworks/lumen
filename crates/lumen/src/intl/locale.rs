@@ -1,17 +1,13 @@
 //! `Intl.Locale` and the shared locale-support predicate.
 
-use super::{ab, canonicalize_locale_list, coerce_options, def_getter, get_string_option, make_service};
+use super::{ab, coerce_options, def_getter, make_service};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, Gc, Property, Value};
+use crate::value::{set_builtin, Gc, Value};
 
-/// Whether a canonical tag is "supported" by our (minimal) data. We accept any structurally valid
-/// tag whose language we have some data for, plus always `en`; locale negotiation elsewhere falls
-/// back to `en` regardless.
+/// Whether a canonical tag is serviced by our (minimal) locale data.
 #[allow(dead_code)]
 pub fn is_supported(tag: &str) -> bool {
-    // For supportedLocalesOf we report support only for locales we can actually service; today that
-    // is the base languages we ship data for. Unknown tags are simply dropped from the result.
     let lang = tag.split('-').next().unwrap_or("");
     matches!(
         lang,
@@ -19,59 +15,113 @@ pub fn is_supported(tag: &str) -> bool {
     )
 }
 
+// ---- subtag validators (the option grammar) --------------------------------------------------
+
+fn is_alpha(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
+}
+fn is_alnum(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+fn is_digit(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+fn valid_language(s: &str) -> bool {
+    ((s.len() >= 2 && s.len() <= 3) || (s.len() >= 5 && s.len() <= 8)) && is_alpha(s)
+}
+fn valid_script(s: &str) -> bool {
+    s.len() == 4 && is_alpha(s)
+}
+fn valid_region(s: &str) -> bool {
+    (s.len() == 2 && is_alpha(s)) || (s.len() == 3 && is_digit(s))
+}
+fn valid_variant_subtag(s: &str) -> bool {
+    (s.len() >= 5 && s.len() <= 8 && is_alnum(s))
+        || (s.len() == 4 && s.as_bytes()[0].is_ascii_digit() && is_alnum(s))
+}
+/// One or more "-"-joined variant subtags.
+fn valid_variants(s: &str) -> bool {
+    !s.is_empty() && s.split('-').all(valid_variant_subtag)
+}
+/// A Unicode keyword type: one or more "-"-joined 3..8 alnum subtags (used by ca/co/nu).
+fn valid_type(s: &str) -> bool {
+    !s.is_empty() && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && is_alnum(p))
+}
+
 pub fn install(it: &mut Interp, ns: &Gc) {
-    let (ctor, proto) = make_service(it, ns, "Locale", 1, locale_construct);
+    let (_ctor, proto) = make_service(it, ns, "Locale", 1, locale_construct);
 
     def_getter(it, &proto, "baseName", |i, this, _| {
-        Ok(Value::from_string(field(i, &this, "__locale_basename")))
+        Ok(Value::from_string(slot(i, &this, "__locale_basename")?))
     });
     def_getter(it, &proto, "language", |i, this, _| {
-        Ok(Value::from_string(field(i, &this, "__locale_language")))
+        Ok(Value::from_string(slot(i, &this, "__locale_language")?))
     });
-    def_getter(it, &proto, "script", |i, this, _| {
-        opt_field(i, &this, "__locale_script")
-    });
-    def_getter(it, &proto, "region", |i, this, _| {
-        opt_field(i, &this, "__locale_region")
-    });
-    def_getter(it, &proto, "calendar", |i, this, _| opt_field(i, &this, "__locale_ca"));
-    def_getter(it, &proto, "collation", |i, this, _| opt_field(i, &this, "__locale_co"));
-    def_getter(it, &proto, "hourCycle", |i, this, _| opt_field(i, &this, "__locale_hc"));
-    def_getter(it, &proto, "caseFirst", |i, this, _| opt_field(i, &this, "__locale_kf"));
-    def_getter(it, &proto, "numberingSystem", |i, this, _| {
-        opt_field(i, &this, "__locale_nu")
-    });
+    def_getter(it, &proto, "script", |i, this, _| opt_slot(i, &this, "__locale_script"));
+    def_getter(it, &proto, "region", |i, this, _| opt_slot(i, &this, "__locale_region"));
+    def_getter(it, &proto, "variants", |i, this, _| opt_slot(i, &this, "__locale_variants"));
+    def_getter(it, &proto, "calendar", |i, this, _| opt_slot(i, &this, "__locale_ca"));
+    def_getter(it, &proto, "collation", |i, this, _| opt_slot(i, &this, "__locale_co"));
+    def_getter(it, &proto, "hourCycle", |i, this, _| opt_slot(i, &this, "__locale_hc"));
+    def_getter(it, &proto, "caseFirst", |i, this, _| opt_slot(i, &this, "__locale_kf"));
+    def_getter(it, &proto, "firstDayOfWeek", |i, this, _| opt_slot(i, &this, "__locale_fw"));
+    def_getter(it, &proto, "numberingSystem", |i, this, _| opt_slot(i, &this, "__locale_nu"));
     def_getter(it, &proto, "numeric", |i, this, _| {
         let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
-        let v = o.borrow().props.get("__locale_kn").map(|p| p.value.clone());
-        Ok(Value::Bool(matches!(v, Some(Value::Str(s)) if &*s == "true" || s.is_empty())))
+        let present = o.borrow().props.contains("__locale_kn");
+        let is_false = matches!(
+            o.borrow().props.get("__locale_kn").map(|p| p.value.clone()),
+            Some(Value::Str(s)) if &*s == "false"
+        );
+        Ok(Value::Bool(present && !is_false))
     });
 
     it.def_method(&proto, "toString", 0, |i, this, _| {
-        Ok(Value::from_string(field(i, &this, "__locale_tag")))
+        Ok(Value::from_string(slot(i, &this, "__locale_tag")?))
     });
-    it.def_method(&proto, "maximize", 0, |_i, this, _| Ok(this));
-    it.def_method(&proto, "minimize", 0, |_i, this, _| Ok(this));
-
-    let _ = ctor;
+    it.def_method(&proto, "maximize", 0, |i, this, _| relocale(i, &this, true));
+    it.def_method(&proto, "minimize", 0, |i, this, _| relocale(i, &this, false));
 }
 
-fn field(i: &mut Interp, this: &Value, slot: &str) -> String {
-    match this.as_obj().and_then(|o| o.borrow().props.get(slot).map(|p| p.value.clone())) {
-        Some(Value::Str(s)) => s.to_string(),
-        _ => {
-            let _ = i;
-            String::new()
-        }
+fn slot(i: &mut Interp, this: &Value, name: &str) -> Result<String, Value> {
+    let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
+    match o.borrow().props.get(name).map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => Ok(s.to_string()),
+        _ => Err(i.make_error("TypeError", "receiver is not an Intl.Locale")),
     }
 }
 
-fn opt_field(i: &mut Interp, this: &Value, slot: &str) -> Result<Value, Value> {
+/// A getter whose result is the slot value (possibly `""`) when the slot exists, else `undefined`.
+fn opt_slot(i: &mut Interp, this: &Value, name: &str) -> Result<Value, Value> {
     let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
-    match o.borrow().props.get(slot).map(|p| p.value.clone()) {
-        Some(Value::Str(s)) if !s.is_empty() => Ok(Value::Str(s)),
+    if !o.borrow().props.contains("__locale_tag") {
+        return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
+    }
+    match o.borrow().props.get(name).map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => Ok(Value::Str(s)),
         _ => Ok(Value::Undefined),
     }
+}
+
+fn titlecase(s: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i == 0 {
+            out.extend(c.to_uppercase());
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// GetOption(options, prop, "string"): reads + ToStrings the option, or `None` if undefined.
+fn get_str(i: &mut Interp, options: &Value, prop: &str) -> Result<Option<String>, Value> {
+    let v = ab(i.get_member(options, prop))?;
+    if matches!(v, Value::Undefined) {
+        return Ok(None);
+    }
+    Ok(Some(ab(i.to_string(&v))?.to_string()))
 }
 
 fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
@@ -79,7 +129,6 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
         return Err(i.make_error("TypeError", "Intl.Locale requires 'new'"));
     }
     let tag_arg = super::arg(a, 0);
-    // The tag may be a string or another Locale.
     let mut base = match &tag_arg {
         Value::Str(s) => s.to_string(),
         Value::Obj(o) if o.borrow().props.contains("__locale_tag") => {
@@ -99,16 +148,41 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
 
     let options = coerce_options(i, &super::arg(a, 1))?;
 
-    // Options override the corresponding fields; here we apply the base-name overrides then the
-    // Unicode-extension keyword overrides by rebuilding the tag.
-    let language = get_string_option(i, &options, "language", &[], None)?;
-    let script = get_string_option(i, &options, "script", &[], None)?;
-    let region = get_string_option(i, &options, "region", &[], None)?;
-    let ca = get_string_option(i, &options, "calendar", &[], None)?;
-    let co = get_string_option(i, &options, "collation", &[], None)?;
-    let hc = get_string_option(i, &options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
-    let kf = get_string_option(i, &options, "caseFirst", &["upper", "lower", "false"], None)?;
-    let nu = get_string_option(i, &options, "numberingSystem", &[], None)?;
+    // ---- ApplyOptionsToTag: language / script / region / variants overrides -------------------
+    let mut parsed = tags::parse(&base).unwrap();
+
+    if let Some(l) = get_str(i, &options, "language")? {
+        if !valid_language(&l) {
+            return Err(i.make_error("RangeError", "invalid language option"));
+        }
+        parsed.language = l.to_lowercase();
+    }
+    if let Some(s) = get_str(i, &options, "script")? {
+        if !valid_script(&s) {
+            return Err(i.make_error("RangeError", "invalid script option"));
+        }
+        parsed.script = titlecase(&s);
+    }
+    if let Some(r) = get_str(i, &options, "region")? {
+        if !valid_region(&r) {
+            return Err(i.make_error("RangeError", "invalid region option"));
+        }
+        parsed.region = r.to_uppercase();
+    }
+    if let Some(v) = get_str(i, &options, "variants")? {
+        if !valid_variants(&v) {
+            return Err(i.make_error("RangeError", "invalid variants option"));
+        }
+        parsed.variants = v.to_lowercase().split('-').map(|s| s.to_string()).collect();
+    }
+
+    // ---- keyword options (calendar/collation/hourCycle/caseFirst/numeric/numberingSystem/…) ---
+    let ca = keyword_opt(i, &options, "calendar", &[], valid_type)?;
+    let co = keyword_opt(i, &options, "collation", &[], valid_type)?;
+    let fw = firstday_opt(i, &options)?;
+    let hc = keyword_opt(i, &options, "hourCycle", &["h11", "h12", "h23", "h24"], |_| true)?;
+    let kf = keyword_opt(i, &options, "caseFirst", &["upper", "lower", "false"], |_| true)?;
+    let nu = keyword_opt(i, &options, "numberingSystem", &[], valid_type)?;
     let kn = {
         let v = ab(i.get_member(&options, "numeric"))?;
         if matches!(v, Value::Undefined) {
@@ -118,32 +192,12 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
         }
     };
 
-    let mut parsed = tags::parse(&base).unwrap();
-    if let Some(l) = &language {
-        parsed.language = l.to_lowercase();
-    }
-    if let Some(s) = &script {
-        parsed.script = titlecase(s);
-    }
-    if let Some(r) = &region {
-        parsed.region = r.to_uppercase();
-    }
-    // Rebuild the base tag, then re-canonicalize with the Unicode-extension keywords applied.
-    let base_only = {
-        let mut t = parsed.clone();
-        t.unicode = None;
-        t.transform = None;
-        t.other_ext.clear();
-        t.private.clear();
-        tags::render(&t)
-    };
-
-    // Merge keyword overrides into the existing -u- keywords.
+    // Merge keyword overrides into the -u- extension.
     let (mut attrs, mut kws) = parsed.unicode.take().unwrap_or_default();
     let mut set_kw = |key: &str, val: Option<String>| {
         if let Some(v) = val {
             kws.retain(|(k, _)| k != key);
-            let types: Vec<String> = if v.is_empty() {
+            let types: Vec<String> = if v.is_empty() || v == "true" {
                 Vec::new()
             } else {
                 v.split('-').map(|s| s.to_string()).collect()
@@ -151,66 +205,116 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
             kws.push((key.to_string(), types));
         }
     };
-    set_kw("ca", ca.clone());
-    set_kw("co", co.clone());
-    set_kw("hc", hc.clone());
-    set_kw("kf", kf.clone());
-    set_kw("nu", nu.clone());
+    set_kw("ca", ca);
+    set_kw("co", co);
+    set_kw("fw", fw);
+    set_kw("hc", hc);
+    set_kw("kf", kf);
+    set_kw("nu", nu);
     if let Some(b) = kn {
         set_kw("kn", Some(if b { String::new() } else { "false".to_string() }));
     }
-    attrs.sort();
-    kws.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut full = tags::parse(&base_only).unwrap();
     if !attrs.is_empty() || !kws.is_empty() {
-        full.unicode = Some((attrs, kws.clone()));
+        attrs.sort();
+        kws.sort_by(|a, b| a.0.cmp(&b.0));
+        parsed.unicode = Some((attrs, kws));
+    } else {
+        parsed.unicode = None;
     }
-    let tag = tags::canonicalize_language_tag(&tags::render(&full))
-        .ok_or_else(|| i.make_error("RangeError", "invalid locale"))?;
 
+    let tag = tags::canonicalize_language_tag(&tags::render(&parsed))
+        .ok_or_else(|| i.make_error("RangeError", "invalid locale"))?;
+    build_locale_object(i, &tag)
+}
+
+/// Read a keyword string option, validating it against an explicit value set or a grammar check.
+fn keyword_opt(
+    i: &mut Interp,
+    options: &Value,
+    prop: &str,
+    values: &[&str],
+    valid: fn(&str) -> bool,
+) -> Result<Option<String>, Value> {
+    let v = ab(i.get_member(options, prop))?;
+    if matches!(v, Value::Undefined) {
+        return Ok(None);
+    }
+    let s = ab(i.to_string(&v))?.to_string();
+    let lower = s.to_lowercase();
+    if !values.is_empty() {
+        if !values.contains(&lower.as_str()) {
+            return Err(i.make_error("RangeError", format!("invalid {prop} option: {s}")));
+        }
+    } else if !valid(&lower) {
+        return Err(i.make_error("RangeError", format!("invalid {prop} option: {s}")));
+    }
+    Ok(Some(lower))
+}
+
+/// firstDayOfWeek accepts a weekday name (mon…sun) or a number 0-7; canonicalizes to the fw type.
+fn firstday_opt(i: &mut Interp, options: &Value) -> Result<Option<String>, Value> {
+    let v = ab(i.get_member(options, "firstDayOfWeek"))?;
+    if matches!(v, Value::Undefined) {
+        return Ok(None);
+    }
+    let s = ab(i.to_string(&v))?.to_string().to_lowercase();
+    let day = match s.as_str() {
+        "mon" | "1" => "mon",
+        "tue" | "2" => "tue",
+        "wed" | "3" => "wed",
+        "thu" | "4" => "thu",
+        "fri" | "5" => "fri",
+        "sat" | "6" => "sat",
+        "sun" | "7" => "sun",
+        "0" => "sun",
+        _ => return Err(i.make_error("RangeError", format!("invalid firstDayOfWeek: {s}"))),
+    };
+    Ok(Some(day.to_string()))
+}
+
+fn build_locale_object(i: &mut Interp, tag: &str) -> Result<Value, Value> {
     let obj = i.new_object();
     if let Some(proto) = i.extra_protos.get("Intl.Locale").cloned() {
         obj.borrow_mut().proto = Some(proto);
     }
-    let cparsed = tags::parse(&tag).unwrap();
-    set_builtin(&obj, "__locale_tag", Value::from_string(tag.clone()));
-    set_builtin(&obj, "__locale_basename", Value::from_string(base_name(&cparsed)));
-    set_builtin(&obj, "__locale_language", Value::from_string(cparsed.language.clone()));
-    set_builtin(&obj, "__locale_script", Value::from_string(cparsed.script.clone()));
-    set_builtin(&obj, "__locale_region", Value::from_string(cparsed.region.clone()));
-    if let Some((_a, keywords)) = &cparsed.unicode {
+    let p = tags::parse(tag).unwrap();
+    // baseName = language[-script][-region][-variants…] (no extensions).
+    let base = {
+        let mut b = p.clone();
+        b.unicode = None;
+        b.transform = None;
+        b.other_ext.clear();
+        b.private.clear();
+        tags::render(&b)
+    };
+    set_builtin(&obj, "__locale_tag", Value::from_string(tag.to_string()));
+    set_builtin(&obj, "__locale_basename", Value::from_string(base));
+    set_builtin(&obj, "__locale_language", Value::from_string(p.language.clone()));
+    if !p.script.is_empty() {
+        set_builtin(&obj, "__locale_script", Value::from_string(p.script.clone()));
+    }
+    if !p.region.is_empty() {
+        set_builtin(&obj, "__locale_region", Value::from_string(p.region.clone()));
+    }
+    if !p.variants.is_empty() {
+        set_builtin(&obj, "__locale_variants", Value::from_string(p.variants.join("-")));
+    }
+    if let Some((_a, keywords)) = &p.unicode {
         for (k, types) in keywords {
             let slot = format!("__locale_{k}");
-            let val = types.join("-");
-            set_builtin(&obj, Box::leak(slot.into_boxed_str()), Value::from_string(val));
+            set_builtin(
+                &obj,
+                Box::leak(slot.into_boxed_str()),
+                Value::from_string(types.join("-")),
+            );
         }
     }
-    let _ = canonicalize_locale_list;
     Ok(Value::Obj(obj))
 }
 
-fn base_name(t: &tags::LangTag) -> String {
-    let mut b = t.clone();
-    b.unicode = None;
-    b.transform = None;
-    b.other_ext.clear();
-    b.private.clear();
-    tags::render(&b)
+/// maximize/minimize require likely-subtags data we do not yet ship; return an equivalent Locale so
+/// the identity/shape of the result is correct even when the language is unchanged.
+fn relocale(i: &mut Interp, this: &Value, _maximize: bool) -> Result<Value, Value> {
+    let tag = slot(i, this, "__locale_tag")?;
+    build_locale_object(i, &tag)
 }
-
-fn titlecase(s: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i == 0 {
-            out.extend(c.to_uppercase());
-        } else {
-            out.extend(c.to_lowercase());
-        }
-    }
-    out
-}
-
-// Re-export the Property type usage to satisfy the unused-import lint in some builds.
-#[allow(unused)]
-type _P = Property;
