@@ -337,6 +337,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         ));
     }
 
+    // era and timeZoneName do not count toward ToDateTimeOptions' needDefaults check (only the date
+    // and time components do), so a formatter with only `era` still gets the default date components.
     let has_explicit = weekday.is_some()
         || year.is_some()
         || month.is_some()
@@ -344,7 +346,6 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         || hour.is_some()
         || minute.is_some()
         || second.is_some()
-        || era.is_some()
         || day_period.is_some()
         || frac_sec.is_some();
     let resolved = resolve_locale(i, &requested, &["ca", "nu", "hc"]);
