@@ -4757,6 +4757,33 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             },
         ))
     });
+    it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (d, _) = zoned_local(e, o);
+        let nt = match arg(a, 0) {
+            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            v => to_time(i, &v, &Value::Undefined)?,
+        };
+        let local = dt_ns(d, nt);
+        let off = offset_for_local(&tz, local);
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz },
+        ))
+    });
+    it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let (_, tm) = zoned_local(e, o);
+        let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
+        let local = dt_ns(nd, tm);
+        let off = offset_for_local(&tz, local);
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz },
+        ))
+    });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
         let o = to_instant(i, &arg(a, 0))?;
