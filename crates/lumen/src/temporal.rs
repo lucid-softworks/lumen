@@ -5015,6 +5015,52 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         Ok(v)
     });
 }
+/// CalendarMonthDayToISOReferenceDate for a non-ISO calendar: the reference ISO date is the latest
+/// date at or before 1972-12-31 (in the calendar) whose monthCode and day match the request, so a
+/// leap monthCode anchors to a year that actually has it. `snap` holds the already-read fields.
+fn cal_month_day_reference(i: &mut Interp, cal: &str, snap: &Gc, has_year: bool, ovf: Overflow) -> Result<IsoDate, Value> {
+    let ref_iso = IsoDate { year: 1972, month: 12, day: 31 };
+    let start_cy = cal_year_num(cal, ref_iso);
+    // Resolve the request in a candidate calendar year (day/month/monthCode from `snap`, year = `cy`).
+    let resolve = |i: &mut Interp, cy: i64| -> Result<IsoDate, Value> {
+        let merged = i.new_object();
+        for k in ["day", "month", "monthCode"] {
+            let fv = getm(i, &Value::Obj(snap.clone()), k)?;
+            if !matches!(fv, Value::Undefined) {
+                setm(&merged, k, fv);
+            }
+        }
+        setm(&merged, "year", Value::Num(cy as f64));
+        let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, ovf)?;
+        regulate_date(i, raw, ovf)
+    };
+    // If a year was supplied, resolve there (validating a leap month under reject); otherwise anchor
+    // at the reference year. Either way the request's monthCode is what we then search for.
+    let anchor = if has_year {
+        let merged = i.new_object();
+        for k in ["day", "era", "eraYear", "month", "monthCode", "year"] {
+            let fv = getm(i, &Value::Obj(snap.clone()), k)?;
+            if !matches!(fv, Value::Undefined) {
+                setm(&merged, k, fv);
+            }
+        }
+        let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, ovf)?;
+        regulate_date(i, raw, ovf)?
+    } else {
+        resolve(i, start_cy)?
+    };
+    let want = cal_month_code(cal, anchor);
+    // Search downward for the latest ISO date ≤ ref that has the wanted monthCode.
+    for cy in (start_cy - 24..=start_cy).rev() {
+        if let Ok(iso) = resolve(i, cy) {
+            if cal_month_code(cal, iso) == want && epoch_days(iso) <= epoch_days(ref_iso) {
+                return Ok(iso);
+            }
+        }
+    }
+    // Fallback: the anchor itself (should be unreachable for representable month-days).
+    Ok(anchor)
+}
 fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
     if let Some(Temporal::MonthDay(d)) = get(i, v) {
         to_overflow(i, opts)?;
@@ -5038,20 +5084,21 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
                 let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
                 Ok(IsoDate { year: 1972, month, day })
             } else {
-                // Resolve month/monthCode + day in the calendar, defaulting the year to the calendar
-                // year of a fixed reference ISO date.
-                let ref_year = cal_fields(&cal, IsoDate { year: 1972, month: 12, day: 31 }).0;
-                let merged = i.new_object();
-                setm(&merged, "year", Value::Num(ref_year as f64));
-                for k in ["year", "month", "monthCode", "day"] {
+                // Snapshot the caller's fields once (in the observable order), then resolve the
+                // reference date via the calendar-specific search.
+                let snap = i.new_object();
+                let mut has_year = false;
+                for k in ["day", "era", "eraYear", "month", "monthCode", "year"] {
                     let fv = getm(i, v, k)?;
                     if !matches!(fv, Value::Undefined) {
-                        setm(&merged, k, fv);
+                        if matches!(k, "year" | "era" | "eraYear") {
+                            has_year = true;
+                        }
+                        setm(&snap, k, fv);
                     }
                 }
                 let ovf = to_overflow(i, opts)?;
-                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
-                regulate_date(i, raw, ovf)
+                cal_month_day_reference(i, &cal, &snap, has_year, ovf)
             }
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainMonthDay")),
