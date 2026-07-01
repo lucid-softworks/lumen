@@ -83,15 +83,16 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         let digital_base = if plural == &"hours" { "numeric" } else { "2-digit" };
 
         let mut style = get_option(i, &options, plural, styles_list, None)?;
-        let mut display_default = "always";
+        // display defaults to "always" only for the primary clock units (hours/minutes/seconds).
+        let mut display_default = if matches!(*plural, "hours" | "minutes" | "seconds") {
+            "always"
+        } else {
+            "auto"
+        };
         if style.is_none() {
             if base_style == "digital" {
-                if !is_time {
-                    display_default = "auto";
-                }
                 style = Some(digital_base.to_string());
             } else {
-                display_default = "auto";
                 match prev_style.as_deref() {
                     Some("fractional") | Some("numeric") | Some("2-digit") => {
                         style = Some("numeric".to_string());
@@ -101,8 +102,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             }
         }
         let mut style = style.unwrap();
-        if style == "numeric" && is_subsecond {
-            style = "fractional".to_string();
+        let _ = is_subsecond;
+        if style == "fractional" {
             display_default = "auto";
         }
 
@@ -196,14 +197,12 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
             return Err(i.make_error("RangeError", "calendar unit out of range"));
         }
     }
-    let total_sec = vals[3] * 86400.0
-        + vals[4] * 3600.0
-        + vals[5] * 60.0
-        + vals[6]
-        + vals[7] / 1e3
-        + vals[8] / 1e6
-        + vals[9] / 1e9;
-    if total_sec.abs() > 9007199254740991.0 {
+    // The whole-second magnitude (days..seconds) must fit in 2^53-1; sub-second fields add at most
+    // one extra second toward the same sign, so they can only push a boundary value over.
+    let whole_sec = vals[3] * 86400.0 + vals[4] * 3600.0 + vals[5] * 60.0 + vals[6];
+    let sub_over = vals[7] != 0.0 || vals[8] != 0.0 || vals[9] != 0.0;
+    let limit = 9007199254740991.0;
+    if whole_sec.abs() > limit || (whole_sec.abs() == limit && sub_over) {
         return Err(i.make_error("RangeError", "duration time total out of range"));
     }
     Ok(vals)
