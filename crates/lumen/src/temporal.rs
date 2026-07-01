@@ -3760,7 +3760,13 @@ fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow
         }
     }
     if !has_month {
-        setm(&merged, "month", Value::Num(cm as f64));
+        // For leap-month calendars the month's identity is its monthCode (an ordinal shifts between
+        // leap and common years); carrying it over lets a year change reject/constrain correctly.
+        if matches!(cal, "hebrew" | "chinese" | "dangi") {
+            setm(&merged, "monthCode", Value::str(cal_month_code(cal, d).as_str()));
+        } else {
+            setm(&merged, "month", Value::Num(cm as f64));
+        }
     }
     if !has_day {
         setm(&merged, "day", Value::Num(cd as f64));
