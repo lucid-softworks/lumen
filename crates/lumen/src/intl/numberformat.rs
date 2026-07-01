@@ -939,14 +939,19 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         "currency" => {
             let code = get_str(o, "__nf_currency");
             let disp = get_str(o, "__nf_currencydisplay");
-            let sym = currency_symbol(&code, &disp);
-            // Accounting notation wraps in parentheses exactly when a minus sign would otherwise be
-            // shown (so `signDisplay:never` and sign-suppressed zeros are never wrapped).
+            let loc = get_str(o, "__nf_locale");
+            let lang = loc.split('-').next().unwrap_or("en");
+            let sym = currency_symbol_loc(lang, &code, &disp);
+            // Symbol placement is locale-specific (de puts it after with a NBSP).
+            let after = curr_symbol_after(lang);
+            let body = if after { format!("{num}\u{a0}{sym}") } else { format!("{sym}{num}") };
+            // Accounting wraps a negative in parentheses in symbol-before locales; symbol-after
+            // locales (de) keep the minus sign.
             let accounting = get_str(o, "__nf_currencysign") == "accounting";
-            if accounting && sign == "-" {
-                num = format!("({sym}{num})");
+            if accounting && sign == "-" && !after {
+                num = format!("({body})");
             } else {
-                num = format!("{sign}{sym}{num}");
+                num = format!("{sign}{body}");
             }
         }
         "unit" => {
@@ -962,6 +967,23 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     }
     let _ = i;
     num
+}
+
+/// Whether the currency symbol follows the amount (with a NBSP) in this locale.
+fn curr_symbol_after(lang: &str) -> bool {
+    matches!(lang, "de" | "fr" | "fi" | "sv" | "cs" | "sk" | "hu" | "pl" | "ru" | "pt")
+}
+
+/// The locale-aware currency symbol. For USD the default "symbol" form is "$" in en/de but "US$"
+/// elsewhere; "narrowSymbol" is always the plain "$".
+fn currency_symbol_loc(lang: &str, code: &str, display: &str) -> String {
+    if code == "USD" && (display == "symbol" || display.is_empty()) {
+        return if matches!(lang, "en" | "de") { "$" } else { "US$" }.to_string();
+    }
+    if code == "USD" && display == "narrowSymbol" {
+        return "$".to_string();
+    }
+    currency_symbol(code, display)
 }
 
 fn currency_symbol(code: &str, display: &str) -> String {
