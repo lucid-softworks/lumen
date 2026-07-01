@@ -136,6 +136,7 @@ struct DigitOpts {
     max_frac: u32,
     min_sig: Option<u32>,
     max_sig: Option<u32>,
+    mxfd_set: bool,
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
@@ -211,7 +212,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         .as_deref()
         .map(|c| currency_fraction_digits(&c.to_uppercase()))
         .unwrap_or(2);
-    let digits = read_digit_options(i, &options, &style, cur_digits)?;
+    let mut digits = read_digit_options(i, &options, &style, cur_digits)?;
 
     let rounding_increment = {
         let v = ab(i.get_member(&options, "roundingIncrement"))?;
@@ -254,6 +255,17 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             "TypeError",
             "roundingIncrement is only supported with fractionDigits rounding",
         ));
+    }
+    // With a roundingIncrement, maxFractionDigits must equal minFractionDigits: an explicit mismatch
+    // is a RangeError, and an unset maximum defaults down to the minimum.
+    if rounding_increment != 1 {
+        if digits.mxfd_set {
+            if digits.min_frac != digits.max_frac {
+                return Err(i.make_error("RangeError", "maximumFractionDigits must equal minimumFractionDigits with roundingIncrement"));
+            }
+        } else {
+            digits.max_frac = digits.min_frac;
+        }
     }
     let trailing_zero = get_option(
         i,
@@ -376,6 +388,7 @@ fn read_digit_options(i: &mut Interp, options: &Value, style: &str, cur_digits: 
         max_frac,
         min_sig,
         max_sig,
+        mxfd_set: mxfd.is_some(),
     })
 }
 
