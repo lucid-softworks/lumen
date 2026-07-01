@@ -2907,9 +2907,7 @@ fn install_typed_arrays(it: &mut Interp) {
             .props
             .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
         set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
-        // Static from/of construct through `this` (the constructor), so they work for every kind.
-        it.def_method(&ctor, "of", 0, ta_of);
-        it.def_method(&ctor, "from", 1, ta_from);
+        // from/of are inherited from %TypedArray% (they construct through `this`), not own here.
         set_builtin(&it.global, kind.name(), Value::Obj(ctor));
     }
     install_uint8_base64(it);
@@ -3138,7 +3136,7 @@ fn u8_set_bytes(
 }
 
 fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    if !this.is_callable() {
+    if !is_constructor_value(&this) {
         return Err(i.make_error("TypeError", "TypedArray.of requires a constructor receiver"));
     }
     let ta = ab(i.construct(this, &[Value::Num(args.len() as f64)]))?;
@@ -3148,7 +3146,7 @@ fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     Ok(ta)
 }
 fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    if !this.is_callable() {
+    if !is_constructor_value(&this) {
         return Err(i.make_error(
             "TypeError",
             "TypedArray.from requires a constructor receiver",
