@@ -63,17 +63,19 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
     it.def_method(&proto, "formatRange", 2, |i, this, a| {
-        let (s, e) = range_dates(i, &arg(a, 0), &arg(a, 1))?;
-        let a1 = do_format(i, &this, &Value::Num(s))?;
+        let o = brand_slot(i, &this, "__dtf")?;
+        let (s, e, kind) = range_dates(i, &o, &arg(a, 0), &arg(a, 1))?;
+        let a1 = do_format_ms(&o, s, kind);
         if s == e {
             return Ok(Value::from_string(a1));
         }
-        let a2 = do_format(i, &this, &Value::Num(e))?;
+        let a2 = do_format_ms(&o, e, kind);
         Ok(Value::from_string(format!("{a1}\u{2009}\u{2013}\u{2009}{a2}")))
     });
     it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
-        let (s, e) = range_dates(i, &arg(a, 0), &arg(a, 1))?;
-        let a1 = do_format(i, &this, &Value::Num(s))?;
+        let o = brand_slot(i, &this, "__dtf")?;
+        let (s, e, kind) = range_dates(i, &o, &arg(a, 0), &arg(a, 1))?;
+        let a1 = do_format_ms(&o, s, kind);
         let mk = |i: &mut Interp, src: &str, val: &str| {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str("literal"));
@@ -83,7 +85,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         };
         let mut parts = vec![mk(i, if s == e { "shared" } else { "startRange" }, &a1)];
         if s != e {
-            let a2 = do_format(i, &this, &Value::Num(e))?;
+            let a2 = do_format_ms(&o, e, kind);
             parts.push(mk(i, "shared", "\u{2009}\u{2013}\u{2009}"));
             parts.push(mk(i, "endRange", &a2));
         }
@@ -92,20 +94,24 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     install_format_getter(it, &proto);
 }
 
-/// ToDateTimeFormattable + ordering for a range: both endpoints ToNumber; NaN or start > end throws.
-fn range_dates(i: &mut Interp, a: &Value, b: &Value) -> Result<(f64, f64), Value> {
+/// Resolve both range endpoints (numbers or Temporal objects) to epoch-ms + kind. The two endpoints
+/// must be the same kind; NaN or start > end throws.
+fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64, u8), Value> {
     if matches!(a, Value::Undefined) || matches!(b, Value::Undefined) {
         return Err(i.make_error("TypeError", "formatRange requires two dates"));
     }
-    let s = ab(i.to_number(a))?;
-    let e = ab(i.to_number(b))?;
+    let (s, ks) = dtf_ms_kind(i, o, a)?;
+    let (e, ke) = dtf_ms_kind(i, o, b)?;
+    if ks != ke {
+        return Err(i.make_error("TypeError", "formatRange endpoints must be the same type"));
+    }
     if !s.is_finite() || !e.is_finite() {
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
     if s > e {
         return Err(i.make_error("RangeError", "start date is after end date"));
     }
-    Ok((s, e))
+    Ok((s, e, ks))
 }
 
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
@@ -438,8 +444,12 @@ fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) 
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
     let o = brand_slot(i, this, "__dtf")?;
     let (ms, kind) = dtf_ms_kind(i, &o, date)?;
-    let parts = build_parts(&o, ms, kind);
-    Ok(parts.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(""))
+    Ok(do_format_ms(&o, ms, kind))
+}
+
+/// Format an already-resolved epoch-ms + Temporal kind to the joined string.
+fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
+    build_parts(o, ms, kind).into_iter().map(|(_, v)| v).collect::<Vec<_>>().join("")
 }
 
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
@@ -449,6 +459,11 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // A Temporal receiver restricts the displayable fields: YearMonth drops day/weekday/time,
     // MonthDay drops year/weekday/time, Date/YearMonth/MonthDay drop time, Time drops date.
     let allow = |slot: &str| -> bool {
+        // A Temporal receiver without a time zone (any kind except 0/number and 6/Zoned) never
+        // shows a time-zone name.
+        if slot == "tzname" && matches!(kind, 1 | 2 | 3 | 4 | 5) {
+            return false;
+        }
         match kind {
             1 => !matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"), // Date
             2 => matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"),  // Time
@@ -562,6 +577,19 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
     }
 
+    // Time-zone name (UTC only; the display form depends on the requested style).
+    if let Some(style) = get("__dtf_tzname") {
+        let tz = match o.borrow().props.get("__dtf_tz").map(|p| p.value.clone()) {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => "UTC".to_string(),
+        };
+        let name = tz_display_name(&tz, &style);
+        if !parts.is_empty() {
+            lit(&mut parts, " ");
+        }
+        parts.push(("timeZoneName", name));
+    }
+
     if parts.is_empty() {
         // Default numeric date.
         parts.push(("month", format!("{mo}")));
@@ -571,6 +599,19 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         parts.push(("year", format!("{y}")));
     }
     parts
+}
+
+/// The time-zone display name for the (UTC) zone under a `timeZoneName` style.
+fn tz_display_name(tz: &str, style: &str) -> String {
+    if tz == "UTC" {
+        return match style {
+            "long" | "longGeneric" => "Coordinated Universal Time",
+            "longOffset" => "GMT",
+            _ => "UTC", // short, shortOffset, shortGeneric
+        }
+        .to_string();
+    }
+    tz.to_string()
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
