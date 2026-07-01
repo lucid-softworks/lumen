@@ -3,7 +3,7 @@
 use super::{ab, coerce_options, def_getter, make_service};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 /// Whether a canonical tag is serviced by our (minimal) locale data.
 #[allow(dead_code)]
@@ -114,15 +114,15 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "getTextInfo", 0, |i, this, _| {
         let _ = slot(i, &this, "__locale_tag")?;
         let o = i.new_object();
-        set_builtin(&o, "direction", Value::str("ltr"));
+        set_data(&o, "direction", Value::str("ltr"));
         Ok(Value::Obj(o))
     });
     it.def_method(&proto, "getWeekInfo", 0, |i, this, _| {
         let _ = slot(i, &this, "__locale_tag")?;
         let o = i.new_object();
-        set_builtin(&o, "firstDay", Value::Num(1.0));
-        set_builtin(&o, "weekend", i.make_array(vec![Value::Num(6.0), Value::Num(7.0)]));
-        set_builtin(&o, "minimalDays", Value::Num(1.0));
+        set_data(&o, "firstDay", Value::Num(1.0));
+        set_data(&o, "weekend", i.make_array(vec![Value::Num(6.0), Value::Num(7.0)]));
+        set_data(&o, "minimalDays", Value::Num(1.0));
         Ok(Value::Obj(o))
     });
 }
@@ -202,7 +202,10 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
         Value::Obj(_) => ab(i.to_string(&tag_arg))?.to_string(),
         _ => return Err(i.make_error("TypeError", "locale tag must be a string or Locale")),
     };
-    if !tags::is_structurally_valid_tag(&base) {
+    // Intl.Locale requires a full unicode_language_id (a language subtag); a private-use-only tag
+    // such as "x-foo" has no language and is rejected.
+    let has_language = tags::parse(&base).map(|p| !p.language.is_empty()).unwrap_or(false);
+    if !tags::is_structurally_valid_tag(&base) || !has_language {
         return Err(i.make_error("RangeError", format!("invalid language tag: {base}")));
     }
     base = tags::canonicalize_language_tag(&base)
