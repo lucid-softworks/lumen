@@ -3019,8 +3019,17 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
         2 => high.weeks += increment,
         _ => high.days += increment,
     }
-    let dl = epoch_days(add_date_dur(lo, low));
-    let dh = epoch_days(add_date_dur(lo, high));
+    // The boundary dates must be produced with the calendar's own month arithmetic (ISO
+    // `add_date_dur` would place month boundaries on the wrong days for a non-ISO calendar).
+    let cadd = |dur: IsoDuration| {
+        if is_month_structure(cal) {
+            cal_add_c(cal, lo, dur, 1)
+        } else {
+            add_date_dur(lo, dur)
+        }
+    };
+    let dl = epoch_days(cadd(low));
+    let dh = epoch_days(cadd(high));
     let dt = epoch_days(hi);
     let denom = (dh - dl) as f64;
     let fraction = if denom == 0.0 { 0.0 } else { (dt - dl) as f64 / denom };
@@ -3029,7 +3038,7 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     // Re-balance the rounded date back to `largest`. This uses the *greedy* difference (a clamped
     // month counts as whole), NOT DifferenceDate's clamp-backoff — the rounded duration is exact and
     // must be preserved (e.g. relativeTo + 11 months rounded to months stays 11, not 10mo+30d).
-    let result = diff_date_greedy(cal, lo, add_date_dur(lo, chosen), largest);
+    let result = diff_date_greedy(cal, lo, cadd(chosen), largest);
     if positive { result } else { neg_duration(result) }
 }
 
