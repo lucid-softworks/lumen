@@ -56,14 +56,30 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
             out
         }
         "word" => {
-            // Split runs of "word" characters (letters/digits) vs. non-word.
+            // Runs of "word" characters (letters/digits) vs. non-word, with UAX #29 infix handling:
+            // a MidNum/MidLetter/MidNumLet (e.g. "." or ",") between two word characters does not
+            // break, so "1.23" and "3,000" stay whole.
             let mut out = Vec::new();
             let mut idx = 0;
             while idx < n {
                 let start = idx;
                 let word = is_word_cu(s[idx]);
-                while idx < n && is_word_cu(s[idx]) == word {
+                if word {
                     idx += 1;
+                    while idx < n {
+                        if is_word_cu(s[idx]) {
+                            idx += 1;
+                        } else if idx + 1 < n && mid_joins(s[idx - 1], s[idx], s[idx + 1]) {
+                            idx += 2;
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    idx += 1;
+                    while idx < n && !is_word_cu(s[idx]) {
+                        idx += 1;
+                    }
                 }
                 out.push((start, word));
             }
@@ -91,6 +107,27 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
             }
             out
         }
+    }
+}
+
+fn is_num_cu(c: u16) -> bool {
+    (0x30..=0x39).contains(&c)
+}
+fn is_alpha_cu(c: u16) -> bool {
+    matches!(c, 0x41..=0x5A | 0x61..=0x7A) || c >= 0x80
+}
+
+/// Whether a MidNum/MidLetter/MidNumLet character `mid` joins its neighbours (UAX #29 WB6/7/11/12):
+/// MidNumLet (. ' ’ ⁄) joins two numbers or two letters; MidNum (, ;) only two numbers; MidLetter
+/// (: ·) only two letters.
+fn mid_joins(prev: u16, mid: u16, next: u16) -> bool {
+    let both_num = is_num_cu(prev) && is_num_cu(next);
+    let both_alpha = is_alpha_cu(prev) && is_alpha_cu(next);
+    match mid {
+        0x2E | 0x27 | 0x2019 | 0x2044 => both_num || both_alpha,
+        0x2C | 0x3B => both_num,
+        0x3A | 0x00B7 => both_alpha,
+        _ => false,
     }
 }
 
