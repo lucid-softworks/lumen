@@ -118,6 +118,12 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
             return Err(i.make_error("RangeError", "formatRange endpoints have different calendars"));
         }
     }
+    // The two endpoints must be the same type — a plain number/Date pairs only with another
+    // number/Date, and a Temporal value only with the same Temporal type (kind alone is too coarse:
+    // it lumps number/Date/Instant together).
+    if range_type_tag(i, a) != range_type_tag(i, b) {
+        return Err(i.make_error("TypeError", "formatRange endpoints must be the same type"));
+    }
     let (s, ks) = dtf_ms_kind(i, o, a)?;
     let (e, ke) = dtf_ms_kind(i, o, b)?;
     if ks != ke {
@@ -127,6 +133,26 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
     Ok((s, e, ks))
+}
+
+/// A type discriminant for formatRange: 0 = non-Temporal (number/Date), else the Temporal variant.
+fn range_type_tag(i: &Interp, v: &Value) -> u8 {
+    use crate::temporal::Temporal as T;
+    if let Some(o) = v.as_obj() {
+        if let Some(t) = i.temporal.get(&(Rc::as_ptr(o) as usize)) {
+            return match t {
+                T::Date(_) => 1,
+                T::Time(_) => 2,
+                T::DateTime(..) => 3,
+                T::YearMonth(_) => 4,
+                T::MonthDay(_) => 5,
+                T::Instant(_) => 6,
+                T::Zoned { .. } => 7,
+                T::Duration(_) => 8,
+            };
+        }
+    }
+    0
 }
 
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
