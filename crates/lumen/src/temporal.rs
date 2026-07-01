@@ -3152,13 +3152,14 @@ fn dur_field_add(m: &mut IsoDuration, unit: &str, delta: i64) {
 /// between the two candidate boundary datetimes.
 #[allow(clippy::too_many_arguments)]
 fn diff_datetime_rounded(
+    cal: &str,
     d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime,
     largest: &str, smallest: &str, increment: i64, mode: &str,
 ) -> IsoDuration {
     let smallest = sing(smallest);
     let is_cal = matches!(largest, "year" | "month" | "week");
     let base = if is_cal {
-        diff_datetime(d1, t1, d2, t2, largest)
+        diff_datetime(cal, d1, t1, d2, t2, largest)
     } else {
         balance_ns(dt_ns(d2, t2) - dt_ns(d1, t1), largest)
     };
@@ -3194,7 +3195,7 @@ fn diff_datetime_rounded(
     let chosen = if up { high } else { low };
     let (rd, rt) = add_dt_dur(lo_d, lo_t, &chosen);
     let result = if is_cal {
-        diff_datetime(lo_d, lo_t, rd, rt, largest)
+        diff_datetime(cal, lo_d, lo_t, rd, rt, largest)
     } else {
         balance_ns(dt_ns(rd, rt) - dt_ns(lo_d, lo_t), largest)
     };
@@ -3279,7 +3280,7 @@ fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, 
 
 /// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
 /// date part and balancing the remaining time-of-day, with a borrow when the end time is earlier.
-fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &str) -> IsoDuration {
+fn diff_datetime(cal: &str, d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &str) -> IsoDuration {
     let a = dt_ns(d1, t1);
     let b = dt_ns(d2, t2);
     if a == b {
@@ -3302,7 +3303,7 @@ fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &s
             day: da,
         };
     }
-    let mut out = diff_date(sd, end_date, largest); // years/months/weeks/days (positive)
+    let mut out = diff_date_cal(cal, sd, end_date, largest); // years/months/weeks/days (positive)
     let time = balance_ns(tdiff as i128, "hour");
     out.hours = time.hours;
     out.minutes = time.minutes;
@@ -4595,14 +4596,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_datetime_rounded(d, tm, od, otm, &largest, &smallest, incr, &mode);
+        let cal = cal_of(i, &t);
+        let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_datetime_rounded(d, tm, od, otm, &largest, &smallest, incr, negate_mode(&mode));
+        let cal = cal_of(i, &t);
+        let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
 
