@@ -31,12 +31,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         Ok(Value::from_string(format_string(i, &this, &arg(a, 0))?))
     });
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
-        // A single literal part carrying the whole string (sufficient for the shape tests).
-        let s = format_string(i, &this, &arg(a, 0))?;
-        let ob = i.new_object();
-        set_data(&ob, "type", Value::str("literal"));
-        set_data(&ob, "value", Value::from_string(s));
-        Ok(i.make_array(vec![Value::Obj(ob)]))
+        format_to_parts(i, &this, &arg(a, 0))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
 }
@@ -297,7 +292,29 @@ fn new_service(i: &mut Interp, service: &str, locale: &str, opts: Gc) -> Result<
     ab(i.construct(ctor, &[Value::from_string(locale.to_string()), Value::Obj(opts)]))
 }
 
+/// One formatted piece: NumberFormat part `type`/`value`, plus the singular `unit` it belongs to
+/// (`None` for a `:` time separator literal).
+type DurPart = (String, String, Option<String>);
+
 fn format_string(i: &mut Interp, this: &Value, dur: &Value) -> Result<String, Value> {
+    let (groups, list_style, locale) = partition(i, this, dur)?;
+    let strings: Vec<String> = groups
+        .iter()
+        .map(|g| g.iter().map(|(_, v, _)| v.as_str()).collect::<String>())
+        .collect();
+    let lf_opts = i.new_object();
+    set_data(&lf_opts, "type", Value::str("unit"));
+    set_data(&lf_opts, "style", Value::from_string(list_style));
+    let lf = new_service(i, "ListFormat", &locale, lf_opts)?;
+    let arr = i.make_array(strings.into_iter().map(Value::from_string).collect());
+    let fmt = ab(i.get_member(&lf, "format"))?;
+    let out = ab(i.call(fmt, lf, &[arr]))?;
+    Ok(if let Value::Str(s) = out { s.to_string() } else { String::new() })
+}
+
+/// PartitionDurationFormatPattern producing the formatted list, and each group's typed parts, ready
+/// to be either joined (format) or substituted into ListFormat's element parts (formatToParts).
+fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPart>>, String, String), Value> {
     let o = brand_slot(i, this, "__df")?;
     let vals = read_duration(i, dur)?;
     let locale = get_str(&o, "__df_locale");
@@ -308,8 +325,8 @@ fn format_string(i: &mut Interp, this: &Value, dur: &Value) -> Result<String, Va
         _ => None,
     };
 
-    let mut group_strings: Vec<String> = Vec::new();
-    let mut cur_group: Option<String> = None; // an in-progress numeric "hh:mm:ss" group
+    let mut groups: Vec<Vec<DurPart>> = Vec::new();
+    let mut cur_group: Option<Vec<DurPart>> = None; // an in-progress numeric "hh:mm:ss" group
     let mut display_negative_sign = true;
 
     let mut idx = 0;
@@ -390,20 +407,35 @@ fn format_string(i: &mut Interp, this: &Value, dur: &Value) -> Result<String, Va
             }
 
             let nf = new_service(i, "NumberFormat", &locale, nf_opts)?;
-            let fmt = ab(i.get_member(&nf, "format"))?;
-            let num_str = ab(i.call(fmt, nf.clone(), &[Value::Num(value)]))?;
-            let num_str = if let Value::Str(s) = num_str { s.to_string() } else { String::new() };
+            let ftp = ab(i.get_member(&nf, "formatToParts"))?;
+            let parts_arr = ab(i.call(ftp, nf.clone(), &[Value::Num(value)]))?;
+            // Read the {type,value} objects into (type,value,unit=singular) parts.
+            let len = ab(i.get_member(&parts_arr, "length"))?;
+            let len = if let Value::Num(n) = len { n as usize } else { 0 };
+            let mut parts: Vec<DurPart> = Vec::with_capacity(len);
+            for k in 0..len {
+                let el = ab(i.get_member(&parts_arr, &k.to_string()))?;
+                let ty = match ab(i.get_member(&el, "type"))? {
+                    Value::Str(s) => s.to_string(),
+                    _ => String::new(),
+                };
+                let va = match ab(i.get_member(&el, "value"))? {
+                    Value::Str(s) => s.to_string(),
+                    _ => String::new(),
+                };
+                parts.push((ty, va, Some(sing.to_string())));
+            }
 
             match &mut cur_group {
                 Some(g) => {
-                    g.push(':');
-                    g.push_str(&num_str);
+                    g.push(("literal".to_string(), ":".to_string(), None));
+                    g.extend(parts);
                 }
                 None => {
                     if style == "2-digit" || style == "numeric" {
-                        cur_group = Some(num_str);
+                        cur_group = Some(parts);
                     } else {
-                        group_strings.push(num_str);
+                        groups.push(parts);
                     }
                 }
             }
@@ -413,32 +445,73 @@ fn format_string(i: &mut Interp, this: &Value, dur: &Value) -> Result<String, Va
             break;
         }
         // A group ends when the next non-numeric unit begins; flush before a standalone unit.
-        if let Some(g) = &cur_group {
+        if cur_group.is_some() {
             let next_numeric = idx + 1 < UNITS.len() && {
                 let ns = get_str(&o, &format!("__df_u_{}", UNITS[idx + 1].0));
                 ns == "numeric" || ns == "2-digit"
             };
             if !next_numeric {
-                group_strings.push(g.clone());
-                cur_group = None;
+                groups.push(cur_group.take().unwrap());
             }
         }
         idx += 1;
     }
     if let Some(g) = cur_group {
-        group_strings.push(g);
+        groups.push(g);
     }
 
-    // Join with a unit-style ListFormat (digital -> short).
-    let list_style = if base_style == "digital" { "short" } else { base_style.as_str() };
+    let list_style = if base_style == "digital" { "short".to_string() } else { base_style };
+    Ok((groups, list_style, locale))
+}
+
+fn format_to_parts(i: &mut Interp, this: &Value, dur: &Value) -> Result<Value, Value> {
+    let (mut groups, list_style, locale) = partition(i, this, dur)?;
+    let strings: Vec<String> = groups
+        .iter()
+        .map(|g| g.iter().map(|(_, v, _)| v.as_str()).collect::<String>())
+        .collect();
+    // Run the group strings through ListFormat.formatToParts; each "element" part expands to that
+    // group's typed sub-parts, while list "literal" parts are kept verbatim.
     let lf_opts = i.new_object();
     set_data(&lf_opts, "type", Value::str("unit"));
-    set_data(&lf_opts, "style", Value::str(list_style));
+    set_data(&lf_opts, "style", Value::from_string(list_style));
     let lf = new_service(i, "ListFormat", &locale, lf_opts)?;
-    let arr = i.make_array(group_strings.into_iter().map(Value::from_string).collect());
-    let fmt = ab(i.get_member(&lf, "format"))?;
-    let out = ab(i.call(fmt, lf, &[arr]))?;
-    Ok(if let Value::Str(s) = out { s.to_string() } else { String::new() })
+    let arr = i.make_array(strings.into_iter().map(Value::from_string).collect());
+    let ftp = ab(i.get_member(&lf, "formatToParts"))?;
+    let list_parts = ab(i.call(ftp, lf, &[arr]))?;
+    let len = match ab(i.get_member(&list_parts, "length"))? {
+        Value::Num(n) => n as usize,
+        _ => 0,
+    };
+    let mut out: Vec<Value> = Vec::new();
+    let mut giter = groups.drain(..);
+    for k in 0..len {
+        let el = ab(i.get_member(&list_parts, &k.to_string()))?;
+        let ty = match ab(i.get_member(&el, "type"))? {
+            Value::Str(s) => s.to_string(),
+            _ => String::new(),
+        };
+        if ty == "element" {
+            if let Some(group) = giter.next() {
+                for (pty, pval, unit) in group {
+                    let ob = i.new_object();
+                    set_data(&ob, "type", Value::from_string(pty));
+                    set_data(&ob, "value", Value::from_string(pval));
+                    if let Some(u) = unit {
+                        set_data(&ob, "unit", Value::from_string(u));
+                    }
+                    out.push(Value::Obj(ob));
+                }
+            }
+        } else {
+            let va = ab(i.get_member(&el, "value"))?;
+            let ob = i.new_object();
+            set_data(&ob, "type", Value::from_string(ty));
+            set_data(&ob, "value", va);
+            out.push(Value::Obj(ob));
+        }
+    }
+    Ok(i.make_array(out))
 }
 
 /// The fractional seconds/ms/us value combining sub-second fields, truncated as a decimal string
