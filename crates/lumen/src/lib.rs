@@ -33,6 +33,7 @@ mod modules;
 mod parser;
 mod regex;
 mod temporal;
+mod numbering;
 mod token;
 mod tz;
 #[rustfmt::skip]

@@ -865,10 +865,26 @@ fn unit_wrap(num: &str, unit: &str, display: &str) -> String {
     }
 }
 
+/// Replace the ASCII digits of a formatted number with the glyphs of numbering system `nu` (a no-op
+/// for `latn` or an unknown system).
+fn xlate_digits(s: &str, nu: &str) -> String {
+    if nu == "latn" {
+        return s.to_string();
+    }
+    match crate::numbering::NUMBERING.iter().find(|(id, _)| *id == nu) {
+        Some((_, glyphs)) => s
+            .chars()
+            .map(|c| if c.is_ascii_digit() { glyphs[c as usize - '0' as usize] } else { c })
+            .collect(),
+        None => s.to_string(),
+    }
+}
+
 fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value> {
     let o = instance(i, this)?;
     let n = to_intl_number(i, x)?;
-    Ok(Value::from_string(assemble_number(i, &o, n)))
+    let s = assemble_number(i, &o, n);
+    Ok(Value::from_string(xlate_digits(&s, &get_str(&o, "__nf_nu"))))
 }
 
 /// The trailing-affix classification for this formatter's parts (compact suffix vs plain).
@@ -892,12 +908,15 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
     let o = instance(i, this)?;
     let n = to_intl_number(i, x)?;
     let whole = assemble_number(i, &o, n);
+    let nu = get_str(&o, "__nf_nu");
     let parts = decompose_parts(&whole, &suffix_type_of(&o));
     let arr: Vec<Value> = parts
         .into_iter()
         .map(|(t, v)| {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
+            // Localize the digits of numeric parts to the numbering system.
+            let v = if matches!(t, "integer" | "fraction") { xlate_digits(&v, &nu) } else { v };
             set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })
