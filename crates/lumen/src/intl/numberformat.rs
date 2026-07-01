@@ -1395,10 +1395,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         put(i, &res, "minimumFractionDigits", "__nf_minfrac");
         put(i, &res, "maximumFractionDigits", "__nf_maxfrac");
     }
-    put(i, &res, "roundingIncrement", "__nf_roundingincrement");
-    put(i, &res, "roundingMode", "__nf_roundingmode");
-    put(i, &res, "roundingPriority", "__nf_roundingpriority");
-    put(i, &res, "trailingZeroDisplay", "__nf_trailingzero");
+    // useGrouping/notation/compactDisplay/signDisplay precede the rounding options in key order.
     set_data(&res, "useGrouping", o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto")));
     put(i, &res, "notation", "__nf_notation");
     // compactDisplay only appears when notation is compact.
@@ -1406,5 +1403,9 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         put(i, &res, "compactDisplay", "__nf_compactdisplay");
     }
     put(i, &res, "signDisplay", "__nf_signdisplay");
+    put(i, &res, "roundingIncrement", "__nf_roundingincrement");
+    put(i, &res, "roundingMode", "__nf_roundingmode");
+    put(i, &res, "roundingPriority", "__nf_roundingpriority");
+    put(i, &res, "trailingZeroDisplay", "__nf_trailingzero");
     Ok(Value::Obj(res))
 }
