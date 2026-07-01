@@ -42,8 +42,17 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
+    // numberingSystem (read right after localeMatcher, validated as a type identifier).
+    let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
+    if let Some(ns) = &numbering {
+        if !ns.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())) {
+            return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
+        }
+    }
+    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
     let style = get_option(i, &options, "style", &["long", "short", "narrow", "digital"], Some("short"))?
         .unwrap();
+
     let resolved = resolve_locale(i, &requested, &["nu"]);
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.DurationFormat") {
@@ -51,8 +60,63 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     set_builtin(&obj, "__df", Value::Bool(true));
     set_builtin(&obj, "__df_locale", Value::from_string(resolved.locale));
-    set_builtin(&obj, "__df_style", Value::from_string(style));
-    set_builtin(&obj, "__df_nu", Value::str("latn"));
+    set_builtin(&obj, "__df_style", Value::from_string(style.clone()));
+    set_builtin(&obj, "__df_nu", Value::from_string(numbering));
+
+    // Per-unit style + display options (read in unit order). Each unit's default style depends on
+    // the base style; a following-numeric constraint applies for time units.
+    let mut prev_numeric = false;
+    for (idx, (plural, _sing)) in UNITS.iter().enumerate() {
+        let is_time = idx >= 4; // hours..nanoseconds
+        let is_frac_capable = idx >= 7; // ms/us/ns
+        let allowed: &[&str] = if is_frac_capable {
+            &["long", "short", "narrow", "numeric", "2-digit", "fractional"]
+        } else if is_time {
+            &["long", "short", "narrow", "numeric", "2-digit"]
+        } else {
+            &["long", "short", "narrow"]
+        };
+        let default_style = match style.as_str() {
+            "digital" if is_time => "numeric",
+            s => s,
+        };
+        let unit_style = get_option(i, &options, plural, allowed, Some(default_style))?.unwrap();
+        // A numeric/2-digit time unit may not be followed by a long/short/narrow one.
+        if prev_numeric && matches!(unit_style.as_str(), "long" | "short" | "narrow") {
+            return Err(i.make_error(
+                "RangeError",
+                format!("{plural} style conflicts with a preceding numeric unit"),
+            ));
+        }
+        let display_prop = format!("{plural}Display");
+        let default_display = if unit_style == "numeric" || unit_style == "2-digit" {
+            "always"
+        } else {
+            "auto"
+        };
+        let display = get_option(i, &options, &display_prop, &["always", "auto"], Some(default_display))?
+            .unwrap();
+        set_builtin(&obj, Box::leak(format!("__df_u_{plural}").into_boxed_str()), Value::from_string(unit_style.clone()));
+        set_builtin(&obj, Box::leak(format!("__df_d_{plural}").into_boxed_str()), Value::from_string(display));
+        prev_numeric = matches!(unit_style.as_str(), "numeric" | "2-digit");
+    }
+
+    // fractionalDigits (0..9).
+    let frac = {
+        let v = ab(i.get_member(&options, "fractionalDigits"))?;
+        if matches!(v, Value::Undefined) {
+            None
+        } else {
+            let n = ab(i.to_number(&v))?;
+            if n.fract() != 0.0 || n < 0.0 || n > 9.0 {
+                return Err(i.make_error("RangeError", "fractionalDigits out of range"));
+            }
+            Some(n as u32)
+        }
+    };
+    if let Some(f) = frac {
+        set_builtin(&obj, "__df_frac", Value::Num(f as f64));
+    }
     Ok(Value::Obj(obj))
 }
 
@@ -133,5 +197,13 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     set_data(&res, "locale", get("__df_locale"));
     set_data(&res, "numberingSystem", get("__df_nu"));
     set_data(&res, "style", get("__df_style"));
+    // Per-unit style + display, in unit order.
+    for (plural, _sing) in UNITS {
+        set_data(&res, plural, get(&format!("__df_u_{plural}")));
+        set_data(&res, Box::leak(format!("{plural}Display").into_boxed_str()), get(&format!("__df_d_{plural}")));
+    }
+    if o.borrow().props.contains("__df_frac") {
+        set_data(&res, "fractionalDigits", get("__df_frac"));
+    }
     Ok(Value::Obj(res))
 }
