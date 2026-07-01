@@ -438,10 +438,12 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
     let max_sig = get_num(o, "__nf_maxsig");
 
     let increment = get_num(o, "__nf_roundingincrement").unwrap_or(1);
+    let mode = get_str(o, "__nf_roundingmode");
+    let mode = if mode.is_empty() { "halfExpand".to_string() } else { mode };
     let mut s = if let Some(msig) = max_sig {
-        round_significant(x, msig, min_sig.unwrap_or(1))
+        round_significant_dec(x, msig, min_sig.unwrap_or(1), &mode)
     } else {
-        round_fraction_inc(x, min_frac, max_frac, increment)
+        round_fraction_dec(x, min_frac, max_frac, increment, &mode)
     };
     // Pad integer digits to min_int.
     {
@@ -466,19 +468,100 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
     s
 }
 
-/// Round `x` to at most `max_frac` fraction digits (half-expand), snapping to a multiple of
-/// `increment` at the `max_frac` scale, and pad to `min_frac`.
-fn round_fraction_inc(x: f64, min_frac: u32, max_frac: u32, increment: u32) -> String {
-    let factor = 10f64.powi(max_frac as i32);
-    let scaled = x * factor;
-    let rounded = if increment > 1 {
-        let inc = increment as f64;
-        (scaled / inc).round() * inc / factor
+/// The shortest round-trip decimal digits of `|x|` as (integer_digits, fraction_digits). Rounding is
+/// performed on this decimal expansion (not the binary f64) so `1.015` rounds like the source `1.015`.
+fn decimal_digits(x: f64) -> (String, String) {
+    let s = format!("{}", x.abs());
+    match s.split_once('.') {
+        Some((a, b)) => (a.to_string(), b.to_string()),
+        None => (s, String::new()),
+    }
+}
+
+/// Round the decimal `int_str.frac_str` to `keep` fraction digits (may be negative, rounding integer
+/// places), snapping to a multiple of `inc` at that scale, per the ECMA-402 `mode`. Returns the exact
+/// decimal string (unsigned, `keep` fraction digits when `keep > 0`, no min-frac padding).
+fn round_decimal(int_str: &str, frac_str: &str, keep: i32, inc: u32, mode: &str, negative: bool) -> String {
+    let mut digits: Vec<u8> = int_str.bytes().chain(frac_str.bytes()).map(|b| b - b'0').collect();
+    let point = int_str.len() as i32;
+    let cut = point + keep; // number of leading digits retained as the coefficient
+    if cut <= 0 {
+        // Everything is discarded; the only possible non-zero result is a single rounded-up unit.
+        let any = digits.iter().any(|&d| d != 0);
+        let up = round_up_decision(mode, negative, /*rem*/ 0.0, /*frac*/ if any { 0.5001 } else { 0.0 }, inc);
+        let val = if up { inc as u128 } else { 0 };
+        return place_decimal(&val.to_string(), keep);
+    }
+    let cut = cut as usize;
+    if digits.len() < cut {
+        digits.resize(cut, 0);
+    }
+    let retained: String = digits[..cut].iter().map(|d| (d + b'0') as char).collect();
+    let discarded = &digits[cut..];
+    // The discarded tail as a fraction of one retained unit (short string → exact enough to compare).
+    let frac = if discarded.is_empty() {
+        0.0
     } else {
-        scaled.round() / factor
+        let s: String = discarded.iter().map(|d| (d + b'0') as char).collect();
+        format!("0.{s}").parse::<f64>().unwrap_or(0.0)
     };
-    let mut s = format!("{:.*}", max_frac as usize, rounded);
-    if increment == 1 && max_frac > min_frac && s.contains('.') {
+    let Ok(c) = retained.parse::<u128>() else {
+        // Coefficient too large for exact arithmetic; emit unrounded (huge integers seldom round).
+        return place_decimal(&retained, keep);
+    };
+    let rem = (c % inc.max(1) as u128) as f64;
+    let up = round_up_decision(mode, negative, rem, frac, inc);
+    let base = c - (c % inc.max(1) as u128);
+    let result = if up { base + inc as u128 } else { base };
+    place_decimal(&result.to_string(), keep)
+}
+
+/// Reconstruct a decimal string from an integer coefficient at scale `10^-keep`.
+fn place_decimal(coeff: &str, keep: i32) -> String {
+    if keep <= 0 {
+        return format!("{coeff}{}", "0".repeat((-keep) as usize));
+    }
+    let keep = keep as usize;
+    let padded = if coeff.len() <= keep {
+        format!("{:0>width$}", coeff, width = keep + 1)
+    } else {
+        coeff.to_string()
+    };
+    let split = padded.len() - keep;
+    format!("{}.{}", &padded[..split], &padded[split..])
+}
+
+/// Whether to round the coefficient up by one increment, given the discarded position `rem + frac`
+/// (in increment units, `rem` an integer remainder and `frac` in [0,1)) under ECMA-402 `mode`.
+fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32) -> bool {
+    let position = rem + frac;
+    let half = inc as f64 / 2.0;
+    let some = position > 0.0;
+    match mode {
+        "trunc" => false,
+        "expand" => some,
+        "ceil" => some && !negative,
+        "floor" => some && negative,
+        "halfTrunc" => position > half,
+        "halfExpand" => position >= half,
+        "halfCeil" => position > half || (position == half && !negative),
+        "halfFloor" => position > half || (position == half && negative),
+        "halfEven" => {
+            // Tie → round toward the multiple whose quotient is even.
+            position > half || (position == half && (((rem / inc as f64).round() as i64) % 2 != 0))
+        }
+        _ => position >= half, // halfExpand default
+    }
+}
+
+/// Round `x` to at most `max_frac` fraction digits, snapping to `increment`, per `mode`; pad to
+/// `min_frac`.
+fn round_fraction_dec(x: f64, min_frac: u32, max_frac: u32, increment: u32, mode: &str) -> String {
+    let (int_str, frac_str) = decimal_digits(x);
+    let negative = x.is_sign_negative();
+    let mut s = round_decimal(&int_str, &frac_str, max_frac as i32, increment.max(1), mode, negative);
+    // Trim trailing zeros beyond min_frac (only meaningful without an increment > 1).
+    if increment <= 1 && max_frac > min_frac && s.contains('.') {
         while s.ends_with('0') {
             let frac_len = s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
             if frac_len as u32 <= min_frac {
@@ -493,50 +576,29 @@ fn round_fraction_inc(x: f64, min_frac: u32, max_frac: u32, increment: u32) -> S
     s
 }
 
-/// Round `x` to at most `max_frac` fraction digits (half-expand) and pad to `min_frac`.
-#[allow(dead_code)]
-fn round_fraction(x: f64, min_frac: u32, max_frac: u32) -> String {
-    let factor = 10f64.powi(max_frac as i32);
-    let rounded = (x * factor).round() / factor;
-    let mut s = format!("{:.*}", max_frac as usize, rounded);
-    // Trim trailing zeros beyond min_frac.
-    if max_frac > min_frac && s.contains('.') {
-        while s.ends_with('0') {
-            let frac_len = s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
-            if frac_len as u32 <= min_frac {
-                break;
-            }
-            s.pop();
-        }
-        if s.ends_with('.') {
-            s.pop();
-        }
-    }
-    s
-}
-
-/// Round `x` to `max_sig` significant digits, ensuring at least `min_sig` are shown.
-fn round_significant(x: f64, max_sig: u32, min_sig: u32) -> String {
+/// Round `x` to `max_sig` significant digits (per `mode`), keeping at least `min_sig`.
+fn round_significant_dec(x: f64, max_sig: u32, min_sig: u32, mode: &str) -> String {
     if x == 0.0 {
         if min_sig > 1 {
             return format!("0.{}", "0".repeat((min_sig - 1) as usize));
         }
         return "0".to_string();
     }
-    let d = x.abs().log10().floor() as i32; // position of the most-significant digit
-    let round_pos = max_sig as i32 - 1 - d; // fraction digits to keep
-    let factor = 10f64.powi(round_pos);
-    let rounded = (x * factor).round() / factor;
-    let frac_digits = round_pos.max(0) as usize;
-    let mut s = format!("{:.*}", frac_digits, rounded);
-    // Trim to min_sig if there are excess trailing zeros.
+    let (int_str, frac_str) = decimal_digits(x);
+    let negative = x.is_sign_negative();
+    // Position of the most-significant digit (0 = ones place, positive = 10^k, negative = 10^-k).
+    let int_trim = int_str.trim_start_matches('0');
+    let msd: i32 = if !int_trim.is_empty() {
+        int_trim.len() as i32 - 1
+    } else {
+        // Leading zeros in the fraction push the first significant digit right.
+        -(1 + frac_str.bytes().take_while(|&b| b == b'0').count() as i32)
+    };
+    let keep = max_sig as i32 - 1 - msd; // fraction digits to retain
+    let mut s = round_decimal(&int_str, &frac_str, keep, 1, mode, negative);
+    // Trim trailing fractional zeros down to min_sig significant digits.
     if s.contains('.') {
-        let significant = |t: &str| {
-            t.chars()
-                .filter(|c| c.is_ascii_digit())
-                .skip_while(|c| *c == '0')
-                .count()
-        };
+        let significant = |t: &str| t.chars().filter(|c| c.is_ascii_digit()).skip_while(|c| *c == '0').count();
         while s.ends_with('0') && significant(&s) as u32 > min_sig {
             s.pop();
         }
@@ -546,6 +608,7 @@ fn round_significant(x: f64, max_sig: u32, min_sig: u32) -> String {
     }
     s
 }
+
 
 fn group_integer(int_part: &str, grouping: &Value, sep: &str, sizes: (usize, usize)) -> String {
     let enabled = !matches!(grouping, Value::Bool(false));
@@ -625,8 +688,8 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         let mag = if notation == "compact" && !has_sig {
             // roundingPriority "morePrecision" over (max 0 fraction) and (max 2 significant): pick
             // whichever shows more fraction digits (ties keep the integer/fraction result).
-            let s_frac = round_fraction_inc(value.abs(), 0, 0, 1);
-            let s_sig = round_significant(value.abs(), 2, 1);
+            let s_frac = round_fraction_dec(value.abs(), 0, 0, 1, "halfExpand");
+            let s_sig = round_significant_dec(value.abs(), 2, 1, "halfExpand");
             let fd = |s: &str| s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
             if fd(&s_sig) > fd(&s_frac) {
                 s_sig
