@@ -245,6 +245,16 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("auto"),
     )?
     .unwrap();
+    // A roundingIncrement other than 1 is only valid with fraction-digit rounding: it is incompatible
+    // with significant digits or a morePrecision/lessPrecision priority (TypeError, per the spec).
+    if rounding_increment != 1
+        && (digits.min_sig.is_some() || digits.max_sig.is_some() || rounding_priority != "auto")
+    {
+        return Err(i.make_error(
+            "TypeError",
+            "roundingIncrement is only supported with fractionDigits rounding",
+        ));
+    }
     let trailing_zero = get_option(
         i,
         &options,

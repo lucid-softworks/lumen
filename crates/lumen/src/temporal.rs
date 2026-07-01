@@ -2941,18 +2941,21 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
         cal_add_c(cal, a, IsoDuration { years: y, months: m, ..Default::default() }, dir)
     };
     let a_dom = cal_fields(cal, a).2;
+    let a_code = cal_month_code(cal, a);
     let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
-    // A whole unit reached exactly at `b` only via day-clamping (`a`'s day doesn't fit the shorter
-    // target month) is not complete when moving *forward*. Moving backward the clamped unit counts
-    // (matching ICU4X: e.g. a leap year's last day back one year lands on the common year's last day).
+    // A whole month reached exactly at `b` only because `a`'s day was clamped to a shorter target
+    // month is not complete when moving *forward* (backward it counts, per ICU4X).
     let clamped_at = |m: IsoDate| dir > 0 && cmp_date(m, b) == 0 && cal_fields(cal, m).2 < a_dom;
+    // The year step additionally must preserve the monthCode: landing on `b` only after a leap
+    // monthCode was constrained to its plain form (M04L → M04 in a non-leap year) is not a whole year.
+    let year_clamped = |m: IsoDate| clamped_at(m) || (dir > 0 && cmp_date(m, b) == 0 && cal_month_code(cal, m) != a_code);
     // Largest year magnitude that has not passed `b`, backing off a clamped exact landing.
     let mut years = 0i64;
     if largest == "year" {
         while !passed(addc(years + 1, 0)) {
             years += 1;
         }
-        if years > 0 && clamped_at(addc(years, 0)) {
+        if years > 0 && year_clamped(addc(years, 0)) {
             years -= 1;
         }
     }
