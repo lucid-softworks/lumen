@@ -532,18 +532,18 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         }
         exponent = Some(e);
     }
-    if value.is_infinite() {
-        let sign = if negative { "-" } else { "" };
-        return format!("{sign}∞");
-    }
-    let mag = format_magnitude(value.abs(), o);
-    let (int_part, frac_part) = match mag.split_once('.') {
-        Some((a, b)) => (a.to_string(), Some(b.to_string())),
-        None => (mag.clone(), None),
+    let (int_part, frac_part) = if value.is_infinite() {
+        ("\u{221e}".to_string(), None)
+    } else {
+        let mag = format_magnitude(value.abs(), o);
+        match mag.split_once('.') {
+            Some((a, b)) => (a.to_string(), Some(b.to_string())),
+            None => (mag.clone(), None),
+        }
     };
     let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
     // Grouping is suppressed in scientific/engineering notation.
-    let grouped = if exponent.is_some() {
+    let grouped = if exponent.is_some() || value.is_infinite() {
         int_part.clone()
     } else {
         group_integer(&int_part, &grouping)
@@ -603,7 +603,13 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             let code = get_str(o, "__nf_currency");
             let disp = get_str(o, "__nf_currencydisplay");
             let sym = currency_symbol(&code, &disp);
-            num = format!("{sign}{sym}{num}");
+            // Accounting notation wraps a negative amount in parentheses instead of a minus sign.
+            let accounting = get_str(o, "__nf_currencysign") == "accounting";
+            if accounting && negative && !is_zero {
+                num = format!("({sym}{num})");
+            } else {
+                num = format!("{sign}{sym}{num}");
+            }
         }
         "unit" => {
             let unit = get_str(o, "__nf_unit");
