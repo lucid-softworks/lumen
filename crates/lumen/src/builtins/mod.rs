@@ -2317,7 +2317,10 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         } else {
             Value::Num(ab(i.to_number(&arg(args, 1)))?)
         };
-        if actual < 0.0 || actual >= len as f64 {
+        // IsValidIntegerIndex is re-checked against the *current* length: coercing the value may
+        // have grown or shrunk a resizable backing buffer.
+        let cur_len = i.ta_len(&info).unwrap_or(0);
+        if actual < 0.0 || actual >= cur_len as f64 {
             return Err(i.make_error("RangeError", "invalid TypedArray index"));
         }
         let actual = actual as usize;
@@ -2670,24 +2673,19 @@ fn ta_native(
                 return Ok(Value::Num(-1.0));
             }
             let last = method == "lastIndexOf";
-            // fromIndex: ToIntegerOrInfinity; default is 0 (indexOf) / len-1 (lastIndexOf). Computed
-            // against the captured length.
-            let from = match args.get(1) {
-                Some(v) if !matches!(v, Value::Undefined) => {
-                    let n = ab(i.to_number(v))?;
-                    if n.is_nan() {
-                        0.0
-                    } else {
-                        n.trunc()
-                    }
+            // fromIndex: ToIntegerOrInfinity when *present* (even if explicitly `undefined`, which
+            // coerces to 0); the default when absent is 0 (indexOf) / len-1 (lastIndexOf).
+            let from = if args.len() >= 2 {
+                let n = ab(i.to_number(&arg(args, 1)))?;
+                if n.is_nan() {
+                    0.0
+                } else {
+                    n.trunc()
                 }
-                _ => {
-                    if last {
-                        (len - 1) as f64
-                    } else {
-                        0.0
-                    }
-                }
+            } else if last {
+                (len - 1) as f64
+            } else {
+                0.0
             };
             // Argument coercion may have detached/resized the buffer; re-derive the live length
             // (indexOf/lastIndexOf only inspect indices that still HasProperty, i.e. in-bounds).
@@ -2723,6 +2721,10 @@ fn ta_native(
         })()),
         "includes" => Some((|| {
             let search = arg(args, 0);
+            // A zero-length array is false before ToIntegerOrInfinity(fromIndex) runs any user code.
+            if len == 0 {
+                return Ok(Value::Bool(false));
+            }
             let from = match args.get(1) {
                 Some(v) if !matches!(v, Value::Undefined) => {
                     let n = ab(i.to_number(v))?;
@@ -2836,6 +2838,18 @@ fn ta_native(
                 ab(i.ta_store(&new_info, k, &v))?;
             }
             Ok(new_ta)
+        })()),
+        "reverse" => Some((|| {
+            if i.immutable_buffers.contains(&info.buffer) {
+                return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+            }
+            for k in 0..len / 2 {
+                let a = i.ta_read(&info, k);
+                let b = i.ta_read(&info, len - 1 - k);
+                ab(i.ta_store(&info, k, &b))?;
+                ab(i.ta_store(&info, len - 1 - k, &a))?;
+            }
+            Ok(this.clone())
         })()),
         "slice" => Some((|| {
             let start = rel_index(ab(i.to_number(&arg(args, 0)))?, len);
@@ -3483,7 +3497,7 @@ fn install_typed_arrays(it: &mut Interp) {
         // Each method's `length` matches its required-parameter count.
         let len = match *name {
             "copyWithin" | "slice" | "subarray" | "with" => 2,
-            "keys" | "values" | "entries" | "toReversed" => 0,
+            "keys" | "values" | "entries" | "toReversed" | "reverse" => 0,
             _ => 1,
         };
         it.def_method(&ta_proto, name, len, *f);
