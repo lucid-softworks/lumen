@@ -947,6 +947,8 @@ impl Interp {
         let name = func.name.clone().unwrap_or_default();
         let is_arrow = func.is_arrow;
         let is_method = func.is_method;
+        let is_generator = func.is_generator;
+        let is_async = func.is_async;
         {
             let mut b = obj.borrow_mut();
             b.call = Callable::User(func, env);
@@ -959,9 +961,11 @@ impl Interp {
                 Property::data(Value::from_string(name), false, false, true),
             );
         }
-        // Concise methods / getters / setters / arrows are not constructors and have no own
-        // `prototype`; ordinary function declarations/expressions (and generators) do.
-        if !is_arrow && !is_method {
+        // A `prototype` is present on ordinary functions and on generators (even generator methods);
+        // arrows, async functions, and concise methods/getters/setters have none. Only ordinary
+        // functions are constructors (generators/async are not, despite generators having a prototype).
+        let has_prototype = !is_arrow && !is_async && (!is_method || is_generator);
+        if has_prototype {
             let proto = self.new_object();
             proto
                 .borrow_mut()
@@ -971,6 +975,8 @@ impl Interp {
                 "prototype",
                 Property::data(Value::Obj(proto), true, false, false),
             );
+        }
+        if !is_arrow && !is_method && !is_async && !is_generator {
             obj.borrow_mut().is_constructor = true;
         }
         Value::Obj(obj)
