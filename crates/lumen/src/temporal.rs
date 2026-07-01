@@ -2597,8 +2597,35 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
     }
     match v {
         Value::Undefined => Ok(None),
+        Value::Obj(_) => {
+            // A `timeZone` field, if a string, must be a valid time-zone identifier (offset, named
+            // zone, or an ISO string carrying a `[...]` annotation — a bare date-time string is not).
+            let tzv = getm(i, &v, "timeZone")?;
+            if let Value::Str(s) = &tzv {
+                validate_tz_string(i, s)?;
+            }
+            Ok(Some(to_date(i, &v, &Value::Undefined)?))
+        }
         _ => Ok(Some(to_date(i, &v, &Value::Undefined)?)),
     }
+}
+
+/// Validate a time-zone identifier string per ToTemporalTimeZoneIdentifier: an offset, a named zone,
+/// or an ISO date/time string whose `[...]` annotation is itself a valid zone. RangeError otherwise.
+fn validate_tz_string(i: &Interp, s: &str) -> Result<(), Value> {
+    let t = s.trim();
+    if t.starts_with('+') || t.starts_with('-') {
+        return normalize_tz(i, t).map(|_| ());
+    }
+    if crate::tz::canonicalize(t).is_some() {
+        return Ok(());
+    }
+    if let Some(p) = parse_iso(t) {
+        if let Some(tz) = p.tz {
+            return validate_tz_string(i, &tz);
+        }
+    }
+    Err(i.make_error("RangeError", "invalid time zone identifier"))
 }
 
 /// Add a duration to a date+time, carrying the time overflow into the date.
