@@ -2043,35 +2043,36 @@ fn regulate_time(i: &Interp, v: [i64; 6], ovf: Overflow) -> Result<IsoTime, Valu
 
 /// ToTemporalDate: accept a PlainDate/PlainDateTime, a fields object, or an ISO string. `opts`
 /// supplies the `overflow` option (validated as an options object).
-/// Like [`to_date`], but also returns the resolved calendar id.
-fn to_date_cal(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
-    let cal: std::rc::Rc<str> = match get(i, v) {
-        Some(Temporal::Date(_))
-        | Some(Temporal::DateTime(_, _))
-        | Some(Temporal::YearMonth(_))
-        | Some(Temporal::MonthDay(_)) => cal_of(i, v),
-        _ => match v {
-            Value::Str(s) => {
-                let parsed = parse_iso(s).and_then(|p| p.calendar);
-                match parsed {
-                    Some(c) if KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()) => {
-                        std::rc::Rc::from(c.to_lowercase().as_str())
-                    }
-                    Some(_) => std::rc::Rc::from("iso8601"),
-                    None => std::rc::Rc::from("iso8601"),
-                }
-            }
-            Value::Obj(_) => {
-                let c = getm(i, v, "calendar")?;
-                match &c {
-                    Value::Undefined => std::rc::Rc::from("iso8601"),
-                    Value::Str(_) => check_calendar(i, &c)?,
-                    _ => std::rc::Rc::from("iso8601"),
-                }
+/// Extract the calendar id from a Temporal-like input (Temporal object, ISO string, or property bag).
+fn input_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
+    if get(i, v).is_some() {
+        return Ok(cal_of(i, v));
+    }
+    Ok(match v {
+        Value::Str(s) => match parse_iso(s).and_then(|p| p.calendar) {
+            Some(c) if KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()) => {
+                std::rc::Rc::from(c.to_lowercase().as_str())
             }
             _ => std::rc::Rc::from("iso8601"),
         },
-    };
+        Value::Obj(_) => {
+            let c = getm(i, v, "calendar")?;
+            match &c {
+                Value::Str(_) => check_calendar(i, &c)?,
+                _ => std::rc::Rc::from("iso8601"),
+            }
+        }
+        _ => std::rc::Rc::from("iso8601"),
+    })
+}
+
+fn datetime_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
+    input_cal(i, v)
+}
+
+/// Like [`to_date`], but also returns the resolved calendar id.
+fn to_date_cal(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
+    let cal = input_cal(i, v)?;
     let d = to_date(i, v, opts)?;
     Ok((d, cal))
 }
@@ -2746,14 +2747,19 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let ms = to_int_default(i, &arg(a, 6), 0)?;
         let us = to_int_default(i, &arg(a, 7), 0)?;
         let ns = to_int_default(i, &arg(a, 8), 0)?;
-        check_calendar(i, &arg(a, 9))?;
+        let cal = check_calendar(i, &arg(a, 9))?;
         let d = build_date(i, year, month, day)?;
         let tm = build_time(i, hour, minute, second, ms, us, ns)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let (d, tm) = to_datetime(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        let cal = datetime_cal(i, &arg(a, 0))?;
+        let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let (xd, xt) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
@@ -2974,7 +2980,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         require_new(i)?;
         let year = to_int(i, &arg(a, 0))?;
         let month = to_int(i, &arg(a, 1))?;
-        check_calendar(i, &arg(a, 2))?;
+        let cal = check_calendar(i, &arg(a, 2))?;
         let day = to_int_default(i, &arg(a, 3), 1)?;
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month as u8) as i64 {
             return Err(i.make_error("RangeError", "invalid year-month"));
@@ -2982,7 +2988,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         if !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "year-month is outside the supported range"));
         }
-        Ok(make(
+        let v = make(
             i,
             "Temporal.PlainYearMonth",
             Temporal::YearMonth(IsoDate {
@@ -2990,11 +2996,16 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
                 month: month as u8,
                 day: day as u8,
             }),
-        ))
+        );
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
+        let cal = input_cal(i, &arg(a, 0))?;
         let d = to_yearmonth(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(d)))
+        let v = make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
@@ -3068,14 +3079,19 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         require_new(i)?;
         let month = to_int(i, &arg(a, 0))?;
         let day = to_int(i, &arg(a, 1))?;
-        check_calendar(i, &arg(a, 2))?;
+        let cal = check_calendar(i, &arg(a, 2))?;
         let year = to_int_default(i, &arg(a, 3), 1972)?;
         let d = build_date(i, year, month, day)?;
-        Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
+        let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
+        let cal = input_cal(i, &arg(a, 0))?;
         let d = to_monthday(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
+        let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
 }
 fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
