@@ -60,7 +60,7 @@ fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> 
     let (o, a, b) = range_endpoints(i, this, x, y)?;
     let stype = suffix_type_of(&o);
     let mut out: Vec<Value> = Vec::new();
-    let mut push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
+    let push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
         for (t, v) in decompose_parts(whole, &stype) {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
