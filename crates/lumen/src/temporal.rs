@@ -711,6 +711,38 @@ fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: 
     }
     Ok(cal_add_c(cal, d, dur, sign))
 }
+/// Months in year `y` of a month-structure calendar (13 for coptic/ethiopic, 12 or 13 for Hebrew).
+fn cal_months_in_year(cal: &str, y: i64) -> i64 {
+    if cal == "hebrew" {
+        hebrew_months_in_year(y)
+    } else if is_13month(cal) {
+        13
+    } else {
+        12
+    }
+}
+/// The (year, month) `k` calendar months after `lo`'s month (Hebrew walks month-by-month because its
+/// months-per-year varies).
+fn cal_month_advance(cal: &str, lo: IsoDate, k: i64) -> (i64, i64) {
+    let f = cal_fields(cal, lo);
+    let (ly, lm) = (f.0, f.1);
+    if cal == "hebrew" {
+        let (mut y, mut m) = (ly, lm);
+        for _ in 0..k {
+            m += 1;
+            if m > hebrew_months_in_year(y) {
+                m = 1;
+                y += 1;
+            }
+        }
+        (y, m)
+    } else {
+        let mpy = cal_months_in_year(cal, ly);
+        let total = ly * mpy + (lm - 1) + k;
+        (total.div_euclid(mpy), total.rem_euclid(mpy) + 1)
+    }
+}
+
 /// Constrain-only calendar add (clamps the day to the target month).
 fn cal_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
     let f = cal_fields(cal, d);
@@ -2370,15 +2402,34 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
         return IsoDuration::default();
     }
     let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
-    let mpy = cal_fields(cal, lo).4;
+    let lf = cal_fields(cal, lo);
+    let (ly, lm, cd) = (lf.0, lf.1, lf.2);
+    // The largest whole-month offset `k` such that `lo`'s day exists in month `k` (no clamping) and
+    // the resulting date is ≤ `hi`. A month whose length is < cd simply doesn't count, but a later
+    // (longer) month still can, so we keep scanning until even the 1st of month k exceeds `hi`.
     let mut months = 0i64;
-    while cmp_date(cal_add_c(cal, lo, IsoDuration { months: months + 1, ..Default::default() }, 1), hi) <= 0 {
-        months += 1;
+    let mut k = 1i64;
+    loop {
+        let (ny, nm) = cal_month_advance(cal, lo, k);
+        if cmp_date(cal_to_iso(cal, ny, nm, 1), hi) > 0 {
+            break;
+        }
+        if cd <= cal_month_len(cal, ny, nm) && cmp_date(cal_to_iso(cal, ny, nm, cd), hi) <= 0 {
+            months = k;
+        }
+        k += 1;
     }
-    let mid = cal_add_c(cal, lo, IsoDuration { months, ..Default::default() }, 1);
+    let (fy, fm) = cal_month_advance(cal, lo, months);
+    let mid = cal_to_iso(cal, fy, fm, cd);
     let days = epoch_days(hi) - epoch_days(mid);
     let (years, months) = if largest == "year" {
-        (months.div_euclid(mpy), months.rem_euclid(mpy))
+        let mut years = fy - ly;
+        let mut months = fm - lm;
+        if months < 0 {
+            years -= 1;
+            months += cal_months_in_year(cal, fy - 1);
+        }
+        (years, months)
     } else {
         (0, months)
     };
