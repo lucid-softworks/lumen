@@ -3694,6 +3694,7 @@ fn default_constructor(derived: bool) -> Function {
         expr_body: false,
         is_generator: false,
         is_async: false,
+        is_method: false,
     }
 }
 

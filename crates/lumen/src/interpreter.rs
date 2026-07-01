@@ -946,6 +946,7 @@ impl Interp {
             .count();
         let name = func.name.clone().unwrap_or_default();
         let is_arrow = func.is_arrow;
+        let is_method = func.is_method;
         {
             let mut b = obj.borrow_mut();
             b.call = Callable::User(func, env);
@@ -958,8 +959,9 @@ impl Interp {
                 Property::data(Value::from_string(name), false, false, true),
             );
         }
-        if !is_arrow {
-            // Non-arrow functions get a fresh `prototype` object with a back-reference.
+        // Concise methods / getters / setters / arrows are not constructors and have no own
+        // `prototype`; ordinary function declarations/expressions (and generators) do.
+        if !is_arrow && !is_method {
             let proto = self.new_object();
             proto
                 .borrow_mut()
@@ -2197,8 +2199,10 @@ impl Interp {
                 r
             }
             Callable::User(func, env) => {
-                if func.is_arrow {
-                    return Err(self.throw("TypeError", "arrow functions are not constructors"));
+                // Arrows, concise methods, getters/setters, generators and async functions have no
+                // [[Construct]].
+                if func.is_arrow || func.is_method || func.is_generator || func.is_async {
+                    return Err(self.throw("TypeError", "this function is not a constructor"));
                 }
                 // OrdinaryCreateFromConstructor: the new instance's prototype comes from new.target.
                 let proto = match self.get_member(&new_target, "prototype")? {

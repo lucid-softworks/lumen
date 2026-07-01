@@ -370,6 +370,9 @@ pub struct Function {
     pub expr_body: bool,
     pub is_generator: bool,
     pub is_async: bool,
+    /// A concise method / getter / setter: has no own `prototype` and is not a constructor (the
+    /// class `constructor` member is re-flagged false once identified).
+    pub is_method: bool,
 }
 
 #[derive(Debug, Clone)]

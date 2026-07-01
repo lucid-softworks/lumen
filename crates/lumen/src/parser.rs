@@ -2190,6 +2190,7 @@ impl Parser {
             expr_body: false,
             is_generator,
             is_async,
+            is_method: false,
         })
     }
 
@@ -2318,6 +2319,7 @@ impl Parser {
                 expr_body: false,
                 is_generator: false,
                 is_async: false,
+                is_method: false,
             };
             return Ok(vec![ClassMember {
                 key: PropKey::Ident(String::new()),
@@ -2371,7 +2373,7 @@ impl Parser {
         let key = self.parse_prop_key()?;
 
         if self.is_punct("(") {
-            let func = self.parse_method_function_kind(is_generator, is_async)?;
+            let mut func = self.parse_method_function_kind(is_generator, is_async)?;
             if matches!(kind, MemberKind::Get | MemberKind::Set) {
                 check_accessor_arity(&func, kind == MemberKind::Get).map_err(|m| ParseError {
                     message: m,
@@ -2379,6 +2381,8 @@ impl Parser {
                 })?;
             }
             let kind = if kind == MemberKind::Method && !is_static && key_is(&key, "constructor") {
+                // The class `constructor` is the class's [[Construct]] — not a mere method.
+                func.is_method = false;
                 MemberKind::Constructor
             } else {
                 kind
@@ -2444,6 +2448,7 @@ impl Parser {
             expr_body: false,
             is_generator,
             is_async,
+            is_method: true,
         })
     }
 
@@ -2594,6 +2599,7 @@ impl Parser {
                 expr_body: false,
                 is_generator: false,
                 is_async,
+                is_method: false,
             }
         } else {
             let expr = self.parse_assign()?;
@@ -2606,6 +2612,7 @@ impl Parser {
                 expr_body: true,
                 is_generator: false,
                 is_async,
+                is_method: false,
             }
         };
         self.in_async = sa;
