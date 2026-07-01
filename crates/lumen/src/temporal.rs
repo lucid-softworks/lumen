@@ -6177,9 +6177,25 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         Ok(Value::BigInt(as_instant(i, &t)?))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
-        let ns = as_instant(i, &t)?;
-        let z = ns.div_euclid(86_400_000_000_000) as i64;
-        let rem = ns.rem_euclid(86_400_000_000_000) as i64;
+        let ns_utc = as_instant(i, &t)?;
+        let opts = arg(a, 0);
+        // A timeZone option shifts the displayed local time and shows that zone's offset (a
+        // date-time string's [IANA] annotation names the zone); otherwise the instant renders as UTC.
+        let (local, suffix) = if let Value::Obj(_) = &opts {
+            let tzv = getm(i, &opts, "timeZone")?;
+            if matches!(tzv, Value::Undefined) {
+                (ns_utc, "Z".to_string())
+            } else {
+                let s = i.to_string(&tzv).map_err(unab)?;
+                let tz = normalize_tz(i, &s)?;
+                let off = zone_offset(&tz, ns_utc);
+                (ns_utc + off as i128, offset_string(off))
+            }
+        } else {
+            (ns_utc, "Z".to_string())
+        };
+        let z = local.div_euclid(86_400_000_000_000) as i64;
+        let rem = local.rem_euclid(86_400_000_000_000) as i64;
         let (y, mo, da) = civil_from_days(z);
         let secs = rem / 1_000_000_000;
         let t = IsoTime {
@@ -6190,15 +6206,12 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             us: ((rem / 1000) % 1000) as u16,
             ns: (rem % 1000) as u16,
         };
-        let ts = fmt_time_opts(i, t, &arg(a, 0))?;
+        let ts = fmt_time_opts(i, t, &opts)?;
         Ok(Value::str(format!(
-            "{}T{}Z",
-            fmt_date(IsoDate {
-                year: y,
-                month: mo,
-                day: da
-            }),
-            ts
+            "{}T{}{}",
+            fmt_date(IsoDate { year: y, month: mo, day: da }),
+            ts,
+            suffix
         )))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
