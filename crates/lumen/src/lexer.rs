@@ -18,6 +18,16 @@ struct Lexer<'a> {
     nl_pending: bool,
     /// Set while reading a string that contained a legacy octal / `\8` / `\9` escape.
     pending_legacy: bool,
+    /// One entry per open `{`: `true` if it opened a block/function body (statement position),
+    /// `false` if an object literal (expression position). Used to disambiguate a `/` after `}`.
+    brace_stack: Vec<bool>,
+    /// Classification of the most recently closed `}` (`true` = a block). A `/` after a block-closing
+    /// `}` begins a regex; after an object-literal-closing `}` it is division.
+    last_close_block: bool,
+    /// One entry per `function` keyword whose body has not opened yet: `true` if the function is an
+    /// *expression* (so its body `}` is followed by division), `false` if a *declaration* (its `}`
+    /// ends a statement, so a `/` after it is a regex).
+    pending_fn: Vec<bool>,
 }
 
 /// Tokenize `src`. A lex error is reported as a SyntaxError by the caller.
@@ -30,6 +40,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
         out: Vec::new(),
         nl_pending: false,
         pending_legacy: false,
+        brace_stack: Vec::new(),
+        last_close_block: false,
+        pending_fn: Vec::new(),
     };
     lx.run()?;
     Ok(lx.out)
@@ -70,12 +83,70 @@ impl<'a> Lexer<'a> {
             ) => false,
             Some(Tok::Ident(_)) => false,
             Some(Tok::Keyword(k)) => !matches!(*k, "this" | "super" | "true" | "false" | "null"),
-            Some(Tok::Punct(p)) => !matches!(*p, ")" | "]" | "}"),
+            // A `/` after `)` or `]` is division; after `}` it depends on whether the `}` closed a
+            // block (statement → regex) or an object literal (value → division).
+            Some(Tok::Punct(p)) => match *p {
+                ")" | "]" => false,
+                "}" => self.last_close_block,
+                _ => true,
+            },
             Some(Tok::Eof) => false,
         }
     }
 
+    /// Classify an opening `{` (about to be pushed): does the matching `}` end at statement position
+    /// (a block, control body, or function *declaration* body → a following `/` is a regex) or at
+    /// value position (an object literal or function *expression* body → division)?
+    fn brace_ends_statement(&mut self) -> bool {
+        let prev_is_paren = matches!(self.out.last().map(|t| &t.kind), Some(Tok::Punct(")")));
+        if prev_is_paren {
+            // A body after `)` — either a function body (classified by `pending_fn`) or a control
+            // block / method (statement position).
+            return match self.pending_fn.pop() {
+                Some(is_expr) => !is_expr,
+                None => true,
+            };
+        }
+        match self.out.last().map(|t| &t.kind) {
+            None => true,
+            Some(Tok::Punct(p)) => matches!(*p, ";" | "{" | "}" | "=>"),
+            Some(Tok::Keyword(k)) => matches!(*k, "else" | "do" | "try" | "finally"),
+            _ => false,
+        }
+    }
+
+    /// Whether a `function` keyword (about to be pushed) sits in statement position (a declaration)
+    /// rather than expression position.
+    fn function_is_declaration(&self) -> bool {
+        match self.out.last().map(|t| &t.kind) {
+            None => true,
+            Some(Tok::Punct(p)) => match *p {
+                ";" | "{" => true,
+                "}" => self.last_close_block,
+                _ => false,
+            },
+            Some(Tok::Keyword(k)) => {
+                matches!(*k, "else" | "do" | "try" | "finally" | "export" | "default")
+            }
+            _ => false,
+        }
+    }
+
     fn push(&mut self, kind: Tok) {
+        match &kind {
+            Tok::Keyword(k) if *k == "function" => {
+                let is_expr = !self.function_is_declaration();
+                self.pending_fn.push(is_expr);
+            }
+            Tok::Punct(p) if *p == "{" => {
+                let ends_stmt = self.brace_ends_statement();
+                self.brace_stack.push(ends_stmt);
+            }
+            Tok::Punct(p) if *p == "}" => {
+                self.last_close_block = self.brace_stack.pop().unwrap_or(false);
+            }
+            _ => {}
+        }
         let nl = self.nl_pending;
         self.nl_pending = false;
         self.out.push(Token {
