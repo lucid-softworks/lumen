@@ -71,6 +71,31 @@ fn singular(unit: &str) -> Option<&'static str> {
     }
 }
 
+/// The English unit word for a relative-time unit under a given style. `long` uses the full singular
+/// or plural form; `short`/`narrow` use the CLDR abbreviations.
+fn unit_word_en(sing: &str, plural: bool, style: &str) -> String {
+    if style == "long" {
+        return if plural { format!("{sing}s") } else { sing.to_string() };
+    }
+    // short & narrow share these English abbreviations; quarter and day take a plural form.
+    match sing {
+        "second" => "sec.".to_string(),
+        "minute" => "min.".to_string(),
+        "hour" => "hr.".to_string(),
+        "week" => "wk.".to_string(),
+        "month" => "mo.".to_string(),
+        "quarter" => if plural { "qtrs." } else { "qtr." }.to_string(),
+        "year" => "yr.".to_string(),
+        _ => {
+            if plural {
+                format!("{sing}s")
+            } else {
+                sing.to_string()
+            }
+        }
+    }
+}
+
 /// The English "auto" phrasing for the common near values, if any.
 fn auto_phrase(unit: &str, v: f64) -> Option<&'static str> {
     match (unit, v as i64) {
@@ -132,11 +157,11 @@ fn format(
     let past = v < 0.0 || (v == 0.0 && v.is_sign_negative());
     let n = v.abs();
     let plural = n != 1.0;
-    let unit_word = if plural {
-        format!("{sing}s")
-    } else {
-        sing.to_string()
+    let style = match o.borrow().props.get("__rtf_style").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "long".to_string(),
     };
+    let unit_word = unit_word_en(sing, plural, &style);
     // Format the number through NumberFormat so grouping and the numbering system apply ("1,000").
     let locale = match o.borrow().props.get("__rtf_locale").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
