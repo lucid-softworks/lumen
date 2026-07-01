@@ -4519,7 +4519,18 @@ fn install_date(it: &mut Interp) {
         if !t.is_finite() {
             return Ok(Value::str("Invalid Date"));
         }
-        intl_delegate(i, "DateTimeFormat", arg(args, 0), arg(args, 1), "format", &[Value::Num(t)])
+        // ToDateTimeOptions(options, "any", "all"): with no options, default to date AND time.
+        let opts = match arg(args, 1) {
+            Value::Undefined => {
+                let o = i.new_object();
+                for k in ["year", "month", "day", "hour", "minute", "second"] {
+                    set_data(&o, k, Value::str("numeric"));
+                }
+                Value::Obj(o)
+            }
+            other => other,
+        };
+        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
     });
     it.def_method(&proto, "toLocaleDateString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
