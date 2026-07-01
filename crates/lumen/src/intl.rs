@@ -86,12 +86,15 @@ pub(crate) fn canonicalize_locale_list(
         }
         Value::Null => return Err(i.make_error("TypeError", "Cannot convert null to object")),
         _ => {
-            let lenv = ab(i.get_member(locales, "length"))?;
+            // CanonicalizeLocaleList does ToObject(locales) first, so a primitive (number, boolean,
+            // symbol) is boxed and its inherited `length`/indexed properties are read.
+            let obj = crate::builtins::box_primitive_pub(i, locales.clone());
+            let lenv = ab(i.get_member(&obj, "length"))?;
             let len = to_length(i, &lenv)?;
             for k in 0..len {
                 let key = k.to_string();
-                if ab(i.js_has_property(locales, &key))? {
-                    let item = ab(i.get_member(locales, &key))?;
+                if ab(i.js_has_property(&obj, &key))? {
+                    let item = ab(i.get_member(&obj, &key))?;
                     process_locale_item(i, &item, &mut seen)?;
                 }
             }
