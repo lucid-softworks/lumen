@@ -138,28 +138,60 @@ fn format(
     } else {
         sing.to_string()
     };
-    let num_str = crate::intl::relativetimeformat::fmt_num(n);
+    // Format the number through NumberFormat so grouping and the numbering system apply ("1,000").
+    let locale = match o.borrow().props.get("__rtf_locale").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "en".to_string(),
+    };
+    let numbering = match o.borrow().props.get("__rtf_nu").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "latn".to_string(),
+    };
+    let nf_opts = i.new_object();
+    set_data(&nf_opts, "numberingSystem", Value::from_string(numbering));
+    let nf = new_service(i, "NumberFormat", &locale, nf_opts)?;
+    let nfmt = ab(i.get_member(&nf, "format"))?;
+    let num_str = match ab(i.call(nfmt, nf.clone(), &[Value::Num(n)]))? {
+        Value::Str(s) => s.to_string(),
+        _ => fmt_num(n),
+    };
     if to_parts {
         let mut arr: Vec<Value> = Vec::new();
         let push_lit = |i: &mut Interp, arr: &mut Vec<Value>, s: &str| {
+            if s.is_empty() {
+                return;
+            }
             let ob = i.new_object();
             set_data(&ob, "type", Value::str("literal"));
             set_data(&ob, "value", Value::from_string(s.to_string()));
             arr.push(Value::Obj(ob));
         };
-        let push_num = |i: &mut Interp, arr: &mut Vec<Value>, s: &str, unit: &str| {
-            let ob = i.new_object();
-            set_data(&ob, "type", Value::str("integer"));
-            set_data(&ob, "value", Value::from_string(s.to_string()));
-            set_data(&ob, "unit", Value::from_string(format!("{unit}")));
-            arr.push(Value::Obj(ob));
+        // The number expands into its NumberFormat parts, each tagged with the relative-time unit.
+        let ntp = ab(i.get_member(&nf, "formatToParts"))?;
+        let nparts = ab(i.call(ntp, nf, &[Value::Num(n)]))?;
+        let nlen = match ab(i.get_member(&nparts, "length"))? {
+            Value::Num(x) => x as usize,
+            _ => 0,
+        };
+        let mut push_num = |i: &mut Interp, arr: &mut Vec<Value>| -> Result<(), Value> {
+            for k in 0..nlen {
+                let el = ab(i.get_member(&nparts, &k.to_string()))?;
+                let ty = ab(i.get_member(&el, "type"))?;
+                let va = ab(i.get_member(&el, "value"))?;
+                let ob = i.new_object();
+                set_data(&ob, "type", ty);
+                set_data(&ob, "value", va);
+                set_data(&ob, "unit", Value::from_string(sing.to_string()));
+                arr.push(Value::Obj(ob));
+            }
+            Ok(())
         };
         if past {
-            push_num(i, &mut arr, &num_str, sing);
+            push_num(i, &mut arr)?;
             push_lit(i, &mut arr, &format!(" {unit_word} ago"));
         } else {
             push_lit(i, &mut arr, "in ");
-            push_num(i, &mut arr, &num_str, sing);
+            push_num(i, &mut arr)?;
             push_lit(i, &mut arr, &format!(" {unit_word}"));
         }
         return Ok(i.make_array(arr));
@@ -170,6 +202,13 @@ fn format(
         format!("in {num_str} {unit_word}")
     };
     Ok(Value::from_string(out))
+}
+
+/// Construct `new Intl.<service>(locale, options)`.
+fn new_service(i: &mut Interp, service: &str, locale: &str, opts: crate::value::Gc) -> Result<Value, Value> {
+    let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
+    let ctor = ab(i.get_member(&intl, service))?;
+    ab(i.construct(ctor, &[Value::from_string(locale.to_string()), Value::Obj(opts)]))
 }
 
 /// Format a non-negative number the way our minimal number formatter would (integer or decimal).
