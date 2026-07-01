@@ -1402,6 +1402,28 @@ fn cal_uses_era(cal: &str) -> bool {
     matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew" || cal == "persian"
 }
 
+/// Whether `era` (already lowercased) is an era this calendar defines.
+fn valid_era(cal: &str, era: &str) -> bool {
+    match cal {
+        "gregory" => matches!(era, "ce" | "bce" | "gregory" | "gregory-inverse" | "ad" | "bc"),
+        "japanese" => matches!(
+            era,
+            "ce" | "bce" | "gregory" | "gregory-inverse" | "ad" | "bc"
+                | "reiwa" | "heisei" | "showa" | "taisho" | "meiji"
+        ),
+        "buddhist" => era == "be",
+        "roc" => matches!(era, "roc" | "roc-inverse" | "broc" | "minguo" | "before-roc"),
+        "coptic" => era == "am",
+        "ethiopic" => matches!(era, "am" | "aa" | "mundi" | "incar"),
+        "ethioaa" => matches!(era, "aa" | "mundi"),
+        _ if is_islamic(cal) => matches!(era, "ah" | "bh"),
+        "indian" => era == "shaka",
+        "hebrew" => era == "am",
+        "persian" => era == "ap",
+        _ => false,
+    }
+}
+
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
 fn thirteen_month_year(cal: &str, year: Option<i64>, era: &Option<String>, era_year: Option<i64>) -> Option<i64> {
     // For `ethioaa` the year/`aa` era counts amete-alem (= amete-mihret + 5500).
@@ -3460,6 +3482,14 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
         Value::Undefined => None,
         _ => Some(to_int(i, &year_f)?),
     };
+
+    // An `era` that isn't one this calendar defines is a RangeError (raised before the required-field
+    // TypeErrors of the resolution below).
+    if let Some(e) = &era {
+        if !valid_era(cal, e) {
+            return Err(i.make_error("RangeError", format!("{e} is not a valid era in calendar {cal}")));
+        }
+    }
 
     // Hebrew: the year field (or era "am") is the Hebrew year; the month is an ordinal, or a
     // monthCode (which may be the leap "M05L"). Resolve directly to ISO.
