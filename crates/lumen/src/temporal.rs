@@ -390,10 +390,23 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
                 other => other,
             };
             if KNOWN_CALENDARS.contains(&canon) {
-                Ok(std::rc::Rc::from(canon))
-            } else {
-                Err(i.make_error("RangeError", "invalid calendar identifier"))
+                return Ok(std::rc::Rc::from(canon));
             }
+            // Not a bare id: the string may be an ISO date/time whose `[u-ca=...]` annotation (or the
+            // implicit "iso8601") supplies the calendar.
+            if let Some(parsed) = parse_iso(s) {
+                let cal = parsed.calendar.unwrap_or_else(|| "iso8601".to_string());
+                let canon = match cal.as_str() {
+                    "islamicc" => "islamic-civil",
+                    "ethiopic-amete-alem" => "ethioaa",
+                    "gregorian" => "gregory",
+                    other => other,
+                };
+                if KNOWN_CALENDARS.contains(&canon) {
+                    return Ok(std::rc::Rc::from(canon));
+                }
+            }
+            Err(i.make_error("RangeError", "invalid calendar identifier"))
         }
         _ => Err(i.make_error("TypeError", "calendar must be a string")),
     }
