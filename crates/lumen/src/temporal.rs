@@ -3259,6 +3259,21 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         Ok(Value::str(month_code(as_yearmonth(i, &t)?.month)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
+        let ym = as_yearmonth(i, &t)?;
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "toPlainDate() argument must be an object"));
+        }
+        // The day is required to complete a date from a year-month.
+        let dv = getm(i, &f, "day")?;
+        if matches!(dv, Value::Undefined) {
+            return Err(i.make_error("TypeError", "toPlainDate() requires a day"));
+        }
+        let day = to_int(i, &dv)?;
+        let d = build_date(i, ym.year, ym.month as i64, day)?;
+        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+    });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
         Ok(Value::Num(days_in_month(d.year, d.month) as f64))
@@ -4822,6 +4837,53 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
                 tz,
             },
         ))
+    });
+    it.def_method(&proto, "withTimeZone", 1, |i, t, a| {
+        let (e, _, _) = as_zoned(i, &t)?;
+        let s = i.to_string(&arg(a, 0)).map_err(unab)?;
+        let tz = normalize_tz(i, &s)?;
+        let off = zone_offset(&tz, e);
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned { epoch_ns: e, offset_ns: off, tz },
+        ))
+    });
+    it.def_method(&proto, "withCalendar", 1, |i, t, a| {
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let cal = check_calendar(i, &arg(a, 0))?;
+        let v = make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned { epoch_ns: e, offset_ns: o, tz },
+        );
+        set_cal(i, &v, cal);
+        Ok(v)
+    });
+    it.def_method(&proto, "getTimeZoneTransition", 1, |i, t, a| {
+        let (e, _, tz) = as_zoned(i, &t)?;
+        let dir = match arg(a, 0) {
+            Value::Str(s) => s.to_string(),
+            Value::Obj(_) => opt_str(i, &arg(a, 0), "direction", "")?,
+            Value::Undefined => return Err(i.make_error("TypeError", "direction is required")),
+            v => i.to_string(&v).map_err(unab)?.to_string(),
+        };
+        let dir = sing(&dir);
+        if dir != "next" && dir != "previous" {
+            return Err(i.make_error("RangeError", "direction must be 'next' or 'previous'"));
+        }
+        let epoch_sec = (e.div_euclid(1_000_000_000)) as i64;
+        match crate::tz::next_transition(&tz, epoch_sec, dir == "next") {
+            Some(ts) => {
+                let (off, _) = (zone_offset(&tz, ts as i128 * 1_000_000_000), ());
+                Ok(make(
+                    i,
+                    "Temporal.ZonedDateTime",
+                    Temporal::Zoned { epoch_ns: ts as i128 * 1_000_000_000, offset_ns: off, tz },
+                ))
+            }
+            None => Ok(Value::Null),
+        }
     });
     it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
