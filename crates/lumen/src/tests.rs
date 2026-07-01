@@ -5269,3 +5269,20 @@ fn typedarray_subarray_semantics() {
         "TypeError"
     );
 }
+
+#[test]
+fn typedarray_identity_and_names() {
+    // @@iterator is the same function object as values; toString is Array.prototype.toString.
+    assert_eq!(
+        run("Int8Array.prototype[Symbol.iterator]===Int8Array.prototype.values"),
+        "true"
+    );
+    assert_eq!(
+        run("Int8Array.prototype.toString===Array.prototype.toString"),
+        "true"
+    );
+    // Accessor getter names are prefixed with "get ".
+    assert_eq!(run("Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Int8Array.prototype),'length').get.name"), "get length");
+    // toLocaleString on an out-of-bounds view throws.
+    assert_eq!(throws("var b=new ArrayBuffer(16,{maxByteLength:16}); var a=new Int32Array(b,0,4); b.resize(4); a.toLocaleString()"), "TypeError");
+}

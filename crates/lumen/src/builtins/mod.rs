@@ -2992,7 +2992,7 @@ ta_methods! {
     "indexOf" => tad_indexof, "lastIndexOf" => tad_lastindexof, "includes" => tad_includes,
     "join" => tad_join, "fill" => tad_fill, "reverse" => tad_reverse, "sort" => tad_sort,
     "slice" => tad_slice, "at" => tad_at, "keys" => tad_keys, "values" => tad_values,
-    "entries" => tad_entries, "toString" => tad_tostring, "copyWithin" => tad_copywithin,
+    "entries" => tad_entries, "copyWithin" => tad_copywithin,
     "toReversed" => tad_toreversed, "toSorted" => tad_tosorted, "with" => tad_with,
 }
 
@@ -3502,27 +3502,38 @@ fn install_typed_arrays(it: &mut Interp) {
         };
         it.def_method(&ta_proto, name, len, *f);
     }
+    // %TypedArray%.prototype.toString is the very same function object as %Array.prototype.toString%.
+    if let Some(p) = it.array_proto.borrow().props.get("toString").cloned() {
+        ta_proto.borrow_mut().props.insert("toString", p);
+    }
+    // %TypedArray%.prototype[@@iterator] is the same function object as its own `values`.
     if let Some(sym) = it.iterator_sym.clone() {
         let k = Interp::sym_key(&sym);
-        if let Some(p) = it.array_proto.borrow().props.get(&k).cloned() {
+        let values_prop = ta_proto.borrow().props.get("values").cloned();
+        if let Some(p) = values_prop {
             ta_proto.borrow_mut().props.insert(k, p);
         }
     }
     it.def_method(&ta_proto, "set", 1, ta_set);
     it.def_method(&ta_proto, "subarray", 2, ta_subarray);
     it.def_method(&ta_proto, "toLocaleString", 0, |i, this, _a| {
-        // Per spec: call `toLocaleString` on each element and join with ",".
+        // ValidateTypedArray then Invoke `toLocaleString` on each element, joining with ",". The
+        // length is captured once; an out-of-bounds/detached receiver throws, but an element that
+        // reads back `undefined` after a mid-iteration shrink is skipped.
         let info = map_ptr(&this).and_then(|p| i.typed_arrays.get(&p).copied());
         let info = info.ok_or_else(|| i.make_error("TypeError", "not a TypedArray"))?;
-        if !i.array_buffers.contains_key(&info.buffer) {
-            return Err(i.make_error("TypeError", "detached buffer"));
-        }
+        let len = i
+            .ta_len(&info)
+            .ok_or_else(|| i.make_error("TypeError", "TypedArray is out of bounds"))?;
         let mut out = String::new();
-        for k in 0..i.ta_len(&info).unwrap_or(0) {
+        for k in 0..len {
             if k > 0 {
                 out.push(',');
             }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = i.ta_read(&info, k);
+            if matches!(v, Value::Undefined | Value::Null) {
+                continue;
+            }
             let tls = ab(i.get_member(&v, "toLocaleString"))?;
             if !tls.is_callable() {
                 return Err(i.make_error("TypeError", "toLocaleString is not a function"));
@@ -3543,7 +3554,7 @@ fn install_typed_arrays(it: &mut Interp) {
         ("byteOffset", ta_byteoffset_get),
         ("buffer", ta_buffer_get),
     ] {
-        let g = it.make_native(name, 0, getter);
+        let g = it.make_native(&format!("get {name}"), 0, getter);
         ta_proto.borrow_mut().props.insert(
             name,
             Property {
