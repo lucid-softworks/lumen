@@ -1947,6 +1947,38 @@ fn diff_date_rounded(a: IsoDate, b: IsoDate, largest: &str, smallest: &str, incr
     if positive { result } else { neg_duration(result) }
 }
 
+/// A PlainYearMonth's reference ISO date (the first of its month).
+fn ym_ref(d: IsoDate) -> IsoDate {
+    IsoDate { year: d.year, month: d.month, day: 1 }
+}
+
+/// Read `until`/`since` options for a PlainYearMonth difference: (largest, smallest, mode). Only
+/// `year`/`month` units are allowed and `roundingIncrement` must be 1.
+fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String), Value> {
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "month")?).to_string();
+    if !matches!(smallest.as_str(), "year" | "month") {
+        return Err(i.make_error("RangeError", "smallestUnit must be year or month"));
+    }
+    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
+    let largest = if largest_raw == "auto" {
+        if smallest == "year" { "year" } else { "year" }.to_string()
+    } else {
+        if !matches!(largest_raw.as_str(), "year" | "month") {
+            return Err(i.make_error("RangeError", "largestUnit must be year or month"));
+        }
+        largest_raw
+    };
+    // largest (year=9) must not be narrower than smallest.
+    if largest == "month" && smallest == "year" {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    check_increment(i, &smallest, incr)?;
+    Ok((largest, smallest, mode))
+}
+
 /// Read `until`/`since` options for a PlainDate difference: (largest, smallest, increment, mode).
 fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
     let largest = date_largest_unit(i, opts)?;
@@ -3155,40 +3187,18 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
-        let months = (o.year * 12 + o.month as i64) - (d.year * 12 + d.month as i64);
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
-        let dur = if largest == "month" {
-            IsoDuration {
-                months,
-                ..Default::default()
-            }
-        } else {
-            IsoDuration {
-                years: months / 12,
-                months: months % 12,
-                ..Default::default()
-            }
-        };
+        let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
+        let (d1, o1) = (ym_ref(d), ym_ref(o));
+        let dur = diff_date_rounded(d1, o1, &largest, &smallest, 1, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
-        let months = (d.year * 12 + d.month as i64) - (o.year * 12 + o.month as i64);
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "year")?;
-        let dur = if largest == "month" {
-            IsoDuration {
-                months,
-                ..Default::default()
-            }
-        } else {
-            IsoDuration {
-                years: months / 12,
-                months: months % 12,
-                ..Default::default()
-            }
-        };
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
+        let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
+        let (d1, o1) = (ym_ref(d), ym_ref(o));
+        let dur = diff_date_rounded(d1, o1, &largest, &smallest, 1, negate_mode(&mode));
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     let ctor = add_ctor(it, ns, "PlainYearMonth", 2, proto, |i, _t, a| {
         require_new(i)?;
