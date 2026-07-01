@@ -3334,6 +3334,68 @@ fn diff_datetime_rounded(
 }
 
 /// Read `until`/`since` options for a PlainDateTime difference: (largest, smallest, increment, mode).
+/// DifferenceZonedDateTime: the difference between two instants in `tz`/`cal`. Time-only largest
+/// units use a rounded nanosecond span; date units count whole calendar days in the time zone (a day
+/// may be 23/25 hours across a DST transition) and balance the remaining time of day.
+fn diff_zoned(
+    _i: &Interp,
+    e1: i128,
+    o1: i64,
+    e2: i128,
+    tz: &str,
+    cal: &str,
+    largest: &str,
+    smallest: &str,
+    incr: i64,
+    mode: &str,
+) -> IsoDuration {
+    if e1 == e2 {
+        return IsoDuration::default();
+    }
+    if !matches!(largest, "year" | "month" | "week" | "day") {
+        let un = unit_ns(smallest).unwrap_or(1);
+        let rounded = round_ns(e2 - e1, un * incr as i128, mode);
+        return balance_ns(rounded, largest);
+    }
+    let (d1, t1) = zoned_local(e1, o1);
+    let sign = if e1 <= e2 { 1i64 } else { -1 };
+    let add_days_ns = |days: i64| -> i128 {
+        let (y, mo, da) = civil_from_days(epoch_days(d1) + days);
+        let local = dt_ns(IsoDate { year: y, month: mo, day: da }, t1);
+        local - offset_for_local(tz, local) as i128
+    };
+    let mut days = ((e2 - e1) / 86_400_000_000_000) as i64;
+    for _ in 0..4 {
+        let ns = add_days_ns(days);
+        if sign > 0 {
+            if ns > e2 {
+                days -= 1;
+            } else if add_days_ns(days + 1) <= e2 {
+                days += 1;
+            } else {
+                break;
+            }
+        } else if ns < e2 {
+            days += 1;
+        } else if add_days_ns(days - 1) >= e2 {
+            days -= 1;
+        } else {
+            break;
+        }
+    }
+    let mid_ns = add_days_ns(days);
+    let (my, mmo, mda) = civil_from_days(epoch_days(d1) + days);
+    let mut out = diff_date_cal(cal, d1, IsoDate { year: my, month: mmo, day: mda }, largest);
+    let tb = balance_ns(e2 - mid_ns, "hour");
+    out.hours = tb.hours;
+    out.minutes = tb.minutes;
+    out.seconds = tb.seconds;
+    out.ms = tb.ms;
+    out.us = tb.us;
+    out.ns = tb.ns;
+    out
+}
+
 fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
@@ -6791,24 +6853,20 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz }))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
-        let (e, _, _) = as_zoned(i, &t)?;
-        let (o, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(o - e, &largest)),
-        ))
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
+        let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
+        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let dur = diff_zoned(i, e, o, oe, &tz, &cal, &largest, &smallest, incr, &mode);
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
-        let (e, _, _) = as_zoned(i, &t)?;
-        let (o, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(balance_ns(e - o, &largest)),
-        ))
+        let (e, o, tz) = as_zoned(i, &t)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
+        let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
+        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let dur = diff_zoned(i, e, o, oe, &tz, &cal, &largest, &smallest, incr, &negate_mode(&mode));
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
