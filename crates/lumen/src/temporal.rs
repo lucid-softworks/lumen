@@ -366,19 +366,49 @@ fn build_time_ovf(
         }),
     }
 }
-/// Validate a constructor's calendar argument: `undefined`, or an ASCII case-insensitive "iso8601".
-/// A non-string (other than undefined) is a TypeError; an unknown calendar id is a RangeError.
-fn check_calendar(i: &mut Interp, v: &Value) -> Result<(), Value> {
+/// The recognised BCP-47 calendar identifiers. Date arithmetic uses the proleptic ISO/Gregorian
+/// calendar for all of them (exact for iso8601/gregory; the others are accepted so construction and
+/// `calendarId` round-trip, even though their field output is not yet calendar-specific).
+const KNOWN_CALENDARS: &[&str] = &[
+    "iso8601", "gregory", "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic",
+    "hebrew", "indian", "islamic", "islamic-umalqura", "islamic-tbla", "islamic-civil",
+    "islamic-rgsa", "islamicc", "japanese", "persian", "roc",
+];
+
+/// Validate a constructor's calendar argument and return its canonical id. `undefined` → "iso8601".
+/// A non-string (other than undefined) is a TypeError; an unknown id is a RangeError.
+fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
     match v {
-        Value::Undefined => Ok(()),
+        Value::Undefined => Ok(std::rc::Rc::from("iso8601")),
         Value::Str(s) => {
-            if s.eq_ignore_ascii_case("iso8601") {
-                Ok(())
+            let lc = s.to_lowercase();
+            let canon = if lc == "islamicc" { "islamic-civil" } else { lc.as_str() };
+            if KNOWN_CALENDARS.contains(&lc.as_str()) {
+                Ok(std::rc::Rc::from(canon))
             } else {
                 Err(i.make_error("RangeError", "invalid calendar identifier"))
             }
         }
         _ => Err(i.make_error("TypeError", "calendar must be a string")),
+    }
+}
+
+/// Record the calendar id on a just-created Temporal object.
+fn set_cal(i: &mut Interp, v: &Value, cal: std::rc::Rc<str>) {
+    if let Value::Obj(o) = v {
+        i.temporal_cal.insert(Rc::as_ptr(o) as usize, cal);
+    }
+}
+
+/// The calendar id of a Temporal receiver (default "iso8601").
+fn cal_of(i: &Interp, this: &Value) -> std::rc::Rc<str> {
+    match this {
+        Value::Obj(o) => i
+            .temporal_cal
+            .get(&(Rc::as_ptr(o) as usize))
+            .cloned()
+            .unwrap_or_else(|| std::rc::Rc::from("iso8601")),
+        _ => std::rc::Rc::from("iso8601"),
     }
 }
 /// ToIntegerIfIntegral: ToNumber, then reject non-finite and any fractional part (Duration fields).
@@ -942,7 +972,7 @@ fn matches_month_day(core: &str) -> bool {
 /// Whether an effective calendar annotation is acceptable (only the ISO 8601 calendar is supported).
 fn cal_ok(cal: &Option<String>) -> bool {
     match cal {
-        Some(c) => c == "iso8601",
+        Some(c) => KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()),
         None => true,
     }
 }
@@ -1136,9 +1166,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "monthCode", |i, t, _| {
         Ok(Value::str(month_code(as_date(i, &t)?.month)))
     });
-    def_getter(it, &proto, "calendarId", |_i, _t, _| {
-        Ok(Value::str("iso8601"))
-    });
+    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "dayOfWeek", |i, t, _| {
         Ok(Value::Num(iso_day_of_week(as_date(i, &t)?) as f64))
     });
@@ -1310,13 +1338,17 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let year = to_int(i, &arg(a, 0))?;
         let month = to_int(i, &arg(a, 1))?;
         let day = to_int(i, &arg(a, 2))?;
-        check_calendar(i, &arg(a, 3))?;
+        let cal = check_calendar(i, &arg(a, 3))?;
         let d = build_date(i, year, month, day)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        let v = make(i, "Temporal.PlainDate", Temporal::Date(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
-        let d = to_date(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        let (d, cal) = to_date_cal(i, &arg(a, 0), &arg(a, 1))?;
+        let v = make(i, "Temporal.PlainDate", Temporal::Date(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_date(i, &arg(a, 0), &Value::Undefined)?;
@@ -1906,7 +1938,7 @@ fn regulate_high(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Re
 /// matched case-insensitively against "iso8601"; otherwise the id may be a full ISO date/datetime
 /// string whose optional `[u-ca=...]` annotation must itself resolve to the ISO calendar.
 fn canon_calendar(i: &Interp, s: &str) -> Result<(), Value> {
-    if s.eq_ignore_ascii_case("iso8601") {
+    if KNOWN_CALENDARS.contains(&s.to_lowercase().as_str()) {
         return Ok(());
     }
     if parse_iso(s).is_some() {
@@ -2011,6 +2043,39 @@ fn regulate_time(i: &Interp, v: [i64; 6], ovf: Overflow) -> Result<IsoTime, Valu
 
 /// ToTemporalDate: accept a PlainDate/PlainDateTime, a fields object, or an ISO string. `opts`
 /// supplies the `overflow` option (validated as an options object).
+/// Like [`to_date`], but also returns the resolved calendar id.
+fn to_date_cal(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
+    let cal: std::rc::Rc<str> = match get(i, v) {
+        Some(Temporal::Date(_))
+        | Some(Temporal::DateTime(_, _))
+        | Some(Temporal::YearMonth(_))
+        | Some(Temporal::MonthDay(_)) => cal_of(i, v),
+        _ => match v {
+            Value::Str(s) => {
+                let parsed = parse_iso(s).and_then(|p| p.calendar);
+                match parsed {
+                    Some(c) if KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()) => {
+                        std::rc::Rc::from(c.to_lowercase().as_str())
+                    }
+                    Some(_) => std::rc::Rc::from("iso8601"),
+                    None => std::rc::Rc::from("iso8601"),
+                }
+            }
+            Value::Obj(_) => {
+                let c = getm(i, v, "calendar")?;
+                match &c {
+                    Value::Undefined => std::rc::Rc::from("iso8601"),
+                    Value::Str(_) => check_calendar(i, &c)?,
+                    _ => std::rc::Rc::from("iso8601"),
+                }
+            }
+            _ => std::rc::Rc::from("iso8601"),
+        },
+    };
+    let d = to_date(i, v, opts)?;
+    Ok((d, cal))
+}
+
 fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
     match get(i, v) {
         Some(Temporal::Date(d)) | Some(Temporal::DateTime(d, _)) => {
@@ -2449,9 +2514,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "monthCode", |i, t, _| {
         Ok(Value::str(month_code(as_datetime(i, &t)?.0.month)))
     });
-    def_getter(it, &proto, "calendarId", |_i, _t, _| {
-        Ok(Value::str("iso8601"))
-    });
+    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "hour", |i, t, _| {
         Ok(Value::Num(as_datetime(i, &t)?.1.hour as f64))
     });
@@ -2777,9 +2840,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "monthCode", |i, t, _| {
         Ok(Value::str(month_code(as_yearmonth(i, &t)?.month)))
     });
-    def_getter(it, &proto, "calendarId", |_i, _t, _| {
-        Ok(Value::str("iso8601"))
-    });
+    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
         Ok(Value::Num(days_in_month(d.year, d.month) as f64))
@@ -2982,9 +3043,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "day", |i, t, _| {
         Ok(Value::Num(as_monthday(i, &t)?.day as f64))
     });
-    def_getter(it, &proto, "calendarId", |_i, _t, _| {
-        Ok(Value::str("iso8601"))
-    });
+    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
         let suffix = cal_suffix(i, &arg(a, 0))?;
@@ -4112,9 +4171,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     time_get!("millisecond", |t: IsoTime| Value::Num(t.ms as f64));
     time_get!("microsecond", |t: IsoTime| Value::Num(t.us as f64));
     time_get!("nanosecond", |t: IsoTime| Value::Num(t.ns as f64));
-    def_getter(it, &proto, "calendarId", |_i, _t, _| {
-        Ok(Value::str("iso8601"))
-    });
+    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
         Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000) as f64))
     });

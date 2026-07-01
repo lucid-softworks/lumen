@@ -357,6 +357,8 @@ pub struct Interp {
     pub promises: HashMap<usize, PromiseState>,
     /// Temporal object internal slots, keyed by the object's pointer.
     pub temporal: HashMap<usize, crate::temporal::Temporal>,
+    /// The calendar id of a Temporal date-bearing object (default "iso8601"), keyed by object ptr.
+    pub temporal_cal: HashMap<usize, std::rc::Rc<str>>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
     pub microtasks: std::collections::VecDeque<Job>,
     /// Live generator coroutines, keyed by the generator object's pointer. Each owns an OS thread
@@ -690,6 +692,7 @@ impl Interp {
             realms: HashMap::new(),
             promises: HashMap::new(),
             temporal: HashMap::new(),
+            temporal_cal: HashMap::new(),
             microtasks: std::collections::VecDeque::new(),
             generators: HashMap::new(),
             gc_next: GC_TRIGGER,
