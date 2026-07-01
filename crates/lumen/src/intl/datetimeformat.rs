@@ -272,6 +272,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));
+    let locale_lang = resolved.locale.split('-').next().unwrap_or("").to_string();
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved.locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(calendar.clone().unwrap_or_else(|| "gregory".to_string())));
     set_builtin(&obj, "__dtf_nu", Value::from_string(numbering.clone().unwrap_or_else(|| "latn".to_string())));
@@ -321,9 +322,15 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // hourCycle / hour12 are resolved only when an hour is shown (explicit hour, or a timeStyle).
     let shows_hour = hour.is_some() || time_style.is_some();
     if shows_hour {
-        // hour12 overrides hourCycle: true → h12, false → h23.
+        // hour12 overrides hourCycle: true → the locale's 12-hour cycle (h11 for ja, else h12);
+        // false → h23. Absent both, fall back to the requested hourCycle or h23.
+        let lang = locale_lang.as_str();
         let hc = if let Some(h12) = hour12 {
-            if h12 { "h12" } else { "h23" }.to_string()
+            if h12 {
+                if lang == "ja" { "h11" } else { "h12" }.to_string()
+            } else {
+                "h23".to_string()
+            }
         } else {
             hour_cycle.clone().unwrap_or_else(|| "h23".to_string())
         };
