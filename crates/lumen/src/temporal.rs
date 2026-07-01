@@ -442,6 +442,9 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
                 (Some("before-roc"), Some(1 - y))
             }
         }
+        "coptic" => (Some("am"), Some(from_13month(d, COPTIC_EPOCH).0)),
+        "ethiopic" => (Some("am"), Some(from_13month(d, ETHIOPIC_EPOCH).0)),
+        "ethioaa" => (Some("aa"), Some(from_13month(d, ETHIOPIC_EPOCH).0 + 5500)),
         _ => (None, None),
     }
 }
@@ -468,11 +471,71 @@ fn japanese_era(d: IsoDate) -> (Option<&'static str>, Option<i64>) {
     }
 }
 
+// epoch_days (days from 1970-01-01, proleptic Gregorian) of each 13-month calendar's year 1-1-1.
+const COPTIC_EPOCH: i64 = -615558; // Coptic 1-01-01 = Julian 284-08-29
+const ETHIOPIC_EPOCH: i64 = -716367; // Ethiopic (amete mihret) 1-01-01 = Julian 8-08-29
+
+fn is_13month(cal: &str) -> bool {
+    matches!(cal, "coptic" | "ethiopic" | "ethioaa")
+}
+fn epoch_13(cal: &str) -> i64 {
+    if cal == "coptic" { COPTIC_EPOCH } else { ETHIOPIC_EPOCH }
+}
+
+/// A 13-month (12×30 days + a 5/6-day epagomenal month) calendar date from an ISO date: returns
+/// (year, month, day). `epoch` is the calendar's 1-01-01 in epoch-days.
+fn from_13month(iso: IsoDate, epoch: i64) -> (i64, i64, i64) {
+    let ed = epoch_days(iso);
+    let d0 = ed - epoch; // days since epoch, 0-based
+    let year = (4 * d0 + 1463).div_euclid(1461);
+    let year_start = epoch + 365 * (year - 1) + year.div_euclid(4);
+    let doy = ed - year_start; // 0-based day within the year
+    (year, doy.div_euclid(30) + 1, doy.rem_euclid(30) + 1)
+}
+/// The ISO date for a 13-month calendar (year, month, day).
+fn to_13month(year: i64, month: i64, day: i64, epoch: i64) -> IsoDate {
+    let ed = epoch + 365 * (year - 1) + year.div_euclid(4) + 30 * (month - 1) + (day - 1);
+    let (y, m, d) = civil_from_days(ed);
+    IsoDate { year: y, month: m, day: d }
+}
+
+/// Full calendar fields for an ISO date: (year, month, day, daysInMonth, monthsInYear, dayOfYear,
+/// daysInYear, inLeapYear). ISO/arithmetic calendars keep the Gregorian month/day structure.
+fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bool) {
+    if is_13month(cal) {
+        let (y, m, d) = from_13month(iso, epoch_13(cal));
+        let leap = y.rem_euclid(4) == 3;
+        let dim = if m <= 12 {
+            30
+        } else if leap {
+            6
+        } else {
+            5
+        };
+        let doy = 30 * (m - 1) + d;
+        let diy = if leap { 366 } else { 365 };
+        (y, m, d, dim, 13, doy, diy, leap)
+    } else {
+        (
+            cal_year_num(cal, iso),
+            iso.month as i64,
+            iso.day as i64,
+            days_in_month(iso.year, iso.month) as i64,
+            12,
+            iso_day_of_year(iso) as i64,
+            if is_leap(iso.year) { 366 } else { 365 },
+            is_leap(iso.year),
+        )
+    }
+}
+
 /// The calendar-year number a receiver's `.year` reports (ISO/gregory/japanese use the ISO year).
 fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
     match cal {
         "buddhist" => d.year + 543,
         "roc" => d.year - 1911,
+        "coptic" | "ethiopic" => from_13month(d, epoch_13(cal)).0,
+        "ethioaa" => from_13month(d, ETHIOPIC_EPOCH).0 + 5500,
         _ => d.year,
     }
 }
@@ -505,7 +568,21 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc")
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal)
+}
+
+/// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
+fn thirteen_month_year(cal: &str, year: Option<i64>, era: &Option<String>, era_year: Option<i64>) -> Option<i64> {
+    // For `ethioaa` the year/`aa` era counts amete-alem (= amete-mihret + 5500).
+    let offset = if cal == "ethioaa" { 5500 } else { 0 };
+    if let Some(y) = year {
+        return Some(y - offset);
+    }
+    match (era.as_deref(), era_year) {
+        (Some("am"), Some(ey)) => Some(ey),
+        (Some("aa"), Some(ey)) => Some(ey - 5500),
+        _ => None,
+    }
 }
 
 /// Make a new Temporal value that inherits `src`'s calendar (operations like add/with/round preserve
@@ -1293,20 +1370,24 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
-        Ok(Value::Num(as_date(i, &t)?.month as f64))
+        let d = as_date(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).1 as f64))
     });
     def_getter(it, &proto, "day", |i, t, _| {
-        Ok(Value::Num(as_date(i, &t)?.day as f64))
+        let d = as_date(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).2 as f64))
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
-        Ok(Value::str(month_code(as_date(i, &t)?.month)))
+        let d = as_date(i, &t)?;
+        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "dayOfWeek", |i, t, _| {
         Ok(Value::Num(iso_day_of_week(as_date(i, &t)?) as f64))
     });
     def_getter(it, &proto, "dayOfYear", |i, t, _| {
-        Ok(Value::Num(iso_day_of_year(as_date(i, &t)?) as f64))
+        let d = as_date(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).5 as f64))
     });
     def_getter(it, &proto, "weekOfYear", |i, t, _| {
         Ok(Value::Num(iso_week(as_date(i, &t)?).0 as f64))
@@ -1320,18 +1401,19 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(Value::Num(days_in_month(d.year, d.month) as f64))
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).3 as f64))
     });
     def_getter(it, &proto, "daysInYear", |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }))
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).6 as f64))
     });
     def_getter(it, &proto, "monthsInYear", |i, t, _| {
-        as_date(i, &t)?;
-        Ok(Value::Num(12.0))
+        let d = as_date(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).4 as f64))
     });
     def_getter(it, &proto, "inLeapYear", |i, t, _| {
-        Ok(Value::Bool(is_leap(as_date(i, &t)?.year)))
+        let d = as_date(i, &t)?;
+        Ok(Value::Bool(cal_fields(&cal_of(i, &t), d).7))
     });
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
@@ -2419,6 +2501,33 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             Some(n)
         }
     };
+    // A 13-month (Coptic/Ethiopic) calendar converts its own (year, month, day) directly to ISO.
+    if is_13month(cal) {
+        let cy = thirteen_month_year(cal, year_opt, &era, era_year)
+            .ok_or_else(|| i.make_error("TypeError", "year is required"))?;
+        let month = match (month, mc_num) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"))
+            }
+            (Some(a), _) => a,
+            (None, Some(b)) => b,
+            (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+        };
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        // Constrain to the calendar's ranges (13 months; the epagomenal month has 5 or 6 days).
+        let month = month.clamp(1, 13);
+        let leap = cy.rem_euclid(4) == 3;
+        let dim = if month <= 12 {
+            30
+        } else if leap {
+            6
+        } else {
+            5
+        };
+        let day = day.clamp(1, dim);
+        let iso = to_13month(cy, month, day, epoch_13(cal));
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
     // Reconcile year / era+eraYear BEFORE month (a missing year is a TypeError that the spec raises
     // before a month/monthCode conflict). An era, when present, must be valid for the calendar even
     // if a `year` field also supplies the value.
