@@ -2930,40 +2930,46 @@ fn ta_species_create(
         return Err(i.make_error("TypeError", "TypedArray species is not a constructor"));
     }
     let result = ab(i.construct(chosen, args))?;
+    ta_validate_created(i, result, args, write)
+}
+
+/// TypedArrayCreate validation of a just-constructed result: it must be a TypedArray, in bounds
+/// (not detached/shrunk), and — for a single-Number argument list — at least that long. When
+/// `write` is set (the result will be written into), an immutable backing buffer is also rejected.
+fn ta_validate_created(
+    i: &mut Interp,
+    result: Value,
+    args: &[Value],
+    write: bool,
+) -> Result<Value, Value> {
     let new_info = match map_ptr(&result).and_then(|p| i.typed_arrays.get(&p).copied()) {
         Some(info) => info,
         None => {
             return Err(i.make_error(
                 "TypeError",
-                "TypedArray species constructor did not return a TypedArray",
+                "TypedArray constructor did not return a TypedArray",
             ))
         }
     };
-    // ValidateTypedArray(result): a detached or out-of-bounds destination is a TypeError. All
-    // species-create callers write into the result, so an immutable destination is rejected too.
     let actual_len = match i.ta_len(&new_info) {
         Some(l) => l,
         None => {
             return Err(i.make_error(
                 "TypeError",
-                "TypedArray species destination is detached or out of bounds",
+                "TypedArray destination is detached or out of bounds",
             ))
         }
     };
     if write && i.immutable_buffers.contains(&new_info.buffer) {
         return Err(i.make_error(
             "TypeError",
-            "TypedArray species destination is backed by an immutable buffer",
+            "TypedArray destination is backed by an immutable buffer",
         ));
     }
-    // TypedArrayCreate: when the argument list is a single length, the result must be at least that
-    // long (a species constructor can't hand back a too-short array).
     if args.len() == 1 {
         if let Value::Num(n) = args[0] {
             if (actual_len as f64) < n {
-                return Err(
-                    i.make_error("TypeError", "TypedArray species destination is too small")
-                );
+                return Err(i.make_error("TypeError", "TypedArray destination is too small"));
             }
         }
     }
@@ -3881,7 +3887,9 @@ fn ta_of(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     if !is_constructor_value(&this) {
         return Err(i.make_error("TypeError", "TypedArray.of requires a constructor receiver"));
     }
-    let ta = ab(i.construct(this, &[Value::Num(args.len() as f64)]))?;
+    let len_args = [Value::Num(args.len() as f64)];
+    let ta = ab(i.construct(this, &len_args))?;
+    let ta = ta_validate_created(i, ta, &len_args, true)?;
     for (k, v) in args.iter().enumerate() {
         ab(i.set_member(&ta, &k.to_string(), v.clone()))?;
     }
@@ -3899,32 +3907,43 @@ fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> 
         return Err(i.make_error("TypeError", "mapfn is not callable"));
     }
     let this_arg = arg(args, 2);
-    // A source with an @@iterator is iterated; otherwise it is treated as an array-like.
     let source = arg(args, 0);
-    let items: Vec<Value> = match &source {
-        Value::Str(_) => ab(i.iterate(&source))?,
-        Value::Obj(_) if i.has_iterator(&source) => ab(i.iterate(&source))?,
-        Value::Obj(_) => {
-            let lenv = ab(i.get_member(&source, "length"))?;
-            let n = ab(i.to_number(&lenv))?;
-            let len = if n.is_nan() || n < 0.0 {
-                0
-            } else {
-                n.min(9007199254740991.0) as usize
-            };
-            let mut v = Vec::with_capacity(len.min(1 << 20));
-            for k in 0..len {
-                v.push(ab(i.get_member(&source, &k.to_string()))?);
-            }
-            v
-        }
-        Value::Undefined | Value::Null => {
-            return Err(i.make_error("TypeError", "TypedArray.from source is not iterable"))
-        }
-        _ => Vec::new(),
+    // GetMethod(source, @@iterator): reading @@iterator off undefined/null throws, and a throwing
+    // getter propagates. A callable result means the source is iterated; otherwise it is array-like.
+    let iter_key = well_known_key(i, "iterator");
+    let using_iter = match &iter_key {
+        Some(k) => ab(i.get_member(&source, k))?,
+        None => Value::Undefined,
     };
-    let ta = ab(i.construct(this, &[Value::Num(items.len() as f64)]))?;
-    for (k, v) in items.into_iter().enumerate() {
+    if !matches!(using_iter, Value::Undefined | Value::Null) && !using_iter.is_callable() {
+        return Err(i.make_error("TypeError", "@@iterator is not callable"));
+    }
+    if using_iter.is_callable() {
+        // Iterable source: collect all values (reusing the already-fetched @@iterator), then
+        // construct the target and fill it.
+        let items = ab(i.iterate_with(&source, using_iter))?;
+        let len_args = [Value::Num(items.len() as f64)];
+        let ta = ab(i.construct(this, &len_args))?;
+        let ta = ta_validate_created(i, ta, &len_args, true)?;
+        for (k, v) in items.into_iter().enumerate() {
+            let val = if mapfn.is_callable() {
+                ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?
+            } else {
+                v
+            };
+            ab(i.set_member(&ta, &k.to_string(), val))?;
+        }
+        return Ok(ta);
+    }
+    // Array-like source: ToObject, read its length, construct the target *before* visiting any
+    // element, then read and set each element in turn.
+    let src = Value::Obj(to_object_arg(i, source, "TypedArray.from")?);
+    let len = ab(i.to_length(src.as_obj().unwrap()))?;
+    let len_args = [Value::Num(len as f64)];
+    let ta = ab(i.construct(this, &len_args))?;
+    let ta = ta_validate_created(i, ta, &len_args, true)?;
+    for k in 0..len {
+        let v = ab(i.get_member(&src, &k.to_string()))?;
         let val = if mapfn.is_callable() {
             ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?
         } else {

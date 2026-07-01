@@ -855,30 +855,36 @@ impl Interp {
             let key = Interp::sym_key(&sym);
             let itfn = self.get_member(v, &key)?;
             if itfn.is_callable() {
-                let iter = self.call(itfn, v.clone(), &[])?;
-                let next = self.get_member(&iter, "next")?;
-                if !next.is_callable() {
-                    return Err(self.throw("TypeError", "iterator.next is not a function"));
-                }
-                let mut out = Vec::new();
-                loop {
-                    let res = self.call(next.clone(), iter.clone(), &[])?;
-                    if !matches!(res, Value::Obj(_)) {
-                        return Err(self.throw("TypeError", "iterator result is not an object"));
-                    }
-                    let done = self.get_member(&res, "done")?;
-                    if self.to_boolean(&done) {
-                        break;
-                    }
-                    out.push(self.get_member(&res, "value")?);
-                    if out.len() > crate::interpreter::MAX_ARRAY_OP_LEN {
-                        return Err(self.throw("RangeError", "iterator produced too many values"));
-                    }
-                }
-                return Ok(out);
+                return self.iterate_with(v, itfn);
             }
         }
         Err(self.throw("TypeError", "value is not iterable"))
+    }
+
+    /// Drive the iterator protocol on `v` using an already-resolved `@@iterator` method `itfn`
+    /// (so callers that fetched it via GetMethod don't re-read the property).
+    pub(crate) fn iterate_with(&mut self, v: &Value, itfn: Value) -> Result<Vec<Value>, Abrupt> {
+        let iter = self.call(itfn, v.clone(), &[])?;
+        let next = self.get_member(&iter, "next")?;
+        if !next.is_callable() {
+            return Err(self.throw("TypeError", "iterator.next is not a function"));
+        }
+        let mut out = Vec::new();
+        loop {
+            let res = self.call(next.clone(), iter.clone(), &[])?;
+            if !matches!(res, Value::Obj(_)) {
+                return Err(self.throw("TypeError", "iterator result is not an object"));
+            }
+            let done = self.get_member(&res, "done")?;
+            if self.to_boolean(&done) {
+                break;
+            }
+            out.push(self.get_member(&res, "value")?);
+            if out.len() > crate::interpreter::MAX_ARRAY_OP_LEN {
+                return Err(self.throw("RangeError", "iterator produced too many values"));
+            }
+        }
+        Ok(out)
     }
 
     /// Whether `v` is iterable (has a callable `@@iterator`). Used by `Array.from` to choose between

@@ -5327,3 +5327,18 @@ fn typedarray_exotic_internals() {
     // A TypedArray element can't be deleted (returns true for a canonical-invalid index).
     assert_eq!(run("var a=new Int8Array(2); delete a[5]"), "true");
 }
+
+#[test]
+fn typedarray_from_of_validation() {
+    // from/of validate the constructed result and construct the array-like target before reading it.
+    assert_eq!(run("Int8Array.from([1,2,3]).join(',')"), "1,2,3");
+    assert_eq!(run("Int8Array.of(4,5,6).join(',')"), "4,5,6");
+    assert_eq!(run("Uint8Array.from([1,2,3], x=>x*2).join(',')"), "2,4,6");
+    // A custom constructor that returns a non-TypedArray is a TypeError.
+    assert_eq!(
+        throws("var C=function(){return {};}; Int8Array.from.call(C,[1,2])"),
+        "TypeError"
+    );
+    // A throwing @@iterator getter propagates.
+    assert_eq!(throws("var s={}; Object.defineProperty(s,Symbol.iterator,{get(){throw new TypeError('x');}}); Int8Array.from(s)"), "TypeError");
+}
