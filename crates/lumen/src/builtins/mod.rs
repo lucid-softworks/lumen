@@ -28,18 +28,37 @@ fn this_obj(this: &Value) -> Option<Gc> {
 /// ToDateTimeOptions default for toLocaleDateString/toLocaleTimeString: when `options` is undefined,
 /// supply the date-only or time-only component defaults; otherwise pass the options through.
 fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Value, Value> {
-    if !matches!(options, Value::Undefined) {
-        return Ok(options.clone());
+    // ToDateTimeOptions(options, required, defaults) for toLocaleDateString(date)/toLocaleTimeString(time):
+    // add the dimension's numeric defaults unless a component of that dimension (or a dateStyle/
+    // timeStyle) is already present. The user's other-dimension components are kept (via the proto chain).
+    let user_obj = match options {
+        Value::Undefined => None,
+        Value::Obj(o) => Some(o.clone()),
+        _ => return Err(i.make_error("TypeError", "options must be an object")),
+    };
+    let dim: &[&str] = if date {
+        &["weekday", "year", "month", "day"]
+    } else {
+        &["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"]
+    };
+    let mut need = true;
+    if user_obj.is_some() {
+        for k in dim.iter().chain(["dateStyle", "timeStyle"].iter()) {
+            if !matches!(ab(i.get_member(options, k))?, Value::Undefined) {
+                need = false;
+                break;
+            }
+        }
     }
     let o = i.new_object();
-    if date {
-        set_data(&o, "year", Value::str("numeric"));
-        set_data(&o, "month", Value::str("numeric"));
-        set_data(&o, "day", Value::str("numeric"));
-    } else {
-        set_data(&o, "hour", Value::str("numeric"));
-        set_data(&o, "minute", Value::str("numeric"));
-        set_data(&o, "second", Value::str("numeric"));
+    if let Some(uo) = &user_obj {
+        o.borrow_mut().proto = Some(uo.clone());
+    }
+    if need {
+        let defs: &[&str] = if date { &["year", "month", "day"] } else { &["hour", "minute", "second"] };
+        for k in defs {
+            set_data(&o, k, Value::str("numeric"));
+        }
     }
     Ok(Value::Obj(o))
 }
