@@ -2818,47 +2818,63 @@ fn round_calendar_unit(
 /// (years/months/weeks/days). Assumes nothing about ordering; the result carries the sign.
 fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     let largest = largest.strip_suffix('s').unwrap_or(largest); // accept plural unit names
-    let sign = cmp_date(a, b);
+    let c = cmp_date(a, b);
     let mut out = IsoDuration::default();
-    if sign == 0 {
+    if c == 0 {
         return out;
     }
-    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
     match largest {
         "year" | "month" => {
-            let mut years = if largest == "year" {
-                hi.year - lo.year
+            // `a`-anchored field difference (per Temporal's DifferenceISODate). `sign` is the sign of
+            // the result (b - a). A month only counts if `a`'s day fits in the target month: reaching
+            // b's month solely by day-clamping (e.g. Jan 29 → Feb 28) does NOT count as a whole month.
+            let sign: i64 = if c < 0 { 1 } else { -1 };
+            let mut years = if largest == "year" { b.year - a.year } else { 0 };
+            let mut months = if largest == "year" {
+                b.month as i64 - a.month as i64
             } else {
-                0
+                (b.year - a.year) * 12 + (b.month as i64 - a.month as i64)
             };
-            let mid = constrain_add_ym(lo, years * 12);
-            if cmp_date(mid, hi) > 0 {
-                years -= 1;
+            loop {
+                let mid = constrain_add_ym(a, years * 12 + months);
+                let cc = cmp_date(mid, b);
+                let mid_sign = if cc < 0 { 1 } else if cc > 0 { -1 } else { 0 };
+                let clamped = a.day as i64 > days_in_month(mid.year, mid.month) as i64;
+                if mid_sign == -sign || (mid_sign == 0 && clamped) {
+                    months -= sign; // overshot, or landed on b only via clamping
+                } else {
+                    break;
+                }
             }
-            // Count whole months by always adding to the *original* `lo` (not the running midpoint):
-            // re-clamping a short month each step would otherwise compound day drift.
-            let base = years * 12;
-            let mut months = 0i64;
-            while cmp_date(constrain_add_ym(lo, base + months + 1), hi) <= 0 {
-                months += 1;
+            // Rebalance a month component that borrowed against the year total.
+            if largest == "year" && months * sign < 0 {
+                years -= sign;
+                months += sign * 12;
             }
-            let mid = constrain_add_ym(lo, base + months);
-            let days = epoch_days(hi) - epoch_days(mid);
+            let mid = constrain_add_ym(a, years * 12 + months);
+            let days = if mid.year == b.year && mid.month == b.month {
+                b.day as i64 - mid.day as i64
+            } else if sign < 0 {
+                -(mid.day as i64) - (days_in_month(b.year, b.month) as i64 - b.day as i64)
+            } else {
+                b.day as i64 + (days_in_month(mid.year, mid.month) as i64 - mid.day as i64)
+            };
+            if largest == "month" {
+                months += years * 12;
+                years = 0;
+            }
             out.years = years;
             out.months = months;
             out.days = days;
         }
         "week" => {
-            let total = epoch_days(hi) - epoch_days(lo);
+            let total = epoch_days(b) - epoch_days(a);
             out.weeks = total / 7;
             out.days = total % 7;
         }
         _ => {
-            out.days = epoch_days(hi) - epoch_days(lo);
+            out.days = epoch_days(b) - epoch_days(a);
         }
-    }
-    if sign > 0 {
-        out = neg_duration(out);
     }
     out
 }
@@ -2890,85 +2906,64 @@ fn round_up_magnitude(mode: &str, fraction: f64, positive: bool, low_even: bool)
 /// two candidate boundary dates (calendar-accurate for the ISO calendar).
 /// Calendar-aware date difference for month-structure calendars: years/months are counted in the
 /// calendar's own months. For day/week largest units (calendar-independent) it defers to `diff_date`.
-/// Chinese/Dangi date difference by adding-and-counting with the calendar's own add (which preserves
-/// monthCode across year steps and steps ordinally across months) — robust to leap months.
-fn china_diff(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
-    let sign = cmp_date(a, b);
-    if sign == 0 {
-        return IsoDuration::default();
-    }
-    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
-    let ym = |y: i64, m: i64| IsoDuration { years: y, months: m, ..Default::default() };
-    let mut years = 0i64;
-    if largest == "year" {
-        while cmp_date(china_add_c(cal, lo, ym(years + 1, 0), 1), hi) <= 0 {
-            years += 1;
-        }
-    }
-    let mut months = 0i64;
-    while cmp_date(china_add_c(cal, lo, ym(years, months + 1), 1), hi) <= 0 {
-        months += 1;
-    }
-    let mid2 = china_add_c(cal, lo, ym(years, months), 1);
-    let days = epoch_days(hi) - epoch_days(mid2);
-    let out = IsoDuration { years, months, days, ..Default::default() };
-    if sign > 0 {
-        neg_duration(out)
-    } else {
-        out
-    }
-}
-
+/// Calendar-aware date difference for month-structure calendars, anchored at `a` and moving toward
+/// `b` (like `diff_date`): years/months are counted with the calendar's own constrain-add, so a
+/// backward difference borrows month lengths near `a`. Day/week largest units defer to `diff_date`.
 fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     let largest = largest.strip_suffix('s').unwrap_or(largest);
     if !is_month_structure(cal) || matches!(largest, "week" | "day") {
         return diff_date(a, b, largest);
     }
-    if cal == "chinese" || cal == "dangi" {
-        return china_diff(cal, a, b, largest);
-    }
     let sign = cmp_date(a, b);
     if sign == 0 {
         return IsoDuration::default();
     }
-    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
-    let lf = cal_fields(cal, lo);
-    let (ly, lm, cd) = (lf.0, lf.1, lf.2);
-    // The largest whole-month offset `k` such that `lo`'s day exists in month `k` (no clamping) and
-    // the resulting date is ≤ `hi`. A month whose length is < cd simply doesn't count, but a later
-    // (longer) month still can, so we keep scanning until even the 1st of month k exceeds `hi`.
+    let dir = if sign < 0 { 1 } else { -1 };
+    let addc = |y: i64, m: i64| {
+        cal_add_c(cal, a, IsoDuration { years: y, months: m, ..Default::default() }, dir)
+    };
+    // Largest year magnitude such that `a + dir*years` has not passed `b`.
+    let mut years = 0i64;
+    if largest == "year" {
+        loop {
+            let c = addc(years + 1, 0);
+            let passed = if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 };
+            if passed {
+                break;
+            }
+            years += 1;
+        }
+    }
+    // Then the largest month magnitude on top of those years.
     let mut months = 0i64;
-    let mut k = 1i64;
     loop {
-        let (ny, nm) = cal_month_advance(cal, lo, k);
-        if cmp_date(cal_to_iso(cal, ny, nm, 1), hi) > 0 {
+        let c = addc(years, months + 1);
+        let passed = if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 };
+        if passed {
             break;
         }
-        if cd <= cal_month_len(cal, ny, nm) && cmp_date(cal_to_iso(cal, ny, nm, cd), hi) <= 0 {
-            months = k;
-        }
-        k += 1;
+        months += 1;
     }
-    let (fy, fm) = cal_month_advance(cal, lo, months);
-    let mid = cal_to_iso(cal, fy, fm, cd);
-    let days = epoch_days(hi) - epoch_days(mid);
-    let (years, months) = if largest == "year" {
-        let mut years = fy - ly;
-        let mut months = fm - lm;
-        if months < 0 {
+    // Clamp-backoff (as in `diff_date`): if the last month landed exactly on `b` only because `a`'s
+    // day-of-month was clamped to a shorter target month, that month is not whole — drop it.
+    let a_dom = cal_fields(cal, a).2;
+    let mid = addc(years, months);
+    if cmp_date(mid, b) == 0 && cal_fields(cal, mid).2 < a_dom {
+        if months > 0 {
+            months -= 1;
+        } else if largest == "year" && years > 0 {
             years -= 1;
-            months += cal_months_in_year(cal, fy - 1);
+            while {
+                let c = addc(years, months + 1);
+                !(if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 })
+            } {
+                months += 1;
+            }
         }
-        (years, months)
-    } else {
-        (0, months)
-    };
-    let out = IsoDuration { years, months, days, ..Default::default() };
-    if sign > 0 {
-        neg_duration(out)
-    } else {
-        out
     }
+    let mid = addc(years, months);
+    let days = epoch_days(b) - epoch_days(mid);
+    IsoDuration { years: dir * years, months: dir * months, days, ..Default::default() }
 }
 
 fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
@@ -2983,7 +2978,9 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     }
     let positive = sign < 0; // a → b is positive when a precedes b
     let (lo, hi) = if positive { (a, b) } else { (b, a) };
-    let mag = if positive { base } else { neg_duration(base) }; // unsigned lo → hi
+    // Unsigned lo → hi difference, anchored at `lo`. (Not `neg_duration(base)`: because a difference
+    // is anchored at its start date, `a.until(b)` negated is not `b.until(a)` when a month clamps.)
+    let mag = diff_date_cal(cal, lo, hi, largest);
 
     // The candidate durations: truncated at `smallest`, and one increment above.
     let (low, field, base_units) = match smallest {
@@ -3021,9 +3018,66 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     let fraction = if denom == 0.0 { 0.0 } else { (dt - dl) as f64 / denom };
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
     let chosen = if up { high } else { low };
-    // Re-balance the rounded date back to `largest`.
-    let result = diff_date_cal(cal, lo, add_date_dur(lo, chosen), largest);
+    // Re-balance the rounded date back to `largest`. This uses the *greedy* difference (a clamped
+    // month counts as whole), NOT DifferenceDate's clamp-backoff — the rounded duration is exact and
+    // must be preserved (e.g. relativeTo + 11 months rounded to months stays 11, not 10mo+30d).
+    let result = diff_date_greedy(cal, lo, add_date_dur(lo, chosen), largest);
     if positive { result } else { neg_duration(result) }
+}
+
+/// A date difference (`a` → `b`, either direction) that greedily maximizes the larger units: a month
+/// reached only by day-clamping still counts as a whole month. This is the balancing semantics used
+/// by Duration rounding/totalling — unlike `diff_date`, which drops a clamped month for
+/// `until`/`since`.
+fn diff_date_greedy(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
+    let largest = largest.strip_suffix('s').unwrap_or(largest);
+    let mut out = IsoDuration::default();
+    let c = cmp_date(a, b);
+    if c == 0 {
+        return out;
+    }
+    let dir = if c < 0 { 1 } else { -1 };
+    let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
+    match largest {
+        "week" => {
+            let t = epoch_days(b) - epoch_days(a);
+            out.weeks = t / 7;
+            out.days = t % 7;
+        }
+        "day" => out.days = epoch_days(b) - epoch_days(a),
+        _ if is_month_structure(cal) => {
+            let ym = |y: i64, m: i64| IsoDuration { years: y, months: m, ..Default::default() };
+            let mut years = 0i64;
+            if largest == "year" {
+                while !passed(cal_add_c(cal, a, ym(years + 1, 0), dir)) {
+                    years += 1;
+                }
+            }
+            let mut months = 0i64;
+            while !passed(cal_add_c(cal, a, ym(years, months + 1), dir)) {
+                months += 1;
+            }
+            let mid = cal_add_c(cal, a, ym(years, months), dir);
+            out.years = dir * years;
+            out.months = dir * months;
+            out.days = epoch_days(b) - epoch_days(mid);
+        }
+        _ => {
+            let mut tm = 0i64;
+            while !passed(constrain_add_ym(a, dir * (tm + 1))) {
+                tm += 1;
+            }
+            let mid = constrain_add_ym(a, dir * tm);
+            if largest == "year" {
+                out.years = dir * (tm / 12);
+                out.months = dir * (tm % 12);
+            } else {
+                out.months = dir * tm;
+            }
+            out.days = epoch_days(b) - epoch_days(mid);
+        }
+    }
+    out
 }
 
 /// Add a full duration (date + time parts) to a datetime, carrying time overflow into days.
@@ -3264,7 +3318,8 @@ fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &s
 /// Add `months` months to a date, clamping the day to the resulting month's length.
 fn constrain_add_ym(d: IsoDate, months: i64) -> IsoDate {
     let total = d.year * 12 + (d.month as i64 - 1) + months;
-    let (y, m) = balance_year_month(total / 12, total % 12 + 1);
+    let y = total.div_euclid(12);
+    let m = (total.rem_euclid(12) + 1) as u8;
     let day = (d.day).min(days_in_month(y, m));
     IsoDate {
         year: y,
@@ -5171,13 +5226,13 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
             let (ed, et) = add_full_duration(rel, d);
             let dest = (epoch_days(ed) - epoch_days(rel)) as i128 * day_ns + time_to_ns(et) as i128;
             if scal {
-                let bal = diff_date(rel, ed, &largest);
+                let bal = diff_date_greedy("iso8601", rel, ed, &largest);
                 let rounded = round_calendar_unit(rel, dest, &bal, &smallest, incr, sign, &mode);
                 // Bubble the rounded date up to the largest unit (weeks are never re-balanced away).
                 if smallest == "week" {
                     rounded
                 } else {
-                    diff_date(rel, add_date_dur(rel, rounded), &largest)
+                    diff_date_greedy("iso8601", rel, add_date_dur(rel, rounded), &largest)
                 }
             } else {
                 let un = unit_ns(&smallest).unwrap();
@@ -5187,7 +5242,8 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
                     let rdays = rounded / day_ns;
                     let sub = rounded % day_ns;
                     let (y, m, da) = civil_from_days(epoch_days(rel) + rdays as i64);
-                    let mut out = diff_date(
+                    let mut out = diff_date_greedy(
+                        "iso8601",
                         rel,
                         IsoDate {
                             year: y,
@@ -5266,7 +5322,7 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         };
         let value = if matches!(unit, "year" | "month" | "week") {
             let (rel, ed) = rel_o.unwrap();
-            let bal = diff_date(rel, ed, unit);
+            let bal = diff_date_greedy("iso8601", rel, ed, unit);
             let comp = match unit {
                 "year" => bal.years,
                 "month" => bal.months,
