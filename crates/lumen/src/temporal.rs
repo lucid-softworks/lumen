@@ -6634,6 +6634,11 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
         Value::Str(s) => {
             let p =
                 parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
+            // A `[u-ca=...]` annotation must name a calendar Temporal supports (RangeError otherwise;
+            // e.g. a not-yet-adopted "bangla").
+            if let Some(cal) = &p.calendar {
+                canon_calendar(i, cal)?;
+            }
             let date = p
                 .date
                 .ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
