@@ -355,10 +355,11 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
     let min_sig = get_num(o, "__nf_minsig");
     let max_sig = get_num(o, "__nf_maxsig");
 
+    let increment = get_num(o, "__nf_roundingincrement").unwrap_or(1);
     let mut s = if let Some(msig) = max_sig {
         round_significant(x, msig, min_sig.unwrap_or(1))
     } else {
-        round_fraction(x, min_frac, max_frac)
+        round_fraction_inc(x, min_frac, max_frac, increment)
     };
     // Pad integer digits to min_int.
     {
@@ -383,7 +384,35 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
     s
 }
 
+/// Round `x` to at most `max_frac` fraction digits (half-expand), snapping to a multiple of
+/// `increment` at the `max_frac` scale, and pad to `min_frac`.
+fn round_fraction_inc(x: f64, min_frac: u32, max_frac: u32, increment: u32) -> String {
+    let factor = 10f64.powi(max_frac as i32);
+    let scaled = x * factor;
+    let rounded = if increment > 1 {
+        let inc = increment as f64;
+        (scaled / inc).round() * inc / factor
+    } else {
+        scaled.round() / factor
+    };
+    let mut s = format!("{:.*}", max_frac as usize, rounded);
+    if increment == 1 && max_frac > min_frac && s.contains('.') {
+        while s.ends_with('0') {
+            let frac_len = s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
+            if frac_len as u32 <= min_frac {
+                break;
+            }
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    s
+}
+
 /// Round `x` to at most `max_frac` fraction digits (half-expand) and pad to `min_frac`.
+#[allow(dead_code)]
 fn round_fraction(x: f64, min_frac: u32, max_frac: u32) -> String {
     let factor = 10f64.powi(max_frac as i32);
     let rounded = (x * factor).round() / factor;
@@ -460,18 +489,51 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     if style == "percent" {
         value *= 100.0;
     }
-    let negative = value.is_sign_negative() && value != 0.0;
+    // Negative zero counts as negative for sign display (so -0 formats as "-0").
+    let negative = value.is_sign_negative() && !value.is_nan();
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    // scientific / engineering notation: mantissa in [1,10) or [1,1000), plus an exponent.
+    let notation = get_str(o, "__nf_notation");
+    let mut exponent: Option<i32> = None;
+    if (notation == "scientific" || notation == "engineering") && value != 0.0 && value.is_finite() {
+        let mut e = value.abs().log10().floor() as i32;
+        if notation == "engineering" {
+            e -= e.rem_euclid(3);
+        }
+        value /= 10f64.powi(e);
+        // Guard against log10 rounding pushing the mantissa to 10.
+        if value.abs() >= if notation == "engineering" { 1000.0 } else { 10.0 } {
+            value /= 10.0;
+            e += 1;
+        }
+        exponent = Some(e);
+    }
+    if value.is_infinite() {
+        let sign = if negative { "-" } else { "" };
+        return format!("{sign}∞");
+    }
     let mag = format_magnitude(value.abs(), o);
     let (int_part, frac_part) = match mag.split_once('.') {
         Some((a, b)) => (a.to_string(), Some(b.to_string())),
         None => (mag.clone(), None),
     };
     let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
-    let grouped = group_integer(&int_part, &grouping);
+    // Grouping is suppressed in scientific/engineering notation.
+    let grouped = if exponent.is_some() {
+        int_part.clone()
+    } else {
+        group_integer(&int_part, &grouping)
+    };
     let mut num = match frac_part {
         Some(f) => format!("{grouped}.{f}"),
         None => grouped,
     };
+    if let Some(e) = exponent {
+        // CLDR: "E" then the exponent with its sign ("E-6", "E6").
+        num = format!("{num}E{e}");
+    }
 
     // Sign display.
     let sign_display = get_str(o, "__nf_signdisplay");
