@@ -12,6 +12,9 @@ pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "PluralRules", 0, construct);
     install_supported_locales(it, &ctor);
     it.def_method(&proto, "select", 1, |i, this, a| select(i, &this, &arg(a, 0)));
+    it.def_method(&proto, "selectRange", 2, |i, this, a| {
+        select_range(i, &this, &arg(a, 0), &arg(a, 1))
+    });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
 }
 
@@ -118,6 +121,33 @@ fn select(i: &mut Interp, this: &Value, n: &Value) -> Result<Value, Value> {
         let int = ax.trunc() as u64;
         let has_fraction = ax.fract() != 0.0;
         data::plural_cardinal(lang, int, has_fraction)
+    };
+    Ok(Value::str(cat))
+}
+
+/// PluralRules.prototype.selectRange: both endpoints are required and must be numbers (NaN throws
+/// RangeError). We resolve the category of the end value (CLDR range rules collapse to the end
+/// category for the locales we ship).
+fn select_range(i: &mut Interp, this: &Value, start: &Value, end: &Value) -> Result<Value, Value> {
+    let o = brand_slot(i, this, "__pr")?;
+    if matches!(start, Value::Undefined) || matches!(end, Value::Undefined) {
+        return Err(i.make_error("TypeError", "selectRange requires two numbers"));
+    }
+    let x = ab(i.to_number(start))?;
+    let y = ab(i.to_number(end))?;
+    if x.is_nan() || y.is_nan() {
+        return Err(i.make_error("RangeError", "selectRange arguments must not be NaN"));
+    }
+    let locale = match o.borrow().props.get("__pr_locale").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "en".to_string(),
+    };
+    let lang = locale.split('-').next().unwrap_or("en");
+    let cat = if y.is_infinite() {
+        "other"
+    } else {
+        let ay = y.abs();
+        data::plural_cardinal(lang, ay.trunc() as u64, ay.fract() != 0.0)
     };
     Ok(Value::str(cat))
 }
