@@ -58,9 +58,10 @@ fn format_range(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Va
 fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Value, Value> {
     let (o, a, b) = range_endpoints(i, this, x, y)?;
     let stype = suffix_type_of(&o);
+    let (dec, grp) = loc_seps(&o);
     let mut out: Vec<Value> = Vec::new();
     let push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
-        for (t, v) in decompose_parts(whole, &stype) {
+        for (t, v) in decompose_parts(whole, &stype, dec, grp) {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
             set_data(&ob, "value", Value::from_string(v));
@@ -1123,7 +1124,8 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
     let n = to_intl_number(i, x)?;
     let whole = assemble_number(i, &o, n);
     let nu = get_str(&o, "__nf_nu");
-    let parts = decompose_parts(&whole, &suffix_type_of(&o));
+    let (dec, grp) = loc_seps(&o);
+    let parts = decompose_parts(&whole, &suffix_type_of(&o), dec, grp);
     let arr: Vec<Value> = parts
         .into_iter()
         .map(|(t, v)| {
@@ -1141,7 +1143,17 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
 /// Break an assembled number string into typed parts (minusSign/plusSign, currency/percentSign/
 /// literal affixes, grouped integer, decimal, fraction, and the exponent group). `suffix_type`
 /// classifies the trailing affix ("compact" for compact notation, else percent/literal by content).
-fn decompose_parts(s: &str, suffix_type: &str) -> Vec<(&'static str, String)> {
+/// The (decimal, group) separator chars for a formatter's locale.
+fn loc_seps(o: &Gc) -> (char, char) {
+    let loc = get_str(o, "__nf_locale");
+    let mut lp = loc.split('-');
+    let lang = lp.next().unwrap_or("en");
+    let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let (dec, grp, _) = crate::intl::data::number_symbols(lang, region);
+    (dec.chars().next().unwrap_or('.'), grp.chars().next().unwrap_or(','))
+}
+
+fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'static str, String)> {
     let mut parts: Vec<(&'static str, String)> = Vec::new();
     // Split off the exponent tail, if any.
     let (main, exp) = match s.split_once('E') {
@@ -1187,16 +1199,16 @@ fn decompose_parts(s: &str, suffix_type: &str) -> Vec<(&'static str, String)> {
     }
     // Integer digits (with grouping commas).
     let int_start = idx;
-    while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == ',') {
+    while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == grp) {
         idx += 1;
     }
     let int_str: String = bytes[int_start..idx].iter().collect();
-    for seg in split_grouped(&int_str) {
+    for seg in split_grouped(&int_str, grp) {
         parts.push(seg);
     }
     // Decimal + fraction.
-    if idx < bytes.len() && bytes[idx] == '.' {
-        parts.push(("decimal", ".".to_string()));
+    if idx < bytes.len() && bytes[idx] == dec {
+        parts.push(("decimal", dec.to_string()));
         idx += 1;
         let frac_start = idx;
         while idx < bytes.len() && bytes[idx].is_ascii_digit() {
@@ -1238,16 +1250,16 @@ fn decompose_parts(s: &str, suffix_type: &str) -> Vec<(&'static str, String)> {
     parts
 }
 
-/// Split a grouped integer like "12,345" into integer/group parts.
-fn split_grouped(int_str: &str) -> Vec<(&'static str, String)> {
+/// Split a grouped integer like "12,345" into integer/group parts (group char is locale-specific).
+fn split_grouped(int_str: &str, grp: char) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for c in int_str.chars() {
-        if c == ',' {
+        if c == grp {
             if !cur.is_empty() {
                 out.push(("integer", std::mem::take(&mut cur)));
             }
-            out.push(("group", ",".to_string()));
+            out.push(("group", grp.to_string()));
         } else {
             cur.push(c);
         }
