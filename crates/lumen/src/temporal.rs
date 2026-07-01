@@ -545,6 +545,52 @@ fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
     IsoDate { year: yy, month: mm, day: dd }
 }
 
+/// Whether a calendar has its own month structure (not the Gregorian months), so date arithmetic
+/// must add years/months in the calendar's own terms.
+fn is_month_structure(cal: &str) -> bool {
+    is_13month(cal) || is_islamic(cal) || cal == "indian"
+}
+/// The ISO date for a month-structure calendar's (year, month, day).
+fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
+    if is_13month(cal) {
+        to_13month(y, m, d, epoch_13(cal))
+    } else if is_islamic(cal) {
+        to_islamic(y, m, d, islamic_epoch(cal))
+    } else {
+        to_indian(y, m, d)
+    }
+}
+/// The length of month `m` in year `y` of a month-structure calendar.
+fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
+    if is_13month(cal) {
+        if m <= 12 {
+            30
+        } else if y.rem_euclid(4) == 3 {
+            6
+        } else {
+            5
+        }
+    } else if is_islamic(cal) {
+        islamic_month_len(m, islamic_leap(y))
+    } else {
+        indian_month_len(m, is_leap(y + 78))
+    }
+}
+/// CalendarDateAdd for a month-structure calendar: add years/months in the calendar (clamping the
+/// day to the target month), then weeks/days as elapsed days.
+fn cal_add(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
+    let f = cal_fields(cal, d);
+    let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
+    let total = cy * mpy + (cm - 1) + sign * (dur.years * mpy + dur.months);
+    let ny = total.div_euclid(mpy);
+    let nm = total.rem_euclid(mpy) + 1;
+    let nd = cd.min(cal_month_len(cal, ny, nm));
+    let iso0 = cal_to_iso(cal, ny, nm, nd);
+    let z = epoch_days(iso0) + sign * (dur.weeks * 7 + dur.days);
+    let (yy, mm, dd) = civil_from_days(z);
+    IsoDate { year: yy, month: mm, day: dd }
+}
+
 // Indian national (Saka) calendar: a solar calendar whose year begins on Chaitra 1 (Gregorian
 // Mar 22, or Mar 21 in a Gregorian leap year). Saka year = Gregorian - 78.
 fn indian_month_len(m: i64, leap: bool) -> i64 {
@@ -1586,14 +1632,16 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let nd = add_to_date(i, d, dur, 1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let nd = add_to_date(i, d, dur, 1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let nd = add_to_date(i, d, dur, -1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let nd = add_to_date(i, d, dur, -1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
@@ -2996,7 +3044,12 @@ fn add_to_date(
     dur: IsoDuration,
     sign: i64,
     ovf: Overflow,
+    cal: &str,
 ) -> Result<IsoDate, Value> {
+    // Month-structure calendars (Coptic/Ethiopic/Islamic/Indian) add in their own months.
+    if is_month_structure(cal) {
+        return check_date(i, cal_add(cal, d, dur, sign));
+    }
     // Add years & months first (constraining the day), then weeks & days.
     let total_months = d.year * 12 + (d.month as i64 - 1) + sign * (dur.years * 12 + dur.months);
     let (y, m) = balance_year_month(total_months / 12, total_months % 12 + 1);
@@ -3109,8 +3162,9 @@ fn dt_add(
     dur: IsoDuration,
     sign: i64,
     ovf: Overflow,
+    cal: &str,
 ) -> Result<(IsoDate, IsoTime), Value> {
-    let nd = add_to_date(i, d, dur, sign, ovf)?;
+    let nd = add_to_date(i, d, dur, sign, ovf, cal)?;
     let total = time_to_ns(t) as i128 + sign as i128 * duration_time_ns(dur);
     let carry = total.div_euclid(86_400_000_000_000);
     let tns = total.rem_euclid(86_400_000_000_000);
@@ -3520,14 +3574,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -5202,7 +5258,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf, &cal_id)?;
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
@@ -5213,7 +5270,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let dur = to_duration(i, &arg(a, 0))?;
         let (d, tm) = zoned_local(e, o);
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf)?;
+        let cal_id = cal_of(i, &t);
+        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf, &cal_id)?;
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
