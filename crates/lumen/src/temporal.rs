@@ -2943,8 +2943,9 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     let a_dom = cal_fields(cal, a).2;
     let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
     // A whole unit reached exactly at `b` only via day-clamping (`a`'s day doesn't fit the shorter
-    // target month) is not complete — the same clamp-backoff `diff_date` applies to the ISO calendar.
-    let clamped_at = |m: IsoDate| cmp_date(m, b) == 0 && cal_fields(cal, m).2 < a_dom;
+    // target month) is not complete when moving *forward*. Moving backward the clamped unit counts
+    // (matching ICU4X: e.g. a leap year's last day back one year lands on the common year's last day).
+    let clamped_at = |m: IsoDate| dir > 0 && cmp_date(m, b) == 0 && cal_fields(cal, m).2 < a_dom;
     // Largest year magnitude that has not passed `b`, backing off a clamped exact landing.
     let mut years = 0i64;
     if largest == "year" {
