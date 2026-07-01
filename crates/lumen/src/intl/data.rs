@@ -66,7 +66,9 @@ pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {
 /// Cardinal plural category of `n` (an already-formatted non-negative number, given as its integer
 /// value `i` plus whether it had a fractional part) for a language. Returns one of
 /// "zero"/"one"/"two"/"few"/"many"/"other". A small subset of the CLDR plural rules.
-pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool) -> &'static str {
+/// The CLDR cardinal plural category. `e` is the compact/scientific exponent operand (0 for standard
+/// notation); `has_fraction` proxies the CLDR `v != 0` operand test.
+pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool, e: i32) -> &'static str {
     match lang {
         // English-like: one iff i==1 and no fraction.
         "en" | "de" | "nl" | "it" | "es" | "pt" | "sv" | "da" | "et" | "fi" => {
@@ -76,12 +78,40 @@ pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool) -> &'static str {
                 "other"
             }
         }
-        // French: one iff i==0 or i==1; many for a non-zero whole multiple of 10^6.
+        // French: one iff i = 0,1; many when e=0 and i is a non-zero whole 10^6 multiple, or e∉0..5.
         "fr" => {
-            if (i == 0 || i == 1) && !has_fraction {
+            if i == 0 || i == 1 {
                 "one"
-            } else if i != 0 && i % 1_000_000 == 0 && !has_fraction {
+            } else if (e == 0 && i != 0 && i % 1_000_000 == 0 && !has_fraction)
+                || !(0..=5).contains(&e)
+            {
                 "many"
+            } else {
+                "other"
+            }
+        }
+        // Manx (gv): one/two/few on i mod 10/100 with v=0; many when v!=0.
+        "gv" => {
+            if has_fraction {
+                "many"
+            } else if i % 10 == 1 {
+                "one"
+            } else if i % 10 == 2 {
+                "two"
+            } else if matches!(i % 100, 0 | 20 | 40 | 60 | 80) {
+                "few"
+            } else {
+                "other"
+            }
+        }
+        // Slovenian (sl): one/two/few on i mod 100 with v=0; few also when v!=0.
+        "sl" => {
+            if !has_fraction && i % 100 == 1 {
+                "one"
+            } else if !has_fraction && i % 100 == 2 {
+                "two"
+            } else if has_fraction || matches!(i % 100, 3 | 4) {
+                "few"
             } else {
                 "other"
             }
@@ -106,6 +136,8 @@ pub fn plural_categories(lang: &str) -> &'static [&'static str] {
         "ru" | "uk" | "pl" => &["one", "few", "many", "other"],
         "cs" | "sk" => &["one", "few", "many", "other"],
         "fr" => &["one", "many", "other"],
+        "gv" => &["one", "two", "few", "many", "other"],
+        "sl" => &["one", "two", "few", "other"],
         _ => &["one", "other"],
     }
 }

@@ -964,7 +964,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
                 None => {
                     let unit = get_str(o, "__nf_unit");
                     let disp = get_str(o, "__nf_unitdisplay");
-                    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0);
+                    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0, 0);
                     format!("{sign}{}", unit_wrap(&num, &unit, &disp, cat != "one"))
                 }
             };
@@ -1197,7 +1197,7 @@ fn unit_pattern_of(o: &Gc, value: f64) -> Option<String> {
         ("en", "IN") => "en-IN",
         _ => lang,
     };
-    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0);
+    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0, 0);
     crate::cldr_units::unit_pattern(cldr_loc, &unit, style, cat)
         .or_else(|| crate::cldr_units::unit_pattern(cldr_loc, &unit, style, "other"))
         .or_else(|| crate::cldr_units::unit_pattern(lang, &unit, style, "other"))

@@ -123,6 +123,10 @@ fn select(i: &mut Interp, this: &Value, n: &Value) -> Result<Value, Value> {
         _ => "en".to_string(),
     };
     let x = ab(i.to_number(n))?;
+    let compact = matches!(
+        o.borrow().props.get("__pr_notation").map(|p| p.value.clone()),
+        Some(Value::Str(s)) if &*s == "compact"
+    );
     let lang = locale.split('-').next().unwrap_or("en");
     let cat = if x.is_nan() || x.is_infinite() {
         "other"
@@ -130,7 +134,19 @@ fn select(i: &mut Interp, this: &Value, n: &Value) -> Result<Value, Value> {
         let ax = x.abs();
         let int = ax.trunc() as u64;
         let has_fraction = ax.fract() != 0.0;
-        data::plural_cardinal(lang, int, has_fraction)
+        // The compact exponent operand `e`: the largest 10^(3k) tier not exceeding the magnitude.
+        let e = if compact {
+            let mut v = ax;
+            let mut ex = 0i32;
+            while v >= 1000.0 {
+                v /= 1000.0;
+                ex += 3;
+            }
+            ex
+        } else {
+            0
+        };
+        data::plural_cardinal(lang, int, has_fraction, e)
     };
     Ok(Value::str(cat))
 }
@@ -157,7 +173,7 @@ fn select_range(i: &mut Interp, this: &Value, start: &Value, end: &Value) -> Res
         "other"
     } else {
         let ay = y.abs();
-        data::plural_cardinal(lang, ay.trunc() as u64, ay.fract() != 0.0)
+        data::plural_cardinal(lang, ay.trunc() as u64, ay.fract() != 0.0, 0)
     };
     Ok(Value::str(cat))
 }
