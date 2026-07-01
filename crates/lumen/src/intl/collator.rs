@@ -74,12 +74,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     };
     let resolved = resolve_locale(i, &requested, &["co", "kn", "kf"]);
     let kw = |k: &str| resolved.keywords.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+    let numeric_opt = numeric;
+    let case_first_opt = case_first.clone();
     // The option wins over the locale's -u- keyword; a bare -u-kn (empty value) means numeric=true.
-    let numeric = numeric.unwrap_or_else(|| match kw("kn") {
+    let numeric = numeric_opt.unwrap_or_else(|| match kw("kn") {
         Some(v) => v != "false",
         None => false,
     });
-    let case_first = case_first.or_else(|| kw("kf")).unwrap_or_else(|| "false".to_string());
+    let case_first = case_first_opt.clone().or_else(|| kw("kf")).unwrap_or_else(|| "false".to_string());
     // The `-u-co-` value must be a known collation type (never the reserved standard/search); an
     // unknown one falls back to "default".
     const COLLATIONS: [&str; 15] = [
@@ -90,12 +92,45 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         .filter(|c| COLLATIONS.contains(&c.as_str()))
         .unwrap_or_else(|| "default".to_string());
 
+    // ResolveLocale: reflect the surviving `-u-` keywords in the resolved locale string. A keyword
+    // survives when its value came from the locale extension and no differing option overrode it
+    // (keys are emitted in alphabetical order: co, kf, kn).
+    let mut additions: Vec<(&str, String)> = Vec::new();
+    if let Some(co) = kw("co") {
+        if COLLATIONS.contains(&co.as_str()) {
+            additions.push(("co", co));
+        }
+    }
+    if let Some(kf) = kw("kf") {
+        if ["upper", "lower", "false"].contains(&kf.as_str())
+            && case_first_opt.as_deref().map_or(true, |o| o == kf)
+        {
+            additions.push(("kf", kf));
+        }
+    }
+    if let Some(kn) = kw("kn") {
+        let kn_bool = kn != "false";
+        if numeric_opt.map_or(true, |o| o == kn_bool) {
+            // Canonical form: the `true` value is elided (`-u-kn`), `false` is spelled out.
+            additions.push(("kn", if kn_bool { String::new() } else { "false".to_string() }));
+        }
+    }
+    let locale = if additions.is_empty() {
+        resolved.locale.clone()
+    } else {
+        let ext: String = additions
+            .iter()
+            .map(|(k, v)| if v.is_empty() { format!("-{k}") } else { format!("-{k}-{v}") })
+            .collect();
+        format!("{}-u{}", resolved.locale, ext)
+    };
+
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.Collator")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__co", Value::Bool(true));
-    set_builtin(&obj, "__co_locale", Value::from_string(resolved.locale));
+    set_builtin(&obj, "__co_locale", Value::from_string(locale));
     set_builtin(&obj, "__co_usage", Value::from_string(usage));
     set_builtin(&obj, "__co_sensitivity", Value::from_string(sensitivity));
     set_builtin(&obj, "__co_ignorepunct", Value::Bool(ignore_punct));
