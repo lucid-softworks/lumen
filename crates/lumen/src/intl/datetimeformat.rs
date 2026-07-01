@@ -270,6 +270,28 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     put(&obj, "__dtf_tzname", &tz_name);
     put(&obj, "__dtf_datestyle", &date_style);
     put(&obj, "__dtf_timestyle", &time_style);
+    // dateStyle / timeStyle expand to a preset component set (en; used by build_parts).
+    if let Some(ds) = &date_style {
+        let (wd, mo, dy, yr): (Option<&str>, &str, &str, &str) = match ds.as_str() {
+            "full" => (Some("long"), "long", "numeric", "numeric"),
+            "long" => (None, "long", "numeric", "numeric"),
+            "medium" => (None, "short", "numeric", "numeric"),
+            _ => (None, "numeric", "numeric", "2-digit"), // short
+        };
+        if let Some(w) = wd {
+            set_builtin(&obj, "__dtfx_weekday", Value::str(w));
+        }
+        set_builtin(&obj, "__dtfx_month", Value::str(mo));
+        set_builtin(&obj, "__dtfx_day", Value::str(dy));
+        set_builtin(&obj, "__dtfx_year", Value::str(yr));
+    }
+    if let Some(ts) = &time_style {
+        set_builtin(&obj, "__dtfx_hour", Value::str("numeric"));
+        set_builtin(&obj, "__dtfx_minute", Value::str("2-digit"));
+        if matches!(ts.as_str(), "medium" | "long" | "full") {
+            set_builtin(&obj, "__dtfx_second", Value::str("2-digit"));
+        }
+    }
     // hourCycle / hour12 are resolved only when an hour is shown (explicit hour, or a timeStyle).
     let shows_hour = hour.is_some() || time_style.is_some();
     if shows_hour {
@@ -399,9 +421,13 @@ fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
 fn build_parts(o: &Gc, ms: f64) -> Vec<(&'static str, String)> {
     let (y, mo, d, h, mi, s, wd) = ymd(ms);
-    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value.clone()) {
-        Some(Value::Str(s)) => Some(s.to_string()),
-        _ => None,
+    // Read a component slot, falling back to the dateStyle/timeStyle expansion (`__dtfx_`).
+    let get = |k: &str| {
+        let read = |key: &str| match o.borrow().props.get(key).map(|p| p.value.clone()) {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            _ => None,
+        };
+        read(k).or_else(|| read(&k.replacen("__dtf_", "__dtfx_", 1)))
     };
     let mut parts: Vec<(&'static str, String)> = Vec::new();
     let lit = |parts: &mut Vec<(&'static str, String)>, s: &str| {
