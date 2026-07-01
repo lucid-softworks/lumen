@@ -1753,7 +1753,7 @@ fn duration_sign(d: IsoDuration) -> i64 {
 enum Off {
     None,
     Z,
-    Num(i64), // offset in nanoseconds
+    Num(i64, bool), // offset in nanoseconds; bool = seconds were present (match-exactly, not match-minutes)
 }
 
 /// The result of parsing an ISO date-time string (one of the date / date-time / time productions).
@@ -1977,7 +1977,7 @@ fn p_offset(c: &mut Cur) -> Option<Off> {
         + ms as i64 * 1_000_000
         + us as i64 * 1000
         + ns as i64;
-    Some(Off::Num(sign * total))
+    Some(Off::Num(sign * total, had_sec))
 }
 
 /// An annotation key: lowercase, starting with `a-z`/`_`.
@@ -2004,7 +2004,7 @@ fn valid_tz(s: &str) -> bool {
     }
     if matches!(s.as_bytes()[0], b'+' | b'-') {
         let mut c = Cur::new(s);
-        return matches!(p_offset(&mut c), Some(Off::Num(_))) && c.done();
+        return matches!(p_offset(&mut c), Some(Off::Num(..))) && c.done();
     }
     s.split('/').all(|comp| {
         let bytes = comp.as_bytes();
@@ -6216,7 +6216,12 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
                 let s = i.to_string(&tzv).map_err(unab)?;
                 let tz = normalize_tz(i, &s)?;
                 let off = zone_offset(&tz, ns_utc);
-                (ns_utc + off as i128, offset_string(off))
+                // The wall time uses the full offset, but Instant.toString renders the offset string
+                // rounded to the nearest minute (FormatDateTimeUTCOffsetRounded).
+                let minute = 60_000_000_000i64;
+                let (q, r) = (off / minute, off % minute);
+                let rounded = (if r.abs() * 2 >= minute { q + r.signum() } else { q }) * minute;
+                (ns_utc + off as i128, offset_string(rounded))
             }
         } else {
             (ns_utc, "Z".to_string())
@@ -6409,7 +6414,7 @@ fn parse_instant(s: &str) -> Option<i128> {
     let time = p.time?;
     let offset = match p.offset {
         Off::Z => 0,
-        Off::Num(n) => n,
+        Off::Num(n, _) => n,
         Off::None => return None, // ...with an absolute reference (Z or numeric offset)
     };
     let ns = dt_ns(date, time) - offset as i128;
@@ -6484,6 +6489,7 @@ fn interpret_offset(
     local: i128,
     has_offset: bool,
     offset_ns: i64,
+    offset_exact: bool,
     offset_opt: &str,
     disamb: &str,
 ) -> Result<(i128, i64), Value> {
@@ -6495,9 +6501,23 @@ fn interpret_offset(
         return Ok((local - offset_ns as i128, offset_ns));
     }
     // "prefer"/"reject": use the supplied offset if it is valid for one of the possible instants.
+    // When the parsed offset has whole-minute precision, a candidate whose offset *rounds* to it
+    // (half away from zero) also matches — e.g. "-00:45" matches Africa/Monrovia's -00:44:30. On a
+    // fuzzy match the returned offset is the zone's own full-precision value, not the parsed one.
+    let minute = 60_000_000_000i64;
+    let minute_precision = !offset_exact && offset_ns % minute == 0;
     for inst in possible_epochs(tz, local) {
-        if (local - inst) as i64 == offset_ns {
-            return Ok((inst, offset_ns));
+        let cand = (local - inst) as i64;
+        if cand == offset_ns {
+            return Ok((inst, cand));
+        }
+        if minute_precision {
+            let q = cand / minute;
+            let r = cand % minute;
+            let rounded = if r.abs() * 2 >= minute { q + r.signum() } else { q } * minute;
+            if rounded == offset_ns {
+                return Ok((inst, cand));
+            }
         }
     }
     if offset_opt == "reject" {
@@ -6549,7 +6569,7 @@ fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
         } else {
             match p.offset {
                 Off::Z => return Ok(Rc::from("UTC")),
-                Off::Num(n) => return Ok(Rc::from(offset_string(n).as_str())),
+                Off::Num(n, _) => return Ok(Rc::from(offset_string(n).as_str())),
                 Off::None => {}
             }
         }
@@ -6691,16 +6711,26 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             // A string with an offset defaults to `offset: reject`; the fixed-offset zone case ("Z" or
             // a numeric-offset id) always uses the annotation's own offset.
             let offset_opt = opt_str(i, opts, "offset", "reject")?;
-            let (has_off, off_ns) = match p.offset {
-                Off::Z => (true, 0),
-                Off::Num(n) => (true, n),
-                Off::None => (false, 0),
+            let (has_off, off_ns, off_exact) = match p.offset {
+                Off::Z => (true, 0, true),
+                Off::Num(n, exact) => (true, n, exact),
+                Off::None => (false, 0, false),
             };
             if parse_fixed_offset(&tz).is_some() {
-                let off = zone_offset(&tz, local) ; // fixed offset zone
+                // A fixed-offset zone: `use` takes the string's offset, `reject` errors on a mismatch
+                // (e.g. a sub-minute -00:44:30 against a minute-precision -00:45 zone), else the zone's.
+                let zone_off = zone_offset(&tz, local);
+                let off = if offset_opt == "use" && has_off {
+                    off_ns
+                } else {
+                    if offset_opt == "reject" && has_off && off_ns != zone_off {
+                        return Err(i.make_error("RangeError", "offset does not match the time zone"));
+                    }
+                    zone_off
+                };
                 return Ok((local - off as i128, off, tz));
             }
-            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, &offset_opt, &disamb)?;
+            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, off_exact, &offset_opt, &disamb)?;
             Ok((epoch, off, tz))
         }
         Value::Obj(_) => {
@@ -6717,14 +6747,15 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             let zcal = input_cal(i, v)?;
             // The bag's own `offset` field (a "+HH:MM" string), if present.
             let offv = getm(i, v, "offset")?;
-            let (has_off, off_ns) = match &offv {
-                Value::Undefined => (false, 0),
+            let (has_off, off_ns, off_exact) = match &offv {
+                Value::Undefined => (false, 0, false),
                 _ => {
                     let s = i.to_string(&offv).map_err(unab)?;
                     if !(s.starts_with('+') || s.starts_with('-')) {
                         return Err(i.make_error("RangeError", "invalid offset string"));
                     }
-                    (true, tz_offset_ns(&s))
+                    // A property-bag offset is always matched exactly — no minute-rounding fuzz.
+                    (true, tz_offset_ns(&s), true)
                 }
             };
             let snap = snapshot_date_fields(i, v)?;
@@ -6740,7 +6771,7 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 let off = zone_offset(&tz, local);
                 return Ok((local - off as i128, off, tz));
             }
-            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, &offset_opt, &disamb)?;
+            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, off_exact, &offset_opt, &disamb)?;
             Ok((epoch, off, tz))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
@@ -7043,8 +7074,28 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             },
         )?;
         let local = dt_ns(nd, nt);
-        let off = offset_for_local(&tz, local);
-        let epoch = local - off as i128;
+        // The offset field defaults to the instance's current offset; with() matches it exactly (no
+        // minute-rounding fuzz) and defaults the offset option to "prefer".
+        let offv = getm(i, &f, "offset")?;
+        let off_str = match &offv {
+            Value::Undefined => offset_string(o),
+            _ => {
+                let s = i.to_string(&offv).map_err(unab)?;
+                if !(s.starts_with('+') || s.starts_with('-')) {
+                    return Err(i.make_error("RangeError", "invalid offset string"));
+                }
+                s.to_string()
+            }
+        };
+        let off_ns = tz_offset_ns(&off_str);
+        let offset_opt = opt_str(i, &arg(a, 1), "offset", "prefer")?;
+        let disamb = opt_str(i, &arg(a, 1), "disambiguation", "compatible")?;
+        let (epoch, off) = if parse_fixed_offset(&tz).is_some() {
+            let z = zone_offset(&tz, local);
+            (local - z as i128, z)
+        } else {
+            interpret_offset(i, &tz, local, true, off_ns, true, &offset_opt, &disamb)?
+        };
         Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
     });
     it.def_method(&proto, "withTimeZone", 1, |i, t, a| {
