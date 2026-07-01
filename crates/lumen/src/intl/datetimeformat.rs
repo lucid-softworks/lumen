@@ -547,9 +547,6 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "iso8601".to_string(),
             };
-            if tcal != "iso8601" && tcal != dcal {
-                return Err(i.make_error("RangeError", format!("calendar mismatch: {tcal} vs {dcal}")));
-            }
             let kind = match t {
                 T::Date(_) => 1,
                 T::Time(_) => 2,
@@ -558,6 +555,12 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
                 T::MonthDay(_) => 5,
                 _ => 0,
             };
+            // YearMonth/MonthDay require an EXACT calendar match (no ISO exception, since a bare
+            // month-day/year-month is calendar-specific); other types accept an ISO instance.
+            let exact = matches!(kind, 4 | 5);
+            if (exact && tcal != dcal) || (!exact && tcal != "iso8601" && tcal != dcal) {
+                return Err(i.make_error("RangeError", format!("calendar mismatch: {tcal} vs {dcal}")));
+            }
             return Ok((temporal_to_ms(&t), kind));
         }
     }
