@@ -4234,11 +4234,8 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         if dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0 {
             return Err(i.make_error("RangeError", "Instant.add does not accept calendar units"));
         }
-        Ok(make(
-            i,
-            "Temporal.Instant",
-            Temporal::Instant(x + duration_time_ns(dur)),
-        ))
+        let r = check_instant(i, x + duration_time_ns(dur))?;
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(r)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
@@ -4249,11 +4246,8 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
                 "Instant.subtract does not accept calendar units",
             ));
         }
-        Ok(make(
-            i,
-            "Temporal.Instant",
-            Temporal::Instant(x - duration_time_ns(dur)),
-        ))
+        let r = check_instant(i, x - duration_time_ns(dur))?;
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(r)))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
@@ -4298,6 +4292,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
             Value::BigInt(n) => n,
             v => to_int(i, &v)? as i128,
         };
+        let ns = check_instant(i, ns)?;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
@@ -4305,18 +4300,20 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         Ok(make(i, "Temporal.Instant", Temporal::Instant(n)))
     });
     it.def_method(&ctor, "fromEpochMilliseconds", 1, |i, _t, a| {
-        let ms = to_int(i, &arg(a, 0))? as i128;
-        Ok(make(
-            i,
-            "Temporal.Instant",
-            Temporal::Instant(ms * 1_000_000),
-        ))
+        // ToNumber then require an integer in the representable range.
+        let n = i.to_number(&arg(a, 0)).map_err(unab)?;
+        if !n.is_finite() || n.fract() != 0.0 {
+            return Err(i.make_error("RangeError", "epochMilliseconds must be an integer"));
+        }
+        let ns = check_instant(i, n as i128 * 1_000_000)?;
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
     it.def_method(&ctor, "fromEpochNanoseconds", 1, |i, _t, a| {
         let ns = match arg(a, 0) {
             Value::BigInt(n) => n,
             v => to_int(i, &v)? as i128,
         };
+        let ns = check_instant(i, ns)?;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
@@ -4341,6 +4338,15 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
         }
     }
 }
+/// Reject an epoch-nanosecond value outside Temporal's representable instant range (±8.64e21).
+fn check_instant(i: &Interp, ns: i128) -> Result<i128, Value> {
+    if ns.abs() > 8_640_000_000_000_000_000_000 {
+        Err(i.make_error("RangeError", "instant is outside the representable range"))
+    } else {
+        Ok(ns)
+    }
+}
+
 /// Parse an ISO instant string (must carry a `Z` or `±HH:MM` offset).
 fn parse_instant(s: &str) -> Option<i128> {
     let p = parse_iso(s)?;
@@ -5003,6 +5009,18 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
 
 // ===== Now ====================================================================================
 
+/// Validate a `Now.*ISO` time-zone argument (a string identifier, or undefined for the default).
+fn now_validate_zone(i: &mut Interp, v: &Value) -> Result<(), Value> {
+    match v {
+        Value::Undefined => Ok(()),
+        Value::Str(s) => validate_tz_string(i, s),
+        _ => {
+            let s = i.to_string(v).map_err(unab)?;
+            validate_tz_string(i, &s)
+        }
+    }
+}
+
 fn install_now(it: &mut Interp, ns: &Gc) {
     let now = Object::new(Some(it.object_proto.clone()));
     // lumen has no real clock; the epoch is fixed at 1970-01-01T00:00:00Z. Structure/type tests
@@ -5027,7 +5045,8 @@ fn install_now(it: &mut Interp, ns: &Gc) {
             Temporal::Zoned { epoch_ns: 0, offset_ns: off, tz },
         ))
     });
-    it.def_method(&now, "plainDateISO", 0, |i, _t, _| {
+    it.def_method(&now, "plainDateISO", 0, |i, _t, a| {
+        now_validate_zone(i, &arg(a, 0))?;
         Ok(make(
             i,
             "Temporal.PlainDate",
@@ -5038,7 +5057,8 @@ fn install_now(it: &mut Interp, ns: &Gc) {
             }),
         ))
     });
-    it.def_method(&now, "plainTimeISO", 0, |i, _t, _| {
+    it.def_method(&now, "plainTimeISO", 0, |i, _t, a| {
+        now_validate_zone(i, &arg(a, 0))?;
         Ok(make(
             i,
             "Temporal.PlainTime",
@@ -5052,7 +5072,8 @@ fn install_now(it: &mut Interp, ns: &Gc) {
             }),
         ))
     });
-    it.def_method(&now, "plainDateTimeISO", 0, |i, _t, _| {
+    it.def_method(&now, "plainDateTimeISO", 0, |i, _t, a| {
+        now_validate_zone(i, &arg(a, 0))?;
         Ok(make(
             i,
             "Temporal.PlainDateTime",
