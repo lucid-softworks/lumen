@@ -796,9 +796,13 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
         let has_hour = time_defaulted || get("__dtf_hour").is_some();
         // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word; a plain
-        // AM/PM marker only appears alongside a 12-hour clock.
+        // AM/PM marker only appears alongside a 12-hour clock. When the hour cycle wasn't resolved
+        // (a default formatter over a PlainTime), use the locale default (en is 12-hour, others 24).
         let use12 = day_period.is_some()
-            || !matches!(o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()), Some(Value::Bool(false)));
+            || match o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()) {
+                Some(Value::Bool(b)) => b,
+                _ => cldr_loc == "en",
+            };
         let (disp_h, ampm) = if use12 {
             let ap = match &day_period {
                 Some(w) => Some(day_period_word(h, w)),
