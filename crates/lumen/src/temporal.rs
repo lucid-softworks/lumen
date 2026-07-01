@@ -4879,6 +4879,44 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
+        let cal = cal_of(i, &t);
+        if &*cal != "iso8601" {
+            // Merge the calendar (year, monthCode) with the partial input (day 1), then reduce back to
+            // the resulting year-month.
+            let present = |i: &mut Interp, k: &str| -> Result<bool, Value> {
+                Ok(!matches!(getm(i, &f, k)?, Value::Undefined))
+            };
+            let has_year = present(i, "year")? || present(i, "era")? || present(i, "eraYear")?;
+            let has_month = present(i, "month")? || present(i, "monthCode")?;
+            let merged = i.new_object();
+            if !has_year {
+                setm(&merged, "year", Value::Num(cal_year_num(&cal, d) as f64));
+                let (era, ery) = cal_era(&cal, d);
+                if let Some(e) = era {
+                    setm(&merged, "era", Value::str(e));
+                }
+                if let Some(ey) = ery {
+                    setm(&merged, "eraYear", Value::Num(ey as f64));
+                }
+            }
+            if !has_month {
+                setm(&merged, "monthCode", Value::str(cal_month_code(&cal, d).as_str()));
+            }
+            for k in ["year", "era", "eraYear", "month", "monthCode"] {
+                let v = getm(i, &f, k)?;
+                if !matches!(v, Value::Undefined) {
+                    setm(&merged, k, v);
+                }
+            }
+            setm(&merged, "day", Value::Num(1.0));
+            let ovf = to_overflow(i, &arg(a, 1))?;
+            let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
+            let iso = regulate_date(i, raw, ovf)?;
+            return Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(ym_ref_of(&cal, iso))));
+        }
         let year = field_int(i, &f, "year", d.year)?;
         let month_raw = field_int(i, &f, "month", d.month as i64)?;
         let ovf = to_overflow(i, &arg(a, 1))?;
