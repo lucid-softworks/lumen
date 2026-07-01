@@ -217,11 +217,12 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         if matches!(v, Value::Undefined) {
             None
         } else {
+            // GetNumberOption(1, 3): reject NaN/out-of-range, otherwise floor into [1,3].
             let n = ab(i.to_number(&v))?;
-            if n.fract() != 0.0 || n < 1.0 || n > 3.0 {
+            if n.is_nan() || n < 1.0 || n > 3.0 {
                 return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
             }
-            Some(n as u32)
+            Some(n.floor() as u32)
         }
     };
     let tz_name = get_option(
@@ -597,6 +598,13 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
                 lit(&mut parts, ":");
             }
             parts.push(("second", format!("{s:02}")));
+            // fractionalSecondDigits appends the leading digits of the millisecond fraction.
+            if let Some(Value::Num(fd)) = o.borrow().props.get("__dtf_fracsec").map(|p| p.value.clone()) {
+                let ms_frac = (ms.rem_euclid(1000.0)) as u32;
+                let digits = format!("{ms_frac:03}");
+                lit(&mut parts, ".");
+                parts.push(("fractionalSecond", digits[..fd as usize].to_string()));
+            }
         }
         if let Some(ap) = ampm {
             // Separate the day-period marker from the clock only when clock digits were emitted.
