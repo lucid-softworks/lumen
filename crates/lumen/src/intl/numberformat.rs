@@ -789,9 +789,10 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             let code = get_str(o, "__nf_currency");
             let disp = get_str(o, "__nf_currencydisplay");
             let sym = currency_symbol(&code, &disp);
-            // Accounting notation wraps a negative amount in parentheses instead of a minus sign.
+            // Accounting notation wraps in parentheses exactly when a minus sign would otherwise be
+            // shown (so `signDisplay:never` and sign-suppressed zeros are never wrapped).
             let accounting = get_str(o, "__nf_currencysign") == "accounting";
-            if accounting && negative && !zeroish {
+            if accounting && sign == "-" {
                 num = format!("({sym}{num})");
             } else {
                 num = format!("{sign}{sym}{num}");
@@ -898,6 +899,11 @@ fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
     // Leading affix: a sign, then any non-digit prefix (currency symbol).
     if idx < bytes.len() && (bytes[idx] == '-' || bytes[idx] == '+') {
         parts.push((if bytes[idx] == '-' { "minusSign" } else { "plusSign" }, bytes[idx].to_string()));
+        idx += 1;
+    }
+    // Accounting notation's opening parenthesis is its own literal part.
+    if idx < bytes.len() && bytes[idx] == '(' {
+        parts.push(("literal", "(".to_string()));
         idx += 1;
     }
     // The number body is either digits, the infinity glyph, or "NaN"; the prefix loop stops there.
