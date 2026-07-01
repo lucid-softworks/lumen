@@ -3658,8 +3658,22 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         Ok(Value::Bool(duration_sign(as_duration(i, &t)?) == 0))
     });
 
-    it.def_method(&proto, "toString", 0, |i, t, _| {
-        Ok(Value::str(fmt_duration(as_duration(i, &t)?)))
+    it.def_method(&proto, "toString", 0, |i, t, a| {
+        let d = as_duration(i, &t)?;
+        // Validate the options: smallestUnit (if present) must be second or smaller, and
+        // roundingMode / fractionalSecondDigits must be well-formed.
+        let opts = arg(a, 0);
+        let smallest = opt_str(i, &opts, "smallestUnit", "")?;
+        let su = smallest.strip_suffix('s').unwrap_or(&smallest);
+        if !su.is_empty()
+            && !matches!(su, "second" | "millisecond" | "microsecond" | "nanosecond")
+        {
+            return Err(i.make_error("RangeError", "smallestUnit must be second or smaller"));
+        }
+        let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+        check_mode(i, &mode)?;
+        read_frac_digits(i, &opts)?;
+        Ok(Value::str(fmt_duration(d)))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         Ok(Value::str(fmt_duration(as_duration(i, &t)?)))
