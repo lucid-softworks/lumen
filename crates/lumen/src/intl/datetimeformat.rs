@@ -666,9 +666,10 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
     }
 
-    // A PlainTime (kind 2) whose formatter carries no time component still shows h:m:s: unrelated
-    // date options are dropped and the natural time fields fill in.
-    let time_defaulted = kind == 2
+    // A PlainTime (kind 2), or a fully-defaulted formatter over a PlainDateTime (kind 3), shows the
+    // natural h:m:s even without explicit time components (the PlainDateTime format defaults to all).
+    let dtf_defaulted = o.borrow().props.contains("__dtf_defaults");
+    let time_defaulted = (kind == 2 || (kind == 3 && dtf_defaulted))
         && get("__dtf_hour").is_none()
         && get("__dtf_minute").is_none()
         && get("__dtf_second").is_none();
