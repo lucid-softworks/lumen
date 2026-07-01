@@ -18,6 +18,14 @@ pub fn number_symbols(lang: &str, region: &str) -> (&'static str, &'static str, 
     }
 }
 
+/// The localized "NaN" symbol (most locales use "NaN"; Traditional Chinese differs).
+pub fn nan_symbol(lang: &str, region: &str) -> &'static str {
+    match (lang, region) {
+        ("zh", "TW") | ("zh", "HK") | ("zh", "MO") | ("yue", _) => "非數值",
+        _ => "NaN",
+    }
+}
+
 /// The four list patterns (two, start, middle, end) for a (language, type, style). Falls back to
 /// English when the language is unknown. `{0}`/`{1}` are the placeholders.
 pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {

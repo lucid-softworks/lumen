@@ -697,7 +697,11 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         compact = true;
     }
     let (int_part, frac_part) = if value.is_nan() {
-        ("NaN".to_string(), None)
+        let loc = get_str(o, "__nf_locale");
+        let mut lp = loc.split('-');
+        let lang = lp.next().unwrap_or("en");
+        let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+        (crate::intl::data::nan_symbol(lang, region).to_string(), None)
     } else if value.is_infinite() {
         ("\u{221e}".to_string(), None)
     } else {
