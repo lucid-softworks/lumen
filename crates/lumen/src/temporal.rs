@@ -3233,6 +3233,31 @@ fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i
 fn ym_ref(d: IsoDate) -> IsoDate {
     IsoDate { year: d.year, month: d.month, day: 1 }
 }
+/// The ISO date of the first day of `iso`'s month in calendar `cal` — the reference date a
+/// PlainYearMonth stores.
+fn ym_ref_of(cal: &str, iso: IsoDate) -> IsoDate {
+    if cal == "iso8601" {
+        return IsoDate { year: iso.year, month: iso.month, day: 1 };
+    }
+    let day_of = cal_fields(cal, iso).2;
+    let (y, m, d) = civil_from_days(epoch_days(iso) - (day_of - 1));
+    IsoDate { year: y, month: m, day: d }
+}
+/// The ISO date of the last day of `iso`'s calendar month.
+fn cal_month_last(cal: &str, iso: IsoDate) -> IsoDate {
+    let f = cal_fields(cal, iso);
+    let (day_of, dim) = (f.2, f.3);
+    let (y, m, d) = civil_from_days(epoch_days(iso) + (dim - day_of));
+    IsoDate { year: y, month: m, day: d }
+}
+/// Add/subtract a duration to a PlainYearMonth in its calendar: anchored at the month's first day
+/// (or last day when moving backwards), then reduced back to the resulting year-month.
+fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+    let eff = sign * duration_sign(dur);
+    let start = if eff < 0 { cal_month_last(cal, d) } else { ym_ref_of(cal, d) };
+    let result = add_to_date(i, start, dur, sign, ovf, cal)?;
+    Ok(ym_ref_of(cal, result))
+}
 
 /// Read `until`/`since` options for a PlainYearMonth difference: (largest, smallest, mode). Only
 /// `year`/`month` units are allowed and `roundingIncrement` must be 1.
@@ -4868,16 +4893,18 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let total = d.year * 12 + (d.month as i64 - 1) + dur.years * 12 + dur.months;
-        let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1, })))
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let cal = cal_of(i, &t);
+        let r = ym_add(i, &cal, d, dur, 1, ovf)?;
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(r)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let total = d.year * 12 + (d.month as i64 - 1) - dur.years * 12 - dur.months;
-        let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1, })))
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let cal = cal_of(i, &t);
+        let r = ym_add(i, &cal, d, dur, -1, ovf)?;
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(r)))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
