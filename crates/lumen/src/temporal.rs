@@ -1033,10 +1033,17 @@ fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Val
     Ok(s)
 }
 /// The `[u-ca=iso8601]` calendar annotation per the `calendarName` option.
-fn cal_suffix(i: &mut Interp, opts: &Value) -> Result<&'static str, Value> {
+fn cal_suffix(i: &mut Interp, opts: &Value, cal: &str) -> Result<String, Value> {
     match opt_str(i, opts, "calendarName", "auto")?.as_str() {
-        "always" | "critical" => Ok("[u-ca=iso8601]"),
-        _ => Ok(""),
+        "never" => Ok(String::new()),
+        "always" => Ok(format!("[u-ca={cal}]")),
+        "critical" => Ok(format!("[!u-ca={cal}]")),
+        // "auto": show the annotation only for a non-ISO calendar.
+        _ => Ok(if cal == "iso8601" {
+            String::new()
+        } else {
+            format!("[u-ca={cal}]")
+        }),
     }
 }
 
@@ -1742,7 +1749,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(Value::str(format!(
             "{}{}",
             fmt_date(d),
-            cal_suffix(i, &arg(a, 0))?
+            cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?
         )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
@@ -3718,7 +3725,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             "{}T{}{}",
             fmt_date(d),
             ts,
-            cal_suffix(i, &arg(a, 0))?
+            cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?
         )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
@@ -4031,7 +4038,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        let suffix = cal_suffix(i, &arg(a, 0))?;
+        let suffix = cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?;
         // When the calendar is shown, a PlainYearMonth includes its reference ISO day (`-DD`).
         let s = if suffix.is_empty() {
             format!("{}-{:02}", pad_year(d.year), d.month)
@@ -4191,7 +4198,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        let suffix = cal_suffix(i, &arg(a, 0))?;
+        let suffix = cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?;
         // When the calendar is shown, a PlainMonthDay includes its reference ISO year (`YYYY-`).
         let s = if suffix.is_empty() {
             format!("{:02}-{:02}", d.month, d.day)
@@ -5493,7 +5500,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             ts,
             offset_string(o),
             tz,
-            cal_suffix(i, &arg(a, 0))?
+            cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?
         )))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
