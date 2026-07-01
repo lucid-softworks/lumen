@@ -1947,6 +1947,138 @@ fn diff_date_rounded(a: IsoDate, b: IsoDate, largest: &str, smallest: &str, incr
     if positive { result } else { neg_duration(result) }
 }
 
+/// Add a full duration (date + time parts) to a datetime, carrying time overflow into days.
+fn add_dt_dur(d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
+    let date_only = IsoDuration {
+        years: dur.years,
+        months: dur.months,
+        weeks: dur.weeks,
+        days: dur.days,
+        ..Default::default()
+    };
+    let nd = add_date_dur(d, date_only);
+    let time_ns = dur.hours as i128 * 3_600_000_000_000
+        + dur.minutes as i128 * 60_000_000_000
+        + dur.seconds as i128 * 1_000_000_000
+        + dur.ms as i128 * 1_000_000
+        + dur.us as i128 * 1_000
+        + dur.ns as i128;
+    let total = time_to_ns(t) as i128 + time_ns;
+    let carry = total.div_euclid(86_400_000_000_000);
+    let rem = total.rem_euclid(86_400_000_000_000);
+    let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
+    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+}
+
+/// Zero every duration field strictly smaller than the unit of rank `srank` (year=9 … ns=0).
+fn zero_below(m: &mut IsoDuration, srank: i32) {
+    if srank > 0 { m.ns = 0; }
+    if srank > 1 { m.us = 0; }
+    if srank > 2 { m.ms = 0; }
+    if srank > 3 { m.seconds = 0; }
+    if srank > 4 { m.minutes = 0; }
+    if srank > 5 { m.hours = 0; }
+    if srank > 6 { m.days = 0; }
+    if srank > 7 { m.weeks = 0; }
+    if srank > 8 { m.months = 0; }
+}
+/// The value of the duration field named by `unit`.
+fn dur_field_val(m: &IsoDuration, unit: &str) -> i64 {
+    match unit {
+        "year" => m.years,
+        "month" => m.months,
+        "week" => m.weeks,
+        "day" => m.days,
+        "hour" => m.hours,
+        "minute" => m.minutes,
+        "second" => m.seconds,
+        "millisecond" => m.ms,
+        "microsecond" => m.us,
+        _ => m.ns,
+    }
+}
+/// Add `delta` to the duration field named by `unit`.
+fn dur_field_add(m: &mut IsoDuration, unit: &str, delta: i64) {
+    match unit {
+        "year" => m.years += delta,
+        "month" => m.months += delta,
+        "week" => m.weeks += delta,
+        "day" => m.days += delta,
+        "hour" => m.hours += delta,
+        "minute" => m.minutes += delta,
+        "second" => m.seconds += delta,
+        "millisecond" => m.ms += delta,
+        "microsecond" => m.us += delta,
+        _ => m.ns += delta,
+    }
+}
+
+/// A PlainDateTime difference (`d1t1` → `d2t2`) balanced to `largest`, then rounded to `smallest`
+/// with `increment`/`mode`. The fraction of the smallest unit is measured on the absolute-ns line
+/// between the two candidate boundary datetimes.
+#[allow(clippy::too_many_arguments)]
+fn diff_datetime_rounded(
+    d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime,
+    largest: &str, smallest: &str, increment: i64, mode: &str,
+) -> IsoDuration {
+    let smallest = sing(smallest);
+    let is_cal = matches!(largest, "year" | "month" | "week");
+    let base = if is_cal {
+        diff_datetime(d1, t1, d2, t2, largest)
+    } else {
+        balance_ns(dt_ns(d2, t2) - dt_ns(d1, t1), largest)
+    };
+    let srank = unit_rank(smallest).unwrap_or(0);
+    if srank == 0 && increment <= 1 {
+        return base;
+    }
+    let a_ns = dt_ns(d1, t1);
+    let b_ns = dt_ns(d2, t2);
+    if a_ns == b_ns {
+        return base;
+    }
+    let positive = a_ns < b_ns;
+    let (lo_d, lo_t, hi_d, hi_t) = if positive { (d1, t1, d2, t2) } else { (d2, t2, d1, t1) };
+    let mag = if positive { base } else { neg_duration(base) };
+    let mut low = mag;
+    zero_below(&mut low, srank);
+    if increment > 1 {
+        let v = dur_field_val(&low, smallest);
+        dur_field_add(&mut low, smallest, -v.rem_euclid(increment));
+    }
+    let base_units = dur_field_val(&low, smallest) / increment.max(1);
+    let mut high = low;
+    dur_field_add(&mut high, smallest, increment);
+    let (ld, lt) = add_dt_dur(lo_d, lo_t, &low);
+    let (hd, ht) = add_dt_dur(lo_d, lo_t, &high);
+    let low_ns = dt_ns(ld, lt);
+    let high_ns = dt_ns(hd, ht);
+    let target_ns = dt_ns(hi_d, hi_t);
+    let denom = (high_ns - low_ns) as f64;
+    let fraction = if denom == 0.0 { 0.0 } else { (target_ns - low_ns) as f64 / denom };
+    let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
+    let chosen = if up { high } else { low };
+    let (rd, rt) = add_dt_dur(lo_d, lo_t, &chosen);
+    let result = if is_cal {
+        diff_datetime(lo_d, lo_t, rd, rt, largest)
+    } else {
+        balance_ns(dt_ns(rd, rt) - dt_ns(lo_d, lo_t), largest)
+    };
+    if positive { result } else { neg_duration(result) }
+}
+
+/// Read `until`/`since` options for a PlainDateTime difference: (largest, smallest, increment, mode).
+fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+    let largest = any_largest_unit(i, opts, "nanosecond", 6)?;
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
+    unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    check_increment(i, &smallest, incr)?;
+    Ok((largest, smallest, incr, mode))
+}
+
 /// A PlainYearMonth's reference ISO date (the first of its month).
 fn ym_ref(d: IsoDate) -> IsoDate {
     IsoDate { year: d.year, month: d.month, day: 1 }
@@ -2953,24 +3085,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = any_largest_unit(i, &arg(a, 1), "nanosecond", 6)?;
-        let dur = if matches!(largest.as_str(), "year" | "month" | "week") {
-            diff_datetime(d, tm, od, otm, &largest)
-        } else {
-            balance_ns(dt_ns(od, otm) - dt_ns(d, tm), &largest)
-        };
+        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let dur = diff_datetime_rounded(d, tm, od, otm, &largest, &smallest, incr, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = any_largest_unit(i, &arg(a, 1), "nanosecond", 6)?;
-        let dur = if matches!(largest.as_str(), "year" | "month" | "week") {
-            diff_datetime(od, otm, d, tm, &largest)
-        } else {
-            balance_ns(dt_ns(d, tm) - dt_ns(od, otm), &largest)
-        };
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
+        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let dur = diff_datetime_rounded(d, tm, od, otm, &largest, &smallest, incr, negate_mode(&mode));
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
 
     let ctor = add_ctor(it, ns, "PlainDateTime", 3, proto, |i, _t, a| {
