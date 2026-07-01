@@ -3855,6 +3855,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             return Err(i.make_error("RangeError", format!("{e} is not a valid era in calendar {cal}")));
         }
     }
+    // A missing day is a TypeError, raised before the month/monthCode-consistency RangeError below.
+    let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
 
     // Hebrew: the year field (or era "am") is the Hebrew year; the month is an ordinal, or a
     // monthCode (which may be the leap "M05L"). Resolve directly to ISO.
@@ -3889,7 +3891,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
         } else {
             month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?
         };
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let ord = clamp_or(i, ord, hebrew_months_in_year(hy), ovf, "month")?;
         let day = clamp_or(i, day, hebrew_month_len(hy, ord), ovf, "day")?;
         let iso = hebrew_to_iso(hy, ord, day);
@@ -3899,7 +3900,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
     // "M01".."M12" with an optional leap "L" suffix. Resolve to the month's new-moon start day.
     if cal == "chinese" || cal == "dangi" {
         let cy = year_opt.ok_or_else(|| i.make_error("TypeError", "year is required"))?;
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let start = if let Some(code) = &month_code {
             let body = code
                 .strip_prefix('M')
@@ -3977,7 +3977,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             (None, Some(b)) => b,
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         // Constrain to the calendar's ranges (13 months; the epagomenal month has 5 or 6 days).
         let month = clamp_or(i, month, 13, ovf, "month")?;
         let leap = cy.rem_euclid(4) == 3;
@@ -4011,7 +4010,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             (None, Some(b)) => b,
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let month = clamp_or(i, month, 12, ovf, "month")?;
         let day = clamp_or(i, day, isl_month_len(cal, iy, month), ovf, "day")?;
         let iso = isl_to(cal, iy, month, day);
@@ -4034,7 +4032,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             (None, Some(b)) => b,
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let month = clamp_or(i, month, 12, ovf, "month")?;
         let day = clamp_or(i, day, indian_month_len(month, is_leap(sy + 78)), ovf, "day")?;
         let iso = to_indian(sy, month, day);
@@ -4058,7 +4055,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             (None, Some(b)) => b,
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
-        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let month = clamp_or(i, month, 12, ovf, "month")?;
         let day = clamp_or(i, day, persian_month_len(py, month), ovf, "day")?;
         let iso = to_persian(py, month, day);
@@ -4093,7 +4089,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
     if month.is_none() && mc_num.is_none() {
         return Err(i.make_error("TypeError", "month or monthCode is required"));
     }
-    let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
     let month = match (month, mc_num) {
         (Some(a), Some(b)) => {
             if a != b {
