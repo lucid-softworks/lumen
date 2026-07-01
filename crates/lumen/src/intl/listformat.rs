@@ -55,16 +55,18 @@ fn string_list(i: &mut Interp, list: &Value) -> Result<Vec<String>, Value> {
     if matches!(list, Value::Undefined) {
         return Ok(Vec::new());
     }
-    let items = ab(i.iterate(list))?;
-    let mut out = Vec::with_capacity(items.len());
-    for it in items {
-        match it {
-            Value::Str(s) => out.push(s.to_string()),
-            _ => {
-                return Err(i.make_error(
-                    "TypeError",
-                    "Intl.ListFormat list elements must be strings",
-                ))
+    // Iterate LAZILY so a non-string element throws immediately (stopping the iteration), rather than
+    // eagerly draining the iterable first.
+    let (iter, next) = ab(i.get_iterator(list))?;
+    let mut out = Vec::new();
+    loop {
+        match ab(i.iterator_step(&iter, &next))? {
+            None => break,
+            Some(Value::Str(s)) => out.push(s.to_string()),
+            Some(_) => {
+                let err = i.make_error("TypeError", "Intl.ListFormat list elements must be strings");
+                i.iterator_close(&iter);
+                return Err(err);
             }
         }
     }
