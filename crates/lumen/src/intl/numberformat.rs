@@ -1322,10 +1322,12 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
         } else if suffix.contains('%') {
             parts.push(("percentSign", suffix));
         } else if suffix_type == "compact" {
-            // A leading space separates the number from the compact word; it is its own literal.
-            let trimmed = suffix.trim_start_matches(' ');
-            if trimmed.len() < suffix.len() {
-                parts.push(("literal", " ".to_string()));
+            // A leading space (regular or NBSP, as in de "988 Mio.") separates the number from the
+            // compact word and is its own literal.
+            let trimmed = suffix.trim_start_matches([' ', '\u{a0}']);
+            let lead = &suffix[..suffix.len() - trimmed.len()];
+            if !lead.is_empty() {
+                parts.push(("literal", lead.to_string()));
             }
             if trimmed == ")" {
                 parts.push(("literal", ")".to_string()));
