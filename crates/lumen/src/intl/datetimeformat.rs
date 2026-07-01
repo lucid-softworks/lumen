@@ -279,7 +279,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let locale_lang = resolved.locale.split('-').next().unwrap_or("").to_string();
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved.locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(calendar.clone().unwrap_or_else(|| "gregory".to_string())));
-    set_builtin(&obj, "__dtf_nu", Value::from_string(numbering.clone().unwrap_or_else(|| "latn".to_string())));
+    let nu_final = numbering
+        .clone()
+        .filter(|n| n == "latn" || crate::numbering::NUMBERING.iter().any(|(id, _)| id == n))
+        .unwrap_or_else(|| "latn".to_string());
+    set_builtin(&obj, "__dtf_nu", Value::from_string(nu_final));
     set_builtin(&obj, "__dtf_tz", Value::from_string(time_zone));
     let put = |obj: &Gc, k: &str, v: &Option<String>| {
         if let Some(v) = v {
