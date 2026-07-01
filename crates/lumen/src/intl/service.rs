@@ -96,7 +96,17 @@ pub fn resolve_locale_nu(requested: &[String], option: Option<&str>) -> (String,
             }
         }
     }
-    let mut value = "latn".to_string();
+    // The locale's default numbering system (most are latn; Arabic uses arab, Persian arabext).
+    let default_nu = {
+        let lang = base.split('-').next().unwrap_or("");
+        let region = base.split('-').find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+        match lang {
+            "ar" if !matches!(region, "DZ" | "MA" | "TN" | "LY" | "EH" | "MR") => "arab",
+            "fa" | "ps" => "arabext",
+            _ => "latn",
+        }
+    };
+    let mut value = default_nu.to_string();
     let mut addition: Option<String> = None;
     if let Some(ev) = &ext_value {
         if is_supported_nu(ev) {
