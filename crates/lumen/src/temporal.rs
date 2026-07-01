@@ -4800,6 +4800,25 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let d = as_datetime(i, &t)?.0;
         Ok(Value::Bool(cal_fields(&cal_of(i, &t), d).7))
     });
+    // Week numbering is defined only for the ISO calendar.
+    def_getter(it, &proto, "weekOfYear", |i, t, _| {
+        let d = as_datetime(i, &t)?.0;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        Ok(Value::Num(iso_week(d).0 as f64))
+    });
+    def_getter(it, &proto, "yearOfWeek", |i, t, _| {
+        let d = as_datetime(i, &t)?.0;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        Ok(Value::Num(iso_week(d).1 as f64))
+    });
+    def_getter(it, &proto, "daysInWeek", |i, t, _| {
+        as_datetime(i, &t)?;
+        Ok(Value::Num(7.0))
+    });
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
