@@ -5140,3 +5140,28 @@ fn float16_rounds_once() {
     );
     assert_eq!(run("Math.f16round(1.337)"), "1.3369140625");
 }
+
+#[test]
+#[test]
+#[test]
+fn typedarray_iteration_semantics() {
+    // Reflect.set writes a TypedArray element (integer-indexed exotic [[Set]]), not a shadow prop.
+    assert_eq!(
+        run("var a=new Float64Array([1,2,3]); Reflect.set(a,1,9); a[1]"),
+        "9"
+    );
+    // Callback methods observe live element writes during iteration.
+    assert_eq!(
+        run("var a=new Int32Array([5,6,7]); var seen=[]; a.forEach(function(v,idx){ if(idx===0)a[1]=42; seen.push(v);}); seen.join(',')"),
+        "5,42,7"
+    );
+    // The length is captured once; shrinking mid-iteration surfaces undefined for OOB indices.
+    assert_eq!(
+        run("var b=new ArrayBuffer(16,{maxByteLength:16}); var a=new Int32Array(b); a.fill(1); var seen=[]; a.forEach(function(v,idx){ if(idx===1)b.resize(4); seen.push(v);}); seen.map(String).join(',')"),
+        "1,1,undefined,undefined"
+    );
+    // includes reads OOB as undefined (found), indexOf uses strict equality on in-bounds only.
+    assert_eq!(run("new Uint8Array([1,2,3]).includes(2)"), "true");
+    assert_eq!(run("new Uint8Array([1,2,3]).indexOf(2)"), "1");
+    assert_eq!(run("new Uint8Array([1,2,3,2]).lastIndexOf(2)"), "3");
+}

@@ -2337,6 +2337,13 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         }
         return Ok(new_ta);
     }
+    // Most iteration / search / mutation methods have TypedArray-specific semantics the generic
+    // Array delegation can't reproduce: the length is captured once up front, out-of-bounds reads
+    // (after a mid-operation detach or resizable-buffer shrink) yield `undefined` instead of
+    // stopping early, and the mutators re-validate the buffer after argument coercion.
+    if let Some(r) = ta_native(i, this, &info, method, args) {
+        return r;
+    }
     let f = it_array_method(i, method);
     let result = ab(i.call(f, this.clone(), args))?;
     // Methods that produce a new collection return a TypedArray built via TypedArraySpeciesCreate
@@ -2362,6 +2369,355 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         return Ok(new_ta);
     }
     Ok(result)
+}
+
+/// ToIntegerOrInfinity then clamp to a relative index in `[0, len]` (negatives count from the end).
+fn rel_index(n: f64, len: usize) -> usize {
+    if n.is_nan() {
+        return 0;
+    }
+    let n = if n.is_infinite() {
+        if n > 0.0 {
+            len as f64
+        } else {
+            0.0
+        }
+    } else {
+        n.trunc()
+    };
+    if n < 0.0 {
+        (len as f64 + n).max(0.0) as usize
+    } else {
+        n.min(len as f64) as usize
+    }
+}
+
+/// TypedArray-specific implementations of the iteration/search/mutation prototype methods. Returns
+/// `None` for methods handled by the generic Array delegation. `len` semantics: captured once here,
+/// so out-of-bounds element reads (after a detach/shrink during a callback) surface as `undefined`.
+fn ta_native(
+    i: &mut Interp,
+    this: &Value,
+    info: &TaInfo,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, Value>> {
+    let info = *info;
+    let len = i.ta_len(&info).unwrap_or(0);
+    let cb = arg(args, 0);
+    let this_arg = arg(args, 1);
+    // A predicate/callback method requires its first argument to be callable.
+    let require_cb = |i: &mut Interp| {
+        if cb.is_callable() {
+            Ok(())
+        } else {
+            Err(i.make_error("TypeError", "callback is not a function"))
+        }
+    };
+    match method {
+        "forEach" => Some((|| {
+            require_cb(i)?;
+            for k in 0..len {
+                let v = i.ta_read(&info, k);
+                ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v, Value::Num(k as f64), this.clone()],
+                ))?;
+            }
+            Ok(Value::Undefined)
+        })()),
+        "every" => Some((|| {
+            require_cb(i)?;
+            for k in 0..len {
+                let v = i.ta_read(&info, k);
+                let r = ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v, Value::Num(k as f64), this.clone()],
+                ))?;
+                if !i.to_boolean(&r) {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        })()),
+        "some" => Some((|| {
+            require_cb(i)?;
+            for k in 0..len {
+                let v = i.ta_read(&info, k);
+                let r = ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v, Value::Num(k as f64), this.clone()],
+                ))?;
+                if i.to_boolean(&r) {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        })()),
+        "find" | "findIndex" | "findLast" | "findLastIndex" => Some((|| {
+            require_cb(i)?;
+            let want_value = method == "find" || method == "findLast";
+            let reverse = method == "findLast" || method == "findLastIndex";
+            let order: Vec<usize> = if reverse {
+                (0..len).rev().collect()
+            } else {
+                (0..len).collect()
+            };
+            for k in order {
+                let v = i.ta_read(&info, k);
+                let r = ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v.clone(), Value::Num(k as f64), this.clone()],
+                ))?;
+                if i.to_boolean(&r) {
+                    return Ok(if want_value { v } else { Value::Num(k as f64) });
+                }
+            }
+            Ok(if want_value {
+                Value::Undefined
+            } else {
+                Value::Num(-1.0)
+            })
+        })()),
+        "map" => Some((|| {
+            require_cb(i)?;
+            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+            let new_info = map_ptr(&new_ta)
+                .and_then(|p| i.typed_arrays.get(&p).copied())
+                .ok_or_else(|| {
+                    i.make_error("TypeError", "map: species did not return a TypedArray")
+                })?;
+            for k in 0..len {
+                let v = i.ta_read(&info, k);
+                let mapped = ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v, Value::Num(k as f64), this.clone()],
+                ))?;
+                ab(i.ta_store(&new_info, k, &mapped))?;
+            }
+            Ok(new_ta)
+        })()),
+        "filter" => Some((|| {
+            require_cb(i)?;
+            let mut kept: Vec<Value> = Vec::new();
+            for k in 0..len {
+                let v = i.ta_read(&info, k);
+                let r = ab(i.call(
+                    cb.clone(),
+                    this_arg.clone(),
+                    &[v.clone(), Value::Num(k as f64), this.clone()],
+                ))?;
+                if i.to_boolean(&r) {
+                    kept.push(v);
+                }
+            }
+            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(kept.len() as f64)])?;
+            let new_info = map_ptr(&new_ta)
+                .and_then(|p| i.typed_arrays.get(&p).copied())
+                .ok_or_else(|| {
+                    i.make_error("TypeError", "filter: species did not return a TypedArray")
+                })?;
+            for (n, v) in kept.iter().enumerate() {
+                ab(i.ta_store(&new_info, n, v))?;
+            }
+            Ok(new_ta)
+        })()),
+        "reduce" | "reduceRight" => Some((|| {
+            require_cb(i)?;
+            let right = method == "reduceRight";
+            let order: Vec<usize> = if right {
+                (0..len).rev().collect()
+            } else {
+                (0..len).collect()
+            };
+            let mut acc: Value;
+            let mut start = 0;
+            if args.len() >= 2 {
+                acc = arg(args, 1);
+            } else {
+                if len == 0 {
+                    return Err(
+                        i.make_error("TypeError", "Reduce of empty array with no initial value")
+                    );
+                }
+                acc = i.ta_read(&info, order[0]);
+                start = 1;
+            }
+            for &k in &order[start..] {
+                let v = i.ta_read(&info, k);
+                acc = ab(i.call(
+                    cb.clone(),
+                    Value::Undefined,
+                    &[acc, v, Value::Num(k as f64), this.clone()],
+                ))?;
+            }
+            Ok(acc)
+        })()),
+        "indexOf" | "lastIndexOf" => Some((|| {
+            let search = arg(args, 0);
+            if len == 0 {
+                return Ok(Value::Num(-1.0));
+            }
+            let last = method == "lastIndexOf";
+            // fromIndex: ToIntegerOrInfinity; default is 0 (indexOf) / len-1 (lastIndexOf). Computed
+            // against the captured length.
+            let from = match args.get(1) {
+                Some(v) if !matches!(v, Value::Undefined) => {
+                    let n = ab(i.to_number(v))?;
+                    if n.is_nan() {
+                        0.0
+                    } else {
+                        n.trunc()
+                    }
+                }
+                _ => {
+                    if last {
+                        (len - 1) as f64
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            // Argument coercion may have detached/resized the buffer; re-derive the live length
+            // (indexOf/lastIndexOf only inspect indices that still HasProperty, i.e. in-bounds).
+            let curlen = match i.ta_len(&info) {
+                Some(l) => l,
+                None => return Ok(Value::Num(-1.0)),
+            };
+            let order: Vec<i64> = if last {
+                let k = if from >= 0.0 {
+                    from.min((len - 1) as f64) as i64
+                } else {
+                    (len as f64 + from) as i64
+                };
+                (0..=k).rev().collect()
+            } else {
+                let k = if from >= 0.0 {
+                    from as i64
+                } else {
+                    (len as f64 + from).max(0.0) as i64
+                };
+                (k..len as i64).collect()
+            };
+            for k in order {
+                if k < 0 || k as usize >= curlen {
+                    continue;
+                }
+                let v = i.ta_read(&info, k as usize);
+                if i.strict_equals(&v, &search) {
+                    return Ok(Value::Num(k as f64));
+                }
+            }
+            Ok(Value::Num(-1.0))
+        })()),
+        "includes" => Some((|| {
+            let search = arg(args, 0);
+            let from = match args.get(1) {
+                Some(v) if !matches!(v, Value::Undefined) => {
+                    let n = ab(i.to_number(v))?;
+                    if n.is_nan() {
+                        0.0
+                    } else {
+                        n.trunc()
+                    }
+                }
+                _ => 0.0,
+            };
+            // includes iterates the *captured* length and reads out-of-bounds indices as `undefined`
+            // (so `includes(undefined)` is true after a mid-coercion detach/shrink).
+            let lo = if from < 0.0 {
+                (len as f64 + from).max(0.0) as usize
+            } else {
+                (from as usize).min(len)
+            };
+            for k in lo..len {
+                let v = i.ta_read(&info, k);
+                if same_value_zero(&v, &search) {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        })()),
+        "fill" => Some((|| {
+            if i.immutable_buffers.contains(&info.buffer) {
+                return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+            }
+            // The fill value is coerced to the element type exactly once.
+            let value = if info.kind.is_bigint() {
+                Value::BigInt(ab(i.to_bigint(&arg(args, 0)))?)
+            } else {
+                Value::Num(ab(i.to_number(&arg(args, 0)))?)
+            };
+            let start = rel_index(ab(i.to_number(&arg(args, 1)))?, len);
+            let end = match args.get(2) {
+                Some(v) if !matches!(v, Value::Undefined) => rel_index(ab(i.to_number(v))?, len),
+                _ => len,
+            };
+            // Re-validate after coercions: a detach/shrink that put the view out of bounds throws.
+            let curlen = i
+                .ta_len(&info)
+                .ok_or_else(|| i.make_error("TypeError", "TypedArray is out of bounds"))?;
+            let start = start.min(curlen);
+            let end = end.min(curlen);
+            for k in start..end {
+                ab(i.ta_store(&info, k, &value))?;
+            }
+            Ok(this.clone())
+        })()),
+        "copyWithin" => Some((|| {
+            if i.immutable_buffers.contains(&info.buffer) {
+                return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+            }
+            let to = rel_index(ab(i.to_number(&arg(args, 0)))?, len);
+            let from = rel_index(ab(i.to_number(&arg(args, 1)))?, len);
+            let final_ = match args.get(2) {
+                Some(v) if !matches!(v, Value::Undefined) => rel_index(ab(i.to_number(v))?, len),
+                _ => len,
+            };
+            let count = (final_ as i64 - from as i64).min(len as i64 - to as i64);
+            // Re-validate after coercions.
+            let curlen = i
+                .ta_len(&info)
+                .ok_or_else(|| i.make_error("TypeError", "TypedArray is out of bounds"))?;
+            let to = to.min(curlen);
+            let from = from.min(curlen);
+            let count = count
+                .min(curlen as i64 - to as i64)
+                .min(curlen as i64 - from as i64);
+            if count > 0 {
+                let snap: Vec<Value> = (0..count as usize)
+                    .map(|j| i.ta_read(&info, from + j))
+                    .collect();
+                for (j, v) in snap.iter().enumerate() {
+                    ab(i.ta_store(&info, to + j, v))?;
+                }
+            }
+            Ok(this.clone())
+        })()),
+        "join" => Some((|| {
+            let sep = match args.first() {
+                Some(v) if !matches!(v, Value::Undefined) => ab(i.to_string(v))?.to_string(),
+                _ => ",".to_string(),
+            };
+            let mut out = String::new();
+            for k in 0..len {
+                if k > 0 {
+                    out.push_str(&sep);
+                }
+                let v = i.ta_read(&info, k);
+                if !matches!(v, Value::Undefined | Value::Null) {
+                    out.push_str(&ab(i.to_string(&v))?);
+                }
+            }
+            Ok(Value::from_string(out))
+        })()),
+        _ => None,
+    }
 }
 
 /// TypedArraySpeciesCreate(O, args): construct a new TypedArray using `O.constructor[@@species]`,
@@ -6209,6 +6565,33 @@ fn reflect_ordinary_set(
     value: Value,
     receiver: &Value,
 ) -> Result<bool, Value> {
+    // Integer-indexed exotic [[Set]]: a canonical numeric index on a TypedArray is handled by
+    // TypedArraySetElement (which coerces the value unconditionally, writing only when the index is
+    // in range) and never falls back to creating an ordinary shadowing property.
+    if let Some(info) = map_ptr(target).and_then(|p| i.typed_arrays.get(&p).copied()) {
+        if i.canonical_numeric_index(key).is_some() {
+            let same =
+                matches!((target, receiver), (Value::Obj(a), Value::Obj(b)) if Rc::ptr_eq(a, b));
+            if same {
+                if info.kind.is_bigint() {
+                    let n = ab(i.to_bigint(&value))?;
+                    if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
+                        i.ta_write_bigint(&info, idx, n);
+                    }
+                } else {
+                    let n = ab(i.to_number(&value))?;
+                    if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
+                        i.ta_write(&info, idx, n);
+                    }
+                }
+                return Ok(true);
+            }
+            // A different receiver: a valid index is a silent success; otherwise fall through.
+            if !matches!(i.ta_index_kind(&info, key), TaIndex::Ordinary) {
+                return Ok(true);
+            }
+        }
+    }
     let mut current = target.clone();
     loop {
         if proxy_pair(i, &current).is_some() {
