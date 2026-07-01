@@ -412,27 +412,25 @@ fn read_range_opt(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32)
 }
 
 fn read_use_grouping(i: &mut Interp, options: &Value, notation: &str) -> Result<Value, Value> {
+    // GetStringOrBooleanOption: undefined → fallback; `true` → "always"; a falsy value → false;
+    // otherwise ToString and validate against ["min2","auto","always"] (so the string "true" is a
+    // RangeError, not "always"). The fallback is "auto" (or "min2" for compact notation).
     let v = ab(i.get_member(options, "useGrouping"))?;
-    // Default: "min2" for compact notation? No — default "auto".
     let default = Value::str(if notation == "compact" { "min2" } else { "auto" });
-    match v {
-        Value::Undefined => Ok(default),
-        Value::Bool(true) => Ok(Value::str("always")),
-        Value::Bool(false) => Ok(Value::Bool(false)),
-        _ => {
-            let s = ab(i.to_string(&v))?.to_string();
-            if s == "true" {
-                return Ok(Value::str("always"));
-            }
-            if s == "false" {
-                return Ok(Value::Bool(false));
-            }
-            if !["always", "auto", "min2"].contains(&s.as_str()) {
-                return Err(i.make_error("RangeError", format!("invalid useGrouping: {s}")));
-            }
-            Ok(Value::from_string(s))
-        }
+    if matches!(v, Value::Undefined) {
+        return Ok(default);
     }
+    if matches!(v, Value::Bool(true)) {
+        return Ok(Value::str("always"));
+    }
+    if !i.to_boolean(&v) {
+        return Ok(Value::Bool(false));
+    }
+    let s = ab(i.to_string(&v))?.to_string();
+    if !["always", "auto", "min2"].contains(&s.as_str()) {
+        return Err(i.make_error("RangeError", format!("invalid useGrouping: {s}")));
+    }
+    Ok(Value::from_string(s))
 }
 
 fn is_well_formed_currency(c: &str) -> bool {
