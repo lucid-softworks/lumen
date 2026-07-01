@@ -444,7 +444,7 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
         }
         "ethioaa" => (Some("aa"), Some(from_13month(d, ETHIOPIC_EPOCH).0 + 5500)),
         _ if is_islamic(cal) => {
-            let y = from_islamic(d, islamic_epoch(cal)).0;
+            let y = isl_from(cal, d).0;
             if y >= 1 {
                 (Some("ah"), Some(y))
             } else {
@@ -538,6 +538,79 @@ fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
     let fixed = epoch + (y - 1) * 354 + (3 + 11 * y).div_euclid(30) + (m - 1) * 29 + m.div_euclid(2) + (d - 1);
     let (yy, mm, dd) = civil_from_days(fixed);
     IsoDate { year: yy, month: mm, day: dd }
+}
+
+// --- Umm al-Qura (islamic-umalqura): table-based for AH 1300-1600 (ICU data), else tabular civil.
+fn umalqura_in_range(y: i64) -> bool {
+    y >= crate::umalqura::YEAR_START as i64 && y <= crate::umalqura::YEAR_END as i64
+}
+/// Length (29/30) of Islamic month `m` (1-based) in year `y` under Umm al-Qura.
+fn umalqura_month_len(y: i64, m: i64) -> i64 {
+    if umalqura_in_range(y) {
+        let bits = crate::umalqura::MONTH_LENGTHS[(y - crate::umalqura::YEAR_START as i64) as usize];
+        if bits & (1 << (12 - m)) != 0 { 30 } else { 29 }
+    } else {
+        islamic_month_len(m, islamic_leap(y))
+    }
+}
+/// Epoch-day of the first day of Umm al-Qura year `y`.
+fn umalqura_year_start(y: i64) -> i64 {
+    if umalqura_in_range(y) {
+        crate::umalqura::YEAR_STARTS[(y - crate::umalqura::YEAR_START as i64) as usize] + crate::umalqura::EPOCH_OFFSET
+    } else {
+        epoch_days(to_islamic(y, 1, 1, ISLAMIC_EPOCH))
+    }
+}
+fn from_umalqura(iso: IsoDate) -> (i64, i64, i64) {
+    let ed = epoch_days(iso);
+    let mut y = 1300 + ((ed - umalqura_year_start(1300)) as f64 / 354.367) as i64;
+    while umalqura_year_start(y) > ed {
+        y -= 1;
+    }
+    while umalqura_year_start(y + 1) <= ed {
+        y += 1;
+    }
+    let mut rem = ed - umalqura_year_start(y);
+    let mut m = 1;
+    while m < 12 {
+        let ml = umalqura_month_len(y, m);
+        if rem < ml {
+            break;
+        }
+        rem -= ml;
+        m += 1;
+    }
+    (y, m, rem + 1)
+}
+fn to_umalqura(y: i64, m: i64, d: i64) -> IsoDate {
+    let off: i64 = (1..m).map(|mm| umalqura_month_len(y, mm)).sum::<i64>() + (d - 1);
+    let (yy, mm, dd) = civil_from_days(umalqura_year_start(y) + off);
+    IsoDate { year: yy, month: mm, day: dd }
+}
+fn umalqura_year_len(y: i64) -> i64 {
+    (1..=12).map(|m| umalqura_month_len(y, m)).sum()
+}
+/// Calendar-aware Islamic conversions: `islamic-umalqura` uses the ICU table, others are tabular.
+fn isl_from(cal: &str, iso: IsoDate) -> (i64, i64, i64) {
+    if cal == "islamic-umalqura" {
+        from_umalqura(iso)
+    } else {
+        from_islamic(iso, islamic_epoch(cal))
+    }
+}
+fn isl_to(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
+    if cal == "islamic-umalqura" {
+        to_umalqura(y, m, d)
+    } else {
+        to_islamic(y, m, d, islamic_epoch(cal))
+    }
+}
+fn isl_month_len(cal: &str, y: i64, m: i64) -> i64 {
+    if cal == "islamic-umalqura" {
+        umalqura_month_len(y, m)
+    } else {
+        islamic_month_len(m, islamic_leap(y))
+    }
 }
 
 // ===== Hebrew (lunisolar) calendar ============================================================
@@ -1133,7 +1206,7 @@ fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
     if is_13month(cal) {
         to_13month(y, m, d, epoch_13(cal))
     } else if is_islamic(cal) {
-        to_islamic(y, m, d, islamic_epoch(cal))
+        isl_to(cal, y, m, d)
     } else if cal == "hebrew" {
         hebrew_to_iso(y, m, d)
     } else if cal == "persian" {
@@ -1155,7 +1228,7 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
             5
         }
     } else if is_islamic(cal) {
-        islamic_month_len(m, islamic_leap(y))
+        isl_month_len(cal, y, m)
     } else if cal == "hebrew" {
         hebrew_month_len(y, m)
     } else if cal == "persian" {
@@ -1294,11 +1367,17 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let diy = if leap { 366 } else { 365 };
         (y, m, d, dim, 13, doy, diy, leap)
     } else if is_islamic(cal) {
-        let (y, m, d) = from_islamic(iso, islamic_epoch(cal));
-        let leap = islamic_leap(y);
-        let dim = islamic_month_len(m, leap);
-        let doy = (1..m).map(|mm| islamic_month_len(mm, leap)).sum::<i64>() + d;
-        let diy = if leap { 355 } else { 354 };
+        let (y, m, d) = isl_from(cal, iso);
+        let dim = isl_month_len(cal, y, m);
+        let doy = (1..m).map(|mm| isl_month_len(cal, y, mm)).sum::<i64>() + d;
+        let diy = if cal == "islamic-umalqura" {
+            umalqura_year_len(y)
+        } else if islamic_leap(y) {
+            355
+        } else {
+            354
+        };
+        let leap = diy == 355;
         (y, m, d, dim, 12, doy, diy, leap)
     } else if cal == "indian" {
         let (y, m, d) = from_indian(iso);
@@ -1364,7 +1443,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         "roc" => d.year - 1911,
         "coptic" | "ethiopic" => from_13month(d, epoch_13(cal)).0,
         "ethioaa" => from_13month(d, ETHIOPIC_EPOCH).0 + 5500,
-        _ if is_islamic(cal) => from_islamic(d, islamic_epoch(cal)).0,
+        _ if is_islamic(cal) => isl_from(cal, d).0,
         "indian" => from_indian(d).0,
         "hebrew" => hebrew_from_iso(d).0,
         "persian" => from_persian(d).0,
@@ -3724,8 +3803,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let month = clamp_or(i, month, 12, ovf, "month")?;
-        let day = clamp_or(i, day, islamic_month_len(month, islamic_leap(iy)), ovf, "day")?;
-        let iso = to_islamic(iy, month, day, islamic_epoch(cal));
+        let day = clamp_or(i, day, isl_month_len(cal, iy, month), ovf, "day")?;
+        let iso = isl_to(cal, iy, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
     // Indian (Saka): convert (year | era "shaka", month, day) to ISO.

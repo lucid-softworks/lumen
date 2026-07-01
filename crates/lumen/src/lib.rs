@@ -37,6 +37,8 @@ mod token;
 mod tz;
 #[rustfmt::skip]
 mod tzdata;
+#[rustfmt::skip]
+mod umalqura;
 mod unicode_props;
 mod value;
 
