@@ -7,12 +7,17 @@ use crate::interpreter::Interp;
 use crate::value::{set_builtin, Gc, Object, Property, Value};
 use std::rc::Rc;
 
+mod collator;
 mod data;
+mod datetimeformat;
+mod displaynames;
+mod durationformat;
 mod listformat;
 mod locale;
 mod numberformat;
 mod pluralrules;
 mod relativetimeformat;
+mod segmenter;
 mod service;
 mod tags;
 
@@ -50,6 +55,11 @@ pub fn install(it: &mut Interp) {
     pluralrules::install(it, &intl);
     relativetimeformat::install(it, &intl);
     numberformat::install(it, &intl);
+    collator::install(it, &intl);
+    displaynames::install(it, &intl);
+    segmenter::install(it, &intl);
+    durationformat::install(it, &intl);
+    datetimeformat::install(it, &intl);
 
     it.global
         .borrow_mut()
