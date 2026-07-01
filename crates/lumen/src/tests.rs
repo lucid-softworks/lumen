@@ -5165,3 +5165,32 @@ fn typedarray_iteration_semantics() {
     assert_eq!(run("new Uint8Array([1,2,3]).indexOf(2)"), "1");
     assert_eq!(run("new Uint8Array([1,2,3,2]).lastIndexOf(2)"), "3");
 }
+
+#[test]
+#[test]
+#[test]
+fn typedarray_set_semantics() {
+    // Copy from another TypedArray, with overlap (same buffer) handled via a snapshot.
+    assert_eq!(
+        run("var a=new Int32Array([1,2,3,4]); a.set(a.subarray(0,3),1); a.join(',')"),
+        "1,1,2,3"
+    );
+    // ToObject a primitive source (a String) reads its indexed chars.
+    assert_eq!(
+        run("var a=new Uint8Array(3); a.set('12'); a.join(',')"),
+        "1,2,0"
+    );
+    // Mixing BigInt and Number content types is a TypeError.
+    assert_eq!(
+        throws("new BigInt64Array(2).set(new Int32Array(1))"),
+        "TypeError"
+    );
+    // Uint8Clamped rounds half to even.
+    assert_eq!(
+        run("var a=new Uint8ClampedArray(3); a.set([0.5,1.5,2.5]); a.join(',')"),
+        "0,2,2"
+    );
+    // A negative offset is a RangeError; an oversized source too.
+    assert_eq!(throws("new Int8Array(4).set([1],-1)"), "RangeError");
+    assert_eq!(throws("new Int8Array(2).set([1,2,3])"), "RangeError");
+}

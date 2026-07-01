@@ -268,10 +268,22 @@ impl TaKind {
             TaKind::I8 => vec![int(n) as i8 as u8],
             TaKind::U8 => vec![int(n) as u8],
             TaKind::U8Clamped => {
-                let c = if n.is_nan() {
+                // ToUint8Clamp: round-half-to-even (0.5 → 0, 1.5 → 2, 2.5 → 2), clamped to [0,255].
+                let c = if n.is_nan() || n <= 0.0 {
                     0.0
+                } else if n >= 255.0 {
+                    255.0
                 } else {
-                    n.round().clamp(0.0, 255.0)
+                    let f = n.floor();
+                    if f + 0.5 < n {
+                        f + 1.0
+                    } else if n < f + 0.5 {
+                        f
+                    } else if (f as i64) % 2 == 1 {
+                        f + 1.0
+                    } else {
+                        f
+                    }
                 };
                 vec![c as u8]
             }

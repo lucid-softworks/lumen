@@ -3168,6 +3168,10 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         .typed_arrays
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "set on non-TypedArray"))?;
+    // An immutable target buffer can't be written — verified before any argument is coerced.
+    if i.immutable_buffers.contains(&info.buffer) {
+        return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+    }
     // targetOffset = ToIntegerOrInfinity(offset); a negative offset is a RangeError.
     let offset_n = match arg(args, 1) {
         Value::Undefined => 0.0,
@@ -3183,32 +3187,49 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     if offset_n < 0.0 {
         return Err(i.make_error("RangeError", "TypedArray.prototype.set offset is negative"));
     }
-    // Coercing the offset can run user code that detaches the target — re-validate.
-    if !i.array_buffers.contains_key(&info.buffer) {
-        return Err(i.make_error("TypeError", "detached buffer"));
-    }
-    let offset = offset_n as usize;
+    // Re-validate the target after offset coercion: an out-of-bounds (detached or shrunk-resizable)
+    // target is a TypeError, and an immutable target buffer can't be written.
+    let target_len = i
+        .ta_len(&info)
+        .ok_or_else(|| i.make_error("TypeError", "TypedArray target is out of bounds"))?;
     let source = arg(args, 0);
-    // The source is array-like (or another TypedArray): read its length, bounds-check, then copy
-    // element by element (so a throwing getter leaves earlier elements written).
-    let src_len = match &source {
-        Value::Obj(_) => {
-            let lenv = ab(i.get_member(&source, "length"))?;
-            let n = ab(i.to_number(&lenv))?;
-            if n.is_nan() || n < 0.0 {
-                0
-            } else {
-                n.min(9007199254740991.0) as usize
-            }
+    let src_info = source
+        .as_obj()
+        .and_then(|o| i.typed_arrays.get(&(Rc::as_ptr(o) as usize)).copied());
+    if let Some(src_info) = src_info {
+        // SetTypedArrayFromTypedArray: the source view must be in bounds, the target long enough,
+        // and the content types must match (mixing BigInt and Number is a TypeError).
+        let src_len = i
+            .ta_len(&src_info)
+            .ok_or_else(|| i.make_error("TypeError", "TypedArray source is out of bounds"))?;
+        if offset_n + src_len as f64 > target_len as f64 {
+            return Err(i.make_error("RangeError", "source is too large for the target at offset"));
         }
-        _ => 0,
-    };
-    // Compare in f64 so an Infinity offset can't overflow the usize addition.
-    if offset_n + src_len as f64 > i.ta_len(&info).unwrap_or(0) as f64 {
+        if src_info.kind.is_bigint() != info.kind.is_bigint() {
+            return Err(i.make_error(
+                "TypeError",
+                "TypedArray content types (BigInt vs Number) differ",
+            ));
+        }
+        let offset = offset_n as usize;
+        // Snapshot the source first so an overlapping same-buffer copy reads pre-write values.
+        let vals: Vec<Value> = (0..src_len).map(|k| i.ta_read(&src_info, k)).collect();
+        for (k, v) in vals.iter().enumerate() {
+            ab(i.ta_store(&info, offset + k, v))?;
+        }
+        return Ok(Value::Undefined);
+    }
+    // SetTypedArrayFromArrayLike: ToObject(source), read its length, bounds-check, then copy element
+    // by element (coercing each value; a throwing getter leaves earlier elements written).
+    let src = to_object_arg(i, source, "TypedArray.prototype.set")?;
+    let src_len = ab(i.to_length(&src))?;
+    if offset_n + src_len as f64 > target_len as f64 {
         return Err(i.make_error("RangeError", "source is too large for the target at offset"));
     }
+    let offset = offset_n as usize;
+    let src = Value::Obj(src);
     for k in 0..src_len {
-        let item = ab(i.get_member(&source, &k.to_string()))?;
+        let item = ab(i.get_member(&src, &k.to_string()))?;
         ab(i.ta_store(&info, offset + k, &item))?;
     }
     Ok(Value::Undefined)
