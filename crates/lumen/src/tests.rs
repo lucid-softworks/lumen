@@ -5384,3 +5384,25 @@ fn regexp_replace_dollar_substitutions() {
     // Named-group substitution.
     assert_eq!(run("'2020'.replace(/(?<y>\\d{4})/, '$<y>!')"), "2020!");
 }
+
+#[test]
+fn regexp_d_flag_indices() {
+    assert_eq!(run("/b/d.exec('abc').indices[0].join(',')"), "1,2");
+    assert_eq!(run("'has indices: '+/x/d.hasIndices"), "has indices: true");
+    // Named-group indices live on `.indices.groups`.
+    assert_eq!(
+        run("var m=/(?<a>b)(?<c>d)/d.exec('abd'); m.indices.groups.c.join(',')"),
+        "2,3"
+    );
+    // An unmatched optional group's indices entry is undefined.
+    assert_eq!(run("typeof /(a)|(b)/d.exec('b').indices[1]"), "undefined");
+}
+
+#[test]
+fn string_replace_named_group_callback() {
+    // The replacer function receives the named-groups object as its last argument.
+    assert_eq!(
+        run("'2020-06'.replace(/(?<y>\\d+)-(?<m>\\d+)/, (m,y,mo,off,s,g)=>g.m+'/'+g.y)"),
+        "06/2020"
+    );
+}
