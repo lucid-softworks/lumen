@@ -2017,10 +2017,6 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
     }
 }
 /// Read raw year/month/day integers from a property bag (no regulation yet).
-fn read_date_raw(i: &mut Interp, v: &Value) -> Result<(i64, i64, i64), Value> {
-    read_date_raw_cal(i, v, "iso8601")
-}
-
 /// Read raw (year, month, day) from a property bag, resolving `era`/`eraYear` to an ISO year for
 /// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`).
 fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, i64), Value> {
@@ -2562,6 +2558,14 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "year", |i, t, _| {
         Ok(Value::Num(as_datetime(i, &t)?.0.year as f64))
     });
+    def_getter(it, &proto, "era", |i, t, _| {
+        let y = as_datetime(i, &t)?.0.year;
+        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+    });
+    def_getter(it, &proto, "eraYear", |i, t, _| {
+        let y = as_datetime(i, &t)?.0.year;
+        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+    });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_datetime(i, &t)?.0.month as f64))
     });
@@ -2878,7 +2882,8 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
-            let draw = read_date_raw(i, v)?;
+            let cal = input_cal(i, v)?;
+            let draw = read_date_raw_cal(i, v, &cal)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
             Ok((regulate_date(i, draw, ovf)?, regulate_time(i, traw, ovf)?))
@@ -2895,6 +2900,14 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         .insert("Temporal.PlainYearMonth", proto.clone());
     def_getter(it, &proto, "year", |i, t, _| {
         Ok(Value::Num(as_yearmonth(i, &t)?.year as f64))
+    });
+    def_getter(it, &proto, "era", |i, t, _| {
+        let y = as_yearmonth(i, &t)?.year;
+        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+    });
+    def_getter(it, &proto, "eraYear", |i, t, _| {
+        let y = as_yearmonth(i, &t)?.year;
+        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_yearmonth(i, &t)?.month as f64))
@@ -4145,7 +4158,8 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 Value::Str(s) => s.clone(),
                 _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
             };
-            let draw = read_date_raw(i, v)?;
+            let zcal = input_cal(i, v)?;
+            let draw = read_date_raw_cal(i, v, &zcal)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
             let date = regulate_date(i, draw, ovf)?;
