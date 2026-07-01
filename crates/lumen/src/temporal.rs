@@ -3252,10 +3252,11 @@ fn cal_month_last(cal: &str, iso: IsoDate) -> IsoDate {
 }
 /// Add/subtract a duration to a PlainYearMonth in its calendar: anchored at the month's first day
 /// (or last day when moving backwards), then reduced back to the resulting year-month.
-fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, _ovf: Overflow) -> Result<IsoDate, Value> {
     let eff = sign * duration_sign(dur);
     let start = if eff < 0 { cal_month_last(cal, d) } else { ym_ref_of(cal, d) };
-    let result = add_to_date(i, start, dur, sign, ovf, cal)?;
+    // The anchor day is synthetic, so it is always constrained (only the resulting year-month is kept).
+    let result = add_to_date(i, start, dur, sign, Overflow::Constrain, cal)?;
     Ok(ym_ref_of(cal, result))
 }
 
