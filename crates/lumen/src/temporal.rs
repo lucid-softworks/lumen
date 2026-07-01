@@ -3178,13 +3178,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
-        Ok(Value::Num(as_datetime(i, &t)?.0.month as f64))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).1 as f64))
     });
     def_getter(it, &proto, "day", |i, t, _| {
-        Ok(Value::Num(as_datetime(i, &t)?.0.day as f64))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).2 as f64))
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
-        Ok(Value::str(month_code(as_datetime(i, &t)?.0.month)))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "hour", |i, t, _| {
@@ -3209,18 +3212,24 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         Ok(Value::Num(iso_day_of_week(as_datetime(i, &t)?.0) as f64))
     });
     def_getter(it, &proto, "dayOfYear", |i, t, _| {
-        Ok(Value::Num(iso_day_of_year(as_datetime(i, &t)?.0) as f64))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).5 as f64))
     });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
-        Ok(Value::Num(days_in_month(d.year, d.month) as f64))
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).3 as f64))
     });
     def_getter(it, &proto, "daysInYear", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
-        Ok(Value::Num(if is_leap(d.year) { 366.0 } else { 365.0 }))
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).6 as f64))
+    });
+    def_getter(it, &proto, "monthsInYear", |i, t, _| {
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).4 as f64))
     });
     def_getter(it, &proto, "inLeapYear", |i, t, _| {
-        Ok(Value::Bool(is_leap(as_datetime(i, &t)?.0.year)))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Bool(cal_fields(&cal_of(i, &t), d).7))
     });
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
@@ -3520,10 +3529,12 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
-        Ok(Value::Num(as_yearmonth(i, &t)?.month as f64))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).1 as f64))
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
-        Ok(Value::str(month_code(as_yearmonth(i, &t)?.month)))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
@@ -3543,21 +3554,19 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::Num(days_in_month(d.year, d.month) as f64))
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).3 as f64))
     });
     def_getter(it, &proto, "daysInYear", |i, t, _| {
-        Ok(Value::Num(if is_leap(as_yearmonth(i, &t)?.year) {
-            366.0
-        } else {
-            365.0
-        }))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).6 as f64))
     });
     def_getter(it, &proto, "monthsInYear", |i, t, _| {
-        as_yearmonth(i, &t)?;
-        Ok(Value::Num(12.0))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).4 as f64))
     });
     def_getter(it, &proto, "inLeapYear", |i, t, _| {
-        Ok(Value::Bool(is_leap(as_yearmonth(i, &t)?.year)))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::Bool(cal_fields(&cal_of(i, &t), d).7))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -3721,10 +3730,12 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     it.extra_protos
         .insert("Temporal.PlainMonthDay", proto.clone());
     def_getter(it, &proto, "monthCode", |i, t, _| {
-        Ok(Value::str(month_code(as_monthday(i, &t)?.month)))
+        let d = as_monthday(i, &t)?;
+        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
     });
     def_getter(it, &proto, "day", |i, t, _| {
-        Ok(Value::Num(as_monthday(i, &t)?.day as f64))
+        let d = as_monthday(i, &t)?;
+        Ok(Value::Num(cal_fields(&cal_of(i, &t), d).2 as f64))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     it.def_method(&proto, "toString", 0, |i, t, a| {
@@ -4829,6 +4840,15 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             });
         };
     }
+    // Calendar-aware field getter: `$f` receives the full `cal_fields` tuple.
+    macro_rules! calf_get {
+        ($name:literal, $f:expr) => {
+            def_getter(it, &proto, $name, |i, t, _| {
+                let (e, o, _) = as_zoned(i, &t)?;
+                Ok($f(cal_fields(&cal_of(i, &t), zoned_local(e, o).0)))
+            });
+        };
+    }
     def_getter(it, &proto, "year", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
         Ok(Value::Num(cal_year_num(&cal_of(i, &t), zoned_local(e, o).0) as f64))
@@ -4841,28 +4861,21 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, _) = as_zoned(i, &t)?;
         Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0).1.map(|v| Value::Num(v as f64)).unwrap_or(Value::Undefined))
     });
-    date_get!("month", |d: IsoDate| Value::Num(d.month as f64));
-    date_get!("day", |d: IsoDate| Value::Num(d.day as f64));
-    date_get!("monthCode", |d: IsoDate| Value::str(month_code(d.month)));
+    type CF = (i64, i64, i64, i64, i64, i64, i64, bool);
+    calf_get!("month", |f: CF| Value::Num(f.1 as f64));
+    calf_get!("day", |f: CF| Value::Num(f.2 as f64));
+    calf_get!("monthCode", |f: CF| Value::str(month_code(f.1 as u8)));
     date_get!("dayOfWeek", |d: IsoDate| Value::Num(
         iso_day_of_week(d) as f64
     ));
-    date_get!("dayOfYear", |d: IsoDate| Value::Num(
-        iso_day_of_year(d) as f64
-    ));
-    date_get!("daysInMonth", |d: IsoDate| Value::Num(
-        days_in_month(d.year, d.month) as f64
-    ));
-    date_get!("daysInYear", |d: IsoDate| Value::Num(if is_leap(d.year) {
-        366.0
-    } else {
-        365.0
-    }));
-    date_get!("inLeapYear", |d: IsoDate| Value::Bool(is_leap(d.year)));
+    calf_get!("dayOfYear", |f: CF| Value::Num(f.5 as f64));
+    calf_get!("daysInMonth", |f: CF| Value::Num(f.3 as f64));
+    calf_get!("daysInYear", |f: CF| Value::Num(f.6 as f64));
+    calf_get!("inLeapYear", |f: CF| Value::Bool(f.7));
     date_get!("weekOfYear", |d: IsoDate| Value::Num(iso_week(d).0 as f64));
     date_get!("yearOfWeek", |d: IsoDate| Value::Num(iso_week(d).1 as f64));
     date_get!("daysInWeek", |_d: IsoDate| Value::Num(7.0));
-    date_get!("monthsInYear", |_d: IsoDate| Value::Num(12.0));
+    calf_get!("monthsInYear", |f: CF| Value::Num(f.4 as f64));
     def_getter(it, &proto, "hoursInDay", |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
