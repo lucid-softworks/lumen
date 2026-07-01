@@ -1651,7 +1651,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(make(
             i,
             "Temporal.Duration",
-            Temporal::Duration(diff_date_rounded(d, o, &largest, &smallest, incr, &mode)),
+            Temporal::Duration({ let cal = cal_of(i, &t); diff_date_rounded(&cal, d, o, &largest, &smallest, incr, &mode) }),
         ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
@@ -1659,7 +1659,8 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
         // `since` mirrors `until` with a negated rounding mode, then negates the result.
         let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
-        let dur = diff_date_rounded(d, o, &largest, &smallest, incr, negate_mode(&mode));
+        let cal = cal_of(i, &t);
+        let dur = diff_date_rounded(&cal, d, o, &largest, &smallest, incr, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
@@ -2199,8 +2200,40 @@ fn round_up_magnitude(mode: &str, fraction: f64, positive: bool, low_even: bool)
 /// `increment`/`mode`. `mode` is oriented for the caller (`since` passes a negated mode). The
 /// fractional part of the smallest unit is measured by interpolating the target date between the
 /// two candidate boundary dates (calendar-accurate for the ISO calendar).
-fn diff_date_rounded(a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
-    let base = diff_date(a, b, largest);
+/// Calendar-aware date difference for month-structure calendars: years/months are counted in the
+/// calendar's own months. For day/week largest units (calendar-independent) it defers to `diff_date`.
+fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
+    let largest = largest.strip_suffix('s').unwrap_or(largest);
+    if !is_month_structure(cal) || matches!(largest, "week" | "day") {
+        return diff_date(a, b, largest);
+    }
+    let sign = cmp_date(a, b);
+    if sign == 0 {
+        return IsoDuration::default();
+    }
+    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
+    let mpy = cal_fields(cal, lo).4;
+    let mut months = 0i64;
+    while cmp_date(cal_add(cal, lo, IsoDuration { months: months + 1, ..Default::default() }, 1), hi) <= 0 {
+        months += 1;
+    }
+    let mid = cal_add(cal, lo, IsoDuration { months, ..Default::default() }, 1);
+    let days = epoch_days(hi) - epoch_days(mid);
+    let (years, months) = if largest == "year" {
+        (months.div_euclid(mpy), months.rem_euclid(mpy))
+    } else {
+        (0, months)
+    };
+    let out = IsoDuration { years, months, days, ..Default::default() };
+    if sign > 0 {
+        neg_duration(out)
+    } else {
+        out
+    }
+}
+
+fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
+    let base = diff_date_cal(cal, a, b, largest);
     let smallest = smallest.strip_suffix('s').unwrap_or(smallest);
     if smallest == "day" && increment <= 1 {
         return base; // day differences are already whole
@@ -2250,7 +2283,7 @@ fn diff_date_rounded(a: IsoDate, b: IsoDate, largest: &str, smallest: &str, incr
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
     let chosen = if up { high } else { low };
     // Re-balance the rounded date back to `largest`.
-    let result = diff_date(lo, add_date_dur(lo, chosen), largest);
+    let result = diff_date_cal(cal, lo, add_date_dur(lo, chosen), largest);
     if positive { result } else { neg_duration(result) }
 }
 
@@ -3871,7 +3904,8 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
         let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let dur = diff_date_rounded(d1, o1, &largest, &smallest, 1, &mode);
+        let cal = cal_of(i, &t);
+        let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
@@ -3879,7 +3913,8 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
         let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let dur = diff_date_rounded(d1, o1, &largest, &smallest, 1, negate_mode(&mode));
+        let cal = cal_of(i, &t);
+        let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     let ctor = add_ctor(it, ns, "PlainYearMonth", 2, proto, |i, _t, a| {
