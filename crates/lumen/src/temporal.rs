@@ -3749,20 +3749,16 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(add_duration(d, o, 1)),
-        ))
+        let r = add_duration(d, o, 1);
+        validate_duration(i, r)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(r)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(add_duration(d, o, -1)),
-        ))
+        let r = add_duration(d, o, -1);
+        validate_duration(i, r)?;
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(r)))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
