@@ -215,6 +215,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid calendar: {c}")));
         }
     }
+    // "islamic"/"islamic-rgsa" are not directly available; fall back to a concrete Islamic calendar.
+    let calendar = calendar.map(|c| {
+        if c == "islamic" || c == "islamic-rgsa" {
+            "islamic-civil".to_string()
+        } else {
+            c
+        }
+    });
     let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
     if let Some(ns) = &numbering {
         if !valid_type_id(ns) {
