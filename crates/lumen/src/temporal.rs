@@ -4914,7 +4914,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
-        let o = to_instant(i, &arg(a, 0))?;
+        let (o, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         Ok(make(
             i,
@@ -4924,7 +4924,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
-        let o = to_instant(i, &arg(a, 0))?;
+        let (o, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
         let largest = opt_str(i, &arg(a, 1), "largestUnit", "hour")?;
         Ok(make(
             i,
