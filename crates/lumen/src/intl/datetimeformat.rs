@@ -431,7 +431,8 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
     if !n.is_finite() || n.abs() > 8.64e15 {
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
-    Ok((n, 0))
+    // TimeClip truncates toward zero (so -0.9 -> +0, not floor's -1).
+    Ok((n.trunc() + 0.0, 0))
 }
 
 /// A Temporal receiver must overlap the formatter's requested fields, else TypeError. The requested
