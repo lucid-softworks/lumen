@@ -415,22 +415,35 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
     Ok((n, 0))
 }
 
-/// A Temporal receiver only conflicts with the formatter through dateStyle/timeStyle: individual
-/// components outside the receiver's field set are silently dropped (see [`build_parts`]'s `allow`).
-/// A date-only receiver rejects a lone `timeStyle`; a `PlainTime` rejects any `dateStyle`.
+/// A Temporal receiver must overlap the formatter's requested fields, else TypeError. The requested
+/// set includes both explicit component options and any dateStyle/timeStyle expansion, so e.g. a
+/// lone `timeStyle` (time fields only) has no overlap with a `PlainDate` and throws, while a
+/// `dateStyle`+`timeStyle` formatter overlaps every receiver.
 fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) -> Result<(), Value> {
     use crate::temporal::Temporal as T;
-    let has = |k: &str| o.borrow().props.contains(k);
-    let date_style = has("__dtf_datestyle");
-    let time_style = has("__dtf_timestyle");
-    let err = |i: &mut Interp, msg: &str| Err(i.make_error("TypeError", msg.to_string()));
-    match t {
-        T::Date(_) | T::YearMonth(_) | T::MonthDay(_) if time_style && !date_style => {
-            err(i, "a date-only Temporal value cannot be formatted with timeStyle alone")
-        }
-        T::Time(_) if date_style => err(i, "PlainTime cannot be formatted with dateStyle"),
-        _ => Ok(()),
+    // Field set of the receiver (era is auxiliary to year and never stands alone, so it is omitted).
+    let recv: &[&str] = match t {
+        T::Date(_) => &["weekday", "year", "month", "day"],
+        T::YearMonth(_) => &["year", "month"],
+        T::MonthDay(_) => &["month", "day"],
+        T::Time(_) => &["hour", "minute", "second", "fracsec", "dayperiod"],
+        _ => return Ok(()), // DateTime / Instant / Zoned overlap everything
+    };
+    // A fully-defaulted formatter adapts its fields to the receiver, so it always overlaps.
+    if o.borrow().props.contains("__dtf_defaults") {
+        return Ok(());
     }
+    // A field is requested if set explicitly (`__dtf_`) or via a dateStyle/timeStyle (`__dtfx_`).
+    let present = |field: &str| {
+        let b = o.borrow();
+        b.props.contains(&format!("__dtf_{field}")) || b.props.contains(&format!("__dtfx_{field}"))
+    };
+    const ALL: &[&str] = &["weekday", "year", "month", "day", "hour", "minute", "second", "fracsec", "dayperiod"];
+    let requested: Vec<&str> = ALL.iter().copied().filter(|f| present(f)).collect();
+    if !requested.is_empty() && !requested.iter().any(|f| recv.contains(f)) {
+        return Err(i.make_error("TypeError", "no overlap between the formatter and the Temporal value"));
+    }
+    Ok(())
 }
 
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
