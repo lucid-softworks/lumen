@@ -507,8 +507,17 @@ fn read_frac_digits(i: &mut Interp, opts: &Value) -> Result<Option<usize>, Value
 }
 /// Format a time honoring `smallestUnit` / `fractionalSecondDigits` options.
 fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Value> {
-    let smallest = opt_str(i, opts, "smallestUnit", "")?;
-    let smallest = smallest.strip_suffix('s').unwrap_or(&smallest);
+    let smallest_raw = opt_str(i, opts, "smallestUnit", "")?;
+    let smallest = smallest_raw.strip_suffix('s').unwrap_or(&smallest_raw);
+    // A present smallestUnit must be a time unit; the roundingMode option is validated even when the
+    // default is used (a non-string / out-of-range value is a RangeError).
+    if !smallest.is_empty()
+        && !matches!(smallest, "minute" | "second" | "millisecond" | "microsecond" | "nanosecond")
+    {
+        return Err(i.make_error("RangeError", "smallestUnit must be a time unit"));
+    }
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
     let base = format!("{:02}:{:02}", t.hour, t.minute);
     if smallest == "minute" {
         return Ok(base);
