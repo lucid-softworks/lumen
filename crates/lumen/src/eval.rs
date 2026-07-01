@@ -290,6 +290,7 @@ impl Interp {
                                     mutable: true,
                                     initialized: false,
                                     import_ref: None,
+                                    deletable: false,
                                 },
                             );
                         }
@@ -305,6 +306,7 @@ impl Interp {
                                 mutable: true,
                                 initialized: true,
                                 import_ref: None,
+                                deletable: false,
                             },
                         );
                     }
@@ -319,6 +321,7 @@ impl Interp {
                                 mutable: true,
                                 initialized: false,
                                 import_ref: None,
+                                deletable: false,
                             },
                         );
                     }
@@ -575,6 +578,7 @@ impl Interp {
                                         mutable: true,
                                         initialized: false,
                                         import_ref: None,
+                                        deletable: false,
                                     },
                                 );
                             }
@@ -1011,6 +1015,7 @@ impl Interp {
                 mutable: !is_const,
                 initialized: true,
                 import_ref: None,
+                deletable: false,
             },
         );
     }
@@ -2008,36 +2013,289 @@ impl Interp {
     }
 
     /// Direct eval: a non-string argument is returned unchanged; a string is parsed and executed.
-    /// Strict eval (inherited or via its own `"use strict"`) gets a fresh scope; sloppy eval shares
-    /// the caller's scope so `var`/function declarations leak into it (per spec for sloppy code).
     fn direct_eval(&mut self, arg: Option<&Value>, env: &Env) -> Result<Value, Abrupt> {
         let code = match arg {
             Some(Value::Str(s)) => s.clone(),
             Some(other) => return Ok(other.clone()),
             None => return Ok(Value::Undefined),
         };
-        let body = crate::parser::parse_script(&code, self.strict)
+        self.perform_eval(&code, env, true)
+    }
+
+    /// PerformEval: parse `code`, set up its variable + lexical environments, run
+    /// EvalDeclarationInstantiation, then execute the body.
+    ///
+    /// A *direct* eval (`direct` = true) inherits the caller's strictness and runs in `caller_env`:
+    /// sloppy code hoists its `var`/function declarations into the caller's nearest variable
+    /// environment while its lexical declarations stay private to a fresh scope. An *indirect* eval
+    /// always runs in the global scope and is only strict via its own `"use strict"` directive.
+    pub(crate) fn perform_eval(
+        &mut self,
+        code: &str,
+        caller_env: &Env,
+        direct: bool,
+    ) -> Result<Value, Abrupt> {
+        let base_strict = direct && self.strict;
+        let body = crate::parser::parse_script(code, base_strict)
             .map_err(|e| self.throw("SyntaxError", e.message))?;
         // A direct `eval` inherits the caller's super-call context: a `super(...)` in the eval is an
         // early SyntaxError unless the eval sits directly inside a derived constructor body. (Caught
         // here, before any of the eval body runs, so side effects preceding the `super()` don't.)
-        if !self.super_call_ok && stmts_have_super_call(&body) {
+        if direct && !self.super_call_ok && stmts_have_super_call(&body) {
             return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
         }
         let directive_strict = matches!(
             body.first(),
             Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict"
         );
-        let run_env = if self.strict || directive_strict {
-            new_scope(Some(env.clone()))
+        let strict = base_strict || directive_strict;
+
+        // PerformEval steps: choose the variable and lexical environments.
+        let (var_env, lex_env) = if !direct {
+            if strict {
+                // Strict indirect eval: its own environments — top-level declarations don't leak to
+                // the global object.
+                let e = new_var_scope(Some(self.global_env.clone()));
+                (e.clone(), e)
+            } else {
+                // Sloppy indirect eval runs in the global scope.
+                (
+                    self.global_env.clone(),
+                    new_scope(Some(self.global_env.clone())),
+                )
+            }
+        } else if strict {
+            // Strict direct eval: its own variable + lexical environment — nothing leaks out.
+            let e = new_var_scope(Some(caller_env.clone()));
+            (e.clone(), e)
         } else {
-            env.clone()
+            // Sloppy direct eval: `var`/function declarations hoist into the caller's nearest
+            // variable environment; lexical declarations stay in a fresh, private lexical scope.
+            (
+                nearest_var_env(caller_env),
+                new_scope(Some(caller_env.clone())),
+            )
         };
+
+        self.eval_declaration_instantiation(&body, &var_env, &lex_env, strict)?;
+
         let saved = self.strict;
-        self.strict = self.strict || directive_strict;
-        let result = self.eval_in_scope(&body, &run_env);
+        self.strict = strict;
+        let result = self.run_eval_body(&body, &lex_env);
         self.strict = saved;
         result
+    }
+
+    /// EvalDeclarationInstantiation: validate the eval body's `var`/function declarations against the
+    /// surrounding environments (throwing `SyntaxError`/`TypeError` on a conflict), then create them.
+    fn eval_declaration_instantiation(
+        &mut self,
+        body: &[Stmt],
+        var_env: &Env,
+        lex_env: &Env,
+        strict: bool,
+    ) -> Result<(), Abrupt> {
+        // Top-level function-declaration names (last of a duplicate name wins) and `var` names.
+        let mut func_names: Vec<String> = Vec::new();
+        for stmt in body {
+            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
+                if let Some(name) = &func.name {
+                    func_names.retain(|n| n != name);
+                    func_names.push(name.clone());
+                }
+            }
+        }
+        // VarDeclaredNames (all `var` binding names plus hoisted function names) — gathered by
+        // hoisting into a throwaway scope, which mirrors the interpreter's own var-scoping rules.
+        let probe = new_scope(None);
+        self.hoist(body, &probe, true);
+        let var_names: Vec<String> = probe.borrow().vars.keys().cloned().collect();
+        let is_global = Rc::ptr_eq(var_env, &self.global_env);
+
+        if !strict {
+            // A sloppy eval must not hoist a `var` over a same-named global lexical declaration...
+            if is_global {
+                for name in &var_names {
+                    if name != "this" && self.global_env.borrow().vars.contains_key(name) {
+                        return Err(self.throw(
+                            "SyntaxError",
+                            format!("Identifier '{name}' has already been declared"),
+                        ));
+                    }
+                }
+            }
+            // ...nor over a like-named lexical binding in any scope between the eval and its variable
+            // environment (block `let`/`const`, a parameter scope's `arguments`/parameters, etc.).
+            let mut cur = Some(lex_env.clone());
+            while let Some(s) = cur {
+                if Rc::ptr_eq(&s, var_env) {
+                    break;
+                }
+                let (is_with, parent) = {
+                    let b = s.borrow();
+                    (b.with_obj.is_some(), b.parent.clone())
+                };
+                if !is_with {
+                    for name in &var_names {
+                        if s.borrow().vars.contains_key(name) {
+                            return Err(self.throw(
+                                "SyntaxError",
+                                format!("Identifier '{name}' has already been declared"),
+                            ));
+                        }
+                    }
+                }
+                cur = parent;
+            }
+        }
+
+        // A global variable environment can refuse a declaration (non-extensible global, or a
+        // non-configurable same-named property) with a TypeError.
+        if is_global {
+            for name in &func_names {
+                if !self.can_declare_global_function(name) {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("cannot declare global function '{name}'"),
+                    ));
+                }
+            }
+            for name in &var_names {
+                if !func_names.contains(name) && !self.can_declare_global_var(name) {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("cannot declare global variable '{name}'"),
+                    ));
+                }
+            }
+        }
+
+        // Instantiate function declarations (their closure is the eval's lexical environment).
+        for stmt in body {
+            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
+                if let Some(name) = &func.name {
+                    let f = self.make_function(func.clone(), lex_env.clone());
+                    if is_global {
+                        self.create_global_function_binding(name, f);
+                    } else {
+                        var_env.borrow_mut().vars.insert(name.clone(), {
+                            let mut b = Binding::data(f, true, true);
+                            b.deletable = true;
+                            b
+                        });
+                    }
+                }
+            }
+        }
+        // Instantiate `var` names (undefined; an existing binding keeps its value).
+        for name in &var_names {
+            if func_names.contains(name) {
+                continue;
+            }
+            if is_global {
+                self.create_global_var_binding(name);
+            } else if !var_env.borrow().vars.contains_key(name) {
+                var_env.borrow_mut().vars.insert(name.clone(), {
+                    let mut b = Binding::data(Value::Undefined, true, true);
+                    b.deletable = true;
+                    b
+                });
+            }
+        }
+        // Lexical declarations (`let`/`const`/`class`) stay in the eval's private lexical scope.
+        self.declare_block_lexicals(body, lex_env, false);
+        Ok(())
+    }
+
+    /// CanDeclareGlobalVar: a global `var` is definable if the property already exists or the global
+    /// object is extensible.
+    fn can_declare_global_var(&self, name: &str) -> bool {
+        if self.global.borrow().props.contains(name) {
+            return true;
+        }
+        self.global.borrow().extensible
+    }
+
+    /// CanDeclareGlobalFunction: definable if an existing property is configurable (or a writable,
+    /// enumerable data property), or — when absent — the global object is extensible.
+    fn can_declare_global_function(&self, name: &str) -> bool {
+        let g = self.global.borrow();
+        match g.props.get(name) {
+            None => g.extensible,
+            Some(p) => {
+                p.configurable || (p.get.is_none() && p.set.is_none() && p.writable && p.enumerable)
+            }
+        }
+    }
+
+    /// CreateGlobalFunctionBinding(name, value, deletable=true): define (or overwrite) a configurable
+    /// global function property.
+    fn create_global_function_binding(&mut self, name: &str, value: Value) {
+        let existing = self
+            .global
+            .borrow()
+            .props
+            .get(name)
+            .map(|p| (p.configurable, p.get.is_none() && p.set.is_none()));
+        match existing {
+            Some((false, true)) => {
+                // A pre-existing non-configurable data property keeps its attributes; only its value
+                // is replaced.
+                if let Some(p) = self.global.borrow_mut().props.get_mut(name) {
+                    p.value = value;
+                }
+            }
+            _ => {
+                self.global
+                    .borrow_mut()
+                    .props
+                    .insert(name, Property::data(value, true, true, true));
+            }
+        }
+    }
+
+    /// CreateGlobalVarBinding(name, deletable=true): create a configurable global var property if the
+    /// global object doesn't already have one.
+    fn create_global_var_binding(&mut self, name: &str) {
+        if self.global.borrow().props.contains(name) {
+            return;
+        }
+        if self.global.borrow().extensible {
+            self.global
+                .borrow_mut()
+                .props
+                .insert(name, Property::data(Value::Undefined, true, true, true));
+        }
+    }
+
+    /// Execute an eval body's statements in its lexical environment (declarations already
+    /// instantiated), returning the completion value of the last value-producing statement.
+    fn run_eval_body(&mut self, body: &[Stmt], lex_env: &Env) -> Result<Value, Abrupt> {
+        let has_using = body.iter().any(stmt_declares_using);
+        if has_using {
+            self.using_stack.push(Vec::new());
+        }
+        let mut last = Value::Undefined;
+        let mut result: Completion = Ok(Value::Undefined);
+        for stmt in body {
+            match self.exec_stmt(stmt, lex_env) {
+                Ok(v) => {
+                    if !matches!(v, Value::Undefined) {
+                        last = v;
+                    }
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        if has_using {
+            let frame = self.using_stack.pop().unwrap_or_default();
+            result = self.dispose_frame(frame, result);
+        }
+        result?;
+        Ok(last)
     }
 
     // ----- classes ----------------------------------------------------------------------------
@@ -2848,6 +3106,58 @@ impl Interp {
                     return Ok(Value::Bool(false));
                 }
                 Ok(Value::Bool(true))
+            }
+            // `delete <identifier>`: an environment binding is removable only if it is `deletable`
+            // (a `var`/function created by a sloppy `eval`); a global-object property follows its
+            // own configurability. An unresolvable reference deletes to `true`.
+            Expr::Ident(name) => {
+                let mut cur = Some(env.clone());
+                while let Some(s) = cur {
+                    let (has, deletable, with_obj, parent) = {
+                        let b = s.borrow();
+                        let binding = b.vars.get(name);
+                        (
+                            binding.is_some(),
+                            binding.map(|x| x.deletable).unwrap_or(false),
+                            b.with_obj.clone(),
+                            b.parent.clone(),
+                        )
+                    };
+                    if has {
+                        if deletable {
+                            s.borrow_mut().vars.remove(name);
+                            return Ok(Value::Bool(true));
+                        }
+                        return Ok(Value::Bool(false));
+                    }
+                    if let Some(Value::Obj(o)) = &with_obj {
+                        if self.js_has_property(&Value::Obj(o.clone()), name)? {
+                            let configurable = o
+                                .borrow()
+                                .props
+                                .get(name)
+                                .map(|p| p.configurable)
+                                .unwrap_or(true);
+                            if configurable {
+                                o.borrow_mut().props.remove(name);
+                                return Ok(Value::Bool(true));
+                            }
+                            return Ok(Value::Bool(false));
+                        }
+                    }
+                    cur = parent;
+                }
+                // Fall back to a global-object property.
+                let g = self.global.clone();
+                let existing = g.borrow().props.get(name).map(|p| p.configurable);
+                match existing {
+                    Some(true) => {
+                        g.borrow_mut().props.remove(name);
+                        Ok(Value::Bool(true))
+                    }
+                    Some(false) => Ok(Value::Bool(false)),
+                    None => Ok(Value::Bool(true)),
+                }
             }
             _ => Ok(Value::Bool(true)),
         }
@@ -3685,6 +3995,7 @@ fn bind(env: &Env, name: &str, value: Value) {
             mutable: true,
             initialized: true,
             import_ref: None,
+            deletable: false,
         },
     );
 }

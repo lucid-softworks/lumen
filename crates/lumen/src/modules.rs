@@ -135,6 +135,7 @@ impl Interp {
                     mutable: false,
                     initialized: true,
                     import_ref: Some((dep_env.clone(), src_local.clone())),
+                    deletable: false,
                 };
                 env.borrow_mut().vars.insert(local.to_string(), binding);
                 return true;

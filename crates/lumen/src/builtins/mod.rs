@@ -14059,10 +14059,8 @@ fn install_globals(it: &mut Interp) {
             Value::Str(s) => s,
             other => return Ok(other),
         };
-        let body = crate::parser::parse_script(&code, false)
-            .map_err(|e| i.make_error("SyntaxError", e.message))?;
         let env = i.global_env.clone();
-        ab(i.eval_in_scope(&body, &env))
+        ab(i.perform_eval(&code, &env, false))
     });
     set_builtin(&it.global, "eval", Value::Obj(eval_fn.clone()));
     it.eval_fn = Some(eval_fn);

@@ -137,6 +137,11 @@ pub struct Scope {
     pub parent: Option<Env>,
     /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
     pub with_obj: Option<Value>,
+    /// `true` if this is a *variable* environment (a function body scope, the global scope, or an
+    /// `eval` scope) — the target for `var`/function hoisting. Block, `with`, and function *parameter*
+    /// scopes are `false`, so a sloppy direct `eval` hoists its vars past them into the nearest
+    /// enclosing variable environment (see EvalDeclarationInstantiation).
+    pub var_boundary: bool,
 }
 
 pub struct Binding {
@@ -146,6 +151,9 @@ pub struct Binding {
     pub initialized: bool,
     /// A live module import: reads/writes redirect to `(exporter scope, local name)`.
     pub import_ref: Option<(Env, String)>,
+    /// `true` for a `var`/function binding created by a sloppy `eval` (CreateMutableBinding with
+    /// `deletable` set): `delete <name>` may remove it, unlike ordinary declarations.
+    pub deletable: bool,
 }
 
 impl Binding {
@@ -155,6 +163,7 @@ impl Binding {
             mutable,
             initialized,
             import_ref: None,
+            deletable: false,
         }
     }
 }
@@ -164,6 +173,18 @@ pub fn new_scope(parent: Option<Env>) -> Env {
         vars: HashMap::new(),
         parent,
         with_obj: None,
+        var_boundary: false,
+    }))
+}
+
+/// A *variable* environment: the hoisting target for `var`/function declarations (function body,
+/// global, or `eval` scope). See [`Scope::var_boundary`].
+pub fn new_var_scope(parent: Option<Env>) -> Env {
+    Rc::new(RefCell::new(Scope {
+        vars: HashMap::new(),
+        parent,
+        with_obj: None,
+        var_boundary: true,
     }))
 }
 
@@ -173,7 +194,24 @@ pub fn new_with_scope(parent: Env, obj: Value) -> Env {
         vars: HashMap::new(),
         parent: Some(parent),
         with_obj: Some(obj),
+        var_boundary: false,
     }))
+}
+
+/// Walk up from `env` to the nearest variable environment (function body, global, or `eval` scope) —
+/// the scope a `var`/function declaration hoists into. Falls back to the outermost scope.
+pub fn nearest_var_env(env: &Env) -> Env {
+    let mut cur = env.clone();
+    loop {
+        if cur.borrow().var_boundary {
+            return cur;
+        }
+        let parent = cur.borrow().parent.clone();
+        match parent {
+            Some(p) => cur = p,
+            None => return cur,
+        }
+    }
 }
 
 /// A non-local completion. Expressions only raise `Throw`; the rest flow out of statements.
@@ -259,6 +297,35 @@ pub fn pattern_idents(pat: &Pattern, out: &mut Vec<String>) {
             }
         }
         Pattern::Member(_) => {}
+    }
+}
+
+/// Whether a formal parameter list "contains an expression" (ECMAScript ContainsExpression): a
+/// default initializer or a destructuring pattern with a default/computed key. When true, the callee
+/// gets a separate parameter Environment Record distinct from the body's variable environment, so a
+/// direct `eval` in a parameter default cannot leak bindings into the body (and `arguments`/params
+/// live in a scope the body's `var` hoisting sits below).
+pub fn params_have_expr(params: &[Param]) -> bool {
+    params
+        .iter()
+        .any(|p| p.default.is_some() || pattern_has_expr(&p.pattern))
+}
+
+fn pattern_has_expr(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Ident(_) | Pattern::Member(_) => false,
+        Pattern::Array(elems) => elems.iter().any(|e| match e {
+            ArrayPatElem::Hole => false,
+            ArrayPatElem::Elem { pattern, default } => {
+                default.is_some() || pattern_has_expr(pattern)
+            }
+            ArrayPatElem::Rest(p) => pattern_has_expr(p),
+        }),
+        Pattern::Object(o) => o.props.iter().any(|p| {
+            p.default.is_some()
+                || matches!(p.key, PropKey::Computed(_))
+                || pattern_has_expr(&p.value)
+        }),
     }
 }
 
@@ -538,7 +605,7 @@ impl Interp {
         self.boolean_proto = boolean_proto;
         self.symbol_proto = symbol_proto;
         self.global = global.clone();
-        self.global_env = new_scope(None);
+        self.global_env = new_var_scope(None);
         self.error_protos = HashMap::new();
         self.extra_protos = HashMap::new();
         self.eval_fn = None;
@@ -552,6 +619,7 @@ impl Interp {
                 mutable: false,
                 initialized: true,
                 import_ref: None,
+                deletable: false,
             },
         );
         // Share the well-known symbols: overwrite the realm's freshly-minted ones with the originals.
@@ -646,7 +714,7 @@ impl Interp {
         boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
         let global = Object::new(Some(object_proto.clone()));
-        let global_env = new_scope(None);
+        let global_env = new_var_scope(None);
         let mut interp = Interp {
             global,
             global_env,
@@ -712,6 +780,7 @@ impl Interp {
                 mutable: false,
                 initialized: true,
                 import_ref: None,
+                deletable: false,
             },
         );
         interp
@@ -1773,7 +1842,20 @@ impl Interp {
         is_construct: bool,
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
-        let scope = new_scope(Some(closure));
+        // A function with parameter expressions (default values or destructuring with defaults) gets
+        // a separate parameter Environment Record — not a variable environment — so its body's `var`
+        // hoisting sits in a distinct scope below it (and a direct `eval` in a parameter default
+        // cannot leak declarations into the body). Otherwise a single variable environment suffices.
+        let has_param_exprs = params_have_expr(&func.params);
+        let scope = if has_param_exprs {
+            // Chain: callee base (variable env) → parameter env → body variable env. A direct `eval`
+            // in a parameter default hoists its `var`s into the callee base, not the enclosing
+            // scope, and its walk passes through the parameter env (where `arguments`/params live).
+            let callee_base = new_var_scope(Some(closure));
+            new_scope(Some(callee_base))
+        } else {
+            new_var_scope(Some(closure))
+        };
 
         // `new.target`: an ordinary call clears it, a construct installs the pending target; an arrow
         // inherits the enclosing value. Saved and restored around the body.
@@ -1805,6 +1887,7 @@ impl Interp {
                     mutable: false,
                     initialized: true,
                     import_ref: None,
+                    deletable: false,
                 },
             );
             // A minimal `arguments` array (not the live mapped object).
@@ -1816,6 +1899,7 @@ impl Interp {
                     mutable: true,
                     initialized: true,
                     import_ref: None,
+                    deletable: false,
                 },
             );
             // Expose the callee for named function expressions / recursion via `name`.
@@ -1828,36 +1912,71 @@ impl Interp {
                             mutable: false,
                             initialized: true,
                             import_ref: None,
+                            deletable: false,
                         },
                     );
                 }
             }
         }
 
-        self.bind_params(&func.params, args, &scope)?;
+        // Parameter binding may throw (a default initializer, a destructuring mismatch, or an
+        // EvalDeclarationInstantiation conflict). For an ordinary async function this abrupt
+        // completion rejects the returned promise rather than throwing synchronously; every other
+        // kind of function (including async *generators*) throws synchronously.
+        let bind_result = self.bind_params(&func.params, args, &scope);
+
+        // With parameter expressions, the body runs in a fresh variable environment below the
+        // parameter scope; a `var` sharing a parameter's name starts with that parameter's value.
+        let body = if has_param_exprs {
+            new_var_scope(Some(scope.clone()))
+        } else {
+            scope.clone()
+        };
+        let param_seed = if has_param_exprs {
+            Some(scope.clone())
+        } else {
+            None
+        };
 
         let saved_strict = self.strict;
         self.strict = func.is_strict;
 
-        // Generators (sync and async) suspend at each yield on their own coroutine; see run_generator.
-        if func.is_generator {
-            let gen = self.run_generator(func, &scope);
-            self.strict = saved_strict;
-            self.new_target = saved_new_target;
-            return gen;
-        }
-        // Async functions run on a coroutine too, parking at each `await`; see run_async.
-        if func.is_async {
-            let r = self.run_async(func, &scope);
+        if func.is_async && !func.is_generator {
+            if let Err(e) = bind_result {
+                self.strict = saved_strict;
+                self.new_target = saved_new_target;
+                let reason = abrupt_value(e);
+                let promise = self.new_promise();
+                self.reject_promise(&promise, reason);
+                return Ok(promise);
+            }
+            let r = self.run_async(func, &body, param_seed);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             return r;
         }
 
+        if let Err(e) = bind_result {
+            self.strict = saved_strict;
+            self.new_target = saved_new_target;
+            return Err(e);
+        }
+
+        // Generators (sync and async) suspend at each yield on their own coroutine; see run_generator.
+        if func.is_generator {
+            let gen = self.run_generator(func, &body, param_seed);
+            self.strict = saved_strict;
+            self.new_target = saved_new_target;
+            return gen;
+        }
+
         // Hoist `var`/function declarations into the function scope before executing the body.
-        self.hoist(&func.body, &scope, true);
+        self.hoist(&func.body, &body, true);
+        if let Some(ps) = &param_seed {
+            self.seed_param_vars(ps, &body);
+        }
         // Pre-declare body-level `let`/`const` in their temporal dead zone.
-        self.declare_block_lexicals(&func.body, &scope, false);
+        self.declare_block_lexicals(&func.body, &body, false);
 
         // The function body is a disposal boundary for its `using` declarations.
         let has_using = func.body.iter().any(crate::eval::stmt_declares_using);
@@ -1866,7 +1985,7 @@ impl Interp {
         }
         let mut result = Ok(Value::Undefined);
         for stmt in &func.body {
-            match self.exec_stmt(stmt, &scope) {
+            match self.exec_stmt(stmt, &body) {
                 Ok(_) => {}
                 Err(Abrupt::Return(v)) => {
                     result = Ok(v);
@@ -1889,7 +2008,12 @@ impl Interp {
 
     /// Start a generator: spawn its coroutine (parked until the first `next`) and return the
     /// generator object. The body runs lazily on its own thread, suspending at each `yield`.
-    fn run_generator(&mut self, func: &Rc<Function>, scope: &Env) -> Result<Value, Abrupt> {
+    fn run_generator(
+        &mut self,
+        func: &Rc<Function>,
+        scope: &Env,
+        param_seed: Option<Env>,
+    ) -> Result<Value, Abrupt> {
         let func = func.clone();
         let scope = scope.clone();
         let is_async = func.is_async;
@@ -1897,6 +2021,9 @@ impl Interp {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
             i.hoist(&func.body, &scope, true);
+            if let Some(ps) = &param_seed {
+                i.seed_param_vars(ps, &scope);
+            }
             i.declare_block_lexicals(&func.body, &scope, false);
             let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
             for stmt in &func.body {
@@ -1928,13 +2055,21 @@ impl Interp {
     /// Start an async function: spawn its coroutine, return a promise that settles when the body
     /// finishes. Each `await` parks the coroutine; a microtask resumes it once the awaited value
     /// settles.
-    fn run_async(&mut self, func: &Rc<Function>, scope: &Env) -> Result<Value, Abrupt> {
+    fn run_async(
+        &mut self,
+        func: &Rc<Function>,
+        scope: &Env,
+        param_seed: Option<Env>,
+    ) -> Result<Value, Abrupt> {
         let func = func.clone();
         let scope = scope.clone();
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
             i.hoist(&func.body, &scope, true);
+            if let Some(ps) = &param_seed {
+                i.seed_param_vars(ps, &scope);
+            }
             i.declare_block_lexicals(&func.body, &scope, false);
             let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
             for stmt in &func.body {
@@ -2120,6 +2255,21 @@ impl Interp {
     }
 
     fn bind_params(&mut self, params: &[Param], args: &[Value], scope: &Env) -> Result<(), Abrupt> {
+        // With parameter expressions, every parameter's binding is created (uninitialized) up front,
+        // so a default initializer naming a later parameter is a temporal-dead-zone reference and a
+        // direct `eval` observes the parameter bindings (matching FunctionDeclarationInstantiation).
+        if params_have_expr(params) {
+            let mut names = Vec::new();
+            for p in params {
+                pattern_idents(&p.pattern, &mut names);
+            }
+            for name in names {
+                scope
+                    .borrow_mut()
+                    .vars
+                    .insert(name, Binding::data(Value::Undefined, true, false));
+            }
+        }
         for (i, p) in params.iter().enumerate() {
             let value = if p.rest {
                 let rest: Vec<Value> = args.iter().skip(i).cloned().collect();
@@ -2144,6 +2294,35 @@ impl Interp {
             }
         }
         Ok(())
+    }
+
+    /// When a function has parameter expressions, a body `var` sharing a parameter's name starts
+    /// with that parameter's value (FunctionDeclarationInstantiation step for the separate variable
+    /// environment). `hoist` has just created the body's `var` bindings as `undefined`; fill in the
+    /// initial value from the parameter scope for names it declares.
+    fn seed_param_vars(&self, param_scope: &Env, body_scope: &Env) {
+        let names: Vec<String> = body_scope.borrow().vars.keys().cloned().collect();
+        for name in names {
+            if name == "this" {
+                continue;
+            }
+            let seeded = param_scope
+                .borrow()
+                .vars
+                .get(&name)
+                .filter(|b| b.initialized)
+                .map(|b| b.value.clone());
+            if let Some(v) = seeded {
+                let mut bs = body_scope.borrow_mut();
+                if let Some(b) = bs.vars.get_mut(&name) {
+                    // Only a plain `var` slot (still `undefined`) inherits the parameter value; a
+                    // function declaration keeps its function object.
+                    if matches!(b.value, Value::Undefined) {
+                        b.value = v;
+                    }
+                }
+            }
+        }
     }
 
     pub fn construct(&mut self, callee: Value, args: &[Value]) -> Result<Value, Abrupt> {
@@ -2421,6 +2600,7 @@ impl Interp {
                             mutable: true,
                             initialized: true,
                             import_ref: None,
+                            deletable: false,
                         },
                     );
                 }
@@ -2459,6 +2639,7 @@ impl Interp {
                             mutable: true,
                             initialized: true,
                             import_ref: None,
+                            deletable: false,
                         },
                     );
                 }
@@ -2538,6 +2719,7 @@ impl Interp {
                                     mutable: true,
                                     initialized: true,
                                     import_ref: None,
+                                    deletable: false,
                                 },
                             );
                         }
@@ -2577,6 +2759,7 @@ impl Interp {
                                         mutable: true,
                                         initialized: true,
                                         import_ref: None,
+                                        deletable: false,
                                     },
                                 );
                             }
@@ -2601,6 +2784,7 @@ impl Interp {
                             mutable: true,
                             initialized: true,
                             import_ref: None,
+                            deletable: false,
                         },
                     );
                 }
