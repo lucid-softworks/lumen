@@ -2,7 +2,6 @@
 
 use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
-    resolve_locale,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
@@ -39,21 +38,18 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
         }
     }
-    // An unknown numbering system is ignored (falls back to latn).
-    let numbering = numbering
-        .filter(|n| n == "latn" || crate::numbering::NUMBERING.iter().any(|(id, _)| id == n))
-        .unwrap_or_else(|| "latn".to_string());
     let style = get_option(i, &options, "style", &["long", "short", "narrow"], Some("long"))?
         .unwrap();
     let numeric = get_option(i, &options, "numeric", &["always", "auto"], Some("always"))?.unwrap();
-    let resolved = resolve_locale(i, &requested, &["nu"]);
+    let (resolved_locale, numbering) =
+        super::service::resolve_locale_nu(&requested, numbering.as_deref());
 
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.RelativeTimeFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__rtf", Value::Bool(true));
-    set_builtin(&obj, "__rtf_locale", Value::from_string(resolved.locale));
+    set_builtin(&obj, "__rtf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__rtf_numeric", Value::from_string(numeric));
     set_builtin(&obj, "__rtf_style", Value::from_string(style));
     set_builtin(&obj, "__rtf_nu", Value::from_string(numbering));

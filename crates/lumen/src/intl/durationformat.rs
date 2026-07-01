@@ -4,7 +4,6 @@
 
 use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
-    resolve_locale,
 };
 use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
 use crate::interpreter::Interp;
@@ -49,17 +48,17 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {nsid}")));
         }
     }
-    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
     let base_style = get_option(i, &options, "style", &["long", "short", "narrow", "digital"], Some("short"))?
         .unwrap();
 
-    let resolved = resolve_locale(i, &requested, &["nu"]);
+    let (resolved_locale, numbering) =
+        super::service::resolve_locale_nu(&requested, numbering.as_deref());
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.DurationFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__df", Value::Bool(true));
-    set_builtin(&obj, "__df_locale", Value::from_string(resolved.locale));
+    set_builtin(&obj, "__df_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__df_style", Value::from_string(base_style.clone()));
     set_builtin(&obj, "__df_nu", Value::from_string(numbering));
 

@@ -2,7 +2,6 @@
 
 use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
-    resolve_locale,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
@@ -151,8 +150,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
         }
     }
-    let resolved = resolve_locale(i, &requested, &["nu"]);
-    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
+    let (resolved_locale, numbering) =
+        super::service::resolve_locale_nu(&requested, numbering.as_deref());
 
     let style = get_option(
         i,
@@ -293,7 +292,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__nf", Value::Bool(true));
-    set_builtin(&obj, "__nf_locale", Value::from_string(resolved.locale));
+    set_builtin(&obj, "__nf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__nf_nu", Value::from_string(numbering));
     set_builtin(&obj, "__nf_roundingincrement", Value::Num(rounding_increment as f64));
     set_builtin(&obj, "__nf_roundingpriority", Value::from_string(rounding_priority));

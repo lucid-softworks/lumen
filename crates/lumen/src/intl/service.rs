@@ -63,6 +63,59 @@ pub fn resolve_locale(
     }
 }
 
+/// Whether `n` is a numbering system this engine can render with.
+pub fn is_supported_nu(n: &str) -> bool {
+    n == "latn" || crate::numbering::NUMBERING.iter().any(|(id, _)| *id == n)
+}
+
+/// ResolveLocale specialised to the single `nu` key: returns the resolved locale string (the base
+/// name plus a `-u-nu-<value>` addition when it survives) and the chosen numbering system. The
+/// `-u-nu-` addition is kept only when the value came from the requested locale's extension; an
+/// options value that differs from it drops the addition (per ResolveLocale steps for `nu`).
+pub fn resolve_locale_nu(requested: &[String], option: Option<&str>) -> (String, String) {
+    let mut base = "en".to_string();
+    let mut ext_value: Option<String> = None;
+    for tag in requested {
+        if let Some(parsed) = tags::parse(tag) {
+            if supported_language(&parsed.language) {
+                let mut b = parsed.clone();
+                b.unicode = None;
+                b.transform = None;
+                b.other_ext.clear();
+                b.private.clear();
+                base = tags::render(&b);
+                if let Some((_a, kws)) = &parsed.unicode {
+                    for (k, types) in kws {
+                        if k == "nu" {
+                            ext_value = Some(types.join("-"));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    let mut value = "latn".to_string();
+    let mut addition: Option<String> = None;
+    if let Some(ev) = &ext_value {
+        if is_supported_nu(ev) {
+            value = ev.clone();
+            addition = Some(ev.clone());
+        }
+    }
+    if let Some(opt) = option {
+        if is_supported_nu(opt) && opt != value {
+            value = opt.to_string();
+            addition = None;
+        }
+    }
+    let locale = match addition {
+        Some(a) => format!("{base}-u-nu-{a}"),
+        None => base,
+    };
+    (locale, value)
+}
+
 /// GetOption(options, "localeMatcher", string, «"lookup","best fit"», "best fit"). Validated then
 /// discarded (both matchers behave identically here).
 pub fn read_locale_matcher(i: &mut Interp, options: &Value) -> Result<(), Value> {
