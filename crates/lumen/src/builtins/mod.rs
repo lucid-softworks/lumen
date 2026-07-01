@@ -2321,7 +2321,7 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
             return Err(i.make_error("RangeError", "invalid TypedArray index"));
         }
         let actual = actual as usize;
-        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)], true)?;
         let new_info = map_ptr(&new_ta)
             .and_then(|p| i.typed_arrays.get(&p).copied())
             .ok_or_else(|| {
@@ -2354,7 +2354,7 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
     ) {
         let len = ab(i.get_member(&result, "length"))?;
         let len = ab(i.to_number(&len))? as usize;
-        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)], true)?;
         // SpeciesConstructor access can run user code that detaches the source — re-validate.
         if !i.array_buffers.contains_key(&info.buffer) {
             return Err(i.make_error(
@@ -2485,7 +2485,7 @@ fn ta_native(
         })()),
         "map" => Some((|| {
             require_cb(i)?;
-            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)])?;
+            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)], true)?;
             let new_info = map_ptr(&new_ta)
                 .and_then(|p| i.typed_arrays.get(&p).copied())
                 .ok_or_else(|| {
@@ -2516,7 +2516,8 @@ fn ta_native(
                     kept.push(v);
                 }
             }
-            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(kept.len() as f64)])?;
+            let new_ta =
+                ta_species_create(i, this, info.kind, &[Value::Num(kept.len() as f64)], true)?;
             let new_info = map_ptr(&new_ta)
                 .and_then(|p| i.typed_arrays.get(&p).copied())
                 .ok_or_else(|| {
@@ -2727,6 +2728,7 @@ fn ta_species_create(
     this: &Value,
     kind: TaKind,
     args: &[Value],
+    write: bool,
 ) -> Result<Value, Value> {
     let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), kind.name()))?;
     let ctor = ab(i.get_member(this, "constructor"))?;
@@ -2750,14 +2752,42 @@ fn ta_species_create(
         return Err(i.make_error("TypeError", "TypedArray species is not a constructor"));
     }
     let result = ab(i.construct(chosen, args))?;
-    if map_ptr(&result)
-        .and_then(|p| i.typed_arrays.get(&p))
-        .is_none()
-    {
+    let new_info = match map_ptr(&result).and_then(|p| i.typed_arrays.get(&p).copied()) {
+        Some(info) => info,
+        None => {
+            return Err(i.make_error(
+                "TypeError",
+                "TypedArray species constructor did not return a TypedArray",
+            ))
+        }
+    };
+    // ValidateTypedArray(result): a detached or out-of-bounds destination is a TypeError. All
+    // species-create callers write into the result, so an immutable destination is rejected too.
+    let actual_len = match i.ta_len(&new_info) {
+        Some(l) => l,
+        None => {
+            return Err(i.make_error(
+                "TypeError",
+                "TypedArray species destination is detached or out of bounds",
+            ))
+        }
+    };
+    if write && i.immutable_buffers.contains(&new_info.buffer) {
         return Err(i.make_error(
             "TypeError",
-            "TypedArray species constructor did not return a TypedArray",
+            "TypedArray species destination is backed by an immutable buffer",
         ));
+    }
+    // TypedArrayCreate: when the argument list is a single length, the result must be at least that
+    // long (a species constructor can't hand back a too-short array).
+    if args.len() == 1 {
+        if let Value::Num(n) = args[0] {
+            if (actual_len as f64) < n {
+                return Err(
+                    i.make_error("TypeError", "TypedArray species destination is too small")
+                );
+            }
+        }
     }
     Ok(result)
 }
@@ -3212,6 +3242,7 @@ fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
             Value::Num(new_offset as f64),
             Value::Num(new_len as f64),
         ],
+        false,
     )
 }
 
