@@ -152,6 +152,77 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     Ok(Value::Obj(obj))
 }
 
+/// Parse an ISO 8601 duration string (`±PnYnMnWnDTnHnMnS`) into the 10-field values array. A
+/// fractional final time component distributes into the sub-second fields; calendar/whole units must
+/// be integers. Returns `None` on any grammar violation.
+fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
+    let mut rest = s;
+    let mut sign = 1.0;
+    if let Some(r) = rest.strip_prefix('+') {
+        rest = r;
+    } else if let Some(r) = rest.strip_prefix('-').or_else(|| rest.strip_prefix('\u{2212}')) {
+        rest = r;
+        sign = -1.0;
+    }
+    rest = rest.strip_prefix(['P', 'p'])?;
+    let (date_part, time_part) = match rest.find(['T', 't']) {
+        Some(p) => (&rest[..p], Some(&rest[p + 1..])),
+        None => (rest, None),
+    };
+    let mut vals = [0f64; 10];
+    let mut any = false;
+    // Consume `<number><designator>` pairs; `designators` maps a letter to its field index and
+    // whether that field may carry a fraction (only the seconds field, which spills into ms/us/ns).
+    let consume = |section: &str, designators: &[(char, usize)], vals: &mut [f64; 10], any: &mut bool| -> Option<()> {
+        let mut buf = String::new();
+        for c in section.chars() {
+            if c.is_ascii_digit() {
+                buf.push(c);
+            } else if c == '.' || c == ',' {
+                buf.push('.');
+            } else {
+                let (_, idx) = designators.iter().find(|(d, _)| *d == c.to_ascii_uppercase())?;
+                if buf.is_empty() {
+                    return None;
+                }
+                let frac = buf.contains('.');
+                let num: f64 = buf.parse().ok()?;
+                if frac {
+                    // Only the seconds field accepts a fraction; distribute to ms/us/ns.
+                    if *idx != 6 {
+                        return None;
+                    }
+                    vals[6] = num.trunc();
+                    let sub = ((num.fract() * 1e9).round()) as i64;
+                    vals[7] = (sub / 1_000_000) as f64;
+                    vals[8] = ((sub / 1000) % 1000) as f64;
+                    vals[9] = (sub % 1000) as f64;
+                } else {
+                    vals[*idx] = num;
+                }
+                *any = true;
+                buf.clear();
+            }
+        }
+        // A trailing number with no designator is invalid.
+        if buf.is_empty() { Some(()) } else { None }
+    };
+    consume(date_part, &[('Y', 0), ('M', 1), ('W', 2), ('D', 3)], &mut vals, &mut any)?;
+    if let Some(tp) = time_part {
+        if tp.is_empty() {
+            return None; // a lone "T" with no time components
+        }
+        consume(tp, &[('H', 4), ('M', 5), ('S', 6)], &mut vals, &mut any)?;
+    }
+    if !any {
+        return None;
+    }
+    for v in &mut vals {
+        *v *= sign;
+    }
+    Some(vals)
+}
+
 fn valid_type(s: &str) -> bool {
     !s.is_empty() && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
@@ -159,6 +230,10 @@ fn valid_type(s: &str) -> bool {
 /// ToDurationRecord + IsValidDuration: read integer fields, require a single sign, and bound the
 /// calendar units (< 2^32) and total time (< 2^53 seconds).
 fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
+    // A string is parsed as an ISO 8601 duration; a bad string is a RangeError, not a TypeError.
+    if let Value::Str(s) = v {
+        return parse_iso_duration(s).ok_or_else(|| i.make_error("RangeError", "invalid ISO 8601 duration string"));
+    }
     if !matches!(v, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "duration must be an object"));
     }
