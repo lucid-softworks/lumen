@@ -379,14 +379,31 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         }
     }
     let eff_cal = calendar.clone().or(ca_ext).unwrap_or_else(|| "gregory".to_string());
-    // Reflect the surviving -u-ca- addition (inserting it before any -u-nu- so keys stay sorted).
-    let resolved_locale = match ca_addition {
-        Some(ca) if resolved_locale.contains("-u-nu-") => {
-            resolved_locale.replacen("-u-nu-", &format!("-u-ca-{ca}-nu-"), 1)
-        }
-        Some(ca) => format!("{resolved_locale}-u-ca-{ca}"),
-        None => resolved_locale,
+    // ResolveLocale for the `hc` key: reflect a valid -u-hc- unless the hourCycle/hour12 options
+    // override it with a different value.
+    let hc_valid = hc_ext.clone().filter(|v| matches!(v.as_str(), "h11" | "h12" | "h23" | "h24"));
+    let hc_addition = match (&hc_valid, &hour_cycle, hour12) {
+        (Some(e), Some(opt), _) if opt != e => None,
+        (Some(_), _, Some(_)) => None,
+        (Some(e), _, _) => Some(e.clone()),
+        _ => None,
     };
+    // Rebuild the -u- extension from the surviving ca/hc/nu additions (keys sorted alphabetically).
+    let base = resolved_locale.split("-u-").next().unwrap_or(&resolved_locale).to_string();
+    let nu_add = resolved_locale
+        .strip_prefix(&format!("{base}-u-nu-"))
+        .map(|s| s.to_string());
+    let mut ext = String::new();
+    if let Some(ca) = &ca_addition {
+        ext.push_str(&format!("-ca-{ca}"));
+    }
+    if let Some(hc) = &hc_addition {
+        ext.push_str(&format!("-hc-{hc}"));
+    }
+    if let Some(nu) = &nu_add {
+        ext.push_str(&format!("-nu-{nu}"));
+    }
+    let resolved_locale = if ext.is_empty() { base } else { format!("{base}-u{ext}") };
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(eff_cal));
     set_builtin(&obj, "__dtf_nu", Value::from_string(nu_final));
