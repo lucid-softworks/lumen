@@ -735,7 +735,9 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
                 s_frac
             }
         } else {
-            format_magnitude(value.abs(), o)
+            // Pass the signed value so the sign-sensitive rounding modes (ceil/floor and their
+            // half-variants) see the true sign; the returned magnitude is unsigned.
+            format_magnitude(value, o)
         };
         match mag.split_once('.') {
             Some((a, b)) => (a.to_string(), Some(b.to_string())),
