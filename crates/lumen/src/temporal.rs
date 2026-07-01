@@ -4800,7 +4800,18 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
             return Err(i.make_error("TypeError", "toPlainDate() requires a day"));
         }
         let day = to_int(i, &dv)?;
-        let d = build_date(i, ym.year, ym.month as i64, day)?;
+        let cal = cal_of(i, &t);
+        let d = if &*cal == "iso8601" {
+            build_date(i, ym.year, ym.month as i64, day)?
+        } else {
+            // Combine the calendar's (year, monthCode) with the day, resolving through the calendar.
+            let merged = i.new_object();
+            setm(&merged, "year", Value::Num(cal_year_num(&cal, ym) as f64));
+            setm(&merged, "monthCode", Value::str(cal_month_code(&cal, ym).as_str()));
+            setm(&merged, "day", Value::Num(day as f64));
+            let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, Overflow::Constrain)?;
+            regulate_date(i, raw, Overflow::Constrain)?
+        };
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
@@ -5026,7 +5037,18 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
             return Err(i.make_error("TypeError", "toPlainDate() requires a year"));
         }
         let year = to_int(i, &yv)?;
-        let d = build_date(i, year, md.month as i64, md.day as i64)?;
+        let cal = cal_of(i, &t);
+        let d = if &*cal == "iso8601" {
+            build_date(i, year, md.month as i64, md.day as i64)?
+        } else {
+            // Combine the month-day's calendar (monthCode, day) with the supplied year.
+            let merged = i.new_object();
+            setm(&merged, "year", Value::Num(year as f64));
+            setm(&merged, "monthCode", Value::str(cal_month_code(&cal, md).as_str()));
+            setm(&merged, "day", Value::Num(md.day as f64));
+            let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, Overflow::Constrain)?;
+            regulate_date(i, raw, Overflow::Constrain)?
+        };
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     let ctor = add_ctor(it, ns, "PlainMonthDay", 2, proto, |i, _t, a| {
