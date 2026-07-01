@@ -2251,10 +2251,27 @@ pub fn install(it: &mut Interp) {
     for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant"] {
         if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
             it.def_method(&proto, "toLocaleString", 0, |i, this, a| {
-                let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
-                let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
                 let locales = a.first().cloned().unwrap_or(Value::Undefined);
                 let options = a.get(1).cloned().unwrap_or(Value::Undefined);
+                // The receiver's `required` (date/time/any) rejects a mismatched dateStyle/timeStyle,
+                // which the generic DateTimeFormat.format path (required=any) would otherwise allow.
+                let required = match get(i, &this) {
+                    Some(Temporal::Date(_)) | Some(Temporal::YearMonth(_)) | Some(Temporal::MonthDay(_)) => "date",
+                    Some(Temporal::Time(_)) => "time",
+                    _ => "any",
+                };
+                if matches!(options, Value::Obj(_)) {
+                    let ds = i.get_member(&options, "dateStyle").map_err(unab)?;
+                    let ts = i.get_member(&options, "timeStyle").map_err(unab)?;
+                    if required == "date" && !matches!(ts, Value::Undefined) {
+                        return Err(i.make_error("TypeError", "timeStyle cannot format a date-only Temporal value"));
+                    }
+                    if required == "time" && !matches!(ds, Value::Undefined) {
+                        return Err(i.make_error("TypeError", "dateStyle cannot format a time-only Temporal value"));
+                    }
+                }
+                let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
+                let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
                 let dtf = i.construct(ctor, &[locales, options]).map_err(unab)?;
                 let fmt = i.get_member(&dtf, "format").map_err(unab)?;
                 i.call(fmt, dtf, &[this]).map_err(unab)
