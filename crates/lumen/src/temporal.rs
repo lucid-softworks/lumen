@@ -3159,12 +3159,20 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     // A year also fails to complete when a leap monthCode had to collapse to its plain form of the
     // SAME number (Chinese M04L → M04). A leap month that maps to a differently-numbered plain month
     // (Hebrew Adar I "M05L" → Adar "M06") is still a whole year.
+    // A whole year fails to complete when a leap monthCode was constrained on landing at `b`. The
+    // condition is asymmetric: forward, a SAME-numbered plain month (Chinese M04L→M04) doesn't
+    // complete; backward, a DIFFERENT-numbered plain month (Hebrew Adar-I M05L→Adar M06) doesn't.
     let year_clamped = |m: IsoDate| {
-        clamped_at(m)
-            || (dir > 0
-                && cmp_date(m, b) == 0
+        if dir > 0 {
+            clamped_at(m)
+                || (cmp_date(m, b) == 0
+                    && a_code.ends_with('L')
+                    && a_code.trim_end_matches('L') == cal_month_code(cal, m))
+        } else {
+            cmp_date(m, b) == 0
                 && a_code.ends_with('L')
-                && a_code.trim_end_matches('L') == cal_month_code(cal, m))
+                && a_code.trim_end_matches('L') != cal_month_code(cal, m)
+        }
     };
     // Largest year magnitude that has not passed `b`, backing off a clamped exact landing.
     let mut years = 0i64;
