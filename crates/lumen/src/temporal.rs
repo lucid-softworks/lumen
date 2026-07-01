@@ -4251,6 +4251,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         };
     }
     date_get!("year", |d: IsoDate| Value::Num(d.year as f64));
+    def_getter(it, &proto, "era", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        let y = zoned_local(e, o).0.year;
+        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+    });
+    def_getter(it, &proto, "eraYear", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        let y = zoned_local(e, o).0.year;
+        Ok(era_of(&cal_of(i, &t), y).1.map(|v| Value::Num(v as f64)).unwrap_or(Value::Undefined))
+    });
     date_get!("month", |d: IsoDate| Value::Num(d.month as f64));
     date_get!("day", |d: IsoDate| Value::Num(d.day as f64));
     date_get!("monthCode", |d: IsoDate| Value::str(month_code(d.month)));
@@ -4570,8 +4580,9 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
+        let cal = check_calendar(i, &arg(a, 2))?;
         let offset_ns = tz_offset_ns(&tz);
-        Ok(make(
+        let v = make(
             i,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
@@ -4579,11 +4590,14 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
                 offset_ns,
                 tz,
             },
-        ))
+        );
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
+        let cal = input_cal(i, &arg(a, 0))?;
         let (epoch_ns, offset_ns, tz) = to_zoned(i, &arg(a, 0), &arg(a, 1))?;
-        Ok(make(
+        let v = make(
             i,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
@@ -4591,7 +4605,9 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
                 offset_ns,
                 tz,
             },
-        ))
+        );
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_zoned(i, &arg(a, 0), &Value::Undefined)?.0;
