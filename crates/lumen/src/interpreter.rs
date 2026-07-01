@@ -142,6 +142,10 @@ pub struct Scope {
     /// scopes are `false`, so a sloppy direct `eval` hoists its vars past them into the nearest
     /// enclosing variable environment (see EvalDeclarationInstantiation).
     pub var_boundary: bool,
+    /// `true` for a `catch` clause's parameter environment. A sloppy direct `eval`'s
+    /// EvalDeclarationInstantiation walk skips it, so `eval("var e")` inside `catch (e) { … }` is
+    /// allowed (the web-compatibility carve-out for VariableStatements in catch blocks).
+    pub catch_param: bool,
 }
 
 pub struct Binding {
@@ -174,6 +178,7 @@ pub fn new_scope(parent: Option<Env>) -> Env {
         parent,
         with_obj: None,
         var_boundary: false,
+        catch_param: false,
     }))
 }
 
@@ -185,6 +190,19 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
         parent,
         with_obj: None,
         var_boundary: true,
+        catch_param: false,
+    }))
+}
+
+/// A `catch (e)` parameter environment: like a block scope, but flagged so a sloppy direct `eval`'s
+/// var-hoisting walk skips it (see [`Scope::catch_param`]).
+pub fn new_catch_scope(parent: Env) -> Env {
+    Rc::new(RefCell::new(Scope {
+        vars: HashMap::new(),
+        parent: Some(parent),
+        with_obj: None,
+        var_boundary: false,
+        catch_param: true,
     }))
 }
 
@@ -195,6 +213,7 @@ pub fn new_with_scope(parent: Env, obj: Value) -> Env {
         parent: Some(parent),
         with_obj: Some(obj),
         var_boundary: false,
+        catch_param: false,
     }))
 }
 
@@ -632,6 +651,15 @@ impl Interp {
         }
         self.iterator_sym = saved_iter;
 
+        // Tag this realm's `eval` so an *indirect* call to it (`otherRealm.eval(code)`) runs the code
+        // in this realm's global scope, not the caller's (see `call_inner`).
+        if let Some(ef) = &self.eval_fn {
+            ef.borrow_mut().props.insert(
+                "__eval_realm",
+                Property::data(Value::Obj(self.global.clone()), false, false, false),
+            );
+        }
+
         let realm_state = self.snapshot_realm();
         let ptr = Rc::as_ptr(&global) as usize;
         self.realms.insert(ptr, realm_state);
@@ -649,12 +677,11 @@ impl Interp {
             Some(r) => r.snapshot_clone(),
             None => return Err(self.throw("TypeError", "unknown realm")),
         };
-        let body = crate::parser::parse_script(src, false)
-            .map_err(|e| self.throw("SyntaxError", e.message))?;
         let saved = self.snapshot_realm();
         self.restore_realm(&realm);
         let env = self.global_env.clone();
-        let result = self.eval_in_scope(&body, &env);
+        // Indirect eval semantics, in the target realm's global scope.
+        let result = self.perform_eval(src, &env, false);
         self.restore_realm(&saved);
         result
     }
@@ -1704,6 +1731,26 @@ impl Interp {
                 return self.call(trap, handler, &[target, this, arr]);
             }
         }
+        // An indirect call to another realm's `eval` runs in that realm's global scope. (A direct
+        // `eval(...)` of the current realm is intercepted earlier, in `eval_call`.)
+        if !self.realms.is_empty() {
+            let realm_g = obj
+                .borrow()
+                .props
+                .get("__eval_realm")
+                .map(|p| p.value.clone());
+            if let Some(realm_g @ Value::Obj(_)) = realm_g {
+                return match args.first() {
+                    Some(Value::Str(s)) => {
+                        let s = s.clone();
+                        self.eval_in_realm(&realm_g, &s)
+                    }
+                    Some(other) => Ok(other.clone()),
+                    None => Ok(Value::Undefined),
+                };
+            }
+        }
+
         let call = obj.borrow().call.clone();
         // A plain call is never constructing (only `new` sets the flag). Clearing it here keeps a
         // wrapper constructor invoked as a function — `Number(x)` — from boxing.

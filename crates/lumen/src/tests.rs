@@ -5406,3 +5406,75 @@ fn string_replace_named_group_callback() {
         "06/2020"
     );
 }
+
+#[test]
+fn eval_lexical_declarations_do_not_leak() {
+    // A sloppy direct eval's `let`/`const`/`class` stay in the eval's own lexical scope.
+    assert_eq!(run("eval('let x = 1'); typeof x"), "undefined");
+    assert_eq!(run("eval('const y = 1'); typeof y"), "undefined");
+    assert_eq!(run("eval('class Z {}'); typeof Z"), "undefined");
+    // ...but `var`/function declarations hoist into the caller's variable environment.
+    assert_eq!(run("eval('var v = 7'); v"), "7");
+    assert_eq!(run("eval('function f(){ return 9; }'); f()"), "9");
+}
+
+#[test]
+fn eval_var_over_lexical_is_syntax_error() {
+    // A direct eval must not hoist a `var` over a like-named lexical binding between it and its
+    // variable environment (EvalDeclarationInstantiation).
+    assert_eq!(throws("{ let x; { eval('var x;'); } }"), "SyntaxError");
+    // A global lexical binding conflicts too.
+    assert_eq!(throws("let g; eval('var g;')"), "SyntaxError");
+}
+
+#[test]
+fn eval_var_arguments_in_parameter_default_throws() {
+    // With parameter expressions, `arguments`/params live in a parameter environment the eval's
+    // variable environment sits below, so `eval("var arguments")` conflicts.
+    assert_eq!(
+        throws("function f(p = eval('var arguments')) {} f()"),
+        "SyntaxError"
+    );
+    assert_eq!(
+        throws("function f(p = eval('var q'), q) {} f()"),
+        "SyntaxError"
+    );
+    // Without parameter expressions there is a single environment — no conflict.
+    assert_eq!(run("function f(a){ eval('var a'); return 1; } f()"), "1");
+}
+
+#[test]
+fn eval_created_local_bindings_are_deletable() {
+    // A `var`/function created by a sloppy eval inside a function may be deleted.
+    assert_eq!(
+        run("(function(){ eval('var x = 5;'); return delete x; })()"),
+        "true"
+    );
+    // An ordinary declaration is not deletable.
+    assert_eq!(
+        run("(function(){ var y = 5; return delete y; })()"),
+        "false"
+    );
+}
+
+#[test]
+fn eval_global_function_non_definable_is_type_error() {
+    // `NaN` is a non-configurable, non-writable global — a global function declaration over it fails.
+    assert_eq!(throws("eval('function NaN(){}')"), "TypeError");
+}
+
+#[test]
+fn eval_new_target_and_super_property() {
+    // `new.target` is valid in a direct eval inside an ordinary function...
+    assert_eq!(
+        run("var t; (function(){ t = eval('new.target'); })(); typeof t"),
+        "undefined"
+    );
+    // ...but a super property with no home object is a SyntaxError.
+    assert_eq!(throws("eval('super.x')"), "SyntaxError");
+    // A top-level arrow does not supply new.target, so its eval rejects it.
+    assert_eq!(
+        throws("var f = () => eval('new.target'); f()"),
+        "SyntaxError"
+    );
+}

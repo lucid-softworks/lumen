@@ -14,6 +14,16 @@ pub struct ParseError {
 /// Parse a complete script. `strict` seeds strict mode (e.g. for the strict test262 variant); a
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
+    parse_script_eval(src, strict, false)
+}
+
+/// Parse eval code. Like [`parse_script`], but `allow_new_target` permits a top-level `new.target`
+/// (a direct eval whose caller is inside a function).
+pub fn parse_script_eval(
+    src: &str,
+    strict: bool,
+    allow_new_target: bool,
+) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError {
         message: e.message,
         line: e.line,
@@ -37,6 +47,7 @@ pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
             ..Default::default()
         }],
         next_scope_is_fn_boundary: false,
+        allow_new_target,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -71,6 +82,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
             ..Default::default()
         }],
         next_scope_is_fn_boundary: false,
+        allow_new_target: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -251,6 +263,10 @@ struct Parser {
     decl_scopes: Vec<DeclScope>,
     /// Set just before parsing a function body so the scope it pushes is marked a var boundary.
     next_scope_is_fn_boundary: bool,
+    /// Seeds `new.target` validity at the top level of an `eval` whose caller is inside a function
+    /// (direct eval in function code). `return`/`super()` stay gated separately, since they remain
+    /// illegal in eval code even there.
+    allow_new_target: bool,
 }
 
 #[derive(Default)]
@@ -1656,7 +1672,7 @@ impl Parser {
                     return self.err("expected 'target' after 'new.'");
                 }
                 self.advance();
-                if self.fn_depth == 0 {
+                if self.fn_depth == 0 && !self.allow_new_target {
                     return self.err("new.target is only valid inside a function");
                 }
                 Expr::NewTarget
@@ -1900,6 +1916,7 @@ impl Parser {
                             ..Default::default()
                         }],
                         next_scope_is_fn_boundary: false,
+                        allow_new_target: self.allow_new_target,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     Expr::ToStr(Box::new(sub.parse_expr()?))
@@ -1951,6 +1968,7 @@ impl Parser {
                             ..Default::default()
                         }],
                         next_scope_is_fn_boundary: false,
+                        allow_new_target: self.allow_new_target,
                     };
                     subs.push(sub.parse_expr()?);
                 }

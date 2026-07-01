@@ -940,14 +940,20 @@ impl Interp {
         let after_catch = match result {
             Err(Abrupt::Throw(ex)) => {
                 if let Some((param, body)) = handler {
-                    let catch_env = new_scope(Some(env.clone()));
-                    if let Some(pat) = param {
+                    // The catch parameter lives in its own environment (flagged so a sloppy `eval`'s
+                    // var-hoisting walk skips it); the body's lexicals + statements run in a child
+                    // block environment.
+                    let body_env = if let Some(pat) = param {
+                        let catch_env = new_catch_scope(env.clone());
                         self.bind_pattern(pat, ex, &catch_env, BindMode::Lexical(false))?;
-                    }
+                        new_scope(Some(catch_env))
+                    } else {
+                        new_scope(Some(env.clone()))
+                    };
                     let mut last = Ok(Value::Undefined);
-                    self.declare_block_lexicals(body, &catch_env, true);
+                    self.declare_block_lexicals(body, &body_env, true);
                     for s in body {
-                        match self.exec_stmt(s, &catch_env) {
+                        match self.exec_stmt(s, &body_env) {
                             Ok(v) => last = Ok(v),
                             Err(e) => {
                                 last = Err(e);
@@ -1074,6 +1080,28 @@ impl Interp {
 
     /// Walk the scope chain for an initialized binding without the `with`/global fallback or the
     /// not-defined throw. Used for internal `%...%` markers that only ever live in scopes.
+    /// Whether `env` is inside an ordinary (non-arrow) function, which is what supplies `new.target`.
+    /// Non-arrow functions bind `this` in their scope; arrows do not (they inherit it), so an arrow
+    /// at the top level is *not* function code for `new.target` purposes. Governs `new.target`
+    /// validity in a direct eval.
+    fn in_function_code(&self, env: &Env) -> bool {
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            if Rc::ptr_eq(&s, &self.global_env) {
+                return false;
+            }
+            let (has_this, parent) = {
+                let b = s.borrow();
+                (b.vars.contains_key("this"), b.parent.clone())
+            };
+            if has_this {
+                return true;
+            }
+            cur = parent;
+        }
+        false
+    }
+
     fn peek_binding(&self, name: &str, env: &Env) -> Option<Value> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
@@ -1096,7 +1124,12 @@ impl Interp {
                 None => Value::Null,
             });
         }
-        self.get_var("%superproto%", env)
+        // No home object in scope (e.g. `super.x` reached through an `eval` in a non-method): a
+        // super property reference here is an early SyntaxError.
+        match self.peek_binding("%superproto%", env) {
+            Some(v) => Ok(v),
+            None => Err(self.throw("SyntaxError", "'super' keyword unexpected here")),
+        }
     }
 
     pub fn assign_var(&mut self, name: &str, value: Value, env: &Env) -> Result<(), Abrupt> {
@@ -2036,7 +2069,9 @@ impl Interp {
         direct: bool,
     ) -> Result<Value, Abrupt> {
         let base_strict = direct && self.strict;
-        let body = crate::parser::parse_script(code, base_strict)
+        // `new.target` is valid at the top level of a direct eval whose caller is in function code.
+        let allow_new_target = direct && self.in_function_code(caller_env);
+        let body = crate::parser::parse_script_eval(code, base_strict, allow_new_target)
             .map_err(|e| self.throw("SyntaxError", e.message))?;
         // A direct `eval` inherits the caller's super-call context: a `super(...)` in the eval is an
         // early SyntaxError unless the eval sits directly inside a derived constructor body. (Caught
@@ -2095,21 +2130,27 @@ impl Interp {
         lex_env: &Env,
         strict: bool,
     ) -> Result<(), Abrupt> {
-        // Top-level function-declaration names (last of a duplicate name wins) and `var` names.
-        let mut func_names: Vec<String> = Vec::new();
-        for stmt in body {
-            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
-                if let Some(name) = &func.name {
-                    func_names.retain(|n| n != name);
-                    func_names.push(name.clone());
-                }
-            }
-        }
-        // VarDeclaredNames (all `var` binding names plus hoisted function names) — gathered by
-        // hoisting into a throwaway scope, which mirrors the interpreter's own var-scoping rules.
-        let probe = new_scope(None);
+        // VarDeclaredNames (every `var` binding name plus hoisted function names, top-level and Annex
+        // B.3.3 block-scoped) together with their instantiation values — gathered by hoisting into a
+        // throwaway scope, which mirrors the interpreter's own var-scoping and function-precedence
+        // rules exactly. Its parent is the eval's lexical environment so any function closes over it.
+        // The hoist runs in the eval's strict mode so Annex B block functions apply only when sloppy.
+        let probe = new_scope(Some(lex_env.clone()));
+        let saved_strict = self.strict;
+        self.strict = strict;
         self.hoist(body, &probe, true);
+        self.strict = saved_strict;
         let var_names: Vec<String> = probe.borrow().vars.keys().cloned().collect();
+        // A callable hoisted value is a function declaration (which becomes a global *function*
+        // binding); everything else is a plain `var`.
+        let is_func = |name: &str| {
+            probe
+                .borrow()
+                .vars
+                .get(name)
+                .map(|b| b.value.is_callable())
+                .unwrap_or(false)
+        };
         let is_global = Rc::ptr_eq(var_env, &self.global_env);
 
         if !strict {
@@ -2131,11 +2172,13 @@ impl Interp {
                 if Rc::ptr_eq(&s, var_env) {
                     break;
                 }
-                let (is_with, parent) = {
+                let (skip, parent) = {
                     let b = s.borrow();
-                    (b.with_obj.is_some(), b.parent.clone())
+                    // A `with` object environment holds no lexical declarations, and a `catch`
+                    // parameter environment is exempt from the var/lexical conflict check.
+                    (b.with_obj.is_some() || b.catch_param, b.parent.clone())
                 };
-                if !is_with {
+                if !skip {
                     for name in &var_names {
                         if s.borrow().vars.contains_key(name) {
                             return Err(self.throw(
@@ -2152,48 +2195,43 @@ impl Interp {
         // A global variable environment can refuse a declaration (non-extensible global, or a
         // non-configurable same-named property) with a TypeError.
         if is_global {
-            for name in &func_names {
-                if !self.can_declare_global_function(name) {
-                    return Err(self.throw(
-                        "TypeError",
-                        format!("cannot declare global function '{name}'"),
-                    ));
-                }
-            }
             for name in &var_names {
-                if !func_names.contains(name) && !self.can_declare_global_var(name) {
+                let ok = if is_func(name) {
+                    self.can_declare_global_function(name)
+                } else {
+                    self.can_declare_global_var(name)
+                };
+                if !ok {
                     return Err(self.throw(
                         "TypeError",
-                        format!("cannot declare global variable '{name}'"),
+                        format!("cannot declare global binding '{name}'"),
                     ));
                 }
             }
         }
 
-        // Instantiate function declarations (their closure is the eval's lexical environment).
-        for stmt in body {
-            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
-                if let Some(name) = &func.name {
-                    let f = self.make_function(func.clone(), lex_env.clone());
-                    if is_global {
-                        self.create_global_function_binding(name, f);
-                    } else {
-                        var_env.borrow_mut().vars.insert(name.clone(), {
-                            let mut b = Binding::data(f, true, true);
-                            b.deletable = true;
-                            b
-                        });
-                    }
-                }
-            }
-        }
-        // Instantiate `var` names (undefined; an existing binding keeps its value).
+        // Instantiate each declared name from the value the probe hoist computed (a function object —
+        // top-level or Annex B.3.3 block-scoped, later hoists winning — or `undefined` for a plain
+        // `var`). A pre-existing `var` binding keeps its value; a function binding always overwrites.
         for name in &var_names {
-            if func_names.contains(name) {
-                continue;
-            }
+            let value = probe
+                .borrow()
+                .vars
+                .get(name)
+                .map(|b| b.value.clone())
+                .unwrap_or(Value::Undefined);
             if is_global {
-                self.create_global_var_binding(name);
+                if is_func(name) {
+                    self.create_global_function_binding(name, value);
+                } else {
+                    self.create_global_var_binding(name);
+                }
+            } else if is_func(name) {
+                var_env.borrow_mut().vars.insert(name.clone(), {
+                    let mut b = Binding::data(value, true, true);
+                    b.deletable = true;
+                    b
+                });
             } else if !var_env.borrow().vars.contains_key(name) {
                 var_env.borrow_mut().vars.insert(name.clone(), {
                     let mut b = Binding::data(Value::Undefined, true, true);
