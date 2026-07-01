@@ -3153,7 +3153,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         } else {
             match (era.as_deref(), era_year) {
                 (Some("ap"), Some(ey)) => ey,
-                (Some("bp"), Some(ey)) => 1 - ey,
                 _ => return Err(i.make_error("TypeError", "year is required")),
             }
         };
