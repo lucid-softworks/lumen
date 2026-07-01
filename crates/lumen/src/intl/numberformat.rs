@@ -331,12 +331,20 @@ fn read_digit_options(i: &mut Interp, options: &Value, style: &str, cur_digits: 
     let (min_frac, max_frac) = if min_sig.is_some() || max_sig.is_some() {
         (0, 0)
     } else {
-        let mnfd = mnfd.unwrap_or(default_min_frac);
-        let mxfd = mxfd.unwrap_or(default_max_frac.max(mnfd));
-        if mnfd > mxfd {
-            return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
+        // SetNumberFormatDigitOptions: when only one of min/max fraction digits is provided, the
+        // other is clamped toward it (min toward the given max, max toward the given min); when both
+        // are absent the currency/style defaults apply; only when both are given can they conflict.
+        match (mnfd, mxfd) {
+            (None, None) => (default_min_frac, default_max_frac),
+            (None, Some(mx)) => (default_min_frac.min(mx), mx),
+            (Some(mn), None) => (mn, default_max_frac.max(mn)),
+            (Some(mn), Some(mx)) => {
+                if mn > mx {
+                    return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
+                }
+                (mn, mx)
+            }
         }
-        (mnfd, mxfd)
     };
     if let (Some(a), Some(b)) = (min_sig, max_sig) {
         if a > b {
