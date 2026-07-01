@@ -270,19 +270,19 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let resolved = resolve_locale(i, &requested, &["ca", "nu", "hc"]);
     // The `-u-hc-` locale-extension hour cycle (the `hourCycle` option, read later, overrides it).
     let hc_ext = resolved.keywords.iter().find(|(k, _)| k == "hc").map(|(_, v)| v.clone());
+    // ResolveLocale for the `nu` key gives both the numbering system and the resolved locale string
+    // (reflecting a surviving `-u-nu-` extension).
+    let (resolved_locale, nu_final) =
+        super::service::resolve_locale_nu(&requested, numbering.as_deref());
 
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.DateTimeFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));
-    let locale_lang = resolved.locale.split('-').next().unwrap_or("").to_string();
-    set_builtin(&obj, "__dtf_locale", Value::from_string(resolved.locale));
+    let locale_lang = resolved_locale.split('-').next().unwrap_or("").to_string();
+    set_builtin(&obj, "__dtf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(calendar.clone().unwrap_or_else(|| "gregory".to_string())));
-    let nu_final = numbering
-        .clone()
-        .filter(|n| n == "latn" || crate::numbering::NUMBERING.iter().any(|(id, _)| id == n))
-        .unwrap_or_else(|| "latn".to_string());
     set_builtin(&obj, "__dtf_nu", Value::from_string(nu_final));
     set_builtin(&obj, "__dtf_tz", Value::from_string(time_zone));
     let put = |obj: &Gc, k: &str, v: &Option<String>| {
