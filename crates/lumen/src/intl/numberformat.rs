@@ -867,7 +867,7 @@ fn unit_wrap(num: &str, unit: &str, display: &str) -> String {
 
 /// Replace the ASCII digits of a formatted number with the glyphs of numbering system `nu` (a no-op
 /// for `latn` or an unknown system).
-fn xlate_digits(s: &str, nu: &str) -> String {
+pub(crate) fn xlate_digits(s: &str, nu: &str) -> String {
     if nu == "latn" {
         return s.to_string();
     }

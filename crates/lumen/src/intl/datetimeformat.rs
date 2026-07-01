@@ -49,13 +49,15 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
         let (ms, kind) = dtf_ms_kind(i, &o, &arg(a, 0))?;
+        let nu = dtf_nu(&o);
         let parts = build_parts(&o, ms, kind);
         let arr: Vec<Value> = parts
             .into_iter()
             .map(|(t, v)| {
                 let ob = i.new_object();
                 set_data(&ob, "type", Value::str(t));
-                set_data(&ob, "value", Value::from_string(v));
+                // Localize digits to the numbering system (name/literal parts have no ASCII digits).
+                set_data(&ob, "value", Value::from_string(crate::intl::numberformat::xlate_digits(&v, &nu)));
                 Value::Obj(ob)
             })
             .collect();
@@ -462,9 +464,17 @@ fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value
     Ok(do_format_ms(&o, ms, kind))
 }
 
+/// The formatter's numbering system id (`latn` unless set).
+fn dtf_nu(o: &Gc) -> String {
+    match o.borrow().props.get("__dtf_nu").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "latn".to_string(),
+    }
+}
 /// Format an already-resolved epoch-ms + Temporal kind to the joined string.
 fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
-    build_parts(o, ms, kind).into_iter().map(|(_, v)| v).collect::<Vec<_>>().join("")
+    let s: String = build_parts(o, ms, kind).into_iter().map(|(_, v)| v).collect();
+    crate::intl::numberformat::xlate_digits(&s, &dtf_nu(o))
 }
 
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
