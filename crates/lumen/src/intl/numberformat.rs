@@ -601,7 +601,7 @@ fn round_decimal(int_str: &str, frac_str: &str, keep: i32, inc: u32, mode: &str,
     if cut <= 0 {
         // Everything is discarded; the only possible non-zero result is a single rounded-up unit.
         let any = digits.iter().any(|&d| d != 0);
-        let up = round_up_decision(mode, negative, /*rem*/ 0.0, /*frac*/ if any { 0.5001 } else { 0.0 }, inc);
+        let up = round_up_decision(mode, negative, /*rem*/ 0.0, /*frac*/ if any { 0.5001 } else { 0.0 }, inc, 0);
         let val = if up { inc as u128 } else { 0 };
         return place_decimal(&val.to_string(), keep);
     }
@@ -623,7 +623,8 @@ fn round_decimal(int_str: &str, frac_str: &str, keep: i32, inc: u32, mode: &str,
         return place_decimal(&retained, keep);
     };
     let rem = (c % inc.max(1) as u128) as f64;
-    let up = round_up_decision(mode, negative, rem, frac, inc);
+    let quotient = c / inc.max(1) as u128;
+    let up = round_up_decision(mode, negative, rem, frac, inc, quotient);
     let base = c - (c % inc.max(1) as u128);
     let result = if up { base + inc as u128 } else { base };
     place_decimal(&result.to_string(), keep)
@@ -646,7 +647,7 @@ fn place_decimal(coeff: &str, keep: i32) -> String {
 
 /// Whether to round the coefficient up by one increment, given the discarded position `rem + frac`
 /// (in increment units, `rem` an integer remainder and `frac` in [0,1)) under ECMA-402 `mode`.
-fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32) -> bool {
+fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32, quotient: u128) -> bool {
     let position = rem + frac;
     let half = inc as f64 / 2.0;
     let some = position > 0.0;
@@ -660,8 +661,8 @@ fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32) 
         "halfCeil" => position > half || (position == half && !negative),
         "halfFloor" => position > half || (position == half && negative),
         "halfEven" => {
-            // Tie → round toward the multiple whose quotient is even.
-            position > half || (position == half && (((rem / inc as f64).round() as i64) % 2 != 0))
+            // Tie → round toward the multiple whose quotient is even (parity of the retained value).
+            position > half || (position == half && quotient % 2 == 1)
         }
         _ => position >= half, // halfExpand default
     }
@@ -978,7 +979,7 @@ fn curr_symbol_after(lang: &str) -> bool {
 /// elsewhere; "narrowSymbol" is always the plain "$".
 fn currency_symbol_loc(lang: &str, code: &str, display: &str) -> String {
     if code == "USD" && (display == "symbol" || display.is_empty()) {
-        return if matches!(lang, "en" | "de") { "$" } else { "US$" }.to_string();
+        return if matches!(lang, "en" | "de" | "ja") { "$" } else { "US$" }.to_string();
     }
     if code == "USD" && display == "narrowSymbol" {
         return "$".to_string();
@@ -1053,9 +1054,12 @@ fn unit_wrap(num: &str, unit: &str, display: &str, plural: bool) -> String {
     if display == "long" {
         return format!("{num} {}", unit_long_en(unit, plural));
     }
-    match unit_short_name(unit) {
-        Some(n) => format!("{num} {n}"),
-        None => format!("{num} {unit}"),
+    let name = unit_short_name(unit).unwrap_or(unit);
+    // The narrow style attaches the unit with no space ("987km/h"); short keeps a space.
+    if display == "narrow" {
+        format!("{num}{name}")
+    } else {
+        format!("{num} {name}")
     }
 }
 
