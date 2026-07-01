@@ -470,6 +470,22 @@ fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
 /// `kind` gates which components a Temporal receiver may show (see [`dtf_ms_kind`]).
 fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
+    // An absolute instant (number/Date/Instant, kind 0) is shifted into the formatter's time zone;
+    // Temporal wall-clock values (kinds 1-5) already carry their own local time.
+    let ms = if kind == 0 {
+        match o.borrow().props.get("__dtf_tz").map(|p| p.value.clone()) {
+            Some(Value::Str(tz)) => {
+                let epoch_sec = (ms / 1000.0).floor() as i64;
+                let off_ms = crate::tz::offset_at(&tz, epoch_sec)
+                    .map(|s| s as f64 * 1000.0)
+                    .unwrap_or_else(|| tz_offset_ms(&tz));
+                ms + off_ms
+            }
+            _ => ms,
+        }
+    } else {
+        ms
+    };
     let (y, mo, d, h, mi, s, wd) = ymd(ms);
     // A Temporal receiver restricts the displayable fields: YearMonth drops day/weekday/time,
     // MonthDay drops year/weekday/time, Date/YearMonth/MonthDay drop time, Time drops date.
@@ -657,17 +673,22 @@ fn canonicalize_time_zone(tz: &str) -> Option<String> {
     if first == b'+' || first == b'-' {
         return canon_utc_offset(tz);
     }
-    if tz.eq_ignore_ascii_case("UTC") || tz.eq_ignore_ascii_case("Etc/UTC")
-        || tz.eq_ignore_ascii_case("GMT") || tz.eq_ignore_ascii_case("Etc/GMT")
-    {
-        return Some("UTC".to_string());
+    // A named IANA zone canonicalizes to its registry name (case-insensitive); unknown names fail.
+    crate::tz::canonicalize(tz).map(|s| s.to_string())
+}
+
+/// The signed millisecond offset of a canonical `±HH:MM[:SS]` UTC-offset zone (0 for anything else).
+fn tz_offset_ms(tz: &str) -> f64 {
+    let b = tz.as_bytes();
+    if b.first().map_or(true, |&c| c != b'+' && c != b'-') {
+        return 0.0;
     }
-    // A named IANA zone is ASCII letters/digits with `/`, `_`, `+`, `-`, `.` separators (this also
-    // rejects offset-like strings written with a Unicode minus sign).
-    if tz.is_empty() || !tz.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'+' | b'-' | b'.')) {
-        return None;
-    }
-    Some(tz.to_string())
+    let sign = if b[0] == b'-' { -1.0 } else { 1.0 };
+    let mut parts = tz[1..].split(':');
+    let h: f64 = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    let m: f64 = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    let s: f64 = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+    sign * (h * 3_600_000.0 + m * 60_000.0 + s * 1000.0)
 }
 
 /// Parse a strict minute-precision UTC offset string, returning the `±HH:MM` canonical form.
