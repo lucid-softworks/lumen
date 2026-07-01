@@ -4075,18 +4075,32 @@ fn to_duration(i: &mut Interp, v: &Value) -> Result<IsoDuration, Value> {
             Ok(d)
         }
         Value::Obj(_) => {
-            let d = IsoDuration {
-                years: dur_field(i, v, "years", 0)?,
-                months: dur_field(i, v, "months", 0)?,
-                weeks: dur_field(i, v, "weeks", 0)?,
-                days: dur_field(i, v, "days", 0)?,
-                hours: dur_field(i, v, "hours", 0)?,
-                minutes: dur_field(i, v, "minutes", 0)?,
-                seconds: dur_field(i, v, "seconds", 0)?,
-                ms: dur_field(i, v, "milliseconds", 0)?,
-                us: dur_field(i, v, "microseconds", 0)?,
-                ns: dur_field(i, v, "nanoseconds", 0)?,
+            // ToTemporalPartialDurationRecord: read the fields in alphabetical order; at least one
+            // recognized field must be present (an empty object / array / singular-name is a TypeError).
+            let mut any = false;
+            let mut read = |i: &mut Interp, key: &str| -> Result<i64, Value> {
+                let fv = getm(i, v, key)?;
+                if matches!(fv, Value::Undefined) {
+                    Ok(0)
+                } else {
+                    any = true;
+                    to_int_integral(i, &fv)
+                }
             };
+            let days = read(i, "days")?;
+            let hours = read(i, "hours")?;
+            let us = read(i, "microseconds")?;
+            let ms = read(i, "milliseconds")?;
+            let minutes = read(i, "minutes")?;
+            let months = read(i, "months")?;
+            let ns = read(i, "nanoseconds")?;
+            let seconds = read(i, "seconds")?;
+            let weeks = read(i, "weeks")?;
+            let years = read(i, "years")?;
+            if !any {
+                return Err(i.make_error("TypeError", "invalid Temporal.Duration-like: no recognized fields"));
+            }
+            let d = IsoDuration { years, months, weeks, days, hours, minutes, seconds, ms, us, ns };
             validate_duration(i, d)?;
             Ok(d)
         }
