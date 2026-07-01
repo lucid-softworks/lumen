@@ -382,8 +382,14 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
         Value::Undefined => Ok(std::rc::Rc::from("iso8601")),
         Value::Str(s) => {
             let lc = s.to_lowercase();
-            let canon = if lc == "islamicc" { "islamic-civil" } else { lc.as_str() };
-            if KNOWN_CALENDARS.contains(&lc.as_str()) {
+            // CLDR calendar aliases → canonical id.
+            let canon = match lc.as_str() {
+                "islamicc" => "islamic-civil",
+                "ethiopic-amete-alem" => "ethioaa",
+                "gregorian" => "gregory",
+                other => other,
+            };
+            if KNOWN_CALENDARS.contains(&canon) {
                 Ok(std::rc::Rc::from(canon))
             } else {
                 Err(i.make_error("RangeError", "invalid calendar identifier"))
