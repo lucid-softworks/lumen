@@ -1473,13 +1473,9 @@ fn check_increment(i: &Interp, unit: &str, incr: i64) -> Result<(), Value> {
         "hour" => 24,
         "minute" | "second" => 60,
         "millisecond" | "microsecond" | "nanosecond" => 1000,
-        _ => {
-            return if incr == 1 {
-                Ok(())
-            } else {
-                Err(i.make_error("RangeError", "roundingIncrement out of range"))
-            }
-        }
+        // Calendar units (year/month/week/day) have no divisibility ceiling — any positive integer
+        // increment is valid (the value is simply rounded to that multiple).
+        _ => return Ok(()),
     };
     if incr >= max || max % incr != 0 {
         return Err(i.make_error("RangeError", "roundingIncrement out of range"));
