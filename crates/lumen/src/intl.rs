@@ -7,10 +7,16 @@ use crate::interpreter::Interp;
 use crate::value::{set_builtin, Gc, Object, Property, Value};
 use std::rc::Rc;
 
+mod data;
+mod listformat;
 mod locale;
+mod pluralrules;
+mod relativetimeformat;
+mod service;
 mod tags;
 
 pub use tags::{canonicalize_language_tag, is_structurally_valid_tag};
+pub(crate) use service::{resolve_locale, ResolvedLocale};
 
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or(Value::Undefined)
@@ -39,6 +45,9 @@ pub fn install(it: &mut Interp) {
     set_builtin(&intl, "supportedValuesOf", Value::Obj(f));
 
     locale::install(it, &intl);
+    listformat::install(it, &intl);
+    pluralrules::install(it, &intl);
+    relativetimeformat::install(it, &intl);
 
     it.global
         .borrow_mut()
@@ -172,28 +181,7 @@ pub(crate) fn make_service(
     (ctor, proto)
 }
 
-/// GetOption(options, property, "string", values, fallback): reads and coerces a string option,
-/// validating it against `values` when non-empty. `None` fallback means the option is required.
-pub(crate) fn get_string_option(
-    i: &mut Interp,
-    options: &Value,
-    property: &str,
-    values: &[&str],
-    fallback: Option<&str>,
-) -> Result<Option<String>, Value> {
-    let v = ab(i.get_member(options, property))?;
-    if matches!(v, Value::Undefined) {
-        return Ok(fallback.map(|s| s.to_string()));
-    }
-    let s = ab(i.to_string(&v))?.to_string();
-    if !values.is_empty() && !values.contains(&s.as_str()) {
-        return Err(i.make_error(
-            "RangeError",
-            format!("value {s} out of range for option {property}"),
-        ));
-    }
-    Ok(Some(s))
-}
+// (get_string_option removed; per-service option readers live in each module)
 
 /// GetOption(options, property, "boolean", …).
 #[allow(dead_code)]
