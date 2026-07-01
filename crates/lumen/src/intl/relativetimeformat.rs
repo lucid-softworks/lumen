@@ -96,6 +96,45 @@ fn unit_word_en(sing: &str, plural: bool, style: &str) -> String {
     }
 }
 
+/// The Polish relative-time unit word for a plural category (one/few/many/other) and style.
+fn unit_word_pl(sing: &str, cat: &str, style: &str) -> String {
+    // (one, few, many, other) per CLDR.
+    let (one, few, many, other) = match (style, sing) {
+        ("long", "second") => ("sekundę", "sekundy", "sekund", "sekundy"),
+        ("long", "minute") => ("minutę", "minuty", "minut", "minuty"),
+        ("long", "hour") => ("godzinę", "godziny", "godzin", "godziny"),
+        ("long", "day") => ("dzień", "dni", "dni", "dnia"),
+        ("long", "week") => ("tydzień", "tygodnie", "tygodni", "tygodnia"),
+        ("long", "month") => ("miesiąc", "miesiące", "miesięcy", "miesiąca"),
+        ("long", "quarter") => ("kwartał", "kwartały", "kwartałów", "kwartału"),
+        ("long", "year") => ("rok", "lata", "lat", "roku"),
+        ("short", "second") => ("sek.", "sek.", "sek.", "sek."),
+        ("short", "minute") => ("min", "min", "min", "min"),
+        ("short", "hour") => ("godz.", "godz.", "godz.", "godz."),
+        ("short", "day") => ("dzień", "dni", "dni", "dnia"),
+        ("short", "week") => ("tydz.", "tyg.", "tyg.", "tyg."),
+        ("short", "month") => ("mies.", "mies.", "mies.", "mies."),
+        ("short", "quarter") => ("kw.", "kw.", "kw.", "kw."),
+        ("short", "year") => ("rok", "lata", "lat", "roku"),
+        ("narrow", "second") => ("s", "s", "s", "s"),
+        ("narrow", "minute") => ("min", "min", "min", "min"),
+        ("narrow", "hour") => ("g.", "g.", "g.", "g."),
+        ("narrow", "day") => ("dzień", "dni", "dni", "dnia"),
+        ("narrow", "week") => ("tydz.", "tyg.", "tyg.", "tyg."),
+        ("narrow", "month") => ("mies.", "mies.", "mies.", "mies."),
+        ("narrow", "quarter") => ("kw.", "kw.", "kw.", "kw."),
+        ("narrow", "year") => ("rok", "lata", "lat", "roku"),
+        _ => ("", "", "", ""),
+    };
+    match cat {
+        "one" => one,
+        "few" => few,
+        "many" => many,
+        _ => other,
+    }
+    .to_string()
+}
+
 /// The English "auto" phrasing for the common near values, if any.
 fn auto_phrase(unit: &str, v: f64) -> Option<&'static str> {
     match (unit, v as i64) {
@@ -153,26 +192,37 @@ fn format(
         }
     }
 
-    // Numeric phrasing: "<n> <unit>[s] ago" (past) / "in <n> <unit>[s]" (future).
+    // Numeric phrasing. English: "in <n> <unit>[s]" / "<n> <unit>[s] ago"; Polish: "za <n> <unit>" /
+    // "<n> <unit> temu", with the unit word chosen by CLDR plural category.
     let past = v < 0.0 || (v == 0.0 && v.is_sign_negative());
     let n = v.abs();
-    let plural = n != 1.0;
     let style = match o.borrow().props.get("__rtf_style").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "long".to_string(),
     };
-    let unit_word = unit_word_en(sing, plural, &style);
-    // Format the number through NumberFormat so grouping and the numbering system apply ("1,000").
     let locale = match o.borrow().props.get("__rtf_locale").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "en".to_string(),
     };
+    let lang = locale.split('-').next().unwrap_or("en");
+    // (unit word, future prefix/suffix, past prefix/suffix) around the "<n> <unit>" core.
+    let (unit_word, fut_pre, fut_post, past_pre, past_post) = if lang == "pl" {
+        let cat = crate::intl::data::plural_cardinal("pl", n.trunc() as u64, n.fract() != 0.0, 0);
+        (unit_word_pl(sing, cat, &style), "za ", "", "", " temu")
+    } else {
+        (unit_word_en(sing, n != 1.0, &style), "in ", "", "", " ago")
+    };
+    // Format the number through NumberFormat so grouping and the numbering system apply. Polish uses
+    // minimumGroupingDigits=2 ("min2" grouping): 1000 stays "1000", 123456 groups as "123 456".
     let numbering = match o.borrow().props.get("__rtf_nu").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "latn".to_string(),
     };
     let nf_opts = i.new_object();
     set_data(&nf_opts, "numberingSystem", Value::from_string(numbering));
+    if lang == "pl" {
+        set_data(&nf_opts, "useGrouping", Value::str("min2"));
+    }
     let nf = new_service(i, "NumberFormat", &locale, nf_opts)?;
     let nfmt = ab(i.get_member(&nf, "format"))?;
     let num_str = match ab(i.call(nfmt, nf.clone(), &[Value::Num(n)]))? {
@@ -211,19 +261,20 @@ fn format(
             Ok(())
         };
         if past {
+            push_lit(i, &mut arr, past_pre);
             push_num(i, &mut arr)?;
-            push_lit(i, &mut arr, &format!(" {unit_word} ago"));
+            push_lit(i, &mut arr, &format!(" {unit_word}{past_post}"));
         } else {
-            push_lit(i, &mut arr, "in ");
+            push_lit(i, &mut arr, fut_pre);
             push_num(i, &mut arr)?;
-            push_lit(i, &mut arr, &format!(" {unit_word}"));
+            push_lit(i, &mut arr, &format!(" {unit_word}{fut_post}"));
         }
         return Ok(i.make_array(arr));
     }
     let out = if past {
-        format!("{num_str} {unit_word} ago")
+        format!("{past_pre}{num_str} {unit_word}{past_post}")
     } else {
-        format!("in {num_str} {unit_word}")
+        format!("{fut_pre}{num_str} {unit_word}{fut_post}")
     };
     Ok(Value::from_string(out))
 }

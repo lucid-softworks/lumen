@@ -8,7 +8,9 @@ pub fn number_symbols(lang: &str, region: &str) -> (&'static str, &'static str, 
         ("en", "IN") | ("hi", _) | ("bn", "IN") | ("ta", "IN") => (".", ",", (3, 2)),
         ("de", _) | ("es", "ES") | ("it", _) | ("nl", _) | ("pt", "PT") | ("da", _)
         | ("id", _) | ("tr", _) => (",", ".", (3, 3)),
-        ("fr", _) | ("ru", _) | ("pl", _) | ("cs", _) | ("hu", _) | ("fi", _) | ("sv", _) => {
+        // Polish groups with a plain no-break space (U+00A0) and applies minimumGroupingDigits=2.
+        ("pl", _) => (",", "\u{00a0}", (3, 3)),
+        ("fr", _) | ("ru", _) | ("cs", _) | ("hu", _) | ("fi", _) | ("sv", _) => {
             (",", "\u{202f}", (3, 3))
         }
         ("es", _) => (",", ".", (3, 3)),
@@ -102,6 +104,19 @@ pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool, e: i32) -> &'stat
                 "few"
             } else {
                 "other"
+            }
+        }
+        // Polish (pl) — also ru/uk/be: one iff i=1; few for i%10=2..4 (excluding i%100=12..14);
+        // everything else (integers) many; fractions other.
+        "pl" => {
+            if has_fraction {
+                "other"
+            } else if i == 1 {
+                "one"
+            } else if matches!(i % 10, 2..=4) && !matches!(i % 100, 12..=14) {
+                "few"
+            } else {
+                "many"
             }
         }
         // Slovenian (sl): one/two/few on i mod 100 with v=0; few also when v!=0.

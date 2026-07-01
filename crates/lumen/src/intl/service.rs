@@ -12,7 +12,7 @@ pub fn supported_language(lang: &str) -> bool {
     matches!(
         lang,
         "en" | "de" | "fr" | "es" | "it" | "pt" | "nl" | "ja" | "zh" | "ko" | "ru" | "ar" | "sr"
-            | "th" | "gv" | "sl"
+            | "th" | "gv" | "sl" | "pl"
     )
 }
 
