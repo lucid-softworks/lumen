@@ -2567,7 +2567,9 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                     l
                 }
                 None => {
-                    if !buflen.is_multiple_of(es) {
+                    // The "not a multiple of element size" rule only applies to a fixed-length
+                    // buffer; over a resizable buffer the view is length-tracking (auto length).
+                    if !resizable && !buflen.is_multiple_of(es) {
                         return Err(i.make_error(
                             "RangeError",
                             "buffer length is not a multiple of the element size",
