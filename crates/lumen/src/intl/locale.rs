@@ -68,6 +68,9 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "numberingSystem", |i, this, _| opt_slot(i, &this, "__locale_nu"));
     def_getter(it, &proto, "numeric", |i, this, _| {
         let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
+        if !o.borrow().props.contains("__locale_tag") {
+            return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
+        }
         let present = o.borrow().props.contains("__locale_kn");
         let is_false = matches!(
             o.borrow().props.get("__locale_kn").map(|p| p.value.clone()),
@@ -119,10 +122,14 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "getWeekInfo", 0, |i, this, _| {
         let _ = slot(i, &this, "__locale_tag")?;
+        // firstDay comes from the fw keyword (option or -u-fw-), defaulting to Monday.
+        let first = match opt_slot(i, &this, "__locale_fw")? {
+            Value::Str(s) => fw_to_num(&s).unwrap_or(1.0),
+            _ => 1.0,
+        };
         let o = i.new_object();
-        set_data(&o, "firstDay", Value::Num(1.0));
+        set_data(&o, "firstDay", Value::Num(first));
         set_data(&o, "weekend", i.make_array(vec![Value::Num(6.0), Value::Num(7.0)]));
-        set_data(&o, "minimalDays", Value::Num(1.0));
         Ok(Value::Obj(o))
     });
 }
@@ -321,6 +328,20 @@ fn keyword_opt(
     Ok(Some(lower))
 }
 
+/// The 1..7 (Mon..Sun) weekday number for an fw keyword value.
+fn fw_to_num(fw: &str) -> Option<f64> {
+    Some(match fw {
+        "mon" => 1.0,
+        "tue" => 2.0,
+        "wed" => 3.0,
+        "thu" => 4.0,
+        "fri" => 5.0,
+        "sat" => 6.0,
+        "sun" => 7.0,
+        _ => return None,
+    })
+}
+
 /// firstDayOfWeek accepts a weekday name (mon…sun) or a number 0-7; canonicalizes to the fw type.
 fn firstday_opt(i: &mut Interp, options: &Value) -> Result<Option<String>, Value> {
     let v = ab(i.get_member(options, "firstDayOfWeek"))?;
@@ -328,18 +349,28 @@ fn firstday_opt(i: &mut Interp, options: &Value) -> Result<Option<String>, Value
         return Ok(None);
     }
     let s = ab(i.to_string(&v))?.to_string().to_lowercase();
-    let day = match s.as_str() {
-        "mon" | "1" => "mon",
-        "tue" | "2" => "tue",
-        "wed" | "3" => "wed",
-        "thu" | "4" => "thu",
-        "fri" | "5" => "fri",
-        "sat" | "6" => "sat",
-        "sun" | "7" => "sun",
-        "0" => "sun",
-        _ => return Err(i.make_error("RangeError", format!("invalid firstDayOfWeek: {s}"))),
-    };
-    Ok(Some(day.to_string()))
+    // WeekdayToString: 1..7 (and 0) map to weekday abbreviations; any other value is kept verbatim.
+    let mapped = match s.as_str() {
+        "1" => "mon",
+        "2" => "tue",
+        "3" => "wed",
+        "4" => "thu",
+        "5" => "fri",
+        "6" => "sat",
+        "7" | "0" => "sun",
+        other => other,
+    }
+    .to_string();
+    // It must match the Unicode `type` production: one or more 3-8 char alphanumeric subtags.
+    let valid = !mapped.is_empty()
+        && mapped
+            .split('-')
+            .all(|p| (3..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()));
+    if !valid {
+        return Err(i.make_error("RangeError", format!("invalid firstDayOfWeek: {s}")));
+    }
+    // A keyword value of "true" canonicalizes to the empty value (rendered as bare "-u-fw").
+    Ok(Some(if mapped == "true" { String::new() } else { mapped }))
 }
 
 fn build_locale_object(i: &mut Interp, tag: &str) -> Result<Value, Value> {
