@@ -2349,19 +2349,20 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
         Ok(make(
             i,
             "Temporal.Duration",
-            Temporal::Duration({ let cal = cal_of(i, &t); diff_date_rounded(&cal, d, o, &largest, &smallest, incr, &mode) }),
+            Temporal::Duration(diff_date_rounded(&cal, d, o, &largest, &smallest, incr, &mode)),
         ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         // `since` mirrors `until` with a negated rounding mode, then negates the result.
         let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
-        let cal = cal_of(i, &t);
         let dur = diff_date_rounded(&cal, d, o, &largest, &smallest, incr, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
@@ -3821,6 +3822,16 @@ fn regulate_time(i: &Interp, v: [i64; 6], ovf: Overflow) -> Result<IsoTime, Valu
 
 /// ToTemporalDate: accept a PlainDate/PlainDateTime, a fields object, or an ISO string. `opts`
 /// supplies the `overflow` option (validated as an options object).
+/// The receiver's calendar, requiring the `other` operand (of `until`/`since`) to share it (else a
+/// RangeError, as calendar arithmetic between two calendars is undefined).
+fn same_calendar(i: &mut Interp, t: &Value, other: &Value) -> Result<std::rc::Rc<str>, Value> {
+    let cal = cal_of(i, t);
+    let ocal = input_cal(i, other)?;
+    if cal != ocal {
+        return Err(i.make_error("RangeError", "operating between two calendars is not supported"));
+    }
+    Ok(cal)
+}
 /// Extract the calendar id from a Temporal-like input (Temporal object, ISO string, or property bag).
 fn input_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
     if get(i, v).is_some() {
@@ -4590,16 +4601,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let cal = cal_of(i, &t);
         let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let cal = cal_of(i, &t);
         let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
@@ -4817,18 +4828,18 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
         let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let cal = cal_of(i, &t);
         let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
+        let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
         let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let cal = cal_of(i, &t);
         let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, negate_mode(&mode));
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
