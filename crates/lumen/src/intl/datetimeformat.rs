@@ -68,16 +68,18 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         let o = brand_slot(i, &this, "__dtf")?;
         let (s, e, kind) = range_dates(i, &o, &arg(a, 0), &arg(a, 1))?;
         let a1 = do_format_ms(&o, s, kind);
-        if s == e {
+        let a2 = do_format_ms(&o, e, kind);
+        // "Practically equal" (the two endpoints render identically) collapses to a single date.
+        if a1 == a2 {
             return Ok(Value::from_string(a1));
         }
-        let a2 = do_format_ms(&o, e, kind);
         Ok(Value::from_string(format!("{a1}\u{2009}\u{2013}\u{2009}{a2}")))
     });
     it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
         let (s, e, kind) = range_dates(i, &o, &arg(a, 0), &arg(a, 1))?;
         let a1 = do_format_ms(&o, s, kind);
+        let a2 = do_format_ms(&o, e, kind);
         let mk = |i: &mut Interp, src: &str, val: &str| {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str("literal"));
@@ -85,9 +87,9 @@ pub fn install(it: &mut Interp, ns: &Gc) {
             set_data(&ob, "source", Value::str(src));
             Value::Obj(ob)
         };
-        let mut parts = vec![mk(i, if s == e { "shared" } else { "startRange" }, &a1)];
-        if s != e {
-            let a2 = do_format_ms(&o, e, kind);
+        let equal = a1 == a2;
+        let mut parts = vec![mk(i, if equal { "shared" } else { "startRange" }, &a1)];
+        if !equal {
             parts.push(mk(i, "shared", "\u{2009}\u{2013}\u{2009}"));
             parts.push(mk(i, "endRange", &a2));
         }
