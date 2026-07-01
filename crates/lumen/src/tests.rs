@@ -5300,3 +5300,30 @@ fn array_iterator_exhaustion_and_ta_bounds() {
         "TypeError"
     );
 }
+
+#[test]
+fn typedarray_exotic_internals() {
+    // getOwnPropertyDescriptor: a non-canonical numeric key ("+1", "1.0") is an ordinary property.
+    assert_eq!(
+        run("var a=new Int8Array(3); Object.getOwnPropertyDescriptor(a,'+1')"),
+        "undefined"
+    );
+    assert_eq!(run("var a=new Int8Array(3); Object.defineProperty(a,'1.0',{value:9,configurable:true}); a['1.0']"), "9");
+    // A valid index write via a plain-object receiver whose proto is a TA creates on the receiver.
+    assert_eq!(
+        run("var t=new Int8Array([5]); var r=Object.create(t); r[0]=9; t[0]+','+r[0]"),
+        "5,9"
+    );
+    // Reflect.set with a TypedArray receiver writes the element.
+    assert_eq!(
+        run("var t=new Int8Array([5]); var r=new Int8Array([7]); Reflect.set(t,0,3,r); r[0]"),
+        "3"
+    );
+    // Strict-mode delete of a non-configurable property throws.
+    assert_eq!(
+        throws("'use strict'; var o={}; Object.defineProperty(o,'x',{value:1}); delete o.x"),
+        "TypeError"
+    );
+    // A TypedArray element can't be deleted (returns true for a canonical-invalid index).
+    assert_eq!(run("var a=new Int8Array(2); delete a[5]"), "true");
+}

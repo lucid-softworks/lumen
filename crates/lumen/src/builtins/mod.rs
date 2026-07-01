@@ -5550,6 +5550,18 @@ fn install_reflect(it: &mut Interp) {
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
+        // A TypedArray canonical numeric index reads from the buffer (out-of-range → undefined).
+        if let Some(info) = ta_info(i, &o) {
+            if i.canonical_numeric_index(&key).is_some() {
+                return Ok(match i.ta_index_kind(&info, &key) {
+                    TaIndex::Element(idx) => {
+                        let val = i.ta_read(&info, idx);
+                        descriptor_from_prop(i, Property::data(val, true, true, true))
+                    }
+                    _ => Value::Undefined,
+                });
+            }
+        }
         // A proxy's [[GetOwnProperty]] goes through its getOwnPropertyDescriptor trap.
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             return proxy_gopd_value(i, &target, &handler, &key);
@@ -6849,9 +6861,13 @@ fn reflect_ordinary_set(
                 }
                 return Ok(true);
             }
-            // A different receiver: a valid index is a silent success; otherwise fall through.
-            if !matches!(i.ta_index_kind(&info, key), TaIndex::Ordinary) {
-                return Ok(true);
+            // A different receiver: a canonical-invalid index is an inert success; a valid index is
+            // a writable data property on the target, so OrdinarySet creates it on the receiver
+            // (never touching the target's element or the prototype chain).
+            match i.ta_index_kind(&info, key) {
+                TaIndex::Exotic => return Ok(true),
+                TaIndex::Element(_) => return reflect_define_on_receiver(i, receiver, key, value),
+                TaIndex::Ordinary => {}
             }
         }
     }
@@ -6920,6 +6936,19 @@ fn reflect_define_on_receiver(
         Value::Obj(o) => o.clone(),
         _ => return Ok(false),
     };
+    // A TypedArray receiver's integer index is written through its exotic [[DefineOwnProperty]]
+    // (CreateDataProperty semantics), not stored as an ordinary property.
+    if let Some(info) = ta_info(i, &ro) {
+        if i.canonical_numeric_index(key).is_some() {
+            return match i.ta_index_kind(&info, key) {
+                TaIndex::Element(idx) => {
+                    ab(i.ta_store(&info, idx, &value))?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            };
+        }
+    }
     let existing = ro.borrow().props.get(key).cloned();
     match existing {
         Some(ep) if ep.accessor || !ep.writable => Ok(false),
@@ -8551,17 +8580,18 @@ fn install_object(it: &mut Interp) {
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
-        // A TypedArray integer index is an own data property reading from the buffer.
+        // A TypedArray canonical numeric index is an own data property reading from the buffer; a
+        // canonical-but-out-of-range index has no own property (a non-canonical key like "1.0" or
+        // "+1" is an ordinary property, handled below).
         if let Some(info) = ta_info(i, &o) {
-            if let Ok(idx) = key.parse::<usize>() {
-                if idx >= i.ta_len(&info).unwrap_or(0) {
-                    return Ok(Value::Undefined);
-                }
-                let val = i.ta_read(&info, idx);
-                return Ok(descriptor_from_prop(
-                    i,
-                    Property::data(val, true, true, true),
-                ));
+            if i.canonical_numeric_index(&key).is_some() {
+                return Ok(match i.ta_index_kind(&info, &key) {
+                    TaIndex::Element(idx) => {
+                        let val = i.ta_read(&info, idx);
+                        descriptor_from_prop(i, Property::data(val, true, true, true))
+                    }
+                    _ => Value::Undefined,
+                });
             }
         }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {

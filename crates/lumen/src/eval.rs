@@ -2783,6 +2783,13 @@ impl Interp {
                         o.borrow_mut().props.remove(prop);
                         return Ok(Value::Bool(true));
                     }
+                    // [[Delete]] returned false: strict-mode `delete` throws.
+                    if self.strict {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot delete non-configurable property '{prop}'"),
+                        ));
+                    }
                     return Ok(Value::Bool(false));
                 }
                 Ok(Value::Bool(true))
@@ -2821,6 +2828,12 @@ impl Interp {
                     if configurable {
                         o.borrow_mut().props.remove(&key);
                         return Ok(Value::Bool(true));
+                    }
+                    if self.strict {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot delete non-configurable property '{key}'"),
+                        ));
                     }
                     return Ok(Value::Bool(false));
                 }

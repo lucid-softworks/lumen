@@ -1238,6 +1238,19 @@ impl Interp {
                 }
                 return Ok(());
             }
+            // A TypedArray reached via the prototype chain: its integer-indexed elements are its own
+            // properties, so the search must stop here (never consulting the TA prototype's
+            // accessors). A valid index is a writable data property → create one on the receiver; a
+            // canonical-numeric non-index is an inert success.
+            if !Rc::ptr_eq(&o, &obj) {
+                if let Some(info) = self.typed_arrays.get(&optr).copied() {
+                    match self.ta_index_kind(&info, key) {
+                        TaIndex::Element(_) => break,
+                        TaIndex::Exotic => return Ok(()),
+                        TaIndex::Ordinary => {}
+                    }
+                }
+            }
             let prop = o.borrow().props.get(key).cloned();
             if let Some(p) = prop {
                 if p.accessor {
