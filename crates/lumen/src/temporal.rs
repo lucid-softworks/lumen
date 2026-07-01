@@ -413,7 +413,7 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
 /// The (era code, era year) for a proleptic-Gregorian year in a given calendar. Only the era-based
 /// calendars (gregory/japanese) expose an era here; others (incl. iso8601) return `(None, None)`.
 /// (era, eraYear) for an arithmetic calendar at an ISO date. `None` for calendars without eras.
-fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
+pub fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
     match cal {
         "gregory" => {
             if d.year >= 1 {

@@ -155,6 +155,21 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
     Ok((s, e, ks))
 }
 
+/// Map a temporal era CODE to its CLDR era index for name lookup (single-era calendars are "0";
+/// two-era calendars split by sign; japanese eras have no simple index so fall back to the code).
+fn era_cldr_index(cal: &str, code: &str) -> &'static str {
+    match code {
+        "ce" | "ad" => "1",
+        "bce" | "bc" => "0",
+        "ah" => "0",
+        "bh" => "1",
+        "roc" | "minguo" => "1",
+        "broc" => "0",
+        "am" if cal == "coptic" || cal == "ethiopic" => "1",
+        _ => "0",
+    }
+}
+
 /// A type discriminant for formatRange: 0 = non-Temporal (number/Date), else the Temporal variant.
 fn range_type_tag(i: &Interp, v: &Value) -> u8 {
     use crate::temporal::Temporal as T;
@@ -602,19 +617,18 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         ms
     };
     let (mut y, mut mo, mut d, h, mi, s, wd) = ymd(ms);
-    // A non-Gregorian calendar renders its own numeric year/month/day (month NAMES stay Gregorian-
-    // only for now, so a named-month non-Gregorian format falls back to a numeric month).
+    let iso_date = crate::temporal::IsoDate { year: y, month: mo as u8, day: d as u8 };
+    // A non-Gregorian calendar renders its own numeric year/month/day via the calendar tables.
     let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "iso8601".to_string(),
     };
     let greg_cal = matches!(dcal.as_str(), "" | "gregory" | "iso8601");
     if !greg_cal {
-        let iso = crate::temporal::IsoDate { year: y, month: mo as u8, day: d as u8 };
-        let f = crate::temporal::cal_fields(&dcal, iso);
+        let f = crate::temporal::cal_fields(&dcal, iso_date);
         // The year uses cal_year_num (era-year, e.g. ethioaa amete-alem = +5500); month/day come
         // from cal_fields.
-        y = crate::temporal::cal_year_num(&dcal, iso);
+        y = crate::temporal::cal_year_num(&dcal, iso_date);
         mo = f.1 as u32;
         d = f.2 as u32;
     }
@@ -726,15 +740,17 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             }
             parts.push(("year", yy.clone()));
         }
-        // The era follows the date (Gregorian/ISO only: AD/BC by sign of the year).
-        if let (true, Some(e)) = (greg_cal, get("__dtf_era")) {
-            let era = match e.as_str() {
-                "long" => if y > 0 { "Anno Domini" } else { "Before Christ" },
-                "narrow" => if y > 0 { "A" } else { "B" },
-                _ => if y > 0 { "AD" } else { "BC" },
-            };
+    }
+    // The era follows the date (CLDR name for the calendar/locale; the code is the fallback).
+    if let (true, Some(width)) = (have_date, get("__dtf_era")) {
+        let (code, _) = crate::temporal::cal_era(if greg_cal { "gregory" } else { &dcal }, iso_date);
+        if let Some(code) = code {
+            let idx = era_cldr_index(if greg_cal { "gregory" } else { &dcal }, code);
+            let name = crate::cldr_dates::era_name(&cldr_loc, cal_key, &width, idx)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| code.to_uppercase());
             lit(&mut parts, " ");
-            parts.push(("era", era.to_string()));
+            parts.push(("era", name));
         }
     }
 
