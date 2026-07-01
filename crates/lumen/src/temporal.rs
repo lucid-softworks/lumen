@@ -3738,7 +3738,10 @@ fn setm(o: &Gc, k: &str, v: Value) {
 /// (CalendarMergeFields — a provided year/era or month/monthCode replaces the receiver's whole
 /// group), then resolve back to an ISO date.
 fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow) -> Result<IsoDate, Value> {
-    let (cy, cm, cd, ..) = cal_fields(cal, d);
+    let (_, cm, cd, ..) = cal_fields(cal, d);
+    // The `year` field is the calendar's reported year number (e.g. ethioaa's amete-alem = amete-mihret
+    // + 5500), which is not always `cal_fields().0`.
+    let cy = cal_year_num(cal, d);
     let (cera, cery) = cal_era(cal, d);
     let present = |i: &mut Interp, k: &str| -> Result<bool, Value> {
         Ok(!matches!(getm(i, f, k)?, Value::Undefined))
