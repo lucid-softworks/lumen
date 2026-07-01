@@ -181,7 +181,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         if matches!(v, Value::Undefined) {
             "UTC".to_string()
         } else {
-            ab(i.to_string(&v))?.to_string()
+            let raw = ab(i.to_string(&v))?.to_string();
+            match canonicalize_time_zone(&raw) {
+                Some(tz) => tz,
+                None => return Err(i.make_error("RangeError", format!("invalid time zone: {raw}"))),
+            }
         }
     };
 
@@ -581,6 +585,51 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         parts.push(("year", format!("{y}")));
     }
     parts
+}
+
+/// Validate and canonicalize a `timeZone` option. Offset forms (`±HH`, `±HH:MM`, `±HHMM`) are
+/// checked strictly (ASCII sign, hour 00-23, minute 00-59) and normalized to `±HH:MM`; the UTC
+/// aliases collapse to "UTC"; any other IANA-looking name is accepted as-is (we lack a full DB).
+fn canonicalize_time_zone(tz: &str) -> Option<String> {
+    let first = tz.bytes().next()?;
+    if first == b'+' || first == b'-' {
+        return canon_utc_offset(tz);
+    }
+    if tz.eq_ignore_ascii_case("UTC") || tz.eq_ignore_ascii_case("Etc/UTC")
+        || tz.eq_ignore_ascii_case("GMT") || tz.eq_ignore_ascii_case("Etc/GMT")
+    {
+        return Some("UTC".to_string());
+    }
+    Some(tz.to_string())
+}
+
+/// Parse a strict minute-precision UTC offset string, returning the `±HH:MM` canonical form.
+fn canon_utc_offset(s: &str) -> Option<String> {
+    let sign = s.as_bytes()[0];
+    let rest = &s[1..];
+    if rest.len() < 2 || !rest.as_bytes()[..2].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let h: u32 = rest[..2].parse().ok()?;
+    if h > 23 {
+        return None;
+    }
+    let after = &rest[2..];
+    let m: u32 = if after.is_empty() {
+        0
+    } else {
+        let digits = after.strip_prefix(':').unwrap_or(after);
+        if digits.len() != 2 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()?
+    };
+    if m > 59 {
+        return None;
+    }
+    // A zero offset canonicalizes to "+00:00" regardless of the written sign.
+    let sign_c = if sign == b'-' && (h != 0 || m != 0) { '-' } else { '+' };
+    Some(format!("{sign_c}{h:02}:{m:02}"))
 }
 
 /// The time-zone display name for the (UTC) zone under a `timeZoneName` style.
