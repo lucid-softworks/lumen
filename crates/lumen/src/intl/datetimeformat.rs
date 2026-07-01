@@ -48,8 +48,8 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     install_supported_locales(it, &ctor);
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
-        let ms = dtf_ms(i, &o, &arg(a, 0))?;
-        let parts = build_parts(&o, ms);
+        let (ms, kind) = dtf_ms_kind(i, &o, &arg(a, 0))?;
+        let parts = build_parts(&o, ms, kind);
         let arr: Vec<Value> = parts
             .into_iter()
             .map(|(t, v)| {
@@ -355,20 +355,42 @@ const MON_SHORT: [&str; 12] =
 
 /// Resolve the format argument to epoch-milliseconds. A Temporal receiver uses its ISO fields and
 /// must be compatible with the formatter's requested components (else TypeError/RangeError).
-fn dtf_ms(i: &mut Interp, o: &Gc, date: &Value) -> Result<f64, Value> {
+/// Resolve to (epoch-ms, Temporal-kind); kind gates the components a Temporal receiver may show
+/// (1=Date, 2=Time, 3=DateTime, 4=YearMonth, 5=MonthDay, 0=any/number/instant/zoned).
+fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value> {
+    use crate::temporal::Temporal as T;
     if matches!(date, Value::Undefined) {
-        // "now" is non-deterministic; epoch 0 keeps explicit-date tests deterministic.
-        return Ok(0.0);
+        return Ok((0.0, 0));
     }
-    if let Some(t) = date.as_obj().and_then(|d| i.temporal.get(&(Rc::as_ptr(d) as usize)).cloned()) {
-        temporal_compat_check(i, o, &t)?;
-        return Ok(temporal_to_ms(&t));
+    if let Some(dobj) = date.as_obj() {
+        let ptr = Rc::as_ptr(dobj) as usize;
+        if let Some(t) = i.temporal.get(&ptr).cloned() {
+            temporal_compat_check(i, o, &t)?;
+            // Calendar mismatch: a non-ISO Temporal calendar must equal the formatter's calendar.
+            let tcal = i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string());
+            let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "iso8601".to_string(),
+            };
+            if tcal != "iso8601" && tcal != dcal {
+                return Err(i.make_error("RangeError", format!("calendar mismatch: {tcal} vs {dcal}")));
+            }
+            let kind = match t {
+                T::Date(_) => 1,
+                T::Time(_) => 2,
+                T::DateTime(..) => 3,
+                T::YearMonth(_) => 4,
+                T::MonthDay(_) => 5,
+                _ => 0,
+            };
+            return Ok((temporal_to_ms(&t), kind));
+        }
     }
     let n = ab(i.to_number(date))?;
     if !n.is_finite() {
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
-    Ok(n)
+    Ok((n, 0))
 }
 
 /// A Temporal receiver's kind must not request incompatible fields from the formatter.
@@ -415,16 +437,32 @@ fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) 
 
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
     let o = brand_slot(i, this, "__dtf")?;
-    let ms = dtf_ms(i, &o, date)?;
-    let parts = build_parts(&o, ms);
+    let (ms, kind) = dtf_ms_kind(i, &o, date)?;
+    let parts = build_parts(&o, ms, kind);
     Ok(parts.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(""))
 }
 
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
-fn build_parts(o: &Gc, ms: f64) -> Vec<(&'static str, String)> {
+/// `kind` gates which components a Temporal receiver may show (see [`dtf_ms_kind`]).
+fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     let (y, mo, d, h, mi, s, wd) = ymd(ms);
-    // Read a component slot, falling back to the dateStyle/timeStyle expansion (`__dtfx_`).
+    // A Temporal receiver restricts the displayable fields: YearMonth drops day/weekday/time,
+    // MonthDay drops year/weekday/time, Date/YearMonth/MonthDay drop time, Time drops date.
+    let allow = |slot: &str| -> bool {
+        match kind {
+            1 => !matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"), // Date
+            2 => matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"),  // Time
+            4 => matches!(slot, "year" | "month" | "era"),                                 // YearMonth
+            5 => matches!(slot, "month" | "day"),                                          // MonthDay
+            _ => true,
+        }
+    };
+    // Read a component slot (gated by `allow`), falling back to the dateStyle/timeStyle expansion.
     let get = |k: &str| {
+        let field = k.trim_start_matches("__dtf_");
+        if !allow(field) {
+            return None;
+        }
         let read = |key: &str| match o.borrow().props.get(key).map(|p| p.value.clone()) {
             Some(Value::Str(s)) => Some(s.to_string()),
             _ => None,
