@@ -8,6 +8,8 @@ pub fn language_alias(key: &str) -> Option<&'static str> {
         // Simple deprecated two/three-letter codes.
         "in" => "id",
         "iw" => "he",
+        "heb" => "he",
+        "cnr" => "sr-ME",
         "ji" => "yi",
         "jw" => "jv",
         "mo" => "ro",
