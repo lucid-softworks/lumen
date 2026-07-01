@@ -704,6 +704,11 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             None => (mag.clone(), None),
         }
     };
+    // A value that rounds to zero (e.g. -0.0001 with the default 3 fraction digits) is "zero" for
+    // the purpose of the `exceptZero`/`negative` sign rules, even though its sign bit is negative.
+    let rounded_zero = value.is_finite()
+        && int_part.chars().all(|c| c == '0')
+        && frac_part.as_deref().unwrap_or("").chars().all(|c| c == '0');
     let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
     // Locale number symbols (decimal separator, grouping separator + sizes).
     let locale = get_str(o, "__nf_locale");
@@ -729,10 +734,11 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         num.push_str(&compact_suffix);
     }
 
-    // Sign display. NaN carries no sign regardless of signDisplay.
+    // Sign display. `auto`/`always` key off the sign bit (so -0 and values rounding to zero still
+    // show "-0"); `exceptZero`/`negative` suppress the sign when the displayed value is zero or NaN.
     let sign_display = get_str(o, "__nf_signdisplay");
-    let is_zero = value == 0.0;
-    let sign = if value.is_nan() { "" } else { match sign_display.as_str() {
+    let zeroish = rounded_zero || value.is_nan();
+    let sign = match sign_display.as_str() {
         "never" => "",
         "always" => {
             if negative {
@@ -742,7 +748,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             }
         }
         "exceptZero" => {
-            if is_zero {
+            if zeroish {
                 ""
             } else if negative {
                 "-"
@@ -751,7 +757,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             }
         }
         "negative" => {
-            if negative && !is_zero {
+            if negative && !zeroish {
                 "-"
             } else {
                 ""
@@ -764,7 +770,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
                 ""
             }
         }
-    } };
+    };
 
     // Style wrapping.
     match style.as_str() {
@@ -777,7 +783,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             let sym = currency_symbol(&code, &disp);
             // Accounting notation wraps a negative amount in parentheses instead of a minus sign.
             let accounting = get_str(o, "__nf_currencysign") == "accounting";
-            if accounting && negative && !is_zero {
+            if accounting && negative && !zeroish {
                 num = format!("({sym}{num})");
             } else {
                 num = format!("{sign}{sym}{num}");
