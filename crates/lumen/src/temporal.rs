@@ -2183,20 +2183,75 @@ fn field_int(i: &mut Interp, o: &Value, k: &str, default: i64) -> Result<i64, Va
 /// Read a month from either `month` or `monthCode` ("M01".."M12", optional leap suffix).
 fn field_month(i: &mut Interp, o: &Value) -> Result<i64, Value> {
     let m = getm(i, o, "month")?;
-    if !matches!(m, Value::Undefined) {
-        return to_int(i, &m);
-    }
-    let mc = getm(i, o, "monthCode")?;
-    if let Value::Str(s) = &mc {
-        if let Some(num) = s.strip_prefix('M') {
-            let num = num.trim_end_matches('L');
-            if let Ok(n) = num.parse::<i64>() {
-                return Ok(n);
-            }
+    let month = if matches!(m, Value::Undefined) {
+        None
+    } else {
+        let n = to_int(i, &m)?;
+        if n < 1 {
+            return Err(i.make_error("RangeError", "month must be positive"));
         }
+        Some(n)
+    };
+    // Parse a monthCode "M" + 2 digits + optional "L" (leap). ISO/Gregorian have no leap months.
+    let mc = getm(i, o, "monthCode")?;
+    let mc_num = match &mc {
+        Value::Undefined => None,
+        Value::Str(s) => {
+            let body = s
+                .strip_prefix('M')
+                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode"))?;
+            let (digits, leap) = match body.strip_suffix('L') {
+                Some(d) => (d, true),
+                None => (body, false),
+            };
+            if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(i.make_error("RangeError", "invalid monthCode"));
+            }
+            let n: i64 = digits.parse().unwrap();
+            if n < 1 || leap {
+                // No leap months, and M00 is invalid, in the ISO/Gregorian calendar.
+                return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
+            }
+            Some(n)
+        }
+        _ => {
+            let s = i.to_string(&mc).map_err(unab)?;
+            return field_month_from_str(i, &s, month);
+        }
+    };
+    match (month, mc_num) {
+        (Some(a), Some(b)) => {
+            if a != b {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"));
+            }
+            Ok(a)
+        }
+        (Some(a), None) => Ok(a),
+        (None, Some(b)) => Ok(b),
+        (None, None) => Err(i.make_error("TypeError", "missing 'month' or 'monthCode'")),
+    }
+}
+
+/// monthCode was a non-string coercible value: ToString then re-validate against an optional month.
+fn field_month_from_str(i: &mut Interp, s: &str, month: Option<i64>) -> Result<i64, Value> {
+    let body = s
+        .strip_prefix('M')
+        .ok_or_else(|| i.make_error("RangeError", "invalid monthCode"))?;
+    let (digits, leap) = match body.strip_suffix('L') {
+        Some(d) => (d, true),
+        None => (body, false),
+    };
+    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(i.make_error("RangeError", "invalid monthCode"));
     }
-    Err(i.make_error("TypeError", "missing 'month' or 'monthCode'"))
+    let n: i64 = digits.parse().unwrap();
+    if n < 1 || leap {
+        return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
+    }
+    match month {
+        Some(a) if a != n => Err(i.make_error("RangeError", "month and monthCode disagree")),
+        _ => Ok(n),
+    }
 }
 
 fn add_to_date(
