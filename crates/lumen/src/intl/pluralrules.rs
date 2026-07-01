@@ -41,8 +41,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let min_frac = read_digits(i, &options, "minimumFractionDigits", 0, 100, 0)?;
     let max_frac_default = min_frac.max(3);
     let max_frac = read_digits(i, &options, "maximumFractionDigits", min_frac, 100, max_frac_default)?;
-    let _min_sig = read_digits_opt(i, &options, "minimumSignificantDigits", 1, 21)?;
-    let _max_sig = read_digits_opt(i, &options, "maximumSignificantDigits", 1, 21)?;
+    let mnsd = read_digits_opt(i, &options, "minimumSignificantDigits", 1, 21)?;
+    let mxsd = read_digits_opt(i, &options, "maximumSignificantDigits", 1, 21)?;
+    // When either significant-digit bound is present, both are resolved (min->1, max->21).
+    let (min_sig, max_sig) = if mnsd.is_some() || mxsd.is_some() {
+        (Some(mnsd.unwrap_or(1)), Some(mxsd.unwrap_or(21)))
+    } else {
+        (None, None)
+    };
     let _rinc = {
         let v = ab(i.get_member(&options, "roundingIncrement"))?;
         if matches!(v, Value::Undefined) { 1.0 } else { ab(i.to_number(&v))? }
@@ -69,9 +75,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__pr_minint", Value::Num(min_int as f64));
     set_builtin(&obj, "__pr_minfrac", Value::Num(min_frac as f64));
     set_builtin(&obj, "__pr_maxfrac", Value::Num(max_frac as f64));
-    set_builtin(&obj, "__pr_notation", Value::from_string(notation));
+    set_builtin(&obj, "__pr_notation", Value::from_string(notation.clone()));
     set_builtin(&obj, "__pr_compactdisplay", Value::from_string(compact_display));
     set_builtin(&obj, "__pr_roundingmode", Value::from_string(rounding_mode));
+    if let (Some(mn), Some(mx)) = (min_sig, max_sig) {
+        set_builtin(&obj, "__pr_minsig", Value::Num(mn as f64));
+        set_builtin(&obj, "__pr_maxsig", Value::Num(mx as f64));
+    }
     Ok(Value::Obj(obj))
 }
 
@@ -159,10 +169,18 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     set_data(&res, "locale", get("__pr_locale"));
     set_data(&res, "type", get("__pr_type"));
     set_data(&res, "notation", get("__pr_notation"));
+    // compactDisplay is present only for compact notation.
+    if matches!(get("__pr_notation"), Value::Str(s) if &*s == "compact") {
+        set_data(&res, "compactDisplay", get("__pr_compactdisplay"));
+    }
     set_data(&res, "minimumIntegerDigits", get("__pr_minint"));
     set_data(&res, "minimumFractionDigits", get("__pr_minfrac"));
     set_data(&res, "maximumFractionDigits", get("__pr_maxfrac"));
-    set_data(&res, "roundingMode", get("__pr_roundingmode"));
+    // Significant-digit bounds, when significant-digit rounding is in effect, precede pluralCategories.
+    if !matches!(get("__pr_minsig"), Value::Undefined) {
+        set_data(&res, "minimumSignificantDigits", get("__pr_minsig"));
+        set_data(&res, "maximumSignificantDigits", get("__pr_maxsig"));
+    }
     let locale = match get("__pr_locale") {
         Value::Str(s) => s.to_string(),
         _ => "en".to_string(),
@@ -172,6 +190,8 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         .iter()
         .map(|s| Value::str(*s))
         .collect();
+    // pluralCategories precedes roundingMode in the resolvedOptions key order.
     set_data(&res, "pluralCategories", i.make_array(cats));
+    set_data(&res, "roundingMode", get("__pr_roundingmode"));
     Ok(Value::Obj(res))
 }

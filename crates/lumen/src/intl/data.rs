@@ -76,10 +76,12 @@ pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool) -> &'static str {
                 "other"
             }
         }
-        // French: one iff i==0 or i==1.
+        // French: one iff i==0 or i==1; many for a non-zero whole multiple of 10^6.
         "fr" => {
             if (i == 0 || i == 1) && !has_fraction {
                 "one"
+            } else if i != 0 && i % 1_000_000 == 0 && !has_fraction {
+                "many"
             } else {
                 "other"
             }
@@ -103,6 +105,7 @@ pub fn plural_categories(lang: &str) -> &'static [&'static str] {
         "ar" => &["zero", "one", "two", "few", "many", "other"],
         "ru" | "uk" | "pl" => &["one", "few", "many", "other"],
         "cs" | "sk" => &["one", "few", "many", "other"],
+        "fr" => &["one", "many", "other"],
         _ => &["one", "other"],
     }
 }
