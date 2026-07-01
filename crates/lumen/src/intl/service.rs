@@ -11,8 +11,22 @@ use crate::value::{Gc, Property, Value};
 pub fn supported_language(lang: &str) -> bool {
     matches!(
         lang,
-        "en" | "de" | "fr" | "es" | "it" | "pt" | "nl" | "ja" | "zh" | "ko" | "ru" | "ar" | "sr"
-            | "th" | "gv" | "sl" | "pl"
+        "en" | "de"
+            | "fr"
+            | "es"
+            | "it"
+            | "pt"
+            | "nl"
+            | "ja"
+            | "zh"
+            | "ko"
+            | "ru"
+            | "ar"
+            | "sr"
+            | "th"
+            | "gv"
+            | "sl"
+            | "pl"
     )
 }
 
@@ -99,7 +113,10 @@ pub fn resolve_locale_nu(requested: &[String], option: Option<&str>) -> (String,
     // The locale's default numbering system (most are latn; Arabic uses arab, Persian arabext).
     let default_nu = {
         let lang = base.split('-').next().unwrap_or("");
-        let region = base.split('-').find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+        let region = base
+            .split('-')
+            .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+            .unwrap_or("");
         match lang {
             "ar" if !matches!(region, "DZ" | "MA" | "TN" | "LY" | "EH" | "MR") => "arab",
             "fa" | "ps" => "arabext",
@@ -236,4 +253,3 @@ fn realm_protos_of<'a>(
     }
     None
 }
-

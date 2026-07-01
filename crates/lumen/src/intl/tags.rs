@@ -130,7 +130,10 @@ pub fn parse(tag: &str) -> Option<LangTag> {
             return None; // an extension must have at least one subtag
         }
         // subtag length rules: u/t/other allow 2-8 alnum
-        if !subs.iter().all(|p| p.len() >= 2 && p.len() <= 8 && is_alnum(p)) {
+        if !subs
+            .iter()
+            .all(|p| p.len() >= 2 && p.len() <= 8 && is_alnum(p))
+        {
             return None;
         }
         let _ = start;
@@ -191,9 +194,7 @@ fn parse_unicode(subs: &[&str]) -> Option<(Vec<String>, Vec<(String, Vec<String>
 }
 
 /// Parse the `-t-` extension body into (optional tlang, fields). Fields are (key, [value…]).
-fn parse_transform(
-    subs: &[&str],
-) -> Option<(Option<Box<LangTag>>, Vec<(String, Vec<String>)>)> {
+fn parse_transform(subs: &[&str]) -> Option<(Option<Box<LangTag>>, Vec<(String, Vec<String>)>)> {
     let mut i = 0;
     // optional tlang: starts with a language subtag (2-3 or 5-8 alpha) — not a tfield key (2 alnum
     // with a digit second char).

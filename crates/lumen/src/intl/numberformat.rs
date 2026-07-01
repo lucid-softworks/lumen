@@ -1,11 +1,11 @@
 //! `Intl.NumberFormat` (standard notation; decimal/percent/currency/unit; English grouping).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "NumberFormat", 0, construct);
@@ -31,7 +31,12 @@ pub fn install(it: &mut Interp, ns: &Gc) {
 
 /// The two range endpoints as intl mathematical values, rejecting NaN/undefined per
 /// FormatNumericRange step 1 (`start`/`end` must not be undefined; NaN throws RangeError).
-fn range_endpoints(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<(Gc, f64, f64), Value> {
+fn range_endpoints(
+    i: &mut Interp,
+    this: &Value,
+    x: &Value,
+    y: &Value,
+) -> Result<(Gc, f64, f64), Value> {
     let o = instance(i, this)?;
     if matches!(x, Value::Undefined) || matches!(y, Value::Undefined) {
         return Err(i.make_error("TypeError", "formatRange requires two arguments"));
@@ -55,7 +60,12 @@ fn format_range(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Va
     Ok(Value::from_string(format!("{sa}\u{2013}{sb}")))
 }
 
-fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Value, Value> {
+fn format_range_to_parts(
+    i: &mut Interp,
+    this: &Value,
+    x: &Value,
+    y: &Value,
+) -> Result<Value, Value> {
     let (o, a, b) = range_endpoints(i, this, x, y)?;
     let stype = suffix_type_of(&o);
     let (dec, grp) = loc_seps(&o);
@@ -90,7 +100,12 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
     let g = it.make_native("get format", 0, |i, this, _| {
         let o = brand_slot(i, &this, "__nf")?;
         // Cache a bound function on the instance so repeated reads return the same object.
-        if let Some(f) = o.borrow().props.get("__nf_boundformat").map(|p| p.value.clone()) {
+        if let Some(f) = o
+            .borrow()
+            .props
+            .get("__nf_boundformat")
+            .map(|p| p.value.clone())
+        {
             return Ok(f);
         }
         let f = i.make_native("", 1, |i, that, a| format_number(i, &that, &arg(a, 0)));
@@ -137,7 +152,6 @@ struct DigitOpts {
     max_frac: u32,
     min_sig: Option<u32>,
     max_sig: Option<u32>,
-    mxfd_set: bool,
     /// "significant" | "fraction" | "morePrecision" | "lessPrecision".
     rounding_type: &'static str,
 }
@@ -159,7 +173,10 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // numberingSystem is read right after localeMatcher, and must be a valid type identifier.
     let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
     if let Some(ns) = &numbering {
-        if !ns.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        if !ns
+            .split('-')
+            .all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+        {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
         }
     }
@@ -193,8 +210,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("symbol"),
     )?
     .unwrap();
-    let currency_sign = get_option(i, &options, "currencySign", &["standard", "accounting"], Some("standard"))?
-        .unwrap();
+    let currency_sign = get_option(
+        i,
+        &options,
+        "currencySign",
+        &["standard", "accounting"],
+        Some("standard"),
+    )?
+    .unwrap();
 
     // unit
     let unit = get_option(i, &options, "unit", &[], None)?;
@@ -206,8 +229,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid unit: {u}")));
         }
     }
-    let unit_display = get_option(i, &options, "unitDisplay", &["short", "narrow", "long"], Some("short"))?
-        .unwrap();
+    let unit_display = get_option(
+        i,
+        &options,
+        "unitDisplay",
+        &["short", "narrow", "long"],
+        Some("short"),
+    )?
+    .unwrap();
 
     // notation is read before the digit options.
     let notation = get_option(
@@ -232,7 +261,9 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             1u32
         } else {
             let n = ab(i.to_number(&v))?;
-            let allowed = [1u32, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000];
+            let allowed = [
+                1u32, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000,
+            ];
             if n.fract() != 0.0 || !allowed.contains(&(n as u32)) {
                 return Err(i.make_error("RangeError", "invalid roundingIncrement"));
             }
@@ -244,8 +275,15 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         &options,
         "roundingMode",
         &[
-            "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
-            "halfTrunc", "halfEven",
+            "ceil",
+            "floor",
+            "expand",
+            "trunc",
+            "halfCeil",
+            "halfFloor",
+            "halfExpand",
+            "halfTrunc",
+            "halfEven",
         ],
         Some("halfExpand"),
     )?
@@ -277,7 +315,10 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             ));
         }
         if digits.min_frac != digits.max_frac {
-            return Err(i.make_error("RangeError", "maximumFractionDigits must equal minimumFractionDigits with roundingIncrement"));
+            return Err(i.make_error(
+                "RangeError",
+                "maximumFractionDigits must equal minimumFractionDigits with roundingIncrement",
+            ));
         }
     }
     let trailing_zero = get_option(
@@ -289,8 +330,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     )?
     .unwrap();
 
-    let compact_display = get_option(i, &options, "compactDisplay", &["short", "long"], Some("short"))?
-        .unwrap();
+    let compact_display = get_option(
+        i,
+        &options,
+        "compactDisplay",
+        &["short", "long"],
+        Some("short"),
+    )?
+    .unwrap();
     let use_grouping = read_use_grouping(i, &options, &notation)?;
     let sign_display = get_option(
         i,
@@ -308,13 +355,25 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__nf", Value::Bool(true));
     set_builtin(&obj, "__nf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__nf_nu", Value::from_string(numbering));
-    set_builtin(&obj, "__nf_roundingincrement", Value::Num(rounding_increment as f64));
-    set_builtin(&obj, "__nf_roundingpriority", Value::from_string(rounding_priority));
+    set_builtin(
+        &obj,
+        "__nf_roundingincrement",
+        Value::Num(rounding_increment as f64),
+    );
+    set_builtin(
+        &obj,
+        "__nf_roundingpriority",
+        Value::from_string(rounding_priority),
+    );
     set_builtin(&obj, "__nf_trailingzero", Value::from_string(trailing_zero));
     set_builtin(&obj, "__nf_style", Value::from_string(style));
     if let Some(c) = currency {
         set_builtin(&obj, "__nf_currency", Value::from_string(c.to_uppercase()));
-        set_builtin(&obj, "__nf_currencydisplay", Value::from_string(currency_display));
+        set_builtin(
+            &obj,
+            "__nf_currencydisplay",
+            Value::from_string(currency_display),
+        );
         set_builtin(&obj, "__nf_currencysign", Value::from_string(currency_sign));
     }
     if let Some(u) = unit {
@@ -331,7 +390,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         set_builtin(&obj, "__nf_maxsig", Value::Num(v as f64));
     }
     set_builtin(&obj, "__nf_notation", Value::from_string(notation));
-    set_builtin(&obj, "__nf_compactdisplay", Value::from_string(compact_display));
+    set_builtin(
+        &obj,
+        "__nf_compactdisplay",
+        Value::from_string(compact_display),
+    );
     set_builtin(&obj, "__nf_grouping", use_grouping);
     set_builtin(&obj, "__nf_signdisplay", Value::from_string(sign_display));
     set_builtin(&obj, "__nf_roundingmode", Value::from_string(rounding_mode));
@@ -358,7 +421,13 @@ fn read_raw_digits(i: &mut Interp, options: &Value) -> Result<RawDigits, Value> 
     let mxfd = read_range_opt(i, options, "maximumFractionDigits", 0, 100)?;
     let mnsd = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
     let mxsd = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
-    Ok(RawDigits { min_int, mnfd, mxfd, mnsd, mxsd })
+    Ok(RawDigits {
+        min_int,
+        mnfd,
+        mxfd,
+        mnsd,
+        mxsd,
+    })
 }
 
 /// SetNumberFormatDigitOptions, phase 2: derive the effective digit bounds and rounding type from the
@@ -399,7 +468,10 @@ fn interpret_digits(
             let mn = raw.mnsd.unwrap_or(1);
             let mx = raw.mxsd.unwrap_or(21);
             if mn > mx {
-                return Err(i.make_error("RangeError", "minimumSignificantDigits > maximumSignificantDigits"));
+                return Err(i.make_error(
+                    "RangeError",
+                    "minimumSignificantDigits > maximumSignificantDigits",
+                ));
             }
             min_sig = Some(mn);
             max_sig = Some(mx);
@@ -417,7 +489,10 @@ fn interpret_digits(
                 (Some(mn), None) => (mn, mxfd_default.max(mn)),
                 (Some(mn), Some(mx)) => {
                     if mn > mx {
-                        return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
+                        return Err(i.make_error(
+                            "RangeError",
+                            "minimumFractionDigits > maximumFractionDigits",
+                        ));
                     }
                     (mn, mx)
                 }
@@ -454,15 +529,27 @@ fn interpret_digits(
         max_frac,
         min_sig,
         max_sig,
-        mxfd_set: raw.mxfd.is_some(),
         rounding_type,
     })
 }
 
-fn read_range(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32, fallback: u32) -> Result<u32, Value> {
+fn read_range(
+    i: &mut Interp,
+    options: &Value,
+    prop: &str,
+    lo: u32,
+    hi: u32,
+    fallback: u32,
+) -> Result<u32, Value> {
     Ok(read_range_opt(i, options, prop, lo, hi)?.unwrap_or(fallback))
 }
-fn read_range_opt(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32) -> Result<Option<u32>, Value> {
+fn read_range_opt(
+    i: &mut Interp,
+    options: &Value,
+    prop: &str,
+    lo: u32,
+    hi: u32,
+) -> Result<Option<u32>, Value> {
     let v = ab(i.get_member(options, prop))?;
     if matches!(v, Value::Undefined) {
         return Ok(None);
@@ -483,7 +570,11 @@ fn read_use_grouping(i: &mut Interp, options: &Value, notation: &str) -> Result<
     // otherwise ToString and validate against ["min2","auto","always"] (so the string "true" is a
     // RangeError, not "always"). The fallback is "auto" (or "min2" for compact notation).
     let v = ab(i.get_member(options, "useGrouping"))?;
-    let default = Value::str(if notation == "compact" { "min2" } else { "auto" });
+    let default = Value::str(if notation == "compact" {
+        "min2"
+    } else {
+        "auto"
+    });
     if matches!(v, Value::Undefined) {
         return Ok(default);
     }
@@ -541,10 +632,16 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
 
     let increment = get_num(o, "__nf_roundingincrement").unwrap_or(1);
     let mode = get_str(o, "__nf_roundingmode");
-    let mode = if mode.is_empty() { "halfExpand".to_string() } else { mode };
+    let mode = if mode.is_empty() {
+        "halfExpand".to_string()
+    } else {
+        mode
+    };
     let rtype = get_str(o, "__nf_roundingtype");
     let mut s = match rtype.as_str() {
-        "significant" => round_significant_dec(x, max_sig.unwrap_or(21), min_sig.unwrap_or(1), &mode),
+        "significant" => {
+            round_significant_dec(x, max_sig.unwrap_or(21), min_sig.unwrap_or(1), &mode)
+        }
         "morePrecision" | "lessPrecision" => round_priority(
             x,
             min_sig.unwrap_or(1),
@@ -557,7 +654,9 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
         ),
         "fraction" => round_fraction_dec(x, min_frac, max_frac, increment, &mode),
         // Fallback for formatters created without a stored rounding type.
-        _ if max_sig.is_some() => round_significant_dec(x, max_sig.unwrap(), min_sig.unwrap_or(1), &mode),
+        _ if max_sig.is_some() => {
+            round_significant_dec(x, max_sig.unwrap(), min_sig.unwrap_or(1), &mode)
+        }
         _ => round_fraction_dec(x, min_frac, max_frac, increment, &mode),
     };
     // Pad integer digits to min_int.
@@ -596,14 +695,32 @@ fn decimal_digits(x: f64) -> (String, String) {
 /// Round the decimal `int_str.frac_str` to `keep` fraction digits (may be negative, rounding integer
 /// places), snapping to a multiple of `inc` at that scale, per the ECMA-402 `mode`. Returns the exact
 /// decimal string (unsigned, `keep` fraction digits when `keep > 0`, no min-frac padding).
-fn round_decimal(int_str: &str, frac_str: &str, keep: i32, inc: u32, mode: &str, negative: bool) -> String {
-    let mut digits: Vec<u8> = int_str.bytes().chain(frac_str.bytes()).map(|b| b - b'0').collect();
+fn round_decimal(
+    int_str: &str,
+    frac_str: &str,
+    keep: i32,
+    inc: u32,
+    mode: &str,
+    negative: bool,
+) -> String {
+    let mut digits: Vec<u8> = int_str
+        .bytes()
+        .chain(frac_str.bytes())
+        .map(|b| b - b'0')
+        .collect();
     let point = int_str.len() as i32;
     let cut = point + keep; // number of leading digits retained as the coefficient
     if cut <= 0 {
         // Everything is discarded; the only possible non-zero result is a single rounded-up unit.
         let any = digits.iter().any(|&d| d != 0);
-        let up = round_up_decision(mode, negative, /*rem*/ 0.0, /*frac*/ if any { 0.5001 } else { 0.0 }, inc, 0);
+        let up = round_up_decision(
+            mode,
+            negative,
+            /*rem*/ 0.0,
+            /*frac*/ if any { 0.5001 } else { 0.0 },
+            inc,
+            0,
+        );
         let val = if up { inc as u128 } else { 0 };
         return place_decimal(&val.to_string(), keep);
     }
@@ -649,7 +766,14 @@ fn place_decimal(coeff: &str, keep: i32) -> String {
 
 /// Whether to round the coefficient up by one increment, given the discarded position `rem + frac`
 /// (in increment units, `rem` an integer remainder and `frac` in [0,1)) under ECMA-402 `mode`.
-fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32, quotient: u128) -> bool {
+fn round_up_decision(
+    mode: &str,
+    negative: bool,
+    rem: f64,
+    frac: f64,
+    inc: u32,
+    quotient: u128,
+) -> bool {
     let position = rem + frac;
     let half = inc as f64 / 2.0;
     let some = position > 0.0;
@@ -675,7 +799,14 @@ fn round_up_decision(mode: &str, negative: bool, rem: f64, frac: f64, inc: u32, 
 fn round_fraction_dec(x: f64, min_frac: u32, max_frac: u32, increment: u32, mode: &str) -> String {
     let (int_str, frac_str) = decimal_digits(x);
     let negative = x.is_sign_negative();
-    let mut s = round_decimal(&int_str, &frac_str, max_frac as i32, increment.max(1), mode, negative);
+    let mut s = round_decimal(
+        &int_str,
+        &frac_str,
+        max_frac as i32,
+        increment.max(1),
+        mode,
+        negative,
+    );
     // Trim trailing zeros beyond min_frac (only meaningful without an increment > 1).
     if increment <= 1 && max_frac > min_frac && s.contains('.') {
         while s.ends_with('0') {
@@ -755,7 +886,12 @@ fn round_significant_dec(x: f64, max_sig: u32, min_sig: u32, mode: &str) -> Stri
     let mut s = round_decimal(&int_str, &frac_str, keep, 1, mode, negative);
     // Trim trailing fractional zeros down to min_sig significant digits.
     if s.contains('.') {
-        let significant = |t: &str| t.chars().filter(|c| c.is_ascii_digit()).skip_while(|c| *c == '0').count();
+        let significant = |t: &str| {
+            t.chars()
+                .filter(|c| c.is_ascii_digit())
+                .skip_while(|c| *c == '0')
+                .count()
+        };
         while s.ends_with('0') && significant(&s) as u32 > min_sig {
             s.pop();
         }
@@ -765,7 +901,6 @@ fn round_significant_dec(x: f64, max_sig: u32, min_sig: u32, mode: &str) -> Stri
     }
     s
 }
-
 
 fn group_integer(int_part: &str, grouping: &Value, sep: &str, sizes: (usize, usize)) -> String {
     let enabled = !matches!(grouping, Value::Bool(false));
@@ -781,9 +916,8 @@ fn group_integer(int_part: &str, grouping: &Value, sep: &str, sizes: (usize, usi
     let mut out = String::new();
     for (idx, c) in digits.iter().enumerate() {
         let from_right = n - idx;
-        let boundary = idx > 0
-            && from_right >= primary
-            && (from_right - primary) % secondary == 0;
+        let boundary =
+            idx > 0 && from_right >= primary && (from_right - primary).is_multiple_of(secondary);
         if boundary {
             out.push_str(sep);
         }
@@ -803,14 +937,21 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     // scientific / engineering notation: mantissa in [1,10) or [1,1000), plus an exponent.
     let notation = get_str(o, "__nf_notation");
     let mut exponent: Option<i32> = None;
-    if (notation == "scientific" || notation == "engineering") && value != 0.0 && value.is_finite() {
+    if (notation == "scientific" || notation == "engineering") && value != 0.0 && value.is_finite()
+    {
         let mut e = value.abs().log10().floor() as i32;
         if notation == "engineering" {
             e -= e.rem_euclid(3);
         }
         value /= 10f64.powi(e);
         // Guard against log10 rounding pushing the mantissa to 10.
-        if value.abs() >= if notation == "engineering" { 1000.0 } else { 10.0 } {
+        if value.abs()
+            >= if notation == "engineering" {
+                1000.0
+            } else {
+                10.0
+            }
+        {
             value /= 10.0;
             e += 1;
         }
@@ -824,10 +965,16 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         let loc = get_str(o, "__nf_locale");
         let mut lp = loc.split('-');
         let clang = lp.next().unwrap_or("en").to_string();
-        let cregion = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("").to_string();
+        let cregion = lp
+            .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+            .unwrap_or("")
+            .to_string();
         // Pick the largest compact tier whose divisor does not exceed the value; below the smallest
         // tier the number is formatted normally (locales differ: de starts at 1e6, CJK at 1e4, ko 1e3).
-        if let Some(&(div, suffix)) = compact_tiers(&clang, &cregion, long).iter().find(|(t, _)| value.abs() >= *t) {
+        if let Some(&(div, suffix)) = compact_tiers(&clang, &cregion, long)
+            .iter()
+            .find(|(t, _)| value.abs() >= *t)
+        {
             value /= div;
             compact_suffix = suffix.to_string();
             compact = true;
@@ -837,8 +984,13 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         let loc = get_str(o, "__nf_locale");
         let mut lp = loc.split('-');
         let lang = lp.next().unwrap_or("en");
-        let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
-        (crate::intl::data::nan_symbol(lang, region).to_string(), None)
+        let region = lp
+            .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+            .unwrap_or("");
+        (
+            crate::intl::data::nan_symbol(lang, region).to_string(),
+            None,
+        )
     } else if value.is_infinite() {
         ("\u{221e}".to_string(), None)
     } else {
@@ -871,12 +1023,19 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     let rounded_zero = value.is_finite()
         && int_part.chars().all(|c| c == '0')
         && frac_part.as_deref().unwrap_or("").chars().all(|c| c == '0');
-    let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
+    let grouping = o
+        .borrow()
+        .props
+        .get("__nf_grouping")
+        .map(|p| p.value.clone())
+        .unwrap_or(Value::str("auto"));
     // Locale number symbols (decimal separator, grouping separator + sizes).
     let locale = get_str(o, "__nf_locale");
     let mut lparts = locale.split('-');
     let lang = lparts.next().unwrap_or("en");
-    let region = lparts.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let region = lparts
+        .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+        .unwrap_or("");
     let (dec_sep, grp_sep, sizes) = crate::intl::data::number_symbols(lang, region);
     // Grouping is suppressed in scientific/engineering notation.
     let grouped = if exponent.is_some() || !value.is_finite() {
@@ -947,7 +1106,11 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
             let sym = currency_symbol_loc(lang, &code, &disp);
             // Symbol placement is locale-specific (de puts it after with a NBSP).
             let after = curr_symbol_after(lang);
-            let body = if after { format!("{num}\u{a0}{sym}") } else { format!("{sym}{num}") };
+            let body = if after {
+                format!("{num}\u{a0}{sym}")
+            } else {
+                format!("{sym}{num}")
+            };
             // Accounting wraps a negative in parentheses in symbol-before locales; symbol-after
             // locales (de) keep the minus sign.
             let accounting = get_str(o, "__nf_currencysign") == "accounting";
@@ -964,7 +1127,12 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
                 None => {
                     let unit = get_str(o, "__nf_unit");
                     let disp = get_str(o, "__nf_unitdisplay");
-                    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0, 0);
+                    let cat = crate::intl::data::plural_cardinal(
+                        o_lang(o),
+                        value.abs().trunc() as u64,
+                        value.fract() != 0.0,
+                        0,
+                    );
                     format!("{sign}{}", unit_wrap(&num, &unit, &disp, cat != "one"))
                 }
             };
@@ -979,14 +1147,22 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
 
 /// Whether the currency symbol follows the amount (with a NBSP) in this locale.
 fn curr_symbol_after(lang: &str) -> bool {
-    matches!(lang, "de" | "fr" | "fi" | "sv" | "cs" | "sk" | "hu" | "pl" | "ru" | "pt")
+    matches!(
+        lang,
+        "de" | "fr" | "fi" | "sv" | "cs" | "sk" | "hu" | "pl" | "ru" | "pt"
+    )
 }
 
 /// The locale-aware currency symbol. For USD the default "symbol" form is "$" in en/de but "US$"
 /// elsewhere; "narrowSymbol" is always the plain "$".
 fn currency_symbol_loc(lang: &str, code: &str, display: &str) -> String {
     if code == "USD" && (display == "symbol" || display.is_empty()) {
-        return if matches!(lang, "en" | "de" | "ja") { "$" } else { "US$" }.to_string();
+        return if matches!(lang, "en" | "de" | "ja") {
+            "$"
+        } else {
+            "US$"
+        }
+        .to_string();
     }
     if code == "USD" && display == "narrowSymbol" {
         return "$".to_string();
@@ -1042,16 +1218,30 @@ fn compact_tiers(lang: &str, region: &str, long: bool) -> &'static [(f64, &'stat
         "ko" => &[(1e12, "조"), (1e8, "억"), (1e4, "만"), (1e3, "천")],
         "de" => {
             if long {
-                &[(1e12, " Billionen"), (1e9, " Milliarden"), (1e6, " Millionen"), (1e3, " Tausend")]
+                &[
+                    (1e12, " Billionen"),
+                    (1e9, " Milliarden"),
+                    (1e6, " Millionen"),
+                    (1e3, " Tausend"),
+                ]
             } else {
-                &[(1e12, "\u{a0}Bio."), (1e9, "\u{a0}Mrd."), (1e6, "\u{a0}Mio.")]
+                &[
+                    (1e12, "\u{a0}Bio."),
+                    (1e9, "\u{a0}Mrd."),
+                    (1e6, "\u{a0}Mio."),
+                ]
             }
         }
         // Indian English uses the lakh/crore system in short notation.
         "en" if region == "IN" && !long => &[(1e7, "Cr"), (1e5, "L"), (1e3, "K")],
         _ => {
             if long {
-                &[(1e12, " trillion"), (1e9, " billion"), (1e6, " million"), (1e3, " thousand")]
+                &[
+                    (1e12, " trillion"),
+                    (1e9, " billion"),
+                    (1e6, " million"),
+                    (1e3, " thousand"),
+                ]
             } else {
                 &[(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")]
             }
@@ -1095,7 +1285,13 @@ pub(crate) fn xlate_digits(s: &str, nu: &str) -> String {
     match crate::numbering::NUMBERING.iter().find(|(id, _)| *id == nu) {
         Some((_, glyphs)) => s
             .chars()
-            .map(|c| if c.is_ascii_digit() { glyphs[c as usize - '0' as usize] } else { c })
+            .map(|c| {
+                if c.is_ascii_digit() {
+                    glyphs[c as usize - '0' as usize]
+                } else {
+                    c
+                }
+            })
             .collect(),
         None => s.to_string(),
     }
@@ -1105,7 +1301,10 @@ fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value
     let o = instance(i, this)?;
     let n = to_intl_number(i, x)?;
     let s = assemble_number(i, &o, n);
-    Ok(Value::from_string(xlate_digits(&s, &get_str(&o, "__nf_nu"))))
+    Ok(Value::from_string(xlate_digits(
+        &s,
+        &get_str(&o, "__nf_nu"),
+    )))
 }
 
 /// The trailing-affix classification for this formatter's parts (compact suffix vs plain).
@@ -1160,7 +1359,11 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
             // Localize the digits of numeric parts to the numbering system.
-            let v = if matches!(t, "integer" | "fraction") { xlate_digits(&v, &nu) } else { v };
+            let v = if matches!(t, "integer" | "fraction") {
+                xlate_digits(&v, &nu)
+            } else {
+                v
+            };
             set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })
@@ -1175,8 +1378,18 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
 fn o_lang(o: &Gc) -> &'static str {
     let loc = get_str(o, "__nf_locale");
     match loc.split('-').next().unwrap_or("en") {
-        "de" => "de", "fr" => "fr", "es" => "es", "it" => "it", "pt" => "pt", "nl" => "nl",
-        "ja" => "ja", "ko" => "ko", "zh" => "zh", "ru" => "ru", "ar" => "ar", "pl" => "pl",
+        "de" => "de",
+        "fr" => "fr",
+        "es" => "es",
+        "it" => "it",
+        "pt" => "pt",
+        "nl" => "nl",
+        "ja" => "ja",
+        "ko" => "ko",
+        "zh" => "zh",
+        "ru" => "ru",
+        "ar" => "ar",
+        "pl" => "pl",
         _ => "en",
     }
 }
@@ -1186,18 +1399,29 @@ fn o_lang(o: &Gc) -> &'static str {
 fn unit_pattern_of(o: &Gc, value: f64) -> Option<String> {
     let unit = get_str(o, "__nf_unit");
     let disp = get_str(o, "__nf_unitdisplay");
-    let style = if disp.is_empty() { "short" } else { disp.as_str() };
+    let style = if disp.is_empty() {
+        "short"
+    } else {
+        disp.as_str()
+    };
     let loc = get_str(o, "__nf_locale");
     let mut lp = loc.split('-');
     let lang = lp.next().unwrap_or("en");
-    let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let region = lp
+        .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+        .unwrap_or("");
     let cldr_loc = match (lang, region) {
         ("zh", "TW" | "HK" | "MO") => "zh-Hant",
         ("zh", _) => "zh-Hans",
         ("en", "IN") => "en-IN",
         _ => lang,
     };
-    let cat = crate::intl::data::plural_cardinal(o_lang(o), value.abs().trunc() as u64, value.fract() != 0.0, 0);
+    let cat = crate::intl::data::plural_cardinal(
+        o_lang(o),
+        value.abs().trunc() as u64,
+        value.fract() != 0.0,
+        0,
+    );
     crate::cldr_units::unit_pattern(cldr_loc, &unit, style, cat)
         .or_else(|| crate::cldr_units::unit_pattern(cldr_loc, &unit, style, "other"))
         .or_else(|| crate::cldr_units::unit_pattern(lang, &unit, style, "other"))
@@ -1240,9 +1464,14 @@ fn loc_seps(o: &Gc) -> (char, char) {
     let loc = get_str(o, "__nf_locale");
     let mut lp = loc.split('-');
     let lang = lp.next().unwrap_or("en");
-    let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let region = lp
+        .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+        .unwrap_or("");
     let (dec, grp, _) = crate::intl::data::number_symbols(lang, region);
-    (dec.chars().next().unwrap_or('.'), grp.chars().next().unwrap_or(','))
+    (
+        dec.chars().next().unwrap_or('.'),
+        grp.chars().next().unwrap_or(','),
+    )
 }
 
 /// The localized NaN symbol for a formatter's locale.
@@ -1250,11 +1479,19 @@ fn loc_nan(o: &Gc) -> &'static str {
     let loc = get_str(o, "__nf_locale");
     let mut lp = loc.split('-');
     let lang = lp.next().unwrap_or("en");
-    let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let region = lp
+        .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+        .unwrap_or("");
     crate::intl::data::nan_symbol(lang, region)
 }
 
-fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &str) -> Vec<(&'static str, String)> {
+fn decompose_parts(
+    s: &str,
+    suffix_type: &str,
+    dec: char,
+    grp: char,
+    nan_sym: &str,
+) -> Vec<(&'static str, String)> {
     let mut parts: Vec<(&'static str, String)> = Vec::new();
     // Split off the exponent tail, if any.
     let (main, exp) = match s.split_once('E') {
@@ -1266,7 +1503,14 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &s
     let mut idx = 0;
     // Leading affix: a sign, then any non-digit prefix (currency symbol).
     if idx < bytes.len() && (bytes[idx] == '-' || bytes[idx] == '+') {
-        parts.push((if bytes[idx] == '-' { "minusSign" } else { "plusSign" }, bytes[idx].to_string()));
+        parts.push((
+            if bytes[idx] == '-' {
+                "minusSign"
+            } else {
+                "plusSign"
+            },
+            bytes[idx].to_string(),
+        ));
         idx += 1;
     }
     // Accounting notation's opening parenthesis is its own literal part.
@@ -1276,7 +1520,8 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &s
     }
     // The number body is either digits, the infinity glyph, or the (possibly localized) NaN symbol;
     // the prefix loop stops there.
-    let is_nan_at = |b: &[char], k: usize| !nan_chars.is_empty() && b[k..].starts_with(&nan_chars[..]);
+    let is_nan_at =
+        |b: &[char], k: usize| !nan_chars.is_empty() && b[k..].starts_with(&nan_chars[..]);
     let mut prefix = String::new();
     while idx < bytes.len()
         && !bytes[idx].is_ascii_digit()
@@ -1289,7 +1534,11 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &s
     }
     if !prefix.is_empty() {
         // A leading currency symbol vs. a stray literal — classify a $ / letters as currency.
-        let t = if prefix.chars().all(|c| c == ' ' || c == '\u{00a0}') { "literal" } else { "currency" };
+        let t = if prefix.chars().all(|c| c == ' ' || c == '\u{00a0}') {
+            "literal"
+        } else {
+            "currency"
+        };
         parts.push((t, prefix));
     }
     // Non-finite body: emit a single infinity/nan part, then fall through to any trailing affix.
@@ -1325,7 +1574,11 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &s
         if suffix_type == "unit" || suffix_type == "currency" {
             // The leading separator space(s) are a literal; the rest is the unit/currency symbol
             // (a trailing ")" from accounting notation stays a literal).
-            let tag = if suffix_type == "unit" { "unit" } else { "currency" };
+            let tag = if suffix_type == "unit" {
+                "unit"
+            } else {
+                "currency"
+            };
             let trimmed = suffix.trim_start_matches([' ', '\u{a0}']);
             let lead = &suffix[..suffix.len() - trimmed.len()];
             if !lead.is_empty() {
@@ -1418,10 +1671,19 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         put(i, &res, "maximumFractionDigits", "__nf_maxfrac");
     }
     // useGrouping/notation/compactDisplay/signDisplay precede the rounding options in key order.
-    set_data(&res, "useGrouping", o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto")));
+    set_data(
+        &res,
+        "useGrouping",
+        o.borrow()
+            .props
+            .get("__nf_grouping")
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::str("auto")),
+    );
     put(i, &res, "notation", "__nf_notation");
     // compactDisplay only appears when notation is compact.
-    if matches!(o.borrow().props.get("__nf_notation").map(|p| p.value.clone()), Some(Value::Str(s)) if &*s == "compact") {
+    if matches!(o.borrow().props.get("__nf_notation").map(|p| p.value.clone()), Some(Value::Str(s)) if &*s == "compact")
+    {
         put(i, &res, "compactDisplay", "__nf_compactdisplay");
     }
     put(i, &res, "signDisplay", "__nf_signdisplay");

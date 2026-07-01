@@ -381,8 +381,21 @@ fn build_time_ovf(
 // here: "islamicc" is only an alias (→ islamic-civil), and "islamic"/"islamic-rgsa" are recognized
 // solely by Intl.DateTimeFormat, so Temporal rejects them.
 const KNOWN_CALENDARS: &[&str] = &[
-    "iso8601", "gregory", "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic",
-    "hebrew", "indian", "islamic-umalqura", "islamic-tbla", "islamic-civil", "japanese", "persian",
+    "iso8601",
+    "gregory",
+    "buddhist",
+    "chinese",
+    "coptic",
+    "dangi",
+    "ethioaa",
+    "ethiopic",
+    "hebrew",
+    "indian",
+    "islamic-umalqura",
+    "islamic-tbla",
+    "islamic-civil",
+    "japanese",
+    "persian",
     "roc",
 ];
 
@@ -508,9 +521,7 @@ fn islamic_leap(y: i64) -> bool {
     (14 + 11 * y).rem_euclid(30) < 11
 }
 fn islamic_month_len(m: i64, leap: bool) -> i64 {
-    if m % 2 == 1 {
-        30
-    } else if m == 12 && leap {
+    if m % 2 == 1 || (m == 12 && leap) {
         30
     } else {
         29
@@ -535,9 +546,18 @@ fn from_islamic(iso: IsoDate, epoch: i64) -> (i64, i64, i64) {
     (year, month, rem + 1)
 }
 fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
-    let fixed = epoch + (y - 1) * 354 + (3 + 11 * y).div_euclid(30) + (m - 1) * 29 + m.div_euclid(2) + (d - 1);
+    let fixed = epoch
+        + (y - 1) * 354
+        + (3 + 11 * y).div_euclid(30)
+        + (m - 1) * 29
+        + m.div_euclid(2)
+        + (d - 1);
     let (yy, mm, dd) = civil_from_days(fixed);
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 
 // --- Umm al-Qura (islamic-umalqura): table-based for AH 1300-1600 (ICU data), else tabular civil.
@@ -547,8 +567,13 @@ fn umalqura_in_range(y: i64) -> bool {
 /// Length (29/30) of Islamic month `m` (1-based) in year `y` under Umm al-Qura.
 fn umalqura_month_len(y: i64, m: i64) -> i64 {
     if umalqura_in_range(y) {
-        let bits = crate::umalqura::MONTH_LENGTHS[(y - crate::umalqura::YEAR_START as i64) as usize];
-        if bits & (1 << (12 - m)) != 0 { 30 } else { 29 }
+        let bits =
+            crate::umalqura::MONTH_LENGTHS[(y - crate::umalqura::YEAR_START as i64) as usize];
+        if bits & (1 << (12 - m)) != 0 {
+            30
+        } else {
+            29
+        }
     } else {
         islamic_month_len(m, islamic_leap(y))
     }
@@ -556,7 +581,8 @@ fn umalqura_month_len(y: i64, m: i64) -> i64 {
 /// Epoch-day of the first day of Umm al-Qura year `y`.
 fn umalqura_year_start(y: i64) -> i64 {
     if umalqura_in_range(y) {
-        crate::umalqura::YEAR_STARTS[(y - crate::umalqura::YEAR_START as i64) as usize] + crate::umalqura::EPOCH_OFFSET
+        crate::umalqura::YEAR_STARTS[(y - crate::umalqura::YEAR_START as i64) as usize]
+            + crate::umalqura::EPOCH_OFFSET
     } else {
         epoch_days(to_islamic(y, 1, 1, ISLAMIC_EPOCH))
     }
@@ -585,7 +611,11 @@ fn from_umalqura(iso: IsoDate) -> (i64, i64, i64) {
 fn to_umalqura(y: i64, m: i64, d: i64) -> IsoDate {
     let off: i64 = (1..m).map(|mm| umalqura_month_len(y, mm)).sum::<i64>() + (d - 1);
     let (yy, mm, dd) = civil_from_days(umalqura_year_start(y) + off);
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 fn umalqura_year_len(y: i64) -> i64 {
     (1..=12).map(|m| umalqura_month_len(y, m)).sum()
@@ -622,7 +652,11 @@ fn hebrew_leap(y: i64) -> bool {
     (7 * y + 1).rem_euclid(19) < 7
 }
 fn hebrew_months_in_year(y: i64) -> i64 {
-    if hebrew_leap(y) { 13 } else { 12 }
+    if hebrew_leap(y) {
+        13
+    } else {
+        12
+    }
 }
 fn hebrew_elapsed_days(y: i64) -> i64 {
     let months = (235 * y - 234).div_euclid(19);
@@ -658,17 +692,45 @@ fn hebrew_month_len(y: i64, ordinal: i64) -> i64 {
     let leap = hebrew_leap(y);
     let yl = hebrew_year_len(y);
     match ordinal {
-        1 => 30,                                          // Tishri
-        2 => if yl % 10 == 5 { 30 } else { 29 },          // Marheshvan (30 iff complete year)
-        3 => if yl % 10 == 3 { 29 } else { 30 },          // Kislev (29 iff deficient year)
-        4 => 29,                                          // Tevet
-        5 => 30,                                          // Shevat
-        6 => if leap { 30 } else { 29 },                  // Adar I (leap) / Adar (common)
-        7 => if leap { 29 } else { 30 },                  // Adar II (leap) / Nisan (common)
+        1 => 30, // Tishri
+        2 => {
+            if yl % 10 == 5 {
+                30
+            } else {
+                29
+            }
+        } // Marheshvan (30 iff complete year)
+        3 => {
+            if yl % 10 == 3 {
+                29
+            } else {
+                30
+            }
+        } // Kislev (29 iff deficient year)
+        4 => 29, // Tevet
+        5 => 30, // Shevat
+        6 => {
+            if leap {
+                30
+            } else {
+                29
+            }
+        } // Adar I (leap) / Adar (common)
+        7 => {
+            if leap {
+                29
+            } else {
+                30
+            }
+        } // Adar II (leap) / Nisan (common)
         // From here the alternation continues 30/29; in a leap year everything is shifted by one.
         n => {
             let m = if leap { n - 1 } else { n }; // map to common-year position (7=Nisan..12=Elul)
-            if m % 2 == 1 { 30 } else { 29 }
+            if m % 2 == 1 {
+                30
+            } else {
+                29
+            }
         }
     }
 }
@@ -699,7 +761,11 @@ fn hebrew_to_iso(y: i64, ordinal: i64, day: i64) -> IsoDate {
         fixed += hebrew_month_len(y, m);
     }
     let (yy, mm, dd) = civil_from_days(fixed - RD_OFFSET);
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 /// The Hebrew monthCode for an ordinal month: the leap month (Adar I, ordinal 6 in a leap year) is
 /// "M05L"; later leap-year months shift back by one so codes stay stable across years.
@@ -741,8 +807,10 @@ fn delta_t_seconds(year: i64) -> f64 {
         62.92 + 0.32217 * t + 0.005589 * t * t
     } else if (1986..2005).contains(&year) {
         let t = y - 2000.0;
-        63.86 + 0.3345 * t - 0.060374 * t.powi(2) + 0.0017275 * t.powi(3)
-            + 0.000651814 * t.powi(4) + 0.00002373599 * t.powi(5)
+        63.86 + 0.3345 * t - 0.060374 * t.powi(2)
+            + 0.0017275 * t.powi(3)
+            + 0.000651814 * t.powi(4)
+            + 0.00002373599 * t.powi(5)
     } else if (1961..1986).contains(&year) {
         let t = y - 1975.0;
         45.45 + 1.067 * t - t * t / 260.0 - t.powi(3) / 718.0
@@ -762,7 +830,9 @@ fn delta_t_seconds(year: i64) -> f64 {
     } else if (1800..1860).contains(&year) {
         let t = y - 1800.0;
         13.72 - 0.332447 * t + 0.0068612 * t * t + 0.0041116 * t.powi(3) - 0.00037436 * t.powi(4)
-            + 0.0000121272 * t.powi(5) - 0.0000001699 * t.powi(6) + 0.000000000875 * t.powi(7)
+            + 0.0000121272 * t.powi(5)
+            - 0.0000001699 * t.powi(6)
+            + 0.000000000875 * t.powi(7)
     } else {
         // Coarse fallback (Espenak) for years outside the fitted range.
         let u = (y - 1820.0) / 100.0;
@@ -773,22 +843,42 @@ fn delta_t_seconds(year: i64) -> f64 {
 fn march_equinox_jde(year: i64) -> f64 {
     let yy = (year as f64 - 2000.0) / 1000.0;
     let jde0 = 2451623.80984 + 365242.37404 * yy + 0.05169 * yy.powi(2)
-        - 0.00411 * yy.powi(3) - 0.00057 * yy.powi(4);
+        - 0.00411 * yy.powi(3)
+        - 0.00057 * yy.powi(4);
     let t = (jde0 - 2451545.0) / 36525.0;
     let w = (35999.373 * t - 2.47).to_radians();
     let dl = 1.0 + 0.0334 * w.cos() + 0.0007 * (2.0 * w).cos();
     // Meeus Table 27.A periodic terms (A, B, C); S = Σ A·cos(B + C·T) in degrees.
     const TERMS: [(f64, f64, f64); 24] = [
-        (485.0, 324.96, 1934.136), (203.0, 337.23, 32964.467), (199.0, 342.08, 20.186),
-        (182.0, 27.85, 445267.112), (156.0, 73.14, 45036.886), (136.0, 171.52, 22518.443),
-        (77.0, 222.54, 65928.934), (74.0, 296.72, 3034.906), (70.0, 243.58, 9037.513),
-        (58.0, 119.81, 33718.147), (52.0, 297.17, 150.678), (50.0, 21.02, 2281.226),
-        (45.0, 247.54, 29929.562), (44.0, 325.15, 31555.956), (29.0, 60.93, 4443.417),
-        (18.0, 155.12, 67555.328), (17.0, 288.79, 4562.452), (16.0, 198.04, 62894.029),
-        (14.0, 199.76, 31436.921), (12.0, 95.39, 14577.848), (12.0, 287.11, 31931.756),
-        (12.0, 320.81, 34777.259), (9.0, 227.73, 1222.114), (8.0, 15.45, 16859.074),
+        (485.0, 324.96, 1934.136),
+        (203.0, 337.23, 32964.467),
+        (199.0, 342.08, 20.186),
+        (182.0, 27.85, 445267.112),
+        (156.0, 73.14, 45036.886),
+        (136.0, 171.52, 22518.443),
+        (77.0, 222.54, 65928.934),
+        (74.0, 296.72, 3034.906),
+        (70.0, 243.58, 9037.513),
+        (58.0, 119.81, 33718.147),
+        (52.0, 297.17, 150.678),
+        (50.0, 21.02, 2281.226),
+        (45.0, 247.54, 29929.562),
+        (44.0, 325.15, 31555.956),
+        (29.0, 60.93, 4443.417),
+        (18.0, 155.12, 67555.328),
+        (17.0, 288.79, 4562.452),
+        (16.0, 198.04, 62894.029),
+        (14.0, 199.76, 31436.921),
+        (12.0, 95.39, 14577.848),
+        (12.0, 287.11, 31931.756),
+        (12.0, 320.81, 34777.259),
+        (9.0, 227.73, 1222.114),
+        (8.0, 15.45, 16859.074),
     ];
-    let s: f64 = TERMS.iter().map(|(a, b, c)| a * (b + c * t).to_radians().cos()).sum();
+    let s: f64 = TERMS
+        .iter()
+        .map(|(a, b, c)| a * (b + c * t).to_radians().cos())
+        .sum();
     jde0 + (0.00001 * s) / dl
 }
 /// The epoch-day (days from 1970-01-01) of Nowruz for a Persian year.
@@ -811,9 +901,7 @@ fn persian_leap(py: i64) -> bool {
 fn persian_month_len(py: i64, m: i64) -> i64 {
     if m <= 6 {
         31
-    } else if m <= 11 {
-        30
-    } else if persian_leap(py) {
+    } else if m <= 11 || persian_leap(py) {
         30
     } else {
         29
@@ -838,9 +926,17 @@ fn from_persian(iso: IsoDate) -> (i64, i64, i64) {
     (py, month, doy - mstart + 1)
 }
 fn to_persian(py: i64, m: i64, d: i64) -> IsoDate {
-    let offset = if m <= 7 { 31 * (m - 1) } else { 30 * (m - 1) + 6 };
+    let offset = if m <= 7 {
+        31 * (m - 1)
+    } else {
+        30 * (m - 1) + 6
+    };
     let (yy, mm, dd) = civil_from_days(persian_new_year(py) + offset + (d - 1));
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 
 // ===== Astronomy (from scratch) for the Chinese/Dangi lunisolar calendars ======================
@@ -863,13 +959,55 @@ fn solar_longitude(ed: f64) -> f64 {
         10., 10.,
     ];
     const MULT: [f64; 49] = [
-        0.9287892, 35999.1376958, 35999.4089666, 35998.7287385, 71998.20261, 71998.4403,
-        36000.35726, 71997.4812, 32964.4678, -19.4410, 445267.1117, 45036.8840, 3.1008,
-        22518.4434, -19.9739, 65928.9345, 9038.0293, 3034.7684, 33718.148, 3034.448, -2280.773,
-        29929.992, 31556.493, 149.588, 9037.750, 107997.405, -4444.176, 151.771, 67555.316,
-        31556.080, -4561.540, 107996.706, 1221.655, 62894.167, 31437.369, 14578.298, -31931.757,
-        34777.243, 1221.999, 62894.511, -4442.039, 107997.909, 119.066, 16859.071, -4.578,
-        26895.292, -39.127, 12297.536, 90073.778,
+        0.9287892,
+        35999.1376958,
+        35999.4089666,
+        35998.7287385,
+        71998.20261,
+        71998.4403,
+        36000.35726,
+        71997.4812,
+        32964.4678,
+        -19.4410,
+        445267.1117,
+        45036.8840,
+        3.1008,
+        22518.4434,
+        -19.9739,
+        65928.9345,
+        9038.0293,
+        3034.7684,
+        33718.148,
+        3034.448,
+        -2280.773,
+        29929.992,
+        31556.493,
+        149.588,
+        9037.750,
+        107997.405,
+        -4444.176,
+        151.771,
+        67555.316,
+        31556.080,
+        -4561.540,
+        107996.706,
+        1221.655,
+        62894.167,
+        31437.369,
+        14578.298,
+        -31931.757,
+        34777.243,
+        1221.999,
+        62894.511,
+        -4442.039,
+        107997.909,
+        119.066,
+        16859.071,
+        -4.578,
+        26895.292,
+        -39.127,
+        12297.536,
+        90073.778,
     ];
     const ADD: [f64; 49] = [
         270.54861, 340.19128, 63.91854, 331.26220, 317.843, 86.631, 240.052, 310.26, 247.23,
@@ -893,8 +1031,8 @@ fn solar_longitude(ed: f64) -> f64 {
 fn nth_new_moon(n: i64) -> f64 {
     let k = n as f64;
     let t = k / 1236.85;
-    let jde = 2451550.09766 + MEAN_SYNODIC_MONTH * k + 0.00015437 * t * t
-        - 0.000000150 * t.powi(3) + 0.00000000073 * t.powi(4);
+    let jde = 2451550.09766 + MEAN_SYNODIC_MONTH * k + 0.00015437 * t * t - 0.000000150 * t.powi(3)
+        + 0.00000000073 * t.powi(4);
     let e = 1.0 - 0.002516 * t - 0.0000074 * t * t;
     let m = (2.5534 + 29.10535670 * k - 0.0000014 * t * t - 0.00000011 * t.powi(3)).to_radians();
     let mp = (201.5643 + 385.81693528 * k + 0.0107582 * t * t + 0.00001238 * t.powi(3)
@@ -904,27 +1042,54 @@ fn nth_new_moon(n: i64) -> f64 {
         + 0.000000011 * t.powi(4))
     .to_radians();
     let om = (124.7746 - 1.56375588 * k + 0.0020672 * t * t + 0.00000215 * t.powi(3)).to_radians();
-    let corr = -0.40720 * mp.sin() + 0.17241 * e * m.sin() + 0.01608 * (2.0 * mp).sin()
-        + 0.01039 * (2.0 * f).sin() + 0.00739 * e * (mp - m).sin() - 0.00514 * e * (mp + m).sin()
-        + 0.00208 * e * e * (2.0 * m).sin() - 0.00111 * (mp - 2.0 * f).sin()
-        - 0.00057 * (mp + 2.0 * f).sin() + 0.00056 * e * (2.0 * mp + m).sin()
-        - 0.00042 * (3.0 * mp).sin() + 0.00042 * e * (m + 2.0 * f).sin()
-        + 0.00038 * e * (m - 2.0 * f).sin() - 0.00024 * e * (2.0 * mp - m).sin()
-        - 0.00017 * om.sin() - 0.00007 * (mp + 2.0 * m).sin() + 0.00004 * (2.0 * mp - 2.0 * f).sin()
-        + 0.00004 * (3.0 * m).sin() + 0.00003 * (mp + m - 2.0 * f).sin()
-        + 0.00003 * (2.0 * mp + 2.0 * f).sin() - 0.00003 * (mp + m + 2.0 * f).sin()
-        + 0.00003 * (mp - m + 2.0 * f).sin() - 0.00002 * (mp - m - 2.0 * f).sin()
-        - 0.00002 * (3.0 * mp + m).sin() + 0.00002 * (4.0 * mp).sin();
+    let corr = -0.40720 * mp.sin()
+        + 0.17241 * e * m.sin()
+        + 0.01608 * (2.0 * mp).sin()
+        + 0.01039 * (2.0 * f).sin()
+        + 0.00739 * e * (mp - m).sin()
+        - 0.00514 * e * (mp + m).sin()
+        + 0.00208 * e * e * (2.0 * m).sin()
+        - 0.00111 * (mp - 2.0 * f).sin()
+        - 0.00057 * (mp + 2.0 * f).sin()
+        + 0.00056 * e * (2.0 * mp + m).sin()
+        - 0.00042 * (3.0 * mp).sin()
+        + 0.00042 * e * (m + 2.0 * f).sin()
+        + 0.00038 * e * (m - 2.0 * f).sin()
+        - 0.00024 * e * (2.0 * mp - m).sin()
+        - 0.00017 * om.sin()
+        - 0.00007 * (mp + 2.0 * m).sin()
+        + 0.00004 * (2.0 * mp - 2.0 * f).sin()
+        + 0.00004 * (3.0 * m).sin()
+        + 0.00003 * (mp + m - 2.0 * f).sin()
+        + 0.00003 * (2.0 * mp + 2.0 * f).sin()
+        - 0.00003 * (mp + m + 2.0 * f).sin()
+        + 0.00003 * (mp - m + 2.0 * f).sin()
+        - 0.00002 * (mp - m - 2.0 * f).sin()
+        - 0.00002 * (3.0 * mp + m).sin()
+        + 0.00002 * (4.0 * mp).sin();
     const ADDL: [(f64, f64, f64); 14] = [
-        (0.000325, 299.77, 0.107408), (0.000165, 251.88, 0.016321), (0.000164, 251.83, 26.651886),
-        (0.000126, 349.42, 36.412478), (0.000110, 84.66, 18.206239), (0.000062, 141.74, 53.303771),
-        (0.000060, 207.14, 2.453732), (0.000056, 154.84, 7.306860), (0.000047, 34.52, 27.261239),
-        (0.000042, 207.19, 0.121824), (0.000040, 291.34, 1.844379), (0.000037, 161.72, 24.198154),
-        (0.000035, 239.56, 25.513099), (0.000023, 331.55, 3.592518),
+        (0.000325, 299.77, 0.107408),
+        (0.000165, 251.88, 0.016321),
+        (0.000164, 251.83, 26.651886),
+        (0.000126, 349.42, 36.412478),
+        (0.000110, 84.66, 18.206239),
+        (0.000062, 141.74, 53.303771),
+        (0.000060, 207.14, 2.453732),
+        (0.000056, 154.84, 7.306860),
+        (0.000047, 34.52, 27.261239),
+        (0.000042, 207.19, 0.121824),
+        (0.000040, 291.34, 1.844379),
+        (0.000037, 161.72, 24.198154),
+        (0.000035, 239.56, 25.513099),
+        (0.000023, 331.55, 3.592518),
     ];
     let mut add = 0.0;
     for (idx, (amp, c0, c1)) in ADDL.iter().enumerate() {
-        let arg = if idx == 0 { c0 + c1 * k - 0.009173 * t * t } else { c0 + c1 * k };
+        let arg = if idx == 0 {
+            c0 + c1 * k - 0.009173 * t * t
+        } else {
+            c0 + c1 * k
+        };
         add += amp * arg.to_radians().sin();
     }
     let jde_new = jde + corr + add; // dynamical time
@@ -962,7 +1127,11 @@ fn estimate_prior_solar_longitude(lambda: f64, t: f64) -> f64 {
 fn china_zone(cal: &str, gy: i64) -> f64 {
     if cal == "dangi" {
         // Korea: +8:30 before 1912, +8:00 1912-1954 & 1961-, +8:30 1954-1961 (approx per CLDR).
-        if gy < 1908 { 3809.0 / 450.0 / 24.0 } else { 9.0 / 24.0 }
+        if gy < 1908 {
+            3809.0 / 450.0 / 24.0
+        } else {
+            9.0 / 24.0
+        }
     } else if gy < 1929 {
         1397.0 / 180.0 / 24.0
     } else {
@@ -990,7 +1159,8 @@ fn china_new_moon_on_or_after(cal: &str, day: i64) -> i64 {
 }
 /// Whether the month beginning at new-moon day `m` contains no major solar term (→ a leap month).
 fn china_no_major_solar_term(cal: &str, m: i64) -> bool {
-    current_major_solar_term(cal, m) == current_major_solar_term(cal, china_new_moon_on_or_after(cal, m + 1))
+    current_major_solar_term(cal, m)
+        == current_major_solar_term(cal, china_new_moon_on_or_after(cal, m + 1))
 }
 fn china_winter_solstice_before(cal: &str, day: i64) -> i64 {
     let approx = estimate_prior_solar_longitude(270.0, midnight_china(cal, day + 1));
@@ -1039,7 +1209,11 @@ fn china_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, bool, i64) {
     let leap_year = ((next_m11 - m12) as f64 / MEAN_SYNODIC_MONTH).round() as i64 == 12;
     let m = china_new_moon_before(cal, day + 1);
     let elapsed = ((m - m12) as f64 / MEAN_SYNODIC_MONTH).round() as i64;
-    let adj = if leap_year && china_prior_leap_month(cal, m12, m) { 1 } else { 0 };
+    let adj = if leap_year && china_prior_leap_month(cal, m12, m) {
+        1
+    } else {
+        0
+    };
     let month_num = (elapsed - adj - 1).rem_euclid(12) + 1;
     let leap_month = leap_year
         && china_no_major_solar_term(cal, m)
@@ -1068,7 +1242,14 @@ fn china_month_start(cal: &str, year: i64, num: i64, leap: bool) -> Option<i64> 
     let mut m = china_new_year_of(cal, year);
     for _ in 0..14 {
         let (y, mo, d) = civil_from_days(m);
-        let f = china_fields(cal, IsoDate { year: y, month: mo, day: d });
+        let f = china_fields(
+            cal,
+            IsoDate {
+                year: y,
+                month: mo,
+                day: d,
+            },
+        );
         if f.2 == num && f.3 == leap {
             return Some(m);
         }
@@ -1090,7 +1271,11 @@ fn china_ord_start(cal: &str, year: i64, ordinal: i64) -> i64 {
 }
 fn china_ord_to_iso(cal: &str, year: i64, ordinal: i64, day: i64) -> IsoDate {
     let (y, mo, d) = civil_from_days(china_ord_start(cal, year, ordinal) + day - 1);
-    IsoDate { year: y, month: mo, day: d }
+    IsoDate {
+        year: y,
+        month: mo,
+        day: d,
+    }
 }
 fn china_ord_month_len(cal: &str, year: i64, ordinal: i64) -> i64 {
     china_month_len_at(cal, china_ord_start(cal, year, ordinal))
@@ -1157,7 +1342,13 @@ fn advance_ord(cal: &str, year: i64, ord: i64, k: i64) -> (i64, i64) {
 /// monthCode (constraining an absent leap month), then months by ordinal position, then regulate the
 /// day, then weeks/days. `err` is `Some` for reject-overflow (returns a RangeError), `None` for
 /// constrain (never errors).
-fn leap_cal_add(i: Option<&Interp>, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> Result<IsoDate, Value> {
+fn leap_cal_add(
+    i: Option<&Interp>,
+    cal: &str,
+    d: IsoDate,
+    dur: IsoDuration,
+    sign: i64,
+) -> Result<IsoDate, Value> {
     let f = cal_fields(cal, d);
     let (year, day_of) = (f.0, f.2);
     let code = cal_month_code(cal, d);
@@ -1179,7 +1370,11 @@ fn leap_cal_add(i: Option<&Interp>, cal: &str, d: IsoDate, dur: IsoDuration, sig
     let iso0 = cal_to_iso(cal, fy, fm, dd);
     let z = epoch_days(iso0) + sign * (dur.weeks * 7 + dur.days);
     let (y, m, day) = civil_from_days(z);
-    Ok(IsoDate { year: y, month: m, day })
+    Ok(IsoDate {
+        year: y,
+        month: m,
+        day,
+    })
 }
 /// The Chinese monthCode for a (month-number, leap?): "M04" or "M04L".
 fn china_month_code(num: i64, leap: bool) -> String {
@@ -1241,9 +1436,26 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
 }
 /// CalendarDateAdd for a month-structure calendar: add years/months in the calendar (clamping the
 /// day to the target month under `constrain`, or rejecting when it overflows), then weeks/days.
-fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+fn cal_add(
+    i: &Interp,
+    cal: &str,
+    d: IsoDate,
+    dur: IsoDuration,
+    sign: i64,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     if matches!(cal, "hebrew" | "chinese" | "dangi") {
-        return leap_cal_add(if ovf == Overflow::Reject { Some(i) } else { None }, cal, d, dur, sign);
+        return leap_cal_add(
+            if ovf == Overflow::Reject {
+                Some(i)
+            } else {
+                None
+            },
+            cal,
+            d,
+            dur,
+            sign,
+        );
     }
     if ovf == Overflow::Reject {
         let f = cal_fields(cal, d);
@@ -1285,14 +1497,22 @@ fn cal_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
     let iso0 = cal_to_iso(cal, ny, nm, cd.min(cal_month_len(cal, ny, nm)));
     let z = epoch_days(iso0) + sign * (dur.weeks * 7 + dur.days);
     let (yy, mm, dd) = civil_from_days(z);
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 
 // Indian national (Saka) calendar: a solar calendar whose year begins on Chaitra 1 (Gregorian
 // Mar 22, or Mar 21 in a Gregorian leap year). Saka year = Gregorian - 78.
 fn indian_month_len(m: i64, leap: bool) -> i64 {
     if m == 1 {
-        if leap { 31 } else { 30 }
+        if leap {
+            31
+        } else {
+            30
+        }
     } else if m <= 6 {
         31
     } else {
@@ -1327,10 +1547,18 @@ fn to_indian(s: i64, m: i64, d: i64) -> IsoDate {
     let chaitra1 = days_from_civil(gy, 3, if leap { 21 } else { 22 });
     let doy: i64 = (1..m).map(|mm| indian_month_len(mm, leap)).sum::<i64>() + (d - 1);
     let (yy, mm, dd) = civil_from_days(chaitra1 + doy);
-    IsoDate { year: yy, month: mm, day: dd }
+    IsoDate {
+        year: yy,
+        month: mm,
+        day: dd,
+    }
 }
 fn epoch_13(cal: &str) -> i64 {
-    if cal == "coptic" { COPTIC_EPOCH } else { ETHIOPIC_EPOCH }
+    if cal == "coptic" {
+        COPTIC_EPOCH
+    } else {
+        ETHIOPIC_EPOCH
+    }
 }
 
 /// A 13-month (12×30 days + a 5/6-day epagomenal month) calendar date from an ISO date: returns
@@ -1347,7 +1575,11 @@ fn from_13month(iso: IsoDate, epoch: i64) -> (i64, i64, i64) {
 fn to_13month(year: i64, month: i64, day: i64, epoch: i64) -> IsoDate {
     let ed = epoch + 365 * (year - 1) + year.div_euclid(4) + 30 * (month - 1) + (day - 1);
     let (y, m, d) = civil_from_days(ed);
-    IsoDate { year: y, month: m, day: d }
+    IsoDate {
+        year: y,
+        month: m,
+        day: d,
+    }
 }
 
 /// Full calendar fields for an ISO date: (year, month, day, daysInMonth, monthsInYear, dayOfYear,
@@ -1415,7 +1647,7 @@ pub fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64
             iso.day as i64,
             days_in_month(iso.year, iso.month) as i64,
             12,
-            iso_day_of_year(iso) as i64,
+            iso_day_of_year(iso),
             if is_leap(iso.year) { 366 } else { 365 },
             is_leap(iso.year),
         )
@@ -1480,20 +1712,39 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew" || cal == "persian"
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc")
+        || is_13month(cal)
+        || is_islamic(cal)
+        || cal == "indian"
+        || cal == "hebrew"
+        || cal == "persian"
 }
 
 /// Whether `era` (already lowercased) is an era this calendar defines.
 fn valid_era(cal: &str, era: &str) -> bool {
     match cal {
-        "gregory" => matches!(era, "ce" | "bce" | "gregory" | "gregory-inverse" | "ad" | "bc"),
-        "japanese" => matches!(
+        "gregory" => matches!(
             era,
             "ce" | "bce" | "gregory" | "gregory-inverse" | "ad" | "bc"
-                | "reiwa" | "heisei" | "showa" | "taisho" | "meiji"
+        ),
+        "japanese" => matches!(
+            era,
+            "ce" | "bce"
+                | "gregory"
+                | "gregory-inverse"
+                | "ad"
+                | "bc"
+                | "reiwa"
+                | "heisei"
+                | "showa"
+                | "taisho"
+                | "meiji"
         ),
         "buddhist" => era == "be",
-        "roc" => matches!(era, "roc" | "roc-inverse" | "broc" | "minguo" | "before-roc"),
+        "roc" => matches!(
+            era,
+            "roc" | "roc-inverse" | "broc" | "minguo" | "before-roc"
+        ),
         "coptic" => era == "am",
         "ethiopic" => matches!(era, "am" | "aa" | "mundi" | "incar"),
         "ethioaa" => matches!(era, "aa" | "mundi"),
@@ -1506,7 +1757,12 @@ fn valid_era(cal: &str, era: &str) -> bool {
 }
 
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
-fn thirteen_month_year(cal: &str, year: Option<i64>, era: &Option<String>, era_year: Option<i64>) -> Option<i64> {
+fn thirteen_month_year(
+    cal: &str,
+    year: Option<i64>,
+    era: &Option<String>,
+    era_year: Option<i64>,
+) -> Option<i64> {
     // For `ethioaa` the year/`aa` era counts amete-alem (= amete-mihret + 5500).
     let offset = if cal == "ethioaa" { 5500 } else { 0 };
     if let Some(y) = year {
@@ -1630,7 +1886,10 @@ fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Val
     // A present smallestUnit must be a time unit; the roundingMode option is validated even when the
     // default is used (a non-string / out-of-range value is a RangeError).
     if !smallest.is_empty()
-        && !matches!(smallest, "minute" | "second" | "millisecond" | "microsecond" | "nanosecond")
+        && !matches!(
+            smallest,
+            "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+        )
     {
         return Err(i.make_error("RangeError", "smallestUnit must be a time unit"));
     }
@@ -1671,7 +1930,15 @@ fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Val
 }
 /// The `[u-ca=iso8601]` calendar annotation per the `calendarName` option.
 fn cal_suffix(i: &mut Interp, opts: &Value, cal: &str) -> Result<String, Value> {
-    match opt_enum(i, opts, "calendarName", &["auto", "always", "never", "critical"], "auto")?.as_str() {
+    match opt_enum(
+        i,
+        opts,
+        "calendarName",
+        &["auto", "always", "never", "critical"],
+        "auto",
+    )?
+    .as_str()
+    {
         "never" => Ok(String::new()),
         "always" => Ok(format!("[u-ca={cal}]")),
         "critical" => Ok(format!("[!u-ca={cal}]")),
@@ -2265,22 +2532,39 @@ pub fn install(it: &mut Interp) {
     // Duration keeps its plain toString for toLocaleString (Intl.DurationFormat is separate); the
     // date/time types format through Intl.DateTimeFormat, which understands Temporal receivers.
     for name in ["Duration"] {
-        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
+        if let Some(proto) = it
+            .extra_protos
+            .get(format!("Temporal.{name}").as_str())
+            .cloned()
+        {
             let ts = proto.borrow().props.get("toString").cloned();
             if let Some(p) = ts {
                 proto.borrow_mut().props.insert("toLocaleString", p);
             }
         }
     }
-    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant"] {
-        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
+    for name in [
+        "PlainDate",
+        "PlainTime",
+        "PlainDateTime",
+        "PlainYearMonth",
+        "PlainMonthDay",
+        "Instant",
+    ] {
+        if let Some(proto) = it
+            .extra_protos
+            .get(format!("Temporal.{name}").as_str())
+            .cloned()
+        {
             it.def_method(&proto, "toLocaleString", 0, |i, this, a| {
                 let locales = a.first().cloned().unwrap_or(Value::Undefined);
                 let options = a.get(1).cloned().unwrap_or(Value::Undefined);
                 // The receiver's `required` (date/time/any) rejects a mismatched dateStyle/timeStyle,
                 // which the generic DateTimeFormat.format path (required=any) would otherwise allow.
                 let required = match get(i, &this) {
-                    Some(Temporal::Date(_)) | Some(Temporal::YearMonth(_)) | Some(Temporal::MonthDay(_)) => "date",
+                    Some(Temporal::Date(_))
+                    | Some(Temporal::YearMonth(_))
+                    | Some(Temporal::MonthDay(_)) => "date",
                     Some(Temporal::Time(_)) => "time",
                     _ => "any",
                 };
@@ -2288,13 +2572,21 @@ pub fn install(it: &mut Interp) {
                     let ds = i.get_member(&options, "dateStyle").map_err(unab)?;
                     let ts = i.get_member(&options, "timeStyle").map_err(unab)?;
                     if required == "date" && !matches!(ts, Value::Undefined) {
-                        return Err(i.make_error("TypeError", "timeStyle cannot format a date-only Temporal value"));
+                        return Err(i.make_error(
+                            "TypeError",
+                            "timeStyle cannot format a date-only Temporal value",
+                        ));
                     }
                     if required == "time" && !matches!(ds, Value::Undefined) {
-                        return Err(i.make_error("TypeError", "dateStyle cannot format a time-only Temporal value"));
+                        return Err(i.make_error(
+                            "TypeError",
+                            "dateStyle cannot format a time-only Temporal value",
+                        ));
                     }
                 }
-                let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
+                let intl = i
+                    .get_member(&Value::Obj(i.global.clone()), "Intl")
+                    .map_err(unab)?;
                 let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
                 let dtf = i.construct(ctor, &[locales, options]).map_err(unab)?;
                 let fmt = i.get_member(&dtf, "format").map_err(unab)?;
@@ -2327,14 +2619,16 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
     let ptr = Rc::as_ptr(&obj) as usize;
     let (epoch_ns, tz) = match i.temporal.get(&ptr) {
         Some(Temporal::Zoned { epoch_ns, tz, .. }) => (*epoch_ns, tz.clone()),
-        _ => {
-            return Err(i.make_error(
-                "TypeError",
-                "Temporal.ZonedDateTime.prototype.toLocaleString called on an incompatible receiver",
-            ))
-        }
+        _ => return Err(i.make_error(
+            "TypeError",
+            "Temporal.ZonedDateTime.prototype.toLocaleString called on an incompatible receiver",
+        )),
     };
-    let zcal = i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string());
+    let zcal = i
+        .temporal_cal
+        .get(&ptr)
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "iso8601".to_string());
 
     let locales = a.first().cloned().unwrap_or(Value::Undefined);
     let user_opts = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2349,7 +2643,10 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
     let mut any_comp = false;
     if let Some(uo) = &user_obj {
         // A timeZone option is disallowed (the instance's zone always wins).
-        if !matches!(i.get_member(&user_opts, "timeZone").map_err(unab)?, Value::Undefined) {
+        if !matches!(
+            i.get_member(&user_opts, "timeZone").map_err(unab)?,
+            Value::Undefined
+        ) {
             return Err(i.make_error(
                 "TypeError",
                 "the timeZone option is not allowed for Temporal.ZonedDateTime.prototype.toLocaleString",
@@ -2357,8 +2654,19 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
         }
         opts.borrow_mut().proto = Some(uo.clone());
         for k in [
-            "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second",
-            "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle",
+            "weekday",
+            "era",
+            "year",
+            "month",
+            "day",
+            "dayPeriod",
+            "hour",
+            "minute",
+            "second",
+            "fractionalSecondDigits",
+            "timeZoneName",
+            "dateStyle",
+            "timeStyle",
         ] {
             if !matches!(i.get_member(&user_opts, k).map_err(unab)?, Value::Undefined) {
                 any_comp = true;
@@ -2369,8 +2677,12 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
     // No components requested: default to a full date+time plus the zone name.
     if !any_comp {
         for (k, v) in [
-            ("year", "numeric"), ("month", "numeric"), ("day", "numeric"),
-            ("hour", "numeric"), ("minute", "numeric"), ("second", "numeric"),
+            ("year", "numeric"),
+            ("month", "numeric"),
+            ("day", "numeric"),
+            ("hour", "numeric"),
+            ("minute", "numeric"),
+            ("second", "numeric"),
             ("timeZoneName", "short"),
         ] {
             set_data(&opts, k, Value::str(v));
@@ -2378,12 +2690,18 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
     }
     // Intl.DateTimeFormat canonicalizes the zone (Asia/Calcutta -> Asia/Kolkata); do it here so the
     // formatted zone name reflects the canonical identifier.
-    let tz_canon = crate::tz::canonicalize(&tz).map(|s| s.to_string()).unwrap_or_else(|| tz.to_string());
+    let tz_canon = crate::tz::canonicalize(&tz)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| tz.to_string());
     set_data(&opts, "timeZone", Value::from_string(tz_canon));
 
-    let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
+    let intl = i
+        .get_member(&Value::Obj(i.global.clone()), "Intl")
+        .map_err(unab)?;
     let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
-    let dtf = i.construct(ctor, &[locales, Value::Obj(opts)]).map_err(unab)?;
+    let dtf = i
+        .construct(ctor, &[locales, Value::Obj(opts)])
+        .map_err(unab)?;
 
     // A non-ISO instance calendar must match the formatter's resolved calendar.
     let ropts_fn = i.get_member(&dtf, "resolvedOptions").map_err(unab)?;
@@ -2450,11 +2768,17 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "era", |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .0
+            .map(Value::str)
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .1
+            .map(|e| Value::Num(e as f64))
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         let d = as_date(i, &t)?;
@@ -2468,7 +2792,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
-    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    def_getter(it, &proto, "calendarId", |i, t, _| {
+        Ok(Value::from_string(cal_of(i, &t).to_string()))
+    });
     def_getter(it, &proto, "dayOfWeek", |i, t, _| {
         Ok(Value::Num(iso_day_of_week(as_date(i, &t)?) as f64))
     });
@@ -2580,7 +2906,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(make(
             i,
             "Temporal.Duration",
-            Temporal::Duration(diff_date_rounded(&cal, d, o, &largest, &smallest, incr, &mode)),
+            Temporal::Duration(diff_date_rounded(
+                &cal, d, o, &largest, &smallest, incr, &mode,
+            )),
         ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
@@ -2590,7 +2918,11 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         // `since` mirrors `until` with a negated rounding mode, then negates the result.
         let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
         let dur = diff_date_rounded(&cal, d, o, &largest, &smallest, incr, negate_mode(&mode));
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(dur)),
+        ))
     });
     it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -2605,15 +2937,30 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             },
             v => to_time(i, &v, &Value::Undefined)?,
         };
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, time)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(d, time),
+        ))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(d)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(d),
+        ))
     });
     it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(make_like(i, &t, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainMonthDay",
+            Temporal::MonthDay(d),
+        ))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -2647,7 +2994,16 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         };
         let local = dt_ns(d, time);
         let offset = offset_for_local(&tz, local);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: local - offset as i128,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
 
     let ctor = add_ctor(it, ns, "PlainDate", 3, proto, |i, _t, a| {
@@ -2696,7 +3052,13 @@ fn round_opts(arg0: &Value) -> (Value, Option<String>) {
 }
 
 /// GetOption(string) validated against an explicit value list (RangeError on a value not in it).
-fn opt_enum(i: &mut Interp, opts: &Value, key: &str, values: &[&str], default: &str) -> Result<String, Value> {
+fn opt_enum(
+    i: &mut Interp,
+    opts: &Value,
+    key: &str,
+    values: &[&str],
+    default: &str,
+) -> Result<String, Value> {
     let s = opt_str(i, opts, key, default)?;
     if !values.contains(&s.as_str()) {
         return Err(i.make_error("RangeError", format!("invalid {key}: {s}")));
@@ -3081,7 +3443,11 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
             // the result (b - a). A month only counts if `a`'s day fits in the target month: reaching
             // b's month solely by day-clamping (e.g. Jan 29 → Feb 28) does NOT count as a whole month.
             let sign: i64 = if c < 0 { 1 } else { -1 };
-            let mut years = if largest == "year" { b.year - a.year } else { 0 };
+            let mut years = if largest == "year" {
+                b.year - a.year
+            } else {
+                0
+            };
             let mut months = if largest == "year" {
                 b.month as i64 - a.month as i64
             } else {
@@ -3090,7 +3456,13 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
             loop {
                 let mid = constrain_add_ym(a, years * 12 + months);
                 let cc = cmp_date(mid, b);
-                let mid_sign = if cc < 0 { 1 } else if cc > 0 { -1 } else { 0 };
+                let mid_sign = if cc < 0 {
+                    1
+                } else if cc > 0 {
+                    -1
+                } else {
+                    0
+                };
                 let clamped = a.day as i64 > days_in_month(mid.year, mid.month) as i64;
                 if mid_sign == -sign || (mid_sign == 0 && clamped) {
                     months -= sign; // overshot, or landed on b only via clamping
@@ -3142,10 +3514,18 @@ fn round_up_magnitude(mode: &str, fraction: f64, positive: bool, low_even: bool)
         "halfExpand" => fraction >= 0.5,
         "halfTrunc" => fraction > 0.5,
         "halfCeil" => {
-            if positive { fraction >= 0.5 } else { fraction > 0.5 }
+            if positive {
+                fraction >= 0.5
+            } else {
+                fraction > 0.5
+            }
         }
         "halfFloor" => {
-            if positive { fraction > 0.5 } else { fraction >= 0.5 }
+            if positive {
+                fraction > 0.5
+            } else {
+                fraction >= 0.5
+            }
         }
         "halfEven" => fraction > 0.5 || (fraction == 0.5 && !low_even),
         _ => false,
@@ -3172,11 +3552,26 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     }
     let dir = if sign < 0 { 1 } else { -1 };
     let addc = |y: i64, m: i64| {
-        cal_add_c(cal, a, IsoDuration { years: y, months: m, ..Default::default() }, dir)
+        cal_add_c(
+            cal,
+            a,
+            IsoDuration {
+                years: y,
+                months: m,
+                ..Default::default()
+            },
+            dir,
+        )
     };
     let a_dom = cal_fields(cal, a).2;
     let a_code = cal_month_code(cal, a);
-    let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
+    let passed = |x: IsoDate| {
+        if dir > 0 {
+            cmp_date(x, b) > 0
+        } else {
+            cmp_date(x, b) < 0
+        }
+    };
     // A whole month reached exactly at `b` only because `a`'s day was clamped to a shorter target
     // month is not complete when moving *forward* (backward it counts, per ICU4X).
     let clamped_at = |m: IsoDate| dir > 0 && cmp_date(m, b) == 0 && cal_fields(cal, m).2 < a_dom;
@@ -3220,10 +3615,23 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     }
     let mid = addc(years, months);
     let days = epoch_days(b) - epoch_days(mid);
-    IsoDuration { years: dir * years, months: dir * months, days, ..Default::default() }
+    IsoDuration {
+        years: dir * years,
+        months: dir * months,
+        days,
+        ..Default::default()
+    }
 }
 
-fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
+fn diff_date_rounded(
+    cal: &str,
+    a: IsoDate,
+    b: IsoDate,
+    largest: &str,
+    smallest: &str,
+    increment: i64,
+    mode: &str,
+) -> IsoDuration {
     let base = diff_date_cal(cal, a, b, largest);
     let smallest = smallest.strip_suffix('s').unwrap_or(smallest);
     // No rounding needed (increment 1 and nothing finer than smallestUnit is non-zero): return the
@@ -3250,21 +3658,43 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
 
     // The candidate durations: truncated at `smallest`, and one increment above.
     let (low, field, base_units) = match smallest {
-        "year" => (IsoDuration { years: mag.years, ..Default::default() }, 0u8, mag.years),
+        "year" => (
+            IsoDuration {
+                years: mag.years,
+                ..Default::default()
+            },
+            0u8,
+            mag.years,
+        ),
         "month" => (
-            IsoDuration { years: mag.years, months: mag.months, ..Default::default() },
+            IsoDuration {
+                years: mag.years,
+                months: mag.months,
+                ..Default::default()
+            },
             1,
             mag.months,
         ),
         "week" => (
-            IsoDuration { years: mag.years, months: mag.months, weeks: mag.weeks, ..Default::default() },
+            IsoDuration {
+                years: mag.years,
+                months: mag.months,
+                weeks: mag.weeks,
+                ..Default::default()
+            },
             2,
             mag.weeks,
         ),
         _ => {
             let d = mag.days - mag.days.rem_euclid(increment);
             (
-                IsoDuration { years: mag.years, months: mag.months, weeks: mag.weeks, days: d, ..Default::default() },
+                IsoDuration {
+                    years: mag.years,
+                    months: mag.months,
+                    weeks: mag.weeks,
+                    days: d,
+                    ..Default::default()
+                },
                 3,
                 d / increment,
             )
@@ -3290,7 +3720,11 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     let dh = epoch_days(cadd(high));
     let dt = epoch_days(hi);
     let denom = (dh - dl) as f64;
-    let fraction = if denom == 0.0 { 0.0 } else { (dt - dl) as f64 / denom };
+    let fraction = if denom == 0.0 {
+        0.0
+    } else {
+        (dt - dl) as f64 / denom
+    };
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
     // Without a round-up the truncated units are exactly DifferenceDate's clamp-backoff result
     // (already balanced to `largest`), so return them directly — re-balancing greedily would wrongly
@@ -3301,7 +3735,11 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     } else {
         low
     };
-    if positive { result } else { neg_duration(result) }
+    if positive {
+        result
+    } else {
+        neg_duration(result)
+    }
 }
 
 /// A date difference (`a` → `b`, either direction) that greedily maximizes the larger units: a month
@@ -3316,7 +3754,13 @@ fn diff_date_greedy(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDura
         return out;
     }
     let dir = if c < 0 { 1 } else { -1 };
-    let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
+    let passed = |x: IsoDate| {
+        if dir > 0 {
+            cmp_date(x, b) > 0
+        } else {
+            cmp_date(x, b) < 0
+        }
+    };
     match largest {
         "week" => {
             let t = epoch_days(b) - epoch_days(a);
@@ -3325,7 +3769,11 @@ fn diff_date_greedy(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDura
         }
         "day" => out.days = epoch_days(b) - epoch_days(a),
         _ if is_month_structure(cal) => {
-            let ym = |y: i64, m: i64| IsoDuration { years: y, months: m, ..Default::default() };
+            let ym = |y: i64, m: i64| IsoDuration {
+                years: y,
+                months: m,
+                ..Default::default()
+            };
             let mut years = 0i64;
             if largest == "year" {
                 while !passed(cal_add_c(cal, a, ym(years + 1, 0), dir)) {
@@ -3379,7 +3827,14 @@ fn add_dt_dur(d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
     let carry = total.div_euclid(86_400_000_000_000);
     let rem = total.rem_euclid(86_400_000_000_000);
     let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
-    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+    (
+        IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        },
+        ns_to_time(rem),
+    )
 }
 
 /// Like `add_dt_dur`, but adds the year/month/day part with calendar `cal`'s own arithmetic (for a
@@ -3406,20 +3861,45 @@ fn add_dt_dur_cal(cal: &str, d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoD
     let carry = total.div_euclid(86_400_000_000_000);
     let rem = total.rem_euclid(86_400_000_000_000);
     let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
-    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+    (
+        IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        },
+        ns_to_time(rem),
+    )
 }
 
 /// Zero every duration field strictly smaller than the unit of rank `srank` (year=9 … ns=0).
 fn zero_below(m: &mut IsoDuration, srank: i32) {
-    if srank > 0 { m.ns = 0; }
-    if srank > 1 { m.us = 0; }
-    if srank > 2 { m.ms = 0; }
-    if srank > 3 { m.seconds = 0; }
-    if srank > 4 { m.minutes = 0; }
-    if srank > 5 { m.hours = 0; }
-    if srank > 6 { m.days = 0; }
-    if srank > 7 { m.weeks = 0; }
-    if srank > 8 { m.months = 0; }
+    if srank > 0 {
+        m.ns = 0;
+    }
+    if srank > 1 {
+        m.us = 0;
+    }
+    if srank > 2 {
+        m.ms = 0;
+    }
+    if srank > 3 {
+        m.seconds = 0;
+    }
+    if srank > 4 {
+        m.minutes = 0;
+    }
+    if srank > 5 {
+        m.hours = 0;
+    }
+    if srank > 6 {
+        m.days = 0;
+    }
+    if srank > 7 {
+        m.weeks = 0;
+    }
+    if srank > 8 {
+        m.months = 0;
+    }
 }
 /// The value of the duration field named by `unit`.
 fn dur_field_val(m: &IsoDuration, unit: &str) -> i64 {
@@ -3458,8 +3938,14 @@ fn dur_field_add(m: &mut IsoDuration, unit: &str, delta: i64) {
 #[allow(clippy::too_many_arguments)]
 fn diff_datetime_rounded(
     cal: &str,
-    d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime,
-    largest: &str, smallest: &str, increment: i64, mode: &str,
+    d1: IsoDate,
+    t1: IsoTime,
+    d2: IsoDate,
+    t2: IsoTime,
+    largest: &str,
+    smallest: &str,
+    increment: i64,
+    mode: &str,
 ) -> IsoDuration {
     let smallest = sing(smallest);
     let is_cal = matches!(largest, "year" | "month" | "week");
@@ -3478,7 +3964,11 @@ fn diff_datetime_rounded(
         return base;
     }
     let positive = a_ns < b_ns;
-    let (lo_d, lo_t, hi_d, hi_t) = if positive { (d1, t1, d2, t2) } else { (d2, t2, d1, t1) };
+    let (lo_d, lo_t, hi_d, hi_t) = if positive {
+        (d1, t1, d2, t2)
+    } else {
+        (d2, t2, d1, t1)
+    };
     let mag = if positive { base } else { neg_duration(base) };
     let mut low = mag;
     zero_below(&mut low, srank);
@@ -3495,7 +3985,11 @@ fn diff_datetime_rounded(
     let high_ns = dt_ns(hd, ht);
     let target_ns = dt_ns(hi_d, hi_t);
     let denom = (high_ns - low_ns) as f64;
-    let fraction = if denom == 0.0 { 0.0 } else { (target_ns - low_ns) as f64 / denom };
+    let fraction = if denom == 0.0 {
+        0.0
+    } else {
+        (target_ns - low_ns) as f64 / denom
+    };
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
     let chosen = if up { high } else { low };
     let (rd, rt) = add_dt_dur_cal(cal, lo_d, lo_t, &chosen);
@@ -3504,7 +3998,11 @@ fn diff_datetime_rounded(
     } else {
         balance_ns(dt_ns(rd, rt) - dt_ns(lo_d, lo_t), largest)
     };
-    if positive { result } else { neg_duration(result) }
+    if positive {
+        result
+    } else {
+        neg_duration(result)
+    }
 }
 
 /// Read `until`/`since` options for a PlainDateTime difference: (largest, smallest, increment, mode).
@@ -3535,7 +4033,14 @@ fn diff_zoned(
     let sign = if e1 <= e2 { 1i64 } else { -1 };
     let add_days_ns = |days: i64| -> i128 {
         let (y, mo, da) = civil_from_days(epoch_days(d1) + days);
-        let local = dt_ns(IsoDate { year: y, month: mo, day: da }, t1);
+        let local = dt_ns(
+            IsoDate {
+                year: y,
+                month: mo,
+                day: da,
+            },
+            t1,
+        );
         local - offset_for_local(tz, local) as i128
     };
     let mut days = ((e2 - e1) / 86_400_000_000_000) as i64;
@@ -3559,7 +4064,16 @@ fn diff_zoned(
     }
     let mid_ns = add_days_ns(days);
     let (my, mmo, mda) = civil_from_days(epoch_days(d1) + days);
-    let mut out = diff_date_cal(cal, d1, IsoDate { year: my, month: mmo, day: mda }, largest);
+    let mut out = diff_date_cal(
+        cal,
+        d1,
+        IsoDate {
+            year: my,
+            month: mmo,
+            day: mda,
+        },
+        largest,
+    );
     let tb = balance_ns(e2 - mid_ns, "hour");
     out.hours = tb.hours;
     out.minutes = tb.minutes;
@@ -3570,20 +4084,27 @@ fn diff_zoned(
     out
 }
 
-fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+fn read_datetime_diff(
+    i: &mut Interp,
+    opts: &Value,
+) -> Result<(String, String, i64, String), Value> {
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
     check_mode(i, &mode)?;
     let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
-    let srank = unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
+    let srank =
+        unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
     let lrank = if largest_raw == "auto" {
         srank.max(6)
     } else {
         unit_rank(&largest_raw).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
     };
     if lrank < srank {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     check_increment(i, &smallest, incr)?;
     Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
@@ -3593,15 +4114,30 @@ fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i
 /// PlainYearMonth stores.
 fn ym_ref_of(cal: &str, iso: IsoDate) -> IsoDate {
     if cal == "iso8601" {
-        return IsoDate { year: iso.year, month: iso.month, day: 1 };
+        return IsoDate {
+            year: iso.year,
+            month: iso.month,
+            day: 1,
+        };
     }
     let day_of = cal_fields(cal, iso).2;
     let (y, m, d) = civil_from_days(epoch_days(iso) - (day_of - 1));
-    IsoDate { year: y, month: m, day: d }
+    IsoDate {
+        year: y,
+        month: m,
+        day: d,
+    }
 }
 /// Add/subtract a duration to a PlainYearMonth in its calendar: anchored at the month's first day
 /// (or last day when moving backwards), then reduced back to the resulting year-month.
-fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+fn ym_add(
+    i: &mut Interp,
+    cal: &str,
+    d: IsoDate,
+    dur: IsoDuration,
+    sign: i64,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     // Anchor at day 1: it fits every month, so the synthetic day never triggers a day-overflow reject,
     // while a `reject` overflow still fires for a leap month absent in the target year (an independent
     // check in the calendar add).
@@ -3618,7 +4154,7 @@ fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String)
     }
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let largest = if largest_raw == "auto" {
-        if smallest == "year" { "year" } else { "year" }.to_string()
+        "year".to_string()
     } else {
         if !matches!(largest_raw.as_str(), "year" | "month") {
             return Err(i.make_error("RangeError", "largestUnit must be year or month"));
@@ -3627,7 +4163,10 @@ fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String)
     };
     // largest (year=9) must not be narrower than smallest.
     if largest == "month" && smallest == "year" {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
     check_mode(i, &mode)?;
@@ -3654,7 +4193,10 @@ fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, 
             .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
     };
     if lrank < srank {
-        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+        return Err(i.make_error(
+            "RangeError",
+            "largestUnit cannot be smaller than smallestUnit",
+        ));
     }
     check_increment(i, &smallest, incr)?;
     Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
@@ -3662,7 +4204,14 @@ fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, 
 
 /// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
 /// date part and balancing the remaining time-of-day, with a borrow when the end time is earlier.
-fn diff_datetime(cal: &str, d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &str) -> IsoDuration {
+fn diff_datetime(
+    cal: &str,
+    d1: IsoDate,
+    t1: IsoTime,
+    d2: IsoDate,
+    t2: IsoTime,
+    largest: &str,
+) -> IsoDuration {
     let a = dt_ns(d1, t1);
     let b = dt_ns(d2, t2);
     if a == b {
@@ -3677,11 +4226,19 @@ fn diff_datetime(cal: &str, d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, 
     if sign > 0 && tdiff < 0 {
         tdiff += day_ns;
         let (y, m, da) = civil_from_days(epoch_days(d2) - 1);
-        end_date = IsoDate { year: y, month: m, day: da };
+        end_date = IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        };
     } else if sign < 0 && tdiff > 0 {
         tdiff -= day_ns;
         let (y, m, da) = civil_from_days(epoch_days(d2) + 1);
-        end_date = IsoDate { year: y, month: m, day: da };
+        end_date = IsoDate {
+            year: y,
+            month: m,
+            day: da,
+        };
     }
     let mut out = diff_date_cal(cal, d1, end_date, largest); // signed (anchored at d1)
     let time = balance_ns(tdiff as i128, "hour");
@@ -3827,7 +4384,12 @@ fn clamp_or(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Result<
 /// Read raw (year, month, day) from a property bag, resolving `era`/`eraYear` to an ISO year for
 /// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`). Out-of-range calendar fields
 /// are clamped under `overflow: constrain` and rejected under `overflow: reject`.
-fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Result<(i64, i64, i64), Value> {
+fn read_date_raw_cal(
+    i: &mut Interp,
+    v: &Value,
+    cal: &str,
+    ovf: Overflow,
+) -> Result<(i64, i64, i64), Value> {
     // PrepareTemporalFields reads (and coerces) fields in alphabetical order, calling each field's
     // valueOf/toString as it is read: day, [era, eraYear], month, monthCode, year. Required-field
     // errors are only raised after every field has been read.
@@ -3878,7 +4440,10 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
     // TypeErrors of the resolution below).
     if let Some(e) = &era {
         if !valid_era(cal, e) {
-            return Err(i.make_error("RangeError", format!("{e} is not a valid era in calendar {cal}")));
+            return Err(i.make_error(
+                "RangeError",
+                format!("{e} is not a valid era in calendar {cal}"),
+            ));
         }
     }
     // A missing day is a TypeError, raised before the month/monthCode-consistency RangeError below.
@@ -3902,11 +4467,15 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
                 // absent code is simply invalid.
                 None if code == "M05L" => {
                     if ovf == Overflow::Reject {
-                        return Err(i.make_error("RangeError", "leap month does not exist in this year"));
+                        return Err(
+                            i.make_error("RangeError", "leap month does not exist in this year")
+                        );
                     }
                     hebrew_ord_from_code(hy, "M06").unwrap()
                 }
-                None => return Err(i.make_error("RangeError", "invalid monthCode for this calendar")),
+                None => {
+                    return Err(i.make_error("RangeError", "invalid monthCode for this calendar"))
+                }
             };
             if let Some(m) = month {
                 if m != o {
@@ -3938,7 +4507,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
                 return Err(i.make_error("RangeError", "invalid monthCode"));
             }
             let num: i64 = digits.parse().unwrap();
-            if num < 1 || num > 12 {
+            if !(1..=12).contains(&num) {
                 return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
             }
             let s = match china_month_start(cal, cy, num, leap) {
@@ -3946,8 +4515,12 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
                 // A requested leap month that does not occur this year constrains to the plain
                 // month (or is rejected under `overflow: reject`).
                 None if leap && ovf != Overflow::Reject => china_month_start(cal, cy, num, false)
-                    .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?,
-                None => return Err(i.make_error("RangeError", "invalid monthCode for this calendar")),
+                    .ok_or_else(|| {
+                    i.make_error("RangeError", "invalid monthCode for this calendar")
+                })?,
+                None => {
+                    return Err(i.make_error("RangeError", "invalid monthCode for this calendar"))
+                }
             };
             // A supplied ordinal `month` must agree with the monthCode.
             if let Some(ord) = month {
@@ -3957,14 +4530,19 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             }
             s
         } else {
-            let ord = month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?;
+            let ord =
+                month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?;
             let ord = clamp_or(i, ord, china_months_in_year(cal, cy), ovf, "month")?;
             china_ord_start(cal, cy, ord)
         };
         let dim = china_month_len_at(cal, start);
         let day = clamp_or(i, day, dim, ovf, "day")?;
         let (y, m, dd) = civil_from_days(start + day - 1);
-        let iso = IsoDate { year: y, month: m, day: dd };
+        let iso = IsoDate {
+            year: y,
+            month: m,
+            day: dd,
+        };
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
     // Reconcile month / monthCode ("M" + 2 digits + optional leap "L"; no leap month in ISO/Gregory).
@@ -4059,7 +4637,13 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
         let month = clamp_or(i, month, 12, ovf, "month")?;
-        let day = clamp_or(i, day, indian_month_len(month, is_leap(sy + 78)), ovf, "day")?;
+        let day = clamp_or(
+            i,
+            day,
+            indian_month_len(month, is_leap(sy + 78)),
+            ovf,
+            "day",
+        )?;
         let iso = to_indian(sy, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -4137,7 +4721,13 @@ fn setm(o: &Gc, k: &str, v: Value) {
 /// `with()` for a non-ISO calendar: merge the receiver's calendar fields with the partial input
 /// (CalendarMergeFields — a provided year/era or month/monthCode replaces the receiver's whole
 /// group), then resolve back to an ISO date.
-fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow) -> Result<IsoDate, Value> {
+fn with_cal_date(
+    i: &mut Interp,
+    cal: &str,
+    d: IsoDate,
+    f: &Value,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     let (_, cm, cd, ..) = cal_fields(cal, d);
     // The `year` field is the calendar's reported year number (e.g. ethioaa's amete-alem = amete-mihret
     // + 5500), which is not always `cal_fields().0`.
@@ -4163,7 +4753,11 @@ fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow
         // For leap-month calendars the month's identity is its monthCode (an ordinal shifts between
         // leap and common years); carrying it over lets a year change reject/constrain correctly.
         if matches!(cal, "hebrew" | "chinese" | "dangi") {
-            setm(&merged, "monthCode", Value::str(cal_month_code(cal, d).as_str()));
+            setm(
+                &merged,
+                "monthCode",
+                Value::str(cal_month_code(cal, d).as_str()),
+            );
         } else {
             setm(&merged, "month", Value::Num(cm as f64));
         }
@@ -4237,7 +4831,10 @@ fn same_calendar(i: &mut Interp, t: &Value, other: &Value) -> Result<std::rc::Rc
     let cal = cal_of(i, t);
     let ocal = input_cal(i, other)?;
     if cal != ocal {
-        return Err(i.make_error("RangeError", "operating between two calendars is not supported"));
+        return Err(i.make_error(
+            "RangeError",
+            "operating between two calendars is not supported",
+        ));
     }
     Ok(cal)
 }
@@ -4267,7 +4864,11 @@ fn datetime_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
 }
 
 /// Like [`to_date`], but also returns the resolved calendar id.
-fn to_date_cal(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
+fn to_date_cal(
+    i: &mut Interp,
+    v: &Value,
+    opts: &Value,
+) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
     let cal = input_cal(i, v)?;
     let d = to_date(i, v, opts)?;
     Ok((d, cal))
@@ -4489,7 +5090,11 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
                 // Only a Temporal object (which carries its own zone) is a valid non-string zone;
                 // a plain object or other primitive is a TypeError.
                 Value::Obj(_) if get(i, &tzv).is_some() => {}
-                _ => return Err(i.make_error("TypeError", "timeZone must be a string or Temporal object")),
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "timeZone must be a string or Temporal object")
+                    )
+                }
             }
             Ok(Some(to_date(i, &v, &Value::Undefined)?))
         }
@@ -4799,11 +5404,17 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "era", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
-        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .0
+            .map(Value::str)
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
-        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .1
+            .map(|e| Value::Num(e as f64))
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
@@ -4817,7 +5428,9 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let d = as_datetime(i, &t)?.0;
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
-    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    def_getter(it, &proto, "calendarId", |i, t, _| {
+        Ok(Value::from_string(cal_of(i, &t).to_string()))
+    });
     def_getter(it, &proto, "hour", |i, t, _| {
         Ok(Value::Num(as_datetime(i, &t)?.1.hour as f64))
     });
@@ -4920,12 +5533,22 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             },
             v => to_time(i, &v, &Value::Undefined)?,
         };
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, nt)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(d, nt),
+        ))
     });
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (_, tm) = as_datetime(i, &t)?;
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, tm)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, tm),
+        ))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -4946,7 +5569,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(d, tm);
         let epoch = local_to_epoch(i, &tz, local, &disamb)?;
         let offset = (local - epoch) as i64;
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -4963,7 +5595,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let ovf = to_overflow(i, &arg(a, 1))?;
         let cal_id = cal_of(i, &t);
         let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf, &cal_id)?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ntm),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -4971,7 +5608,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let ovf = to_overflow(i, &arg(a, 1))?;
         let cal_id = cal_of(i, &t);
         let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf, &cal_id)?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ntm),
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -4996,7 +5638,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             with_cal_date(i, &cal, d, &f, ovf)?
         };
         let nt = build_time_ovf(i, hour, minute, second, ms, us, nsf, ovf)?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, nt)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, nt),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -5028,7 +5675,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
                 day: da,
             },
         )?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ns_to_time(rem))))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(nd, ns_to_time(rem)),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -5043,8 +5695,22 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, negate_mode(&mode));
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
+        let dur = diff_datetime_rounded(
+            &cal,
+            d,
+            tm,
+            od,
+            otm,
+            &largest,
+            &smallest,
+            incr,
+            negate_mode(&mode),
+        );
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(dur)),
+        ))
     });
 
     let ctor = add_ctor(it, ns, "PlainDateTime", 3, proto, |i, _t, a| {
@@ -5164,11 +5830,17 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "era", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .0
+            .map(Value::str)
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), d)
+            .1
+            .map(|e| Value::Num(e as f64))
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
@@ -5178,7 +5850,9 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let d = as_yearmonth(i, &t)?;
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
-    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    def_getter(it, &proto, "calendarId", |i, t, _| {
+        Ok(Value::from_string(cal_of(i, &t).to_string()))
+    });
     it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
         let ym = as_yearmonth(i, &t)?;
         let f = arg(a, 0);
@@ -5198,7 +5872,11 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
             // Combine the calendar's (year, monthCode) with the day, resolving through the calendar.
             let merged = i.new_object();
             setm(&merged, "year", Value::Num(cal_year_num(&cal, ym) as f64));
-            setm(&merged, "monthCode", Value::str(cal_month_code(&cal, ym).as_str()));
+            setm(
+                &merged,
+                "monthCode",
+                Value::str(cal_month_code(&cal, ym).as_str()),
+            );
             setm(&merged, "day", Value::Num(day as f64));
             let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, Overflow::Constrain)?;
             regulate_date(i, raw, Overflow::Constrain)?
@@ -5241,7 +5919,9 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let other_cal = arg_calendar(i, &arg(a, 0))?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
-        Ok(Value::Bool(d.year == o.year && d.month == o.month && this_cal == other_cal))
+        Ok(Value::Bool(
+            d.year == o.year && d.month == o.month && this_cal == other_cal,
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5270,7 +5950,11 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
                 }
             }
             if !has_month {
-                setm(&merged, "monthCode", Value::str(cal_month_code(&cal, d).as_str()));
+                setm(
+                    &merged,
+                    "monthCode",
+                    Value::str(cal_month_code(&cal, d).as_str()),
+                );
             }
             for k in ["year", "era", "eraYear", "month", "monthCode"] {
                 let v = getm(i, &f, k)?;
@@ -5282,7 +5966,12 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
             let ovf = to_overflow(i, &arg(a, 1))?;
             let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
             let iso = regulate_date(i, raw, ovf)?;
-            return Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(ym_ref_of(&cal, iso))));
+            return Ok(make_like(
+                i,
+                &t,
+                "Temporal.PlainYearMonth",
+                Temporal::YearMonth(ym_ref_of(&cal, iso)),
+            ));
         }
         let year = field_int(i, &f, "year", d.year)?;
         let month_raw = field_int(i, &f, "month", d.month as i64)?;
@@ -5294,7 +5983,16 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         if !(1..=12).contains(&month) || !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "invalid year-month"));
         }
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year, month: month as u8, day: 1, })))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(IsoDate {
+                year,
+                month: month as u8,
+                day: 1,
+            }),
+        ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5302,7 +6000,12 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let ovf = to_overflow(i, &arg(a, 1))?;
         let cal = cal_of(i, &t);
         let r = ym_add(i, &cal, d, dur, 1, ovf)?;
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(r)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(r),
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5310,7 +6013,12 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let ovf = to_overflow(i, &arg(a, 1))?;
         let cal = cal_of(i, &t);
         let r = ym_add(i, &cal, d, dur, -1, ovf)?;
-        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(r)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainYearMonth",
+            Temporal::YearMonth(r),
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5332,7 +6040,11 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let mut dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, negate_mode(&mode));
         dur.weeks = 0;
         dur.days = 0; // a year-month difference has no day component
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(dur)),
+        ))
     });
     let ctor = add_ctor(it, ns, "PlainYearMonth", 2, proto, |i, _t, a| {
         require_new(i)?;
@@ -5390,7 +6102,11 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
                 let month = field_month(i, v)?;
                 let ovf = to_overflow(i, opts)?;
                 let month = regulate_high(i, month, 12, ovf, "month")? as u8;
-                IsoDate { year, month, day: 1 }
+                IsoDate {
+                    year,
+                    month,
+                    day: 1,
+                }
             } else {
                 // Resolve via the calendar (year/era/month/monthCode) with a reference day of 1.
                 let merged = i.new_object();
@@ -5426,7 +6142,9 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let d = as_monthday(i, &t)?;
         Ok(Value::Num(cal_fields(&cal_of(i, &t), d).2 as f64))
     });
-    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    def_getter(it, &proto, "calendarId", |i, t, _| {
+        Ok(Value::from_string(cal_of(i, &t).to_string()))
+    });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
         let suffix = cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?;
@@ -5447,7 +6165,9 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let other_cal = arg_calendar(i, &arg(a, 0))?;
         let o = to_monthday(i, &arg(a, 0), &Value::Undefined)?;
         let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
-        Ok(Value::Bool(d.month == o.month && d.day == o.day && this_cal == other_cal))
+        Ok(Value::Bool(
+            d.month == o.month && d.day == o.day && this_cal == other_cal,
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let md = as_monthday(i, &t)?;
@@ -5483,7 +6203,11 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
             // Combine the month-day's calendar (monthCode, day) with the supplied year.
             let merged = i.new_object();
             setm(&merged, "year", Value::Num(year as f64));
-            setm(&merged, "monthCode", Value::str(cal_month_code(&cal, md).as_str()));
+            setm(
+                &merged,
+                "monthCode",
+                Value::str(cal_month_code(&cal, md).as_str()),
+            );
             setm(&merged, "day", Value::Num(md.day as f64));
             let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, Overflow::Constrain)?;
             regulate_date(i, raw, Overflow::Constrain)?
@@ -5512,14 +6236,30 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
 /// CalendarMonthDayToISOReferenceDate for a non-ISO calendar: the reference ISO date is the latest
 /// date at or before 1972-12-31 (in the calendar) whose monthCode and day match the request, so a
 /// leap monthCode anchors to a year that actually has it. `snap` holds the already-read fields.
-fn cal_month_day_reference(i: &mut Interp, cal: &str, snap: &Gc, has_year: bool, ovf: Overflow) -> Result<IsoDate, Value> {
+fn cal_month_day_reference(
+    i: &mut Interp,
+    cal: &str,
+    snap: &Gc,
+    has_year: bool,
+    ovf: Overflow,
+) -> Result<IsoDate, Value> {
     // A bare ordinal `month` (no monthCode) can't be interpreted without a year in a non-ISO calendar,
     // so a year is required (a TypeError raised before any month/monthCode-conflict RangeError).
-    let has_month = !matches!(getm(i, &Value::Obj(snap.clone()), "month")?, Value::Undefined);
+    let has_month = !matches!(
+        getm(i, &Value::Obj(snap.clone()), "month")?,
+        Value::Undefined
+    );
     if has_month && !has_year {
-        return Err(i.make_error("TypeError", "year is required to interpret an ordinal month"));
+        return Err(i.make_error(
+            "TypeError",
+            "year is required to interpret an ordinal month",
+        ));
     }
-    let ref_iso = IsoDate { year: 1972, month: 12, day: 31 };
+    let ref_iso = IsoDate {
+        year: 1972,
+        month: 12,
+        day: 31,
+    };
     let start_cy = cal_year_num(cal, ref_iso);
     // Resolve the request in a candidate calendar year (day/month/monthCode from `snap`, year = `cy`).
     let resolve = |i: &mut Interp, cy: i64| -> Result<IsoDate, Value> {
@@ -5603,8 +6343,13 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
                 let day = field_req(i, v, "day")?;
                 let ovf = to_overflow(i, opts)?;
                 let month = regulate_high(i, month, 12, ovf, "month")? as u8;
-                let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
-                Ok(IsoDate { year: 1972, month, day })
+                let day =
+                    regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
+                Ok(IsoDate {
+                    year: 1972,
+                    month,
+                    day,
+                })
             } else {
                 // Snapshot the caller's fields once (in the observable order), then resolve the
                 // reference date via the calendar-specific search.
@@ -5676,8 +6421,7 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         let opts = arg(a, 0);
         let smallest = opt_str(i, &opts, "smallestUnit", "")?;
         let su = smallest.strip_suffix('s').unwrap_or(&smallest);
-        if !su.is_empty()
-            && !matches!(su, "second" | "millisecond" | "microsecond" | "nanosecond")
+        if !su.is_empty() && !matches!(su, "second" | "millisecond" | "microsecond" | "nanosecond")
         {
             return Err(i.make_error("RangeError", "smallestUnit must be second or smaller"));
         }
@@ -5739,7 +6483,18 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         if !any {
             return Err(i.make_error("TypeError", "with() requires at least one duration field"));
         }
-        let nd = IsoDuration { years, months, weeks, days, hours, minutes, seconds, ms, us, ns };
+        let nd = IsoDuration {
+            years,
+            months,
+            weeks,
+            days,
+            hours,
+            minutes,
+            seconds,
+            ms,
+            us,
+            ns,
+        };
         validate_duration(i, nd)?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(nd)))
     });
@@ -6126,9 +6881,23 @@ fn to_duration(i: &mut Interp, v: &Value) -> Result<IsoDuration, Value> {
             let weeks = read(i, "weeks")?;
             let years = read(i, "years")?;
             if !any {
-                return Err(i.make_error("TypeError", "invalid Temporal.Duration-like: no recognized fields"));
+                return Err(i.make_error(
+                    "TypeError",
+                    "invalid Temporal.Duration-like: no recognized fields",
+                ));
             }
-            let d = IsoDuration { years, months, weeks, days, hours, minutes, seconds, ms, us, ns };
+            let d = IsoDuration {
+                years,
+                months,
+                weeks,
+                days,
+                hours,
+                minutes,
+                seconds,
+                ms,
+                us,
+                ns,
+            };
             validate_duration(i, d)?;
             Ok(d)
         }
@@ -6220,7 +6989,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
                 // rounded to the nearest minute (FormatDateTimeUTCOffsetRounded).
                 let minute = 60_000_000_000i64;
                 let (q, r) = (off / minute, off % minute);
-                let rounded = (if r.abs() * 2 >= minute { q + r.signum() } else { q }) * minute;
+                let rounded = (if r.abs() * 2 >= minute {
+                    q + r.signum()
+                } else {
+                    q
+                }) * minute;
                 (ns_utc + off as i128, offset_string(rounded))
             }
         } else {
@@ -6241,7 +7014,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let ts = fmt_time_opts(i, t, &opts)?;
         Ok(Value::str(format!(
             "{}T{}{}",
-            fmt_date(IsoDate { year: y, month: mo, day: da }),
+            fmt_date(IsoDate {
+                year: y,
+                month: mo,
+                day: da
+            }),
             ts,
             suffix
         )))
@@ -6278,7 +7055,16 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let offset = zone_offset(&tz, e);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: offset, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: e,
+                offset_ns: offset,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
@@ -6446,7 +7232,10 @@ fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
 fn possible_epochs(tz: &str, local_ns: i128) -> Vec<i128> {
     let day = 86_400_000_000_000i128;
     let mut v: Vec<i128> = Vec::new();
-    for off in [zone_offset(tz, local_ns - day), zone_offset(tz, local_ns + day)] {
+    for off in [
+        zone_offset(tz, local_ns - day),
+        zone_offset(tz, local_ns + day),
+    ] {
         let inst = local_ns - off as i128;
         if zone_offset(tz, inst) == off && !v.contains(&inst) {
             v.push(inst);
@@ -6468,9 +7257,13 @@ fn local_to_epoch(i: &Interp, tz: &str, local_ns: i128, disamb: &str) -> Result<
             let day = 86_400_000_000_000i128;
             let gap = (zone_offset(tz, local_ns + day) - zone_offset(tz, local_ns - day)) as i128;
             if disamb == "earlier" {
-                Ok(*possible_epochs(tz, local_ns - gap).first().unwrap_or(&(local_ns - gap)))
+                Ok(*possible_epochs(tz, local_ns - gap)
+                    .first()
+                    .unwrap_or(&(local_ns - gap)))
             } else {
-                Ok(*possible_epochs(tz, local_ns + gap).last().unwrap_or(&(local_ns + gap)))
+                Ok(*possible_epochs(tz, local_ns + gap)
+                    .last()
+                    .unwrap_or(&(local_ns + gap)))
             }
         }
         n => match disamb {
@@ -6514,7 +7307,11 @@ fn interpret_offset(
         if minute_precision {
             let q = cand / minute;
             let r = cand % minute;
-            let rounded = if r.abs() * 2 >= minute { q + r.signum() } else { q } * minute;
+            let rounded = if r.abs() * 2 >= minute {
+                q + r.signum()
+            } else {
+                q
+            } * minute;
             if rounded == offset_ns {
                 return Ok((inst, cand));
             }
@@ -6536,7 +7333,9 @@ fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
             // later instant.
             let day = 86_400_000_000_000i128;
             let gap = (zone_offset(tz, local_ns + day) - zone_offset(tz, local_ns - day)) as i128;
-            *possible_epochs(tz, local_ns + gap).last().unwrap_or(&(local_ns - zone_offset(tz, local_ns) as i128))
+            *possible_epochs(tz, local_ns + gap)
+                .last()
+                .unwrap_or(&(local_ns - zone_offset(tz, local_ns) as i128))
         }
         _ => poss[0],
     };
@@ -6724,13 +7523,24 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                     off_ns
                 } else {
                     if offset_opt == "reject" && has_off && off_ns != zone_off {
-                        return Err(i.make_error("RangeError", "offset does not match the time zone"));
+                        return Err(
+                            i.make_error("RangeError", "offset does not match the time zone")
+                        );
                     }
                     zone_off
                 };
                 return Ok((local - off as i128, off, tz));
             }
-            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, off_exact, &offset_opt, &disamb)?;
+            let (epoch, off) = interpret_offset(
+                i,
+                &tz,
+                local,
+                has_off,
+                off_ns,
+                off_exact,
+                &offset_opt,
+                &disamb,
+            )?;
             Ok((epoch, off, tz))
         }
         Value::Obj(_) => {
@@ -6771,7 +7581,16 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 let off = zone_offset(&tz, local);
                 return Ok((local - off as i128, off, tz));
             }
-            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, off_exact, &offset_opt, &disamb)?;
+            let (epoch, off) = interpret_offset(
+                i,
+                &tz,
+                local,
+                has_off,
+                off_ns,
+                off_exact,
+                &offset_opt,
+                &disamb,
+            )?;
             Ok((epoch, off, tz))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
@@ -6812,22 +7631,33 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     }
     def_getter(it, &proto, "year", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(Value::Num(cal_year_num(&cal_of(i, &t), zoned_local(e, o).0) as f64))
+        Ok(Value::Num(
+            cal_year_num(&cal_of(i, &t), zoned_local(e, o).0) as f64,
+        ))
     });
     def_getter(it, &proto, "era", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0).0.map(Value::str).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0)
+            .0
+            .map(Value::str)
+            .unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0).1.map(|v| Value::Num(v as f64)).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0)
+            .1
+            .map(|v| Value::Num(v as f64))
+            .unwrap_or(Value::Undefined))
     });
     type CF = (i64, i64, i64, i64, i64, i64, i64, bool);
     calf_get!("month", |f: CF| Value::Num(f.1 as f64));
     calf_get!("day", |f: CF| Value::Num(f.2 as f64));
     def_getter(it, &proto, "monthCode", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), zoned_local(e, o).0)))
+        Ok(Value::from_string(cal_month_code(
+            &cal_of(i, &t),
+            zoned_local(e, o).0,
+        )))
     });
     date_get!("dayOfWeek", |d: IsoDate| Value::Num(
         iso_day_of_week(d) as f64
@@ -6894,7 +7724,9 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     time_get!("millisecond", |t: IsoTime| Value::Num(t.ms as f64));
     time_get!("microsecond", |t: IsoTime| Value::Num(t.us as f64));
     time_get!("nanosecond", |t: IsoTime| Value::Num(t.ns as f64));
-    def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
+    def_getter(it, &proto, "calendarId", |i, t, _| {
+        Ok(Value::from_string(cal_of(i, &t).to_string()))
+    });
     def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
         Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000) as f64))
     });
@@ -6934,7 +7766,12 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.PlainDateTime",
+            Temporal::DateTime(d, tm),
+        ))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
@@ -7025,7 +7862,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7037,7 +7883,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7096,14 +7951,32 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         } else {
             interpret_offset(i, &tz, local, true, off_ns, true, &offset_opt, &disamb)?
         };
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: epoch,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "withTimeZone", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
         let s = i.to_string(&arg(a, 0)).map_err(unab)?;
         let tz = normalize_tz(i, &s)?;
         let off = zone_offset(&tz, e);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: off, tz }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: e,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7111,7 +7984,11 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let v = make(
             i,
             "Temporal.ZonedDateTime",
-            Temporal::Zoned { epoch_ns: e, offset_ns: o, tz },
+            Temporal::Zoned {
+                epoch_ns: e,
+                offset_ns: o,
+                tz,
+            },
         );
         set_cal(i, &v, cal);
         Ok(v)
@@ -7131,7 +8008,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         match crate::tz::next_transition(&tz, epoch_sec, dir == "next") {
             Some(ts) => {
                 let (off, _) = (zone_offset(&tz, ts as i128 * 1_000_000_000), ());
-                Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: ts as i128 * 1_000_000_000, offset_ns: off, tz }))
+                Ok(make_like(
+                    i,
+                    &t,
+                    "Temporal.ZonedDateTime",
+                    Temporal::Zoned {
+                        epoch_ns: ts as i128 * 1_000_000_000,
+                        offset_ns: off,
+                        tz,
+                    },
+                ))
             }
             None => Ok(Value::Null),
         }
@@ -7140,12 +8026,28 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
         let nt = match arg(a, 0) {
-            Value::Undefined => IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 },
+            Value::Undefined => IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            },
             v => to_time(i, &v, &Value::Undefined)?,
         };
         let local = dt_ns(d, nt);
         let off = offset_for_local(&tz, local);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: local - off as i128,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7153,7 +8055,16 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
         let local = dt_ns(nd, tm);
         let off = offset_for_local(&tz, local);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: local - off as i128,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7168,8 +8079,23 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
         let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_zoned(i, e, o, oe, &tz, &cal, &largest, &smallest, incr, &negate_mode(&mode));
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
+        let dur = diff_zoned(
+            i,
+            e,
+            o,
+            oe,
+            &tz,
+            &cal,
+            &largest,
+            &smallest,
+            incr,
+            negate_mode(&mode),
+        );
+        Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(neg_duration(dur)),
+        ))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -7184,25 +8110,62 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             // Round to the nearest local day boundary; a DST day is 23/25h long, not a fixed 24h.
             let (d, _) = zoned_local(e, o);
             let sod = |dd: IsoDate| -> i128 {
-                let mid = dt_ns(dd, IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+                let mid = dt_ns(
+                    dd,
+                    IsoTime {
+                        hour: 0,
+                        minute: 0,
+                        second: 0,
+                        ms: 0,
+                        us: 0,
+                        ns: 0,
+                    },
+                );
                 mid - offset_for_local(&tz, mid) as i128
             };
             let today = sod(d);
             let (ny, nm, nda) = civil_from_days(epoch_days(d) + 1);
-            let tomorrow = sod(IsoDate { year: ny, month: nm, day: nda });
+            let tomorrow = sod(IsoDate {
+                year: ny,
+                month: nm,
+                day: nda,
+            });
             let denom = (tomorrow - today) as f64;
-            let frac = if denom == 0.0 { 0.0 } else { (e - today) as f64 / denom };
+            let frac = if denom == 0.0 {
+                0.0
+            } else {
+                (e - today) as f64 / denom
+            };
             let up = round_up_magnitude(&mode, frac, true, false);
             let epoch = if up { tomorrow } else { today };
             let off = zone_offset(&tz, epoch);
-            return Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }));
+            return Ok(make_like(
+                i,
+                &t,
+                "Temporal.ZonedDateTime",
+                Temporal::Zoned {
+                    epoch_ns: epoch,
+                    offset_ns: off,
+                    tz,
+                },
+            ));
         }
-        let unit = unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
+        let unit = unit_ns(&smallest)
+            .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
         // Re-resolve the offset for the rounded wall-clock time (it may cross a DST transition).
         let off = offset_for_local(&tz, rounded);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - off as i128, offset_ns: off, tz }))
+        Ok(make_like(
+            i,
+            &t,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned {
+                epoch_ns: rounded - off as i128,
+                offset_ns: off,
+                tz,
+            },
+        ))
     });
 
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
@@ -7289,7 +8252,11 @@ fn install_now(it: &mut Interp, ns: &Gc) {
         Ok(make(
             i,
             "Temporal.ZonedDateTime",
-            Temporal::Zoned { epoch_ns: 0, offset_ns: off, tz },
+            Temporal::Zoned {
+                epoch_ns: 0,
+                offset_ns: off,
+                tz,
+            },
         ))
     });
     it.def_method(&now, "plainDateISO", 0, |i, _t, a| {

@@ -3,9 +3,11 @@
 //! output matches the conformance harness (which drives the same primitives).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
+use super::{
+    ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
+};
 use crate::interpreter::Interp;
 use crate::value::{set_builtin, set_data, Gc, Value};
 
@@ -48,8 +50,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {nsid}")));
         }
     }
-    let base_style = get_option(i, &options, "style", &["long", "short", "narrow", "digital"], Some("short"))?
-        .unwrap();
+    let base_style = get_option(
+        i,
+        &options,
+        "style",
+        &["long", "short", "narrow", "digital"],
+        Some("short"),
+    )?
+    .unwrap();
 
     let (resolved_locale, numbering) =
         super::service::resolve_locale_nu(&requested, numbering.as_deref());
@@ -93,7 +101,9 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
                 } else {
                     display_default = "auto";
                     match prev_style.as_deref() {
-                        Some("fractional") | Some("numeric") | Some("2-digit") => "numeric".to_string(),
+                        Some("fractional") | Some("numeric") | Some("2-digit") => {
+                            "numeric".to_string()
+                        }
                         _ => base_style.clone(),
                     }
                 }
@@ -109,30 +119,53 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         let _ = is_subsecond;
 
         let display_prop = format!("{plural}Display");
-        let display = get_option(i, &options, &display_prop, &["auto", "always"], Some(display_default))?
-            .unwrap();
+        let display = get_option(
+            i,
+            &options,
+            &display_prop,
+            &["auto", "always"],
+            Some(display_default),
+        )?
+        .unwrap();
         if display == "always" && style == "fractional" {
             return Err(i.make_error("RangeError", "a fractional unit cannot be display:always"));
         }
         if prev_style.as_deref() == Some("fractional") && style != "fractional" {
-            return Err(i.make_error("RangeError", "only a fractional unit may follow a fractional unit"));
+            return Err(i.make_error(
+                "RangeError",
+                "only a fractional unit may follow a fractional unit",
+            ));
         }
         // Step 6: a unit following a numeric/2-digit one must itself be numeric-ish; minutes/seconds
         // then render as 2-digit.
         if matches!(prev_style.as_deref(), Some("numeric") | Some("2-digit")) {
             if !matches!(style.as_str(), "fractional" | "numeric" | "2-digit") {
-                return Err(i.make_error("RangeError", format!("{plural} style conflicts with a preceding numeric unit")));
+                return Err(i.make_error(
+                    "RangeError",
+                    format!("{plural} style conflicts with a preceding numeric unit"),
+                ));
             }
             if matches!(*plural, "minutes" | "seconds") {
                 style = "2-digit".to_string();
             }
         }
 
-        set_builtin(&obj, Box::leak(format!("__df_u_{plural}").into_boxed_str()), Value::from_string(style.clone()));
-        set_builtin(&obj, Box::leak(format!("__df_d_{plural}").into_boxed_str()), Value::from_string(display));
+        set_builtin(
+            &obj,
+            Box::leak(format!("__df_u_{plural}").into_boxed_str()),
+            Value::from_string(style.clone()),
+        );
+        set_builtin(
+            &obj,
+            Box::leak(format!("__df_d_{plural}").into_boxed_str()),
+            Value::from_string(display),
+        );
         // prevStyle is updated only for hours..microseconds (nanoseconds and the calendar units do
         // not propagate).
-        if matches!(*plural, "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds") {
+        if matches!(
+            *plural,
+            "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds"
+        ) {
             prev_style = Some(style);
         }
     }
@@ -144,7 +177,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             None
         } else {
             let n = ab(i.to_number(&v))?;
-            if n.fract() != 0.0 || n < 0.0 || n > 9.0 {
+            if n.fract() != 0.0 || !(0.0..=9.0).contains(&n) {
                 return Err(i.make_error("RangeError", "fractionalDigits out of range"));
             }
             Some(n as u32)
@@ -164,7 +197,10 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
     let mut sign = 1.0;
     if let Some(r) = rest.strip_prefix('+') {
         rest = r;
-    } else if let Some(r) = rest.strip_prefix('-').or_else(|| rest.strip_prefix('\u{2212}')) {
+    } else if let Some(r) = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix('\u{2212}'))
+    {
         rest = r;
         sign = -1.0;
     }
@@ -177,7 +213,11 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
     let mut any = false;
     // Consume `<number><designator>` pairs; `designators` maps a letter to its field index and
     // whether that field may carry a fraction (only the seconds field, which spills into ms/us/ns).
-    let consume = |section: &str, designators: &[(char, usize)], vals: &mut [f64; 10], any: &mut bool| -> Option<()> {
+    let consume = |section: &str,
+                   designators: &[(char, usize)],
+                   vals: &mut [f64; 10],
+                   any: &mut bool|
+     -> Option<()> {
         let mut buf = String::new();
         for c in section.chars() {
             if c.is_ascii_digit() {
@@ -185,7 +225,9 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
             } else if c == '.' || c == ',' {
                 buf.push('.');
             } else {
-                let (_, idx) = designators.iter().find(|(d, _)| *d == c.to_ascii_uppercase())?;
+                let (_, idx) = designators
+                    .iter()
+                    .find(|(d, _)| *d == c.to_ascii_uppercase())?;
                 if buf.is_empty() {
                     return None;
                 }
@@ -209,9 +251,18 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
             }
         }
         // A trailing number with no designator is invalid.
-        if buf.is_empty() { Some(()) } else { None }
+        if buf.is_empty() {
+            Some(())
+        } else {
+            None
+        }
     };
-    consume(date_part, &[('Y', 0), ('M', 1), ('W', 2), ('D', 3)], &mut vals, &mut any)?;
+    consume(
+        date_part,
+        &[('Y', 0), ('M', 1), ('W', 2), ('D', 3)],
+        &mut vals,
+        &mut any,
+    )?;
     if let Some(tp) = time_part {
         if tp.is_empty() {
             return None; // a lone "T" with no time components
@@ -228,7 +279,9 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
 }
 
 fn valid_type(s: &str) -> bool {
-    !s.is_empty() && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+    !s.is_empty()
+        && s.split('-')
+            .all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// ToDurationRecord + IsValidDuration: read integer fields, require a single sign, and bound the
@@ -236,7 +289,8 @@ fn valid_type(s: &str) -> bool {
 fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
     // A string is parsed as an ISO 8601 duration; a bad string is a RangeError, not a TypeError.
     if let Value::Str(s) = v {
-        return parse_iso_duration(s).ok_or_else(|| i.make_error("RangeError", "invalid ISO 8601 duration string"));
+        return parse_iso_duration(s)
+            .ok_or_else(|| i.make_error("RangeError", "invalid ISO 8601 duration string"));
     }
     if !matches!(v, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "duration must be an object"));
@@ -305,7 +359,10 @@ fn get_str(o: &Gc, k: &str) -> String {
 fn new_service(i: &mut Interp, service: &str, locale: &str, opts: Gc) -> Result<Value, Value> {
     let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
     let ctor = ab(i.get_member(&intl, service))?;
-    ab(i.construct(ctor, &[Value::from_string(locale.to_string()), Value::Obj(opts)]))
+    ab(i.construct(
+        ctor,
+        &[Value::from_string(locale.to_string()), Value::Obj(opts)],
+    ))
 }
 
 /// One formatted piece: NumberFormat part `type`/`value`, plus the singular `unit` it belongs to
@@ -325,12 +382,20 @@ fn format_string(i: &mut Interp, this: &Value, dur: &Value) -> Result<String, Va
     let arr = i.make_array(strings.into_iter().map(Value::from_string).collect());
     let fmt = ab(i.get_member(&lf, "format"))?;
     let out = ab(i.call(fmt, lf, &[arr]))?;
-    Ok(if let Value::Str(s) = out { s.to_string() } else { String::new() })
+    Ok(if let Value::Str(s) = out {
+        s.to_string()
+    } else {
+        String::new()
+    })
 }
 
 /// PartitionDurationFormatPattern producing the formatted list, and each group's typed parts, ready
 /// to be either joined (format) or substituted into ListFormat's element parts (formatToParts).
-fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPart>>, String, String), Value> {
+fn partition(
+    i: &mut Interp,
+    this: &Value,
+    dur: &Value,
+) -> Result<(Vec<Vec<DurPart>>, String, String), Value> {
     let o = brand_slot(i, this, "__df")?;
     let vals = read_duration(i, dur)?;
     let locale = get_str(&o, "__df_locale");
@@ -399,7 +464,11 @@ fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPa
 
             // Build the NumberFormat options for this unit.
             let nf_opts = i.new_object();
-            set_data(&nf_opts, "numberingSystem", Value::from_string(numbering.clone()));
+            set_data(
+                &nf_opts,
+                "numberingSystem",
+                Value::from_string(numbering.clone()),
+            );
             if sign_never {
                 set_data(&nf_opts, "signDisplay", Value::str("never"));
             }
@@ -428,7 +497,11 @@ fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPa
             let parts_arr = ab(i.call(ftp, nf.clone(), &[Value::Num(value)]))?;
             // Read the {type,value} objects into (type,value,unit=singular) parts.
             let len = ab(i.get_member(&parts_arr, "length"))?;
-            let len = if let Value::Num(n) = len { n as usize } else { 0 };
+            let len = if let Value::Num(n) = len {
+                n as usize
+            } else {
+                0
+            };
             let mut parts: Vec<DurPart> = Vec::with_capacity(len);
             for k in 0..len {
                 let el = ab(i.get_member(&parts_arr, &k.to_string()))?;
@@ -477,7 +550,11 @@ fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPa
         groups.push(g);
     }
 
-    let list_style = if base_style == "digital" { "short".to_string() } else { base_style };
+    let list_style = if base_style == "digital" {
+        "short".to_string()
+    } else {
+        base_style
+    };
     Ok((groups, list_style, locale))
 }
 
@@ -559,14 +636,24 @@ fn fractional_value(vals: &[f64; 10], exp: i32) -> f64 {
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__df")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__df_locale"));
     set_data(&res, "numberingSystem", get("__df_nu"));
     set_data(&res, "style", get("__df_style"));
     for (plural, _sing) in UNITS {
         set_data(&res, plural, get(&format!("__df_u_{plural}")));
-        set_data(&res, Box::leak(format!("{plural}Display").into_boxed_str()), get(&format!("__df_d_{plural}")));
+        set_data(
+            &res,
+            Box::leak(format!("{plural}Display").into_boxed_str()),
+            get(&format!("__df_d_{plural}")),
+        );
     }
     if o.borrow().props.contains("__df_frac") {
         set_data(&res, "fractionalDigits", get("__df_frac"));

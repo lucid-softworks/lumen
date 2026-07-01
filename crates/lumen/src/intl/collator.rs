@@ -1,12 +1,12 @@
 //! `Intl.Collator` (a locale-independent case-aware comparison; option surface complete).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Collator", 0, construct);
@@ -21,7 +21,9 @@ fn install_compare_getter(it: &mut Interp, proto: &Gc) {
         if let Some(f) = o.borrow().props.get("__co_bound").map(|p| p.value.clone()) {
             return Ok(f);
         }
-        let f = i.make_native("", 2, |i, that, a| compare(i, &that, &arg(a, 0), &arg(a, 1)));
+        let f = i.make_native("", 2, |i, that, a| {
+            compare(i, &that, &arg(a, 0), &arg(a, 1))
+        });
         let bound = crate::intl::numberformat::bind_this(i, Value::Obj(f), this.clone());
         set_builtin(&o, "__co_bound", bound.clone());
         Ok(bound)
@@ -74,9 +76,15 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     };
     let resolved = resolve_locale(i, &requested, &["co", "kn", "kf"]);
     // ignorePunctuation defaults per locale: the dictionary-ordered locales (Thai) default to true.
-    let ignore_punct = ignore_punct_opt
-        .unwrap_or_else(|| resolved.locale.split('-').next() == Some("th"));
-    let kw = |k: &str| resolved.keywords.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+    let ignore_punct =
+        ignore_punct_opt.unwrap_or_else(|| resolved.locale.split('-').next() == Some("th"));
+    let kw = |k: &str| {
+        resolved
+            .keywords
+            .iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.clone())
+    };
     let numeric_opt = numeric;
     let case_first_opt = case_first.clone();
     // The option wins over the locale's -u- keyword; a bare -u-kn (empty value) means numeric=true.
@@ -84,7 +92,10 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some(v) => v != "false",
         None => false,
     });
-    let case_first = case_first_opt.clone().or_else(|| kw("kf")).unwrap_or_else(|| "false".to_string());
+    let case_first = case_first_opt
+        .clone()
+        .or_else(|| kw("kf"))
+        .unwrap_or_else(|| "false".to_string());
     // The `-u-co-` value must be a known collation type (never the reserved standard/search); an
     // unknown one falls back to "default".
     const COLLATIONS: [&str; 15] = [
@@ -106,16 +117,23 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     if let Some(kf) = kw("kf") {
         if ["upper", "lower", "false"].contains(&kf.as_str())
-            && case_first_opt.as_deref().map_or(true, |o| o == kf)
+            && case_first_opt.as_deref().is_none_or(|o| o == kf)
         {
             additions.push(("kf", kf));
         }
     }
     if let Some(kn) = kw("kn") {
         let kn_bool = kn != "false";
-        if numeric_opt.map_or(true, |o| o == kn_bool) {
+        if numeric_opt.is_none_or(|o| o == kn_bool) {
             // Canonical form: the `true` value is elided (`-u-kn`), `false` is spelled out.
-            additions.push(("kn", if kn_bool { String::new() } else { "false".to_string() }));
+            additions.push((
+                "kn",
+                if kn_bool {
+                    String::new()
+                } else {
+                    "false".to_string()
+                },
+            ));
         }
     }
     let locale = if additions.is_empty() {
@@ -123,7 +141,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     } else {
         let ext: String = additions
             .iter()
-            .map(|(k, v)| if v.is_empty() { format!("-{k}") } else { format!("-{k}-{v}") })
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    format!("-{k}")
+                } else {
+                    format!("-{k}-{v}")
+                }
+            })
             .collect();
         format!("{}-u{}", resolved.locale, ext)
     };
@@ -145,7 +169,12 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 
 fn compare(i: &mut Interp, this: &Value, a: &Value, b: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__co")?;
-    let sensitivity = match o.borrow().props.get("__co_sensitivity").map(|p| p.value.clone()) {
+    let sensitivity = match o
+        .borrow()
+        .props
+        .get("__co_sensitivity")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Str(s)) => s.to_string(),
         _ => "variant".to_string(),
     };
@@ -167,7 +196,13 @@ fn compare(i: &mut Interp, this: &Value, a: &Value, b: &Value) -> Result<Value, 
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__co")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__co_locale"));
     set_data(&res, "usage", get("__co_usage"));

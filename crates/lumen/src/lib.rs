@@ -30,10 +30,10 @@ mod interpreter;
 mod intl;
 mod lexer;
 mod modules;
+mod numbering;
 mod parser;
 mod regex;
 mod temporal;
-mod numbering;
 mod token;
 mod tz;
 #[rustfmt::skip]

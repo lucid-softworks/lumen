@@ -52,7 +52,11 @@ fn zone(name: &str) -> Option<&'static Zone> {
 pub fn offset_at(name: &str, epoch_sec: i64) -> Option<i32> {
     let z = zone(name)?;
     let idx = z.transitions.partition_point(|&(t, _)| t <= epoch_sec);
-    Some(if idx == 0 { z.initial } else { z.transitions[idx - 1].1 })
+    Some(if idx == 0 {
+        z.initial
+    } else {
+        z.transitions[idx - 1].1
+    })
 }
 
 /// The epoch-second of the next (`forward`) or previous offset transition strictly after/before
@@ -63,6 +67,9 @@ pub fn next_transition(name: &str, epoch_sec: i64, forward: bool) -> Option<i64>
     if forward {
         ts.iter().find(|&&(t, _)| t > epoch_sec).map(|&(t, _)| t)
     } else {
-        ts.iter().rev().find(|&&(t, _)| t < epoch_sec).map(|&(t, _)| t)
+        ts.iter()
+            .rev()
+            .find(|&&(t, _)| t < epoch_sec)
+            .map(|&(t, _)| t)
     }
 }

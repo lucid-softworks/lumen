@@ -46,7 +46,9 @@ pub fn install(it: &mut Interp) {
     set_builtin(&intl, "getCanonicalLocales", Value::Obj(f));
 
     // Intl.supportedValuesOf(key).
-    let f = it.make_native("supportedValuesOf", 1, |i, _t, a| supported_values_of(i, &arg(a, 0)));
+    let f = it.make_native("supportedValuesOf", 1, |i, _t, a| {
+        supported_values_of(i, &arg(a, 0))
+    });
     set_builtin(&intl, "supportedValuesOf", Value::Obj(f));
 
     locale::install(it, &intl);
@@ -107,7 +109,12 @@ pub(crate) fn canonicalize_locale_list(
 fn process_locale_item(i: &mut Interp, item: &Value, seen: &mut Vec<String>) -> Result<(), Value> {
     let tag = match item {
         Value::Obj(o) if o.borrow().props.contains("__locale_tag") => {
-            match o.borrow().props.get("__locale_tag").map(|p| p.value.clone()) {
+            match o
+                .borrow()
+                .props
+                .get("__locale_tag")
+                .map(|p| p.value.clone())
+            {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => String::new(),
             }
@@ -149,11 +156,69 @@ fn supported_values_of(i: &mut Interp, key: &Value) -> Result<Value, Value> {
         return Ok(i.make_array(zs.iter().map(|s| Value::str(*s)).collect()));
     }
     let vals: &[&str] = match &*k {
-        "calendar" => &["buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory", "hebrew", "indian", "islamic", "islamic-umalqura", "islamic-tbla", "islamic-civil", "islamic-rgsa", "iso8601", "japanese", "persian", "roc"],
-        "collation" => &["compat", "dict", "emoji", "eor", "phonebk", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin"],
+        "calendar" => &[
+            "buddhist",
+            "chinese",
+            "coptic",
+            "dangi",
+            "ethioaa",
+            "ethiopic",
+            "gregory",
+            "hebrew",
+            "indian",
+            "islamic",
+            "islamic-umalqura",
+            "islamic-tbla",
+            "islamic-civil",
+            "islamic-rgsa",
+            "iso8601",
+            "japanese",
+            "persian",
+            "roc",
+        ],
+        "collation" => &[
+            "compat", "dict", "emoji", "eor", "phonebk", "pinyin", "searchjl", "stroke", "trad",
+            "unihan", "zhuyin",
+        ],
         "currency" => &["USD", "EUR", "GBP", "JPY", "CNY"],
-        "numberingSystem" => &["adlm", "ahom", "arab", "arabext", "bali", "beng", "deva", "fullwide", "gujr", "guru", "hanidec", "khmr", "knda", "laoo", "latn", "mlym", "mymr", "orya", "tamldec", "telu", "thai", "tibt"],
-        "unit" => &["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "gigabyte", "gram", "hour", "kilogram", "kilometer", "liter", "megabyte", "meter", "mile", "milliliter", "millimeter", "millisecond", "minute", "month", "ounce", "percent", "petabyte", "pound", "second", "terabyte", "week", "yard", "year"],
+        "numberingSystem" => &[
+            "adlm", "ahom", "arab", "arabext", "bali", "beng", "deva", "fullwide", "gujr", "guru",
+            "hanidec", "khmr", "knda", "laoo", "latn", "mlym", "mymr", "orya", "tamldec", "telu",
+            "thai", "tibt",
+        ],
+        "unit" => &[
+            "acre",
+            "bit",
+            "byte",
+            "celsius",
+            "centimeter",
+            "day",
+            "degree",
+            "fahrenheit",
+            "gigabyte",
+            "gram",
+            "hour",
+            "kilogram",
+            "kilometer",
+            "liter",
+            "megabyte",
+            "meter",
+            "mile",
+            "milliliter",
+            "millimeter",
+            "millisecond",
+            "minute",
+            "month",
+            "ounce",
+            "percent",
+            "petabyte",
+            "pound",
+            "second",
+            "terabyte",
+            "week",
+            "yard",
+            "year",
+        ],
         _ => return Err(i.make_error("RangeError", format!("invalid key: {k}"))),
     };
     let mut v: Vec<&str> = vals.to_vec();

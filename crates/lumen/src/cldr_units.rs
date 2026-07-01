@@ -2,7 +2,7 @@
 //! `{0}` is the number placeholder.
 
 #[rustfmt::skip]
-const UNIT_PATTERNS: [(&str, &str, &str, &str, &str); 3334] = [
+static UNIT_PATTERNS: [(&str, &str, &str, &str, &str); 3334] = [
     ("en", "acre", "long", "one", "{0} acre"),
     ("en", "acre", "long", "other", "{0} acres"),
     ("en", "bit", "long", "one", "{0} bit"),

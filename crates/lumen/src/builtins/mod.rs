@@ -39,7 +39,13 @@ fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Val
     let dim: &[&str] = if date {
         &["weekday", "year", "month", "day"]
     } else {
-        &["dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"]
+        &[
+            "dayPeriod",
+            "hour",
+            "minute",
+            "second",
+            "fractionalSecondDigits",
+        ]
     };
     let mut need = true;
     if user_obj.is_some() {
@@ -55,7 +61,11 @@ fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Val
         o.borrow_mut().proto = Some(uo.clone());
     }
     if need {
-        let defs: &[&str] = if date { &["year", "month", "day"] } else { &["hour", "minute", "second"] };
+        let defs: &[&str] = if date {
+            &["year", "month", "day"]
+        } else {
+            &["hour", "minute", "second"]
+        };
         for k in defs {
             set_data(&o, k, Value::str("numeric"));
         }
@@ -74,8 +84,17 @@ fn date_all_default(i: &mut Interp, options: &Value) -> Result<Value, Value> {
     let mut need = true;
     if user_obj.is_some() {
         for k in [
-            "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second",
-            "fractionalSecondDigits", "dateStyle", "timeStyle",
+            "weekday",
+            "year",
+            "month",
+            "day",
+            "dayPeriod",
+            "hour",
+            "minute",
+            "second",
+            "fractionalSecondDigits",
+            "dateStyle",
+            "timeStyle",
         ] {
             if !matches!(ab(i.get_member(options, k))?, Value::Undefined) {
                 need = false;
@@ -4573,7 +4592,14 @@ fn install_date(it: &mut Interp) {
         // ToDateTimeOptions(options, "any", "all"): default to date AND time unless the caller
         // already requested a date or time component (or a dateStyle/timeStyle).
         let opts = date_all_default(i, &arg(args, 1))?;
-        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
+        intl_delegate(
+            i,
+            "DateTimeFormat",
+            arg(args, 0),
+            opts,
+            "format",
+            &[Value::Num(t)],
+        )
     });
     it.def_method(&proto, "toLocaleDateString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
@@ -4581,7 +4607,14 @@ fn install_date(it: &mut Interp) {
             return Ok(Value::str("Invalid Date"));
         }
         let opts = date_style_default(i, &arg(args, 1), true)?;
-        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
+        intl_delegate(
+            i,
+            "DateTimeFormat",
+            arg(args, 0),
+            opts,
+            "format",
+            &[Value::Num(t)],
+        )
     });
     it.def_method(&proto, "toLocaleTimeString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
@@ -4589,7 +4622,14 @@ fn install_date(it: &mut Interp) {
             return Ok(Value::str("Invalid Date"));
         }
         let opts = date_style_default(i, &arg(args, 1), false)?;
-        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
+        intl_delegate(
+            i,
+            "DateTimeFormat",
+            arg(args, 0),
+            opts,
+            "format",
+            &[Value::Num(t)],
+        )
     });
 
     let ctor = it.make_native("Date", 7, date_ctor);
@@ -11591,7 +11631,7 @@ fn locale_lower(s: &str, lang: Option<&str>) -> String {
         let mut k = 0;
         while k < chars.len() {
             match chars[k] {
-                '\u{0130}' => out.push('i'),               // İ → i
+                '\u{0130}' => out.push('i'), // İ → i
                 'I' => {
                     // "I" + combining dot above → "i" (the dot is absorbed); otherwise → dotless ı.
                     if chars.get(k + 1) == Some(&'\u{0307}') {
@@ -11616,8 +11656,8 @@ fn locale_upper(s: &str, lang: Option<&str>) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
             match c {
-                'i' => out.push('\u{0130}'),  // i → İ
-                '\u{0131}' => out.push('I'),  // ı → I
+                'i' => out.push('\u{0130}'), // i → İ
+                '\u{0131}' => out.push('I'), // ı → I
                 c => out.extend(c.to_uppercase()),
             }
         }
@@ -12483,7 +12523,14 @@ fn install_number(it: &mut Interp) {
     let np = it.number_proto.clone();
     it.def_method(&np, "toLocaleString", 0, |i, this, args| {
         let n = this_number(i, &this)?;
-        intl_delegate(i, "NumberFormat", arg(args, 0), arg(args, 1), "format", &[Value::Num(n)])
+        intl_delegate(
+            i,
+            "NumberFormat",
+            arg(args, 0),
+            arg(args, 1),
+            "format",
+            &[Value::Num(n)],
+        )
     });
     it.def_method(&np, "toString", 1, |i, this, args| {
         let n = this_number(i, &this)?;
@@ -12959,7 +13006,14 @@ fn install_bigint(it: &mut Interp) {
     });
     it.def_method(&proto, "toLocaleString", 0, |i, this, args| {
         let b = this_bigint(i, &this)?;
-        intl_delegate(i, "NumberFormat", arg(args, 0), arg(args, 1), "format", &[Value::BigInt(b)])
+        intl_delegate(
+            i,
+            "NumberFormat",
+            arg(args, 0),
+            arg(args, 1),
+            "format",
+            &[Value::BigInt(b)],
+        )
     });
     let ctor = it.make_native("BigInt", 1, |i, _t, a| {
         if i.constructing {

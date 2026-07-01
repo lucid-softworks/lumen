@@ -1,12 +1,12 @@
 //! `Intl.DateTimeFormat` (Gregorian, UTC/en subset).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 use std::rc::Rc;
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's algorithm).
@@ -38,7 +38,11 @@ fn temporal_to_ms(t: &crate::temporal::Temporal) -> f64 {
         T::Instant(ns) => (*ns / 1_000_000) as f64,
         // A ZonedDateTime formats at its *local* wall-clock time (epoch + offset), since our
         // DateTimeFormat renders components in UTC.
-        T::Zoned { epoch_ns, offset_ns, .. } => ((*epoch_ns + *offset_ns as i128) / 1_000_000) as f64,
+        T::Zoned {
+            epoch_ns,
+            offset_ns,
+            ..
+        } => ((*epoch_ns + *offset_ns as i128) / 1_000_000) as f64,
         T::Duration(_) => 0.0,
     }
 }
@@ -57,7 +61,11 @@ pub fn install(it: &mut Interp, ns: &Gc) {
                 let ob = i.new_object();
                 set_data(&ob, "type", Value::str(t));
                 // Localize digits to the numbering system (name/literal parts have no ASCII digits).
-                set_data(&ob, "value", Value::from_string(crate::intl::numberformat::xlate_digits(&v, &nu)));
+                set_data(
+                    &ob,
+                    "value",
+                    Value::from_string(crate::intl::numberformat::xlate_digits(&v, &nu)),
+                );
                 Value::Obj(ob)
             })
             .collect();
@@ -73,7 +81,9 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         if a1 == a2 {
             return Ok(Value::from_string(a1));
         }
-        Ok(Value::from_string(format!("{a1}\u{2009}\u{2013}\u{2009}{a2}")))
+        Ok(Value::from_string(format!(
+            "{a1}\u{2009}\u{2013}\u{2009}{a2}"
+        )))
     });
     it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
@@ -84,7 +94,11 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         let emit = |i: &mut Interp, arr: &mut Vec<Value>, ty: &str, val: &str, src: &str| {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(ty));
-            set_data(&ob, "value", Value::from_string(crate::intl::numberformat::xlate_digits(val, &nu)));
+            set_data(
+                &ob,
+                "value",
+                Value::from_string(crate::intl::numberformat::xlate_digits(val, &nu)),
+            );
             set_data(&ob, "source", Value::str(src));
             arr.push(Value::Obj(ob));
         };
@@ -117,21 +131,37 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
     // ToDateTimeFormattable each endpoint IN ORDER: a Temporal value keeps its type, a non-Temporal
     // is ToNumber-coerced now (its valueOf side-effects must run before the kind-mismatch check).
     let ta = range_type_tag(i, a);
-    let na = if ta == 0 { Some(ab(i.to_number(a))?) } else { None };
+    let na = if ta == 0 {
+        Some(ab(i.to_number(a))?)
+    } else {
+        None
+    };
     let tb = range_type_tag(i, b);
-    let nb = if tb == 0 { Some(ab(i.to_number(b))?) } else { None };
+    let nb = if tb == 0 {
+        Some(ab(i.to_number(b))?)
+    } else {
+        None
+    };
     // Two Temporal endpoints must share a calendar (RangeError otherwise).
     let cal_of = |i: &Interp, v: &Value| -> Option<String> {
         let ptr = Rc::as_ptr(v.as_obj()?) as usize;
         if i.temporal.contains_key(&ptr) {
-            Some(i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string()))
+            Some(
+                i.temporal_cal
+                    .get(&ptr)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "iso8601".to_string()),
+            )
         } else {
             None
         }
     };
     if let (Some(ca), Some(cb)) = (cal_of(i, a), cal_of(i, b)) {
         if ca != cb {
-            return Err(i.make_error("RangeError", "formatRange endpoints have different calendars"));
+            return Err(i.make_error(
+                "RangeError",
+                "formatRange endpoints have different calendars",
+            ));
         }
     }
     // The two endpoints must be the same type (checked AFTER coercion, before TimeClip).
@@ -219,7 +249,9 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
 
 /// A Unicode key type identifier: one or more "-"-joined 3..8 alnum subtags.
 fn valid_type_id(s: &str) -> bool {
-    !s.is_empty() && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+    !s.is_empty()
+        && s.split('-')
+            .all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
@@ -244,9 +276,23 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // Deprecated islamic ids fall back to islamic-civil; any calendar not in AvailableCalendars
     // (a not-yet-supported one like "bangla") falls back to gregory.
     const AVAILABLE_CALENDARS: [&str; 17] = [
-        "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory", "hebrew",
-        "indian", "islamic-civil", "islamic-tbla", "islamic-umalqura", "iso8601", "japanese",
-        "persian", "roc", "islamicc",
+        "buddhist",
+        "chinese",
+        "coptic",
+        "dangi",
+        "ethioaa",
+        "ethiopic",
+        "gregory",
+        "hebrew",
+        "indian",
+        "islamic-civil",
+        "islamic-tbla",
+        "islamic-umalqura",
+        "iso8601",
+        "japanese",
+        "persian",
+        "roc",
+        "islamicc",
     ];
     // Resolve a calendar VALUE: islamic/islamic-rgsa → islamic-civil, an available id is kept, any
     // other (unsupported) value is None so it is ignored (the -u-ca extension, then gregory, apply).
@@ -274,7 +320,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             Some(i.to_boolean(&v))
         }
     };
-    let hour_cycle = get_option(i, &options, "hourCycle", &["h11", "h12", "h23", "h24"], None)?;
+    let hour_cycle = get_option(
+        i,
+        &options,
+        "hourCycle",
+        &["h11", "h12", "h23", "h24"],
+        None,
+    )?;
     let time_zone = {
         let v = ab(i.get_member(&options, "timeZone"))?;
         if matches!(v, Value::Undefined) {
@@ -291,7 +343,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let weekday = get_option(i, &options, "weekday", &["narrow", "short", "long"], None)?;
     let era = get_option(i, &options, "era", &["narrow", "short", "long"], None)?;
     let year = get_option(i, &options, "year", &["2-digit", "numeric"], None)?;
-    let month = get_option(i, &options, "month", &["2-digit", "numeric", "narrow", "short", "long"], None)?;
+    let month = get_option(
+        i,
+        &options,
+        "month",
+        &["2-digit", "numeric", "narrow", "short", "long"],
+        None,
+    )?;
     let day = get_option(i, &options, "day", &["2-digit", "numeric"], None)?;
     let day_period = get_option(i, &options, "dayPeriod", &["narrow", "short", "long"], None)?;
     let hour = get_option(i, &options, "hour", &["2-digit", "numeric"], None)?;
@@ -304,7 +362,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         } else {
             // GetNumberOption(1, 3): reject NaN/out-of-range, otherwise floor into [1,3].
             let n = ab(i.to_number(&v))?;
-            if n.is_nan() || n < 1.0 || n > 3.0 {
+            if n.is_nan() || !(1.0..=3.0).contains(&n) {
                 return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
             }
             Some(n.floor() as u32)
@@ -314,12 +372,37 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         i,
         &options,
         "timeZoneName",
-        &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"],
+        &[
+            "short",
+            "long",
+            "shortOffset",
+            "longOffset",
+            "shortGeneric",
+            "longGeneric",
+        ],
         None,
     )?;
-    let _format_matcher = get_option(i, &options, "formatMatcher", &["basic", "best fit"], Some("best fit"))?;
-    let date_style = get_option(i, &options, "dateStyle", &["full", "long", "medium", "short"], None)?;
-    let time_style = get_option(i, &options, "timeStyle", &["full", "long", "medium", "short"], None)?;
+    let _format_matcher = get_option(
+        i,
+        &options,
+        "formatMatcher",
+        &["basic", "best fit"],
+        Some("best fit"),
+    )?;
+    let date_style = get_option(
+        i,
+        &options,
+        "dateStyle",
+        &["full", "long", "medium", "short"],
+        None,
+    )?;
+    let time_style = get_option(
+        i,
+        &options,
+        "timeStyle",
+        &["full", "long", "medium", "short"],
+        None,
+    )?;
 
     // A dateStyle/timeStyle may not be combined with explicit component options.
     let has_components = weekday.is_some()
@@ -353,7 +436,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         || frac_sec.is_some();
     let resolved = resolve_locale(i, &requested, &["ca", "nu", "hc"]);
     // The `-u-hc-` locale-extension hour cycle (the `hourCycle` option, read later, overrides it).
-    let hc_ext = resolved.keywords.iter().find(|(k, _)| k == "hc").map(|(_, v)| v.clone());
+    let hc_ext = resolved
+        .keywords
+        .iter()
+        .find(|(k, _)| k == "hc")
+        .map(|(_, v)| v.clone());
     // ResolveLocale for the `nu` key gives both the numbering system and the resolved locale string
     // (reflecting a surviving `-u-nu-` extension).
     let (resolved_locale, nu_final) =
@@ -368,20 +455,29 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // ResolveLocale for the `ca` key: the locale's -u-ca- extension value (if supported) is used and
     // reflected in the resolved locale, unless a supported calendar option overrides it with a
     // different value (then the reflection is dropped).
-    let ca_ext = resolved.keywords.iter().find(|(k, _)| k == "ca").and_then(|(_, v)| {
-        let lc = v.to_lowercase();
-        resolve_cal(&crate::intl::tags::canonical_ca(&lc).unwrap_or(lc))
-    });
+    let ca_ext = resolved
+        .keywords
+        .iter()
+        .find(|(k, _)| k == "ca")
+        .and_then(|(_, v)| {
+            let lc = v.to_lowercase();
+            resolve_cal(&crate::intl::tags::canonical_ca(&lc).unwrap_or(lc))
+        });
     let mut ca_addition = ca_ext.clone();
     if let Some(opt) = &calendar {
         if ca_ext.as_ref() != Some(opt) {
             ca_addition = None;
         }
     }
-    let eff_cal = calendar.clone().or(ca_ext).unwrap_or_else(|| "gregory".to_string());
+    let eff_cal = calendar
+        .clone()
+        .or(ca_ext)
+        .unwrap_or_else(|| "gregory".to_string());
     // ResolveLocale for the `hc` key: reflect a valid -u-hc- unless the hourCycle/hour12 options
     // override it with a different value.
-    let hc_valid = hc_ext.clone().filter(|v| matches!(v.as_str(), "h11" | "h12" | "h23" | "h24"));
+    let hc_valid = hc_ext
+        .clone()
+        .filter(|v| matches!(v.as_str(), "h11" | "h12" | "h23" | "h24"));
     let hc_addition = match (&hc_valid, &hour_cycle, hour12) {
         (Some(e), Some(opt), _) if opt != e => None,
         (Some(_), _, Some(_)) => None,
@@ -389,7 +485,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         _ => None,
     };
     // Rebuild the -u- extension from the surviving ca/hc/nu additions (keys sorted alphabetically).
-    let base = resolved_locale.split("-u-").next().unwrap_or(&resolved_locale).to_string();
+    let base = resolved_locale
+        .split("-u-")
+        .next()
+        .unwrap_or(&resolved_locale)
+        .to_string();
     let nu_add = resolved_locale
         .strip_prefix(&format!("{base}-u-nu-"))
         .map(|s| s.to_string());
@@ -403,7 +503,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     if let Some(nu) = &nu_add {
         ext.push_str(&format!("-nu-{nu}"));
     }
-    let resolved_locale = if ext.is_empty() { base } else { format!("{base}-u{ext}") };
+    let resolved_locale = if ext.is_empty() {
+        base
+    } else {
+        format!("{base}-u{ext}")
+    };
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(eff_cal));
     set_builtin(&obj, "__dtf_nu", Value::from_string(nu_final));
@@ -505,7 +609,7 @@ fn ymd(ms: f64) -> (i64, u32, u32, u32, u32, u32, u32) {
     rem %= 60_000;
     let sec = (rem / 1000) as u32;
     let weekday = ((days % 7 + 4) % 7 + 7) as u32 % 7; // 0=Sun; 1970-01-01 was Thursday(4)
-    // civil from days
+                                                       // civil from days
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -520,7 +624,15 @@ fn ymd(ms: f64) -> (i64, u32, u32, u32, u32, u32, u32) {
     (year, m, d, h, mi, sec, weekday)
 }
 
-const WD_LONG: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WD_LONG: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
 const WD_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// Resolve the format argument to epoch-milliseconds. A Temporal receiver uses its ISO fields and
@@ -545,7 +657,11 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
             }
             temporal_compat_check(i, o, &t)?;
             // Calendar mismatch: a non-ISO Temporal calendar must equal the formatter's calendar.
-            let tcal = i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string());
+            let tcal = i
+                .temporal_cal
+                .get(&ptr)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "iso8601".to_string());
             let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "iso8601".to_string(),
@@ -562,8 +678,10 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
             // YearMonth/MonthDay require an EXACT calendar match (no ISO exception, since a bare
             // month-day/year-month is calendar-specific); other types accept an ISO instance.
             let exact = matches!(kind, 4 | 5);
-            if (exact && tcal != dcal) || (!exact && tcal != "iso8601" && tcal != dcal) {
-                return Err(i.make_error("RangeError", format!("calendar mismatch: {tcal} vs {dcal}")));
+            if tcal != dcal && (exact || tcal != "iso8601") {
+                return Err(
+                    i.make_error("RangeError", format!("calendar mismatch: {tcal} vs {dcal}"))
+                );
             }
             return Ok((temporal_to_ms(&t), kind));
         }
@@ -581,7 +699,11 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
 /// set includes both explicit component options and any dateStyle/timeStyle expansion, so e.g. a
 /// lone `timeStyle` (time fields only) has no overlap with a `PlainDate` and throws, while a
 /// `dateStyle`+`timeStyle` formatter overlaps every receiver.
-fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) -> Result<(), Value> {
+fn temporal_compat_check(
+    i: &mut Interp,
+    o: &Gc,
+    t: &crate::temporal::Temporal,
+) -> Result<(), Value> {
     use crate::temporal::Temporal as T;
     // Field set of the receiver (era is auxiliary to year and never stands alone, so it is omitted).
     let recv: &[&str] = match t {
@@ -600,10 +722,23 @@ fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) 
         let b = o.borrow();
         b.props.contains(&format!("__dtf_{field}")) || b.props.contains(&format!("__dtfx_{field}"))
     };
-    const ALL: &[&str] = &["weekday", "year", "month", "day", "hour", "minute", "second", "fracsec", "dayperiod"];
+    const ALL: &[&str] = &[
+        "weekday",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "fracsec",
+        "dayperiod",
+    ];
     let requested: Vec<&str> = ALL.iter().copied().filter(|f| present(f)).collect();
     if !requested.is_empty() && !requested.iter().any(|f| recv.contains(f)) {
-        return Err(i.make_error("TypeError", "no overlap between the formatter and the Temporal value"));
+        return Err(i.make_error(
+            "TypeError",
+            "no overlap between the formatter and the Temporal value",
+        ));
     }
     Ok(())
 }
@@ -623,7 +758,10 @@ fn dtf_nu(o: &Gc) -> String {
 }
 /// Format an already-resolved epoch-ms + Temporal kind to the joined string.
 fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
-    let s: String = build_parts(o, ms, kind).into_iter().map(|(_, v)| v).collect();
+    let s: String = build_parts(o, ms, kind)
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect();
     crate::intl::numberformat::xlate_digits(&s, &dtf_nu(o))
 }
 
@@ -647,7 +785,11 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         ms
     };
     let (mut y, mut mo, mut d, h, mi, s, wd) = ymd(ms);
-    let iso_date = crate::temporal::IsoDate { year: y, month: mo as u8, day: d as u8 };
+    let iso_date = crate::temporal::IsoDate {
+        year: y,
+        month: mo as u8,
+        day: d as u8,
+    };
     // A non-Gregorian calendar renders its own numeric year/month/day via the calendar tables.
     let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
@@ -667,14 +809,14 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     let allow = |slot: &str| -> bool {
         // A Temporal receiver without a time zone (any kind except 0/number and 6/Zoned) never
         // shows a time-zone name.
-        if slot == "tzname" && matches!(kind, 1 | 2 | 3 | 4 | 5) {
+        if slot == "tzname" && matches!(kind, 1..=5) {
             return false;
         }
         match kind {
             1 => !matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"), // Date
             2 => matches!(slot, "hour" | "minute" | "second" | "dayperiod" | "fracsec"),  // Time
-            4 => matches!(slot, "year" | "month" | "era"),                                 // YearMonth
-            5 => matches!(slot, "month" | "day"),                                          // MonthDay
+            4 => matches!(slot, "year" | "month" | "era"), // YearMonth
+            5 => matches!(slot, "month" | "day"),          // MonthDay
             _ => true,
         }
     };
@@ -696,20 +838,31 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     };
 
     if let Some(w) = get("__dtf_weekday") {
-        let name = if w == "long" { WD_LONG[wd as usize] } else { WD_SHORT[wd as usize] };
+        let name = if w == "long" {
+            WD_LONG[wd as usize]
+        } else {
+            WD_SHORT[wd as usize]
+        };
         parts.push(("weekday", name.to_string()));
         lit(&mut parts, ", ");
     }
 
     // CLDR locale key for name lookups (zh splits by script).
     let cldr_loc = {
-        let loc = match o.borrow().props.get("__dtf_locale").map(|p| p.value.clone()) {
+        let loc = match o
+            .borrow()
+            .props
+            .get("__dtf_locale")
+            .map(|p| p.value.clone())
+        {
             Some(Value::Str(s)) => s.to_string(),
             _ => "en".to_string(),
         };
         let mut lp = loc.split('-');
         let l = lp.next().unwrap_or("en");
-        let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+        let region = lp
+            .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase()))
+            .unwrap_or("");
         match (l, region) {
             ("zh", "TW" | "HK" | "MO") => "zh-Hant".to_string(),
             ("zh", _) => "zh-Hans".to_string(),
@@ -731,10 +884,26 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         "2-digit" => format!("{mo:02}"),
         _ => format!("{mo}"),
     });
-    let day_str = get("__dtf_day").map(|dd| if dd == "2-digit" { format!("{d:02}") } else { format!("{d}") });
+    let day_str = get("__dtf_day").map(|dd| {
+        if dd == "2-digit" {
+            format!("{d:02}")
+        } else {
+            format!("{d}")
+        }
+    });
     // When an era is shown for the Gregorian calendar, the year is the positive era year.
-    let disp_year = if greg_cal && get("__dtf_era").is_some() && y <= 0 { 1 - y } else { y };
-    let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (disp_year % 100 + 100) % 100) } else { format!("{disp_year}") });
+    let disp_year = if greg_cal && get("__dtf_era").is_some() && y <= 0 {
+        1 - y
+    } else {
+        y
+    };
+    let year_str = get("__dtf_year").map(|yy| {
+        if yy == "2-digit" {
+            format!("{:02}", (disp_year % 100 + 100) % 100)
+        } else {
+            format!("{disp_year}")
+        }
+    });
     let named_month = month_is_named;
     let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
 
@@ -773,7 +942,8 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     }
     // The era follows the date (CLDR name for the calendar/locale; the code is the fallback).
     if let (true, Some(width)) = (have_date, get("__dtf_era")) {
-        let (code, _) = crate::temporal::cal_era(if greg_cal { "gregory" } else { &dcal }, iso_date);
+        let (code, _) =
+            crate::temporal::cal_era(if greg_cal { "gregory" } else { &dcal }, iso_date);
         if let Some(code) = code {
             let idx = era_cldr_index(if greg_cal { "gregory" } else { &dcal }, code);
             let name = crate::cldr_dates::era_name(&cldr_loc, cal_key, &width, idx)
@@ -805,7 +975,12 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word; a plain
         // AM/PM marker only appears alongside a 12-hour clock. When the hour cycle wasn't resolved
         // (a default formatter over a PlainTime), use the locale default (en is 12-hour, others 24).
-        let cycle = match o.borrow().props.get("__dtf_hourcycle").map(|p| p.value.clone()) {
+        let cycle = match o
+            .borrow()
+            .props
+            .get("__dtf_hourcycle")
+            .map(|p| p.value.clone())
+        {
             Some(Value::Str(s)) => Some(s.to_string()),
             _ => None,
         };
@@ -813,7 +988,12 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             || match cycle.as_deref() {
                 Some("h11") | Some("h12") => true,
                 Some(_) => false,
-                None => match o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()) {
+                None => match o
+                    .borrow()
+                    .props
+                    .get("__dtf_hour12")
+                    .map(|p| p.value.clone())
+                {
                     Some(Value::Bool(b)) => b,
                     _ => cldr_loc == "en",
                 },
@@ -822,11 +1002,29 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         // h23 [0,23], h24 [1,24].
         let disp_h = match cycle.as_deref() {
             Some("h11") => h % 12,
-            Some("h12") => if h % 12 == 0 { 12 } else { h % 12 },
-            Some("h24") => if h == 0 { 24 } else { h },
+            Some("h12") => {
+                if h % 12 == 0 {
+                    12
+                } else {
+                    h % 12
+                }
+            }
+            Some("h24") => {
+                if h == 0 {
+                    24
+                } else {
+                    h
+                }
+            }
             Some("h23") => h,
             Some(_) => h,
-            None if use12 => if h % 12 == 0 { 12 } else { h % 12 },
+            None if use12 => {
+                if h % 12 == 0 {
+                    12
+                } else {
+                    h % 12
+                }
+            }
             None => h,
         };
         let ampm = if use12 {
@@ -847,7 +1045,14 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             // A 24-hour cycle (h23/h24) renders 2-digit even for a numeric hour (CLDR "HH"); a
             // 12-hour cycle uses 1-digit unless "2-digit" was explicitly requested.
             let pad = get("__dtf_hour").as_deref() == Some("2-digit") || !use12;
-            parts.push(("hour", if pad { format!("{disp_h:02}") } else { format!("{disp_h}") }));
+            parts.push((
+                "hour",
+                if pad {
+                    format!("{disp_h:02}")
+                } else {
+                    format!("{disp_h}")
+                },
+            ));
             first = false;
         }
         if time_defaulted || get("__dtf_minute").is_some() {
@@ -863,11 +1068,20 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             }
             parts.push(("second", format!("{s:02}")));
             // fractionalSecondDigits appends the leading digits of the millisecond fraction.
-            if let Some(Value::Num(fd)) = o.borrow().props.get("__dtf_fracsec").map(|p| p.value.clone()) {
+            if let Some(Value::Num(fd)) = o
+                .borrow()
+                .props
+                .get("__dtf_fracsec")
+                .map(|p| p.value.clone())
+            {
                 let ms_frac = (ms.rem_euclid(1000.0)) as u32;
                 let digits = format!("{ms_frac:03}");
                 // The fractional separator is the numbering system's decimal symbol (arab: U+066B).
-                let sep = if matches!(dtf_nu(o).as_str(), "arab" | "arabext") { "\u{066b}" } else { "." };
+                let sep = if matches!(dtf_nu(o).as_str(), "arab" | "arabext") {
+                    "\u{066b}"
+                } else {
+                    "."
+                };
                 lit(&mut parts, sep);
                 parts.push(("fractionalSecond", digits[..fd as usize].to_string()));
             }
@@ -921,7 +1135,7 @@ fn canonicalize_time_zone(tz: &str) -> Option<String> {
 /// The signed millisecond offset of a canonical `±HH:MM[:SS]` UTC-offset zone (0 for anything else).
 fn tz_offset_ms(tz: &str) -> f64 {
     let b = tz.as_bytes();
-    if b.first().map_or(true, |&c| c != b'+' && c != b'-') {
+    if b.first().is_none_or(|&c| c != b'+' && c != b'-') {
         return 0.0;
     }
     let sign = if b[0] == b'-' { -1.0 } else { 1.0 };
@@ -957,7 +1171,11 @@ fn canon_utc_offset(s: &str) -> Option<String> {
         return None;
     }
     // A zero offset canonicalizes to "+00:00" regardless of the written sign.
-    let sign_c = if sign == b'-' && (h != 0 || m != 0) { '-' } else { '+' };
+    let sign_c = if sign == b'-' && (h != 0 || m != 0) {
+        '-'
+    } else {
+        '+'
+    };
     Some(format!("{sign_c}{h:02}:{m:02}"))
 }
 
@@ -965,7 +1183,11 @@ fn canon_utc_offset(s: &str) -> Option<String> {
 /// forms; only `narrow` noon differs).
 fn day_period_word(h: u32, width: &str) -> &'static str {
     if h == 12 {
-        if width == "narrow" { "n" } else { "noon" }
+        if width == "narrow" {
+            "n"
+        } else {
+            "noon"
+        }
     } else if h < 12 {
         "in the morning"
     } else if h < 18 {
@@ -1007,7 +1229,13 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     put(i, &res, "timeZone", "__dtf_tz");
     // hourCycle/hour12 are resolved internally for every formatter but only surface in
     // resolvedOptions when the resolved pattern actually shows an hour.
-    if matches!(o.borrow().props.get("__dtf_hourshown").map(|p| p.value.clone()), Some(Value::Bool(true))) {
+    if matches!(
+        o.borrow()
+            .props
+            .get("__dtf_hourshown")
+            .map(|p| p.value.clone()),
+        Some(Value::Bool(true))
+    ) {
         put(i, &res, "hourCycle", "__dtf_hourcycle");
         put(i, &res, "hour12", "__dtf_hour12");
     }

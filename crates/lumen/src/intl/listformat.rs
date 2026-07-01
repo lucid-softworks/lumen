@@ -1,18 +1,23 @@
 //! `Intl.ListFormat`.
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, data, def_getter, make_service};
+use super::{
+    ab, arg, canonicalize_locale_list, data, def_getter, get_options_object as coerce_options,
+    make_service,
+};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Value};
+use crate::value::{set_builtin, set_data, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "ListFormat", 0, construct);
     install_supported_locales(it, &ctor);
 
-    it.def_method(&proto, "format", 1, |i, this, a| format(i, &this, &arg(a, 0), false));
+    it.def_method(&proto, "format", 1, |i, this, a| {
+        format(i, &this, &arg(a, 0), false)
+    });
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
         format(i, &this, &arg(a, 0), true)
     });
@@ -35,8 +40,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("conjunction"),
     )?
     .unwrap();
-    let style = get_option(i, &options, "style", &["long", "short", "narrow"], Some("long"))?
-        .unwrap();
+    let style = get_option(
+        i,
+        &options,
+        "style",
+        &["long", "short", "narrow"],
+        Some("long"),
+    )?
+    .unwrap();
     let resolved = resolve_locale(i, &requested, &[]);
 
     let obj = i.new_object();
@@ -64,7 +75,8 @@ fn string_list(i: &mut Interp, list: &Value) -> Result<Vec<String>, Value> {
             None => break,
             Some(Value::Str(s)) => out.push(s.to_string()),
             Some(_) => {
-                let err = i.make_error("TypeError", "Intl.ListFormat list elements must be strings");
+                let err =
+                    i.make_error("TypeError", "Intl.ListFormat list elements must be strings");
                 i.iterator_close(&iter);
                 return Err(err);
             }
@@ -135,7 +147,13 @@ fn format(i: &mut Interp, this: &Value, list: &Value, to_parts: bool) -> Result<
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__lf")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__lf_locale"));
     set_data(&res, "type", get("__lf_type"));

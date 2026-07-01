@@ -1,17 +1,21 @@
 //! `Intl.PluralRules` (a subset: default digit options, cardinal + a coarse ordinal).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, data, make_service};
+use super::{
+    ab, arg, canonicalize_locale_list, data, get_options_object as coerce_options, make_service,
+};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Value};
+use crate::value::{set_builtin, set_data, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "PluralRules", 0, construct);
     install_supported_locales(it, &ctor);
-    it.def_method(&proto, "select", 1, |i, this, a| select(i, &this, &arg(a, 0)));
+    it.def_method(&proto, "select", 1, |i, this, a| {
+        select(i, &this, &arg(a, 0))
+    });
     it.def_method(&proto, "selectRange", 2, |i, this, a| {
         select_range(i, &this, &arg(a, 0), &arg(a, 1))
     });
@@ -25,7 +29,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
-    let kind = get_option(i, &options, "type", &["cardinal", "ordinal"], Some("cardinal"))?.unwrap();
+    let kind = get_option(
+        i,
+        &options,
+        "type",
+        &["cardinal", "ordinal"],
+        Some("cardinal"),
+    )?
+    .unwrap();
     // Read order: type, notation, compactDisplay, then the digit + rounding options.
     let notation = get_option(
         i,
@@ -35,12 +46,25 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("standard"),
     )?
     .unwrap();
-    let compact_display =
-        get_option(i, &options, "compactDisplay", &["short", "long"], Some("short"))?.unwrap();
+    let compact_display = get_option(
+        i,
+        &options,
+        "compactDisplay",
+        &["short", "long"],
+        Some("short"),
+    )?
+    .unwrap();
     let min_int = read_digits(i, &options, "minimumIntegerDigits", 1, 21, 1)?;
     let min_frac = read_digits(i, &options, "minimumFractionDigits", 0, 100, 0)?;
     let max_frac_default = min_frac.max(3);
-    let max_frac = read_digits(i, &options, "maximumFractionDigits", min_frac, 100, max_frac_default)?;
+    let max_frac = read_digits(
+        i,
+        &options,
+        "maximumFractionDigits",
+        min_frac,
+        100,
+        max_frac_default,
+    )?;
     let mnsd = read_digits_opt(i, &options, "minimumSignificantDigits", 1, 21)?;
     let mxsd = read_digits_opt(i, &options, "maximumSignificantDigits", 1, 21)?;
     // When either significant-digit bound is present, both are resolved (min->1, max->21).
@@ -51,18 +75,44 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     };
     let _rinc = {
         let v = ab(i.get_member(&options, "roundingIncrement"))?;
-        if matches!(v, Value::Undefined) { 1.0 } else { ab(i.to_number(&v))? }
+        if matches!(v, Value::Undefined) {
+            1.0
+        } else {
+            ab(i.to_number(&v))?
+        }
     };
     let rounding_mode = get_option(
         i,
         &options,
         "roundingMode",
-        &["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"],
+        &[
+            "ceil",
+            "floor",
+            "expand",
+            "trunc",
+            "halfCeil",
+            "halfFloor",
+            "halfExpand",
+            "halfTrunc",
+            "halfEven",
+        ],
         Some("halfExpand"),
     )?
     .unwrap();
-    let _rprio = get_option(i, &options, "roundingPriority", &["auto", "morePrecision", "lessPrecision"], Some("auto"))?;
-    let _tzd = get_option(i, &options, "trailingZeroDisplay", &["auto", "stripIfInteger"], Some("auto"))?;
+    let _rprio = get_option(
+        i,
+        &options,
+        "roundingPriority",
+        &["auto", "morePrecision", "lessPrecision"],
+        Some("auto"),
+    )?;
+    let _tzd = get_option(
+        i,
+        &options,
+        "trailingZeroDisplay",
+        &["auto", "stripIfInteger"],
+        Some("auto"),
+    )?;
     let resolved = resolve_locale(i, &requested, &[]);
 
     let obj = i.new_object();
@@ -76,7 +126,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__pr_minfrac", Value::Num(min_frac as f64));
     set_builtin(&obj, "__pr_maxfrac", Value::Num(max_frac as f64));
     set_builtin(&obj, "__pr_notation", Value::from_string(notation.clone()));
-    set_builtin(&obj, "__pr_compactdisplay", Value::from_string(compact_display));
+    set_builtin(
+        &obj,
+        "__pr_compactdisplay",
+        Value::from_string(compact_display),
+    );
     set_builtin(&obj, "__pr_roundingmode", Value::from_string(rounding_mode));
     if let (Some(mn), Some(mx)) = (min_sig, max_sig) {
         set_builtin(&obj, "__pr_minsig", Value::Num(mn as f64));
@@ -104,7 +158,13 @@ fn read_digits(
     Ok(n.floor() as u32)
 }
 
-fn read_digits_opt(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32) -> Result<Option<u32>, Value> {
+fn read_digits_opt(
+    i: &mut Interp,
+    options: &Value,
+    prop: &str,
+    lo: u32,
+    hi: u32,
+) -> Result<Option<u32>, Value> {
     let v = ab(i.get_member(options, prop))?;
     if matches!(v, Value::Undefined) {
         return Ok(None);
@@ -180,7 +240,13 @@ fn select_range(i: &mut Interp, this: &Value, start: &Value, end: &Value) -> Res
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__pr")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__pr_locale"));
     set_data(&res, "type", get("__pr_type"));

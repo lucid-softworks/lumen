@@ -1,11 +1,11 @@
 //! `Intl.RelativeTimeFormat` (English data; `numeric: "always"` and a small `"auto"` subset).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Value};
+use crate::value::{set_builtin, set_data, Value};
 
 const UNITS: &[&str] = &[
     "year", "years", "quarter", "quarters", "month", "months", "week", "weeks", "day", "days",
@@ -34,12 +34,21 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // Read order: numberingSystem, style, numeric.
     let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
     if let Some(ns) = &numbering {
-        if !ns.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        if !ns
+            .split('-')
+            .all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+        {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
         }
     }
-    let style = get_option(i, &options, "style", &["long", "short", "narrow"], Some("long"))?
-        .unwrap();
+    let style = get_option(
+        i,
+        &options,
+        "style",
+        &["long", "short", "narrow"],
+        Some("long"),
+    )?
+    .unwrap();
     let numeric = get_option(i, &options, "numeric", &["always", "auto"], Some("always"))?.unwrap();
     let (resolved_locale, numbering) =
         super::service::resolve_locale_nu(&requested, numbering.as_deref());
@@ -75,7 +84,11 @@ fn singular(unit: &str) -> Option<&'static str> {
 /// or plural form; `short`/`narrow` use the CLDR abbreviations.
 fn unit_word_en(sing: &str, plural: bool, style: &str) -> String {
     if style == "long" {
-        return if plural { format!("{sing}s") } else { sing.to_string() };
+        return if plural {
+            format!("{sing}s")
+        } else {
+            sing.to_string()
+        };
     }
     // short & narrow share these English abbreviations; quarter and day take a plural form.
     match sing {
@@ -168,7 +181,12 @@ fn format(
     to_parts: bool,
 ) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__rtf")?;
-    let numeric = match o.borrow().props.get("__rtf_numeric").map(|p| p.value.clone()) {
+    let numeric = match o
+        .borrow()
+        .props
+        .get("__rtf_numeric")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Str(s)) => s.to_string(),
         _ => "always".to_string(),
     };
@@ -200,7 +218,12 @@ fn format(
         Some(Value::Str(s)) => s.to_string(),
         _ => "long".to_string(),
     };
-    let locale = match o.borrow().props.get("__rtf_locale").map(|p| p.value.clone()) {
+    let locale = match o
+        .borrow()
+        .props
+        .get("__rtf_locale")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Str(s)) => s.to_string(),
         _ => "en".to_string(),
     };
@@ -280,10 +303,18 @@ fn format(
 }
 
 /// Construct `new Intl.<service>(locale, options)`.
-fn new_service(i: &mut Interp, service: &str, locale: &str, opts: crate::value::Gc) -> Result<Value, Value> {
+fn new_service(
+    i: &mut Interp,
+    service: &str,
+    locale: &str,
+    opts: crate::value::Gc,
+) -> Result<Value, Value> {
     let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
     let ctor = ab(i.get_member(&intl, service))?;
-    ab(i.construct(ctor, &[Value::from_string(locale.to_string()), Value::Obj(opts)]))
+    ab(i.construct(
+        ctor,
+        &[Value::from_string(locale.to_string()), Value::Obj(opts)],
+    ))
 }
 
 /// Format a non-negative number the way our minimal number formatter would (integer or decimal).
@@ -298,7 +329,13 @@ pub(crate) fn fmt_num(n: f64) -> String {
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__rtf")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__rtf_locale"));
     set_data(&res, "style", get("__rtf_style"));

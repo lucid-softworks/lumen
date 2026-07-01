@@ -5142,8 +5142,6 @@ fn float16_rounds_once() {
 }
 
 #[test]
-#[test]
-#[test]
 fn typedarray_iteration_semantics() {
     // Reflect.set writes a TypedArray element (integer-indexed exotic [[Set]]), not a shadow prop.
     assert_eq!(
@@ -5166,8 +5164,6 @@ fn typedarray_iteration_semantics() {
     assert_eq!(run("new Uint8Array([1,2,3,2]).lastIndexOf(2)"), "3");
 }
 
-#[test]
-#[test]
 #[test]
 fn typedarray_set_semantics() {
     // Copy from another TypedArray, with overlap (same buffer) handled via a snapshot.
@@ -5225,9 +5221,6 @@ fn typedarray_sort_semantics() {
     assert_eq!(throws("var i=(new Int32Array([3,1,2])).buffer.transferToImmutable(); new Int32Array(i).sort()"), "TypeError");
 }
 
-#[test]
-#[test]
-#[test]
 #[test]
 fn typedarray_slice_and_subclass_buffer() {
     // slice copies a range into a species-created array; out-of-range indices stay zero.

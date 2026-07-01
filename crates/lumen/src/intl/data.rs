@@ -6,8 +6,14 @@ pub fn number_symbols(lang: &str, region: &str) -> (&'static str, &'static str, 
     // (decimal, group, (primary_group, secondary_group))
     match (lang, region) {
         ("en", "IN") | ("hi", _) | ("bn", "IN") | ("ta", "IN") => (".", ",", (3, 2)),
-        ("de", _) | ("es", "ES") | ("it", _) | ("nl", _) | ("pt", "PT") | ("da", _)
-        | ("id", _) | ("tr", _) => (",", ".", (3, 3)),
+        ("de", _)
+        | ("es", "ES")
+        | ("it", _)
+        | ("nl", _)
+        | ("pt", "PT")
+        | ("da", _)
+        | ("id", _)
+        | ("tr", _) => (",", ".", (3, 3)),
         // Polish groups with a plain no-break space (U+00A0) and applies minimumGroupingDigits=2.
         ("pl", _) => (",", "\u{00a0}", (3, 3)),
         ("fr", _) | ("ru", _) | ("cs", _) | ("hu", _) | ("fi", _) | ("sv", _) => {
@@ -84,7 +90,7 @@ pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool, e: i32) -> &'stat
         "fr" => {
             if i == 0 || i == 1 {
                 "one"
-            } else if (e == 0 && i != 0 && i % 1_000_000 == 0 && !has_fraction)
+            } else if (e == 0 && i != 0 && i.is_multiple_of(1_000_000) && !has_fraction)
                 || !(0..=5).contains(&e)
             {
                 "many"

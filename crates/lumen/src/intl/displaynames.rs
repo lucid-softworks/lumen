@@ -1,13 +1,15 @@
 //! `Intl.DisplayNames` (English data subset).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
+use super::{
+    ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
+};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_data, set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DisplayNames", 2, construct);
@@ -28,19 +30,38 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     let options = coerce_options(i, &opt_arg)?;
     read_locale_matcher(i, &options)?;
-    let style = get_option(i, &options, "style", &["narrow", "short", "long"], Some("long"))?.unwrap();
+    let style = get_option(
+        i,
+        &options,
+        "style",
+        &["narrow", "short", "long"],
+        Some("long"),
+    )?
+    .unwrap();
     let kind = get_option(
         i,
         &options,
         "type",
-        &["language", "region", "script", "currency", "calendar", "dateTimeField"],
+        &[
+            "language",
+            "region",
+            "script",
+            "currency",
+            "calendar",
+            "dateTimeField",
+        ],
         None,
     )?;
     let kind = kind.ok_or_else(|| i.make_error("TypeError", "type option is required"))?;
     let fallback = get_option(i, &options, "fallback", &["code", "none"], Some("code"))?.unwrap();
-    let language_display =
-        get_option(i, &options, "languageDisplay", &["dialect", "standard"], Some("dialect"))?
-            .unwrap();
+    let language_display = get_option(
+        i,
+        &options,
+        "languageDisplay",
+        &["dialect", "standard"],
+        Some("dialect"),
+    )?
+    .unwrap();
     let resolved = resolve_locale(i, &requested, &[]);
 
     let obj = i.new_object();
@@ -52,7 +73,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__dn_style", Value::from_string(style));
     set_builtin(&obj, "__dn_type", Value::from_string(kind));
     set_builtin(&obj, "__dn_fallback", Value::from_string(fallback));
-    set_builtin(&obj, "__dn_langdisplay", Value::from_string(language_display));
+    set_builtin(
+        &obj,
+        "__dn_langdisplay",
+        Value::from_string(language_display),
+    );
     Ok(Value::Obj(obj))
 }
 
@@ -62,7 +87,12 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     };
-    let fallback = match o.borrow().props.get("__dn_fallback").map(|p| p.value.clone()) {
+    let fallback = match o
+        .borrow()
+        .props
+        .get("__dn_fallback")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Str(s)) => s.to_string(),
         _ => "code".to_string(),
     };
@@ -73,7 +103,12 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
             // DisplayNames `language` requires a `unicode_language_id` (language[-script][-region]
             // [-variants]) — a tag carrying extensions or singleton subtags is a RangeError.
             let is_language_id = tags::parse(&s)
-                .map(|t| t.unicode.is_none() && t.transform.is_none() && t.other_ext.is_empty() && t.private.is_empty())
+                .map(|t| {
+                    t.unicode.is_none()
+                        && t.transform.is_none()
+                        && t.other_ext.is_empty()
+                        && t.private.is_empty()
+                })
                 .unwrap_or(false);
             if !is_language_id {
                 return Err(i.make_error("RangeError", format!("invalid language code: {s}")));
@@ -81,8 +116,8 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
             tags::canonicalize_language_tag(&s).unwrap_or(s.clone())
         }
         "region" => {
-            if !(s.len() == 2 && s.bytes().all(|b| b.is_ascii_alphabetic()))
-                && !(s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()))
+            if !(s.len() == 2 && s.bytes().all(|b| b.is_ascii_alphabetic())
+                || s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()))
             {
                 return Err(i.make_error("RangeError", format!("invalid region code: {s}")));
             }
@@ -104,7 +139,9 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
         }
         "calendar" => {
             let ok = !s.is_empty()
-                && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()));
+                && s.split('-').all(|p| {
+                    p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())
+                });
             if !ok {
                 return Err(i.make_error("RangeError", format!("invalid calendar code: {s}")));
             }
@@ -113,8 +150,18 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
         }
         "dateTimeField" => {
             const FIELDS: &[&str] = &[
-                "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod",
-                "hour", "minute", "second", "timeZoneName",
+                "era",
+                "year",
+                "quarter",
+                "month",
+                "weekOfYear",
+                "weekday",
+                "day",
+                "dayPeriod",
+                "hour",
+                "minute",
+                "second",
+                "timeZoneName",
             ];
             if !FIELDS.contains(&s.as_str()) {
                 return Err(i.make_error("RangeError", format!("invalid dateTimeField: {s}")));
@@ -196,7 +243,13 @@ fn display_name(kind: &str, code: &str) -> Option<&'static str> {
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__dn")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__dn_locale"));
     set_data(&res, "style", get("__dn_style"));

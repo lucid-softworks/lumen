@@ -1,17 +1,21 @@
 //! `Intl.Segmenter` (grapheme = per code point; word/sentence = coarse boundaries).
 
 use super::service::{
-    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
+use super::{
+    ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
+};
 use crate::interpreter::Interp;
-use crate::value::{set_data, set_builtin, Gc, Value};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Segmenter", 0, construct);
     install_supported_locales(it, &ctor);
-    it.def_method(&proto, "segment", 1, |i, this, a| segment(i, &this, &arg(a, 0)));
+    it.def_method(&proto, "segment", 1, |i, this, a| {
+        segment(i, &this, &arg(a, 0))
+    });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
 }
 
@@ -22,9 +26,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
-    let granularity =
-        get_option(i, &options, "granularity", &["grapheme", "word", "sentence"], Some("grapheme"))?
-            .unwrap();
+    let granularity = get_option(
+        i,
+        &options,
+        "granularity",
+        &["grapheme", "word", "sentence"],
+        Some("grapheme"),
+    )?
+    .unwrap();
     let resolved = resolve_locale(i, &requested, &[]);
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.Segmenter")? {
@@ -84,7 +93,11 @@ fn gcb_class(cp: u32) -> Gcb {
         0x1160..=0x11A7 | 0xD7B0..=0xD7C6 => return Gcb::V,
         0x11A8..=0x11FF | 0xD7CB..=0xD7FB => return Gcb::T,
         0xAC00..=0xD7A3 => {
-            return if (cp - 0xAC00) % 28 == 0 { Gcb::Lv } else { Gcb::Lvt };
+            return if (cp - 0xAC00).is_multiple_of(28) {
+                Gcb::Lv
+            } else {
+                Gcb::Lvt
+            };
         }
         _ => {}
     }
@@ -111,6 +124,9 @@ fn gcb_class(cp: u32) -> Gcb {
 }
 
 /// UAX #29 grapheme-cluster boundaries as `(start_offset, false)` in UTF-16 code units.
+// The GB3-13 rules deliberately map to separate `else if` arms (several returning the same bool) so
+// each stays traceable to its spec rule; collapsing them would obscure that mapping.
+#[allow(clippy::if_same_then_else)]
 fn grapheme_boundaries(s: &[u16]) -> Vec<(usize, bool)> {
     // Decode to (utf16 offset, code point), keeping surrogate pairs together.
     let n = s.len();
@@ -118,7 +134,8 @@ fn grapheme_boundaries(s: &[u16]) -> Vec<(usize, bool)> {
     let mut idx = 0;
     while idx < n {
         let hi = s[idx];
-        if (0xD800..=0xDBFF).contains(&hi) && idx + 1 < n && (0xDC00..=0xDFFF).contains(&s[idx + 1]) {
+        if (0xD800..=0xDBFF).contains(&hi) && idx + 1 < n && (0xDC00..=0xDFFF).contains(&s[idx + 1])
+        {
             let cp = 0x10000 + (((hi as u32 - 0xD800) << 10) | (s[idx + 1] as u32 - 0xDC00));
             cps.push((idx, cp));
             idx += 2;
@@ -279,15 +296,21 @@ fn mid_joins(prev: u16, mid: u16, next: u16) -> bool {
 
 fn is_word_cu(c: u16) -> bool {
     let c = c as u32;
-    (c >= 0x30 && c <= 0x39)
-        || (c >= 0x41 && c <= 0x5A)
-        || (c >= 0x61 && c <= 0x7A)
-        || c >= 0x80 // treat most non-ASCII as word-like (coarse)
+    (0x30..=0x39).contains(&c)
+        || (0x41..=0x5A).contains(&c)
+        || (0x61..=0x7A).contains(&c)
+        || c >= 0x80
+    // treat most non-ASCII as word-like (coarse)
 }
 
 fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__sg")?;
-    let granularity = match o.borrow().props.get("__sg_granularity").map(|p| p.value.clone()) {
+    let granularity = match o
+        .borrow()
+        .props
+        .get("__sg_granularity")
+        .map(|p| p.value.clone())
+    {
         Some(Value::Str(s)) => s.to_string(),
         _ => "grapheme".to_string(),
     };
@@ -320,10 +343,10 @@ fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> 
             let itf = ab(i.get_member(&recs, "values"))?;
             ab(i.call(itf, recs, &[]))
         });
-        segments
-            .borrow_mut()
-            .props
-            .insert(crate::interpreter::Interp::sym_key(&sym), crate::value::Property::builtin(Value::Obj(f)));
+        segments.borrow_mut().props.insert(
+            crate::interpreter::Interp::sym_key(&sym),
+            crate::value::Property::builtin(Value::Obj(f)),
+        );
     }
     it_containing(i, &segments);
     Ok(Value::Obj(segments))
@@ -356,7 +379,13 @@ fn it_containing(i: &mut Interp, segments: &Gc) {
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let o = brand_slot(i, &this, "__sg")?;
-    let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
+    let get = |k: &str| {
+        o.borrow()
+            .props
+            .get(k)
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined)
+    };
     let res = i.new_object();
     set_data(&res, "locale", get("__sg_locale"));
     set_data(&res, "granularity", get("__sg_granularity"));
