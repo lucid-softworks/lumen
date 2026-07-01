@@ -3229,10 +3229,6 @@ fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i
     Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
 }
 
-/// A PlainYearMonth's reference ISO date (the first of its month).
-fn ym_ref(d: IsoDate) -> IsoDate {
-    IsoDate { year: d.year, month: d.month, day: 1 }
-}
 /// The ISO date of the first day of `iso`'s month in calendar `cal` — the reference date a
 /// PlainYearMonth stores.
 fn ym_ref_of(cal: &str, iso: IsoDate) -> IsoDate {
@@ -4943,8 +4939,10 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
-        let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, &mode);
+        let (d1, o1) = (d, o); // stored references are the calendar month's first day
+        let mut dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, &mode);
+        dur.weeks = 0;
+        dur.days = 0; // a year-month difference has no day component
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
@@ -4952,8 +4950,10 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (largest, smallest, mode) = read_ym_diff(i, &arg(a, 1))?;
-        let (d1, o1) = (ym_ref(d), ym_ref(o));
-        let dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, negate_mode(&mode));
+        let (d1, o1) = (d, o); // stored references are the calendar month's first day
+        let mut dur = diff_date_rounded(&cal, d1, o1, &largest, &smallest, 1, negate_mode(&mode));
+        dur.weeks = 0;
+        dur.days = 0; // a year-month difference has no day component
         Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     let ctor = add_ctor(it, ns, "PlainYearMonth", 2, proto, |i, _t, a| {
