@@ -59,9 +59,10 @@ fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> 
     let (o, a, b) = range_endpoints(i, this, x, y)?;
     let stype = suffix_type_of(&o);
     let (dec, grp) = loc_seps(&o);
+    let nan = loc_nan(&o);
     let mut out: Vec<Value> = Vec::new();
     let push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
-        for (t, v) in decompose_parts(whole, &stype, dec, grp) {
+        for (t, v) in decompose_parts(whole, &stype, dec, grp, nan) {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(t));
             set_data(&ob, "value", Value::from_string(v));
@@ -1144,14 +1145,14 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
                 .and_then(|s| s.strip_suffix(post))
                 .unwrap_or(&whole);
             let mut p = unit_affix_parts(pre, true);
-            p.extend(decompose_parts(num_only, "literal", dec, grp));
+            p.extend(decompose_parts(num_only, "literal", dec, grp, loc_nan(&o)));
             p.extend(unit_affix_parts(post, false));
             p
         } else {
-            decompose_parts(&whole, &suffix_type_of(&o), dec, grp)
+            decompose_parts(&whole, &suffix_type_of(&o), dec, grp, loc_nan(&o))
         }
     } else {
-        decompose_parts(&whole, &suffix_type_of(&o), dec, grp)
+        decompose_parts(&whole, &suffix_type_of(&o), dec, grp, loc_nan(&o))
     };
     let arr: Vec<Value> = parts
         .into_iter()
@@ -1244,7 +1245,16 @@ fn loc_seps(o: &Gc) -> (char, char) {
     (dec.chars().next().unwrap_or('.'), grp.chars().next().unwrap_or(','))
 }
 
-fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'static str, String)> {
+/// The localized NaN symbol for a formatter's locale.
+fn loc_nan(o: &Gc) -> &'static str {
+    let loc = get_str(o, "__nf_locale");
+    let mut lp = loc.split('-');
+    let lang = lp.next().unwrap_or("en");
+    let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    crate::intl::data::nan_symbol(lang, region)
+}
+
+fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char, nan_sym: &str) -> Vec<(&'static str, String)> {
     let mut parts: Vec<(&'static str, String)> = Vec::new();
     // Split off the exponent tail, if any.
     let (main, exp) = match s.split_once('E') {
@@ -1252,6 +1262,7 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
         None => (s, None),
     };
     let bytes: Vec<char> = main.chars().collect();
+    let nan_chars: Vec<char> = nan_sym.chars().collect();
     let mut idx = 0;
     // Leading affix: a sign, then any non-digit prefix (currency symbol).
     if idx < bytes.len() && (bytes[idx] == '-' || bytes[idx] == '+') {
@@ -1263,8 +1274,9 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
         parts.push(("literal", "(".to_string()));
         idx += 1;
     }
-    // The number body is either digits, the infinity glyph, or "NaN"; the prefix loop stops there.
-    let is_nan_at = |b: &[char], k: usize| b[k..].starts_with(&['N', 'a', 'N']);
+    // The number body is either digits, the infinity glyph, or the (possibly localized) NaN symbol;
+    // the prefix loop stops there.
+    let is_nan_at = |b: &[char], k: usize| !nan_chars.is_empty() && b[k..].starts_with(&nan_chars[..]);
     let mut prefix = String::new();
     while idx < bytes.len()
         && !bytes[idx].is_ascii_digit()
@@ -1285,8 +1297,8 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
         parts.push(("infinity", "\u{221e}".to_string()));
         idx += 1;
     } else if is_nan_at(&bytes, idx) {
-        parts.push(("nan", "NaN".to_string()));
-        idx += 3;
+        parts.push(("nan", nan_sym.to_string()));
+        idx += nan_chars.len();
     }
     // Integer digits (with grouping commas).
     let int_start = idx;
