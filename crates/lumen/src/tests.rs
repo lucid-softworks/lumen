@@ -5286,3 +5286,17 @@ fn typedarray_identity_and_names() {
     // toLocaleString on an out-of-bounds view throws.
     assert_eq!(throws("var b=new ArrayBuffer(16,{maxByteLength:16}); var a=new Int32Array(b,0,4); b.resize(4); a.toLocaleString()"), "TypeError");
 }
+
+#[test]
+fn array_iterator_exhaustion_and_ta_bounds() {
+    // An exhausted iterator stays done even if the array grows afterwards.
+    assert_eq!(
+        run("var a=[1]; var it=a[Symbol.iterator](); it.next(); var d=it.next().done; a.push(2,3); [d, it.next().done].join(',')"),
+        "true,true"
+    );
+    // A TypedArray iterator over a shrunk-out-of-bounds view throws TypeError.
+    assert_eq!(
+        throws("var b=new ArrayBuffer(16,{maxByteLength:16}); var a=new Int32Array(b,0,4); var it=a[Symbol.iterator](); it.next(); b.resize(4); it.next();"),
+        "TypeError"
+    );
+}

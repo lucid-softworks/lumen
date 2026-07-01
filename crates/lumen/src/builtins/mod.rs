@@ -11355,17 +11355,34 @@ pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
 
 fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
     let target = ab(i.get_member(&this, "__ai_target"))?;
+    // An exhausted iterator clears its target so it stays done even if the source later grows.
+    if matches!(target, Value::Undefined) {
+        let result = i.new_object();
+        set_data(&result, "value", Value::Undefined);
+        set_data(&result, "done", Value::Bool(true));
+        return Ok(Value::Obj(result));
+    }
     let idx_v = ab(i.get_member(&this, "__ai_index"))?;
     let idx = ab(i.to_number(&idx_v))? as usize;
     let kind_v = ab(i.get_member(&this, "__ai_kind"))?;
     let kind = ab(i.to_number(&kind_v))? as u8;
-    let len = match &target {
-        Value::Obj(o) => i.array_length(o),
-        Value::Str(s) => s.chars().count(),
-        _ => 0,
+    // A TypedArray target re-derives its length each step; an out-of-bounds (detached/shrunk-past)
+    // view throws TypeError.
+    let len = if let Some(info) = map_ptr(&target).and_then(|p| i.typed_arrays.get(&p).copied()) {
+        match i.ta_len(&info) {
+            Some(l) => l,
+            None => return Err(i.make_error("TypeError", "TypedArray is out of bounds")),
+        }
+    } else {
+        match &target {
+            Value::Obj(o) => i.array_length(o),
+            Value::Str(s) => s.chars().count(),
+            _ => 0,
+        }
     };
     let result = i.new_object();
     if idx >= len {
+        ab(i.set_member(&this, "__ai_target", Value::Undefined))?;
         set_data(&result, "value", Value::Undefined);
         set_data(&result, "done", Value::Bool(true));
         return Ok(Value::Obj(result));
