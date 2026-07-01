@@ -108,9 +108,6 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
     if !s.is_finite() || !e.is_finite() {
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
-    if s > e {
-        return Err(i.make_error("RangeError", "start date is after end date"));
-    }
     Ok((s, e, ks))
 }
 
@@ -399,46 +396,22 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
     Ok((n, 0))
 }
 
-/// A Temporal receiver's kind must not request incompatible fields from the formatter.
+/// A Temporal receiver only conflicts with the formatter through dateStyle/timeStyle: individual
+/// components outside the receiver's field set are silently dropped (see [`build_parts`]'s `allow`).
+/// A date-only receiver rejects a lone `timeStyle`; a `PlainTime` rejects any `dateStyle`.
 fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) -> Result<(), Value> {
     use crate::temporal::Temporal as T;
     let has = |k: &str| o.borrow().props.contains(k);
-    // Defaulted (not explicitly requested) components never conflict.
-    let defaulted = has("__dtf_defaults");
-    let has_time = has("__dtf_hour") || has("__dtf_minute") || has("__dtf_second")
-        || has("__dtf_dayperiod") || has("__dtf_fracsec") || has("__dtf_timestyle");
-    let has_date_any = !defaulted
-        && (has("__dtf_weekday") || has("__dtf_era") || has("__dtf_year")
-            || has("__dtf_month") || has("__dtf_day") || has("__dtf_datestyle"));
-    let has_year = !defaulted && has("__dtf_year");
-    let has_day = !defaulted && has("__dtf_day");
-    let has_weekday = !defaulted && has("__dtf_weekday");
+    let date_style = has("__dtf_datestyle");
+    let time_style = has("__dtf_timestyle");
     let err = |i: &mut Interp, msg: &str| Err(i.make_error("TypeError", msg.to_string()));
     match t {
-        T::Date(_) => {
-            if has_time {
-                return err(i, "PlainDate cannot be formatted with time components");
-            }
+        T::Date(_) | T::YearMonth(_) | T::MonthDay(_) if time_style && !date_style => {
+            err(i, "a date-only Temporal value cannot be formatted with timeStyle alone")
         }
-        T::Time(_) => {
-            if has_date_any {
-                return err(i, "PlainTime cannot be formatted with date components");
-            }
-        }
-        T::YearMonth(_) => {
-            if has_time || has_day || has_weekday {
-                return err(i, "PlainYearMonth accepts only year/month");
-            }
-        }
-        T::MonthDay(_) => {
-            if has_time || has_year || has_weekday {
-                return err(i, "PlainMonthDay accepts only month/day");
-            }
-        }
-        // DateTime / Instant / Zoned accept any components.
-        _ => {}
+        T::Time(_) if date_style => err(i, "PlainTime cannot be formatted with dateStyle"),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
@@ -541,7 +514,16 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
     }
 
-    let have_time = get("__dtf_hour").is_some() || get("__dtf_minute").is_some() || get("__dtf_second").is_some();
+    // A PlainTime (kind 2) whose formatter carries no time component still shows h:m:s: unrelated
+    // date options are dropped and the natural time fields fill in.
+    let time_defaulted = kind == 2
+        && get("__dtf_hour").is_none()
+        && get("__dtf_minute").is_none()
+        && get("__dtf_second").is_none();
+    let have_time = time_defaulted
+        || get("__dtf_hour").is_some()
+        || get("__dtf_minute").is_some()
+        || get("__dtf_second").is_some();
     if have_time {
         if have_date {
             lit(&mut parts, ", ");
@@ -554,18 +536,18 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             (h, None)
         };
         let mut first = true;
-        if get("__dtf_hour").is_some() {
+        if time_defaulted || get("__dtf_hour").is_some() {
             parts.push(("hour", if get("__dtf_hour").as_deref() == Some("2-digit") { format!("{disp_h:02}") } else { format!("{disp_h}") }));
             first = false;
         }
-        if get("__dtf_minute").is_some() {
+        if time_defaulted || get("__dtf_minute").is_some() {
             if !first {
                 lit(&mut parts, ":");
             }
             parts.push(("minute", format!("{mi:02}")));
             first = false;
         }
-        if get("__dtf_second").is_some() {
+        if time_defaulted || get("__dtf_second").is_some() {
             if !first {
                 lit(&mut parts, ":");
             }
