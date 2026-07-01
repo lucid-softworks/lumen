@@ -5244,3 +5244,28 @@ fn typedarray_slice_and_subclass_buffer() {
     // slice via a subclass source builds a subclass result with a real buffer.
     assert_eq!(run("class MyU extends Uint8Array {}; var s=new MyU([1,2,3]).slice(1); [typeof s.buffer, s.join(',')].join('|')"), "object|2,3");
 }
+
+#[test]
+fn typedarray_subarray_semantics() {
+    // subarray shares the buffer (a view, not a copy).
+    assert_eq!(
+        run("var a=new Int32Array([1,2,3,4]); var s=a.subarray(1,3); s[0]=9; a.join(',')+'|'+s.join(',')"),
+        "1,9,3,4|9,3"
+    );
+    // NaN/false end coerce to 0; a negative end counts from the end.
+    assert_eq!(run("new Int8Array([1,2,3,4]).subarray(0,NaN).length"), "0");
+    assert_eq!(
+        run("new Int8Array([1,2,3,4]).subarray(0,-1).join(',')"),
+        "1,2,3"
+    );
+    // A length-tracking source with no end stays length-tracking.
+    assert_eq!(
+        run("var b=new ArrayBuffer(16,{maxByteLength:32}); var a=new Int32Array(b); var s=a.subarray(1); var before=s.length; b.resize(32); before+','+s.length"),
+        "3,7"
+    );
+    // subarray over a detached buffer throws (constructing a view on detached memory).
+    assert_eq!(
+        throws("var a=new Int32Array(4); var t=a.buffer.transfer(); a.subarray(0);"),
+        "TypeError"
+    );
+}

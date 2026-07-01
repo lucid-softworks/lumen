@@ -3206,8 +3206,17 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             let (bv, bp) = make_array_buffer(i, 0);
             (bv, bp, 0, 0, false)
         }
-        Some(Value::Obj(o)) if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)) => {
+        // An ArrayBuffer (or SharedArrayBuffer) backing store: identified by the live side table, or
+        // by the [[ArrayBufferData]] marker for a detached buffer (still an ArrayBuffer, so it can't
+        // fall through to the array-like path — using a detached buffer is a TypeError).
+        Some(Value::Obj(o))
+            if i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize))
+                || o.borrow().props.contains("__abMaxByteLength") =>
+        {
             let bp = Rc::as_ptr(o) as usize;
+            if !i.array_buffers.contains_key(&bp) {
+                return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+            }
             let bv = Value::Obj(o.clone());
             // byteOffset is a ToIndex value and must be a multiple of the element size.
             let offset = match args.get(1) {
@@ -3407,17 +3416,30 @@ fn ta_subarray(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "subarray on non-TypedArray"))?;
     let es = info.kind.elsize();
-    let len = i.ta_len(&info).unwrap_or(0) as i64;
-    let begin = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+    // srcLength is the length at entry (0 if the view is already out of bounds); the begin/end
+    // coercions below clamp against it even if they resize the buffer.
+    let len = i.ta_len(&info).unwrap_or(0);
+    let begin = rel_index(ab(i.to_number(&arg(args, 0)))?, len);
+    let new_offset = info.offset + begin * es;
+    let buf_val = ab(i.get_member(&this, "buffer"))?;
+    // A length-tracking source subarrayed with no explicit end stays length-tracking: pass only
+    // «buffer, byteOffset» so the result auto-sizes to the buffer (TypedArraySpeciesCreate honors
+    // a subclass `@@species`).
+    let end_absent = matches!(args.get(1), None | Some(Value::Undefined));
+    if info.track && end_absent {
+        return ta_species_create(
+            i,
+            &this,
+            info.kind,
+            &[buf_val, Value::Num(new_offset as f64)],
+            false,
+        );
+    }
     let end = match arg(args, 1) {
         Value::Undefined => len,
-        v => norm_index(ab(i.to_number(&v))?, len, len),
+        v => rel_index(ab(i.to_number(&v))?, len),
     };
-    let new_len = (end - begin).max(0) as usize;
-    let new_offset = info.offset + begin as usize * es;
-    let buf_val = ab(i.get_member(&this, "buffer"))?;
-    // subarray builds the result via TypedArraySpeciesCreate(O, «buffer, byteOffset, length»), so a
-    // subclass `@@species` (or a detaching `constructor` getter) is honored.
+    let new_len = end.saturating_sub(begin);
     ta_species_create(
         i,
         &this,
