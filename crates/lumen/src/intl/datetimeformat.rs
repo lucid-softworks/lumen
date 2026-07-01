@@ -216,11 +216,20 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         }
     }
     // "islamic"/"islamic-rgsa" are not directly available; fall back to a concrete Islamic calendar.
+    // Deprecated islamic ids fall back to islamic-civil; any calendar not in AvailableCalendars
+    // (a not-yet-supported one like "bangla") falls back to gregory.
+    const AVAILABLE_CALENDARS: [&str; 17] = [
+        "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory", "hebrew",
+        "indian", "islamic-civil", "islamic-tbla", "islamic-umalqura", "iso8601", "japanese",
+        "persian", "roc", "islamicc",
+    ];
     let calendar = calendar.map(|c| {
         if c == "islamic" || c == "islamic-rgsa" {
             "islamic-civil".to_string()
-        } else {
+        } else if AVAILABLE_CALENDARS.contains(&c.as_str()) {
             c
+        } else {
+            "gregory".to_string()
         }
     });
     let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
