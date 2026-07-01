@@ -3286,24 +3286,22 @@ fn diff_datetime(cal: &str, d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, 
     if a == b {
         return IsoDuration::default();
     }
+    // Anchor the difference at (d1, t1) and move toward (d2, t2), matching `diff_date`. The time part
+    // carries a whole-day borrow (in the direction of travel) when the end time-of-day would overshoot.
+    let day_ns = 86_400_000_000_000i64;
     let sign = if a < b { 1 } else { -1 };
-    let (sd, st, ed, et) = if a < b {
-        (d1, t1, d2, t2)
-    } else {
-        (d2, t2, d1, t1)
-    };
-    let mut tdiff = time_to_ns(et) - time_to_ns(st);
-    let mut end_date = ed;
-    if tdiff < 0 {
-        tdiff += 86_400_000_000_000;
-        let (y, m, da) = civil_from_days(epoch_days(ed) - 1);
-        end_date = IsoDate {
-            year: y,
-            month: m,
-            day: da,
-        };
+    let mut tdiff = time_to_ns(t2) - time_to_ns(t1);
+    let mut end_date = d2;
+    if sign > 0 && tdiff < 0 {
+        tdiff += day_ns;
+        let (y, m, da) = civil_from_days(epoch_days(d2) - 1);
+        end_date = IsoDate { year: y, month: m, day: da };
+    } else if sign < 0 && tdiff > 0 {
+        tdiff -= day_ns;
+        let (y, m, da) = civil_from_days(epoch_days(d2) + 1);
+        end_date = IsoDate { year: y, month: m, day: da };
     }
-    let mut out = diff_date_cal(cal, sd, end_date, largest); // years/months/weeks/days (positive)
+    let mut out = diff_date_cal(cal, d1, end_date, largest); // signed (anchored at d1)
     let time = balance_ns(tdiff as i128, "hour");
     out.hours = time.hours;
     out.minutes = time.minutes;
@@ -3311,9 +3309,6 @@ fn diff_datetime(cal: &str, d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, 
     out.ms = time.ms;
     out.us = time.us;
     out.ns = time.ns;
-    if sign < 0 {
-        out = neg_duration(out);
-    }
     out
 }
 
