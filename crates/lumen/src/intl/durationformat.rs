@@ -69,38 +69,45 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         let is_time = idx >= 4;
         let is_subsecond = idx >= 7;
         let styles_list: &[&str] = if is_subsecond {
-            &["long", "short", "narrow", "numeric", "2-digit", "fractional"]
+            &["long", "short", "narrow", "numeric"]
         } else if is_time {
             &["long", "short", "narrow", "numeric", "2-digit"]
         } else {
             &["long", "short", "narrow"]
         };
-        let digital_base = if plural == &"hours" { "numeric" } else { "2-digit" };
+        // GetDurationUnitOptions digitalBase: "short" for the calendar units, "numeric" for the
+        // clock/sub-second units (per Table 3).
+        let digital_base = if is_time { "numeric" } else { "short" };
 
-        let mut style = get_option(i, &options, plural, styles_list, None)?;
-        // display defaults to "always" only for the primary clock units (hours/minutes/seconds).
-        let mut display_default = if matches!(*plural, "hours" | "minutes" | "seconds") {
-            "always"
-        } else {
-            "auto"
-        };
-        if style.is_none() {
-            if base_style == "digital" {
-                style = Some(digital_base.to_string());
-            } else {
-                match prev_style.as_deref() {
-                    Some("fractional") | Some("numeric") | Some("2-digit") => {
-                        style = Some("numeric".to_string());
+        // Step 1-3: resolve the style and its display default.
+        let style_opt = get_option(i, &options, plural, styles_list, None)?;
+        let mut display_default = "always";
+        let is_frac_second = matches!(*plural, "milliseconds" | "microseconds" | "nanoseconds");
+        let style = match style_opt {
+            Some(s) => s,
+            None => {
+                if base_style == "digital" {
+                    if !matches!(*plural, "hours" | "minutes" | "seconds") {
+                        display_default = "auto";
                     }
-                    _ => style = Some(base_style.clone()),
+                    digital_base.to_string()
+                } else {
+                    display_default = "auto";
+                    match prev_style.as_deref() {
+                        Some("fractional") | Some("numeric") | Some("2-digit") => "numeric".to_string(),
+                        _ => base_style.clone(),
+                    }
                 }
             }
-        }
-        let mut style = style.unwrap();
-        let _ = is_subsecond;
-        if style == "fractional" {
+        };
+        // Step 4 folds a numeric sub-second unit into a "fractional" one; that style is only ever
+        // observable as "numeric" (resolvedOptions maps it back, and the formatter folds it into the
+        // preceding second), so we keep it "numeric" and merely mirror the displayDefault->"auto".
+        let mut style = style;
+        if is_frac_second && style == "numeric" {
             display_default = "auto";
         }
+        let _ = is_subsecond;
 
         let display_prop = format!("{plural}Display");
         let display = get_option(i, &options, &display_prop, &["auto", "always"], Some(display_default))?
@@ -111,21 +118,24 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         if prev_style.as_deref() == Some("fractional") && style != "fractional" {
             return Err(i.make_error("RangeError", "only a fractional unit may follow a fractional unit"));
         }
-        if matches!(prev_style.as_deref(), Some("numeric") | Some("2-digit"))
-            && !matches!(style.as_str(), "fractional" | "numeric" | "2-digit")
-        {
-            return Err(i.make_error("RangeError", format!("{plural} style conflicts with a preceding numeric unit")));
-        }
-        // minutes/seconds after a numeric/2-digit unit render as 2-digit.
-        if (plural == &"minutes" || plural == &"seconds")
-            && matches!(prev_style.as_deref(), Some("numeric") | Some("2-digit"))
-        {
-            style = "2-digit".to_string();
+        // Step 6: a unit following a numeric/2-digit one must itself be numeric-ish; minutes/seconds
+        // then render as 2-digit.
+        if matches!(prev_style.as_deref(), Some("numeric") | Some("2-digit")) {
+            if !matches!(style.as_str(), "fractional" | "numeric" | "2-digit") {
+                return Err(i.make_error("RangeError", format!("{plural} style conflicts with a preceding numeric unit")));
+            }
+            if matches!(*plural, "minutes" | "seconds") {
+                style = "2-digit".to_string();
+            }
         }
 
         set_builtin(&obj, Box::leak(format!("__df_u_{plural}").into_boxed_str()), Value::from_string(style.clone()));
         set_builtin(&obj, Box::leak(format!("__df_d_{plural}").into_boxed_str()), Value::from_string(display));
-        prev_style = Some(style);
+        // prevStyle is updated only for hours..microseconds (nanoseconds and the calendar units do
+        // not propagate).
+        if matches!(*plural, "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds") {
+            prev_style = Some(style);
+        }
     }
 
     // fractionalDigits (0..9).
@@ -244,7 +254,8 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
         if !n.is_finite() || n.fract() != 0.0 {
             return Err(i.make_error("RangeError", format!("invalid duration field {plural}")));
         }
-        vals[k] = n;
+        // ToIntegerIfIntegral yields a mathematical value, so -0 becomes +0.
+        vals[k] = n + 0.0;
     }
     if !any_present {
         return Err(i.make_error("TypeError", "duration has no recognized fields"));
@@ -267,12 +278,18 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
             return Err(i.make_error("RangeError", "calendar unit out of range"));
         }
     }
-    // The whole-second magnitude (days..seconds) must fit in 2^53-1; sub-second fields add at most
-    // one extra second toward the same sign, so they can only push a boundary value over.
-    let whole_sec = vals[3] * 86400.0 + vals[4] * 3600.0 + vals[5] * 60.0 + vals[6];
-    let sub_over = vals[7] != 0.0 || vals[8] != 0.0 || vals[9] != 0.0;
-    let limit = 9007199254740991.0;
-    if whole_sec.abs() > limit || (whole_sec.abs() == limit && sub_over) {
+    // IsValidDurationRecord: abs(normalizedSeconds) must be < 2^53. Evaluate exactly in i128 as a
+    // total nanosecond count so the boundary (values crafted just under 2^53) is decided precisely;
+    // grossly-oversized fields saturate on the `as i128` cast, which still lands past the limit.
+    let ns_total: i128 = (vals[3] as i128) * 86_400_000_000_000
+        + (vals[4] as i128) * 3_600_000_000_000
+        + (vals[5] as i128) * 60_000_000_000
+        + (vals[6] as i128) * 1_000_000_000
+        + (vals[7] as i128) * 1_000_000
+        + (vals[8] as i128) * 1_000
+        + (vals[9] as i128);
+    let limit: i128 = 9_007_199_254_740_992 * 1_000_000_000; // 2^53 seconds, in nanoseconds
+    if ns_total.abs() >= limit {
         return Err(i.make_error("RangeError", "duration time total out of range"));
     }
     Ok(vals)
@@ -337,14 +354,15 @@ fn partition(i: &mut Interp, this: &Value, dur: &Value) -> Result<(Vec<Vec<DurPa
         let display = get_str(&o, &format!("__df_d_{plural}"));
         let need_separator = cur_group.is_some();
 
-        // Seconds/ms/us combine into a fractional value when the next unit is numeric.
+        // Seconds/ms/us absorb the smaller sub-second units into a single fractional value when the
+        // next unit is numeric (formatting then stops — the fold consumes everything smaller).
         let mut done = false;
         let mut nf_max_frac: Option<u32> = None;
         let mut nf_min_frac: Option<u32> = None;
         let mut nf_trunc = false;
         if matches!(plural, "seconds" | "milliseconds" | "microseconds") {
             let next_style = get_str(&o, &format!("__df_u_{}", UNITS[idx + 1].0));
-            if next_style == "numeric" || next_style == "fractional" {
+            if next_style == "numeric" {
                 let exp = match plural {
                     "seconds" => 9,
                     "milliseconds" => 6,
