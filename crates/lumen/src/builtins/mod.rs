@@ -11518,6 +11518,60 @@ fn same_value_zero(a: &Value, b: &Value) -> bool {
 // String / Number / Boolean / Math / errors / globals
 // ---------------------------------------------------------------------------------------------
 
+/// Canonicalize the locale argument to toLocale{Lower,Upper}Case and return its language subtag
+/// (lowercased), or `None` when no locale was supplied. Invalid locales throw RangeError.
+fn locale_case_lang(i: &mut Interp, locales: &Value) -> Result<Option<String>, Value> {
+    let list = crate::intl::canonicalize_locale_list(i, locales)?;
+    Ok(list
+        .first()
+        .and_then(|l| l.split('-').next())
+        .map(|s| s.to_ascii_lowercase()))
+}
+
+/// Language-sensitive lowercasing. Turkish/Azeri map the dotted/dotless I pair specially; all other
+/// languages use the default Unicode mapping.
+fn locale_lower(s: &str, lang: Option<&str>) -> String {
+    if matches!(lang, Some("tr") | Some("az")) {
+        let mut out = String::with_capacity(s.len());
+        let chars: Vec<char> = s.chars().collect();
+        let mut k = 0;
+        while k < chars.len() {
+            match chars[k] {
+                '\u{0130}' => out.push('i'),               // İ → i
+                'I' => {
+                    // "I" + combining dot above → "i" (the dot is absorbed); otherwise → dotless ı.
+                    if chars.get(k + 1) == Some(&'\u{0307}') {
+                        out.push('i');
+                        k += 1;
+                    } else {
+                        out.push('\u{0131}');
+                    }
+                }
+                c => out.extend(c.to_lowercase()),
+            }
+            k += 1;
+        }
+        return out;
+    }
+    s.to_lowercase()
+}
+
+/// Language-sensitive uppercasing (Turkish/Azeri dotted-I handling).
+fn locale_upper(s: &str, lang: Option<&str>) -> String {
+    if matches!(lang, Some("tr") | Some("az")) {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                'i' => out.push('\u{0130}'),  // i → İ
+                '\u{0131}' => out.push('I'),  // ı → I
+                c => out.extend(c.to_uppercase()),
+            }
+        }
+        return out;
+    }
+    s.to_uppercase()
+}
+
 fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
     match this {
         Value::Str(s) => Ok(s.clone()),
@@ -11660,11 +11714,15 @@ fn install_string(it: &mut Interp) {
         }
         Ok(Value::Num(found))
     });
-    it.def_method(&sp, "toLocaleLowerCase", 0, |i, this, _| {
-        Ok(Value::from_string(this_string(i, &this)?.to_lowercase()))
+    it.def_method(&sp, "toLocaleLowerCase", 0, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let lang = locale_case_lang(i, &arg(args, 0))?;
+        Ok(Value::from_string(locale_lower(&s, lang.as_deref())))
     });
-    it.def_method(&sp, "toLocaleUpperCase", 0, |i, this, _| {
-        Ok(Value::from_string(this_string(i, &this)?.to_uppercase()))
+    it.def_method(&sp, "toLocaleUpperCase", 0, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let lang = locale_case_lang(i, &arg(args, 0))?;
+        Ok(Value::from_string(locale_upper(&s, lang.as_deref())))
     });
     it.def_method(&sp, "includes", 1, |i, this, args| {
         let s = this_string(i, &this)?;
