@@ -2890,10 +2890,42 @@ fn round_up_magnitude(mode: &str, fraction: f64, positive: bool, low_even: bool)
 /// two candidate boundary dates (calendar-accurate for the ISO calendar).
 /// Calendar-aware date difference for month-structure calendars: years/months are counted in the
 /// calendar's own months. For day/week largest units (calendar-independent) it defers to `diff_date`.
+/// Chinese/Dangi date difference by adding-and-counting with the calendar's own add (which preserves
+/// monthCode across year steps and steps ordinally across months) — robust to leap months.
+fn china_diff(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
+    let sign = cmp_date(a, b);
+    if sign == 0 {
+        return IsoDuration::default();
+    }
+    let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
+    let ym = |y: i64, m: i64| IsoDuration { years: y, months: m, ..Default::default() };
+    let mut years = 0i64;
+    if largest == "year" {
+        while cmp_date(china_add_c(cal, lo, ym(years + 1, 0), 1), hi) <= 0 {
+            years += 1;
+        }
+    }
+    let mut months = 0i64;
+    while cmp_date(china_add_c(cal, lo, ym(years, months + 1), 1), hi) <= 0 {
+        months += 1;
+    }
+    let mid2 = china_add_c(cal, lo, ym(years, months), 1);
+    let days = epoch_days(hi) - epoch_days(mid2);
+    let out = IsoDuration { years, months, days, ..Default::default() };
+    if sign > 0 {
+        neg_duration(out)
+    } else {
+        out
+    }
+}
+
 fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     let largest = largest.strip_suffix('s').unwrap_or(largest);
     if !is_month_structure(cal) || matches!(largest, "week" | "day") {
         return diff_date(a, b, largest);
+    }
+    if cal == "chinese" || cal == "dangi" {
+        return china_diff(cal, a, b, largest);
     }
     let sign = cmp_date(a, b);
     if sign == 0 {
