@@ -1052,25 +1052,27 @@ pub fn install(it: &mut Interp) {
     install_zoned(it, &ns);
     install_now(it, &ns);
     // toLocaleString aliases toString (lumen has no Intl).
-    for name in [
-        "PlainDate",
-        "PlainTime",
-        "PlainDateTime",
-        "PlainYearMonth",
-        "PlainMonthDay",
-        "Duration",
-        "Instant",
-        "ZonedDateTime",
-    ] {
-        if let Some(proto) = it
-            .extra_protos
-            .get(format!("Temporal.{name}").as_str())
-            .cloned()
-        {
+    // Duration keeps its plain toString for toLocaleString (Intl.DurationFormat is separate); the
+    // date/time types format through Intl.DateTimeFormat, which understands Temporal receivers.
+    for name in ["Duration", "ZonedDateTime"] {
+        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
             let ts = proto.borrow().props.get("toString").cloned();
             if let Some(p) = ts {
                 proto.borrow_mut().props.insert("toLocaleString", p);
             }
+        }
+    }
+    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant"] {
+        if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
+            it.def_method(&proto, "toLocaleString", 0, |i, this, a| {
+                let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
+                let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
+                let locales = a.first().cloned().unwrap_or(Value::Undefined);
+                let options = a.get(1).cloned().unwrap_or(Value::Undefined);
+                let dtf = i.construct(ctor, &[locales, options]).map_err(unab)?;
+                let fmt = i.get_member(&dtf, "format").map_err(unab)?;
+                i.call(fmt, dtf, &[this]).map_err(unab)
+            });
         }
     }
     it.global

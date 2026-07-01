@@ -7,6 +7,39 @@ use super::service::{
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
 use crate::value::{set_data, set_builtin, Gc, Value};
+use std::rc::Rc;
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// The epoch-milliseconds a Temporal value formats at (ISO calendar, UTC).
+fn temporal_to_ms(t: &crate::temporal::Temporal) -> f64 {
+    use crate::temporal::Temporal as T;
+    let date_ms = |d: &crate::temporal::IsoDate| {
+        days_from_civil(d.year, d.month as i64, d.day as i64) as f64 * 86_400_000.0
+    };
+    let time_ms = |t: &crate::temporal::IsoTime| {
+        (t.hour as f64) * 3_600_000.0
+            + (t.minute as f64) * 60_000.0
+            + (t.second as f64) * 1000.0
+            + (t.ms as f64)
+    };
+    match t {
+        T::Date(d) | T::YearMonth(d) | T::MonthDay(d) => date_ms(d),
+        T::DateTime(d, tm) => date_ms(d) + time_ms(tm),
+        T::Time(tm) => time_ms(tm),
+        T::Instant(ns) => (*ns / 1_000_000) as f64,
+        T::Zoned { epoch_ns, .. } => (*epoch_ns / 1_000_000) as f64,
+        T::Duration(_) => 0.0,
+    }
+}
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DateTimeFormat", 0, construct);
@@ -292,6 +325,9 @@ fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value
     let ms = if matches!(date, Value::Undefined) {
         // "now" is non-deterministic; use epoch 0 so tests that pass an explicit date are unaffected.
         0.0
+    } else if let Some(t) = date.as_obj().and_then(|d| i.temporal.get(&(Rc::as_ptr(d) as usize)).cloned()) {
+        // A Temporal object formats from its (ISO-calendar) date/time fields.
+        temporal_to_ms(&t)
     } else {
         let n = ab(i.to_number(date))?;
         if !n.is_finite() {
