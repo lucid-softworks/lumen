@@ -1,5 +1,23 @@
 //! Embedded CLDR-derived formatting data (a deliberate subset). Grown as the intl402 score climbs.
 
+/// The (decimal, group) separators for a locale's `latn` number symbols, and the grouping sizes
+/// (primary, secondary) — e.g. Indian `en-IN` groups as 3;2.
+pub fn number_symbols(lang: &str, region: &str) -> (&'static str, &'static str, (usize, usize)) {
+    // (decimal, group, (primary_group, secondary_group))
+    match (lang, region) {
+        ("en", "IN") | ("hi", _) | ("bn", "IN") | ("ta", "IN") => (".", ",", (3, 2)),
+        ("de", _) | ("es", "ES") | ("it", _) | ("nl", _) | ("pt", "PT") | ("da", _)
+        | ("id", _) | ("tr", _) => (",", ".", (3, 3)),
+        ("fr", _) | ("ru", _) | ("pl", _) | ("cs", _) | ("hu", _) | ("fi", _) | ("sv", _) => {
+            (",", "\u{202f}", (3, 3))
+        }
+        ("es", _) => (",", ".", (3, 3)),
+        ("pt", _) => (",", ".", (3, 3)),
+        // English, Japanese, Chinese, Korean, and the default: "." decimal, "," group, 3;3.
+        _ => (".", ",", (3, 3)),
+    }
+}
+
 /// The four list patterns (two, start, middle, end) for a (language, type, style). Falls back to
 /// English when the language is unknown. `{0}`/`{1}` are the placeholders.
 pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {

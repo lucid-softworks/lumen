@@ -487,20 +487,27 @@ fn round_significant(x: f64, max_sig: u32, min_sig: u32) -> String {
     s
 }
 
-fn group_integer(int_part: &str, grouping: &Value) -> String {
+fn group_integer(int_part: &str, grouping: &Value, sep: &str, sizes: (usize, usize)) -> String {
     let enabled = !matches!(grouping, Value::Bool(false));
     let min2 = matches!(grouping, Value::Str(s) if &**s == "min2");
-    if !enabled || int_part.len() < 4 || (min2 && int_part.len() < 5) {
+    let (primary, secondary) = sizes;
+    if !enabled || int_part.len() <= primary || (min2 && int_part.len() <= primary + 1) {
         return int_part.to_string();
     }
-    let bytes = int_part.as_bytes();
+    // Insert separators right-to-left: the first (rightmost) group is `primary` digits, the rest are
+    // `secondary` digits (Indian-style 3;2 when they differ).
+    let digits: Vec<char> = int_part.chars().collect();
+    let n = digits.len();
     let mut out = String::new();
-    let n = bytes.len();
-    for (idx, b) in bytes.iter().enumerate() {
-        if idx > 0 && (n - idx) % 3 == 0 {
-            out.push(',');
+    for (idx, c) in digits.iter().enumerate() {
+        let from_right = n - idx;
+        let boundary = idx > 0
+            && from_right >= primary
+            && (from_right - primary) % secondary == 0;
+        if boundary {
+            out.push_str(sep);
         }
-        out.push(*b as char);
+        out.push(*c);
     }
     out
 }
@@ -542,14 +549,20 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         }
     };
     let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
+    // Locale number symbols (decimal separator, grouping separator + sizes).
+    let locale = get_str(o, "__nf_locale");
+    let mut lparts = locale.split('-');
+    let lang = lparts.next().unwrap_or("en");
+    let region = lparts.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+    let (dec_sep, grp_sep, sizes) = crate::intl::data::number_symbols(lang, region);
     // Grouping is suppressed in scientific/engineering notation.
     let grouped = if exponent.is_some() || value.is_infinite() {
         int_part.clone()
     } else {
-        group_integer(&int_part, &grouping)
+        group_integer(&int_part, &grouping, grp_sep, sizes)
     };
     let mut num = match frac_part {
-        Some(f) => format!("{grouped}.{f}"),
+        Some(f) => format!("{grouped}{dec_sep}{f}"),
         None => grouped,
     };
     if let Some(e) = exponent {
