@@ -80,8 +80,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         None => false,
     });
     let case_first = case_first.or_else(|| kw("kf")).unwrap_or_else(|| "false".to_string());
+    // The `-u-co-` value must be a known collation type (never the reserved standard/search); an
+    // unknown one falls back to "default".
+    const COLLATIONS: [&str; 15] = [
+        "compat", "dict", "emoji", "eor", "phonebk", "phonetic", "pinyin", "reformed", "searchjl",
+        "stroke", "trad", "unihan", "zhuyin", "big5han", "gb2312",
+    ];
     let collation = kw("co")
-        .filter(|c| c != "standard" && c != "search")
+        .filter(|c| COLLATIONS.contains(&c.as_str()))
         .unwrap_or_else(|| "default".to_string());
 
     let obj = i.new_object();
