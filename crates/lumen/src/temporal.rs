@@ -4199,7 +4199,12 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
         let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
-        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        // Instant rounding: the increment times the unit must evenly divide a 24-hour solar day
+        // (inclusive — a full day is allowed).
+        let max = (86_400_000_000_000i128 / unit) as i64;
+        if incr_raw < 1 || incr_raw > max || max % incr_raw != 0 {
+            return Err(i.make_error("RangeError", "roundingIncrement out of range"));
+        }
         let incr = incr_raw as i128;
         Ok(make(
             i,
