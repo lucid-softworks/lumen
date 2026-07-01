@@ -51,10 +51,18 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
     );
 }
 
-/// Bind `this_arg` onto `target` via Function.prototype.bind.
+/// Bind `this_arg` onto `target` via Function.prototype.bind, then normalise the result to match the
+/// spec's `format`/`compare` bound functions: name `""`, length 1, and not a constructor.
 pub(crate) fn bind_this(i: &mut Interp, target: Value, this_arg: Value) -> Value {
     if let Ok(bindfn) = i.get_member(&target, "bind") {
         if let Ok(bound) = i.call(bindfn, target.clone(), &[this_arg]) {
+            if let Value::Obj(o) = &bound {
+                o.borrow_mut().is_constructor = false;
+                o.borrow_mut().props.insert(
+                    "name",
+                    crate::value::Property::data(Value::str(""), false, false, true),
+                );
+            }
             return bound;
         }
     }
