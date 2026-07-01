@@ -36,7 +36,10 @@ pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {
     if kind == "unit" {
         return match (lang, style) {
             (_, "narrow") => SPACE,
+            // Spanish unit lists: the 2-item form uses "y", but 3+ item lists are comma-joined in
+            // short (only `long` keeps "y" before the final item).
             ("es", "long") => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0} y {1}"],
+            ("es", "short") => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
             _ => COMMA,
         };
     }
