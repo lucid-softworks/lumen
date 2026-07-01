@@ -3404,10 +3404,17 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
         _ => Ok(()),
     }
 }
-/// Read raw year/month/day integers from a property bag (no regulation yet).
+/// Clamp `val` into `[1, hi]`, or (under `overflow: reject`) raise a RangeError if it was out of range.
+fn clamp_or(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Result<i64, Value> {
+    if ovf == Overflow::Reject && (val < 1 || val > hi) {
+        return Err(i.make_error("RangeError", format!("{what} is out of range")));
+    }
+    Ok(val.clamp(1, hi))
+}
 /// Read raw (year, month, day) from a property bag, resolving `era`/`eraYear` to an ISO year for
-/// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`).
-fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, i64), Value> {
+/// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`). Out-of-range calendar fields
+/// are clamped under `overflow: constrain` and rejected under `overflow: reject`.
+fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Result<(i64, i64, i64), Value> {
     // PrepareTemporalFields reads (and coerces) fields in alphabetical order, calling each field's
     // valueOf/toString as it is read: day, [era, eraYear], month, monthCode, year. Required-field
     // errors are only raised after every field has been read.
@@ -3478,7 +3485,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         let ord = ord.clamp(1, hebrew_months_in_year(hy));
-        let day = day.clamp(1, hebrew_month_len(hy, ord));
+        let day = clamp_or(i, day, hebrew_month_len(hy, ord), ovf, "day")?;
         let iso = hebrew_to_iso(hy, ord, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -3504,8 +3511,9 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             }
             let s = match china_month_start(cal, cy, num, leap) {
                 Some(s) => s,
-                // A requested leap month that does not occur this year constrains to the plain month.
-                None if leap => china_month_start(cal, cy, num, false)
+                // A requested leap month that does not occur this year constrains to the plain
+                // month (or is rejected under `overflow: reject`).
+                None if leap && ovf != Overflow::Reject => china_month_start(cal, cy, num, false)
                     .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?,
                 None => return Err(i.make_error("RangeError", "invalid monthCode for this calendar")),
             };
@@ -3522,7 +3530,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             china_ord_start(cal, cy, ord)
         };
         let dim = china_month_len_at(cal, start);
-        let day = day.clamp(1, dim);
+        let day = clamp_or(i, day, dim, ovf, "day")?;
         let (y, m, dd) = civil_from_days(start + day - 1);
         let iso = IsoDate { year: y, month: m, day: dd };
         return Ok((iso.year, iso.month as i64, iso.day as i64));
@@ -3565,7 +3573,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
         // Constrain to the calendar's ranges (13 months; the epagomenal month has 5 or 6 days).
-        let month = month.clamp(1, 13);
+        let month = clamp_or(i, month, 13, ovf, "month")?;
         let leap = cy.rem_euclid(4) == 3;
         let dim = if month <= 12 {
             30
@@ -3574,7 +3582,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         } else {
             5
         };
-        let day = day.clamp(1, dim);
+        let day = clamp_or(i, day, dim, ovf, "day")?;
         let iso = to_13month(cy, month, day, epoch_13(cal));
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -3598,8 +3606,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
-        let month = month.clamp(1, 12);
-        let day = day.clamp(1, islamic_month_len(month, islamic_leap(iy)));
+        let month = clamp_or(i, month, 12, ovf, "month")?;
+        let day = clamp_or(i, day, islamic_month_len(month, islamic_leap(iy)), ovf, "day")?;
         let iso = to_islamic(iy, month, day, islamic_epoch(cal));
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -3621,8 +3629,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
-        let month = month.clamp(1, 12);
-        let day = day.clamp(1, indian_month_len(month, is_leap(sy + 78)));
+        let month = clamp_or(i, month, 12, ovf, "month")?;
+        let day = clamp_or(i, day, indian_month_len(month, is_leap(sy + 78)), ovf, "day")?;
         let iso = to_indian(sy, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -3645,8 +3653,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
-        let month = month.clamp(1, 12);
-        let day = day.clamp(1, persian_month_len(py, month));
+        let month = clamp_or(i, month, 12, ovf, "month")?;
+        let day = clamp_or(i, day, persian_month_len(py, month), ovf, "day")?;
         let iso = to_persian(py, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
@@ -3731,7 +3739,7 @@ fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow
             setm(&merged, k, v);
         }
     }
-    let raw = read_date_raw_cal(i, &Value::Obj(merged), cal)?;
+    let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, ovf)?;
     regulate_date(i, raw, ovf)
 }
 
@@ -3846,8 +3854,8 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
         Value::Obj(_) => {
             read_calendar(i, v)?;
             let cal = input_cal(i, v)?;
-            let raw = read_date_raw_cal(i, v, &cal)?;
             let ovf = to_overflow(i, opts)?;
+            let raw = read_date_raw_cal(i, v, &cal, ovf)?;
             regulate_date(i, raw, ovf)?
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDate")),
@@ -4652,7 +4660,9 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
         Value::Obj(_) => {
             read_calendar(i, v)?;
             let cal = input_cal(i, v)?;
-            let draw = read_date_raw_cal(i, v, &cal)?;
+            // Fields (date then time) are read before the overflow option, so the calendar resolution
+            // here constrains; `regulate_date` re-applies the real overflow to the ISO result.
+            let draw = read_date_raw_cal(i, v, &cal, Overflow::Constrain)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
             let d = regulate_date(i, draw, ovf)?;
@@ -4859,7 +4869,7 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
                     }
                 }
                 let ovf = to_overflow(i, opts)?;
-                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal)?;
+                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
                 regulate_date(i, raw, ovf)?
             }
         }
@@ -4988,7 +4998,7 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
                     }
                 }
                 let ovf = to_overflow(i, opts)?;
-                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal)?;
+                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
                 regulate_date(i, raw, ovf)
             }
         }
@@ -5974,7 +5984,7 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             };
             let tz = normalize_tz(i, &tz_raw)?;
             let zcal = input_cal(i, v)?;
-            let draw = read_date_raw_cal(i, v, &zcal)?;
+            let draw = read_date_raw_cal(i, v, &zcal, Overflow::Constrain)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
             let date = regulate_date(i, draw, ovf)?;
