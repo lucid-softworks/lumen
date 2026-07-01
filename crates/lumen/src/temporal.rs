@@ -3565,9 +3565,9 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let f = arg(a, 0);
-        let year = field_int(i, &f, "year", d.year)?;
-        let month = field_int(i, &f, "month", d.month as i64)?;
-        let day = field_int(i, &f, "day", d.day as i64)?;
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
         let hour = field_int(i, &f, "hour", tm.hour as i64)?;
         let minute = field_int(i, &f, "minute", tm.minute as i64)?;
         let second = field_int(i, &f, "second", tm.second as i64)?;
@@ -3575,13 +3575,17 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let us = field_int(i, &f, "microsecond", tm.us as i64)?;
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)?;
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let nd = build_date_ovf(i, year, month, day, ovf)?;
+        let cal = cal_of(i, &t);
+        let nd = if &*cal == "iso8601" {
+            let year = field_int(i, &f, "year", d.year)?;
+            let month = field_int(i, &f, "month", d.month as i64)?;
+            let day = field_int(i, &f, "day", d.day as i64)?;
+            build_date_ovf(i, year, month, day, ovf)?
+        } else {
+            with_cal_date(i, &cal, d, &f, ovf)?
+        };
         let nt = build_time_ovf(i, hour, minute, second, ms, us, nsf, ovf)?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, nt),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, nt)))
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -5303,17 +5307,25 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
         let f = arg(a, 0);
-        let year = field_int(i, &f, "year", d.year)?;
-        let month = field_int(i, &f, "month", d.month as i64)? as u8;
-        let day = field_int(i, &f, "day", d.day as i64)? as u8;
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
         let hour = field_int(i, &f, "hour", tm.hour as i64)? as u8;
         let minute = field_int(i, &f, "minute", tm.minute as i64)? as u8;
         let second = field_int(i, &f, "second", tm.second as i64)? as u8;
         let ms = field_int(i, &f, "millisecond", tm.ms as i64)? as u16;
         let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
         let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
-        to_overflow(i, &arg(a, 1))?; // validate the overflow option
-        let nd = check_date(i, IsoDate { year, month, day })?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        let cal = cal_of(i, &t);
+        let nd = if &*cal == "iso8601" {
+            let year = field_int(i, &f, "year", d.year)?;
+            let month = field_int(i, &f, "month", d.month as i64)? as u8;
+            let day = field_int(i, &f, "day", d.day as i64)? as u8;
+            check_date(i, IsoDate { year, month, day })?
+        } else {
+            with_cal_date(i, &cal, d, &f, ovf)?
+        };
         let nt = check_time(
             i,
             IsoTime {
