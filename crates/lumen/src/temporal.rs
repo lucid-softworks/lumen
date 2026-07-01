@@ -4186,12 +4186,14 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
         Some(Temporal::Zoned { epoch_ns, .. }) => return Ok(epoch_ns),
         _ => {}
     }
+    // ToTemporalInstant: a non-Temporal value is coerced to a string (ToPrimitive, string hint) and
+    // parsed as an ISO instant.
     match v {
         Value::BigInt(n) => Ok(*n),
-        Value::Str(s) => {
-            parse_instant(s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
+        _ => {
+            let s = i.to_string(v).map_err(unab)?;
+            parse_instant(&s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
         }
-        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.Instant")),
     }
 }
 /// Parse an ISO instant string (must carry a `Z` or `±HH:MM` offset).
