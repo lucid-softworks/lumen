@@ -1011,11 +1011,6 @@ fn china_month_start(cal: &str, year: i64, num: i64, leap: bool) -> Option<i64> 
     }
     None
 }
-fn china_to_iso(cal: &str, year: i64, num: i64, leap: bool, day: i64) -> Option<IsoDate> {
-    let start = china_month_start(cal, year, num, leap)?;
-    let (y, mo, d) = civil_from_days(start + day - 1);
-    Some(IsoDate { year: y, month: mo, day: d })
-}
 /// The length of the Chinese month starting at new-moon day `start`.
 fn china_month_len_at(cal: &str, start: i64) -> i64 {
     china_new_moon_on_or_after(cal, start + 1) - start
@@ -1050,13 +1045,33 @@ fn china_resolve_month_ord(cal: &str, year: i64, num: i64, leap: bool) -> (bool,
         (false, china_ord_of_start(cal, year, s))
     }
 }
-/// Advance an ordinal month by `k` (signed) across Chinese years of varying length.
-fn china_advance_ord(cal: &str, year: i64, ord: i64, k: i64) -> (i64, i64) {
+/// Resolve a monthCode to an ordinal month in a leap-month calendar (hebrew/chinese/dangi),
+/// constraining an absent leap month to its plain counterpart. Returns (ordinal, leap-existed?).
+fn resolve_code_ord(cal: &str, year: i64, code: &str) -> (i64, bool) {
+    if cal == "hebrew" {
+        if let Some(o) = hebrew_ord_from_code(year, code) {
+            return (o, true);
+        }
+        let plain = code.strip_suffix('L').unwrap_or(code);
+        (hebrew_ord_from_code(year, plain).unwrap(), false)
+    } else {
+        let body = code.strip_prefix('M').unwrap();
+        let (digits, leap) = match body.strip_suffix('L') {
+            Some(d) => (d, true),
+            None => (body, false),
+        };
+        let num: i64 = digits.parse().unwrap();
+        let (ok, ord) = china_resolve_month_ord(cal, year, num, leap);
+        (ord, ok)
+    }
+}
+/// Advance an ordinal month by a signed `k` across years of a varying-length calendar.
+fn advance_ord(cal: &str, year: i64, ord: i64, k: i64) -> (i64, i64) {
     let (mut y, mut m) = (year, ord);
     if k >= 0 {
         for _ in 0..k {
             m += 1;
-            if m > china_months_in_year(cal, y) {
+            if m > cal_months_in_year(cal, y) {
                 m = 1;
                 y += 1;
             }
@@ -1066,43 +1081,39 @@ fn china_advance_ord(cal: &str, year: i64, ord: i64, k: i64) -> (i64, i64) {
             m -= 1;
             if m < 1 {
                 y -= 1;
-                m = china_months_in_year(cal, y);
+                m = cal_months_in_year(cal, y);
             }
         }
     }
     (y, m)
 }
-/// CalendarDateAdd for Chinese/Dangi: add years (preserving the monthCode, constraining an absent
-/// leap month), then months (by ordinal position), then regulate the day, then add weeks/days.
-fn china_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
-    let (year, _ord, num, leap, day_of) = china_fields(cal, d);
+/// CalendarDateAdd for leap-month calendars (hebrew/chinese/dangi): add years while preserving the
+/// monthCode (constraining an absent leap month), then months by ordinal position, then regulate the
+/// day, then weeks/days. `err` is `Some` for reject-overflow (returns a RangeError), `None` for
+/// constrain (never errors).
+fn leap_cal_add(i: Option<&Interp>, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> Result<IsoDate, Value> {
+    let f = cal_fields(cal, d);
+    let (year, day_of) = (f.0, f.2);
+    let code = cal_month_code(cal, d);
     let ny = year + sign * dur.years;
-    let (leap_ok, ord0) = china_resolve_month_ord(cal, ny, num, leap);
-    if ovf == Overflow::Reject && !leap_ok {
-        return Err(i.make_error("RangeError", "leap month does not exist in the target year"));
+    let (ord0, leap_ok) = resolve_code_ord(cal, ny, &code);
+    if let Some(i) = i {
+        if !leap_ok {
+            return Err(i.make_error("RangeError", "leap month does not exist in the target year"));
+        }
     }
-    let (fy, fm) = china_advance_ord(cal, ny, ord0, sign * dur.months);
-    let start = china_ord_start(cal, fy, fm);
-    let mlen = china_month_len_at(cal, start);
-    if ovf == Overflow::Reject && day_of > mlen {
-        return Err(i.make_error("RangeError", "day is out of range in the target month"));
+    let (fy, fm) = advance_ord(cal, ny, ord0, sign * dur.months);
+    let mlen = cal_month_len(cal, fy, fm);
+    if let Some(i) = i {
+        if day_of > mlen {
+            return Err(i.make_error("RangeError", "day is out of range in the target month"));
+        }
     }
     let dd = day_of.min(mlen);
-    let z = start + dd - 1 + sign * (dur.weeks * 7 + dur.days);
+    let iso0 = cal_to_iso(cal, fy, fm, dd);
+    let z = epoch_days(iso0) + sign * (dur.weeks * 7 + dur.days);
     let (y, m, day) = civil_from_days(z);
     Ok(IsoDate { year: y, month: m, day })
-}
-/// Constrain-only Chinese/Dangi CalendarDateAdd (the same steps as `china_add`, never erroring).
-fn china_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
-    let (year, _ord, num, leap, day_of) = china_fields(cal, d);
-    let ny = year + sign * dur.years;
-    let (_leap_ok, ord0) = china_resolve_month_ord(cal, ny, num, leap);
-    let (fy, fm) = china_advance_ord(cal, ny, ord0, sign * dur.months);
-    let start = china_ord_start(cal, fy, fm);
-    let dd = day_of.min(china_month_len_at(cal, start));
-    let z = start + dd - 1 + sign * (dur.weeks * 7 + dur.days);
-    let (y, m, day) = civil_from_days(z);
-    IsoDate { year: y, month: m, day }
 }
 /// The Chinese monthCode for a (month-number, leap?): "M04" or "M04L".
 fn china_month_code(num: i64, leap: bool) -> String {
@@ -1165,8 +1176,8 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
 /// CalendarDateAdd for a month-structure calendar: add years/months in the calendar (clamping the
 /// day to the target month under `constrain`, or rejecting when it overflows), then weeks/days.
 fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
-    if cal == "chinese" || cal == "dangi" {
-        return china_add(i, cal, d, dur, sign, ovf);
+    if matches!(cal, "hebrew" | "chinese" | "dangi") {
+        return leap_cal_add(if ovf == Overflow::Reject { Some(i) } else { None }, cal, d, dur, sign);
     }
     if ovf == Overflow::Reject {
         let f = cal_fields(cal, d);
@@ -1191,33 +1202,14 @@ fn cal_months_in_year(cal: &str, y: i64) -> i64 {
         12
     }
 }
-/// The (year, month) `k` calendar months after `lo`'s month (Hebrew walks month-by-month because its
-/// months-per-year varies).
-fn cal_month_advance(cal: &str, lo: IsoDate, k: i64) -> (i64, i64) {
-    let f = cal_fields(cal, lo);
-    let (ly, lm) = (f.0, f.1);
-    if cal == "hebrew" || cal == "chinese" || cal == "dangi" {
-        let (mut y, mut m) = (ly, lm);
-        for _ in 0..k {
-            m += 1;
-            if m > cal_months_in_year(cal, y) {
-                m = 1;
-                y += 1;
-            }
-        }
-        (y, m)
-    } else {
-        let mpy = cal_months_in_year(cal, ly);
-        let total = ly * mpy + (lm - 1) + k;
-        (total.div_euclid(mpy), total.rem_euclid(mpy) + 1)
-    }
-}
-
 /// Constrain-only calendar add (clamps the day to the target month).
 fn cal_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
-    if cal == "chinese" || cal == "dangi" {
-        // Constrain never errors; reuse the reject-free path.
-        return china_add_c(cal, d, dur, sign);
+    if matches!(cal, "hebrew" | "chinese" | "dangi") {
+        // Constrain never errors (`None` interpreter → reject-free path).
+        return match leap_cal_add(None, cal, d, dur, sign) {
+            Ok(v) => v,
+            Err(_) => unreachable!(),
+        };
     }
     let f = cal_fields(cal, d);
     let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
