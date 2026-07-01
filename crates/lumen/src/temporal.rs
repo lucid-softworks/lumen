@@ -4090,19 +4090,33 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
-            // The day ceiling is computed against the provided year (or the ISO reference year
-            // 1972, also a leap year) but the stored reference year is always 1972.
-            let year = field_int(i, v, "year", 1972)?;
-            let month = field_month(i, v)?;
-            let day = field_req(i, v, "day")?;
-            let ovf = to_overflow(i, opts)?;
-            let month = regulate_high(i, month, 12, ovf, "month")? as u8;
-            let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
-            Ok(IsoDate {
-                year: 1972,
-                month,
-                day,
-            })
+            let cal = input_cal(i, v)?;
+            if &*cal == "iso8601" {
+                // The day ceiling is computed against the provided year (or the ISO reference year
+                // 1972, also a leap year) but the stored reference year is always 1972.
+                let year = field_int(i, v, "year", 1972)?;
+                let month = field_month(i, v)?;
+                let day = field_req(i, v, "day")?;
+                let ovf = to_overflow(i, opts)?;
+                let month = regulate_high(i, month, 12, ovf, "month")? as u8;
+                let day = regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
+                Ok(IsoDate { year: 1972, month, day })
+            } else {
+                // Resolve month/monthCode + day in the calendar, defaulting the year to the calendar
+                // year of a fixed reference ISO date.
+                let ref_year = cal_fields(&cal, IsoDate { year: 1972, month: 12, day: 31 }).0;
+                let merged = i.new_object();
+                setm(&merged, "year", Value::Num(ref_year as f64));
+                for k in ["year", "month", "monthCode", "day"] {
+                    let fv = getm(i, v, k)?;
+                    if !matches!(fv, Value::Undefined) {
+                        setm(&merged, k, fv);
+                    }
+                }
+                let ovf = to_overflow(i, opts)?;
+                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal)?;
+                regulate_date(i, raw, ovf)
+            }
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainMonthDay")),
     }
