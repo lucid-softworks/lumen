@@ -1352,7 +1352,7 @@ fn to_13month(year: i64, month: i64, day: i64, epoch: i64) -> IsoDate {
 
 /// Full calendar fields for an ISO date: (year, month, day, daysInMonth, monthsInYear, dayOfYear,
 /// daysInYear, inLeapYear). ISO/arithmetic calendars keep the Gregorian month/day structure.
-fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bool) {
+pub fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bool) {
     if is_13month(cal) {
         let (y, m, d) = from_13month(iso, epoch_13(cal));
         let leap = y.rem_euclid(4) == 3;
@@ -1437,7 +1437,7 @@ fn cal_month_code(cal: &str, iso: IsoDate) -> String {
 }
 
 /// The calendar-year number a receiver's `.year` reports (ISO/gregory/japanese use the ISO year).
-fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
+pub fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
     match cal {
         "buddhist" => d.year + 543,
         "roc" => d.year - 1911,

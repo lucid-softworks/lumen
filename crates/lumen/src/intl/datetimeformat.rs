@@ -587,7 +587,23 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     } else {
         ms
     };
-    let (y, mo, d, h, mi, s, wd) = ymd(ms);
+    let (mut y, mut mo, mut d, h, mi, s, wd) = ymd(ms);
+    // A non-Gregorian calendar renders its own numeric year/month/day (month NAMES stay Gregorian-
+    // only for now, so a named-month non-Gregorian format falls back to a numeric month).
+    let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "iso8601".to_string(),
+    };
+    let greg_cal = matches!(dcal.as_str(), "" | "gregory" | "iso8601");
+    if !greg_cal {
+        let iso = crate::temporal::IsoDate { year: y, month: mo as u8, day: d as u8 };
+        let f = crate::temporal::cal_fields(&dcal, iso);
+        // The year uses cal_year_num (era-year, e.g. ethioaa amete-alem = +5500); month/day come
+        // from cal_fields.
+        y = crate::temporal::cal_year_num(&dcal, iso);
+        mo = f.1 as u32;
+        d = f.2 as u32;
+    }
     // A Temporal receiver restricts the displayable fields: YearMonth drops day/weekday/time,
     // MonthDay drops year/weekday/time, Date/YearMonth/MonthDay drop time, Time drops date.
     let allow = |slot: &str| -> bool {
@@ -627,18 +643,20 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         lit(&mut parts, ", ");
     }
 
+    // Gregorian month names are only used for Gregorian/ISO; other calendars render numeric.
+    let named_ok = greg_cal && (1..=12).contains(&mo);
     let month_str = get("__dtf_month").map(|m| match m.as_str() {
-        "long" => MON_LONG[(mo - 1) as usize].to_string(),
-        "short" => MON_SHORT[(mo - 1) as usize].to_string(),
-        "narrow" => MON_LONG[(mo - 1) as usize][..1].to_string(),
+        "long" if named_ok => MON_LONG[(mo - 1) as usize].to_string(),
+        "short" if named_ok => MON_SHORT[(mo - 1) as usize].to_string(),
+        "narrow" if named_ok => MON_LONG[(mo - 1) as usize][..1].to_string(),
         "2-digit" => format!("{mo:02}"),
         _ => format!("{mo}"),
     });
     let day_str = get("__dtf_day").map(|dd| if dd == "2-digit" { format!("{d:02}") } else { format!("{d}") });
-    // When an era is shown, the year is the positive era year (ISO 0 -> 1 BC, ISO -1 -> 2 BC).
-    let disp_year = if get("__dtf_era").is_some() && y <= 0 { 1 - y } else { y };
+    // When an era is shown for the Gregorian calendar, the year is the positive era year.
+    let disp_year = if greg_cal && get("__dtf_era").is_some() && y <= 0 { 1 - y } else { y };
     let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (disp_year % 100 + 100) % 100) } else { format!("{disp_year}") });
-    let named_month = matches!(get("__dtf_month").as_deref(), Some("long" | "short" | "narrow"));
+    let named_month = named_ok && matches!(get("__dtf_month").as_deref(), Some("long" | "short" | "narrow"));
     let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
 
     if named_month {
@@ -674,7 +692,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             parts.push(("year", yy.clone()));
         }
         // The era follows the date (Gregorian/ISO only: AD/BC by sign of the year).
-        if let Some(e) = get("__dtf_era") {
+        if let (true, Some(e)) = (greg_cal, get("__dtf_era")) {
             let era = match e.as_str() {
                 "long" => if y > 0 { "Anno Domini" } else { "Before Christ" },
                 "narrow" => if y > 0 { "A" } else { "B" },
