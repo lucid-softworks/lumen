@@ -698,15 +698,27 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
     }
 }
 /// CalendarDateAdd for a month-structure calendar: add years/months in the calendar (clamping the
-/// day to the target month), then weeks/days as elapsed days.
-fn cal_add(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
+/// day to the target month under `constrain`, or rejecting when it overflows), then weeks/days.
+fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+    if ovf == Overflow::Reject {
+        let f = cal_fields(cal, d);
+        let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
+        let total = cy * mpy + (cm - 1) + sign * (dur.years * mpy + dur.months);
+        let (ny, nm) = (total.div_euclid(mpy), total.rem_euclid(mpy) + 1);
+        if cd > cal_month_len(cal, ny, nm) {
+            return Err(i.make_error("RangeError", "day is out of range in the target month"));
+        }
+    }
+    Ok(cal_add_c(cal, d, dur, sign))
+}
+/// Constrain-only calendar add (clamps the day to the target month).
+fn cal_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
     let f = cal_fields(cal, d);
     let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
     let total = cy * mpy + (cm - 1) + sign * (dur.years * mpy + dur.months);
     let ny = total.div_euclid(mpy);
     let nm = total.rem_euclid(mpy) + 1;
-    let nd = cd.min(cal_month_len(cal, ny, nm));
-    let iso0 = cal_to_iso(cal, ny, nm, nd);
+    let iso0 = cal_to_iso(cal, ny, nm, cd.min(cal_month_len(cal, ny, nm)));
     let z = epoch_days(iso0) + sign * (dur.weeks * 7 + dur.days);
     let (yy, mm, dd) = civil_from_days(z);
     IsoDate { year: yy, month: mm, day: dd }
@@ -2353,10 +2365,10 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     let (lo, hi) = if sign < 0 { (a, b) } else { (b, a) };
     let mpy = cal_fields(cal, lo).4;
     let mut months = 0i64;
-    while cmp_date(cal_add(cal, lo, IsoDuration { months: months + 1, ..Default::default() }, 1), hi) <= 0 {
+    while cmp_date(cal_add_c(cal, lo, IsoDuration { months: months + 1, ..Default::default() }, 1), hi) <= 0 {
         months += 1;
     }
-    let mid = cal_add(cal, lo, IsoDuration { months, ..Default::default() }, 1);
+    let mid = cal_add_c(cal, lo, IsoDuration { months, ..Default::default() }, 1);
     let days = epoch_days(hi) - epoch_days(mid);
     let (years, months) = if largest == "year" {
         (months.div_euclid(mpy), months.rem_euclid(mpy))
@@ -3248,7 +3260,7 @@ fn add_to_date(
 ) -> Result<IsoDate, Value> {
     // Month-structure calendars (Coptic/Ethiopic/Islamic/Indian) add in their own months.
     if is_month_structure(cal) {
-        return check_date(i, cal_add(cal, d, dur, sign));
+        return check_date(i, cal_add(i, cal, d, dur, sign, ovf)?);
     }
     // Add years & months first (constraining the day), then weeks & days.
     let total_months = d.year * 12 + (d.month as i64 - 1) + sign * (dur.years * 12 + dur.months);
