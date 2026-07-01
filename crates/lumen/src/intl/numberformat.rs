@@ -136,6 +136,17 @@ struct DigitOpts {
     min_sig: Option<u32>,
     max_sig: Option<u32>,
     mxfd_set: bool,
+    /// "significant" | "fraction" | "morePrecision" | "lessPrecision".
+    rounding_type: &'static str,
+}
+
+/// The raw significant/fraction-digit options, read in spec order before the rounding options.
+struct RawDigits {
+    min_int: u32,
+    mnfd: Option<u32>,
+    mxfd: Option<u32>,
+    mnsd: Option<u32>,
+    mxsd: Option<u32>,
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
@@ -211,7 +222,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         .as_deref()
         .map(|c| currency_fraction_digits(&c.to_uppercase()))
         .unwrap_or(2);
-    let mut digits = read_digit_options(i, &options, &style, cur_digits)?;
+    let raw_digits = read_raw_digits(i, &options)?;
 
     let rounding_increment = {
         let v = ab(i.get_member(&options, "roundingIncrement"))?;
@@ -245,25 +256,26 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("auto"),
     )?
     .unwrap();
-    // A roundingIncrement other than 1 is only valid with fraction-digit rounding: it is incompatible
-    // with significant digits or a morePrecision/lessPrecision priority (TypeError, per the spec).
-    if rounding_increment != 1
-        && (digits.min_sig.is_some() || digits.max_sig.is_some() || rounding_priority != "auto")
-    {
-        return Err(i.make_error(
-            "TypeError",
-            "roundingIncrement is only supported with fractionDigits rounding",
-        ));
-    }
-    // With a roundingIncrement, maxFractionDigits must equal minFractionDigits: an explicit mismatch
-    // is a RangeError, and an unset maximum defaults down to the minimum.
+    let digits = interpret_digits(
+        i,
+        &raw_digits,
+        &style,
+        &notation,
+        &rounding_priority,
+        cur_digits,
+        rounding_increment,
+    )?;
+    // A roundingIncrement other than 1 requires fraction-digit rounding (TypeError otherwise), and
+    // then maximumFractionDigits must equal minimumFractionDigits (RangeError otherwise).
     if rounding_increment != 1 {
-        if digits.mxfd_set {
-            if digits.min_frac != digits.max_frac {
-                return Err(i.make_error("RangeError", "maximumFractionDigits must equal minimumFractionDigits with roundingIncrement"));
-            }
-        } else {
-            digits.max_frac = digits.min_frac;
+        if digits.rounding_type != "fraction" {
+            return Err(i.make_error(
+                "TypeError",
+                "roundingIncrement is only supported with fractionDigits rounding",
+            ));
+        }
+        if digits.min_frac != digits.max_frac {
+            return Err(i.make_error("RangeError", "maximumFractionDigits must equal minimumFractionDigits with roundingIncrement"));
         }
     }
     let trailing_zero = get_option(
@@ -321,6 +333,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__nf_grouping", use_grouping);
     set_builtin(&obj, "__nf_signdisplay", Value::from_string(sign_display));
     set_builtin(&obj, "__nf_roundingmode", Value::from_string(rounding_mode));
+    set_builtin(&obj, "__nf_roundingtype", Value::str(digits.rounding_type));
     Ok(Value::Obj(obj))
 }
 
@@ -334,60 +347,113 @@ fn currency_fraction_digits(code: &str) -> u32 {
     }
 }
 
-fn read_digit_options(i: &mut Interp, options: &Value, style: &str, cur_digits: u32) -> Result<DigitOpts, Value> {
-    // Read order: minInt, minFrac, maxFrac, minSig, maxSig.
+/// SetNumberFormatDigitOptions, phase 1: read the raw digit options (spec order: minInt, minFrac,
+/// maxFrac, minSig, maxSig). The rounding options are read by the caller afterwards; interpretation
+/// happens in `interpret_digits` once the rounding priority is known.
+fn read_raw_digits(i: &mut Interp, options: &Value) -> Result<RawDigits, Value> {
     let min_int = read_range(i, options, "minimumIntegerDigits", 1, 21, 1)?;
     let mnfd = read_range_opt(i, options, "minimumFractionDigits", 0, 100)?;
     let mxfd = read_range_opt(i, options, "maximumFractionDigits", 0, 100)?;
-    let mut min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
-    let mut max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
-    // When only one significant-digit bound is given, the other defaults (min→1, max→21).
-    if min_sig.is_some() || max_sig.is_some() {
-        min_sig = Some(min_sig.unwrap_or(1));
-        max_sig = Some(max_sig.unwrap_or(21));
-    }
+    let mnsd = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
+    let mxsd = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
+    Ok(RawDigits { min_int, mnfd, mxfd, mnsd, mxsd })
+}
 
-    let (default_min_frac, default_max_frac) = if style == "currency" {
+/// SetNumberFormatDigitOptions, phase 2: derive the effective digit bounds and rounding type from the
+/// raw options, the style/notation defaults, and the rounding priority.
+fn interpret_digits(
+    i: &mut Interp,
+    raw: &RawDigits,
+    style: &str,
+    notation: &str,
+    priority: &str,
+    cur_digits: u32,
+    rounding_increment: u32,
+) -> Result<DigitOpts, Value> {
+    let (mnfd_default, mut mxfd_default) = if style == "currency" {
         (cur_digits, cur_digits)
     } else if style == "percent" {
         (0, 0)
     } else {
         (0, 3)
     };
-
-    let (min_frac, max_frac) = if min_sig.is_some() || max_sig.is_some() {
-        (0, 0)
-    } else {
-        // SetNumberFormatDigitOptions: when only one of min/max fraction digits is provided, the
-        // other is clamped toward it (min toward the given max, max toward the given min); when both
-        // are absent the currency/style defaults apply; only when both are given can they conflict.
-        match (mnfd, mxfd) {
-            (None, None) => (default_min_frac, default_max_frac),
-            (None, Some(mx)) => (default_min_frac.min(mx), mx),
-            (Some(mn), None) => (mn, default_max_frac.max(mn)),
-            (Some(mn), Some(mx)) => {
-                if mn > mx {
-                    return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
-                }
-                (mn, mx)
-            }
-        }
-    };
-    if let (Some(a), Some(b)) = (min_sig, max_sig) {
-        if a > b {
-            return Err(i.make_error(
-                "RangeError",
-                "minimumSignificantDigits > maximumSignificantDigits",
-            ));
+    if rounding_increment != 1 {
+        mxfd_default = mnfd_default;
+    }
+    let has_sd = raw.mnsd.is_some() || raw.mxsd.is_some();
+    let has_fd = raw.mnfd.is_some() || raw.mxfd.is_some();
+    let mut need_sd = true;
+    let mut need_fd = true;
+    if priority == "auto" {
+        need_sd = has_sd;
+        if need_sd || (!has_fd && notation == "compact") {
+            need_fd = false;
         }
     }
+
+    let (mut min_sig, mut max_sig) = (None, None);
+    if need_sd {
+        if has_sd {
+            let mn = raw.mnsd.unwrap_or(1);
+            let mx = raw.mxsd.unwrap_or(21);
+            if mn > mx {
+                return Err(i.make_error("RangeError", "minimumSignificantDigits > maximumSignificantDigits"));
+            }
+            min_sig = Some(mn);
+            max_sig = Some(mx);
+        } else {
+            min_sig = Some(1);
+            max_sig = Some(21);
+        }
+    }
+
+    let (mut min_frac, mut max_frac) = (0u32, 0u32);
+    if need_fd {
+        let (mn, mx) = if has_fd {
+            match (raw.mnfd, raw.mxfd) {
+                (None, Some(mx)) => (mnfd_default.min(mx), mx),
+                (Some(mn), None) => (mn, mxfd_default.max(mn)),
+                (Some(mn), Some(mx)) => {
+                    if mn > mx {
+                        return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
+                    }
+                    (mn, mx)
+                }
+                (None, None) => (mnfd_default, mxfd_default),
+            }
+        } else {
+            (mnfd_default, mxfd_default)
+        };
+        min_frac = mn;
+        max_frac = mx;
+    }
+
+    let rounding_type = if !need_sd && !need_fd {
+        // Neither range requested (compact, auto): the default rounding is morePrecision over 0
+        // fraction and (1..2) significant digits.
+        min_frac = 0;
+        max_frac = 0;
+        min_sig = Some(1);
+        max_sig = Some(2);
+        "morePrecision"
+    } else if priority == "morePrecision" {
+        "morePrecision"
+    } else if priority == "lessPrecision" {
+        "lessPrecision"
+    } else if has_sd {
+        "significant"
+    } else {
+        "fraction"
+    };
+
     Ok(DigitOpts {
-        min_int,
+        min_int: raw.min_int,
         min_frac,
         max_frac,
         min_sig,
         max_sig,
-        mxfd_set: mxfd.is_some(),
+        mxfd_set: raw.mxfd.is_some(),
+        rounding_type,
     })
 }
 
@@ -474,10 +540,23 @@ fn format_magnitude(x: f64, o: &Gc) -> String {
     let increment = get_num(o, "__nf_roundingincrement").unwrap_or(1);
     let mode = get_str(o, "__nf_roundingmode");
     let mode = if mode.is_empty() { "halfExpand".to_string() } else { mode };
-    let mut s = if let Some(msig) = max_sig {
-        round_significant_dec(x, msig, min_sig.unwrap_or(1), &mode)
-    } else {
-        round_fraction_dec(x, min_frac, max_frac, increment, &mode)
+    let rtype = get_str(o, "__nf_roundingtype");
+    let mut s = match rtype.as_str() {
+        "significant" => round_significant_dec(x, max_sig.unwrap_or(21), min_sig.unwrap_or(1), &mode),
+        "morePrecision" | "lessPrecision" => round_priority(
+            x,
+            min_sig.unwrap_or(1),
+            max_sig.unwrap_or(21),
+            min_frac,
+            max_frac,
+            increment,
+            &mode,
+            rtype == "morePrecision",
+        ),
+        "fraction" => round_fraction_dec(x, min_frac, max_frac, increment, &mode),
+        // Fallback for formatters created without a stored rounding type.
+        _ if max_sig.is_some() => round_significant_dec(x, max_sig.unwrap(), min_sig.unwrap_or(1), &mode),
+        _ => round_fraction_dec(x, min_frac, max_frac, increment, &mode),
     };
     // Pad integer digits to min_int.
     {
@@ -608,6 +687,47 @@ fn round_fraction_dec(x: f64, min_frac: u32, max_frac: u32, increment: u32, mode
         }
     }
     s
+}
+
+/// The base-10 exponent of the most-significant digit of `x` (0 for the ones place). Zero maps to 0,
+/// matching ToRawPrecision's handling.
+fn msd_exponent(x: f64) -> i32 {
+    if x == 0.0 {
+        return 0;
+    }
+    let (int_str, frac_str) = decimal_digits(x);
+    let int_trim = int_str.trim_start_matches('0');
+    if !int_trim.is_empty() {
+        int_trim.len() as i32 - 1
+    } else {
+        -(1 + frac_str.bytes().take_while(|&b| b == b'0').count() as i32)
+    }
+}
+
+/// PartitionNumberPattern's morePrecision/lessPrecision disambiguation: round `x` both ways and pick
+/// the significant-digit or fraction-digit result. The rounding magnitude uses the *maximum*
+/// settings (ToRawPrecision: `e - maxSig + 1`; ToRawFixed: `-maxFrac`).
+#[allow(clippy::too_many_arguments)]
+fn round_priority(
+    x: f64,
+    min_sig: u32,
+    max_sig: u32,
+    min_frac: u32,
+    max_frac: u32,
+    increment: u32,
+    mode: &str,
+    more: bool,
+) -> String {
+    let s_result = round_significant_dec(x, max_sig, min_sig, mode);
+    let f_result = round_fraction_dec(x, min_frac, max_frac, increment.max(1), mode);
+    let s_mag = msd_exponent(x) - max_sig as i32 + 1;
+    let f_mag = -(max_frac as i32);
+    let fixed_is_more_precise = f_mag < s_mag;
+    if (more && fixed_is_more_precise) || (!more && !fixed_is_more_precise) {
+        f_result
+    } else {
+        s_result
+    }
 }
 
 /// Round `x` to `max_sig` significant digits (per `mode`), keeping at least `min_sig`.
