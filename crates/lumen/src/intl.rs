@@ -22,7 +22,6 @@ mod service;
 mod tags;
 
 pub use tags::{canonicalize_language_tag, is_structurally_valid_tag};
-pub(crate) use service::{resolve_locale, ResolvedLocale};
 
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or(Value::Undefined)

@@ -4,7 +4,7 @@
 use super::{ab, arg, canonicalize_locale_list};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, Gc, Property, Value};
+use crate::value::{Gc, Property, Value};
 
 /// The languages we ship formatting data for. Unknown languages resolve to `en`.
 pub fn supported_language(lang: &str) -> bool {
@@ -18,6 +18,7 @@ pub fn supported_language(lang: &str) -> bool {
 /// carried (only those relevant to the service are kept by the caller).
 pub struct ResolvedLocale {
     pub locale: String,
+    #[allow(dead_code)]
     pub keywords: Vec<(String, String)>,
 }
 
@@ -138,7 +139,3 @@ pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Option<Gc> {
     i.extra_protos.get(intrinsic).cloned()
 }
 
-/// Store a resolved keyword on the instance object with the given slot prefix.
-pub fn set_slot(obj: &Gc, name: &str, v: Value) {
-    set_builtin(obj, name, v);
-}

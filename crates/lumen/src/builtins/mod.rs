@@ -25,6 +25,42 @@ fn this_obj(this: &Value) -> Option<Gc> {
     this.as_obj().cloned()
 }
 
+/// ToDateTimeOptions default for toLocaleDateString/toLocaleTimeString: when `options` is undefined,
+/// supply the date-only or time-only component defaults; otherwise pass the options through.
+fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Value, Value> {
+    if !matches!(options, Value::Undefined) {
+        return Ok(options.clone());
+    }
+    let o = i.new_object();
+    if date {
+        set_data(&o, "year", Value::str("numeric"));
+        set_data(&o, "month", Value::str("numeric"));
+        set_data(&o, "day", Value::str("numeric"));
+    } else {
+        set_data(&o, "hour", Value::str("numeric"));
+        set_data(&o, "minute", Value::str("numeric"));
+        set_data(&o, "second", Value::str("numeric"));
+    }
+    Ok(Value::Obj(o))
+}
+
+/// Construct `Intl.<service>(locales, options)` and invoke `method(args…)` on it. Used to route the
+/// `toLocale*`/`localeCompare` methods through the Intl services now that they exist.
+fn intl_delegate(
+    i: &mut Interp,
+    service: &str,
+    locales: Value,
+    options: Value,
+    method: &str,
+    call_args: &[Value],
+) -> Result<Value, Value> {
+    let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
+    let ctor = ab(i.get_member(&intl, service))?;
+    let inst = ab(i.construct(ctor, &[locales, options]))?;
+    let f = ab(i.get_member(&inst, method))?;
+    ab(i.call(f, inst, call_args))
+}
+
 pub fn install(it: &mut Interp) {
     // Primitive globals.
     let g = it.global.clone();
@@ -4477,24 +4513,29 @@ fn install_date(it: &mut Interp) {
             utc_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
         ))
     });
-    // No Intl: toLocale* return a stable implementation-defined string.
-    it.def_method(&proto, "toLocaleString", 0, |i, this, _| {
+    // toLocale* route through Intl.DateTimeFormat (which exists now).
+    it.def_method(&proto, "toLocaleString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(
-            iso_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
-        ))
+        if !t.is_finite() {
+            return Ok(Value::str("Invalid Date"));
+        }
+        intl_delegate(i, "DateTimeFormat", arg(args, 0), arg(args, 1), "format", &[Value::Num(t)])
     });
-    it.def_method(&proto, "toLocaleDateString", 0, |i, this, _| {
+    it.def_method(&proto, "toLocaleDateString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(
-            date_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
-        ))
+        if !t.is_finite() {
+            return Ok(Value::str("Invalid Date"));
+        }
+        let opts = date_style_default(i, &arg(args, 1), true)?;
+        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
     });
-    it.def_method(&proto, "toLocaleTimeString", 0, |i, this, _| {
+    it.def_method(&proto, "toLocaleTimeString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(
-            time_str_part(t).unwrap_or_else(|| "Invalid Date".to_string()),
-        ))
+        if !t.is_finite() {
+            return Ok(Value::str("Invalid Date"));
+        }
+        let opts = date_style_default(i, &arg(args, 1), false)?;
+        intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
     });
 
     let ctor = it.make_native("Date", 7, date_ctor);
@@ -11794,13 +11835,17 @@ fn install_string(it: &mut Interp) {
         ))
     });
     it.def_method(&sp, "localeCompare", 1, |i, this, args| {
-        let a = this_string(i, &this)?;
-        let b = ab(i.to_string(&arg(args, 0)))?;
-        Ok(Value::Num(match (*a).cmp(&*b) {
-            std::cmp::Ordering::Less => -1.0,
-            std::cmp::Ordering::Equal => 0.0,
-            std::cmp::Ordering::Greater => 1.0,
-        }))
+        // RequireObjectCoercible + ToString this, then delegate to Intl.Collator.
+        let a = Value::Str(this_string(i, &this)?);
+        let b = Value::Str(ab(i.to_string(&arg(args, 0)))?);
+        intl_delegate(
+            i,
+            "Collator",
+            arg(args, 1),
+            arg(args, 2),
+            "compare",
+            &[a, b],
+        )
     });
     it.def_method(&sp, "toLocaleString", 0, |i, this, _| {
         Ok(Value::Str(this_string(i, &this)?))
@@ -12324,9 +12369,9 @@ fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
 
 fn install_number(it: &mut Interp) {
     let np = it.number_proto.clone();
-    it.def_method(&np, "toLocaleString", 0, |i, this, _| {
+    it.def_method(&np, "toLocaleString", 0, |i, this, args| {
         let n = this_number(i, &this)?;
-        Ok(Value::from_string(i.num_to_str(n)))
+        intl_delegate(i, "NumberFormat", arg(args, 0), arg(args, 1), "format", &[Value::Num(n)])
     });
     it.def_method(&np, "toString", 1, |i, this, args| {
         let n = this_number(i, &this)?;
@@ -12800,11 +12845,9 @@ fn install_bigint(it: &mut Interp) {
     it.def_method(&proto, "valueOf", 0, |i, this, _| {
         Ok(Value::BigInt(this_bigint(i, &this)?))
     });
-    it.def_method(&proto, "toLocaleString", 0, |i, this, _| {
-        Ok(Value::from_string(bigint_to_radix(
-            this_bigint(i, &this)?,
-            10,
-        )))
+    it.def_method(&proto, "toLocaleString", 0, |i, this, args| {
+        let b = this_bigint(i, &this)?;
+        intl_delegate(i, "NumberFormat", arg(args, 0), arg(args, 1), "format", &[Value::BigInt(b)])
     });
     let ctor = it.make_native("BigInt", 1, |i, _t, a| {
         if i.constructing {
