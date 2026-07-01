@@ -5224,3 +5224,23 @@ fn typedarray_sort_semantics() {
     // Sorting an immutable-backed array throws.
     assert_eq!(throws("var i=(new Int32Array([3,1,2])).buffer.transferToImmutable(); new Int32Array(i).sort()"), "TypeError");
 }
+
+#[test]
+#[test]
+#[test]
+#[test]
+fn typedarray_slice_and_subclass_buffer() {
+    // slice copies a range into a species-created array; out-of-range indices stay zero.
+    assert_eq!(
+        run("new Int32Array([1,2,3,4,5]).slice(1,3).join(',')"),
+        "2,3"
+    );
+    assert_eq!(
+        run("new Int32Array([1,2,3,4,5]).slice(-2).join(',')"),
+        "4,5"
+    );
+    // A TypedArray subclass carries its buffer slot onto the derived `this`.
+    assert_eq!(run("class MyF extends Float32Array {}; var a=new MyF(4); [typeof a.buffer, a.byteLength, a instanceof Float32Array].join(',')"), "object,16,true");
+    // slice via a subclass source builds a subclass result with a real buffer.
+    assert_eq!(run("class MyU extends Uint8Array {}; var s=new MyU([1,2,3]).slice(1); [typeof s.buffer, s.join(',')].join('|')"), "object|2,3");
+}

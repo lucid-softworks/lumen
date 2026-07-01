@@ -2837,6 +2837,33 @@ fn ta_native(
             }
             Ok(new_ta)
         })()),
+        "slice" => Some((|| {
+            let start = rel_index(ab(i.to_number(&arg(args, 0)))?, len);
+            let end = match args.get(1) {
+                Some(v) if !matches!(v, Value::Undefined) => rel_index(ab(i.to_number(v))?, len),
+                _ => len,
+            };
+            let count = end.saturating_sub(start);
+            let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(count as f64)], true)?;
+            let new_info = map_ptr(&new_ta)
+                .and_then(|p| i.typed_arrays.get(&p).copied())
+                .ok_or_else(|| i.make_error("TypeError", "slice: species did not return a view"))?;
+            if count > 0 {
+                // The species constructor ran user code; re-validate the source view.
+                let curlen = i.ta_len(&info).ok_or_else(|| {
+                    i.make_error("TypeError", "TypedArray source is out of bounds")
+                })?;
+                for j in 0..count {
+                    let src_idx = start + j;
+                    // Indices past the (possibly shrunk) source stay zero-initialised in the result.
+                    if src_idx < curlen {
+                        let v = i.ta_read(&info, src_idx);
+                        ab(i.ta_store(&new_info, j, &v))?;
+                    }
+                }
+            }
+            Ok(new_ta)
+        })()),
         "join" => Some((|| {
             let sep = match args.first() {
                 Some(v) if !matches!(v, Value::Undefined) => ab(i.to_string(v))?.to_string(),

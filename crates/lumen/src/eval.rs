@@ -2646,6 +2646,11 @@ impl Interp {
                         if let Some(v) = self.typed_arrays.remove(&sp) {
                             self.typed_arrays.insert(dp, v);
                         }
+                        // The TypedArray's `buffer` slot lives in a parallel side table keyed by the
+                        // view's pointer, so it must move to `this` alongside its TaInfo.
+                        if let Some(v) = self.ta_buffer.remove(&sp) {
+                            self.ta_buffer.insert(dp, v);
+                        }
                         if let Some(v) = self.data_views.remove(&sp) {
                             self.data_views.insert(dp, v);
                         }
