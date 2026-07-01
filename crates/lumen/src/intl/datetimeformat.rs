@@ -81,7 +81,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         let nu = dtf_nu(&o);
         let equal = do_format_ms(&o, s, kind) == do_format_ms(&o, e, kind);
         let mut arr: Vec<Value> = Vec::new();
-        let mut emit = |i: &mut Interp, arr: &mut Vec<Value>, ty: &str, val: &str, src: &str| {
+        let emit = |i: &mut Interp, arr: &mut Vec<Value>, ty: &str, val: &str, src: &str| {
             let ob = i.new_object();
             set_data(&ob, "type", Value::str(ty));
             set_data(&ob, "value", Value::from_string(crate::intl::numberformat::xlate_digits(val, &nu)));
@@ -346,8 +346,28 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));
     let locale_lang = resolved_locale.split('-').next().unwrap_or("").to_string();
+    // The calendar comes from the option, else the locale's -u-ca- extension (canonicalized, with the
+    // same islamic/available fallback), else gregory.
+    let ca_ext = resolved.keywords.iter().find(|(k, _)| k == "ca").map(|(_, v)| {
+        let lc = v.to_lowercase();
+        let c = crate::intl::tags::canonical_ca(&lc).unwrap_or(lc);
+        if c == "islamic" || c == "islamic-rgsa" {
+            "islamic-civil".to_string()
+        } else if AVAILABLE_CALENDARS.contains(&c.as_str()) {
+            c
+        } else {
+            "gregory".to_string()
+        }
+    });
+    let eff_cal = calendar.clone().or(ca_ext).unwrap_or_else(|| "gregory".to_string());
+    // Reflect a non-gregory -u-ca- in the resolved locale (only when it came from the locale).
+    let resolved_locale = if calendar.is_none() && eff_cal != "gregory" && !resolved_locale.contains("-u-") {
+        format!("{resolved_locale}-u-ca-{eff_cal}")
+    } else {
+        resolved_locale
+    };
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved_locale));
-    set_builtin(&obj, "__dtf_ca", Value::from_string(calendar.clone().unwrap_or_else(|| "gregory".to_string())));
+    set_builtin(&obj, "__dtf_ca", Value::from_string(eff_cal));
     set_builtin(&obj, "__dtf_nu", Value::from_string(nu_final));
     set_builtin(&obj, "__dtf_tz", Value::from_string(time_zone));
     let put = |obj: &Gc, k: &str, v: &Option<String>| {
@@ -461,12 +481,6 @@ fn ymd(ms: f64) -> (i64, u32, u32, u32, u32, u32, u32) {
 
 const WD_LONG: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WD_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MON_LONG: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September",
-    "October", "November", "December",
-];
-const MON_SHORT: [&str; 12] =
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /// Resolve the format argument to epoch-milliseconds. A Temporal receiver uses its ISO fields and
 /// must be compatible with the formatter's requested components (else TypeError/RangeError).
@@ -643,12 +657,33 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         lit(&mut parts, ", ");
     }
 
-    // Gregorian month names are only used for Gregorian/ISO; other calendars render numeric.
-    let named_ok = greg_cal && (1..=12).contains(&mo);
+    // CLDR locale key for name lookups (zh splits by script).
+    let cldr_loc = {
+        let loc = match o.borrow().props.get("__dtf_locale").map(|p| p.value.clone()) {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => "en".to_string(),
+        };
+        let mut lp = loc.split('-');
+        let l = lp.next().unwrap_or("en");
+        let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+        match (l, region) {
+            ("zh", "TW" | "HK" | "MO") => "zh-Hant".to_string(),
+            ("zh", _) => "zh-Hans".to_string(),
+            _ => l.to_string(),
+        }
+    };
+    let cal_key = if greg_cal { "gregory" } else { dcal.as_str() };
+    // Named months come from CLDR (localized, per-calendar); missing → numeric.
+    let mut month_is_named = false;
     let month_str = get("__dtf_month").map(|m| match m.as_str() {
-        "long" if named_ok => MON_LONG[(mo - 1) as usize].to_string(),
-        "short" if named_ok => MON_SHORT[(mo - 1) as usize].to_string(),
-        "narrow" if named_ok => MON_LONG[(mo - 1) as usize][..1].to_string(),
+        w @ ("long" | "short" | "narrow") => {
+            if let Some(n) = crate::cldr_dates::month_name(&cldr_loc, cal_key, w, mo as u8) {
+                month_is_named = true;
+                n.to_string()
+            } else {
+                format!("{mo}")
+            }
+        }
         "2-digit" => format!("{mo:02}"),
         _ => format!("{mo}"),
     });
@@ -656,7 +691,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // When an era is shown for the Gregorian calendar, the year is the positive era year.
     let disp_year = if greg_cal && get("__dtf_era").is_some() && y <= 0 { 1 - y } else { y };
     let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (disp_year % 100 + 100) % 100) } else { format!("{disp_year}") });
-    let named_month = named_ok && matches!(get("__dtf_month").as_deref(), Some("long" | "short" | "narrow"));
+    let named_month = month_is_named;
     let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
 
     if named_month {
