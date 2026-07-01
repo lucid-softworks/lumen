@@ -173,7 +173,7 @@ fn format(
             Value::Num(x) => x as usize,
             _ => 0,
         };
-        let mut push_num = |i: &mut Interp, arr: &mut Vec<Value>| -> Result<(), Value> {
+        let push_num = |i: &mut Interp, arr: &mut Vec<Value>| -> Result<(), Value> {
             for k in 0..nlen {
                 let el = ab(i.get_member(&nparts, &k.to_string()))?;
                 let ty = ab(i.get_member(&el, "type"))?;

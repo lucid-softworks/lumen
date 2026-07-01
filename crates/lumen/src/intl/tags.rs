@@ -72,14 +72,8 @@ pub fn parse(tag: &str) -> Option<LangTag> {
     let mut idx = 0;
     let mut t = LangTag::default();
 
-    // Private-use-only tag ("x-....").
-    if parts[0].eq_ignore_ascii_case("x") {
-        return parse_privateuse(&parts, 0).map(|p| {
-            let mut t = LangTag::default();
-            t.private = p;
-            t
-        });
-    }
+    // A private-use-only tag ("x-...") has no language subtag, so it is not a valid Unicode locale
+    // identifier and must be rejected (RangeError), even though BCP-47 permits it.
 
     // language
     if idx >= parts.len() || !is_language(parts[idx]) {
