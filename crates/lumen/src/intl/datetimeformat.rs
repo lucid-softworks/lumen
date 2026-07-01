@@ -565,15 +565,18 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         if have_date {
             lit(&mut parts, ", ");
         }
-        // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word.
+        let has_hour = time_defaulted || get("__dtf_hour").is_some();
+        // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word; a plain
+        // AM/PM marker only appears alongside a 12-hour clock.
         let use12 = day_period.is_some()
             || !matches!(o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()), Some(Value::Bool(false)));
         let (disp_h, ampm) = if use12 {
             let ap = match &day_period {
-                Some(w) => day_period_word(h, w),
-                None => if h < 12 { "AM" } else { "PM" },
+                Some(w) => Some(day_period_word(h, w)),
+                None if has_hour => Some(if h < 12 { "AM" } else { "PM" }),
+                None => None,
             };
-            (if h % 12 == 0 { 12 } else { h % 12 }, Some(ap))
+            (if h % 12 == 0 { 12 } else { h % 12 }, ap)
         } else {
             (h, None)
         };
