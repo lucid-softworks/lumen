@@ -261,7 +261,9 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         || hour.is_some()
         || minute.is_some()
         || second.is_some()
-        || era.is_some();
+        || era.is_some()
+        || day_period.is_some()
+        || frac_sec.is_some();
     let resolved = resolve_locale(i, &requested, &["ca", "nu", "hc"]);
 
     let obj = i.new_object();
@@ -552,7 +554,9 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         && get("__dtf_hour").is_none()
         && get("__dtf_minute").is_none()
         && get("__dtf_second").is_none();
+    let day_period = get("__dtf_dayperiod");
     let have_time = time_defaulted
+        || day_period.is_some()
         || get("__dtf_hour").is_some()
         || get("__dtf_minute").is_some()
         || get("__dtf_second").is_some();
@@ -560,13 +564,22 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         if have_date {
             lit(&mut parts, ", ");
         }
-        let use12 = !matches!(o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()), Some(Value::Bool(false)));
+        // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word.
+        let use12 = day_period.is_some()
+            || !matches!(o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()), Some(Value::Bool(false)));
         let (disp_h, ampm) = if use12 {
-            let ap = if h < 12 { "AM" } else { "PM" };
+            let ap = match &day_period {
+                Some(w) => day_period_word(h, w),
+                None => if h < 12 { "AM" } else { "PM" },
+            };
             (if h % 12 == 0 { 12 } else { h % 12 }, Some(ap))
         } else {
             (h, None)
         };
+        let has_clock = time_defaulted
+            || get("__dtf_hour").is_some()
+            || get("__dtf_minute").is_some()
+            || get("__dtf_second").is_some();
         let mut first = true;
         if time_defaulted || get("__dtf_hour").is_some() {
             parts.push(("hour", if get("__dtf_hour").as_deref() == Some("2-digit") { format!("{disp_h:02}") } else { format!("{disp_h}") }));
@@ -586,7 +599,10 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             parts.push(("second", format!("{s:02}")));
         }
         if let Some(ap) = ampm {
-            lit(&mut parts, " ");
+            // Separate the day-period marker from the clock only when clock digits were emitted.
+            if has_clock {
+                lit(&mut parts, " ");
+            }
             parts.push(("dayPeriod", ap.to_string()));
         }
     }
@@ -663,6 +679,22 @@ fn canon_utc_offset(s: &str) -> Option<String> {
     // A zero offset canonicalizes to "+00:00" regardless of the written sign.
     let sign_c = if sign == b'-' && (h != 0 || m != 0) { '-' } else { '+' };
     Some(format!("{sign_c}{h:02}:{m:02}"))
+}
+
+/// The English flexible day-period word for an hour under a `dayPeriod` width (`long`/`short` share
+/// forms; only `narrow` noon differs).
+fn day_period_word(h: u32, width: &str) -> &'static str {
+    if h == 12 {
+        if width == "narrow" { "n" } else { "noon" }
+    } else if h < 12 {
+        "in the morning"
+    } else if h < 18 {
+        "in the afternoon"
+    } else if h < 21 {
+        "in the evening"
+    } else {
+        "at night"
+    }
 }
 
 /// The time-zone display name for the (UTC) zone under a `timeZoneName` style.
