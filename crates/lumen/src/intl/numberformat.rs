@@ -764,8 +764,15 @@ fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
         parts.push((if bytes[idx] == '-' { "minusSign" } else { "plusSign" }, bytes[idx].to_string()));
         idx += 1;
     }
+    // The number body is either digits, the infinity glyph, or "NaN"; the prefix loop stops there.
+    let is_nan_at = |b: &[char], k: usize| b[k..].starts_with(&['N', 'a', 'N']);
     let mut prefix = String::new();
-    while idx < bytes.len() && !bytes[idx].is_ascii_digit() && bytes[idx] != '.' {
+    while idx < bytes.len()
+        && !bytes[idx].is_ascii_digit()
+        && bytes[idx] != '.'
+        && bytes[idx] != '\u{221e}'
+        && !is_nan_at(&bytes, idx)
+    {
         prefix.push(bytes[idx]);
         idx += 1;
     }
@@ -773,6 +780,14 @@ fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
         // A leading currency symbol vs. a stray literal — classify a $ / letters as currency.
         let t = if prefix.chars().all(|c| c == ' ' || c == '\u{00a0}') { "literal" } else { "currency" };
         parts.push((t, prefix));
+    }
+    // Non-finite body: emit a single infinity/nan part, then fall through to any trailing affix.
+    if idx < bytes.len() && bytes[idx] == '\u{221e}' {
+        parts.push(("infinity", "\u{221e}".to_string()));
+        idx += 1;
+    } else if is_nan_at(&bytes, idx) {
+        parts.push(("nan", "NaN".to_string()));
+        idx += 3;
     }
     // Integer digits (with grouping commas).
     let int_start = idx;
