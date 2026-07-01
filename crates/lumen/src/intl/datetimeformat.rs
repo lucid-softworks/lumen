@@ -364,6 +364,12 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         if matches!(ts.as_str(), "medium" | "long" | "full") {
             set_builtin(&obj, "__dtfx_second", Value::str("2-digit"));
         }
+        // full/long time styles include the time-zone name (long / short respectively).
+        match ts.as_str() {
+            "full" => set_builtin(&obj, "__dtfx_tzname", Value::str("long")),
+            "long" => set_builtin(&obj, "__dtfx_tzname", Value::str("short")),
+            _ => {}
+        }
     }
     // hourCycle / hour12 are resolved only when an hour is shown (explicit hour, or a timeStyle).
     let shows_hour = hour.is_some() || time_style.is_some();
@@ -378,8 +384,12 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
                 "h23".to_string()
             }
         } else {
-            // The `hourCycle` option wins, then the locale's `-u-hc-` extension, then h23.
-            hour_cycle.clone().or_else(|| hc_ext.clone()).unwrap_or_else(|| "h23".to_string())
+            // The `hourCycle` option wins, then the locale's `-u-hc-` extension, then the locale
+            // default (en is 12-hour; most others are h23).
+            hour_cycle
+                .clone()
+                .or_else(|| hc_ext.clone())
+                .unwrap_or_else(|| if lang == "en" { "h12" } else { "h23" }.to_string())
         };
         let h12 = matches!(hc.as_str(), "h11" | "h12");
         set_builtin(&obj, "__dtf_hourcycle", Value::from_string(hc));
