@@ -323,6 +323,31 @@ fn canonicalize_struct(t: &mut LangTag) {
 }
 
 fn apply_language_alias(t: &mut LangTag) {
+    // Compound grandfathered aliases of the form `language-variant` (e.g. "art-lojban" → jbo,
+    // "zh-guoyu" → zh): when such a variant appears alongside others (e.g. "art-lojban-fonipa"), the
+    // matched variant is consumed and the rest are kept.
+    let mut vi = 0;
+    while vi < t.variants.len() {
+        let key = format!("{}-{}", t.language.to_lowercase(), t.variants[vi]);
+        if let Some(rep) = aliases::grandfathered(&key) {
+            if let Some(r) = parse(rep) {
+                t.language = r.language.to_lowercase();
+                if t.script.is_empty() {
+                    t.script = titlecase(&r.script);
+                }
+                if t.region.is_empty() {
+                    t.region = r.region.to_uppercase();
+                }
+                t.variants.remove(vi);
+                for v in r.variants.into_iter().rev() {
+                    t.variants.insert(0, v.to_lowercase());
+                }
+                continue;
+            }
+        }
+        vi += 1;
+    }
+
     // CLDR language aliases can key on language, language-region, language-script, or
     // language-script-region; the matched subtags are *consumed* by the replacement. Try the most
     // specific key first.
