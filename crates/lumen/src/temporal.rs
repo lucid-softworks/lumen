@@ -3712,7 +3712,12 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
     } else {
         return Err(i.make_error("TypeError", "year is required"));
     };
-
+    // Every missing-required-field TypeError precedes a month/monthCode-conflict RangeError, so the
+    // presence checks come before the conflict resolution.
+    if month.is_none() && mc_num.is_none() {
+        return Err(i.make_error("TypeError", "month or monthCode is required"));
+    }
+    let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
     let month = match (month, mc_num) {
         (Some(a), Some(b)) => {
             if a != b {
@@ -3722,10 +3727,8 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
         }
         (Some(a), None) => a,
         (None, Some(b)) => b,
-        (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+        (None, None) => unreachable!(),
     };
-
-    let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
     Ok((year, month, day))
 }
 fn setm(o: &Gc, k: &str, v: Value) {
