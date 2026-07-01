@@ -461,6 +461,7 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
                 (Some("bh"), Some(1 - y))
             }
         }
+        "indian" => (Some("shaka"), Some(from_indian(d).0)),
         _ => (None, None),
     }
 }
@@ -543,6 +544,48 @@ fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
     let (yy, mm, dd) = civil_from_days(fixed);
     IsoDate { year: yy, month: mm, day: dd }
 }
+
+// Indian national (Saka) calendar: a solar calendar whose year begins on Chaitra 1 (Gregorian
+// Mar 22, or Mar 21 in a Gregorian leap year). Saka year = Gregorian - 78.
+fn indian_month_len(m: i64, leap: bool) -> i64 {
+    if m == 1 {
+        if leap { 31 } else { 30 }
+    } else if m <= 6 {
+        31
+    } else {
+        30
+    }
+}
+fn from_indian(iso: IsoDate) -> (i64, i64, i64) {
+    let g = iso.year;
+    let fixed = epoch_days(iso);
+    let chaitra1 = |gy: i64| days_from_civil(gy, 3, if is_leap(gy) { 21 } else { 22 });
+    let (s, start) = if fixed >= chaitra1(g) {
+        (g - 78, chaitra1(g))
+    } else {
+        (g - 79, chaitra1(g - 1))
+    };
+    let leap = is_leap(s + 78);
+    let mut rem = fixed - start;
+    let mut month = 1;
+    while month < 12 {
+        let ml = indian_month_len(month, leap);
+        if rem < ml {
+            break;
+        }
+        rem -= ml;
+        month += 1;
+    }
+    (s, month, rem + 1)
+}
+fn to_indian(s: i64, m: i64, d: i64) -> IsoDate {
+    let gy = s + 78;
+    let leap = is_leap(gy);
+    let chaitra1 = days_from_civil(gy, 3, if leap { 21 } else { 22 });
+    let doy: i64 = (1..m).map(|mm| indian_month_len(mm, leap)).sum::<i64>() + (d - 1);
+    let (yy, mm, dd) = civil_from_days(chaitra1 + doy);
+    IsoDate { year: yy, month: mm, day: dd }
+}
 fn epoch_13(cal: &str) -> i64 {
     if cal == "coptic" { COPTIC_EPOCH } else { ETHIOPIC_EPOCH }
 }
@@ -587,6 +630,13 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let doy = (1..m).map(|mm| islamic_month_len(mm, leap)).sum::<i64>() + d;
         let diy = if leap { 355 } else { 354 };
         (y, m, d, dim, 12, doy, diy, leap)
+    } else if cal == "indian" {
+        let (y, m, d) = from_indian(iso);
+        let leap = is_leap(y + 78);
+        let dim = indian_month_len(m, leap);
+        let doy = (1..m).map(|mm| indian_month_len(mm, leap)).sum::<i64>() + d;
+        let diy = if leap { 366 } else { 365 };
+        (y, m, d, dim, 12, doy, diy, leap)
     } else {
         (
             cal_year_num(cal, iso),
@@ -609,6 +659,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         "coptic" | "ethiopic" => from_13month(d, epoch_13(cal)).0,
         "ethioaa" => from_13month(d, ETHIOPIC_EPOCH).0 + 5500,
         _ if is_islamic(cal) => from_islamic(d, islamic_epoch(cal)).0,
+        "indian" => from_indian(d).0,
         _ => d.year,
     }
 }
@@ -641,7 +692,7 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal)
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian"
 }
 
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
@@ -2624,6 +2675,29 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         let month = month.clamp(1, 12);
         let day = day.clamp(1, islamic_month_len(month, islamic_leap(iy)));
         let iso = to_islamic(iy, month, day, islamic_epoch(cal));
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
+    // Indian (Saka): convert (year | era "shaka", month, day) to ISO.
+    if cal == "indian" {
+        let sy = if let Some(y) = year_opt {
+            y
+        } else if era.as_deref() == Some("shaka") {
+            era_year.ok_or_else(|| i.make_error("TypeError", "year is required"))?
+        } else {
+            return Err(i.make_error("TypeError", "year is required"));
+        };
+        let month = match (month, mc_num) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"))
+            }
+            (Some(a), _) => a,
+            (None, Some(b)) => b,
+            (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+        };
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        let month = month.clamp(1, 12);
+        let day = day.clamp(1, indian_month_len(month, is_leap(sy + 78)));
+        let iso = to_indian(sy, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
     // Reconcile year / era+eraYear BEFORE month (a missing year is a TypeError that the spec raises
