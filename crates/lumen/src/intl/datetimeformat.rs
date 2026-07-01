@@ -723,7 +723,9 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             if let Some(Value::Num(fd)) = o.borrow().props.get("__dtf_fracsec").map(|p| p.value.clone()) {
                 let ms_frac = (ms.rem_euclid(1000.0)) as u32;
                 let digits = format!("{ms_frac:03}");
-                lit(&mut parts, ".");
+                // The fractional separator is the numbering system's decimal symbol (arab: U+066B).
+                let sep = if matches!(dtf_nu(o).as_str(), "arab" | "arabext") { "\u{066b}" } else { "." };
+                lit(&mut parts, sep);
                 parts.push(("fractionalSecond", digits[..fd as usize].to_string()));
             }
         }
