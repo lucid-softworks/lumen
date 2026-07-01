@@ -1040,6 +1040,8 @@ fn compact_tiers(lang: &str, region: &str, long: bool) -> &'static [(f64, &'stat
                 &[(1e12, "\u{a0}Bio."), (1e9, "\u{a0}Mrd."), (1e6, "\u{a0}Mio.")]
             }
         }
+        // Indian English uses the lakh/crore system in short notation.
+        "en" if region == "IN" && !long => &[(1e7, "Cr"), (1e5, "L"), (1e3, "K")],
         _ => {
             if long {
                 &[(1e12, " trillion"), (1e9, " billion"), (1e6, " million"), (1e3, " thousand")]
