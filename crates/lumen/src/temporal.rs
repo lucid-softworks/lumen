@@ -3065,7 +3065,10 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
                 return Err(i.make_error("RangeError", "invalid monthCode"));
             }
             let n: i64 = digits.parse().unwrap();
-            if n < 1 || leap {
+            // 13-month calendars allow M13; all others cap at M12. Leap months (the "L" suffix) only
+            // exist in Hebrew/Chinese, which are resolved before this generic parse.
+            let max_month = if is_13month(cal) { 13 } else { 12 };
+            if n < 1 || n > max_month || leap {
                 return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
             }
             Some(n)
