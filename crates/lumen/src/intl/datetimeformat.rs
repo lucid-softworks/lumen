@@ -50,29 +50,31 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
     );
 }
 
+/// A Unicode key type identifier: one or more "-"-joined 3..8 alnum subtags.
+fn valid_type_id(s: &str) -> bool {
+    !s.is_empty() && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     // Legacy service: callable without `new` (returns a fresh instance either way).
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
 
-    let weekday = get_option(i, &options, "weekday", &["narrow", "short", "long"], None)?;
-    let era = get_option(i, &options, "era", &["narrow", "short", "long"], None)?;
-    let year = get_option(i, &options, "year", &["2-digit", "numeric"], None)?;
-    let month = get_option(i, &options, "month", &["2-digit", "numeric", "narrow", "short", "long"], None)?;
-    let day = get_option(i, &options, "day", &["2-digit", "numeric"], None)?;
-    let hour = get_option(i, &options, "hour", &["2-digit", "numeric"], None)?;
-    let minute = get_option(i, &options, "minute", &["2-digit", "numeric"], None)?;
-    let second = get_option(i, &options, "second", &["2-digit", "numeric"], None)?;
-    let tz_name = get_option(
-        i,
-        &options,
-        "timeZoneName",
-        &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"],
-        None,
-    )?;
-    let date_style = get_option(i, &options, "dateStyle", &["full", "long", "medium", "short"], None)?;
-    let time_style = get_option(i, &options, "timeStyle", &["full", "long", "medium", "short"], None)?;
+    // Spec option read order: calendar, numberingSystem, hour12, hourCycle, timeZone, then the
+    // component options, then formatMatcher, dateStyle, timeStyle.
+    let calendar = get_option(i, &options, "calendar", &[], None)?;
+    if let Some(c) = &calendar {
+        if !valid_type_id(c) {
+            return Err(i.make_error("RangeError", format!("invalid calendar: {c}")));
+        }
+    }
+    let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
+    if let Some(ns) = &numbering {
+        if !valid_type_id(ns) {
+            return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
+        }
+    }
     let hour12 = {
         let v = ab(i.get_member(&options, "hour12"))?;
         if matches!(v, Value::Undefined) {
@@ -87,13 +89,60 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         if matches!(v, Value::Undefined) {
             "UTC".to_string()
         } else {
-            let s = ab(i.to_string(&v))?.to_string();
-            if !s.eq_ignore_ascii_case("utc") {
-                return Err(i.make_error("RangeError", format!("unsupported time zone: {s}")));
-            }
-            "UTC".to_string()
+            ab(i.to_string(&v))?.to_string()
         }
     };
+
+    let weekday = get_option(i, &options, "weekday", &["narrow", "short", "long"], None)?;
+    let era = get_option(i, &options, "era", &["narrow", "short", "long"], None)?;
+    let year = get_option(i, &options, "year", &["2-digit", "numeric"], None)?;
+    let month = get_option(i, &options, "month", &["2-digit", "numeric", "narrow", "short", "long"], None)?;
+    let day = get_option(i, &options, "day", &["2-digit", "numeric"], None)?;
+    let day_period = get_option(i, &options, "dayPeriod", &["narrow", "short", "long"], None)?;
+    let hour = get_option(i, &options, "hour", &["2-digit", "numeric"], None)?;
+    let minute = get_option(i, &options, "minute", &["2-digit", "numeric"], None)?;
+    let second = get_option(i, &options, "second", &["2-digit", "numeric"], None)?;
+    let frac_sec = {
+        let v = ab(i.get_member(&options, "fractionalSecondDigits"))?;
+        if matches!(v, Value::Undefined) {
+            None
+        } else {
+            let n = ab(i.to_number(&v))?;
+            if n.fract() != 0.0 || n < 1.0 || n > 3.0 {
+                return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
+            }
+            Some(n as u32)
+        }
+    };
+    let tz_name = get_option(
+        i,
+        &options,
+        "timeZoneName",
+        &["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"],
+        None,
+    )?;
+    let _format_matcher = get_option(i, &options, "formatMatcher", &["basic", "best fit"], Some("best fit"))?;
+    let date_style = get_option(i, &options, "dateStyle", &["full", "long", "medium", "short"], None)?;
+    let time_style = get_option(i, &options, "timeStyle", &["full", "long", "medium", "short"], None)?;
+
+    // A dateStyle/timeStyle may not be combined with explicit component options.
+    let has_components = weekday.is_some()
+        || era.is_some()
+        || year.is_some()
+        || month.is_some()
+        || day.is_some()
+        || day_period.is_some()
+        || hour.is_some()
+        || minute.is_some()
+        || second.is_some()
+        || frac_sec.is_some()
+        || tz_name.is_some();
+    if (date_style.is_some() || time_style.is_some()) && has_components {
+        return Err(i.make_error(
+            "TypeError",
+            "dateStyle/timeStyle cannot be combined with explicit date-time components",
+        ));
+    }
 
     let has_explicit = weekday.is_some()
         || year.is_some()
@@ -111,8 +160,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved.locale));
-    set_builtin(&obj, "__dtf_ca", Value::str("gregory"));
-    set_builtin(&obj, "__dtf_nu", Value::str("latn"));
+    set_builtin(&obj, "__dtf_ca", Value::from_string(calendar.clone().unwrap_or_else(|| "gregory".to_string())));
+    set_builtin(&obj, "__dtf_nu", Value::from_string(numbering.clone().unwrap_or_else(|| "latn".to_string())));
     set_builtin(&obj, "__dtf_tz", Value::from_string(time_zone));
     let put = |obj: &Gc, k: &str, v: &Option<String>| {
         if let Some(v) = v {
@@ -124,9 +173,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     put(&obj, "__dtf_year", &year);
     put(&obj, "__dtf_month", &month);
     put(&obj, "__dtf_day", &day);
+    put(&obj, "__dtf_dayperiod", &day_period);
     put(&obj, "__dtf_hour", &hour);
     put(&obj, "__dtf_minute", &minute);
     put(&obj, "__dtf_second", &second);
+    if let Some(f) = frac_sec {
+        set_builtin(&obj, "__dtf_fracsec", Value::Num(f as f64));
+    }
     put(&obj, "__dtf_tzname", &tz_name);
     put(&obj, "__dtf_datestyle", &date_style);
     put(&obj, "__dtf_timestyle", &time_style);
@@ -304,9 +357,11 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     put(i, &res, "year", "__dtf_year");
     put(i, &res, "month", "__dtf_month");
     put(i, &res, "day", "__dtf_day");
+    put(i, &res, "dayPeriod", "__dtf_dayperiod");
     put(i, &res, "hour", "__dtf_hour");
     put(i, &res, "minute", "__dtf_minute");
     put(i, &res, "second", "__dtf_second");
+    put(i, &res, "fractionalSecondDigits", "__dtf_fracsec");
     put(i, &res, "timeZoneName", "__dtf_tzname");
     put(i, &res, "dateStyle", "__dtf_datestyle");
     put(i, &res, "timeStyle", "__dtf_timestyle");
