@@ -100,6 +100,20 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
     if matches!(a, Value::Undefined) || matches!(b, Value::Undefined) {
         return Err(i.make_error("TypeError", "formatRange requires two dates"));
     }
+    // Two Temporal endpoints must share a calendar (RangeError otherwise).
+    let cal_of = |i: &Interp, v: &Value| -> Option<String> {
+        let ptr = Rc::as_ptr(v.as_obj()?) as usize;
+        if i.temporal.contains_key(&ptr) {
+            Some(i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string()))
+        } else {
+            None
+        }
+    };
+    if let (Some(ca), Some(cb)) = (cal_of(i, a), cal_of(i, b)) {
+        if ca != cb {
+            return Err(i.make_error("RangeError", "formatRange endpoints have different calendars"));
+        }
+    }
     let (s, ks) = dtf_ms_kind(i, o, a)?;
     let (e, ke) = dtf_ms_kind(i, o, b)?;
     if ks != ke {
@@ -394,7 +408,8 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
         }
     }
     let n = ab(i.to_number(date))?;
-    if !n.is_finite() {
+    // TimeClip: the representable range is ±8.64e15 ms; anything outside (or non-finite) is invalid.
+    if !n.is_finite() || n.abs() > 8.64e15 {
         return Err(i.make_error("RangeError", "Invalid time value"));
     }
     Ok((n, 0))
@@ -599,6 +614,11 @@ fn canonicalize_time_zone(tz: &str) -> Option<String> {
         || tz.eq_ignore_ascii_case("GMT") || tz.eq_ignore_ascii_case("Etc/GMT")
     {
         return Some("UTC".to_string());
+    }
+    // A named IANA zone is ASCII letters/digits with `/`, `_`, `+`, `-`, `.` separators (this also
+    // rejects offset-like strings written with a Unicode minus sign).
+    if tz.is_empty() || !tz.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'+' | b'-' | b'.')) {
+        return None;
     }
     Some(tz.to_string())
 }
