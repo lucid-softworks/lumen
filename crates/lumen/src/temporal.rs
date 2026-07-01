@@ -2335,7 +2335,10 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
             set_data(&opts, k, Value::str(v));
         }
     }
-    set_data(&opts, "timeZone", Value::from_string(tz.to_string()));
+    // Intl.DateTimeFormat canonicalizes the zone (Asia/Calcutta -> Asia/Kolkata); do it here so the
+    // formatted zone name reflects the canonical identifier.
+    let tz_canon = crate::tz::canonicalize(&tz).map(|s| s.to_string()).unwrap_or_else(|| tz.to_string());
+    set_data(&opts, "timeZone", Value::from_string(tz_canon));
 
     let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
     let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
