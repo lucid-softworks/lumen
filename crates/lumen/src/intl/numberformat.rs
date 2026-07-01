@@ -20,8 +20,68 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         format_to_parts(i, &this, &arg(a, 0))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
+    it.def_method(&proto, "formatRange", 2, |i, this, a| {
+        format_range(i, &this, &arg(a, 0), &arg(a, 1))
+    });
+    it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
+        format_range_to_parts(i, &this, &arg(a, 0), &arg(a, 1))
+    });
     // A `format` accessor that returns a bound function is what the spec mandates; provide it.
     install_format_getter(it, &proto);
+}
+
+/// The two range endpoints as intl mathematical values, rejecting NaN/undefined per
+/// FormatNumericRange step 1 (`start`/`end` must not be undefined; NaN throws RangeError).
+fn range_endpoints(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<(Gc, f64, f64), Value> {
+    let o = instance(i, this)?;
+    if matches!(x, Value::Undefined) || matches!(y, Value::Undefined) {
+        return Err(i.make_error("TypeError", "formatRange requires two arguments"));
+    }
+    let a = to_intl_number(i, x)?;
+    let b = to_intl_number(i, y)?;
+    if a.is_nan() || b.is_nan() {
+        return Err(i.make_error("RangeError", "formatRange arguments must not be NaN"));
+    }
+    Ok((o, a, b))
+}
+
+fn format_range(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Value, Value> {
+    let (o, a, b) = range_endpoints(i, this, x, y)?;
+    let sa = assemble_number(i, &o, a);
+    if a == b {
+        return Ok(Value::from_string(sa));
+    }
+    let sb = assemble_number(i, &o, b);
+    // The `en` range pattern joins with an en-dash (U+2013), no surrounding spaces.
+    Ok(Value::from_string(format!("{sa}\u{2013}{sb}")))
+}
+
+fn format_range_to_parts(i: &mut Interp, this: &Value, x: &Value, y: &Value) -> Result<Value, Value> {
+    let (o, a, b) = range_endpoints(i, this, x, y)?;
+    let mut out: Vec<Value> = Vec::new();
+    let mut push_parts = |i: &mut Interp, whole: &str, source: &str, out: &mut Vec<Value>| {
+        for (t, v) in decompose_parts(whole) {
+            let ob = i.new_object();
+            set_data(&ob, "type", Value::str(t));
+            set_data(&ob, "value", Value::from_string(v));
+            set_data(&ob, "source", Value::str(source));
+            out.push(Value::Obj(ob));
+        }
+    };
+    let sa = assemble_number(i, &o, a);
+    if a == b {
+        push_parts(i, &sa, "shared", &mut out);
+        return Ok(i.make_array(out));
+    }
+    let sb = assemble_number(i, &o, b);
+    push_parts(i, &sa, "startRange", &mut out);
+    let lit = i.new_object();
+    set_data(&lit, "type", Value::str("literal"));
+    set_data(&lit, "value", Value::str("\u{2013}"));
+    set_data(&lit, "source", Value::str("shared"));
+    out.push(Value::Obj(lit));
+    push_parts(i, &sb, "endRange", &mut out);
+    Ok(i.make_array(out))
 }
 
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
@@ -520,9 +580,6 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     }
     // Negative zero counts as negative for sign display (so -0 formats as "-0").
     let negative = value.is_sign_negative() && !value.is_nan();
-    if value.is_nan() {
-        return "NaN".to_string();
-    }
     // scientific / engineering notation: mantissa in [1,10) or [1,1000), plus an exponent.
     let notation = get_str(o, "__nf_notation");
     let mut exponent: Option<i32> = None;
@@ -557,7 +614,9 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         compact_suffix = if long { longw.to_string() } else { short.to_string() };
         compact = true;
     }
-    let (int_part, frac_part) = if value.is_infinite() {
+    let (int_part, frac_part) = if value.is_nan() {
+        ("NaN".to_string(), None)
+    } else if value.is_infinite() {
         ("\u{221e}".to_string(), None)
     } else {
         // Compact notation rounds with the default "morePrecision" of 2 significant / 0 fraction
@@ -590,7 +649,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     let region = lparts.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
     let (dec_sep, grp_sep, sizes) = crate::intl::data::number_symbols(lang, region);
     // Grouping is suppressed in scientific/engineering notation.
-    let grouped = if exponent.is_some() || value.is_infinite() {
+    let grouped = if exponent.is_some() || !value.is_finite() {
         int_part.clone()
     } else {
         group_integer(&int_part, &grouping, grp_sep, sizes)
@@ -607,10 +666,10 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         num.push_str(&compact_suffix);
     }
 
-    // Sign display.
+    // Sign display. NaN carries no sign regardless of signDisplay.
     let sign_display = get_str(o, "__nf_signdisplay");
     let is_zero = value == 0.0;
-    let sign = match sign_display.as_str() {
+    let sign = if value.is_nan() { "" } else { match sign_display.as_str() {
         "never" => "",
         "always" => {
             if negative {
@@ -642,7 +701,7 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
                 ""
             }
         }
-    };
+    } };
 
     // Style wrapping.
     match style.as_str() {
