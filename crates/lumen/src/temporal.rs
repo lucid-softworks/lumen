@@ -1279,22 +1279,20 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = date_largest_unit(i, &arg(a, 1))?;
+        let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
         Ok(make(
             i,
             "Temporal.Duration",
-            Temporal::Duration(diff_date(d, o, &largest)),
+            Temporal::Duration(diff_date_rounded(d, o, &largest, &smallest, incr, &mode)),
         ))
     });
     it.def_method(&proto, "since", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let largest = date_largest_unit(i, &arg(a, 1))?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(neg_duration(diff_date(d, o, &largest))),
-        ))
+        // `since` mirrors `until` with a negated rounding mode, then negates the result.
+        let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
+        let dur = diff_date_rounded(d, o, &largest, &smallest, incr, negate_mode(&mode));
+        Ok(make(i, "Temporal.Duration", Temporal::Duration(neg_duration(dur))))
     });
     it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -1868,6 +1866,98 @@ fn diff_date(a: IsoDate, b: IsoDate, largest: &str) -> IsoDuration {
     }
     out
 }
+
+/// Whether to round the magnitude up given the discarded `fraction` in [0,1), the `mode`, the sign
+/// of the signed result (`positive`), and the parity of the retained value (for `halfEven`).
+fn round_up_magnitude(mode: &str, fraction: f64, positive: bool, low_even: bool) -> bool {
+    match mode {
+        "trunc" => false,
+        "expand" => fraction > 0.0,
+        "ceil" => positive && fraction > 0.0,
+        "floor" => !positive && fraction > 0.0,
+        "halfExpand" => fraction >= 0.5,
+        "halfTrunc" => fraction > 0.5,
+        "halfCeil" => {
+            if positive { fraction >= 0.5 } else { fraction > 0.5 }
+        }
+        "halfFloor" => {
+            if positive { fraction > 0.5 } else { fraction >= 0.5 }
+        }
+        "halfEven" => fraction > 0.5 || (fraction == 0.5 && !low_even),
+        _ => false,
+    }
+}
+
+/// A PlainDate difference (`a` → `b`) balanced to `largest`, then rounded to `smallest` with
+/// `increment`/`mode`. `mode` is oriented for the caller (`since` passes a negated mode). The
+/// fractional part of the smallest unit is measured by interpolating the target date between the
+/// two candidate boundary dates (calendar-accurate for the ISO calendar).
+fn diff_date_rounded(a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
+    let base = diff_date(a, b, largest);
+    let smallest = smallest.strip_suffix('s').unwrap_or(smallest);
+    if smallest == "day" && increment <= 1 {
+        return base; // day differences are already whole
+    }
+    let sign = cmp_date(a, b);
+    if sign == 0 {
+        return base;
+    }
+    let positive = sign < 0; // a → b is positive when a precedes b
+    let (lo, hi) = if positive { (a, b) } else { (b, a) };
+    let mag = if positive { base } else { neg_duration(base) }; // unsigned lo → hi
+
+    // The candidate durations: truncated at `smallest`, and one increment above.
+    let (low, field, base_units) = match smallest {
+        "year" => (IsoDuration { years: mag.years, ..Default::default() }, 0u8, mag.years),
+        "month" => (
+            IsoDuration { years: mag.years, months: mag.months, ..Default::default() },
+            1,
+            mag.months,
+        ),
+        "week" => (
+            IsoDuration { years: mag.years, months: mag.months, weeks: mag.weeks, ..Default::default() },
+            2,
+            mag.weeks,
+        ),
+        _ => {
+            let d = mag.days - mag.days.rem_euclid(increment);
+            (
+                IsoDuration { years: mag.years, months: mag.months, weeks: mag.weeks, days: d, ..Default::default() },
+                3,
+                d / increment,
+            )
+        }
+    };
+    let mut high = low;
+    match field {
+        0 => high.years += increment,
+        1 => high.months += increment,
+        2 => high.weeks += increment,
+        _ => high.days += increment,
+    }
+    let dl = epoch_days(add_date_dur(lo, low));
+    let dh = epoch_days(add_date_dur(lo, high));
+    let dt = epoch_days(hi);
+    let denom = (dh - dl) as f64;
+    let fraction = if denom == 0.0 { 0.0 } else { (dt - dl) as f64 / denom };
+    let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
+    let chosen = if up { high } else { low };
+    // Re-balance the rounded date back to `largest`.
+    let result = diff_date(lo, add_date_dur(lo, chosen), largest);
+    if positive { result } else { neg_duration(result) }
+}
+
+/// Read `until`/`since` options for a PlainDate difference: (largest, smallest, increment, mode).
+fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+    let largest = date_largest_unit(i, opts)?;
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    check_increment(i, &smallest, incr)?;
+    Ok((largest, smallest, incr, mode))
+}
+
 /// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
 /// date part and balancing the remaining time-of-day, with a borrow when the end time is earlier.
 fn diff_datetime(d1: IsoDate, t1: IsoTime, d2: IsoDate, t2: IsoTime, largest: &str) -> IsoDuration {
