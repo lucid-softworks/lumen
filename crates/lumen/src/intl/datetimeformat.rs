@@ -456,9 +456,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             _ => {}
         }
     }
-    // hourCycle / hour12 are resolved only when an hour is shown (explicit hour, or a timeStyle).
+    // The hour cycle is always resolved (a Temporal PlainTime/Instant/PlainDateTime toLocaleString
+    // shows a defaulted hour that must honor hour12/hourCycle), but only *reported* in
+    // resolvedOptions when the formatter's own pattern shows an hour (explicit hour or a timeStyle).
     let shows_hour = hour.is_some() || time_style.is_some();
-    if shows_hour {
+    {
         // hour12 overrides hourCycle: true → the locale's 12-hour cycle (h11 for ja, else h12);
         // false → h23. Absent both, fall back to the requested hourCycle or h23.
         let lang = locale_lang.as_str();
@@ -479,6 +481,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         let h12 = matches!(hc.as_str(), "h11" | "h12");
         set_builtin(&obj, "__dtf_hourcycle", Value::from_string(hc));
         set_builtin(&obj, "__dtf_hour12", Value::Bool(h12));
+        set_builtin(&obj, "__dtf_hourshown", Value::Bool(shows_hour));
     }
     // Default components when nothing was requested: year/month/day numeric. Flagged so a Temporal
     // receiver's compatibility check ignores them (only *explicit* options can conflict).
@@ -553,6 +556,7 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
                 T::DateTime(..) => 3,
                 T::YearMonth(_) => 4,
                 T::MonthDay(_) => 5,
+                T::Instant(_) => 6, // absolute (tz-shifted like kind 0) but defaults to date+time
                 _ => 0,
             };
             // YearMonth/MonthDay require an EXACT calendar match (no ISO exception, since a bare
@@ -626,9 +630,9 @@ fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
 /// `kind` gates which components a Temporal receiver may show (see [`dtf_ms_kind`]).
 fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
-    // An absolute instant (number/Date/Instant, kind 0) is shifted into the formatter's time zone;
-    // Temporal wall-clock values (kinds 1-5) already carry their own local time.
-    let ms = if kind == 0 {
+    // An absolute instant (number/Date kind 0, Temporal.Instant kind 6) is shifted into the
+    // formatter's time zone; Temporal wall-clock values (kinds 1-5) already carry their local time.
+    let ms = if kind == 0 || kind == 6 {
         match o.borrow().props.get("__dtf_tz").map(|p| p.value.clone()) {
             Some(Value::Str(tz)) => {
                 let epoch_sec = (ms / 1000.0).floor() as i64;
@@ -783,7 +787,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // A PlainTime (kind 2), or a fully-defaulted formatter over a PlainDateTime (kind 3), shows the
     // natural h:m:s even without explicit time components (the PlainDateTime format defaults to all).
     let dtf_defaulted = o.borrow().props.contains("__dtf_defaults");
-    let time_defaulted = (kind == 2 || (kind == 3 && dtf_defaulted))
+    let time_defaulted = (kind == 2 || ((kind == 3 || kind == 6) && dtf_defaulted))
         && get("__dtf_hour").is_none()
         && get("__dtf_minute").is_none()
         && get("__dtf_second").is_none();
@@ -801,20 +805,38 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word; a plain
         // AM/PM marker only appears alongside a 12-hour clock. When the hour cycle wasn't resolved
         // (a default formatter over a PlainTime), use the locale default (en is 12-hour, others 24).
+        let cycle = match o.borrow().props.get("__dtf_hourcycle").map(|p| p.value.clone()) {
+            Some(Value::Str(s)) => Some(s.to_string()),
+            _ => None,
+        };
         let use12 = day_period.is_some()
-            || match o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()) {
-                Some(Value::Bool(b)) => b,
-                _ => cldr_loc == "en",
+            || match cycle.as_deref() {
+                Some("h11") | Some("h12") => true,
+                Some(_) => false,
+                None => match o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()) {
+                    Some(Value::Bool(b)) => b,
+                    _ => cldr_loc == "en",
+                },
             };
-        let (disp_h, ampm) = if use12 {
-            let ap = match &day_period {
+        // Map the 0..23 hour into the display range of the resolved cycle: h11 [0,11], h12 [1,12],
+        // h23 [0,23], h24 [1,24].
+        let disp_h = match cycle.as_deref() {
+            Some("h11") => h % 12,
+            Some("h12") => if h % 12 == 0 { 12 } else { h % 12 },
+            Some("h24") => if h == 0 { 24 } else { h },
+            Some("h23") => h,
+            Some(_) => h,
+            None if use12 => if h % 12 == 0 { 12 } else { h % 12 },
+            None => h,
+        };
+        let ampm = if use12 {
+            match &day_period {
                 Some(w) => Some(day_period_word(h, w)),
                 None if has_hour => Some(if h < 12 { "AM" } else { "PM" }),
                 None => None,
-            };
-            (if h % 12 == 0 { 12 } else { h % 12 }, ap)
+            }
         } else {
-            (h, None)
+            None
         };
         let has_clock = time_defaulted
             || get("__dtf_hour").is_some()
@@ -822,7 +844,10 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             || get("__dtf_second").is_some();
         let mut first = true;
         if time_defaulted || get("__dtf_hour").is_some() {
-            parts.push(("hour", if get("__dtf_hour").as_deref() == Some("2-digit") { format!("{disp_h:02}") } else { format!("{disp_h}") }));
+            // A 24-hour cycle (h23/h24) renders 2-digit even for a numeric hour (CLDR "HH"); a
+            // 12-hour cycle uses 1-digit unless "2-digit" was explicitly requested.
+            let pad = get("__dtf_hour").as_deref() == Some("2-digit") || !use12;
+            parts.push(("hour", if pad { format!("{disp_h:02}") } else { format!("{disp_h}") }));
             first = false;
         }
         if time_defaulted || get("__dtf_minute").is_some() {
@@ -980,8 +1005,12 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     put(i, &res, "calendar", "__dtf_ca");
     put(i, &res, "numberingSystem", "__dtf_nu");
     put(i, &res, "timeZone", "__dtf_tz");
-    put(i, &res, "hourCycle", "__dtf_hourcycle");
-    put(i, &res, "hour12", "__dtf_hour12");
+    // hourCycle/hour12 are resolved internally for every formatter but only surface in
+    // resolvedOptions when the resolved pattern actually shows an hour.
+    if matches!(o.borrow().props.get("__dtf_hourshown").map(|p| p.value.clone()), Some(Value::Bool(true))) {
+        put(i, &res, "hourCycle", "__dtf_hourcycle");
+        put(i, &res, "hour12", "__dtf_hour12");
+    }
     put(i, &res, "weekday", "__dtf_weekday");
     put(i, &res, "era", "__dtf_era");
     put(i, &res, "year", "__dtf_year");

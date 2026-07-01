@@ -63,6 +63,38 @@ fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Val
     Ok(Value::Obj(o))
 }
 
+/// ToDateTimeOptions(options, "any", "all") for toLocaleString: add both date and time numeric
+/// defaults unless the caller already requested a date/time component or a dateStyle/timeStyle.
+fn date_all_default(i: &mut Interp, options: &Value) -> Result<Value, Value> {
+    let user_obj = match options {
+        Value::Undefined => None,
+        Value::Obj(o) => Some(o.clone()),
+        _ => return Err(i.make_error("TypeError", "options must be an object")),
+    };
+    let mut need = true;
+    if user_obj.is_some() {
+        for k in [
+            "weekday", "year", "month", "day", "dayPeriod", "hour", "minute", "second",
+            "fractionalSecondDigits", "dateStyle", "timeStyle",
+        ] {
+            if !matches!(ab(i.get_member(options, k))?, Value::Undefined) {
+                need = false;
+                break;
+            }
+        }
+    }
+    let o = i.new_object();
+    if let Some(uo) = &user_obj {
+        o.borrow_mut().proto = Some(uo.clone());
+    }
+    if need {
+        for k in ["year", "month", "day", "hour", "minute", "second"] {
+            set_data(&o, k, Value::str("numeric"));
+        }
+    }
+    Ok(Value::Obj(o))
+}
+
 /// Construct `Intl.<service>(locales, options)` and invoke `method(args…)` on it. Used to route the
 /// `toLocale*`/`localeCompare` methods through the Intl services now that they exist.
 fn intl_delegate(
@@ -4538,17 +4570,9 @@ fn install_date(it: &mut Interp) {
         if !t.is_finite() {
             return Ok(Value::str("Invalid Date"));
         }
-        // ToDateTimeOptions(options, "any", "all"): with no options, default to date AND time.
-        let opts = match arg(args, 1) {
-            Value::Undefined => {
-                let o = i.new_object();
-                for k in ["year", "month", "day", "hour", "minute", "second"] {
-                    set_data(&o, k, Value::str("numeric"));
-                }
-                Value::Obj(o)
-            }
-            other => other,
-        };
+        // ToDateTimeOptions(options, "any", "all"): default to date AND time unless the caller
+        // already requested a date or time component (or a dateStyle/timeStyle).
+        let opts = date_all_default(i, &arg(args, 1))?;
         intl_delegate(i, "DateTimeFormat", arg(args, 0), opts, "format", &[Value::Num(t)])
     });
     it.def_method(&proto, "toLocaleDateString", 0, |i, this, args| {
