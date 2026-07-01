@@ -39,7 +39,10 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
         }
     }
-    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
+    // An unknown numbering system is ignored (falls back to latn).
+    let numbering = numbering
+        .filter(|n| n == "latn" || crate::numbering::NUMBERING.iter().any(|(id, _)| id == n))
+        .unwrap_or_else(|| "latn".to_string());
     let style = get_option(i, &options, "style", &["long", "short", "narrow"], Some("long"))?
         .unwrap();
     let numeric = get_option(i, &options, "numeric", &["always", "auto"], Some("always"))?.unwrap();
