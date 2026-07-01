@@ -61,7 +61,9 @@ pub fn plural_cardinal(lang: &str, i: u64, has_fraction: bool) -> &'static str {
 pub fn plural_categories(lang: &str) -> &'static [&'static str] {
     match lang {
         "ja" | "zh" | "ko" | "th" | "id" | "vi" => &["other"],
-        "fr" => &["one", "other"],
+        "ar" => &["zero", "one", "two", "few", "many", "other"],
+        "ru" | "uk" | "pl" => &["one", "few", "many", "other"],
+        "cs" | "sk" => &["one", "few", "many", "other"],
         _ => &["one", "other"],
     }
 }

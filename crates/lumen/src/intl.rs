@@ -213,10 +213,12 @@ pub(crate) fn get_boolean_option(
 /// throws; other primitives yield an empty object (their reads fall through to option defaults).
 pub(crate) fn coerce_options(i: &mut Interp, options: &Value) -> Result<Value, Value> {
     match options {
-        Value::Undefined => Ok(Value::Obj(i.new_object())),
+        // CoerceOptionsToObject(undefined) = OrdinaryObjectCreate(null): a null-prototype object, so
+        // option reads never observe Object.prototype pollution.
+        Value::Undefined => Ok(Value::Obj(Object::new(None))),
         Value::Obj(_) => Ok(options.clone()),
         Value::Null => Err(i.make_error("TypeError", "options cannot be null")),
-        _ => Ok(Value::Obj(i.new_object())),
+        _ => Ok(Value::Obj(Object::new(None))),
     }
 }
 
