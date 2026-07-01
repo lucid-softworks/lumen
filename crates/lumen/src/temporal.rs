@@ -3503,8 +3503,19 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             return Err(i.make_error("TypeError", "year is required"));
         };
         let ord = if let Some(code) = &month_code {
-            let o = hebrew_ord_from_code(hy, code)
-                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?;
+            let o = match hebrew_ord_from_code(hy, code) {
+                Some(o) => o,
+                // Adar I ("M05L") is the only code that legitimately doesn't occur (a common year):
+                // under constrain it collapses to Adar ("M06"), under reject it errors. Any other
+                // absent code is simply invalid.
+                None if code == "M05L" => {
+                    if ovf == Overflow::Reject {
+                        return Err(i.make_error("RangeError", "leap month does not exist in this year"));
+                    }
+                    hebrew_ord_from_code(hy, "M06").unwrap()
+                }
+                None => return Err(i.make_error("RangeError", "invalid monthCode for this calendar")),
+            };
             if let Some(m) = month {
                 if m != o {
                     return Err(i.make_error("RangeError", "month and monthCode disagree"));
