@@ -1345,10 +1345,11 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             Value::Obj(_) => (getm(i, &item, "timeZone")?, getm(i, &item, "plainTime")?),
             other => (other.clone(), Value::Undefined),
         };
-        let tz: Rc<str> = match &tzv {
+        let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
+        let tz = normalize_tz(i, &tz_raw)?;
         let time = match timev {
             Value::Undefined => IsoTime {
                 hour: 0,
@@ -2993,10 +2994,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let tzv = arg(a, 0);
-        let tz: Rc<str> = match &tzv {
+        let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
+        let tz = normalize_tz(i, &tz_raw)?;
         let local = dt_ns(d, tm);
         let offset = offset_for_local(&tz, local);
         Ok(make(
@@ -4070,10 +4072,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toZonedDateTimeISO", 1, |i, t, a| {
         let e = as_instant(i, &t)?;
         let tzv = arg(a, 0);
-        let tz: Rc<str> = match &tzv {
+        let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
+        let tz = normalize_tz(i, &tz_raw)?;
         let offset = zone_offset(&tz, e);
         Ok(make(
             i,
@@ -4299,23 +4302,12 @@ fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
     if let Some(off) = parse_fixed_offset(tz) {
         return off;
     }
-    match zone_rule(tz) {
-        Some(ZoneRule { std, dst: None }) => std,
-        Some(ZoneRule {
-            std,
-            dst: Some((dst, start, end, utc_rule)),
-        }) => {
-            let year = civil_from_days((epoch_ns.div_euclid(86_400 * SEC as i128)) as i64).0;
-            let s = transition_ns(year, start, std, utc_rule);
-            let e = transition_ns(year, end, dst, utc_rule);
-            if epoch_ns >= s && epoch_ns < e {
-                dst
-            } else {
-                std
-            }
-        }
-        None => 0,
+    // The generated IANA transition tables (seconds-resolution) cover named zones.
+    let epoch_sec = epoch_ns.div_euclid(1_000_000_000) as i64;
+    if let Some(off_s) = crate::tz::offset_at(tz, epoch_sec) {
+        return off_s as i64 * 1_000_000_000;
     }
+    0
 }
 /// The offset to use when interpreting a *local* wall-clock instant in `tz` (one refinement step).
 fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
@@ -4324,6 +4316,20 @@ fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
 }
 
 /// Parse a fixed-offset id (`UTC`/`Z`/`±HH:MM[:SS]`) to ns, or None for a named zone.
+/// Validate and canonicalize a time-zone identifier: a UTC-offset form (`±HH:MM[:SS]`) normalizes to
+/// its canonical string, a named IANA zone canonicalizes to its registry name, and anything else is
+/// a RangeError.
+fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
+    let t = s.trim();
+    if t.starts_with('+') || t.starts_with('-') {
+        return Ok(Rc::from(offset_string(tz_offset_ns(t)).as_str()));
+    }
+    if let Some(canon) = crate::tz::canonicalize(t) {
+        return Ok(Rc::from(canon));
+    }
+    Err(i.make_error("RangeError", format!("unknown time zone: {t}")))
+}
+
 fn parse_fixed_offset(tz: &str) -> Option<i64> {
     let t = tz.trim();
     if t.eq_ignore_ascii_case("utc") || t == "Z" {
@@ -4421,7 +4427,7 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 .date
                 .ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
             let tz: Rc<str> = match p.tz {
-                Some(t) => Rc::from(t.as_str()),
+                Some(t) => normalize_tz(i, &t)?,
                 None => return Err(i.make_error("RangeError", "missing time zone")),
             };
             let time = p.time.unwrap_or(IsoTime {
@@ -4446,10 +4452,11 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             if matches!(tzv, Value::Undefined) {
                 return Err(i.make_error("TypeError", "missing timeZone"));
             }
-            let tz: Rc<str> = match &tzv {
+            let tz_raw: Rc<str> = match &tzv {
                 Value::Str(s) => s.clone(),
                 _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
             };
+            let tz = normalize_tz(i, &tz_raw)?;
             let zcal = input_cal(i, v)?;
             let draw = read_date_raw_cal(i, v, &zcal)?;
             let (traw, _) = read_time_raw(i, v)?;
@@ -4839,13 +4846,14 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             _ => return Err(i.make_error("TypeError", "epochNanoseconds must be a BigInt")),
         };
         let tzv = arg(a, 1);
-        let tz: Rc<str> = match &tzv {
+        let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
             Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
+        let tz = normalize_tz(i, &tz_raw)?;
         let cal = check_calendar(i, &arg(a, 2))?;
-        let offset_ns = tz_offset_ns(&tz);
+        let offset_ns = zone_offset(&tz, epoch_ns);
         let v = make(
             i,
             "Temporal.ZonedDateTime",

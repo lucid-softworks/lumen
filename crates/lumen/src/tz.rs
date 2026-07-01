@@ -1,0 +1,31 @@
+//! IANA time-zone lookups over the generated [`crate::tzdata`] offset tables.
+
+use crate::tzdata::{Zone, LINKS, ZONES};
+
+/// The canonical registry name for a case-insensitive IANA zone id (`None` if unknown).
+pub fn canonicalize(name: &str) -> Option<&'static str> {
+    if let Some(z) = ZONES.iter().find(|z| z.name.eq_ignore_ascii_case(name)) {
+        return Some(z.name);
+    }
+    LINKS
+        .iter()
+        .find(|(a, _)| a.eq_ignore_ascii_case(name))
+        .map(|(_, canon)| *canon)
+}
+
+/// Whether `name` is a known IANA zone id (case-insensitive).
+pub fn is_valid(name: &str) -> bool {
+    canonicalize(name).is_some()
+}
+
+fn zone(name: &str) -> Option<&'static Zone> {
+    let canon = canonicalize(name)?;
+    ZONES.iter().find(|z| z.name == canon)
+}
+
+/// The UTC offset (seconds) in effect at `epoch_sec` for a named zone.
+pub fn offset_at(name: &str, epoch_sec: i64) -> Option<i32> {
+    let z = zone(name)?;
+    let idx = z.transitions.partition_point(|&(t, _)| t <= epoch_sec);
+    Some(if idx == 0 { z.initial } else { z.transitions[idx - 1].1 })
+}

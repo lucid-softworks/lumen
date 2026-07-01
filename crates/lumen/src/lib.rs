@@ -34,6 +34,9 @@ mod parser;
 mod regex;
 mod temporal;
 mod token;
+mod tz;
+#[rustfmt::skip]
+mod tzdata;
 mod unicode_props;
 mod value;
 
