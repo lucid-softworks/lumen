@@ -200,12 +200,40 @@ pub fn brand_slot(i: &mut Interp, this: &Value, marker: &str) -> Result<Gc, Valu
 pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Result<Option<Gc>, Value> {
     if let Value::Obj(nt) = &i.new_target {
         let nt = nt.clone();
-        match i.get_member(&Value::Obj(nt), "prototype") {
+        match i.get_member(&Value::Obj(nt.clone()), "prototype") {
             Ok(Value::Obj(p)) => return Ok(Some(p)),
-            Ok(_) => {}
+            // GetPrototypeFromConstructor: when newTarget.prototype is not an object, use the
+            // *newTarget's realm* intrinsic (found by matching its prototype chain's Function.prototype
+            // against each realm), not necessarily the current realm's.
+            Ok(_) => {
+                if let Some(protos) = realm_protos_of(i, &nt) {
+                    return Ok(protos.get(intrinsic).cloned());
+                }
+            }
             Err(a) => return Err(ab::<()>(Err(a)).unwrap_err()),
         }
     }
     Ok(i.extra_protos.get(intrinsic).cloned())
+}
+
+/// The `extra_protos` map of the realm that owns `func`, located by walking `func`'s prototype chain
+/// and matching a realm's `Function.prototype`. Returns None (→ current realm) if no match.
+fn realm_protos_of<'a>(
+    i: &'a Interp,
+    func: &Gc,
+) -> Option<&'a std::collections::HashMap<&'static str, Gc>> {
+    let mut cur = func.borrow().proto.clone();
+    while let Some(p) = cur {
+        if std::rc::Rc::ptr_eq(&p, &i.function_proto) {
+            return Some(&i.extra_protos);
+        }
+        for rs in i.realms.values() {
+            if std::rc::Rc::ptr_eq(&p, &rs.function_proto) {
+                return Some(&rs.extra_protos);
+            }
+        }
+        cur = p.borrow().proto.clone();
+    }
+    None
 }
 

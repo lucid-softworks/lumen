@@ -375,7 +375,7 @@ fn firstday_opt(i: &mut Interp, options: &Value) -> Result<Option<String>, Value
 
 fn build_locale_object(i: &mut Interp, tag: &str) -> Result<Value, Value> {
     let obj = i.new_object();
-    if let Some(proto) = i.extra_protos.get("Intl.Locale").cloned() {
+    if let Some(proto) = super::service::instance_proto(i, "Intl.Locale")? {
         obj.borrow_mut().proto = Some(proto);
     }
     let p = tags::parse(tag).unwrap();
