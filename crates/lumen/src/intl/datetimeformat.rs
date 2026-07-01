@@ -46,7 +46,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     install_supported_locales(it, &ctor);
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
-        let ms = dtf_ms(i, &arg(a, 0))?;
+        let ms = dtf_ms(i, &o, &arg(a, 0))?;
         let parts = build_parts(&o, ms);
         let arr: Vec<Value> = parts
             .into_iter()
@@ -283,11 +283,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         set_builtin(&obj, "__dtf_hourcycle", Value::from_string(hc));
         set_builtin(&obj, "__dtf_hour12", Value::Bool(h12));
     }
-    // Default components when nothing was requested: year/month/day numeric.
+    // Default components when nothing was requested: year/month/day numeric. Flagged so a Temporal
+    // receiver's compatibility check ignores them (only *explicit* options can conflict).
     if !has_explicit && date_style.is_none() && time_style.is_none() {
         set_builtin(&obj, "__dtf_year", Value::str("numeric"));
         set_builtin(&obj, "__dtf_month", Value::str("numeric"));
         set_builtin(&obj, "__dtf_day", Value::str("numeric"));
+        set_builtin(&obj, "__dtf_defaults", Value::Bool(true));
     }
     Ok(Value::Obj(obj))
 }
@@ -327,13 +329,15 @@ const MON_LONG: [&str; 12] = [
 const MON_SHORT: [&str; 12] =
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/// Resolve the format argument to epoch-milliseconds (a Temporal receiver uses its ISO fields).
-fn dtf_ms(i: &mut Interp, date: &Value) -> Result<f64, Value> {
+/// Resolve the format argument to epoch-milliseconds. A Temporal receiver uses its ISO fields and
+/// must be compatible with the formatter's requested components (else TypeError/RangeError).
+fn dtf_ms(i: &mut Interp, o: &Gc, date: &Value) -> Result<f64, Value> {
     if matches!(date, Value::Undefined) {
         // "now" is non-deterministic; epoch 0 keeps explicit-date tests deterministic.
         return Ok(0.0);
     }
     if let Some(t) = date.as_obj().and_then(|d| i.temporal.get(&(Rc::as_ptr(d) as usize)).cloned()) {
+        temporal_compat_check(i, o, &t)?;
         return Ok(temporal_to_ms(&t));
     }
     let n = ab(i.to_number(date))?;
@@ -343,9 +347,51 @@ fn dtf_ms(i: &mut Interp, date: &Value) -> Result<f64, Value> {
     Ok(n)
 }
 
+/// A Temporal receiver's kind must not request incompatible fields from the formatter.
+fn temporal_compat_check(i: &mut Interp, o: &Gc, t: &crate::temporal::Temporal) -> Result<(), Value> {
+    use crate::temporal::Temporal as T;
+    let has = |k: &str| o.borrow().props.contains(k);
+    // Defaulted (not explicitly requested) components never conflict.
+    let defaulted = has("__dtf_defaults");
+    let has_time = has("__dtf_hour") || has("__dtf_minute") || has("__dtf_second")
+        || has("__dtf_dayperiod") || has("__dtf_fracsec") || has("__dtf_timestyle");
+    let has_date_any = !defaulted
+        && (has("__dtf_weekday") || has("__dtf_era") || has("__dtf_year")
+            || has("__dtf_month") || has("__dtf_day") || has("__dtf_datestyle"));
+    let has_year = !defaulted && has("__dtf_year");
+    let has_day = !defaulted && has("__dtf_day");
+    let has_weekday = !defaulted && has("__dtf_weekday");
+    let err = |i: &mut Interp, msg: &str| Err(i.make_error("TypeError", msg.to_string()));
+    match t {
+        T::Date(_) => {
+            if has_time {
+                return err(i, "PlainDate cannot be formatted with time components");
+            }
+        }
+        T::Time(_) => {
+            if has_date_any {
+                return err(i, "PlainTime cannot be formatted with date components");
+            }
+        }
+        T::YearMonth(_) => {
+            if has_time || has_day || has_weekday {
+                return err(i, "PlainYearMonth accepts only year/month");
+            }
+        }
+        T::MonthDay(_) => {
+            if has_time || has_year || has_weekday {
+                return err(i, "PlainMonthDay accepts only month/day");
+            }
+        }
+        // DateTime / Instant / Zoned accept any components.
+        _ => {}
+    }
+    Ok(())
+}
+
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
     let o = brand_slot(i, this, "__dtf")?;
-    let ms = dtf_ms(i, date)?;
+    let ms = dtf_ms(i, &o, date)?;
     let parts = build_parts(&o, ms);
     Ok(parts.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(""))
 }
