@@ -5810,6 +5810,23 @@ fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
     if let Some(canon) = crate::tz::canonicalize(t) {
         return Ok(Rc::from(canon));
     }
+    // A full ISO date/time string: its `[tz]` annotation names the zone; otherwise a `Z`/offset does.
+    if let Some(p) = parse_iso(t) {
+        if let Some(tzname) = p.tz {
+            if let Some(canon) = crate::tz::canonicalize(&tzname) {
+                return Ok(Rc::from(canon));
+            }
+            if is_pure_offset(&tzname) {
+                return Ok(Rc::from(offset_string(tz_offset_ns(&tzname)).as_str()));
+            }
+        } else {
+            match p.offset {
+                Off::Z => return Ok(Rc::from("UTC")),
+                Off::Num(n) => return Ok(Rc::from(offset_string(n).as_str())),
+                Off::None => {}
+            }
+        }
+    }
     Err(i.make_error("RangeError", format!("unknown time zone: {t}")))
 }
 
