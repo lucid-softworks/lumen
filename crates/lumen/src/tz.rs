@@ -13,11 +13,6 @@ pub fn canonicalize(name: &str) -> Option<&'static str> {
         .map(|(_, canon)| *canon)
 }
 
-/// Whether `name` is a known IANA zone id (case-insensitive).
-pub fn is_valid(name: &str) -> bool {
-    canonicalize(name).is_some()
-}
-
 fn zone(name: &str) -> Option<&'static Zone> {
     let canon = canonicalize(name)?;
     ZONES.iter().find(|z| z.name == canon)

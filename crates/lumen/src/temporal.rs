@@ -1554,52 +1554,6 @@ fn date_unit_rank(u: &str) -> Option<i32> {
 /// Read & validate the largestUnit for a date-only `until`/`since`: a date unit (year/month/week/day)
 /// or "auto" (⇒ the larger of day and smallestUnit). RangeError if a unit isn't a date unit or
 /// largestUnit is narrower than smallestUnit.
-fn date_largest_unit(i: &mut Interp, opts: &Value) -> Result<String, Value> {
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
-    let srank = date_unit_rank(&smallest)
-        .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a date unit"))?;
-    let largest_raw = opt_str(i, opts, "largestUnit", "auto")?;
-    let largest = sing(&largest_raw).to_string();
-    let lrank = if largest == "auto" {
-        srank.max(6)
-    } else {
-        date_unit_rank(&largest)
-            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
-    };
-    if lrank < srank {
-        return Err(i.make_error(
-            "RangeError",
-            "largestUnit cannot be smaller than smallestUnit",
-        ));
-    }
-    Ok(rank_unit(lrank).to_string())
-}
-/// Read & validate largestUnit/smallestUnit over the full unit group (year…nanosecond) for a
-/// `until`/`since`; "auto" largestUnit resolves to the larger of `auto_rank` and smallestUnit.
-fn any_largest_unit(
-    i: &mut Interp,
-    opts: &Value,
-    smallest_default: &str,
-    auto_rank: i32,
-) -> Result<String, Value> {
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", smallest_default)?).to_string();
-    let srank =
-        unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
-    let largest_raw = opt_str(i, opts, "largestUnit", "auto")?;
-    let largest = sing(&largest_raw).to_string();
-    let lrank = if largest == "auto" {
-        srank.max(auto_rank)
-    } else {
-        unit_rank(&largest).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
-    };
-    if lrank < srank {
-        return Err(i.make_error(
-            "RangeError",
-            "largestUnit cannot be smaller than smallestUnit",
-        ));
-    }
-    Ok(rank_unit(lrank).to_string())
-}
 /// The unit name for a rank (inverse of [`unit_rank`]).
 fn rank_unit(r: i32) -> &'static str {
     match r {
@@ -2083,14 +2037,22 @@ fn diff_datetime_rounded(
 
 /// Read `until`/`since` options for a PlainDateTime difference: (largest, smallest, increment, mode).
 fn read_datetime_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
-    let largest = any_largest_unit(i, opts, "nanosecond", 6)?;
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
-    unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
+    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
     check_mode(i, &mode)?;
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
+    let srank = unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
+    let lrank = if largest_raw == "auto" {
+        srank.max(6)
+    } else {
+        unit_rank(&largest_raw).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
+    };
+    if lrank < srank {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
     check_increment(i, &smallest, incr)?;
-    Ok((largest, smallest, incr, mode))
+    Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
 }
 
 /// A PlainYearMonth's reference ISO date (the first of its month).
@@ -2126,14 +2088,27 @@ fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String)
 }
 
 /// Read `until`/`since` options for a PlainDate difference: (largest, smallest, increment, mode).
+/// GetDifferenceSettings reads the options in the order largestUnit, roundingIncrement,
+/// roundingMode, smallestUnit, then validates the unit relationship.
 fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
-    let largest = date_largest_unit(i, opts)?;
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
+    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
     check_mode(i, &mode)?;
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
+    let srank = date_unit_rank(&smallest)
+        .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a date unit"))?;
+    let lrank = if largest_raw == "auto" {
+        srank.max(6)
+    } else {
+        date_unit_rank(&largest_raw)
+            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
+    };
+    if lrank < srank {
+        return Err(i.make_error("RangeError", "largestUnit cannot be smaller than smallestUnit"));
+    }
     check_increment(i, &smallest, incr)?;
-    Ok((largest, smallest, incr, mode))
+    Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
 }
 
 /// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
@@ -2288,29 +2263,103 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
 /// Read raw (year, month, day) from a property bag, resolving `era`/`eraYear` to an ISO year for
 /// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`).
 fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, i64), Value> {
-    let year_field = getm(i, v, "year")?;
-    let era = getm(i, v, "era")?;
-    let era_year = getm(i, v, "eraYear")?;
-    let has_era = !matches!(era, Value::Undefined) || !matches!(era_year, Value::Undefined);
-    let year = if !matches!(year_field, Value::Undefined) {
-        to_int(i, &year_field)?
-    } else if has_era && matches!(cal, "gregory" | "japanese") {
-        // Both era and eraYear are required together.
-        if matches!(era, Value::Undefined) || matches!(era_year, Value::Undefined) {
-            return Err(i.make_error("TypeError", "era and eraYear must be provided together"));
+    // PrepareTemporalFields reads (and coerces) fields in alphabetical order, calling each field's
+    // valueOf/toString as it is read: day, [era, eraYear], month, monthCode, year. Required-field
+    // errors are only raised after every field has been read.
+    let uses_era = matches!(cal, "gregory" | "japanese");
+    let day_f = getm(i, v, "day")?;
+    let day = match day_f {
+        Value::Undefined => None,
+        _ => Some(to_int(i, &day_f)?),
+    };
+    let (era, era_year) = if uses_era {
+        let e = getm(i, v, "era")?;
+        let e = match e {
+            Value::Undefined => None,
+            _ => Some(i.to_string(&e).map_err(unab)?.to_lowercase()),
+        };
+        let ey = getm(i, v, "eraYear")?;
+        let ey = match ey {
+            Value::Undefined => None,
+            _ => Some(to_int(i, &ey)?),
+        };
+        (e, ey)
+    } else {
+        (None, None)
+    };
+    let month_f = getm(i, v, "month")?;
+    let month = match month_f {
+        Value::Undefined => None,
+        _ => {
+            let n = to_int(i, &month_f)?;
+            if n < 1 {
+                return Err(i.make_error("RangeError", "month must be positive"));
+            }
+            Some(n)
         }
-        let era_s = i.to_string(&era).map_err(unab)?.to_lowercase();
-        let ey = to_int(i, &era_year)?;
-        match era_s.as_str() {
-            "ce" | "gregory" | "ad" | "reiwa" | "heisei" | "showa" | "taisho" | "meiji" => ey,
-            "bce" | "gregory-inverse" | "bc" => 1 - ey,
-            _ => return Err(i.make_error("RangeError", format!("invalid era: {era_s}"))),
+    };
+    let mc_f = getm(i, v, "monthCode")?;
+    let month_code = match mc_f {
+        Value::Undefined => None,
+        _ => Some(i.to_string(&mc_f).map_err(unab)?.to_string()),
+    };
+    let year_f = getm(i, v, "year")?;
+    let year_opt = match year_f {
+        Value::Undefined => None,
+        _ => Some(to_int(i, &year_f)?),
+    };
+
+    // Reconcile month / monthCode ("M" + 2 digits + optional leap "L"; no leap month in ISO/Gregory).
+    let mc_num = match &month_code {
+        None => None,
+        Some(s) => {
+            let body = s
+                .strip_prefix('M')
+                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode"))?;
+            let (digits, leap) = match body.strip_suffix('L') {
+                Some(d) => (d, true),
+                None => (body, false),
+            };
+            if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(i.make_error("RangeError", "invalid monthCode"));
+            }
+            let n: i64 = digits.parse().unwrap();
+            if n < 1 || leap {
+                return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
+            }
+            Some(n)
+        }
+    };
+    let month = match (month, mc_num) {
+        (Some(a), Some(b)) => {
+            if a != b {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"));
+            }
+            a
+        }
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+    };
+
+    // Reconcile year / era+eraYear.
+    let year = if let Some(y) = year_opt {
+        y
+    } else if uses_era {
+        match (era, era_year) {
+            (Some(e), Some(ey)) => match e.as_str() {
+                "ce" | "gregory" | "ad" | "reiwa" | "heisei" | "showa" | "taisho" | "meiji" => ey,
+                "bce" | "gregory-inverse" | "bc" => 1 - ey,
+                _ => return Err(i.make_error("RangeError", format!("invalid era: {e}"))),
+            },
+            (None, None) => return Err(i.make_error("TypeError", "year is required")),
+            _ => return Err(i.make_error("TypeError", "era and eraYear must be provided together")),
         }
     } else {
-        field_req(i, v, "year")?
+        return Err(i.make_error("TypeError", "year is required"));
     };
-    let month = field_month(i, v)?;
-    let day = field_req(i, v, "day")?;
+
+    let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
     Ok((year, month, day))
 }
 /// Regulate raw year/month/day into a valid ISO date per `overflow`.
@@ -4295,87 +4344,6 @@ fn parse_instant(s: &str) -> Option<i128> {
 /// A named-zone rule: standard offset, optional DST offset + transition rules. Transition rules are
 /// `(month, week, weekday, hour)` where week 5 = "last"; weekday 0 = Sunday. `utc_rule` means the
 /// transition hour is in UTC (EU style) rather than local wall time (US style).
-struct ZoneRule {
-    std: i64,
-    dst: Option<(i64, (u8, u8, u8, u8), (u8, u8, u8, u8), bool)>,
-}
-const SEC: i64 = 1_000_000_000;
-const US_START: (u8, u8, u8, u8) = (3, 2, 0, 2); // 2nd Sunday March, 02:00 local
-const US_END: (u8, u8, u8, u8) = (11, 1, 0, 2); // 1st Sunday Nov, 02:00 local
-const EU_START: (u8, u8, u8, u8) = (3, 5, 0, 1); // last Sunday March, 01:00 UTC
-const EU_END: (u8, u8, u8, u8) = (10, 5, 0, 1); // last Sunday Oct, 01:00 UTC
-
-fn zone_rule(tz: &str) -> Option<ZoneRule> {
-    let h = |n: i64| n * 3600 * SEC;
-    let hm = |hh: i64, mm: i64| (hh * 3600 + mm * 60) * SEC;
-    let fixed = |o: i64| Some(ZoneRule { std: o, dst: None });
-    let us = |std: i64, dst: i64| {
-        Some(ZoneRule {
-            std,
-            dst: Some((dst, US_START, US_END, false)),
-        })
-    };
-    let eu = |std: i64, dst: i64| {
-        Some(ZoneRule {
-            std,
-            dst: Some((dst, EU_START, EU_END, true)),
-        })
-    };
-    match tz {
-        "UTC" | "Z" | "Etc/UTC" | "Etc/GMT" | "GMT" => fixed(0),
-        "Africa/Abidjan" | "Africa/Accra" | "Atlantic/Reykjavik" | "Africa/Monrovia" => fixed(0),
-        "Africa/Lagos" | "Africa/Algiers" | "Africa/Tunis" => fixed(h(1)),
-        "Africa/Cairo" | "Africa/Johannesburg" => fixed(h(2)),
-        "Asia/Kolkata" | "Asia/Calcutta" => fixed(hm(5, 30)),
-        "Asia/Katmandu" | "Asia/Kathmandu" => fixed(hm(5, 45)),
-        "Asia/Tokyo" | "Asia/Seoul" => fixed(h(9)),
-        "Asia/Shanghai" | "Asia/Hong_Kong" | "Asia/Singapore" | "Asia/Manila" => fixed(h(8)),
-        "Asia/Dubai" => fixed(h(4)),
-        "America/Sao_Paulo" | "America/Argentina/Buenos_Aires" => fixed(h(-3)),
-        "America/New_York" | "US/Eastern" => us(h(-5), h(-4)),
-        "America/Chicago" | "US/Central" => us(h(-6), h(-5)),
-        "America/Denver" | "US/Mountain" => us(h(-7), h(-6)),
-        "America/Los_Angeles" | "America/Vancouver" | "US/Pacific" => us(h(-8), h(-7)),
-        "America/Halifax" => us(h(-4), h(-3)),
-        "America/St_Johns" => us(hm(-3, -30), hm(-2, -30)),
-        "Europe/London" | "Europe/Lisbon" | "Europe/Dublin" => eu(0, h(1)),
-        "Europe/Vienna" | "Europe/Paris" | "Europe/Berlin" | "Europe/Amsterdam"
-        | "Europe/Madrid" | "Europe/Rome" | "Europe/Brussels" | "Europe/Zurich"
-        | "Europe/Stockholm" | "Europe/Prague" | "Europe/Warsaw" => eu(h(1), h(2)),
-        "Europe/Athens" | "Europe/Helsinki" | "Europe/Bucharest" | "Europe/Kiev" => eu(h(2), h(3)),
-        _ => None,
-    }
-}
-
-/// Day-of-month of the `week`-th `weekday` (0=Sun) of `month` (week 5 = last).
-fn nth_weekday(year: i64, month: u8, week: u8, dow: u8) -> u8 {
-    let dow_of = |day: u8| (days_from_civil(year, month as i64, day as i64).rem_euclid(7) + 4) % 7; // 0=Sun
-    if week >= 5 {
-        let dim = days_in_month(year, month);
-        let mut d = dim;
-        while dow_of(d) as u8 != dow {
-            d -= 1;
-        }
-        d
-    } else {
-        let first = dow_of(1) as u8;
-        let offset = (dow + 7 - first) % 7;
-        1 + offset + (week - 1) * 7
-    }
-}
-/// The UTC nanosecond instant of a DST transition in `year`, given `offset_before` (the offset in
-/// effect just before the transition) and whether the rule hour is UTC.
-fn transition_ns(year: i64, rule: (u8, u8, u8, u8), offset_before: i64, utc_rule: bool) -> i128 {
-    let (month, week, dow, hour) = rule;
-    let day = nth_weekday(year, month, week, dow);
-    let local = days_from_civil(year, month as i64, day as i64) as i128 * 86_400 * SEC as i128
-        + hour as i128 * 3600 * SEC as i128;
-    if utc_rule {
-        local
-    } else {
-        local - offset_before as i128
-    }
-}
 /// The UTC offset (ns) of zone `tz` at instant `epoch_ns`.
 fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
     if let Some(off) = parse_fixed_offset(tz) {
