@@ -3249,11 +3249,15 @@ fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest:
     let denom = (dh - dl) as f64;
     let fraction = if denom == 0.0 { 0.0 } else { (dt - dl) as f64 / denom };
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
-    let chosen = if up { high } else { low };
-    // Re-balance the rounded date back to `largest`. This uses the *greedy* difference (a clamped
-    // month counts as whole), NOT DifferenceDate's clamp-backoff — the rounded duration is exact and
-    // must be preserved (e.g. relativeTo + 11 months rounded to months stays 11, not 10mo+30d).
-    let result = diff_date_greedy(cal, lo, cadd(chosen), largest);
+    // Without a round-up the truncated units are exactly DifferenceDate's clamp-backoff result
+    // (already balanced to `largest`), so return them directly — re-balancing greedily would wrongly
+    // count a constrained leap month (Chinese M04L→M04 across a year) as a whole year. A round-up
+    // shifts the boundary, so re-express it greedily to keep the rounded duration exact.
+    let result = if up {
+        diff_date_greedy(cal, lo, cadd(high), largest)
+    } else {
+        low
+    };
     if positive { result } else { neg_duration(result) }
 }
 
