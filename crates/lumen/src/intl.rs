@@ -231,7 +231,8 @@ pub(crate) fn coerce_options(i: &mut Interp, options: &Value) -> Result<Value, V
         Value::Undefined => Ok(Value::Obj(Object::new(None))),
         Value::Obj(_) => Ok(options.clone()),
         Value::Null => Err(i.make_error("TypeError", "options cannot be null")),
-        _ => Ok(Value::Obj(Object::new(None))),
+        // CoerceOptionsToObject: a primitive is ToObject-boxed (so inherited properties are read).
+        _ => Ok(crate::builtins::box_primitive_pub(i, options.clone())),
     }
 }
 
