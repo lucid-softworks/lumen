@@ -1627,11 +1627,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             },
             v => to_time(i, &v, &Value::Undefined)?,
         };
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(d, time),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, time)))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let d = as_date(i, &t)?;
@@ -1670,15 +1666,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         };
         let local = dt_ns(d, time);
         let offset = offset_for_local(&tz, local);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: local - offset as i128,
-                offset_ns: offset,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz, }))
     });
 
     let ctor = add_ctor(it, ns, "PlainDate", 3, proto, |i, _t, a| {
@@ -3503,11 +3491,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (_, tm) = as_datetime(i, &t)?;
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, tm),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, tm)))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, _| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -3523,15 +3507,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let tz = normalize_tz(i, &tz_raw)?;
         let local = dt_ns(d, tm);
         let offset = offset_for_local(&tz, local);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: local - offset as i128,
-                offset_ns: offset,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz, }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -3545,22 +3521,14 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
         let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf)?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, ntm),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
         let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf)?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, ntm),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ntm)))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -3617,11 +3585,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
                 day: da,
             },
         )?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, ns_to_time(rem)),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, ns_to_time(rem))))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -3830,45 +3794,21 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         if !(1..=12).contains(&month) || !iso_year_month_within_limits(year, month) {
             return Err(i.make_error("RangeError", "invalid year-month"));
         }
-        Ok(make(
-            i,
-            "Temporal.PlainYearMonth",
-            Temporal::YearMonth(IsoDate {
-                year,
-                month: month as u8,
-                day: 1,
-            }),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year, month: month as u8, day: 1, })))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = d.year * 12 + (d.month as i64 - 1) + dur.years * 12 + dur.months;
         let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make(
-            i,
-            "Temporal.PlainYearMonth",
-            Temporal::YearMonth(IsoDate {
-                year: y,
-                month: m,
-                day: 1,
-            }),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1, })))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let total = d.year * 12 + (d.month as i64 - 1) - dur.years * 12 - dur.months;
         let (y, m) = balance_year_month(total / 12, total % 12 + 1);
-        Ok(make(
-            i,
-            "Temporal.PlainYearMonth",
-            Temporal::YearMonth(IsoDate {
-                year: y,
-                month: m,
-                day: 1,
-            }),
-        ))
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(IsoDate { year: y, month: m, day: 1, })))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -4697,15 +4637,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let offset = zone_offset(&tz, e);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: e,
-                offset_ns: offset,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: offset, tz, }))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
@@ -5274,15 +5206,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: epoch,
-                offset_ns: off,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -5293,15 +5217,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(nd, ntm);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: epoch,
-                offset_ns: off,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -5340,26 +5256,14 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let local = dt_ns(nd, nt);
         let off = offset_for_local(&tz, local);
         let epoch = local - off as i128;
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: epoch,
-                offset_ns: off,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz, }))
     });
     it.def_method(&proto, "withTimeZone", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
         let s = i.to_string(&arg(a, 0)).map_err(unab)?;
         let tz = normalize_tz(i, &s)?;
         let off = zone_offset(&tz, e);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned { epoch_ns: e, offset_ns: off, tz },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: e, offset_ns: off, tz }))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -5388,11 +5292,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         match crate::tz::next_transition(&tz, epoch_sec, dir == "next") {
             Some(ts) => {
                 let (off, _) = (zone_offset(&tz, ts as i128 * 1_000_000_000), ());
-                Ok(make(
-                    i,
-                    "Temporal.ZonedDateTime",
-                    Temporal::Zoned { epoch_ns: ts as i128 * 1_000_000_000, offset_ns: off, tz },
-                ))
+                Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: ts as i128 * 1_000_000_000, offset_ns: off, tz }))
             }
             None => Ok(Value::Null),
         }
@@ -5406,11 +5306,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         };
         let local = dt_ns(d, nt);
         let off = offset_for_local(&tz, local);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz }))
     });
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
@@ -5418,11 +5314,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
         let local = dt_ns(nd, tm);
         let off = offset_for_local(&tz, local);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - off as i128, offset_ns: off, tz }))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
@@ -5461,15 +5353,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let incr = incr_raw as i128;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
-        Ok(make(
-            i,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: rounded - o as i128,
-                offset_ns: o,
-                tz,
-            },
-        ))
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz, }))
     });
 
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
