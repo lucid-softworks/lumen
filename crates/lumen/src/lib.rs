@@ -41,6 +41,8 @@ mod tzdata;
 #[rustfmt::skip]
 mod umalqura;
 #[rustfmt::skip]
+mod cldr_likely;
+#[rustfmt::skip]
 mod cldr_dates;
 #[rustfmt::skip]
 mod cldr_units;

@@ -220,7 +220,7 @@ pub fn unicode_type_alias(key: &str, ty: &str) -> Option<&'static str> {
 pub fn grandfathered(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "art-lojban" => "jbo",
-        "cel-gaulish" => "xtg-x-cel-gaulish",
+        "cel-gaulish" => "xtg",
         // `en-gb-oed` is intentionally absent: its 3-letter `oed` subtag is not a valid variant, so
         // the tag is structurally invalid and must be rejected (RangeError), not canonicalized.
         "zh-guoyu" => "zh",

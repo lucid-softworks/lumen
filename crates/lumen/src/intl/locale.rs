@@ -413,9 +413,75 @@ fn build_locale_object(i: &mut Interp, tag: &str) -> Result<Value, Value> {
     Ok(Value::Obj(obj))
 }
 
-/// maximize/minimize require likely-subtags data we do not yet ship; return an equivalent Locale so
-/// the identity/shape of the result is correct even when the language is unchanged.
-fn relocale(i: &mut Interp, this: &Value, _maximize: bool) -> Result<Value, Value> {
+/// Add Likely Subtags (UTS #35): resolve the most likely (language, script, region) for a partial
+/// identifier, keeping any originally-present subtags. Returns None only if nothing matches at all.
+fn add_likely(lang: &str, script: &str, region: &str) -> Option<(String, String, String)> {
+    use crate::cldr_likely::likely;
+    // "und" behaves as an absent language for override purposes.
+    let orig_lang = if lang == "und" { "" } else { lang };
+    let l = if orig_lang.is_empty() { "und" } else { orig_lang };
+    let mut keys: Vec<String> = Vec::new();
+    if !script.is_empty() && !region.is_empty() {
+        keys.push(format!("{l}-{script}-{region}"));
+    }
+    if !region.is_empty() {
+        keys.push(format!("{l}-{region}"));
+    }
+    if !script.is_empty() {
+        keys.push(format!("{l}-{script}"));
+    }
+    keys.push(l.to_string());
+    if !script.is_empty() {
+        keys.push(format!("und-{script}"));
+    }
+    for k in &keys {
+        if let Some(v) = likely(k) {
+            let p: Vec<&str> = v.split('-').collect();
+            let (ml, ms, mr) = (p[0], p.get(1).copied().unwrap_or(""), p.get(2).copied().unwrap_or(""));
+            return Some((
+                if orig_lang.is_empty() { ml } else { orig_lang }.to_string(),
+                if script.is_empty() { ms } else { script }.to_string(),
+                if region.is_empty() { mr } else { region }.to_string(),
+            ));
+        }
+    }
+    None
+}
+
+/// Remove Likely Subtags (UTS #35): the shortest identifier that maximizes back to the same tag.
+fn remove_likely(lang: &str, script: &str, region: &str) -> (String, String, String) {
+    let max = match add_likely(lang, script, region) {
+        Some(m) => m,
+        None => return (lang.to_string(), script.to_string(), region.to_string()),
+    };
+    let (ml, ms, mr) = (max.0.as_str(), max.1.as_str(), max.2.as_str());
+    for cand in [(ml, "", ""), (ml, "", mr), (ml, ms, "")] {
+        if add_likely(cand.0, cand.1, cand.2).as_ref() == Some(&max) {
+            return (cand.0.to_string(), cand.1.to_string(), cand.2.to_string());
+        }
+    }
+    max
+}
+
+/// Intl.Locale.prototype.maximize/minimize via the CLDR likelySubtags data. Only the core
+/// (language, script, region) is transformed; variants and extensions are preserved.
+fn relocale(i: &mut Interp, this: &Value, maximize: bool) -> Result<Value, Value> {
     let tag = slot(i, this, "__locale_tag")?;
-    build_locale_object(i, &tag)
+    let mut t = match super::tags::parse(&tag) {
+        Some(t) => t,
+        None => return build_locale_object(i, &tag),
+    };
+    let (l, s, r) = if maximize {
+        add_likely(&t.language, &t.script, &t.region).unwrap_or((
+            t.language.clone(),
+            t.script.clone(),
+            t.region.clone(),
+        ))
+    } else {
+        remove_likely(&t.language, &t.script, &t.region)
+    };
+    t.language = l;
+    t.script = s;
+    t.region = r;
+    build_locale_object(i, &super::tags::render(&t))
 }
