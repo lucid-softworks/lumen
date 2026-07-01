@@ -6759,7 +6759,6 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             Value::Undefined => return Err(i.make_error("TypeError", "direction is required")),
             v => i.to_string(&v).map_err(unab)?.to_string(),
         };
-        let dir = sing(&dir);
         if dir != "next" && dir != "previous" {
             return Err(i.make_error("RangeError", "direction must be 'next' or 'previous'"));
         }
