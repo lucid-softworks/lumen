@@ -453,6 +453,14 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
             }
         }
         "ethioaa" => (Some("aa"), Some(from_13month(d, ETHIOPIC_EPOCH).0 + 5500)),
+        _ if is_islamic(cal) => {
+            let y = from_islamic(d, islamic_epoch(cal)).0;
+            if y >= 1 {
+                (Some("ah"), Some(y))
+            } else {
+                (Some("bh"), Some(1 - y))
+            }
+        }
         _ => (None, None),
     }
 }
@@ -485,6 +493,55 @@ const ETHIOPIC_EPOCH: i64 = -716367; // Ethiopic (amete mihret) 1-01-01 = Julian
 
 fn is_13month(cal: &str) -> bool {
     matches!(cal, "coptic" | "ethiopic" | "ethioaa")
+}
+
+// Tabular Islamic ("civil"/Kuwaiti) calendar. epoch_days of AH 1-01-01: civil = Julian 622-07-16,
+// astronomical (tbla) = 622-07-15. Observational variants are approximated by the civil algorithm.
+const ISLAMIC_EPOCH: i64 = -492148;
+fn is_islamic(cal: &str) -> bool {
+    cal.starts_with("islamic")
+}
+fn islamic_epoch(cal: &str) -> i64 {
+    if cal == "islamic-tbla" {
+        ISLAMIC_EPOCH - 1
+    } else {
+        ISLAMIC_EPOCH
+    }
+}
+fn islamic_leap(y: i64) -> bool {
+    (14 + 11 * y).rem_euclid(30) < 11
+}
+fn islamic_month_len(m: i64, leap: bool) -> i64 {
+    if m % 2 == 1 {
+        30
+    } else if m == 12 && leap {
+        30
+    } else {
+        29
+    }
+}
+/// Tabular Islamic date from an ISO date: (year, month, day).
+fn from_islamic(iso: IsoDate, epoch: i64) -> (i64, i64, i64) {
+    let fixed = epoch_days(iso);
+    let year = (30 * (fixed - epoch) + 10646).div_euclid(10631);
+    let year_start = epoch + (year - 1) * 354 + (3 + 11 * year).div_euclid(30);
+    let mut rem = fixed - year_start; // 0-based day of year
+    let leap = islamic_leap(year);
+    let mut month = 1;
+    while month < 12 {
+        let ml = islamic_month_len(month, leap);
+        if rem < ml {
+            break;
+        }
+        rem -= ml;
+        month += 1;
+    }
+    (year, month, rem + 1)
+}
+fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
+    let fixed = epoch + (y - 1) * 354 + (3 + 11 * y).div_euclid(30) + (m - 1) * 29 + m.div_euclid(2) + (d - 1);
+    let (yy, mm, dd) = civil_from_days(fixed);
+    IsoDate { year: yy, month: mm, day: dd }
 }
 fn epoch_13(cal: &str) -> i64 {
     if cal == "coptic" { COPTIC_EPOCH } else { ETHIOPIC_EPOCH }
@@ -523,6 +580,13 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let doy = 30 * (m - 1) + d;
         let diy = if leap { 366 } else { 365 };
         (y, m, d, dim, 13, doy, diy, leap)
+    } else if is_islamic(cal) {
+        let (y, m, d) = from_islamic(iso, islamic_epoch(cal));
+        let leap = islamic_leap(y);
+        let dim = islamic_month_len(m, leap);
+        let doy = (1..m).map(|mm| islamic_month_len(mm, leap)).sum::<i64>() + d;
+        let diy = if leap { 355 } else { 354 };
+        (y, m, d, dim, 12, doy, diy, leap)
     } else {
         (
             cal_year_num(cal, iso),
@@ -544,6 +608,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         "roc" => d.year - 1911,
         "coptic" | "ethiopic" => from_13month(d, epoch_13(cal)).0,
         "ethioaa" => from_13month(d, ETHIOPIC_EPOCH).0 + 5500,
+        _ if is_islamic(cal) => from_islamic(d, islamic_epoch(cal)).0,
         _ => d.year,
     }
 }
@@ -576,7 +641,7 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal)
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal)
 }
 
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
@@ -2534,6 +2599,31 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         };
         let day = day.clamp(1, dim);
         let iso = to_13month(cy, month, day, epoch_13(cal));
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
+    // Tabular Islamic: convert (year|era "ah", month, day) to ISO.
+    if is_islamic(cal) {
+        let iy = if let Some(y) = year_opt {
+            y
+        } else {
+            match (era.as_deref(), era_year) {
+                (Some("ah"), Some(ey)) => ey,
+                (Some("bh"), Some(ey)) => 1 - ey,
+                _ => return Err(i.make_error("TypeError", "year is required")),
+            }
+        };
+        let month = match (month, mc_num) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"))
+            }
+            (Some(a), _) => a,
+            (None, Some(b)) => b,
+            (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+        };
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        let month = month.clamp(1, 12);
+        let day = day.clamp(1, islamic_month_len(month, islamic_leap(iy)));
+        let iso = to_islamic(iy, month, day, islamic_epoch(cal));
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
     // Reconcile year / era+eraYear BEFORE month (a missing year is a TypeError that the spec raises
