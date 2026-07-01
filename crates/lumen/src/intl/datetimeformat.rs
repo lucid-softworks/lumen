@@ -405,6 +405,14 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
     if let Some(dobj) = date.as_obj() {
         let ptr = Rc::as_ptr(dobj) as usize;
         if let Some(t) = i.temporal.get(&ptr).cloned() {
+            // format()/formatRange() do not accept Temporal.ZonedDateTime directly (the caller can't
+            // know which time zone to use); Temporal.ZonedDateTime.prototype.toLocaleString handles it.
+            if matches!(t, T::Zoned { .. }) {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Intl.DateTimeFormat does not support Temporal.ZonedDateTime; use zonedDateTime.toLocaleString()",
+                ));
+            }
             temporal_compat_check(i, o, &t)?;
             // Calendar mismatch: a non-ISO Temporal calendar must equal the formatter's calendar.
             let tcal = i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string());

@@ -2248,7 +2248,7 @@ pub fn install(it: &mut Interp) {
             }
         }
     }
-    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant", "ZonedDateTime"] {
+    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant"] {
         if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
             it.def_method(&proto, "toLocaleString", 0, |i, this, a| {
                 let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
@@ -2261,10 +2261,100 @@ pub fn install(it: &mut Interp) {
             });
         }
     }
+    // Temporal.ZonedDateTime.prototype.toLocaleString: the formatter's time zone is forced to the
+    // instance's (a `timeZone` option is disallowed), sensible date+time+zone-name defaults are
+    // applied, and the underlying instant is formatted through Intl.DateTimeFormat.
+    if let Some(proto) = it.extra_protos.get("Temporal.ZonedDateTime").cloned() {
+        it.def_method(&proto, "toLocaleString", 0, zoned_to_locale_string);
+    }
     it.global
         .borrow_mut()
         .props
         .insert("Temporal", Property::builtin(Value::Obj(ns)));
+}
+
+/// Temporal.ZonedDateTime.prototype.toLocaleString(locales, options): the instance's time zone is
+/// forced onto the formatter (a `timeZone` option is a TypeError), the instance's calendar must be
+/// ISO or match the formatter's, sensible date+time+zone-name defaults apply when nothing was asked
+/// for, and the underlying instant is then formatted through Intl.DateTimeFormat.
+fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    use crate::value::set_data;
+    let obj = match this.as_obj() {
+        Some(o) => o.clone(),
+        None => return Err(i.make_error("TypeError", "not an object")),
+    };
+    let ptr = Rc::as_ptr(&obj) as usize;
+    let (epoch_ns, tz) = match i.temporal.get(&ptr) {
+        Some(Temporal::Zoned { epoch_ns, tz, .. }) => (*epoch_ns, tz.clone()),
+        _ => {
+            return Err(i.make_error(
+                "TypeError",
+                "Temporal.ZonedDateTime.prototype.toLocaleString called on an incompatible receiver",
+            ))
+        }
+    };
+    let zcal = i.temporal_cal.get(&ptr).map(|c| c.to_string()).unwrap_or_else(|| "iso8601".to_string());
+
+    let locales = a.first().cloned().unwrap_or(Value::Undefined);
+    let user_opts = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let user_obj = match &user_opts {
+        Value::Undefined => None,
+        Value::Obj(o) => Some(o.clone()),
+        _ => return Err(i.make_error("TypeError", "options must be an object")),
+    };
+
+    // Effective options inherit from the user's so getters still fire; own props shadow.
+    let opts = i.new_object();
+    let mut any_comp = false;
+    if let Some(uo) = &user_obj {
+        // A timeZone option is disallowed (the instance's zone always wins).
+        if !matches!(i.get_member(&user_opts, "timeZone").map_err(unab)?, Value::Undefined) {
+            return Err(i.make_error(
+                "TypeError",
+                "the timeZone option is not allowed for Temporal.ZonedDateTime.prototype.toLocaleString",
+            ));
+        }
+        opts.borrow_mut().proto = Some(uo.clone());
+        for k in [
+            "weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second",
+            "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle",
+        ] {
+            if !matches!(i.get_member(&user_opts, k).map_err(unab)?, Value::Undefined) {
+                any_comp = true;
+                break;
+            }
+        }
+    }
+    // No components requested: default to a full date+time plus the zone name.
+    if !any_comp {
+        for (k, v) in [
+            ("year", "numeric"), ("month", "numeric"), ("day", "numeric"),
+            ("hour", "numeric"), ("minute", "numeric"), ("second", "numeric"),
+            ("timeZoneName", "short"),
+        ] {
+            set_data(&opts, k, Value::str(v));
+        }
+    }
+    set_data(&opts, "timeZone", Value::from_string(tz.to_string()));
+
+    let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;
+    let ctor = i.get_member(&intl, "DateTimeFormat").map_err(unab)?;
+    let dtf = i.construct(ctor, &[locales, Value::Obj(opts)]).map_err(unab)?;
+
+    // A non-ISO instance calendar must match the formatter's resolved calendar.
+    let ropts_fn = i.get_member(&dtf, "resolvedOptions").map_err(unab)?;
+    let ropts = i.call(ropts_fn, dtf.clone(), &[]).map_err(unab)?;
+    let dcal = match i.get_member(&ropts, "calendar").map_err(unab)? {
+        Value::Str(s) => s.to_string(),
+        _ => "iso8601".to_string(),
+    };
+    if zcal != "iso8601" && zcal != dcal {
+        return Err(i.make_error("RangeError", format!("calendar mismatch: {zcal} vs {dcal}")));
+    }
+
+    let ms = (epoch_ns / 1_000_000) as f64;
+    let fmt = i.get_member(&dtf, "format").map_err(unab)?;
+    i.call(fmt, dtf, &[Value::Num(ms)]).map_err(unab)
 }
 
 fn add_ctor(
