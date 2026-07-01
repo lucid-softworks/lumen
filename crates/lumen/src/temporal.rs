@@ -5355,12 +5355,34 @@ fn cal_month_day_reference(i: &mut Interp, cal: &str, snap: &Gc, has_year: bool,
     } else {
         resolve(i, start_cy)?
     };
-    let want = cal_month_code(cal, anchor);
-    // Search downward for the latest ISO date ≤ ref that has the wanted monthCode.
-    for cy in (start_cy - 24..=start_cy).rev() {
-        if let Ok(iso) = resolve(i, cy) {
-            if cal_month_code(cal, iso) == want && epoch_days(iso) <= epoch_days(ref_iso) {
-                return Ok(iso);
+    // The wanted monthCode is the caller's verbatim (preserving a leap "L"); with an ordinal `month`
+    // it comes from the anchor. Try the exact code first, then (for a leap month that never occurs in
+    // range) its plain form — and within each, prefer a year where the day fits un-clamped.
+    let want = match getm(i, &Value::Obj(snap.clone()), "monthCode")? {
+        Value::Undefined => cal_month_code(cal, anchor),
+        mc => i.to_string(&mc).map_err(unab)?.to_string(),
+    };
+    let want_day = match getm(i, &Value::Obj(snap.clone()), "day")? {
+        Value::Undefined => 0,
+        dv => to_int(i, &dv)?,
+    };
+    let plain = want.trim_end_matches('L').to_string();
+    let candidates: Vec<&str> = if want.ends_with('L') {
+        vec![&want, &plain]
+    } else {
+        vec![&want]
+    };
+    for cand in &candidates {
+        for require_day in [true, false] {
+            for cy in (start_cy - 40..=start_cy).rev() {
+                if let Ok(iso) = resolve(i, cy) {
+                    if cal_month_code(cal, iso) == *cand
+                        && (!require_day || cal_fields(cal, iso).2 == want_day)
+                        && epoch_days(iso) <= epoch_days(ref_iso)
+                    {
+                        return Ok(iso);
+                    }
+                }
             }
         }
     }
