@@ -683,8 +683,9 @@ fn canonicalize_time_zone(tz: &str) -> Option<String> {
     if first == b'+' || first == b'-' {
         return canon_utc_offset(tz);
     }
-    // A named IANA zone canonicalizes to its registry name (case-insensitive); unknown names fail.
-    crate::tz::canonicalize(tz).map(|s| s.to_string())
+    // A named IANA zone keeps the given identifier (case-normalized), matching Temporal — the
+    // resolved timeZone preserves an alias like Asia/Calcutta rather than canonicalizing it.
+    crate::tz::registry_name(tz).map(|s| s.to_string())
 }
 
 /// The signed millisecond offset of a canonical `±HH:MM[:SS]` UTC-offset zone (0 for anything else).
