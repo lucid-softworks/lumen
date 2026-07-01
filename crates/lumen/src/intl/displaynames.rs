@@ -97,6 +97,25 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
             }
             s.to_uppercase()
         }
+        "calendar" => {
+            let ok = !s.is_empty()
+                && s.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()));
+            if !ok {
+                return Err(i.make_error("RangeError", format!("invalid calendar code: {s}")));
+            }
+            let lc = s.to_lowercase();
+            crate::intl::tags::canonical_ca(&lc).unwrap_or(lc)
+        }
+        "dateTimeField" => {
+            const FIELDS: &[&str] = &[
+                "era", "year", "quarter", "month", "weekOfYear", "weekday", "day", "dayPeriod",
+                "hour", "minute", "second", "timeZoneName",
+            ];
+            if !FIELDS.contains(&s.as_str()) {
+                return Err(i.make_error("RangeError", format!("invalid dateTimeField: {s}")));
+            }
+            s.clone()
+        }
         _ => s.clone(),
     };
     let name = display_name(&kind, &canonical);
