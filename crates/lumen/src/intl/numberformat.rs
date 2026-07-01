@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "NumberFormat", 0, construct);
@@ -70,13 +70,19 @@ struct DigitOpts {
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    if !i.constructing {
-        return Err(i.make_error("TypeError", "Intl.NumberFormat requires 'new'"));
-    }
+    // Legacy service: callable without `new` (returns a fresh instance either way).
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
+    // numberingSystem is read right after localeMatcher, and must be a valid type identifier.
+    let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
+    if let Some(ns) = &numbering {
+        if !ns.split('-').all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric())) {
+            return Err(i.make_error("RangeError", format!("invalid numberingSystem: {ns}")));
+        }
+    }
     let resolved = resolve_locale(i, &requested, &["nu"]);
+    let numbering = numbering.unwrap_or_else(|| "latn".to_string());
 
     let style = get_option(
         i,
@@ -121,9 +127,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let unit_display = get_option(i, &options, "unitDisplay", &["short", "narrow", "long"], Some("short"))?
         .unwrap();
 
-    // digit options
-    let digits = read_digit_options(i, &options, &style)?;
-
+    // notation is read before the digit options.
     let notation = get_option(
         i,
         &options,
@@ -132,17 +136,23 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("standard"),
     )?
     .unwrap();
-    let compact_display = get_option(i, &options, "compactDisplay", &["short", "long"], Some("short"))?
-        .unwrap();
-    let use_grouping = read_use_grouping(i, &options, &notation)?;
-    let sign_display = get_option(
-        i,
-        &options,
-        "signDisplay",
-        &["auto", "never", "always", "exceptZero", "negative"],
-        Some("auto"),
-    )?
-    .unwrap();
+
+    // digit options (minInt, min/maxFrac, min/maxSig), then the rounding options.
+    let digits = read_digit_options(i, &options, &style, &notation)?;
+
+    let rounding_increment = {
+        let v = ab(i.get_member(&options, "roundingIncrement"))?;
+        if matches!(v, Value::Undefined) {
+            1u32
+        } else {
+            let n = ab(i.to_number(&v))?;
+            let allowed = [1u32, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000];
+            if n.fract() != 0.0 || !allowed.contains(&(n as u32)) {
+                return Err(i.make_error("RangeError", "invalid roundingIncrement"));
+            }
+            n as u32
+        }
+    };
     let rounding_mode = get_option(
         i,
         &options,
@@ -154,6 +164,34 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("halfExpand"),
     )?
     .unwrap();
+    let rounding_priority = get_option(
+        i,
+        &options,
+        "roundingPriority",
+        &["auto", "morePrecision", "lessPrecision"],
+        Some("auto"),
+    )?
+    .unwrap();
+    let trailing_zero = get_option(
+        i,
+        &options,
+        "trailingZeroDisplay",
+        &["auto", "stripIfInteger"],
+        Some("auto"),
+    )?
+    .unwrap();
+
+    let compact_display = get_option(i, &options, "compactDisplay", &["short", "long"], Some("short"))?
+        .unwrap();
+    let use_grouping = read_use_grouping(i, &options, &notation)?;
+    let sign_display = get_option(
+        i,
+        &options,
+        "signDisplay",
+        &["auto", "never", "always", "exceptZero", "negative"],
+        Some("auto"),
+    )?
+    .unwrap();
 
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.NumberFormat") {
@@ -161,7 +199,10 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     set_builtin(&obj, "__nf", Value::Bool(true));
     set_builtin(&obj, "__nf_locale", Value::from_string(resolved.locale));
-    set_builtin(&obj, "__nf_nu", Value::str("latn"));
+    set_builtin(&obj, "__nf_nu", Value::from_string(numbering));
+    set_builtin(&obj, "__nf_roundingincrement", Value::Num(rounding_increment as f64));
+    set_builtin(&obj, "__nf_roundingpriority", Value::from_string(rounding_priority));
+    set_builtin(&obj, "__nf_trailingzero", Value::from_string(trailing_zero));
     set_builtin(&obj, "__nf_style", Value::from_string(style));
     if let Some(c) = currency {
         set_builtin(&obj, "__nf_currency", Value::from_string(c.to_uppercase()));
@@ -189,12 +230,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     Ok(Value::Obj(obj))
 }
 
-fn read_digit_options(i: &mut Interp, options: &Value, style: &str) -> Result<DigitOpts, Value> {
+fn read_digit_options(i: &mut Interp, options: &Value, style: &str, _notation: &str) -> Result<DigitOpts, Value> {
+    // Read order: minInt, minFrac, maxFrac, minSig, maxSig.
     let min_int = read_range(i, options, "minimumIntegerDigits", 1, 21, 1)?;
-    let min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
-    let max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
     let mnfd = read_range_opt(i, options, "minimumFractionDigits", 0, 100)?;
     let mxfd = read_range_opt(i, options, "maximumFractionDigits", 0, 100)?;
+    let min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
+    let max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
 
     let (default_min_frac, default_max_frac) = if style == "currency" {
         (2, 2)
@@ -580,8 +622,8 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
         .into_iter()
         .map(|(t, v)| {
             let ob = i.new_object();
-            set_builtin(&ob, "type", Value::from_string(t));
-            set_builtin(&ob, "value", Value::from_string(v));
+            set_data(&ob, "type", Value::from_string(t));
+            set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })
         .collect();
@@ -613,9 +655,16 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         put(i, &res, "minimumFractionDigits", "__nf_minfrac");
         put(i, &res, "maximumFractionDigits", "__nf_maxfrac");
     }
-    set_builtin(&res, "useGrouping", o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto")));
-    put(i, &res, "notation", "__nf_notation");
-    put(i, &res, "signDisplay", "__nf_signdisplay");
+    put(i, &res, "roundingIncrement", "__nf_roundingincrement");
     put(i, &res, "roundingMode", "__nf_roundingmode");
+    put(i, &res, "roundingPriority", "__nf_roundingpriority");
+    put(i, &res, "trailingZeroDisplay", "__nf_trailingzero");
+    set_data(&res, "useGrouping", o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto")));
+    put(i, &res, "notation", "__nf_notation");
+    // compactDisplay only appears when notation is compact.
+    if matches!(o.borrow().props.get("__nf_notation").map(|p| p.value.clone()), Some(Value::Str(s)) if &*s == "compact") {
+        put(i, &res, "compactDisplay", "__nf_compactdisplay");
+    }
+    put(i, &res, "signDisplay", "__nf_signdisplay");
     Ok(Value::Obj(res))
 }

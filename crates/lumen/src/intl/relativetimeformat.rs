@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Value};
+use crate::value::{set_data, set_builtin, Value};
 
 const UNITS: &[&str] = &[
     "year", "years", "quarter", "quarters", "month", "months", "week", "weeks", "day", "days",
@@ -113,8 +113,8 @@ fn format(
         if let Some(phrase) = auto_phrase(sing, v) {
             if to_parts {
                 let ob = i.new_object();
-                set_builtin(&ob, "type", Value::str("literal"));
-                set_builtin(&ob, "value", Value::str(phrase));
+                set_data(&ob, "type", Value::str("literal"));
+                set_data(&ob, "value", Value::str(phrase));
                 return Ok(i.make_array(vec![Value::Obj(ob)]));
             }
             return Ok(Value::str(phrase));
@@ -135,15 +135,15 @@ fn format(
         let mut arr: Vec<Value> = Vec::new();
         let push_lit = |i: &mut Interp, arr: &mut Vec<Value>, s: &str| {
             let ob = i.new_object();
-            set_builtin(&ob, "type", Value::str("literal"));
-            set_builtin(&ob, "value", Value::from_string(s.to_string()));
+            set_data(&ob, "type", Value::str("literal"));
+            set_data(&ob, "value", Value::from_string(s.to_string()));
             arr.push(Value::Obj(ob));
         };
         let push_num = |i: &mut Interp, arr: &mut Vec<Value>, s: &str, unit: &str| {
             let ob = i.new_object();
-            set_builtin(&ob, "type", Value::str("integer"));
-            set_builtin(&ob, "value", Value::from_string(s.to_string()));
-            set_builtin(&ob, "unit", Value::from_string(format!("{unit}")));
+            set_data(&ob, "type", Value::str("integer"));
+            set_data(&ob, "value", Value::from_string(s.to_string()));
+            set_data(&ob, "unit", Value::from_string(format!("{unit}")));
             arr.push(Value::Obj(ob));
         };
         if past {
@@ -178,10 +178,10 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__rtf")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__rtf_locale"));
-    set_builtin(&res, "style", get("__rtf_style"));
-    set_builtin(&res, "numeric", get("__rtf_numeric"));
-    set_builtin(&res, "numberingSystem", get("__rtf_nu"));
+    set_data(&res, "locale", get("__rtf_locale"));
+    set_data(&res, "style", get("__rtf_style"));
+    set_data(&res, "numeric", get("__rtf_numeric"));
+    set_data(&res, "numberingSystem", get("__rtf_nu"));
     Ok(Value::Obj(res))
 }
 

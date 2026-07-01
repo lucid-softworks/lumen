@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Segmenter", 0, construct);
@@ -120,11 +120,11 @@ fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> 
         let end = bnds.get(k + 1).map(|&(e, _)| e).unwrap_or(units.len());
         let seg: String = String::from_utf16_lossy(&units[start..end]);
         let rec = i.new_object();
-        set_builtin(&rec, "segment", Value::from_string(seg));
-        set_builtin(&rec, "index", Value::Num(start as f64));
-        set_builtin(&rec, "input", Value::from_string(s.clone()));
+        set_data(&rec, "segment", Value::from_string(seg));
+        set_data(&rec, "index", Value::Num(start as f64));
+        set_data(&rec, "input", Value::from_string(s.clone()));
         if granularity == "word" {
-            set_builtin(&rec, "isWordLike", Value::Bool(wordlike));
+            set_data(&rec, "isWordLike", Value::Bool(wordlike));
         }
         records.push(Value::Obj(rec));
     }
@@ -175,7 +175,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__sg")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__sg_locale"));
-    set_builtin(&res, "granularity", get("__sg_granularity"));
+    set_data(&res, "locale", get("__sg_locale"));
+    set_data(&res, "granularity", get("__sg_granularity"));
     Ok(Value::Obj(res))
 }

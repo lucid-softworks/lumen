@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, data, def_getter, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Value};
+use crate::value::{set_data, set_builtin, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "ListFormat", 0, construct);
@@ -123,8 +123,8 @@ fn format(i: &mut Interp, this: &Value, list: &Value, to_parts: bool) -> Result<
         .into_iter()
         .map(|(t, v)| {
             let ob = i.new_object();
-            set_builtin(&ob, "type", Value::from_string(t));
-            set_builtin(&ob, "value", Value::from_string(v));
+            set_data(&ob, "type", Value::from_string(t));
+            set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })
         .collect();
@@ -135,8 +135,8 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__lf")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__lf_locale"));
-    set_builtin(&res, "type", get("__lf_type"));
-    set_builtin(&res, "style", get("__lf_style"));
+    set_data(&res, "locale", get("__lf_locale"));
+    set_data(&res, "type", get("__lf_type"));
+    set_data(&res, "style", get("__lf_style"));
     Ok(Value::Obj(res))
 }

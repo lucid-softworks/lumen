@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, data, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Value};
+use crate::value::{set_data, set_builtin, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "PluralRules", 0, construct);
@@ -85,11 +85,11 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__pr")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__pr_locale"));
-    set_builtin(&res, "type", get("__pr_type"));
-    set_builtin(&res, "minimumIntegerDigits", get("__pr_minint"));
-    set_builtin(&res, "minimumFractionDigits", get("__pr_minfrac"));
-    set_builtin(&res, "maximumFractionDigits", get("__pr_maxfrac"));
+    set_data(&res, "locale", get("__pr_locale"));
+    set_data(&res, "type", get("__pr_type"));
+    set_data(&res, "minimumIntegerDigits", get("__pr_minint"));
+    set_data(&res, "minimumFractionDigits", get("__pr_minfrac"));
+    set_data(&res, "maximumFractionDigits", get("__pr_maxfrac"));
     let locale = match get("__pr_locale") {
         Value::Str(s) => s.to_string(),
         _ => "en".to_string(),
@@ -99,6 +99,6 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         .iter()
         .map(|s| Value::str(*s))
         .collect();
-    set_builtin(&res, "pluralCategories", i.make_array(cats));
+    set_data(&res, "pluralCategories", i.make_array(cats));
     Ok(Value::Obj(res))
 }

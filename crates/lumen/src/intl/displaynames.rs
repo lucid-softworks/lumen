@@ -7,7 +7,7 @@ use super::service::{
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DisplayNames", 2, construct);
@@ -174,10 +174,10 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__dn")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__dn_locale"));
-    set_builtin(&res, "style", get("__dn_style"));
-    set_builtin(&res, "type", get("__dn_type"));
-    set_builtin(&res, "fallback", get("__dn_fallback"));
-    set_builtin(&res, "languageDisplay", get("__dn_langdisplay"));
+    set_data(&res, "locale", get("__dn_locale"));
+    set_data(&res, "style", get("__dn_style"));
+    set_data(&res, "type", get("__dn_type"));
+    set_data(&res, "fallback", get("__dn_fallback"));
+    set_data(&res, "languageDisplay", get("__dn_langdisplay"));
     Ok(Value::Obj(res))
 }

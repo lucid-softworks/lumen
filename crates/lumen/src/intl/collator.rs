@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Collator", 0, construct);
@@ -41,9 +41,7 @@ fn install_compare_getter(it: &mut Interp, proto: &Gc) {
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    if !i.constructing {
-        return Err(i.make_error("TypeError", "Intl.Collator requires 'new'"));
-    }
+    // Legacy service: callable without `new` (returns a fresh instance either way).
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     let usage = get_option(i, &options, "usage", &["sort", "search"], Some("sort"))?.unwrap();
@@ -121,12 +119,12 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__co")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__co_locale"));
-    set_builtin(&res, "usage", get("__co_usage"));
-    set_builtin(&res, "sensitivity", get("__co_sensitivity"));
-    set_builtin(&res, "ignorePunctuation", get("__co_ignorepunct"));
-    set_builtin(&res, "collation", get("__co_collation"));
-    set_builtin(&res, "numeric", get("__co_numeric"));
-    set_builtin(&res, "caseFirst", get("__co_casefirst"));
+    set_data(&res, "locale", get("__co_locale"));
+    set_data(&res, "usage", get("__co_usage"));
+    set_data(&res, "sensitivity", get("__co_sensitivity"));
+    set_data(&res, "ignorePunctuation", get("__co_ignorepunct"));
+    set_data(&res, "collation", get("__co_collation"));
+    set_data(&res, "numeric", get("__co_numeric"));
+    set_data(&res, "caseFirst", get("__co_casefirst"));
     Ok(Value::Obj(res))
 }

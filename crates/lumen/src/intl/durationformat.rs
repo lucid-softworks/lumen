@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 const UNITS: &[(&str, &str)] = &[
     ("years", "year"),
@@ -28,8 +28,8 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
         let s = format_string(i, &this, &arg(a, 0))?;
         let ob = i.new_object();
-        set_builtin(&ob, "type", Value::str("literal"));
-        set_builtin(&ob, "value", Value::from_string(s));
+        set_data(&ob, "type", Value::str("literal"));
+        set_data(&ob, "value", Value::from_string(s));
         Ok(i.make_array(vec![Value::Obj(ob)]))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
@@ -130,8 +130,8 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = brand_slot(i, &this, "__df")?;
     let get = |k: &str| o.borrow().props.get(k).map(|p| p.value.clone()).unwrap_or(Value::Undefined);
     let res = i.new_object();
-    set_builtin(&res, "locale", get("__df_locale"));
-    set_builtin(&res, "numberingSystem", get("__df_nu"));
-    set_builtin(&res, "style", get("__df_style"));
+    set_data(&res, "locale", get("__df_locale"));
+    set_data(&res, "numberingSystem", get("__df_nu"));
+    set_data(&res, "style", get("__df_style"));
     Ok(Value::Obj(res))
 }

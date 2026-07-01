@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Value};
+use crate::value::{set_data, set_builtin, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DateTimeFormat", 0, construct);
@@ -15,8 +15,8 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         let s = do_format(i, &this, &arg(a, 0))?;
         // A single literal part is acceptable for many shape tests.
         let ob = i.new_object();
-        set_builtin(&ob, "type", Value::str("literal"));
-        set_builtin(&ob, "value", Value::from_string(s));
+        set_data(&ob, "type", Value::str("literal"));
+        set_data(&ob, "value", Value::from_string(s));
         Ok(i.make_array(vec![Value::Obj(ob)]))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
@@ -51,9 +51,7 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
 }
 
 fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    if !i.constructing {
-        return Err(i.make_error("TypeError", "Intl.DateTimeFormat requires 'new'"));
-    }
+    // Legacy service: callable without `new` (returns a fresh instance either way).
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
     read_locale_matcher(i, &options)?;
