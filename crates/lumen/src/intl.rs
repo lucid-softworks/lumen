@@ -10,6 +10,7 @@ use std::rc::Rc;
 mod data;
 mod listformat;
 mod locale;
+mod numberformat;
 mod pluralrules;
 mod relativetimeformat;
 mod service;
@@ -48,6 +49,7 @@ pub fn install(it: &mut Interp) {
     listformat::install(it, &intl);
     pluralrules::install(it, &intl);
     relativetimeformat::install(it, &intl);
+    numberformat::install(it, &intl);
 
     it.global
         .borrow_mut()

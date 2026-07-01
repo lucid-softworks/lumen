@@ -1,0 +1,621 @@
+//! `Intl.NumberFormat` (standard notation; decimal/percent/currency/unit; English grouping).
+
+use super::service::{
+    brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
+    resolve_locale,
+};
+use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
+use crate::interpreter::Interp;
+use crate::value::{set_builtin, Gc, Value};
+
+pub fn install(it: &mut Interp, ns: &Gc) {
+    let (ctor, proto) = make_service(it, ns, "NumberFormat", 0, construct);
+    install_supported_locales(it, &ctor);
+    it.def_method(&proto, "format", 1, |i, this, a| {
+        // `format` is a bound-ish getter in the spec; here it's a plain method (sufficient for most
+        // tests) — but many tests read `.format` then call it, so return a stable per-instance fn.
+        format_number(i, &this, &arg(a, 0))
+    });
+    it.def_method(&proto, "formatToParts", 1, |i, this, a| {
+        format_to_parts(i, &this, &arg(a, 0))
+    });
+    it.def_method(&proto, "resolvedOptions", 0, resolved_options);
+    // A `format` accessor that returns a bound function is what the spec mandates; provide it.
+    install_format_getter(it, &proto);
+}
+
+fn install_format_getter(it: &mut Interp, proto: &Gc) {
+    let g = it.make_native("get format", 0, |i, this, _| {
+        let o = brand_slot(i, &this, "__nf")?;
+        // Cache a bound function on the instance so repeated reads return the same object.
+        if let Some(f) = o.borrow().props.get("__nf_boundformat").map(|p| p.value.clone()) {
+            return Ok(f);
+        }
+        let f = i.make_native("", 1, |i, that, a| format_number(i, &that, &arg(a, 0)));
+        // Bind `this` = the NumberFormat instance.
+        let bound = crate::intl::numberformat::bind_this(i, Value::Obj(f), this.clone());
+        set_builtin(&o, "__nf_boundformat", bound.clone());
+        Ok(bound)
+    });
+    proto.borrow_mut().props.insert(
+        "format",
+        crate::value::Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(g)),
+            set: None,
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
+}
+
+/// Bind `this_arg` onto `target` via Function.prototype.bind.
+pub(crate) fn bind_this(i: &mut Interp, target: Value, this_arg: Value) -> Value {
+    if let Ok(bindfn) = i.get_member(&target, "bind") {
+        if let Ok(bound) = i.call(bindfn, target.clone(), &[this_arg]) {
+            return bound;
+        }
+    }
+    target
+}
+
+struct DigitOpts {
+    min_int: u32,
+    min_frac: u32,
+    max_frac: u32,
+    min_sig: Option<u32>,
+    max_sig: Option<u32>,
+}
+
+fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    if !i.constructing {
+        return Err(i.make_error("TypeError", "Intl.NumberFormat requires 'new'"));
+    }
+    let requested = canonicalize_locale_list(i, &arg(a, 0))?;
+    let options = coerce_options(i, &arg(a, 1))?;
+    read_locale_matcher(i, &options)?;
+    let resolved = resolve_locale(i, &requested, &["nu"]);
+
+    let style = get_option(
+        i,
+        &options,
+        "style",
+        &["decimal", "percent", "currency", "unit"],
+        Some("decimal"),
+    )?
+    .unwrap();
+
+    // currency
+    let currency = get_option(i, &options, "currency", &[], None)?;
+    if style == "currency" && currency.is_none() {
+        return Err(i.make_error("TypeError", "currency is required for currency style"));
+    }
+    if let Some(c) = &currency {
+        if !is_well_formed_currency(c) {
+            return Err(i.make_error("RangeError", format!("invalid currency: {c}")));
+        }
+    }
+    let currency_display = get_option(
+        i,
+        &options,
+        "currencyDisplay",
+        &["code", "symbol", "narrowSymbol", "name"],
+        Some("symbol"),
+    )?
+    .unwrap();
+    let currency_sign = get_option(i, &options, "currencySign", &["standard", "accounting"], Some("standard"))?
+        .unwrap();
+
+    // unit
+    let unit = get_option(i, &options, "unit", &[], None)?;
+    if style == "unit" && unit.is_none() {
+        return Err(i.make_error("TypeError", "unit is required for unit style"));
+    }
+    if let Some(u) = &unit {
+        if !is_well_formed_unit(u) {
+            return Err(i.make_error("RangeError", format!("invalid unit: {u}")));
+        }
+    }
+    let unit_display = get_option(i, &options, "unitDisplay", &["short", "narrow", "long"], Some("short"))?
+        .unwrap();
+
+    // digit options
+    let digits = read_digit_options(i, &options, &style)?;
+
+    let notation = get_option(
+        i,
+        &options,
+        "notation",
+        &["standard", "scientific", "engineering", "compact"],
+        Some("standard"),
+    )?
+    .unwrap();
+    let compact_display = get_option(i, &options, "compactDisplay", &["short", "long"], Some("short"))?
+        .unwrap();
+    let use_grouping = read_use_grouping(i, &options, &notation)?;
+    let sign_display = get_option(
+        i,
+        &options,
+        "signDisplay",
+        &["auto", "never", "always", "exceptZero", "negative"],
+        Some("auto"),
+    )?
+    .unwrap();
+    let rounding_mode = get_option(
+        i,
+        &options,
+        "roundingMode",
+        &[
+            "ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand",
+            "halfTrunc", "halfEven",
+        ],
+        Some("halfExpand"),
+    )?
+    .unwrap();
+
+    let obj = i.new_object();
+    if let Some(proto) = instance_proto(i, "Intl.NumberFormat") {
+        obj.borrow_mut().proto = Some(proto);
+    }
+    set_builtin(&obj, "__nf", Value::Bool(true));
+    set_builtin(&obj, "__nf_locale", Value::from_string(resolved.locale));
+    set_builtin(&obj, "__nf_nu", Value::str("latn"));
+    set_builtin(&obj, "__nf_style", Value::from_string(style));
+    if let Some(c) = currency {
+        set_builtin(&obj, "__nf_currency", Value::from_string(c.to_uppercase()));
+        set_builtin(&obj, "__nf_currencydisplay", Value::from_string(currency_display));
+        set_builtin(&obj, "__nf_currencysign", Value::from_string(currency_sign));
+    }
+    if let Some(u) = unit {
+        set_builtin(&obj, "__nf_unit", Value::from_string(u));
+        set_builtin(&obj, "__nf_unitdisplay", Value::from_string(unit_display));
+    }
+    set_builtin(&obj, "__nf_minint", Value::Num(digits.min_int as f64));
+    set_builtin(&obj, "__nf_minfrac", Value::Num(digits.min_frac as f64));
+    set_builtin(&obj, "__nf_maxfrac", Value::Num(digits.max_frac as f64));
+    if let Some(v) = digits.min_sig {
+        set_builtin(&obj, "__nf_minsig", Value::Num(v as f64));
+    }
+    if let Some(v) = digits.max_sig {
+        set_builtin(&obj, "__nf_maxsig", Value::Num(v as f64));
+    }
+    set_builtin(&obj, "__nf_notation", Value::from_string(notation));
+    set_builtin(&obj, "__nf_compactdisplay", Value::from_string(compact_display));
+    set_builtin(&obj, "__nf_grouping", use_grouping);
+    set_builtin(&obj, "__nf_signdisplay", Value::from_string(sign_display));
+    set_builtin(&obj, "__nf_roundingmode", Value::from_string(rounding_mode));
+    Ok(Value::Obj(obj))
+}
+
+fn read_digit_options(i: &mut Interp, options: &Value, style: &str) -> Result<DigitOpts, Value> {
+    let min_int = read_range(i, options, "minimumIntegerDigits", 1, 21, 1)?;
+    let min_sig = read_range_opt(i, options, "minimumSignificantDigits", 1, 21)?;
+    let max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
+    let mnfd = read_range_opt(i, options, "minimumFractionDigits", 0, 100)?;
+    let mxfd = read_range_opt(i, options, "maximumFractionDigits", 0, 100)?;
+
+    let (default_min_frac, default_max_frac) = if style == "currency" {
+        (2, 2)
+    } else if style == "percent" {
+        (0, 0)
+    } else {
+        (0, 3)
+    };
+
+    let (min_frac, max_frac) = if min_sig.is_some() || max_sig.is_some() {
+        (0, 0)
+    } else {
+        let mnfd = mnfd.unwrap_or(default_min_frac);
+        let mxfd = mxfd.unwrap_or(default_max_frac.max(mnfd));
+        if mnfd > mxfd {
+            return Err(i.make_error("RangeError", "minimumFractionDigits > maximumFractionDigits"));
+        }
+        (mnfd, mxfd)
+    };
+    if let (Some(a), Some(b)) = (min_sig, max_sig) {
+        if a > b {
+            return Err(i.make_error(
+                "RangeError",
+                "minimumSignificantDigits > maximumSignificantDigits",
+            ));
+        }
+    }
+    Ok(DigitOpts {
+        min_int,
+        min_frac,
+        max_frac,
+        min_sig,
+        max_sig,
+    })
+}
+
+fn read_range(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32, fallback: u32) -> Result<u32, Value> {
+    Ok(read_range_opt(i, options, prop, lo, hi)?.unwrap_or(fallback))
+}
+fn read_range_opt(i: &mut Interp, options: &Value, prop: &str, lo: u32, hi: u32) -> Result<Option<u32>, Value> {
+    let v = ab(i.get_member(options, prop))?;
+    if matches!(v, Value::Undefined) {
+        return Ok(None);
+    }
+    let n = ab(i.to_number(&v))?;
+    if n.is_nan() {
+        return Err(i.make_error("RangeError", format!("{prop} is NaN")));
+    }
+    let f = n.floor();
+    if f < lo as f64 || f > hi as f64 {
+        return Err(i.make_error("RangeError", format!("{prop} out of range")));
+    }
+    Ok(Some(f as u32))
+}
+
+fn read_use_grouping(i: &mut Interp, options: &Value, notation: &str) -> Result<Value, Value> {
+    let v = ab(i.get_member(options, "useGrouping"))?;
+    // Default: "min2" for compact notation? No — default "auto".
+    let default = Value::str(if notation == "compact" { "min2" } else { "auto" });
+    match v {
+        Value::Undefined => Ok(default),
+        Value::Bool(true) => Ok(Value::str("always")),
+        Value::Bool(false) => Ok(Value::Bool(false)),
+        _ => {
+            let s = ab(i.to_string(&v))?.to_string();
+            if s == "true" {
+                return Ok(Value::str("always"));
+            }
+            if s == "false" {
+                return Ok(Value::Bool(false));
+            }
+            if !["always", "auto", "min2"].contains(&s.as_str()) {
+                return Err(i.make_error("RangeError", format!("invalid useGrouping: {s}")));
+            }
+            Ok(Value::from_string(s))
+        }
+    }
+}
+
+fn is_well_formed_currency(c: &str) -> bool {
+    c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic())
+}
+fn is_well_formed_unit(u: &str) -> bool {
+    // "unit" or "unit-per-unit"; each a 3-8 (roughly) identifier of alpha/-.
+    let simple = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-');
+    match u.split_once("-per-") {
+        Some((a, b)) => simple(a) && simple(b),
+        None => simple(u),
+    }
+}
+
+// ---- formatting ------------------------------------------------------------------------------
+
+fn instance(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
+    brand_slot(i, this, "__nf")
+}
+
+fn get_str(o: &Gc, k: &str) -> String {
+    match o.borrow().props.get(k).map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => String::new(),
+    }
+}
+fn get_num(o: &Gc, k: &str) -> Option<u32> {
+    match o.borrow().props.get(k).map(|p| p.value.clone()) {
+        Some(Value::Num(n)) => Some(n as u32),
+        _ => None,
+    }
+}
+
+/// Produce (sign_is_negative, digit-string) for |x| per digit options.
+fn format_magnitude(x: f64, o: &Gc) -> String {
+    let min_int = get_num(o, "__nf_minint").unwrap_or(1);
+    let min_frac = get_num(o, "__nf_minfrac").unwrap_or(0);
+    let max_frac = get_num(o, "__nf_maxfrac").unwrap_or(0);
+    let min_sig = get_num(o, "__nf_minsig");
+    let max_sig = get_num(o, "__nf_maxsig");
+
+    let mut s = if let Some(msig) = max_sig {
+        round_significant(x, msig, min_sig.unwrap_or(1))
+    } else {
+        round_fraction(x, min_frac, max_frac)
+    };
+    // Pad integer digits to min_int.
+    {
+        let (int_part, frac_part) = match s.split_once('.') {
+            Some((a, b)) => (a.to_string(), Some(b.to_string())),
+            None => (s.clone(), None),
+        };
+        let int_digits = int_part.trim_start_matches('0');
+        let int_len = int_digits.len().max(1);
+        let padded_int = if (int_len as u32) < min_int {
+            format!("{:0>width$}", int_digits.max(""), width = min_int as usize)
+        } else if int_digits.is_empty() {
+            "0".to_string()
+        } else {
+            int_digits.to_string()
+        };
+        s = match frac_part {
+            Some(f) => format!("{padded_int}.{f}"),
+            None => padded_int,
+        };
+    }
+    s
+}
+
+/// Round `x` to at most `max_frac` fraction digits (half-expand) and pad to `min_frac`.
+fn round_fraction(x: f64, min_frac: u32, max_frac: u32) -> String {
+    let factor = 10f64.powi(max_frac as i32);
+    let rounded = (x * factor).round() / factor;
+    let mut s = format!("{:.*}", max_frac as usize, rounded);
+    // Trim trailing zeros beyond min_frac.
+    if max_frac > min_frac && s.contains('.') {
+        while s.ends_with('0') {
+            let frac_len = s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
+            if frac_len as u32 <= min_frac {
+                break;
+            }
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    s
+}
+
+/// Round `x` to `max_sig` significant digits, ensuring at least `min_sig` are shown.
+fn round_significant(x: f64, max_sig: u32, min_sig: u32) -> String {
+    if x == 0.0 {
+        if min_sig > 1 {
+            return format!("0.{}", "0".repeat((min_sig - 1) as usize));
+        }
+        return "0".to_string();
+    }
+    let d = x.abs().log10().floor() as i32; // position of the most-significant digit
+    let round_pos = max_sig as i32 - 1 - d; // fraction digits to keep
+    let factor = 10f64.powi(round_pos);
+    let rounded = (x * factor).round() / factor;
+    let frac_digits = round_pos.max(0) as usize;
+    let mut s = format!("{:.*}", frac_digits, rounded);
+    // Trim to min_sig if there are excess trailing zeros.
+    if s.contains('.') {
+        let significant = |t: &str| {
+            t.chars()
+                .filter(|c| c.is_ascii_digit())
+                .skip_while(|c| *c == '0')
+                .count()
+        };
+        while s.ends_with('0') && significant(&s) as u32 > min_sig {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    s
+}
+
+fn group_integer(int_part: &str, grouping: &Value) -> String {
+    let enabled = !matches!(grouping, Value::Bool(false));
+    let min2 = matches!(grouping, Value::Str(s) if &**s == "min2");
+    if !enabled || int_part.len() < 4 || (min2 && int_part.len() < 5) {
+        return int_part.to_string();
+    }
+    let bytes = int_part.as_bytes();
+    let mut out = String::new();
+    let n = bytes.len();
+    for (idx, b) in bytes.iter().enumerate() {
+        if idx > 0 && (n - idx) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
+    let style = get_str(o, "__nf_style");
+    let mut value = x;
+    if style == "percent" {
+        value *= 100.0;
+    }
+    let negative = value.is_sign_negative() && value != 0.0;
+    let mag = format_magnitude(value.abs(), o);
+    let (int_part, frac_part) = match mag.split_once('.') {
+        Some((a, b)) => (a.to_string(), Some(b.to_string())),
+        None => (mag.clone(), None),
+    };
+    let grouping = o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto"));
+    let grouped = group_integer(&int_part, &grouping);
+    let mut num = match frac_part {
+        Some(f) => format!("{grouped}.{f}"),
+        None => grouped,
+    };
+
+    // Sign display.
+    let sign_display = get_str(o, "__nf_signdisplay");
+    let is_zero = value == 0.0;
+    let sign = match sign_display.as_str() {
+        "never" => "",
+        "always" => {
+            if negative {
+                "-"
+            } else {
+                "+"
+            }
+        }
+        "exceptZero" => {
+            if is_zero {
+                ""
+            } else if negative {
+                "-"
+            } else {
+                "+"
+            }
+        }
+        "negative" => {
+            if negative && !is_zero {
+                "-"
+            } else {
+                ""
+            }
+        }
+        _ => {
+            if negative {
+                "-"
+            } else {
+                ""
+            }
+        }
+    };
+
+    // Style wrapping.
+    match style.as_str() {
+        "percent" => {
+            num = format!("{sign}{num}%");
+        }
+        "currency" => {
+            let code = get_str(o, "__nf_currency");
+            let disp = get_str(o, "__nf_currencydisplay");
+            let sym = currency_symbol(&code, &disp);
+            num = format!("{sign}{sym}{num}");
+        }
+        "unit" => {
+            let unit = get_str(o, "__nf_unit");
+            let disp = get_str(o, "__nf_unitdisplay");
+            num = format!("{sign}{}", unit_wrap(&num, &unit, &disp));
+        }
+        _ => {
+            num = format!("{sign}{num}");
+        }
+    }
+    let _ = i;
+    num
+}
+
+fn currency_symbol(code: &str, display: &str) -> String {
+    if display == "code" {
+        return format!("{code}\u{00a0}");
+    }
+    let sym = match code {
+        "USD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        "CNY" => "CN¥",
+        "AUD" => "A$",
+        "CAD" => "CA$",
+        _ => return format!("{code}\u{00a0}"),
+    };
+    sym.to_string()
+}
+
+fn unit_short_name(u: &str) -> Option<&'static str> {
+    Some(match u {
+        "kilometer-per-hour" => "km/h",
+        "meter" => "m",
+        "kilometer" => "km",
+        "centimeter" => "cm",
+        "percent" => "%",
+        "liter" => "L",
+        "kilobyte" => "kB",
+        "megabyte" => "MB",
+        "celsius" => "°C",
+        "fahrenheit" => "°F",
+        _ => return None,
+    })
+}
+
+fn unit_wrap(num: &str, unit: &str, display: &str) -> String {
+    if display == "long" {
+        return format!("{num} {unit}");
+    }
+    match unit_short_name(unit) {
+        Some(n) => format!("{num} {n}"),
+        None => format!("{num} {unit}"),
+    }
+}
+
+fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value> {
+    let o = instance(i, this)?;
+    let n = to_intl_number(i, x)?;
+    Ok(Value::from_string(assemble_number(i, &o, n)))
+}
+
+fn to_intl_number(i: &mut Interp, x: &Value) -> Result<f64, Value> {
+    // ToIntlMathematicalValue — we approximate with ToNumber (BigInt handled as its value).
+    match x {
+        Value::BigInt(b) => Ok(*b as f64),
+        _ => ab(i.to_number(x)),
+    }
+}
+
+fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value> {
+    let o = instance(i, this)?;
+    let n = to_intl_number(i, x)?;
+    let whole = assemble_number(i, &o, n);
+    // A coarse part breakdown (integer/decimal/fraction/literal). Good enough for many tests.
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut cur_int = String::new();
+    let mut seen_dot = false;
+    let mut cur_frac = String::new();
+    for c in whole.chars() {
+        if c.is_ascii_digit() {
+            if seen_dot {
+                cur_frac.push(c);
+            } else {
+                cur_int.push(c);
+            }
+        } else if c == '.' {
+            seen_dot = true;
+        }
+    }
+    if !cur_int.is_empty() {
+        parts.push(("integer".to_string(), cur_int));
+    }
+    if seen_dot {
+        parts.push(("decimal".to_string(), ".".to_string()));
+        parts.push(("fraction".to_string(), cur_frac));
+    }
+    let arr: Vec<Value> = parts
+        .into_iter()
+        .map(|(t, v)| {
+            let ob = i.new_object();
+            set_builtin(&ob, "type", Value::from_string(t));
+            set_builtin(&ob, "value", Value::from_string(v));
+            Value::Obj(ob)
+        })
+        .collect();
+    Ok(i.make_array(arr))
+}
+
+fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let o = instance(i, &this)?;
+    let res = i.new_object();
+    let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
+        if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {
+            set_builtin(res, k, v);
+        }
+        let _ = i;
+    };
+    put(i, &res, "locale", "__nf_locale");
+    put(i, &res, "numberingSystem", "__nf_nu");
+    put(i, &res, "style", "__nf_style");
+    put(i, &res, "currency", "__nf_currency");
+    put(i, &res, "currencyDisplay", "__nf_currencydisplay");
+    put(i, &res, "currencySign", "__nf_currencysign");
+    put(i, &res, "unit", "__nf_unit");
+    put(i, &res, "unitDisplay", "__nf_unitdisplay");
+    put(i, &res, "minimumIntegerDigits", "__nf_minint");
+    if o.borrow().props.contains("__nf_minsig") {
+        put(i, &res, "minimumSignificantDigits", "__nf_minsig");
+        put(i, &res, "maximumSignificantDigits", "__nf_maxsig");
+    } else {
+        put(i, &res, "minimumFractionDigits", "__nf_minfrac");
+        put(i, &res, "maximumFractionDigits", "__nf_maxfrac");
+    }
+    set_builtin(&res, "useGrouping", o.borrow().props.get("__nf_grouping").map(|p| p.value.clone()).unwrap_or(Value::str("auto")));
+    put(i, &res, "notation", "__nf_notation");
+    put(i, &res, "signDisplay", "__nf_signdisplay");
+    put(i, &res, "roundingMode", "__nf_roundingmode");
+    Ok(Value::Obj(res))
+}
