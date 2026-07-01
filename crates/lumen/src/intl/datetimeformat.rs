@@ -248,15 +248,18 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         "indian", "islamic-civil", "islamic-tbla", "islamic-umalqura", "iso8601", "japanese",
         "persian", "roc", "islamicc",
     ];
-    let calendar = calendar.map(|c| {
+    // Resolve a calendar VALUE: islamic/islamic-rgsa → islamic-civil, an available id is kept, any
+    // other (unsupported) value is None so it is ignored (the -u-ca extension, then gregory, apply).
+    let resolve_cal = |c: &str| -> Option<String> {
         if c == "islamic" || c == "islamic-rgsa" {
-            "islamic-civil".to_string()
-        } else if AVAILABLE_CALENDARS.contains(&c.as_str()) {
-            c
+            Some("islamic-civil".to_string())
+        } else if AVAILABLE_CALENDARS.contains(&c) {
+            Some(c.to_string())
         } else {
-            "gregory".to_string()
+            None
         }
-    });
+    };
+    let calendar = calendar.and_then(|c| resolve_cal(&c));
     let numbering = get_option(i, &options, "numberingSystem", &[], None)?;
     if let Some(ns) = &numbering {
         if !valid_type_id(ns) {
@@ -362,25 +365,27 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));
     let locale_lang = resolved_locale.split('-').next().unwrap_or("").to_string();
-    // The calendar comes from the option, else the locale's -u-ca- extension (canonicalized, with the
-    // same islamic/available fallback), else gregory.
-    let ca_ext = resolved.keywords.iter().find(|(k, _)| k == "ca").map(|(_, v)| {
+    // ResolveLocale for the `ca` key: the locale's -u-ca- extension value (if supported) is used and
+    // reflected in the resolved locale, unless a supported calendar option overrides it with a
+    // different value (then the reflection is dropped).
+    let ca_ext = resolved.keywords.iter().find(|(k, _)| k == "ca").and_then(|(_, v)| {
         let lc = v.to_lowercase();
-        let c = crate::intl::tags::canonical_ca(&lc).unwrap_or(lc);
-        if c == "islamic" || c == "islamic-rgsa" {
-            "islamic-civil".to_string()
-        } else if AVAILABLE_CALENDARS.contains(&c.as_str()) {
-            c
-        } else {
-            "gregory".to_string()
-        }
+        resolve_cal(&crate::intl::tags::canonical_ca(&lc).unwrap_or(lc))
     });
+    let mut ca_addition = ca_ext.clone();
+    if let Some(opt) = &calendar {
+        if ca_ext.as_ref() != Some(opt) {
+            ca_addition = None;
+        }
+    }
     let eff_cal = calendar.clone().or(ca_ext).unwrap_or_else(|| "gregory".to_string());
-    // Reflect a non-gregory -u-ca- in the resolved locale (only when it came from the locale).
-    let resolved_locale = if calendar.is_none() && eff_cal != "gregory" && !resolved_locale.contains("-u-") {
-        format!("{resolved_locale}-u-ca-{eff_cal}")
-    } else {
-        resolved_locale
+    // Reflect the surviving -u-ca- addition (inserting it before any -u-nu- so keys stay sorted).
+    let resolved_locale = match ca_addition {
+        Some(ca) if resolved_locale.contains("-u-nu-") => {
+            resolved_locale.replacen("-u-nu-", &format!("-u-ca-{ca}-nu-"), 1)
+        }
+        Some(ca) => format!("{resolved_locale}-u-ca-{ca}"),
+        None => resolved_locale,
     };
     set_builtin(&obj, "__dtf_locale", Value::from_string(resolved_locale));
     set_builtin(&obj, "__dtf_ca", Value::from_string(eff_cal));
