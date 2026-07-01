@@ -1647,7 +1647,7 @@ fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Val
 }
 /// The `[u-ca=iso8601]` calendar annotation per the `calendarName` option.
 fn cal_suffix(i: &mut Interp, opts: &Value, cal: &str) -> Result<String, Value> {
-    match opt_str(i, opts, "calendarName", "auto")?.as_str() {
+    match opt_enum(i, opts, "calendarName", &["auto", "always", "never", "critical"], "auto")?.as_str() {
         "never" => Ok(String::new()),
         "always" => Ok(format!("[u-ca={cal}]")),
         "critical" => Ok(format!("[!u-ca={cal}]")),
@@ -2643,6 +2643,14 @@ fn round_opts(arg0: &Value) -> (Value, Option<String>) {
     }
 }
 
+/// GetOption(string) validated against an explicit value list (RangeError on a value not in it).
+fn opt_enum(i: &mut Interp, opts: &Value, key: &str, values: &[&str], default: &str) -> Result<String, Value> {
+    let s = opt_str(i, opts, key, default)?;
+    if !values.contains(&s.as_str()) {
+        return Err(i.make_error("RangeError", format!("invalid {key}: {s}")));
+    }
+    Ok(s)
+}
 fn opt_str(i: &mut Interp, opts: &Value, key: &str, default: &str) -> Result<String, Value> {
     match opts {
         Value::Undefined => Ok(default.to_string()),
