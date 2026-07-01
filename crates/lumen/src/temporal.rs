@@ -1567,11 +1567,19 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let f = arg(a, 0);
-        let year = field_int(i, &f, "year", d.year)?;
-        let month = field_int(i, &f, "month", d.month as i64)?;
-        let day = field_int(i, &f, "day", d.day as i64)?;
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
+        let cal = cal_of(i, &t);
         let ovf = to_overflow(i, &arg(a, 1))?;
-        let nd = build_date_ovf(i, year, month, day, ovf)?;
+        let nd = if &*cal == "iso8601" {
+            let year = field_int(i, &f, "year", d.year)?;
+            let month = field_int(i, &f, "month", d.month as i64)?;
+            let day = field_int(i, &f, "day", d.day as i64)?;
+            build_date_ovf(i, year, month, day, ovf)?
+        } else {
+            with_cal_date(i, &cal, d, &f, ovf)?
+        };
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -2740,6 +2748,51 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
     let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
     Ok((year, month, day))
 }
+fn setm(o: &Gc, k: &str, v: Value) {
+    o.borrow_mut()
+        .props
+        .insert(k.to_string(), Property::data(v, true, true, true));
+}
+
+/// `with()` for a non-ISO calendar: merge the receiver's calendar fields with the partial input
+/// (CalendarMergeFields — a provided year/era or month/monthCode replaces the receiver's whole
+/// group), then resolve back to an ISO date.
+fn with_cal_date(i: &mut Interp, cal: &str, d: IsoDate, f: &Value, ovf: Overflow) -> Result<IsoDate, Value> {
+    let (cy, cm, cd, ..) = cal_fields(cal, d);
+    let (cera, cery) = cal_era(cal, d);
+    let present = |i: &mut Interp, k: &str| -> Result<bool, Value> {
+        Ok(!matches!(getm(i, f, k)?, Value::Undefined))
+    };
+    let has_year = present(i, "year")? || present(i, "era")? || present(i, "eraYear")?;
+    let has_month = present(i, "month")? || present(i, "monthCode")?;
+    let has_day = present(i, "day")?;
+    let merged = i.new_object();
+    if !has_year {
+        setm(&merged, "year", Value::Num(cy as f64));
+        if let Some(e) = cera {
+            setm(&merged, "era", Value::str(e));
+        }
+        if let Some(ey) = cery {
+            setm(&merged, "eraYear", Value::Num(ey as f64));
+        }
+    }
+    if !has_month {
+        setm(&merged, "month", Value::Num(cm as f64));
+    }
+    if !has_day {
+        setm(&merged, "day", Value::Num(cd as f64));
+    }
+    // Overlay every field the caller actually supplied.
+    for k in ["year", "era", "eraYear", "month", "monthCode", "day"] {
+        let v = getm(i, f, k)?;
+        if !matches!(v, Value::Undefined) {
+            setm(&merged, k, v);
+        }
+    }
+    let raw = read_date_raw_cal(i, &Value::Obj(merged), cal)?;
+    regulate_date(i, raw, ovf)
+}
+
 /// Regulate raw year/month/day into a valid ISO date per `overflow`.
 fn regulate_date(
     i: &Interp,
