@@ -463,10 +463,8 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
         }
         "indian" => (Some("shaka"), Some(from_indian(d).0)),
         "hebrew" => (Some("am"), Some(hebrew_from_iso(d).0)),
-        "persian" => {
-            let y = from_persian(d).0;
-            if y >= 1 { (Some("ap"), Some(y)) } else { (Some("bp"), Some(1 - y)) }
-        }
+        // Persian has a single proleptic era "ap"; eraYear equals the year even when non-positive.
+        "persian" => (Some("ap"), Some(from_persian(d).0)),
         _ => (None, None),
     }
 }
@@ -780,10 +778,351 @@ fn to_persian(py: i64, m: i64, d: i64) -> IsoDate {
     IsoDate { year: yy, month: mm, day: dd }
 }
 
+// ===== Astronomy (from scratch) for the Chinese/Dangi lunisolar calendars ======================
+// Universal-time moments are real numbers of days from 1970-01-01T00:00Z (an "epoch-day moment").
+const MEAN_TROPICAL_YEAR: f64 = 365.242189;
+const MEAN_SYNODIC_MONTH: f64 = 29.530588861;
+
+fn julian_centuries_tt(ed: f64) -> f64 {
+    let (gy, _, _) = civil_from_days(ed.floor() as i64);
+    let jd_tt = ed + 2440587.5 + delta_t_seconds(gy) / 86400.0;
+    (jd_tt - 2451545.0) / 36525.0
+}
+/// The sun's apparent longitude (degrees) at a universal-time moment (Meeus/Calendrical-Calc series).
+fn solar_longitude(ed: f64) -> f64 {
+    let c = julian_centuries_tt(ed);
+    const COEF: [f64; 49] = [
+        403406., 195207., 119433., 112392., 3891., 2819., 1721., 660., 350., 334., 314., 268.,
+        242., 234., 158., 132., 129., 114., 99., 93., 86., 78., 72., 68., 64., 46., 38., 37., 32.,
+        29., 28., 27., 27., 25., 24., 21., 21., 20., 18., 17., 14., 13., 13., 13., 12., 10., 10.,
+        10., 10.,
+    ];
+    const MULT: [f64; 49] = [
+        0.9287892, 35999.1376958, 35999.4089666, 35998.7287385, 71998.20261, 71998.4403,
+        36000.35726, 71997.4812, 32964.4678, -19.4410, 445267.1117, 45036.8840, 3.1008,
+        22518.4434, -19.9739, 65928.9345, 9038.0293, 3034.7684, 33718.148, 3034.448, -2280.773,
+        29929.992, 31556.493, 149.588, 9037.750, 107997.405, -4444.176, 151.771, 67555.316,
+        31556.080, -4561.540, 107996.706, 1221.655, 62894.167, 31437.369, 14578.298, -31931.757,
+        34777.243, 1221.999, 62894.511, -4442.039, 107997.909, 119.066, 16859.071, -4.578,
+        26895.292, -39.127, 12297.536, 90073.778,
+    ];
+    const ADD: [f64; 49] = [
+        270.54861, 340.19128, 63.91854, 331.26220, 317.843, 86.631, 240.052, 310.26, 247.23,
+        260.87, 297.82, 343.14, 166.79, 81.53, 3.50, 132.75, 182.95, 162.03, 29.8, 266.4, 249.2,
+        157.6, 257.8, 185.1, 69.9, 8.0, 197.1, 250.4, 65.3, 162.7, 341.5, 291.6, 98.5, 146.7,
+        110.0, 5.2, 342.6, 230.9, 256.1, 45.3, 242.9, 115.2, 151.8, 285.3, 53.3, 126.6, 205.7,
+        85.9, 146.1,
+    ];
+    let mut sum = 0.0;
+    for i in 0..49 {
+        sum += COEF[i] * (ADD[i] + MULT[i] * c).to_radians().sin();
+    }
+    let lambda = 282.7771834 + 36000.76953744 * c + 0.000005729577951308232 * sum;
+    let aberration = 0.0000974 * (177.63 + 35999.01848 * c).to_radians().cos() - 0.005575;
+    let a = 124.90 - 1934.134 * c + 0.002063 * c * c;
+    let b = 201.11 + 72001.5377 * c + 0.00057 * c * c;
+    let nutation = -0.004778 * a.to_radians().sin() - 0.0003667 * b.to_radians().sin();
+    (lambda + aberration + nutation).rem_euclid(360.0)
+}
+/// The universal-time moment of the `n`th new moon after the epoch new moon (Meeus, ch. 49).
+fn nth_new_moon(n: i64) -> f64 {
+    let k = n as f64;
+    let t = k / 1236.85;
+    let jde = 2451550.09766 + MEAN_SYNODIC_MONTH * k + 0.00015437 * t * t
+        - 0.000000150 * t.powi(3) + 0.00000000073 * t.powi(4);
+    let e = 1.0 - 0.002516 * t - 0.0000074 * t * t;
+    let m = (2.5534 + 29.10535670 * k - 0.0000014 * t * t - 0.00000011 * t.powi(3)).to_radians();
+    let mp = (201.5643 + 385.81693528 * k + 0.0107582 * t * t + 0.00001238 * t.powi(3)
+        - 0.000000058 * t.powi(4))
+    .to_radians();
+    let f = (160.7108 + 390.67050284 * k - 0.0016118 * t * t - 0.00000227 * t.powi(3)
+        + 0.000000011 * t.powi(4))
+    .to_radians();
+    let om = (124.7746 - 1.56375588 * k + 0.0020672 * t * t + 0.00000215 * t.powi(3)).to_radians();
+    let corr = -0.40720 * mp.sin() + 0.17241 * e * m.sin() + 0.01608 * (2.0 * mp).sin()
+        + 0.01039 * (2.0 * f).sin() + 0.00739 * e * (mp - m).sin() - 0.00514 * e * (mp + m).sin()
+        + 0.00208 * e * e * (2.0 * m).sin() - 0.00111 * (mp - 2.0 * f).sin()
+        - 0.00057 * (mp + 2.0 * f).sin() + 0.00056 * e * (2.0 * mp + m).sin()
+        - 0.00042 * (3.0 * mp).sin() + 0.00042 * e * (m + 2.0 * f).sin()
+        + 0.00038 * e * (m - 2.0 * f).sin() - 0.00024 * e * (2.0 * mp - m).sin()
+        - 0.00017 * om.sin() - 0.00007 * (mp + 2.0 * m).sin() + 0.00004 * (2.0 * mp - 2.0 * f).sin()
+        + 0.00004 * (3.0 * m).sin() + 0.00003 * (mp + m - 2.0 * f).sin()
+        + 0.00003 * (2.0 * mp + 2.0 * f).sin() - 0.00003 * (mp + m + 2.0 * f).sin()
+        + 0.00003 * (mp - m + 2.0 * f).sin() - 0.00002 * (mp - m - 2.0 * f).sin()
+        - 0.00002 * (3.0 * mp + m).sin() + 0.00002 * (4.0 * mp).sin();
+    const ADDL: [(f64, f64, f64); 14] = [
+        (0.000325, 299.77, 0.107408), (0.000165, 251.88, 0.016321), (0.000164, 251.83, 26.651886),
+        (0.000126, 349.42, 36.412478), (0.000110, 84.66, 18.206239), (0.000062, 141.74, 53.303771),
+        (0.000060, 207.14, 2.453732), (0.000056, 154.84, 7.306860), (0.000047, 34.52, 27.261239),
+        (0.000042, 207.19, 0.121824), (0.000040, 291.34, 1.844379), (0.000037, 161.72, 24.198154),
+        (0.000035, 239.56, 25.513099), (0.000023, 331.55, 3.592518),
+    ];
+    let mut add = 0.0;
+    for (idx, (amp, c0, c1)) in ADDL.iter().enumerate() {
+        let arg = if idx == 0 { c0 + c1 * k - 0.009173 * t * t } else { c0 + c1 * k };
+        add += amp * arg.to_radians().sin();
+    }
+    let jde_new = jde + corr + add; // dynamical time
+    let approx_ed = jde_new - 2440587.5;
+    let (gy, _, _) = civil_from_days(approx_ed.floor() as i64);
+    jde_new - delta_t_seconds(gy) / 86400.0 - 2440587.5
+}
+/// The last new moon strictly before universal moment `ed`.
+fn new_moon_before(ed: f64) -> f64 {
+    let n0 = ((ed + 2440587.5 - 2451550.09766) / MEAN_SYNODIC_MONTH).round() as i64;
+    let mut n = n0 + 2;
+    while nth_new_moon(n) >= ed {
+        n -= 1;
+    }
+    nth_new_moon(n)
+}
+/// The first new moon at or after universal moment `ed`.
+fn new_moon_at_or_after(ed: f64) -> f64 {
+    let n0 = ((ed + 2440587.5 - 2451550.09766) / MEAN_SYNODIC_MONTH).round() as i64;
+    let mut n = n0 - 2;
+    while nth_new_moon(n) < ed {
+        n += 1;
+    }
+    nth_new_moon(n)
+}
+fn estimate_prior_solar_longitude(lambda: f64, t: f64) -> f64 {
+    let rate = MEAN_TROPICAL_YEAR / 360.0;
+    let tau = t - rate * (solar_longitude(t) - lambda).rem_euclid(360.0);
+    let delta = (solar_longitude(tau) - lambda + 180.0).rem_euclid(360.0) - 180.0;
+    t.min(tau - rate * delta)
+}
+
+// --- Chinese/Dangi calendar (Beijing / Seoul local time) ---
+/// UTC offset (fraction of a day) for the calendar's reference meridian in a Gregorian year.
+fn china_zone(cal: &str, gy: i64) -> f64 {
+    if cal == "dangi" {
+        // Korea: +8:30 before 1912, +8:00 1912-1954 & 1961-, +8:30 1954-1961 (approx per CLDR).
+        if gy < 1908 { 3809.0 / 450.0 / 24.0 } else { 9.0 / 24.0 }
+    } else if gy < 1929 {
+        1397.0 / 180.0 / 24.0
+    } else {
+        8.0 / 24.0
+    }
+}
+fn midnight_china(cal: &str, day: i64) -> f64 {
+    let (gy, _, _) = civil_from_days(day);
+    day as f64 - china_zone(cal, gy)
+}
+fn china_day_of(cal: &str, ut: f64) -> i64 {
+    let (gy, _, _) = civil_from_days(ut.floor() as i64);
+    (ut + china_zone(cal, gy)).floor() as i64
+}
+/// The index (1..12) of the major solar term (zhongqi) in effect at a Beijing day's midnight.
+fn current_major_solar_term(cal: &str, day: i64) -> i64 {
+    let s = solar_longitude(midnight_china(cal, day));
+    (2 + (s / 30.0).floor() as i64 - 1).rem_euclid(12) + 1
+}
+fn china_new_moon_before(cal: &str, day: i64) -> i64 {
+    china_day_of(cal, new_moon_before(midnight_china(cal, day)))
+}
+fn china_new_moon_on_or_after(cal: &str, day: i64) -> i64 {
+    china_day_of(cal, new_moon_at_or_after(midnight_china(cal, day)))
+}
+/// Whether the month beginning at new-moon day `m` contains no major solar term (→ a leap month).
+fn china_no_major_solar_term(cal: &str, m: i64) -> bool {
+    current_major_solar_term(cal, m) == current_major_solar_term(cal, china_new_moon_on_or_after(cal, m + 1))
+}
+fn china_winter_solstice_before(cal: &str, day: i64) -> i64 {
+    let approx = estimate_prior_solar_longitude(270.0, midnight_china(cal, day + 1));
+    let mut d = approx.floor() as i64 - 1;
+    while solar_longitude(midnight_china(cal, d + 1)) <= 270.0 {
+        d += 1;
+    }
+    d
+}
+fn china_prior_leap_month(cal: &str, m_prime: i64, m: i64) -> bool {
+    m >= m_prime
+        && (china_no_major_solar_term(cal, m)
+            || china_prior_leap_month(cal, m_prime, china_new_moon_before(cal, m)))
+}
+fn china_new_year_in_sui(cal: &str, day: i64) -> i64 {
+    let s1 = china_winter_solstice_before(cal, day);
+    let s2 = china_winter_solstice_before(cal, s1 + 370);
+    let m12 = china_new_moon_on_or_after(cal, s1 + 1);
+    let m13 = china_new_moon_on_or_after(cal, m12 + 1);
+    let next_m11 = china_new_moon_before(cal, s2 + 1);
+    if ((next_m11 - m12) as f64 / MEAN_SYNODIC_MONTH).round() as i64 == 12
+        && (china_no_major_solar_term(cal, m12) || china_no_major_solar_term(cal, m13))
+    {
+        china_new_moon_on_or_after(cal, m13 + 1)
+    } else {
+        m13
+    }
+}
+fn china_new_year_before(cal: &str, day: i64) -> i64 {
+    let ny = china_new_year_in_sui(cal, day);
+    if day >= ny {
+        ny
+    } else {
+        china_new_year_in_sui(cal, day - 180)
+    }
+}
+/// (year, ordinal-month, month-number, leap-month?, day) for an ISO date in Chinese/Dangi.
+/// `ordinal` is the 1-based position in the year (1..13); `month-number` is the 1..12 name shared by
+/// a leap month with its predecessor (the leap month adds an "L" to its monthCode).
+fn china_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, bool, i64) {
+    let day = epoch_days(iso);
+    let s1 = china_winter_solstice_before(cal, day);
+    let s2 = china_winter_solstice_before(cal, s1 + 370);
+    let m12 = china_new_moon_on_or_after(cal, s1 + 1);
+    let next_m11 = china_new_moon_before(cal, s2 + 1);
+    let leap_year = ((next_m11 - m12) as f64 / MEAN_SYNODIC_MONTH).round() as i64 == 12;
+    let m = china_new_moon_before(cal, day + 1);
+    let elapsed = ((m - m12) as f64 / MEAN_SYNODIC_MONTH).round() as i64;
+    let adj = if leap_year && china_prior_leap_month(cal, m12, m) { 1 } else { 0 };
+    let month_num = (elapsed - adj - 1).rem_euclid(12) + 1;
+    let leap_month = leap_year
+        && china_no_major_solar_term(cal, m)
+        && !china_prior_leap_month(cal, m12, china_new_moon_before(cal, m));
+    let ny = china_new_year_before(cal, day);
+    let ordinal = ((m - ny) as f64 / MEAN_SYNODIC_MONTH).round() as i64 + 1;
+    // Temporal reports the Chinese year as the related Gregorian year (the Gregorian year the sui
+    // begins in), not the continuous count.
+    let (year, _, _) = civil_from_days(ny);
+    (year, ordinal, month_num, leap_month, day - m + 1)
+}
+
+/// The epoch-day of Chinese New Year for a given Chinese year.
+fn china_new_year_of(cal: &str, year: i64) -> i64 {
+    // The Chinese year number IS the Gregorian year its CNY falls in.
+    china_new_year_before(cal, days_from_civil(year, 12, 31))
+}
+/// Months in a Chinese year (12, or 13 in a leap year).
+fn china_months_in_year(cal: &str, year: i64) -> i64 {
+    let ny = china_new_year_of(cal, year);
+    let ny2 = china_new_year_of(cal, year + 1);
+    ((ny2 - ny) as f64 / MEAN_SYNODIC_MONTH).round() as i64
+}
+/// The new-moon start-day of the month with (month-number, leap?) in a Chinese year, if it exists.
+fn china_month_start(cal: &str, year: i64, num: i64, leap: bool) -> Option<i64> {
+    let mut m = china_new_year_of(cal, year);
+    for _ in 0..14 {
+        let (y, mo, d) = civil_from_days(m);
+        let f = china_fields(cal, IsoDate { year: y, month: mo, day: d });
+        if f.2 == num && f.3 == leap {
+            return Some(m);
+        }
+        m = china_new_moon_on_or_after(cal, m + 1);
+    }
+    None
+}
+fn china_to_iso(cal: &str, year: i64, num: i64, leap: bool, day: i64) -> Option<IsoDate> {
+    let start = china_month_start(cal, year, num, leap)?;
+    let (y, mo, d) = civil_from_days(start + day - 1);
+    Some(IsoDate { year: y, month: mo, day: d })
+}
+/// The length of the Chinese month starting at new-moon day `start`.
+fn china_month_len_at(cal: &str, start: i64) -> i64 {
+    china_new_moon_on_or_after(cal, start + 1) - start
+}
+/// The new-moon start-day of the ordinal-th month (1-based) of a Chinese year.
+fn china_ord_start(cal: &str, year: i64, ordinal: i64) -> i64 {
+    let mut m = china_new_year_of(cal, year);
+    for _ in 1..ordinal {
+        m = china_new_moon_on_or_after(cal, m + 1);
+    }
+    m
+}
+fn china_ord_to_iso(cal: &str, year: i64, ordinal: i64, day: i64) -> IsoDate {
+    let (y, mo, d) = civil_from_days(china_ord_start(cal, year, ordinal) + day - 1);
+    IsoDate { year: y, month: mo, day: d }
+}
+fn china_ord_month_len(cal: &str, year: i64, ordinal: i64) -> i64 {
+    china_month_len_at(cal, china_ord_start(cal, year, ordinal))
+}
+/// The ordinal position (1-based) of the month starting at new-moon day `start` in a Chinese year.
+fn china_ord_of_start(cal: &str, year: i64, start: i64) -> i64 {
+    let ny = china_new_year_of(cal, year);
+    ((start - ny) as f64 / MEAN_SYNODIC_MONTH).round() as i64 + 1
+}
+/// The ordinal of the month (month-number, leap?) in `year`, constraining a missing leap month to
+/// its plain counterpart. Returns (leap-existed?, ordinal).
+fn china_resolve_month_ord(cal: &str, year: i64, num: i64, leap: bool) -> (bool, i64) {
+    if let Some(s) = china_month_start(cal, year, num, leap) {
+        (true, china_ord_of_start(cal, year, s))
+    } else {
+        let s = china_month_start(cal, year, num, false).unwrap();
+        (false, china_ord_of_start(cal, year, s))
+    }
+}
+/// Advance an ordinal month by `k` (signed) across Chinese years of varying length.
+fn china_advance_ord(cal: &str, year: i64, ord: i64, k: i64) -> (i64, i64) {
+    let (mut y, mut m) = (year, ord);
+    if k >= 0 {
+        for _ in 0..k {
+            m += 1;
+            if m > china_months_in_year(cal, y) {
+                m = 1;
+                y += 1;
+            }
+        }
+    } else {
+        for _ in 0..(-k) {
+            m -= 1;
+            if m < 1 {
+                y -= 1;
+                m = china_months_in_year(cal, y);
+            }
+        }
+    }
+    (y, m)
+}
+/// CalendarDateAdd for Chinese/Dangi: add years (preserving the monthCode, constraining an absent
+/// leap month), then months (by ordinal position), then regulate the day, then add weeks/days.
+fn china_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+    let (year, _ord, num, leap, day_of) = china_fields(cal, d);
+    let ny = year + sign * dur.years;
+    let (leap_ok, ord0) = china_resolve_month_ord(cal, ny, num, leap);
+    if ovf == Overflow::Reject && !leap_ok {
+        return Err(i.make_error("RangeError", "leap month does not exist in the target year"));
+    }
+    let (fy, fm) = china_advance_ord(cal, ny, ord0, sign * dur.months);
+    let start = china_ord_start(cal, fy, fm);
+    let mlen = china_month_len_at(cal, start);
+    if ovf == Overflow::Reject && day_of > mlen {
+        return Err(i.make_error("RangeError", "day is out of range in the target month"));
+    }
+    let dd = day_of.min(mlen);
+    let z = start + dd - 1 + sign * (dur.weeks * 7 + dur.days);
+    let (y, m, day) = civil_from_days(z);
+    Ok(IsoDate { year: y, month: m, day })
+}
+/// Constrain-only Chinese/Dangi CalendarDateAdd (the same steps as `china_add`, never erroring).
+fn china_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
+    let (year, _ord, num, leap, day_of) = china_fields(cal, d);
+    let ny = year + sign * dur.years;
+    let (_leap_ok, ord0) = china_resolve_month_ord(cal, ny, num, leap);
+    let (fy, fm) = china_advance_ord(cal, ny, ord0, sign * dur.months);
+    let start = china_ord_start(cal, fy, fm);
+    let dd = day_of.min(china_month_len_at(cal, start));
+    let z = start + dd - 1 + sign * (dur.weeks * 7 + dur.days);
+    let (y, m, day) = civil_from_days(z);
+    IsoDate { year: y, month: m, day }
+}
+/// The Chinese monthCode for a (month-number, leap?): "M04" or "M04L".
+fn china_month_code(num: i64, leap: bool) -> String {
+    if leap {
+        format!("M{num:02}L")
+    } else {
+        format!("M{num:02}")
+    }
+}
+
 /// Whether a calendar has its own month structure (not the Gregorian months), so date arithmetic
 /// must add years/months in the calendar's own terms.
 fn is_month_structure(cal: &str) -> bool {
-    is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew" || cal == "persian"
+    is_13month(cal)
+        || is_islamic(cal)
+        || cal == "indian"
+        || cal == "hebrew"
+        || cal == "persian"
+        || cal == "chinese"
+        || cal == "dangi"
 }
 /// The ISO date for a month-structure calendar's (year, month, day).
 fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
@@ -795,6 +1134,8 @@ fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
         hebrew_to_iso(y, m, d)
     } else if cal == "persian" {
         to_persian(y, m, d)
+    } else if cal == "chinese" || cal == "dangi" {
+        china_ord_to_iso(cal, y, m, d)
     } else {
         to_indian(y, m, d)
     }
@@ -815,6 +1156,8 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
         hebrew_month_len(y, m)
     } else if cal == "persian" {
         persian_month_len(y, m)
+    } else if cal == "chinese" || cal == "dangi" {
+        china_ord_month_len(cal, y, m)
     } else {
         indian_month_len(m, is_leap(y + 78))
     }
@@ -822,6 +1165,9 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
 /// CalendarDateAdd for a month-structure calendar: add years/months in the calendar (clamping the
 /// day to the target month under `constrain`, or rejecting when it overflows), then weeks/days.
 fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+    if cal == "chinese" || cal == "dangi" {
+        return china_add(i, cal, d, dur, sign, ovf);
+    }
     if ovf == Overflow::Reject {
         let f = cal_fields(cal, d);
         let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
@@ -837,6 +1183,8 @@ fn cal_add(i: &Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: 
 fn cal_months_in_year(cal: &str, y: i64) -> i64 {
     if cal == "hebrew" {
         hebrew_months_in_year(y)
+    } else if cal == "chinese" || cal == "dangi" {
+        china_months_in_year(cal, y)
     } else if is_13month(cal) {
         13
     } else {
@@ -848,11 +1196,11 @@ fn cal_months_in_year(cal: &str, y: i64) -> i64 {
 fn cal_month_advance(cal: &str, lo: IsoDate, k: i64) -> (i64, i64) {
     let f = cal_fields(cal, lo);
     let (ly, lm) = (f.0, f.1);
-    if cal == "hebrew" {
+    if cal == "hebrew" || cal == "chinese" || cal == "dangi" {
         let (mut y, mut m) = (ly, lm);
         for _ in 0..k {
             m += 1;
-            if m > hebrew_months_in_year(y) {
+            if m > cal_months_in_year(cal, y) {
                 m = 1;
                 y += 1;
             }
@@ -867,6 +1215,10 @@ fn cal_month_advance(cal: &str, lo: IsoDate, k: i64) -> (i64, i64) {
 
 /// Constrain-only calendar add (clamps the day to the target month).
 fn cal_add_c(cal: &str, d: IsoDate, dur: IsoDuration, sign: i64) -> IsoDate {
+    if cal == "chinese" || cal == "dangi" {
+        // Constrain never errors; reuse the reject-free path.
+        return china_add_c(cal, d, dur, sign);
+    }
     let f = cal_fields(cal, d);
     let (cy, cm, cd, mpy) = (f.0, f.1, f.2, f.4);
     let total = cy * mpy + (cm - 1) + sign * (dur.years * mpy + dur.months);
@@ -982,6 +1334,16 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let dim = hebrew_month_len(y, m);
         let doy = (1..m).map(|mm| hebrew_month_len(y, mm)).sum::<i64>() + d;
         (y, m, d, dim, mpy, doy, hebrew_year_len(y), hebrew_leap(y))
+    } else if cal == "chinese" || cal == "dangi" {
+        let (y, ord, _num, _leap, d) = china_fields(cal, iso);
+        let day = epoch_days(iso);
+        let start = china_new_moon_before(cal, day + 1);
+        let dim = china_month_len_at(cal, start);
+        let mpy = china_months_in_year(cal, y);
+        let ny = china_new_year_of(cal, y);
+        let doy = day - ny + 1;
+        let diy = china_new_year_of(cal, y + 1) - ny;
+        (y, ord, d, dim, mpy, doy, diy, mpy == 13)
     } else {
         (
             cal_year_num(cal, iso),
@@ -1002,6 +1364,9 @@ fn cal_month_code(cal: &str, iso: IsoDate) -> String {
     if cal == "hebrew" {
         let (y, m, _) = hebrew_from_iso(iso);
         hebrew_month_code(y, m)
+    } else if cal == "chinese" || cal == "dangi" {
+        let (_, _, num, leap, _) = china_fields(cal, iso);
+        china_month_code(num, leap)
     } else {
         month_code(cal_fields(cal, iso).1 as u8).to_string()
     }
@@ -1018,6 +1383,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         "indian" => from_indian(d).0,
         "hebrew" => hebrew_from_iso(d).0,
         "persian" => from_persian(d).0,
+        "chinese" | "dangi" => china_fields(cal, d).0,
         _ => d.year,
     }
 }
@@ -3048,6 +3414,51 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         let ord = ord.clamp(1, hebrew_months_in_year(hy));
         let day = day.clamp(1, hebrew_month_len(hy, ord));
         let iso = hebrew_to_iso(hy, ord, day);
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
+    // Chinese/Dangi: year is a plain number (no era); the month is an ordinal (1..13) or a monthCode
+    // "M01".."M12" with an optional leap "L" suffix. Resolve to the month's new-moon start day.
+    if cal == "chinese" || cal == "dangi" {
+        let cy = year_opt.ok_or_else(|| i.make_error("TypeError", "year is required"))?;
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        let start = if let Some(code) = &month_code {
+            let body = code
+                .strip_prefix('M')
+                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode"))?;
+            let (digits, leap) = match body.strip_suffix('L') {
+                Some(d) => (d, true),
+                None => (body, false),
+            };
+            if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(i.make_error("RangeError", "invalid monthCode"));
+            }
+            let num: i64 = digits.parse().unwrap();
+            if num < 1 || num > 12 {
+                return Err(i.make_error("RangeError", "invalid monthCode for this calendar"));
+            }
+            let s = match china_month_start(cal, cy, num, leap) {
+                Some(s) => s,
+                // A requested leap month that does not occur this year constrains to the plain month.
+                None if leap => china_month_start(cal, cy, num, false)
+                    .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?,
+                None => return Err(i.make_error("RangeError", "invalid monthCode for this calendar")),
+            };
+            // A supplied ordinal `month` must agree with the monthCode.
+            if let Some(ord) = month {
+                if china_ord_start(cal, cy, ord.clamp(1, china_months_in_year(cal, cy))) != s {
+                    return Err(i.make_error("RangeError", "month and monthCode disagree"));
+                }
+            }
+            s
+        } else {
+            let ord = month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?;
+            let ord = ord.clamp(1, china_months_in_year(cal, cy));
+            china_ord_start(cal, cy, ord)
+        };
+        let dim = china_month_len_at(cal, start);
+        let day = day.clamp(1, dim);
+        let (y, m, dd) = civil_from_days(start + day - 1);
+        let iso = IsoDate { year: y, month: m, day: dd };
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
     // Reconcile month / monthCode ("M" + 2 digits + optional leap "L"; no leap month in ISO/Gregory).
