@@ -244,6 +244,14 @@ fn iso_date_within_limits(d: IsoDate) -> bool {
     let ns = epoch_days(d) as i128 * NS_PER_DAY + NS_PER_DAY / 2;
     ns > -NS_MAX_INSTANT - NS_PER_DAY && ns < NS_MAX_INSTANT + NS_PER_DAY
 }
+/// ISODateTimeWithinLimits: the actual date+time instant must lie within ±(8.64e21 + one day) ns.
+fn iso_datetime_within_limits(d: IsoDate, t: IsoTime) -> bool {
+    if d.year < -271_821 || d.year > 275_760 {
+        return false;
+    }
+    let ns = dt_ns(d, t);
+    ns > -NS_MAX_INSTANT - NS_PER_DAY && ns < NS_MAX_INSTANT + NS_PER_DAY
+}
 /// ISOYearMonthWithinLimits: a (year, month) is representable (month-granularity bounds).
 fn iso_year_month_within_limits(year: i64, month: i64) -> bool {
     if !(-271_821..=275_760).contains(&year) {
@@ -3269,9 +3277,6 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             if !cal_ok(&p.calendar) {
                 return Err(i.make_error("RangeError", "unsupported calendar"));
             }
-            if !date_in_range(d) {
-                return Err(i.make_error("RangeError", "date outside representable range"));
-            }
             let t = p.time.unwrap_or(IsoTime {
                 hour: 0,
                 minute: 0,
@@ -3280,6 +3285,9 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
                 us: 0,
                 ns: 0,
             });
+            if !iso_datetime_within_limits(d, t) {
+                return Err(i.make_error("RangeError", "date-time outside representable range"));
+            }
             Ok((d, t))
         }
         Value::Obj(_) => {
@@ -3288,7 +3296,12 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             let draw = read_date_raw_cal(i, v, &cal)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
-            Ok((regulate_date(i, draw, ovf)?, regulate_time(i, traw, ovf)?))
+            let d = regulate_date(i, draw, ovf)?;
+            let t = regulate_time(i, traw, ovf)?;
+            if !iso_datetime_within_limits(d, t) {
+                return Err(i.make_error("RangeError", "date-time outside representable range"));
+            }
+            Ok((d, t))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDateTime")),
     }
