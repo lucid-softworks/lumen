@@ -816,20 +816,19 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     // compact notation: divide into a K/M/B/T tier and append the compact suffix (English data).
     let mut compact_suffix = String::new();
     let mut compact = false;
-    if notation == "compact" && value.is_finite() && value.abs() >= 1000.0 {
+    if notation == "compact" && value.is_finite() {
         let long = get_str(o, "__nf_compactdisplay") == "long";
-        let (div, short, longw) = if value.abs() >= 1e12 {
-            (1e12, "T", " trillion")
-        } else if value.abs() >= 1e9 {
-            (1e9, "B", " billion")
-        } else if value.abs() >= 1e6 {
-            (1e6, "M", " million")
-        } else {
-            (1e3, "K", " thousand")
-        };
-        value /= div;
-        compact_suffix = if long { longw.to_string() } else { short.to_string() };
-        compact = true;
+        let loc = get_str(o, "__nf_locale");
+        let mut lp = loc.split('-');
+        let clang = lp.next().unwrap_or("en").to_string();
+        let cregion = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("").to_string();
+        // Pick the largest compact tier whose divisor does not exceed the value; below the smallest
+        // tier the number is formatted normally (locales differ: de starts at 1e6, CJK at 1e4, ko 1e3).
+        if let Some(&(div, suffix)) = compact_tiers(&clang, &cregion, long).iter().find(|(t, _)| value.abs() >= *t) {
+            value /= div;
+            compact_suffix = suffix.to_string();
+            compact = true;
+        }
     }
     let (int_part, frac_part) = if value.is_nan() {
         let loc = get_str(o, "__nf_locale");
@@ -996,6 +995,36 @@ fn unit_short_name(u: &str) -> Option<&'static str> {
         "fahrenheit" => "°F",
         _ => return None,
     })
+}
+
+/// The compact-notation tiers (threshold divisor, suffix) for a locale, largest first. The suffix
+/// includes any leading spacing. Below the smallest tier the number is not compacted.
+fn compact_tiers(lang: &str, region: &str, long: bool) -> &'static [(f64, &'static str)] {
+    match lang {
+        "ja" => &[(1e12, "兆"), (1e8, "億"), (1e4, "万")],
+        "zh" => {
+            if matches!(region, "TW" | "HK" | "MO") {
+                &[(1e12, "兆"), (1e8, "億"), (1e4, "萬")]
+            } else {
+                &[(1e12, "兆"), (1e8, "亿"), (1e4, "万")]
+            }
+        }
+        "ko" => &[(1e12, "조"), (1e8, "억"), (1e4, "만"), (1e3, "천")],
+        "de" => {
+            if long {
+                &[(1e12, " Billionen"), (1e9, " Milliarden"), (1e6, " Millionen"), (1e3, " Tausend")]
+            } else {
+                &[(1e12, "\u{a0}Bio."), (1e9, "\u{a0}Mrd."), (1e6, "\u{a0}Mio.")]
+            }
+        }
+        _ => {
+            if long {
+                &[(1e12, " trillion"), (1e9, " billion"), (1e6, " million"), (1e3, " thousand")]
+            } else {
+                &[(1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")]
+            }
+        }
+    }
 }
 
 fn unit_wrap(num: &str, unit: &str, display: &str, plural: bool) -> String {
