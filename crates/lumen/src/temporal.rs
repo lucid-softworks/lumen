@@ -399,6 +399,21 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
     }
 }
 
+/// The (era code, era year) for a proleptic-Gregorian year in a given calendar. Only the era-based
+/// calendars (gregory/japanese) expose an era here; others (incl. iso8601) return `(None, None)`.
+fn era_of(cal: &str, year: i64) -> (Option<&'static str>, Option<i64>) {
+    match cal {
+        "gregory" | "japanese" => {
+            if year >= 1 {
+                (Some("ce"), Some(year))
+            } else {
+                (Some("bce"), Some(1 - year))
+            }
+        }
+        _ => (None, None),
+    }
+}
+
 /// Record the calendar id on a just-created Temporal object.
 fn set_cal(i: &mut Interp, v: &Value, cal: std::rc::Rc<str>) {
     if let Value::Obj(o) = v {
@@ -1162,6 +1177,14 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
 
     def_getter(it, &proto, "year", |i, t, _| {
         Ok(Value::Num(as_date(i, &t)?.year as f64))
+    });
+    def_getter(it, &proto, "era", |i, t, _| {
+        let y = as_date(i, &t)?.year;
+        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+    });
+    def_getter(it, &proto, "eraYear", |i, t, _| {
+        let y = as_date(i, &t)?.year;
+        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_date(i, &t)?.month as f64))
@@ -1995,7 +2018,33 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
 }
 /// Read raw year/month/day integers from a property bag (no regulation yet).
 fn read_date_raw(i: &mut Interp, v: &Value) -> Result<(i64, i64, i64), Value> {
-    let year = field_req(i, v, "year")?;
+    read_date_raw_cal(i, v, "iso8601")
+}
+
+/// Read raw (year, month, day) from a property bag, resolving `era`/`eraYear` to an ISO year for
+/// the era-based calendars (gregory/japanese use CE=`ce`, BCE=`bce`).
+fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, i64), Value> {
+    let year_field = getm(i, v, "year")?;
+    let era = getm(i, v, "era")?;
+    let era_year = getm(i, v, "eraYear")?;
+    let has_era = !matches!(era, Value::Undefined) || !matches!(era_year, Value::Undefined);
+    let year = if !matches!(year_field, Value::Undefined) {
+        to_int(i, &year_field)?
+    } else if has_era && matches!(cal, "gregory" | "japanese") {
+        // Both era and eraYear are required together.
+        if matches!(era, Value::Undefined) || matches!(era_year, Value::Undefined) {
+            return Err(i.make_error("TypeError", "era and eraYear must be provided together"));
+        }
+        let era_s = i.to_string(&era).map_err(unab)?.to_lowercase();
+        let ey = to_int(i, &era_year)?;
+        match era_s.as_str() {
+            "ce" | "gregory" | "ad" | "reiwa" | "heisei" | "showa" | "taisho" | "meiji" => ey,
+            "bce" | "gregory-inverse" | "bc" => 1 - ey,
+            _ => return Err(i.make_error("RangeError", format!("invalid era: {era_s}"))),
+        }
+    } else {
+        field_req(i, v, "year")?
+    };
     let month = field_month(i, v)?;
     let day = field_req(i, v, "day")?;
     Ok((year, month, day))
@@ -2112,7 +2161,8 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
-            let raw = read_date_raw(i, v)?;
+            let cal = input_cal(i, v)?;
+            let raw = read_date_raw_cal(i, v, &cal)?;
             let ovf = to_overflow(i, opts)?;
             regulate_date(i, raw, ovf)?
         }
