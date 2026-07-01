@@ -539,10 +539,44 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         }
         exponent = Some(e);
     }
+    // compact notation: divide into a K/M/B/T tier and append the compact suffix (English data).
+    let mut compact_suffix = String::new();
+    let mut compact = false;
+    if notation == "compact" && value.is_finite() && value.abs() >= 1000.0 {
+        let long = get_str(o, "__nf_compactdisplay") == "long";
+        let (div, short, longw) = if value.abs() >= 1e12 {
+            (1e12, "T", " trillion")
+        } else if value.abs() >= 1e9 {
+            (1e9, "B", " billion")
+        } else if value.abs() >= 1e6 {
+            (1e6, "M", " million")
+        } else {
+            (1e3, "K", " thousand")
+        };
+        value /= div;
+        compact_suffix = if long { longw.to_string() } else { short.to_string() };
+        compact = true;
+    }
     let (int_part, frac_part) = if value.is_infinite() {
         ("\u{221e}".to_string(), None)
     } else {
-        let mag = format_magnitude(value.abs(), o);
+        // Compact notation rounds with the default "morePrecision" of 2 significant / 0 fraction
+        // digits: keep max(0, 2 - integerDigits) fraction digits (unless digit options were given).
+        let has_sig = o.borrow().props.contains("__nf_minsig");
+        let mag = if notation == "compact" && !has_sig {
+            // roundingPriority "morePrecision" over (max 0 fraction) and (max 2 significant): pick
+            // whichever shows more fraction digits (ties keep the integer/fraction result).
+            let s_frac = round_fraction_inc(value.abs(), 0, 0, 1);
+            let s_sig = round_significant(value.abs(), 2, 1);
+            let fd = |s: &str| s.split('.').nth(1).map(|f| f.len()).unwrap_or(0);
+            if fd(&s_sig) > fd(&s_frac) {
+                s_sig
+            } else {
+                s_frac
+            }
+        } else {
+            format_magnitude(value.abs(), o)
+        };
         match mag.split_once('.') {
             Some((a, b)) => (a.to_string(), Some(b.to_string())),
             None => (mag.clone(), None),
@@ -568,6 +602,9 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
     if let Some(e) = exponent {
         // CLDR: "E" then the exponent with its sign ("E-6", "E6").
         num = format!("{num}E{e}");
+    }
+    if compact {
+        num.push_str(&compact_suffix);
     }
 
     // Sign display.
