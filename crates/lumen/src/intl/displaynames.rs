@@ -70,7 +70,12 @@ fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
     // Validate the code per type.
     let canonical = match kind.as_str() {
         "language" => {
-            if !tags::is_structurally_valid_tag(&s) {
+            // DisplayNames `language` requires a `unicode_language_id` (language[-script][-region]
+            // [-variants]) — a tag carrying extensions or singleton subtags is a RangeError.
+            let is_language_id = tags::parse(&s)
+                .map(|t| t.unicode.is_none() && t.transform.is_none() && t.other_ext.is_empty() && t.private.is_empty())
+                .unwrap_or(false);
+            if !is_language_id {
                 return Err(i.make_error("RangeError", format!("invalid language code: {s}")));
             }
             tags::canonicalize_language_tag(&s).unwrap_or(s.clone())
