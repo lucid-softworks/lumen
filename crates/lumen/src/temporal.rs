@@ -443,7 +443,15 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
             }
         }
         "coptic" => (Some("am"), Some(from_13month(d, COPTIC_EPOCH).0)),
-        "ethiopic" => (Some("am"), Some(from_13month(d, ETHIOPIC_EPOCH).0)),
+        "ethiopic" => {
+            // Amete-mihret for positive years; the amete-alem era (+5500) covers year <= 0.
+            let am = from_13month(d, ETHIOPIC_EPOCH).0;
+            if am >= 1 {
+                (Some("am"), Some(am))
+            } else {
+                (Some("aa"), Some(am + 5500))
+            }
+        }
         "ethioaa" => (Some("aa"), Some(from_13month(d, ETHIOPIC_EPOCH).0 + 5500)),
         _ => (None, None),
     }
