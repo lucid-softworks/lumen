@@ -40,7 +40,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let resolved = resolve_locale(i, &requested, &[]);
 
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.ListFormat") {
+    if let Some(proto) = instance_proto(i, "Intl.ListFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__lf", Value::Bool(true));

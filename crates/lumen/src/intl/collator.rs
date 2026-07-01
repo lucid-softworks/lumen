@@ -85,7 +85,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         .unwrap_or_else(|| "default".to_string());
 
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.Collator") {
+    if let Some(proto) = instance_proto(i, "Intl.Collator")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__co", Value::Bool(true));

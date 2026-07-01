@@ -272,7 +272,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let hc_ext = resolved.keywords.iter().find(|(k, _)| k == "hc").map(|(_, v)| v.clone());
 
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.DateTimeFormat") {
+    if let Some(proto) = instance_proto(i, "Intl.DateTimeFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__dtf", Value::Bool(true));

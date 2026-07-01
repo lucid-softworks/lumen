@@ -131,12 +131,17 @@ pub fn brand_slot(i: &mut Interp, this: &Value, marker: &str) -> Result<Gc, Valu
 
 /// OrdinaryCreateFromConstructor prototype: `new.target.prototype` when it is an object, else the
 /// intrinsic prototype for this service.
-pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Option<Gc> {
+/// OrdinaryCreateFromConstructor's proto lookup: `Get(newTarget, "prototype")` (propagating a
+/// poisoned getter's error), falling back to the intrinsic prototype when it isn't an object.
+pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Result<Option<Gc>, Value> {
     if let Value::Obj(nt) = &i.new_target {
-        if let Ok(Value::Obj(p)) = i.get_member(&Value::Obj(nt.clone()), "prototype") {
-            return Some(p);
+        let nt = nt.clone();
+        match i.get_member(&Value::Obj(nt), "prototype") {
+            Ok(Value::Obj(p)) => return Ok(Some(p)),
+            Ok(_) => {}
+            Err(a) => return Err(ab::<()>(Err(a)).unwrap_err()),
         }
     }
-    i.extra_protos.get(intrinsic).cloned()
+    Ok(i.extra_protos.get(intrinsic).cloned())
 }
 

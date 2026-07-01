@@ -27,7 +27,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
             .unwrap();
     let resolved = resolve_locale(i, &requested, &[]);
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.Segmenter") {
+    if let Some(proto) = instance_proto(i, "Intl.Segmenter")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__sg", Value::Bool(true));

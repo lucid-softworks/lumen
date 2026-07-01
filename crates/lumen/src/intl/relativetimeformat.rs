@@ -46,7 +46,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let resolved = resolve_locale(i, &requested, &["nu"]);
 
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.RelativeTimeFormat") {
+    if let Some(proto) = instance_proto(i, "Intl.RelativeTimeFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__rtf", Value::Bool(true));

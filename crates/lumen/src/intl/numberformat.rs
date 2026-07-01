@@ -289,7 +289,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     .unwrap();
 
     let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.NumberFormat") {
+    if let Some(proto) = instance_proto(i, "Intl.NumberFormat")? {
         obj.borrow_mut().proto = Some(proto);
     }
     set_builtin(&obj, "__nf", Value::Bool(true));
