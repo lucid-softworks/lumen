@@ -41,12 +41,11 @@ pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {
         };
     }
     if lang == "es" {
-        return match (kind, style) {
-            ("conjunction", "long") => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0} y {1}"],
-            ("conjunction", _) => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
-            ("disjunction", "long") => ["{0} o {1}", "{0}, {1}", "{0}, {1}", "{0} o {1}"],
-            ("disjunction", _) => ["{0} o {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
-            (_, _) => COMMA,
+        // Spanish always joins the final item with "y"/"o", in every width.
+        return match kind {
+            "conjunction" => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0} y {1}"],
+            "disjunction" => ["{0} o {1}", "{0}, {1}", "{0}, {1}", "{0} o {1}"],
+            _ => COMMA,
         };
     }
     // English (and the default for any language we do not yet ship list data for).
