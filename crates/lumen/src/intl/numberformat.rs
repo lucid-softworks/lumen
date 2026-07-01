@@ -665,39 +665,102 @@ fn format_to_parts(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Val
     let o = instance(i, this)?;
     let n = to_intl_number(i, x)?;
     let whole = assemble_number(i, &o, n);
-    // A coarse part breakdown (integer/decimal/fraction/literal). Good enough for many tests.
-    let mut parts: Vec<(String, String)> = Vec::new();
-    let mut cur_int = String::new();
-    let mut seen_dot = false;
-    let mut cur_frac = String::new();
-    for c in whole.chars() {
-        if c.is_ascii_digit() {
-            if seen_dot {
-                cur_frac.push(c);
-            } else {
-                cur_int.push(c);
-            }
-        } else if c == '.' {
-            seen_dot = true;
-        }
-    }
-    if !cur_int.is_empty() {
-        parts.push(("integer".to_string(), cur_int));
-    }
-    if seen_dot {
-        parts.push(("decimal".to_string(), ".".to_string()));
-        parts.push(("fraction".to_string(), cur_frac));
-    }
+    let parts = decompose_parts(&whole);
     let arr: Vec<Value> = parts
         .into_iter()
         .map(|(t, v)| {
             let ob = i.new_object();
-            set_data(&ob, "type", Value::from_string(t));
+            set_data(&ob, "type", Value::str(t));
             set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })
         .collect();
     Ok(i.make_array(arr))
+}
+
+/// Break an assembled number string into typed parts (minusSign/plusSign, currency/percentSign/
+/// literal affixes, grouped integer, decimal, fraction, and the exponent group).
+fn decompose_parts(s: &str) -> Vec<(&'static str, String)> {
+    let mut parts: Vec<(&'static str, String)> = Vec::new();
+    // Split off the exponent tail, if any.
+    let (main, exp) = match s.split_once('E') {
+        Some((m, e)) => (m, Some(e)),
+        None => (s, None),
+    };
+    let bytes: Vec<char> = main.chars().collect();
+    let mut idx = 0;
+    // Leading affix: a sign, then any non-digit prefix (currency symbol).
+    if idx < bytes.len() && (bytes[idx] == '-' || bytes[idx] == '+') {
+        parts.push((if bytes[idx] == '-' { "minusSign" } else { "plusSign" }, bytes[idx].to_string()));
+        idx += 1;
+    }
+    let mut prefix = String::new();
+    while idx < bytes.len() && !bytes[idx].is_ascii_digit() && bytes[idx] != '.' {
+        prefix.push(bytes[idx]);
+        idx += 1;
+    }
+    if !prefix.is_empty() {
+        // A leading currency symbol vs. a stray literal — classify a $ / letters as currency.
+        let t = if prefix.chars().all(|c| c == ' ' || c == '\u{00a0}') { "literal" } else { "currency" };
+        parts.push((t, prefix));
+    }
+    // Integer digits (with grouping commas).
+    let int_start = idx;
+    while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == ',') {
+        idx += 1;
+    }
+    let int_str: String = bytes[int_start..idx].iter().collect();
+    for seg in split_grouped(&int_str) {
+        parts.push(seg);
+    }
+    // Decimal + fraction.
+    if idx < bytes.len() && bytes[idx] == '.' {
+        parts.push(("decimal", ".".to_string()));
+        idx += 1;
+        let frac_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        parts.push(("fraction", bytes[frac_start..idx].iter().collect()));
+    }
+    // Trailing affix (percent sign, unit, or literal).
+    let suffix: String = bytes[idx..].iter().collect();
+    if !suffix.is_empty() {
+        let t = if suffix.contains('%') { "percentSign" } else { "literal" };
+        parts.push((t, suffix));
+    }
+    // Exponent group.
+    if let Some(e) = exp {
+        parts.push(("exponentSeparator", "E".to_string()));
+        let mut ec = e.chars().peekable();
+        if ec.peek() == Some(&'-') {
+            parts.push(("exponentMinusSign", "-".to_string()));
+            ec.next();
+        }
+        let digits: String = ec.collect();
+        parts.push(("exponentInteger", digits));
+    }
+    parts
+}
+
+/// Split a grouped integer like "12,345" into integer/group parts.
+fn split_grouped(int_str: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in int_str.chars() {
+        if c == ',' {
+            if !cur.is_empty() {
+                out.push(("integer", std::mem::take(&mut cur)));
+            }
+            out.push(("group", ",".to_string()));
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(("integer", cur));
+    }
+    out
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
