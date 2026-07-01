@@ -462,6 +462,7 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
             }
         }
         "indian" => (Some("shaka"), Some(from_indian(d).0)),
+        "hebrew" => (Some("am"), Some(hebrew_from_iso(d).0)),
         _ => (None, None),
     }
 }
@@ -545,10 +546,126 @@ fn to_islamic(y: i64, m: i64, d: i64, epoch: i64) -> IsoDate {
     IsoDate { year: yy, month: mm, day: dd }
 }
 
+// ===== Hebrew (lunisolar) calendar ============================================================
+// Reingold/Dershowitz arithmetic. Works in RD (days from proleptic-Gregorian 0001-01-01);
+// RD = epoch_days + 719163 (epoch_days of 0001-01-01 is -719162).
+const RD_OFFSET: i64 = 719163;
+const HEBREW_EPOCH: i64 = -1373427; // RD of Hebrew 1-01-01 (Tishri 1, year 1)
+fn hebrew_leap(y: i64) -> bool {
+    (7 * y + 1).rem_euclid(19) < 7
+}
+fn hebrew_months_in_year(y: i64) -> i64 {
+    if hebrew_leap(y) { 13 } else { 12 }
+}
+fn hebrew_elapsed_days(y: i64) -> i64 {
+    let months = (235 * y - 234).div_euclid(19);
+    let parts = 12084 + 13753 * months;
+    let day = 29 * months + parts.div_euclid(25920);
+    if (3 * (day + 1)).rem_euclid(7) < 3 {
+        day + 1
+    } else {
+        day
+    }
+}
+fn hebrew_new_year(y: i64) -> i64 {
+    // RD of Tishri 1, applying the year-length postponements.
+    let ed = hebrew_elapsed_days(y);
+    let corr = {
+        let ny0 = hebrew_elapsed_days(y - 1);
+        let ny2 = hebrew_elapsed_days(y + 1);
+        if ny2 - ed == 356 {
+            2
+        } else if ed - ny0 == 382 {
+            1
+        } else {
+            0
+        }
+    };
+    HEBREW_EPOCH + ed + corr
+}
+fn hebrew_year_len(y: i64) -> i64 {
+    hebrew_new_year(y + 1) - hebrew_new_year(y)
+}
+/// Length of the `ordinal`-th Hebrew month (Temporal numbering: 1=Tishri) in year `y`.
+fn hebrew_month_len(y: i64, ordinal: i64) -> i64 {
+    let leap = hebrew_leap(y);
+    let yl = hebrew_year_len(y);
+    match ordinal {
+        1 => 30,                                          // Tishri
+        2 => if yl % 10 == 5 { 30 } else { 29 },          // Marheshvan (30 iff complete year)
+        3 => if yl % 10 == 3 { 29 } else { 30 },          // Kislev (29 iff deficient year)
+        4 => 29,                                          // Tevet
+        5 => 30,                                          // Shevat
+        6 => if leap { 30 } else { 29 },                  // Adar I (leap) / Adar (common)
+        7 => if leap { 29 } else { 30 },                  // Adar II (leap) / Nisan (common)
+        // From here the alternation continues 30/29; in a leap year everything is shifted by one.
+        n => {
+            let m = if leap { n - 1 } else { n }; // map to common-year position (7=Nisan..12=Elul)
+            if m % 2 == 1 { 30 } else { 29 }
+        }
+    }
+}
+fn hebrew_from_iso(iso: IsoDate) -> (i64, i64, i64) {
+    let fixed = epoch_days(iso) + RD_OFFSET;
+    let mut y = ((fixed - HEBREW_EPOCH) as f64 / 365.25).floor() as i64 + 1;
+    while hebrew_new_year(y) > fixed {
+        y -= 1;
+    }
+    while hebrew_new_year(y + 1) <= fixed {
+        y += 1;
+    }
+    let mut rem = fixed - hebrew_new_year(y);
+    let mut m = 1;
+    while m < hebrew_months_in_year(y) {
+        let ml = hebrew_month_len(y, m);
+        if rem < ml {
+            break;
+        }
+        rem -= ml;
+        m += 1;
+    }
+    (y, m, rem + 1)
+}
+fn hebrew_to_iso(y: i64, ordinal: i64, day: i64) -> IsoDate {
+    let mut fixed = hebrew_new_year(y) + (day - 1);
+    for m in 1..ordinal {
+        fixed += hebrew_month_len(y, m);
+    }
+    let (yy, mm, dd) = civil_from_days(fixed - RD_OFFSET);
+    IsoDate { year: yy, month: mm, day: dd }
+}
+/// The Hebrew monthCode for an ordinal month: the leap month (Adar I, ordinal 6 in a leap year) is
+/// "M05L"; later leap-year months shift back by one so codes stay stable across years.
+fn hebrew_month_code(y: i64, ordinal: i64) -> String {
+    if hebrew_leap(y) {
+        if ordinal <= 5 {
+            format!("M{ordinal:02}")
+        } else if ordinal == 6 {
+            "M05L".to_string()
+        } else {
+            format!("M{:02}", ordinal - 1)
+        }
+    } else {
+        format!("M{ordinal:02}")
+    }
+}
+/// The ordinal Hebrew month for a monthCode in year `y` (None if not valid that year).
+fn hebrew_ord_from_code(y: i64, code: &str) -> Option<i64> {
+    let leap = hebrew_leap(y);
+    if code == "M05L" {
+        return if leap { Some(6) } else { None };
+    }
+    let n: i64 = code.strip_prefix('M')?.parse().ok()?;
+    if !(1..=12).contains(&n) {
+        return None;
+    }
+    Some(if leap && n >= 6 { n + 1 } else { n })
+}
+
 /// Whether a calendar has its own month structure (not the Gregorian months), so date arithmetic
 /// must add years/months in the calendar's own terms.
 fn is_month_structure(cal: &str) -> bool {
-    is_13month(cal) || is_islamic(cal) || cal == "indian"
+    is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew"
 }
 /// The ISO date for a month-structure calendar's (year, month, day).
 fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
@@ -556,6 +673,8 @@ fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
         to_13month(y, m, d, epoch_13(cal))
     } else if is_islamic(cal) {
         to_islamic(y, m, d, islamic_epoch(cal))
+    } else if cal == "hebrew" {
+        hebrew_to_iso(y, m, d)
     } else {
         to_indian(y, m, d)
     }
@@ -572,6 +691,8 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
         }
     } else if is_islamic(cal) {
         islamic_month_len(m, islamic_leap(y))
+    } else if cal == "hebrew" {
+        hebrew_month_len(y, m)
     } else {
         indian_month_len(m, is_leap(y + 78))
     }
@@ -683,6 +804,12 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let doy = (1..m).map(|mm| indian_month_len(mm, leap)).sum::<i64>() + d;
         let diy = if leap { 366 } else { 365 };
         (y, m, d, dim, 12, doy, diy, leap)
+    } else if cal == "hebrew" {
+        let (y, m, d) = hebrew_from_iso(iso);
+        let mpy = hebrew_months_in_year(y);
+        let dim = hebrew_month_len(y, m);
+        let doy = (1..m).map(|mm| hebrew_month_len(y, mm)).sum::<i64>() + d;
+        (y, m, d, dim, mpy, doy, hebrew_year_len(y), hebrew_leap(y))
     } else {
         (
             cal_year_num(cal, iso),
@@ -697,6 +824,17 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
     }
 }
 
+/// The monthCode string for a date. Most calendars derive it from the ordinal month; Hebrew inserts
+/// the leap month code "M05L".
+fn cal_month_code(cal: &str, iso: IsoDate) -> String {
+    if cal == "hebrew" {
+        let (y, m, _) = hebrew_from_iso(iso);
+        hebrew_month_code(y, m)
+    } else {
+        month_code(cal_fields(cal, iso).1 as u8).to_string()
+    }
+}
+
 /// The calendar-year number a receiver's `.year` reports (ISO/gregory/japanese use the ISO year).
 fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
     match cal {
@@ -706,6 +844,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         "ethioaa" => from_13month(d, ETHIOPIC_EPOCH).0 + 5500,
         _ if is_islamic(cal) => from_islamic(d, islamic_epoch(cal)).0,
         "indian" => from_indian(d).0,
+        "hebrew" => hebrew_from_iso(d).0,
         _ => d.year,
     }
 }
@@ -738,7 +877,7 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian"
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew"
 }
 
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
@@ -1549,7 +1688,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
+        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "dayOfWeek", |i, t, _| {
@@ -2681,6 +2820,34 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         _ => Some(to_int(i, &year_f)?),
     };
 
+    // Hebrew: the year field (or era "am") is the Hebrew year; the month is an ordinal, or a
+    // monthCode (which may be the leap "M05L"). Resolve directly to ISO.
+    if cal == "hebrew" {
+        let hy = if let Some(y) = year_opt {
+            y
+        } else if era.as_deref() == Some("am") {
+            era_year.ok_or_else(|| i.make_error("TypeError", "year is required"))?
+        } else {
+            return Err(i.make_error("TypeError", "year is required"));
+        };
+        let ord = if let Some(code) = &month_code {
+            let o = hebrew_ord_from_code(hy, code)
+                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?;
+            if let Some(m) = month {
+                if m != o {
+                    return Err(i.make_error("RangeError", "month and monthCode disagree"));
+                }
+            }
+            o
+        } else {
+            month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?
+        };
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        let ord = ord.clamp(1, hebrew_months_in_year(hy));
+        let day = day.clamp(1, hebrew_month_len(hy, ord));
+        let iso = hebrew_to_iso(hy, ord, day);
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
     // Reconcile month / monthCode ("M" + 2 digits + optional leap "L"; no leap month in ISO/Gregory).
     let mc_num = match &month_code {
         None => None,
@@ -3487,7 +3654,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
         let d = as_datetime(i, &t)?.0;
-        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
+        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     def_getter(it, &proto, "hour", |i, t, _| {
@@ -3816,7 +3983,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     def_getter(it, &proto, "monthCode", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
+        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| Ok(Value::from_string(cal_of(i, &t).to_string())));
     it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
@@ -4003,7 +4170,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         .insert("Temporal.PlainMonthDay", proto.clone());
     def_getter(it, &proto, "monthCode", |i, t, _| {
         let d = as_monthday(i, &t)?;
-        Ok(Value::str(month_code(cal_fields(&cal_of(i, &t), d).1 as u8)))
+        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "day", |i, t, _| {
         let d = as_monthday(i, &t)?;
@@ -5142,7 +5309,10 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     type CF = (i64, i64, i64, i64, i64, i64, i64, bool);
     calf_get!("month", |f: CF| Value::Num(f.1 as f64));
     calf_get!("day", |f: CF| Value::Num(f.2 as f64));
-    calf_get!("monthCode", |f: CF| Value::str(month_code(f.1 as u8)));
+    def_getter(it, &proto, "monthCode", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(Value::from_string(cal_month_code(&cal_of(i, &t), zoned_local(e, o).0)))
+    });
     date_get!("dayOfWeek", |d: IsoDate| Value::Num(
         iso_day_of_week(d) as f64
     ));
