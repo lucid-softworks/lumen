@@ -508,6 +508,15 @@ fn cal_uses_era(cal: &str) -> bool {
     matches!(cal, "gregory" | "japanese" | "buddhist" | "roc")
 }
 
+/// Make a new Temporal value that inherits `src`'s calendar (operations like add/with/round preserve
+/// the receiver's calendar).
+fn make_like(i: &mut Interp, src: &Value, kind: &str, t: Temporal) -> Value {
+    let cal = cal_of(i, src);
+    let v = make(i, kind, t);
+    set_cal(i, &v, cal);
+    v
+}
+
 /// Record the calendar id on a just-created Temporal object.
 fn set_cal(i: &mut Interp, v: &Value, cal: std::rc::Rc<str>) {
     if let Value::Obj(o) = v {
@@ -1357,21 +1366,21 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let day = field_int(i, &f, "day", d.day as i64)?;
         let ovf = to_overflow(i, &arg(a, 1))?;
         let nd = build_date_ovf(i, year, month, day, ovf)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
         let nd = add_to_date(i, d, dur, 1, ovf)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
         let ovf = to_overflow(i, &arg(a, 1))?;
         let nd = add_to_date(i, d, dur, -1, ovf)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(nd)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -1412,15 +1421,15 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(d)))
+        Ok(make_like(i, &t, "Temporal.PlainYearMonth", Temporal::YearMonth(d)))
     });
     it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
+        Ok(make_like(i, &t, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, _| {
         let d = as_date(i, &t)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -3127,7 +3136,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainDate", 0, |i, t, _| {
         let (d, _) = as_datetime(i, &t)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     it.def_method(&proto, "toPlainTime", 0, |i, t, _| {
         let (_, tm) = as_datetime(i, &t)?;
@@ -3146,7 +3155,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             },
             v => to_time(i, &v, &Value::Undefined)?,
         };
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, nt)))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, nt)))
     });
     it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
         let (_, tm) = as_datetime(i, &t)?;
@@ -3159,7 +3168,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, _| {
         let (d, tm) = as_datetime(i, &t)?;
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
     });
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -3421,7 +3430,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         }
         let day = to_int(i, &dv)?;
         let d = build_date(i, ym.year, ym.month as i64, day)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     def_getter(it, &proto, "daysInMonth", |i, t, _| {
         let d = as_yearmonth(i, &t)?;
@@ -3640,7 +3649,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let ovf = to_overflow(i, &arg(a, 1))?;
         // Keep the reference ISO year; regulate the merged month/day.
         let d = build_date_ovf(i, md.year, month, day, ovf)?;
-        let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
+        let v = make_like(i, &t, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
         set_cal(i, &v, cal_of(i, &t));
         Ok(v)
     });
@@ -3657,7 +3666,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         }
         let year = to_int(i, &yv)?;
         let d = build_date(i, year, md.month as i64, md.day as i64)?;
-        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
     });
     let ctor = add_ctor(it, ns, "PlainMonthDay", 2, proto, |i, _t, a| {
         require_new(i)?;
@@ -4824,7 +4833,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toPlainDateTime", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
-        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
