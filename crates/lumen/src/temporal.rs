@@ -4553,9 +4553,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
         };
         let tz = normalize_tz(i, &tz_raw)?;
+        let disamb = opt_str(i, &arg(a, 1), "disambiguation", "compatible")?;
         let local = dt_ns(d, tm);
-        let offset = offset_for_local(&tz, local);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: local - offset as i128, offset_ns: offset, tz, }))
+        let epoch = local_to_epoch(i, &tz, local, &disamb)?;
+        let offset = (local - epoch) as i64;
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: offset, tz, }))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
@@ -5938,10 +5940,60 @@ fn zone_offset(tz: &str, epoch_ns: i128) -> i64 {
     }
     0
 }
-/// The offset to use when interpreting a *local* wall-clock instant in `tz` (one refinement step).
+/// The epoch instants a local wall-clock time maps to in `tz`: 0 in a spring-forward gap, 2 in a
+/// fall-back overlap, else 1 (GetPossibleInstantsFor), sorted ascending.
+fn possible_epochs(tz: &str, local_ns: i128) -> Vec<i128> {
+    let day = 86_400_000_000_000i128;
+    let mut v: Vec<i128> = Vec::new();
+    for off in [zone_offset(tz, local_ns - day), zone_offset(tz, local_ns + day)] {
+        let inst = local_ns - off as i128;
+        if zone_offset(tz, inst) == off && !v.contains(&inst) {
+            v.push(inst);
+        }
+    }
+    v.sort_unstable();
+    v
+}
+/// DisambiguatePossibleInstants: the epoch instant a local time maps to under `disamb`
+/// (compatible/earlier/later/reject). Returns a RangeError for `reject` on an ambiguous/skipped time.
+fn local_to_epoch(i: &Interp, tz: &str, local_ns: i128, disamb: &str) -> Result<i128, Value> {
+    let poss = possible_epochs(tz, local_ns);
+    match poss.len() {
+        1 => Ok(poss[0]),
+        0 => {
+            if disamb == "reject" {
+                return Err(i.make_error("RangeError", "no such local time (skipped by a DST gap)"));
+            }
+            let day = 86_400_000_000_000i128;
+            let gap = (zone_offset(tz, local_ns + day) - zone_offset(tz, local_ns - day)) as i128;
+            if disamb == "earlier" {
+                Ok(*possible_epochs(tz, local_ns - gap).first().unwrap_or(&(local_ns - gap)))
+            } else {
+                Ok(*possible_epochs(tz, local_ns + gap).last().unwrap_or(&(local_ns + gap)))
+            }
+        }
+        n => match disamb {
+            "later" => Ok(poss[n - 1]),
+            "reject" => Err(i.make_error("RangeError", "ambiguous local time (DST overlap)")),
+            _ => Ok(poss[0]), // compatible / earlier
+        },
+    }
+}
+/// The offset (ns) for interpreting a local wall-clock time under the default "compatible"
+/// disambiguation.
 fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
-    let g = zone_offset(tz, local_ns); // first guess: treat local as UTC
-    zone_offset(tz, local_ns - g as i128)
+    let poss = possible_epochs(tz, local_ns);
+    let inst = match poss.len() {
+        0 => {
+            // Spring-forward gap: shift the wall time forward by the gap (compatible), then take the
+            // later instant.
+            let day = 86_400_000_000_000i128;
+            let gap = (zone_offset(tz, local_ns + day) - zone_offset(tz, local_ns - day)) as i128;
+            *possible_epochs(tz, local_ns + gap).last().unwrap_or(&(local_ns - zone_offset(tz, local_ns) as i128))
+        }
+        _ => poss[0],
+    };
+    (local_ns - inst) as i64
 }
 
 /// Parse a fixed-offset id (`UTC`/`Z`/`±HH:MM[:SS]`) to ns, or None for a named zone.
