@@ -3427,6 +3427,19 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
         _ => Ok(()),
     }
 }
+/// Copy the six date fields out of `v` (reading each once, in `read_date_raw_cal`'s field order) into
+/// a plain object, so the calendar resolution can be deferred past the overflow option without
+/// re-triggering the source's getters.
+fn snapshot_date_fields(i: &mut Interp, v: &Value) -> Result<Value, Value> {
+    let snap = i.new_object();
+    for k in ["day", "era", "eraYear", "month", "monthCode", "year"] {
+        let fv = getm(i, v, k)?;
+        if !matches!(fv, Value::Undefined) {
+            setm(&snap, k, fv);
+        }
+    }
+    Ok(Value::Obj(snap))
+}
 /// Clamp `val` into `[1, hi]`, or (under `overflow: reject`) raise a RangeError if it was out of range.
 fn clamp_or(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Result<i64, Value> {
     if ovf == Overflow::Reject && (val < 1 || val > hi) {
@@ -4726,11 +4739,13 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
         Value::Obj(_) => {
             read_calendar(i, v)?;
             let cal = input_cal(i, v)?;
-            // Fields (date then time) are read before the overflow option, so the calendar resolution
-            // here constrains; `regulate_date` re-applies the real overflow to the ISO result.
-            let draw = read_date_raw_cal(i, v, &cal, Overflow::Constrain)?;
+            // Snapshot the date fields (side-effecting reads, in order), then read time fields, then
+            // the overflow option — matching the spec order — and only then resolve the calendar with
+            // the real overflow (so reject rejects an out-of-range calendar day).
+            let snap = snapshot_date_fields(i, v)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
+            let draw = read_date_raw_cal(i, &snap, &cal, ovf)?;
             let d = regulate_date(i, draw, ovf)?;
             let t = regulate_time(i, traw, ovf)?;
             if !iso_datetime_within_limits(d, t) {
@@ -6103,9 +6118,10 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             };
             let tz = normalize_tz(i, &tz_raw)?;
             let zcal = input_cal(i, v)?;
-            let draw = read_date_raw_cal(i, v, &zcal, Overflow::Constrain)?;
+            let snap = snapshot_date_fields(i, v)?;
             let (traw, _) = read_time_raw(i, v)?;
             let ovf = to_overflow(i, opts)?;
+            let draw = read_date_raw_cal(i, &snap, &zcal, ovf)?;
             let date = regulate_date(i, draw, ovf)?;
             let time = regulate_time(i, traw, ovf)?;
             let local = dt_ns(date, time);
