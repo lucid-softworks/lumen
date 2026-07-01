@@ -37,6 +37,162 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 }
 
 /// Boundaries (UTF-16 code-unit offsets) between segments of `s` at the given granularity.
+/// A UAX #29 Grapheme_Cluster_Break class (plus Extended_Pictographic for GB11).
+#[derive(Clone, Copy, PartialEq)]
+enum Gcb {
+    Other,
+    Cr,
+    Lf,
+    Control,
+    Extend,
+    Zwj,
+    Ri,
+    SpacingMark,
+    L,
+    V,
+    T,
+    Lv,
+    Lvt,
+    ExtPict,
+}
+
+fn in_ranges(r: Option<&'static [(u32, u32)]>, cp: u32) -> bool {
+    match r {
+        Some(ranges) => ranges
+            .binary_search_by(|&(lo, hi)| {
+                if cp < lo {
+                    std::cmp::Ordering::Greater
+                } else if cp > hi {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok(),
+        None => false,
+    }
+}
+
+fn gcb_class(cp: u32) -> Gcb {
+    use crate::unicode_props::lookup;
+    match cp {
+        0x0D => return Gcb::Cr,
+        0x0A => return Gcb::Lf,
+        0x200D => return Gcb::Zwj,
+        // Hangul Jamo (fixed blocks) + conjoining Hangul syllables.
+        0x1100..=0x115F | 0xA960..=0xA97C => return Gcb::L,
+        0x1160..=0x11A7 | 0xD7B0..=0xD7C6 => return Gcb::V,
+        0x11A8..=0x11FF | 0xD7CB..=0xD7FB => return Gcb::T,
+        0xAC00..=0xD7A3 => {
+            return if (cp - 0xAC00) % 28 == 0 { Gcb::Lv } else { Gcb::Lvt };
+        }
+        _ => {}
+    }
+    if in_ranges(lookup("regionalindicator", None), cp) {
+        return Gcb::Ri;
+    }
+    if in_ranges(lookup("graphemeextend", None), cp) {
+        return Gcb::Extend;
+    }
+    if in_ranges(lookup("spacingmark", None), cp) {
+        return Gcb::SpacingMark;
+    }
+    if in_ranges(lookup("extendedpictographic", None), cp) {
+        return Gcb::ExtPict;
+    }
+    if in_ranges(lookup("gc", Some("cc")), cp)
+        || in_ranges(lookup("gc", Some("cf")), cp)
+        || in_ranges(lookup("gc", Some("zl")), cp)
+        || in_ranges(lookup("gc", Some("zp")), cp)
+    {
+        return Gcb::Control;
+    }
+    Gcb::Other
+}
+
+/// UAX #29 grapheme-cluster boundaries as `(start_offset, false)` in UTF-16 code units.
+fn grapheme_boundaries(s: &[u16]) -> Vec<(usize, bool)> {
+    // Decode to (utf16 offset, code point), keeping surrogate pairs together.
+    let n = s.len();
+    let mut cps: Vec<(usize, u32)> = Vec::new();
+    let mut idx = 0;
+    while idx < n {
+        let hi = s[idx];
+        if (0xD800..=0xDBFF).contains(&hi) && idx + 1 < n && (0xDC00..=0xDFFF).contains(&s[idx + 1]) {
+            let cp = 0x10000 + (((hi as u32 - 0xD800) << 10) | (s[idx + 1] as u32 - 0xDC00));
+            cps.push((idx, cp));
+            idx += 2;
+        } else {
+            cps.push((idx, hi as u32));
+            idx += 1;
+        }
+    }
+    if cps.is_empty() {
+        return Vec::new();
+    }
+    let cls: Vec<Gcb> = cps.iter().map(|&(_, cp)| gcb_class(cp)).collect();
+    let mut out = vec![(0usize, false)];
+    // State over the prefix ending at k-1: RI run length and the GB11 "ExtPict Extend* ZWJ" tracker.
+    let mut ri_run: usize = if cls[0] == Gcb::Ri { 1 } else { 0 };
+    let mut pict_active = cls[0] == Gcb::ExtPict;
+    let mut zwj_seen = false;
+    for k in 1..cps.len() {
+        let a = cls[k - 1];
+        let b = cls[k];
+        let no_break = if a == Gcb::Cr && b == Gcb::Lf {
+            true // GB3
+        } else if matches!(a, Gcb::Control | Gcb::Cr | Gcb::Lf)
+            || matches!(b, Gcb::Control | Gcb::Cr | Gcb::Lf)
+        {
+            false // GB4 / GB5
+        } else if a == Gcb::L && matches!(b, Gcb::L | Gcb::V | Gcb::Lv | Gcb::Lvt) {
+            true // GB6
+        } else if matches!(a, Gcb::Lv | Gcb::V) && matches!(b, Gcb::V | Gcb::T) {
+            true // GB7
+        } else if matches!(a, Gcb::Lvt | Gcb::T) && b == Gcb::T {
+            true // GB8
+        } else if matches!(b, Gcb::Extend | Gcb::Zwj) {
+            true // GB9
+        } else if b == Gcb::SpacingMark {
+            true // GB9a
+        } else if pict_active && zwj_seen && b == Gcb::ExtPict {
+            true // GB11
+        } else {
+            a == Gcb::Ri && b == Gcb::Ri && ri_run % 2 == 1 // GB12/13
+        };
+        if !no_break {
+            out.push((cps[k].0, false));
+        }
+        // Fold cls[k] into the running state.
+        ri_run = if b == Gcb::Ri {
+            if no_break {
+                ri_run + 1
+            } else {
+                1
+            }
+        } else {
+            0
+        };
+        match b {
+            Gcb::ExtPict => {
+                pict_active = true;
+                zwj_seen = false;
+            }
+            Gcb::Extend => zwj_seen = false,
+            Gcb::Zwj => {
+                if pict_active {
+                    zwj_seen = true;
+                }
+            }
+            _ => {
+                pict_active = false;
+                zwj_seen = false;
+            }
+        }
+    }
+    out
+}
+
 fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
     // Returns (start, isWordLike) for each segment.
     let n = s.len();
@@ -44,17 +200,7 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
         return Vec::new();
     }
     match granularity {
-        "grapheme" => {
-            // Per code point (surrogate pairs kept together).
-            let mut out = Vec::new();
-            let mut idx = 0;
-            while idx < n {
-                out.push((idx, false));
-                let is_high = (0xD800..=0xDBFF).contains(&s[idx]);
-                idx += if is_high && idx + 1 < n { 2 } else { 1 };
-            }
-            out
-        }
+        "grapheme" => grapheme_boundaries(s),
         "word" => {
             // Runs of "word" characters (letters/digits) vs. non-word, with UAX #29 infix handling:
             // a MidNum/MidLetter/MidNumLet (e.g. "." or ",") between two word characters does not
