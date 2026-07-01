@@ -959,9 +959,27 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         "unit" => {
             let unit = get_str(o, "__nf_unit");
             let disp = get_str(o, "__nf_unitdisplay");
-            // English long names pluralize unless the value is exactly one.
-            let plural = value.abs() != 1.0;
-            num = format!("{sign}{}", unit_wrap(&num, &unit, &disp, plural));
+            let style = if disp.is_empty() { "short" } else { disp.as_str() };
+            let loc = get_str(o, "__nf_locale");
+            let mut lp = loc.split('-');
+            let lang = lp.next().unwrap_or("en");
+            let region = lp.find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_uppercase())).unwrap_or("");
+            // CLDR locale key: zh splits by script, en-IN is region-specific, else the language.
+            let cldr_loc = match (lang, region) {
+                ("zh", "TW" | "HK" | "MO") => "zh-Hant",
+                ("zh", _) => "zh-Hans",
+                ("en", "IN") => "en-IN",
+                _ => lang,
+            };
+            let cat = crate::intl::data::plural_cardinal(lang, value.abs().trunc() as u64, value.fract() != 0.0);
+            // A CLDR unit pattern ("{0} km/h") applies the sign+number; fall back to the English wrap.
+            let pat = crate::cldr_units::unit_pattern(cldr_loc, &unit, style, cat)
+                .or_else(|| crate::cldr_units::unit_pattern(cldr_loc, &unit, style, "other"))
+                .or_else(|| crate::cldr_units::unit_pattern(lang, &unit, style, "other"));
+            num = match pat {
+                Some(p) => p.replace("{0}", &format!("{sign}{num}")),
+                None => format!("{sign}{}", unit_wrap(&num, &unit, &disp, cat != "one")),
+            };
         }
         _ => {
             num = format!("{sign}{num}");
