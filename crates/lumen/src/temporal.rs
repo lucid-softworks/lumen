@@ -3192,8 +3192,17 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
 fn diff_date_rounded(cal: &str, a: IsoDate, b: IsoDate, largest: &str, smallest: &str, increment: i64, mode: &str) -> IsoDuration {
     let base = diff_date_cal(cal, a, b, largest);
     let smallest = smallest.strip_suffix('s').unwrap_or(smallest);
-    if smallest == "day" && increment <= 1 {
-        return base; // day differences are already whole
+    // No rounding needed (increment 1 and nothing finer than smallestUnit is non-zero): return the
+    // direction-correct base directly. The lo→hi `mag` path below loses `a.until(b)`'s anchoring for
+    // backward leap-month diffs (a.until(b) ≠ −(b.until(a)) under calendar constraining).
+    let finer_zero = match smallest {
+        "year" => base.months == 0 && base.weeks == 0 && base.days == 0,
+        "month" => base.weeks == 0 && base.days == 0,
+        "week" => base.days == 0,
+        _ => true,
+    };
+    if increment <= 1 && finer_zero {
+        return base;
     }
     let sign = cmp_date(a, b);
     if sign == 0 {
