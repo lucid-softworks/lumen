@@ -3556,7 +3556,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?
         };
         let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
-        let ord = ord.clamp(1, hebrew_months_in_year(hy));
+        let ord = clamp_or(i, ord, hebrew_months_in_year(hy), ovf, "month")?;
         let day = clamp_or(i, day, hebrew_month_len(hy, ord), ovf, "day")?;
         let iso = hebrew_to_iso(hy, ord, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
@@ -3598,7 +3598,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str, ovf: Overflow) -> Res
             s
         } else {
             let ord = month.ok_or_else(|| i.make_error("TypeError", "month or monthCode is required"))?;
-            let ord = ord.clamp(1, china_months_in_year(cal, cy));
+            let ord = clamp_or(i, ord, china_months_in_year(cal, cy), ovf, "month")?;
             china_ord_start(cal, cy, ord)
         };
         let dim = china_month_len_at(cal, start);
