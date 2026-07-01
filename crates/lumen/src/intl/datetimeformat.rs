@@ -955,7 +955,9 @@ fn tz_display_name(tz: &str, style: &str) -> String {
         }
         .to_string();
     }
-    tz.to_string()
+    // The displayed zone name uses the canonical identifier (Asia/Calcutta -> Asia/Kolkata), even
+    // though resolvedOptions preserves the input id.
+    crate::tz::canonicalize(tz).unwrap_or(tz).to_string()
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
