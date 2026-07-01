@@ -137,16 +137,26 @@ fn process_locale_item(i: &mut Interp, item: &Value, seen: &mut Vec<String>) -> 
 
 fn supported_values_of(i: &mut Interp, key: &Value) -> Result<Value, Value> {
     let k = ab(i.to_string(key))?;
+    // The `timeZone` list is every canonical IANA zone; the others are static. SupportedValuesOf must
+    // return a sorted array with no duplicates.
+    if &*k == "timeZone" {
+        let mut zs: Vec<&str> = crate::tz::canonical_zone_names();
+        zs.sort_unstable();
+        zs.dedup();
+        return Ok(i.make_array(zs.iter().map(|s| Value::str(*s)).collect()));
+    }
     let vals: &[&str] = match &*k {
         "calendar" => &["buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory", "hebrew", "indian", "islamic", "islamic-umalqura", "islamic-tbla", "islamic-civil", "islamic-rgsa", "iso8601", "japanese", "persian", "roc"],
         "collation" => &["compat", "dict", "emoji", "eor", "phonebk", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin"],
         "currency" => &["USD", "EUR", "GBP", "JPY", "CNY"],
         "numberingSystem" => &["adlm", "ahom", "arab", "arabext", "bali", "beng", "deva", "fullwide", "gujr", "guru", "hanidec", "khmr", "knda", "laoo", "latn", "mlym", "mymr", "orya", "tamldec", "telu", "thai", "tibt"],
-        "timeZone" => &["UTC", "America/New_York", "Europe/London", "Asia/Tokyo"],
         "unit" => &["acre", "bit", "byte", "celsius", "centimeter", "day", "degree", "fahrenheit", "gigabyte", "gram", "hour", "kilogram", "kilometer", "liter", "megabyte", "meter", "mile", "milliliter", "millimeter", "millisecond", "minute", "month", "ounce", "percent", "petabyte", "pound", "second", "terabyte", "week", "yard", "year"],
         _ => return Err(i.make_error("RangeError", format!("invalid key: {k}"))),
     };
-    Ok(i.make_array(vals.iter().map(|s| Value::str(*s)).collect()))
+    let mut v: Vec<&str> = vals.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    Ok(i.make_array(v.iter().map(|s| Value::str(*s)).collect()))
 }
 
 // ----- shared helpers used across the intl services --------------------------------------------

@@ -22,6 +22,11 @@ pub fn canonicalize(name: &str) -> Option<&'static str> {
         .map(|(_, canon)| *canon)
 }
 
+/// Every canonical IANA zone name in the registry (for `Intl.supportedValuesOf("timeZone")`).
+pub fn canonical_zone_names() -> Vec<&'static str> {
+    ZONES.iter().map(|z| z.name).collect()
+}
+
 fn zone(name: &str) -> Option<&'static Zone> {
     let canon = canonicalize(name)?;
     ZONES.iter().find(|z| z.name == canon)
