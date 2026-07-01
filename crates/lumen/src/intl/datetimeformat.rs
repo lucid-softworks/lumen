@@ -616,7 +616,9 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         _ => format!("{mo}"),
     });
     let day_str = get("__dtf_day").map(|dd| if dd == "2-digit" { format!("{d:02}") } else { format!("{d}") });
-    let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (y % 100 + 100) % 100) } else { format!("{y}") });
+    // When an era is shown, the year is the positive era year (ISO 0 -> 1 BC, ISO -1 -> 2 BC).
+    let disp_year = if get("__dtf_era").is_some() && y <= 0 { 1 - y } else { y };
+    let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (disp_year % 100 + 100) % 100) } else { format!("{disp_year}") });
     let named_month = matches!(get("__dtf_month").as_deref(), Some("long" | "short" | "narrow"));
     let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
 
@@ -651,6 +653,16 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
                 lit(&mut parts, "/");
             }
             parts.push(("year", yy.clone()));
+        }
+        // The era follows the date (Gregorian/ISO only: AD/BC by sign of the year).
+        if let Some(e) = get("__dtf_era") {
+            let era = match e.as_str() {
+                "long" => if y > 0 { "Anno Domini" } else { "Before Christ" },
+                "narrow" => if y > 0 { "A" } else { "B" },
+                _ => if y > 0 { "AD" } else { "BC" },
+            };
+            lit(&mut parts, " ");
+            parts.push(("era", era.to_string()));
         }
     }
 
