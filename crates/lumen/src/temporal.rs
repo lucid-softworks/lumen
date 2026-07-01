@@ -1546,6 +1546,30 @@ fn cal_of(i: &Interp, this: &Value) -> std::rc::Rc<str> {
         _ => std::rc::Rc::from("iso8601"),
     }
 }
+/// The (canonical) calendar of a value coerced to a Temporal date: a Temporal object carries its own,
+/// a property bag its `calendar` field, an ISO string its `[u-ca=...]` annotation (default iso8601).
+fn arg_calendar(i: &mut Interp, v: &Value) -> Result<String, Value> {
+    let canon = |c: &str| canon_cal(c).unwrap_or("iso8601").to_string();
+    if let Value::Obj(o) = v {
+        let ptr = Rc::as_ptr(o) as usize;
+        if i.temporal.contains_key(&ptr) {
+            return Ok(canon(&cal_of(i, v)));
+        }
+        let c = getm(i, v, "calendar")?;
+        return Ok(match c {
+            Value::Undefined => "iso8601".to_string(),
+            Value::Str(s) => canon(&s),
+            Value::Obj(_) => canon(&cal_of(i, &c)),
+            _ => "iso8601".to_string(),
+        });
+    }
+    if let Value::Str(s) = v {
+        if let Some(p) = parse_iso(s) {
+            return Ok(canon(&p.calendar.unwrap_or_else(|| "iso8601".to_string())));
+        }
+    }
+    Ok("iso8601".to_string())
+}
 /// ToIntegerIfIntegral: ToNumber, then reject non-finite and any fractional part (Duration fields).
 fn to_int_integral(i: &mut Interp, v: &Value) -> Result<i64, Value> {
     let n = i.to_number(v).map_err(unab)?;
@@ -2507,9 +2531,11 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_date(i, &t)?;
+        let other_cal = arg_calendar(i, &arg(a, 0))?;
         let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
         Ok(Value::Bool(
-            d.year == o.year && d.month == o.month && d.day == o.day,
+            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -4924,9 +4950,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
+        let other_cal = arg_calendar(i, &arg(a, 0))?;
         let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
         Ok(Value::Bool(
-            cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm),
+            cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm) && this_cal == other_cal,
         ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -5210,8 +5238,10 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
+        let other_cal = arg_calendar(i, &arg(a, 0))?;
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(Value::Bool(d.year == o.year && d.month == o.month))
+        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        Ok(Value::Bool(d.year == o.year && d.month == o.month && this_cal == other_cal))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5414,8 +5444,10 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_monthday(i, &t)?;
+        let other_cal = arg_calendar(i, &arg(a, 0))?;
         let o = to_monthday(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(Value::Bool(d.month == o.month && d.day == o.day))
+        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        Ok(Value::Bool(d.month == o.month && d.day == o.day && this_cal == other_cal))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let md = as_monthday(i, &t)?;
