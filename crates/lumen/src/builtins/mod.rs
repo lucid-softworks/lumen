@@ -2763,7 +2763,13 @@ fn install_typed_arrays(it: &mut Interp) {
     // delegates to the generic Array method (which works through get_member/array_length/set_member).
     let ta_proto = Object::new(Some(it.object_proto.clone()));
     for (name, f) in TA_METHODS {
-        it.def_method(&ta_proto, name, 1, *f);
+        // Each method's `length` matches its required-parameter count.
+        let len = match *name {
+            "copyWithin" | "slice" | "subarray" | "with" => 2,
+            "keys" | "values" | "entries" | "toReversed" => 0,
+            _ => 1,
+        };
+        it.def_method(&ta_proto, name, len, *f);
     }
     if let Some(sym) = it.iterator_sym.clone() {
         let k = Interp::sym_key(&sym);
