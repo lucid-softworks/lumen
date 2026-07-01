@@ -437,9 +437,9 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
         "roc" => {
             let y = d.year - 1911;
             if y >= 1 {
-                (Some("minguo"), Some(y))
+                (Some("roc"), Some(y))
             } else {
-                (Some("before-roc"), Some(1 - y))
+                (Some("broc"), Some(1 - y))
             }
         }
         "coptic" => (Some("am"), Some(from_13month(d, COPTIC_EPOCH).0)),
@@ -684,8 +684,8 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
         ("japanese", "taisho") => Some(1912 + era_year - 1),
         ("japanese", "meiji") => Some(1868 + era_year - 1),
         ("buddhist", "be") => Some(era_year - 543),
-        ("roc", "minguo" | "roc") => Some(1911 + era_year),
-        ("roc", "before-roc" | "roc-inverse") => Some(1912 - era_year),
+        ("roc", "roc" | "minguo") => Some(1911 + era_year),
+        ("roc", "broc" | "before-roc") => Some(1912 - era_year),
         _ => None,
     }
 }
