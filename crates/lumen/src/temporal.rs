@@ -3120,6 +3120,33 @@ fn add_dt_dur(d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
     (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
 }
 
+/// Like `add_dt_dur`, but adds the year/month/day part with calendar `cal`'s own arithmetic (for a
+/// non-ISO PlainDateTime), carrying time overflow into the calendar day count.
+fn add_dt_dur_cal(cal: &str, d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
+    if !is_month_structure(cal) {
+        return add_dt_dur(d, t, dur);
+    }
+    let date_only = IsoDuration {
+        years: dur.years,
+        months: dur.months,
+        weeks: dur.weeks,
+        days: dur.days,
+        ..Default::default()
+    };
+    let nd = cal_add_c(cal, d, date_only, 1);
+    let time_ns = dur.hours as i128 * 3_600_000_000_000
+        + dur.minutes as i128 * 60_000_000_000
+        + dur.seconds as i128 * 1_000_000_000
+        + dur.ms as i128 * 1_000_000
+        + dur.us as i128 * 1_000
+        + dur.ns as i128;
+    let total = time_to_ns(t) as i128 + time_ns;
+    let carry = total.div_euclid(86_400_000_000_000);
+    let rem = total.rem_euclid(86_400_000_000_000);
+    let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
+    (IsoDate { year: y, month: m, day: da }, ns_to_time(rem))
+}
+
 /// Zero every duration field strictly smaller than the unit of rank `srank` (year=9 … ns=0).
 fn zero_below(m: &mut IsoDuration, srank: i32) {
     if srank > 0 { m.ns = 0; }
@@ -3200,8 +3227,8 @@ fn diff_datetime_rounded(
     let base_units = dur_field_val(&low, smallest) / increment.max(1);
     let mut high = low;
     dur_field_add(&mut high, smallest, increment);
-    let (ld, lt) = add_dt_dur(lo_d, lo_t, &low);
-    let (hd, ht) = add_dt_dur(lo_d, lo_t, &high);
+    let (ld, lt) = add_dt_dur_cal(cal, lo_d, lo_t, &low);
+    let (hd, ht) = add_dt_dur_cal(cal, lo_d, lo_t, &high);
     let low_ns = dt_ns(ld, lt);
     let high_ns = dt_ns(hd, ht);
     let target_ns = dt_ns(hi_d, hi_t);
@@ -3209,7 +3236,7 @@ fn diff_datetime_rounded(
     let fraction = if denom == 0.0 { 0.0 } else { (target_ns - low_ns) as f64 / denom };
     let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
     let chosen = if up { high } else { low };
-    let (rd, rt) = add_dt_dur(lo_d, lo_t, &chosen);
+    let (rd, rt) = add_dt_dur_cal(cal, lo_d, lo_t, &chosen);
     let result = if is_cal {
         diff_datetime(cal, lo_d, lo_t, rd, rt, largest)
     } else {
