@@ -2655,8 +2655,13 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
             // A `timeZone` field, if a string, must be a valid time-zone identifier (offset, named
             // zone, or an ISO string carrying a `[...]` annotation — a bare date-time string is not).
             let tzv = getm(i, &v, "timeZone")?;
-            if let Value::Str(s) = &tzv {
-                validate_tz_string(i, s)?;
+            match &tzv {
+                Value::Undefined => {}
+                Value::Str(s) => validate_tz_string(i, s)?,
+                // Only a Temporal object (which carries its own zone) is a valid non-string zone;
+                // a plain object or other primitive is a TypeError.
+                Value::Obj(_) if get(i, &tzv).is_some() => {}
+                _ => return Err(i.make_error("TypeError", "timeZone must be a string or Temporal object")),
             }
             Ok(Some(to_date(i, &v, &Value::Undefined)?))
         }
