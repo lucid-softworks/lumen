@@ -3159,7 +3159,30 @@ fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> 
         return Err(i.make_error("TypeError", "mapfn is not callable"));
     }
     let this_arg = arg(args, 2);
-    let items = ab(i.iterate(&arg(args, 0)))?;
+    // A source with an @@iterator is iterated; otherwise it is treated as an array-like.
+    let source = arg(args, 0);
+    let items: Vec<Value> = match &source {
+        Value::Str(_) => ab(i.iterate(&source))?,
+        Value::Obj(_) if i.has_iterator(&source) => ab(i.iterate(&source))?,
+        Value::Obj(_) => {
+            let lenv = ab(i.get_member(&source, "length"))?;
+            let n = ab(i.to_number(&lenv))?;
+            let len = if n.is_nan() || n < 0.0 {
+                0
+            } else {
+                n.min(9007199254740991.0) as usize
+            };
+            let mut v = Vec::with_capacity(len.min(1 << 20));
+            for k in 0..len {
+                v.push(ab(i.get_member(&source, &k.to_string()))?);
+            }
+            v
+        }
+        Value::Undefined | Value::Null => {
+            return Err(i.make_error("TypeError", "TypedArray.from source is not iterable"))
+        }
+        _ => Vec::new(),
+    };
     let ta = ab(i.construct(this, &[Value::Num(items.len() as f64)]))?;
     for (k, v) in items.into_iter().enumerate() {
         let val = if mapfn.is_callable() {
