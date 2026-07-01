@@ -3967,14 +3967,26 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
-            let year = field_req(i, v, "year")?;
-            let month = field_month(i, v)?;
-            let ovf = to_overflow(i, opts)?;
-            let month = regulate_high(i, month, 12, ovf, "month")? as u8;
-            IsoDate {
-                year,
-                month,
-                day: 1,
+            let cal = input_cal(i, v)?;
+            if &*cal == "iso8601" {
+                let year = field_req(i, v, "year")?;
+                let month = field_month(i, v)?;
+                let ovf = to_overflow(i, opts)?;
+                let month = regulate_high(i, month, 12, ovf, "month")? as u8;
+                IsoDate { year, month, day: 1 }
+            } else {
+                // Resolve via the calendar (year/era/month/monthCode) with a reference day of 1.
+                let merged = i.new_object();
+                setm(&merged, "day", Value::Num(1.0));
+                for k in ["year", "era", "eraYear", "month", "monthCode"] {
+                    let fv = getm(i, v, k)?;
+                    if !matches!(fv, Value::Undefined) {
+                        setm(&merged, k, fv);
+                    }
+                }
+                let ovf = to_overflow(i, opts)?;
+                let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal)?;
+                regulate_date(i, raw, ovf)?
             }
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainYearMonth")),
