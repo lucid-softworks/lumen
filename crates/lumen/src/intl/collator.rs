@@ -64,15 +64,18 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         Some("variant"),
     )?
     .unwrap();
-    let ignore_punct = {
+    let ignore_punct_opt = {
         let v = ab(i.get_member(&options, "ignorePunctuation"))?;
         if matches!(v, Value::Undefined) {
-            false
+            None
         } else {
-            i.to_boolean(&v)
+            Some(i.to_boolean(&v))
         }
     };
     let resolved = resolve_locale(i, &requested, &["co", "kn", "kf"]);
+    // ignorePunctuation defaults per locale: the dictionary-ordered locales (Thai) default to true.
+    let ignore_punct = ignore_punct_opt
+        .unwrap_or_else(|| resolved.locale.split('-').next() == Some("th"));
     let kw = |k: &str| resolved.keywords.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
     let numeric_opt = numeric;
     let case_first_opt = case_first.clone();
