@@ -472,7 +472,9 @@ fn japanese_era(d: IsoDate) -> (Option<&'static str>, Option<i64>) {
         (Some("showa"), Some(d.year - 1926 + 1))
     } else if e >= start(1912, 7, 30) {
         (Some("taisho"), Some(d.year - 1912 + 1))
-    } else if e >= start(1868, 9, 8) {
+    } else if e >= start(1873, 1, 1) {
+        // ICU's Japanese calendar represents dates before Meiji 6 (1873, when Japan adopted the
+        // Gregorian calendar) with the proleptic "ce"/"bce" eras, not "meiji".
         (Some("meiji"), Some(d.year - 1868 + 1))
     } else if d.year >= 1 {
         (Some("ce"), Some(d.year))
