@@ -1122,7 +1122,9 @@ fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value
 
 /// The trailing-affix classification for this formatter's parts (compact suffix vs plain).
 fn suffix_type_of(o: &Gc) -> String {
-    if get_str(o, "__nf_notation") == "compact" {
+    if get_str(o, "__nf_style") == "unit" {
+        "unit".to_string()
+    } else if get_str(o, "__nf_notation") == "compact" {
         "compact".to_string()
     } else {
         "literal".to_string()
@@ -1237,7 +1239,18 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
     // Trailing affix (percent sign, unit, compact suffix, or literal).
     let suffix: String = bytes[idx..].iter().collect();
     if !suffix.is_empty() {
-        if suffix.contains('%') {
+        if suffix_type == "unit" {
+            // The leading separator space(s) are a literal; the rest is one unit part (internal
+            // spaces, e.g. "kilometers per hour", stay within the unit).
+            let trimmed = suffix.trim_start_matches([' ', '\u{a0}']);
+            let lead = &suffix[..suffix.len() - trimmed.len()];
+            if !lead.is_empty() {
+                parts.push(("literal", lead.to_string()));
+            }
+            if !trimmed.is_empty() {
+                parts.push(("unit", trimmed.to_string()));
+            }
+        } else if suffix.contains('%') {
             parts.push(("percentSign", suffix));
         } else if suffix_type == "compact" {
             // A leading space separates the number from the compact word; it is its own literal.
