@@ -5022,6 +5022,12 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
 /// date at or before 1972-12-31 (in the calendar) whose monthCode and day match the request, so a
 /// leap monthCode anchors to a year that actually has it. `snap` holds the already-read fields.
 fn cal_month_day_reference(i: &mut Interp, cal: &str, snap: &Gc, has_year: bool, ovf: Overflow) -> Result<IsoDate, Value> {
+    // A bare ordinal `month` (no monthCode) can't be interpreted without a year in a non-ISO calendar,
+    // so a year is required (a TypeError raised before any month/monthCode-conflict RangeError).
+    let has_month = !matches!(getm(i, &Value::Obj(snap.clone()), "month")?, Value::Undefined);
+    if has_month && !has_year {
+        return Err(i.make_error("TypeError", "year is required to interpret an ordinal month"));
+    }
     let ref_iso = IsoDate { year: 1972, month: 12, day: 31 };
     let start_cy = cal_year_num(cal, ref_iso);
     // Resolve the request in a candidate calendar year (day/month/monthCode from `snap`, year = `cy`).
