@@ -81,6 +81,68 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "maximize", 0, |i, this, _| relocale(i, &this, true));
     it.def_method(&proto, "minimize", 0, |i, this, _| relocale(i, &this, false));
+
+    // Intl.Locale-info: getX() return the locale's preferred values (the keyword override, if any,
+    // else a data default) as a fresh Array.
+    it.def_method(&proto, "getCalendars", 0, |i, this, _| {
+        info_list(i, &this, "__locale_ca", &["gregory"])
+    });
+    it.def_method(&proto, "getCollations", 0, |i, this, _| {
+        info_list(i, &this, "__locale_co", &["default"])
+    });
+    it.def_method(&proto, "getHourCycles", 0, |i, this, _| {
+        info_list(i, &this, "__locale_hc", &["h23"])
+    });
+    it.def_method(&proto, "getNumberingSystems", 0, |i, this, _| {
+        info_list(i, &this, "__locale_nu", &["latn"])
+    });
+    it.def_method(&proto, "getTimeZones", 0, |i, this, _| {
+        // Defined only for a locale with a region; otherwise `undefined`.
+        let region = {
+            let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
+            if !o.borrow().props.contains("__locale_tag") {
+                return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
+            }
+            matches!(o.borrow().props.get("__locale_region").map(|p| p.value.clone()), Some(Value::Str(s)) if !s.is_empty())
+        };
+        if region {
+            Ok(i.make_array(vec![Value::str("UTC")]))
+        } else {
+            Ok(Value::Undefined)
+        }
+    });
+    it.def_method(&proto, "getTextInfo", 0, |i, this, _| {
+        let _ = slot(i, &this, "__locale_tag")?;
+        let o = i.new_object();
+        set_builtin(&o, "direction", Value::str("ltr"));
+        Ok(Value::Obj(o))
+    });
+    it.def_method(&proto, "getWeekInfo", 0, |i, this, _| {
+        let _ = slot(i, &this, "__locale_tag")?;
+        let o = i.new_object();
+        set_builtin(&o, "firstDay", Value::Num(1.0));
+        set_builtin(&o, "weekend", i.make_array(vec![Value::Num(6.0), Value::Num(7.0)]));
+        set_builtin(&o, "minimalDays", Value::Num(1.0));
+        Ok(Value::Obj(o))
+    });
+}
+
+/// The value list for a `getX` info method: `[keyword]` if the locale carries that keyword, else the
+/// data default. Brand-checks the receiver.
+fn info_list(i: &mut Interp, this: &Value, slot_name: &str, default: &[&str]) -> Result<Value, Value> {
+    let o = this.as_obj().ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
+    if !o.borrow().props.contains("__locale_tag") {
+        return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
+    }
+    let kw = match o.borrow().props.get(slot_name).map(|p| p.value.clone()) {
+        Some(Value::Str(s)) if !s.is_empty() => Some(s.to_string()),
+        _ => None,
+    };
+    let items: Vec<Value> = match kw {
+        Some(v) => vec![Value::from_string(v)],
+        None => default.iter().map(|s| Value::str(*s)).collect(),
+    };
+    Ok(i.make_array(items))
 }
 
 fn slot(i: &mut Interp, this: &Value, name: &str) -> Result<String, Value> {
@@ -177,12 +239,13 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
     }
 
     // ---- keyword options (calendar/collation/hourCycle/caseFirst/numeric/numberingSystem/…) ---
+    // Read in the spec's observable order: calendar, collation, firstDayOfWeek, hourCycle,
+    // caseFirst, numeric, numberingSystem.
     let ca = keyword_opt(i, &options, "calendar", &[], valid_type)?;
     let co = keyword_opt(i, &options, "collation", &[], valid_type)?;
     let fw = firstday_opt(i, &options)?;
     let hc = keyword_opt(i, &options, "hourCycle", &["h11", "h12", "h23", "h24"], |_| true)?;
     let kf = keyword_opt(i, &options, "caseFirst", &["upper", "lower", "false"], |_| true)?;
-    let nu = keyword_opt(i, &options, "numberingSystem", &[], valid_type)?;
     let kn = {
         let v = ab(i.get_member(&options, "numeric"))?;
         if matches!(v, Value::Undefined) {
@@ -191,6 +254,7 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
             Some(i.to_boolean(&v))
         }
     };
+    let nu = keyword_opt(i, &options, "numberingSystem", &[], valid_type)?;
 
     // Merge keyword overrides into the -u- extension.
     let (mut attrs, mut kws) = parsed.unicode.take().unwrap_or_default();
@@ -240,12 +304,15 @@ fn keyword_opt(
         return Ok(None);
     }
     let s = ab(i.to_string(&v))?.to_string();
-    let lower = s.to_lowercase();
     if !values.is_empty() {
-        if !values.contains(&lower.as_str()) {
+        // Enum-valued options (hourCycle/caseFirst) are matched case-sensitively against the values.
+        if !values.contains(&s.as_str()) {
             return Err(i.make_error("RangeError", format!("invalid {prop} option: {s}")));
         }
-    } else if !valid(&lower) {
+        return Ok(Some(s));
+    }
+    let lower = s.to_lowercase();
+    if !valid(&lower) {
         return Err(i.make_error("RangeError", format!("invalid {prop} option: {s}")));
     }
     Ok(Some(lower))

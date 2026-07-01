@@ -146,11 +146,20 @@ pub fn region_alias(region: &str) -> Option<&'static str> {
         "YD" => "YE",
         "YU" => "RS",
         "ZR" => "CD",
-        // numeric → alpha
+        // Deprecated numeric region codes → current alpha-2 (CLDR territoryAlias).
         "004" => "AF",
         "008" => "AL",
+        "554" => "NZ",
         "756" => "CH",
+        "810" => "RU",
         "840" => "US",
+        "890" => "RS",
+        "230" => "ET",
+        "280" => "DE",
+        "532" => "CW",
+        "536" => "SA",
+        "582" => "FM",
+        "886" => "YE",
         _ => return None,
     })
 }
@@ -203,35 +212,16 @@ pub fn unicode_type_alias(key: &str, ty: &str) -> Option<&'static str> {
     })
 }
 
-/// Grandfathered / redundant whole-tag replacements (matched case-insensitively).
+/// Grammar-valid grandfathered / redundant whole-tag replacements (matched lowercase). The
+/// *irregular* grandfathered tags (`i-*`, `no-bok`, `no-nyn`, `sgn-*`, `zh-min`, `zh-min-nan`) do
+/// not match the Unicode grammar and are simply rejected as structurally invalid.
 pub fn grandfathered(tag: &str) -> Option<&'static str> {
-    let t = tag.to_ascii_lowercase();
-    Some(match t.as_str() {
+    Some(match tag {
         "art-lojban" => "jbo",
-        "cel-gaulish" => "xtg",
+        "cel-gaulish" => "xtg-x-cel-gaulish",
         "en-gb-oed" => "en-GB-oxendict",
-        "i-ami" => "ami",
-        "i-bnn" => "bnn",
-        "i-default" => return None, // remains as-is (irregular, no preferred value)
-        "i-enochian" => return None,
-        "i-hak" => "hak",
-        "i-klingon" => "tlh",
-        "i-lux" => "lb",
-        "i-mingo" => return None,
-        "i-navajo" => "nv",
-        "i-pwn" => "pwn",
-        "i-tao" => "tao",
-        "i-tay" => "tay",
-        "i-tsu" => "tsu",
-        "no-bok" => "nb",
-        "no-nyn" => "nn",
-        "sgn-be-fr" => "sfb",
-        "sgn-be-nl" => "vgt",
-        "sgn-ch-de" => "sgg",
         "zh-guoyu" => "zh",
         "zh-hakka" => "hak",
-        "zh-min" => return None,
-        "zh-min-nan" => "nan",
         "zh-xiang" => "hsn",
         _ => return None,
     })

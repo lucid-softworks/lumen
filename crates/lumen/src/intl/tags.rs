@@ -4,9 +4,10 @@
 
 mod aliases;
 
-/// Whether every subtag has an allowed shape and the overall grammar holds (IsStructurallyValidLanguageTag).
+/// Whether the tag matches the Unicode locale grammar, or is one of the grammar-valid grandfathered
+/// tags (IsStructurallyValidLanguageTag).
 pub fn is_structurally_valid_tag(tag: &str) -> bool {
-    parse(tag).is_some()
+    aliases::grandfathered(&tag.to_ascii_lowercase()).is_some() || parse(tag).is_some()
 }
 
 fn is_alpha(s: &str) -> bool {
@@ -52,20 +53,12 @@ pub struct LangTag {
     /// The `-u-` (unicode) extension: attributes plus key/value keywords.
     pub unicode: Option<(Vec<String>, Vec<(String, Vec<String>)>)>,
     pub private: Vec<String>,
-    /// A grandfathered/irregular tag that canonicalizes wholesale.
-    pub grandfathered: Option<String>,
 }
 
 /// Parse a tag into its structure, or `None` if it is not structurally valid.
 pub fn parse(tag: &str) -> Option<LangTag> {
     if tag.is_empty() || tag.len() > 255 {
         return None;
-    }
-    // Grandfathered / irregular tags are matched case-insensitively as whole tags.
-    if let Some(repl) = aliases::grandfathered(tag) {
-        let mut t = LangTag::default();
-        t.grandfathered = Some(repl.to_string());
-        return Some(t);
     }
     let parts: Vec<&str> = tag.split('-').collect();
     if parts.iter().any(|p| p.is_empty()) {
@@ -263,11 +256,11 @@ fn titlecase(s: &str) -> String {
 
 /// CanonicalizeUnicodeLocaleId: parse, apply case + alias replacement + ordering, and render.
 pub fn canonicalize_language_tag(tag: &str) -> Option<String> {
-    let mut t = parse(tag)?;
-    if let Some(g) = &t.grandfathered {
-        // The replacement is itself a canonical tag (possibly needing a second pass for case).
-        return canonicalize_language_tag(g);
+    // A grammar-valid grandfathered/redundant tag canonicalizes wholesale first.
+    if let Some(repl) = aliases::grandfathered(&tag.to_ascii_lowercase()) {
+        return canonicalize_language_tag(repl);
     }
+    let mut t = parse(tag)?;
     canonicalize_struct(&mut t);
     Some(render(&t))
 }
