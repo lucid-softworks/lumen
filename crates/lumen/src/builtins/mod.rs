@@ -1588,125 +1588,371 @@ fn regexp_escape_char(c: char, first: bool) -> String {
     }
 }
 
-fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
-    if ptr.is_none() {
-        return Err(i.make_error("TypeError", "[Symbol.match] called on non-RegExp"));
+/// `this` must be an Object for the generic `RegExp.prototype[@@…]` methods (they read flags and
+/// call `exec` through ordinary property access rather than the internal slots).
+fn require_regexp_this(i: &mut Interp, this: &Value, name: &str) -> Result<(), Value> {
+    match this {
+        Value::Obj(_) => Ok(()),
+        _ => Err(i.make_error("TypeError", format!("{name} called on a non-object"))),
     }
-    let s = ab(i.to_string(&arg(a, 0)))?;
-    let re = i.regexps[&ptr.unwrap()].clone();
-    let chars: Vec<char> = s.chars().collect();
-    if re.global {
-        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
-        let all = regex_find_all(&re, &chars);
-        if all.is_empty() {
-            return Ok(Value::Null);
+}
+
+/// RegExpExec(R, S): call `R.exec` if it is callable (validating the result is an Object or null),
+/// otherwise fall back to the built-in `RegExp.prototype.exec` (which requires a real RegExp).
+fn regexp_exec_abstract(i: &mut Interp, r: &Value, s: Rc<str>) -> Result<Value, Value> {
+    let exec = ab(i.get_member(r, "exec"))?;
+    if exec.is_callable() {
+        let res = ab(i.call(exec, r.clone(), &[Value::Str(s)]))?;
+        if !matches!(res, Value::Obj(_) | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "RegExp exec method returned something other than an Object or null",
+            ));
         }
-        let items: Vec<Value> = all
-            .iter()
-            .map(|c| {
-                let (x, y) = c[0].unwrap();
-                Value::from_string(chars[x..y].iter().collect::<String>())
-            })
-            .collect();
-        Ok(i.make_array(items))
+        return Ok(res);
+    }
+    if map_ptr(r).map(|p| i.regexps.contains_key(&p)) != Some(true) {
+        return Err(i.make_error("TypeError", "exec called on a non-RegExp object"));
+    }
+    regexp_exec(i, r.clone(), &[Value::Str(s)])
+}
+
+/// AdvanceStringIndex. lumen strings are sequences of code points (not UTF-16 units), so a step is
+/// always one code point — the `fullUnicode` distinction (surrogate pairs) doesn't apply here.
+fn advance_string_index(index: usize, _s: &str, _unicode: bool) -> usize {
+    index + 1
+}
+
+fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    require_regexp_this(i, &this, "[Symbol.match]")?;
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let flags = ab(i.get_member(&this, "flags"))?;
+    let flags = ab(i.to_string(&flags))?;
+    if !flags.contains('g') {
+        return regexp_exec_abstract(i, &this, s);
+    }
+    let unicode = flags.contains('u') || flags.contains('v');
+    ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+    let mut results: Vec<Value> = Vec::new();
+    loop {
+        let result = regexp_exec_abstract(i, &this, s.clone())?;
+        if matches!(result, Value::Null) {
+            break;
+        }
+        let m0 = ab(i.get_member(&result, "0"))?;
+        let match_str = ab(i.to_string(&m0))?;
+        results.push(Value::Str(match_str.clone()));
+        if match_str.is_empty() {
+            let li = ab(i.get_member(&this, "lastIndex"))?;
+            let li = ab(i.to_number(&li))?.max(0.0) as usize;
+            let next = advance_string_index(li, &s, unicode);
+            ab(i.set_member(&this, "lastIndex", Value::Num(next as f64)))?;
+        }
+    }
+    if results.is_empty() {
+        Ok(Value::Null)
     } else {
-        regexp_exec(i, this, &[Value::Str(s)])
+        Ok(i.make_array(results))
+    }
+}
+fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    require_regexp_this(i, &this, "[Symbol.search]")?;
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let prev = ab(i.get_member(&this, "lastIndex"))?;
+    if !same_value(&prev, &Value::Num(0.0)) {
+        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+    }
+    let result = regexp_exec_abstract(i, &this, s)?;
+    let cur = ab(i.get_member(&this, "lastIndex"))?;
+    if !same_value(&cur, &prev) {
+        ab(i.set_member(&this, "lastIndex", prev))?;
+    }
+    match result {
+        Value::Null => Ok(Value::Num(-1.0)),
+        _ => ab(i.get_member(&result, "index")),
     }
 }
 fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    if map_ptr(&this).map(|p| i.regexps.contains_key(&p)) != Some(true) {
-        return Err(i.make_error("TypeError", "[Symbol.replace] called on non-RegExp"));
-    }
-    let s = ab(i.to_string(&arg(a, 0)))?.to_string();
-    regex_replace(i, &s, &this, &arg(a, 1))
-}
-fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
-    if ptr.is_none() {
-        return Err(i.make_error("TypeError", "[Symbol.search] called on non-RegExp"));
-    }
+    require_regexp_this(i, &this, "[Symbol.replace]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
-    let re = i.regexps[&ptr.unwrap()].clone();
-    let chars: Vec<char> = s.chars().collect();
-    Ok(match re.exec_at(&chars, 0) {
-        Some(c) => Value::Num(c[0].unwrap().0 as f64),
-        None => Value::Num(-1.0),
-    })
-}
-fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
-    if ptr.is_none() {
-        return Err(i.make_error("TypeError", "[Symbol.matchAll] called on non-RegExp"));
+    let schars: Vec<char> = s.chars().collect();
+    let size = schars.len();
+    let repl = arg(a, 1);
+    let functional = repl.is_callable();
+    let repl_str = if functional {
+        Rc::from("")
+    } else {
+        ab(i.to_string(&repl))?
+    };
+    let global_v = ab(i.get_member(&this, "global"))?;
+    let global = i.to_boolean(&global_v);
+    let unicode = if global {
+        let unicode_v = ab(i.get_member(&this, "unicode"))?;
+        let u = i.to_boolean(&unicode_v);
+        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+        u
+    } else {
+        false
+    };
+    // Collect every match (RegExpExec advances lastIndex; empty matches step forward manually).
+    let mut results: Vec<Value> = Vec::new();
+    loop {
+        let result = regexp_exec_abstract(i, &this, s.clone())?;
+        if matches!(result, Value::Null) {
+            break;
+        }
+        results.push(result.clone());
+        if !global {
+            break;
+        }
+        let m0_v = ab(i.get_member(&result, "0"))?;
+        let m0 = ab(i.to_string(&m0_v))?;
+        if m0.is_empty() {
+            let li_v = ab(i.get_member(&this, "lastIndex"))?;
+            let li = ab(i.to_number(&li_v))?.max(0.0) as usize;
+            let next = advance_string_index(li, &s, unicode);
+            ab(i.set_member(&this, "lastIndex", Value::Num(next as f64)))?;
+        }
     }
-    let s = ab(i.to_string(&arg(a, 0)))?;
-    let re = i.regexps[&ptr.unwrap()].clone();
-    let chars: Vec<char> = s.chars().collect();
-    let all = regex_find_all(&re, &chars);
-    let mut results = Vec::new();
-    for caps in all {
-        let (x, y) = caps[0].unwrap();
-        let mut items = vec![Value::from_string(chars[x..y].iter().collect::<String>())];
-        for g in 1..=re.ngroups {
-            items.push(match caps[g] {
-                Some((aa, bb)) => Value::from_string(chars[aa..bb].iter().collect::<String>()),
-                None => Value::Undefined,
+    let mut accumulated = String::new();
+    let mut next_pos = 0usize;
+    for result in &results {
+        let length_v = ab(i.get_member(result, "length"))?;
+        let length = to_length_val(i, &length_v)?;
+        let ncaptures = length.saturating_sub(1);
+        let matched_v = ab(i.get_member(result, "0"))?;
+        let matched = ab(i.to_string(&matched_v))?;
+        let match_len = matched.chars().count();
+        let index_v = ab(i.get_member(result, "index"))?;
+        let pos_raw = ab(i.to_number(&index_v))?;
+        let position = if pos_raw.is_nan() || pos_raw < 0.0 {
+            0
+        } else {
+            (pos_raw as usize).min(size)
+        };
+        let mut captures: Vec<Value> = Vec::new();
+        for n in 1..=ncaptures {
+            let cap = ab(i.get_member(result, &n.to_string()))?;
+            captures.push(if matches!(cap, Value::Undefined) {
+                Value::Undefined
+            } else {
+                Value::Str(ab(i.to_string(&cap))?)
             });
         }
-        let m = i.make_array(items);
-        if let Value::Obj(o) = &m {
-            set_data(o, "index", Value::Num(x as f64));
-            set_data(o, "input", Value::Str(s.clone()));
+        let named = ab(i.get_member(result, "groups"))?;
+        let replacement = if functional {
+            let mut cbargs = vec![Value::Str(matched.clone())];
+            cbargs.extend(captures.iter().cloned());
+            cbargs.push(Value::Num(position as f64));
+            cbargs.push(Value::Str(s.clone()));
+            if !matches!(named, Value::Undefined) {
+                cbargs.push(named.clone());
+            }
+            let r = ab(i.call(repl.clone(), Value::Undefined, &cbargs))?;
+            ab(i.to_string(&r))?.to_string()
+        } else {
+            get_substitution(i, &matched, &schars, position, &captures, &named, &repl_str)?
+        };
+        if position >= next_pos {
+            accumulated.extend(schars[next_pos..position].iter());
+            accumulated.push_str(&replacement);
+            next_pos = position + match_len;
         }
-        results.push(m);
     }
-    let arr = i.make_array(results);
-    Ok(make_array_iterator(i, arr, 0))
+    if next_pos < size {
+        accumulated.extend(schars[next_pos..].iter());
+    }
+    Ok(Value::from_string(accumulated))
+}
+
+/// ToLength of a value (clamped to a non-negative integer).
+fn to_length_val(i: &mut Interp, v: &Value) -> Result<usize, Value> {
+    let n = ab(i.to_number(v))?;
+    Ok(if n.is_nan() || n < 0.0 {
+        0
+    } else {
+        n.min(9_007_199_254_740_991.0) as usize
+    })
+}
+
+/// GetSubstitution: expand a `$`-template against a match. `captures` are already `Value::Str` /
+/// `Value::Undefined`; `named` is the match's `groups` object (or `undefined`).
+fn get_substitution(
+    i: &mut Interp,
+    matched: &str,
+    schars: &[char],
+    position: usize,
+    captures: &[Value],
+    named: &Value,
+    template: &str,
+) -> Result<String, Value> {
+    let tail = (position + matched.chars().count()).min(schars.len());
+    let push_cap = |out: &mut String, cap: &Value| {
+        if let Value::Str(s) = cap {
+            out.push_str(s);
+        }
+    };
+    let t: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut k = 0;
+    while k < t.len() {
+        if t[k] != '$' || k + 1 >= t.len() {
+            out.push(t[k]);
+            k += 1;
+            continue;
+        }
+        match t[k + 1] {
+            '$' => {
+                out.push('$');
+                k += 2;
+            }
+            '&' => {
+                out.push_str(matched);
+                k += 2;
+            }
+            '`' => {
+                out.extend(schars[..position].iter());
+                k += 2;
+            }
+            '\'' => {
+                out.extend(schars[tail..].iter());
+                k += 2;
+            }
+            '<' if !matches!(named, Value::Undefined) => {
+                if let Some(rel) = t[k + 2..].iter().position(|&c| c == '>') {
+                    let name: String = t[k + 2..k + 2 + rel].iter().collect();
+                    let v = ab(i.get_member(named, &name))?;
+                    if !matches!(v, Value::Undefined) {
+                        out.push_str(&ab(i.to_string(&v))?);
+                    }
+                    k = k + 2 + rel + 1;
+                } else {
+                    out.push('$');
+                    k += 1;
+                }
+            }
+            d if d.is_ascii_digit() => {
+                let one = d.to_digit(10).unwrap() as usize;
+                let two = if k + 2 < t.len() && t[k + 2].is_ascii_digit() {
+                    Some(one * 10 + t[k + 2].to_digit(10).unwrap() as usize)
+                } else {
+                    None
+                };
+                // Prefer a two-digit group reference when it is in range.
+                if let Some(tw) = two {
+                    if tw >= 1 && tw <= captures.len() {
+                        push_cap(&mut out, &captures[tw - 1]);
+                        k += 3;
+                        continue;
+                    }
+                }
+                if one >= 1 && one <= captures.len() {
+                    push_cap(&mut out, &captures[one - 1]);
+                    k += 2;
+                } else {
+                    out.push('$');
+                    k += 1;
+                }
+            }
+            _ => {
+                out.push('$');
+                k += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    require_regexp_this(i, &this, "[Symbol.matchAll]")?;
+    let s = ab(i.to_string(&arg(a, 0)))?;
+    let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "RegExp"))?;
+    let c = species_constructor(i, &this, &default_ctor)?;
+    let flags_v = ab(i.get_member(&this, "flags"))?;
+    let flags = ab(i.to_string(&flags_v))?;
+    let matcher = ab(i.construct(c, &[this.clone(), Value::Str(flags.clone())]))?;
+    let li_v = ab(i.get_member(&this, "lastIndex"))?;
+    let last = to_length_val(i, &li_v)?;
+    ab(i.set_member(&matcher, "lastIndex", Value::Num(last as f64)))?;
+    let global = flags.contains('g');
+    let unicode = flags.contains('u') || flags.contains('v');
+    Ok(create_regexp_string_iterator(
+        i, matcher, s, global, unicode,
+    ))
 }
 fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
-    if ptr.is_none() {
-        return Err(i.make_error("TypeError", "[Symbol.split] called on non-RegExp"));
-    }
+    require_regexp_this(i, &this, "[Symbol.split]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
-    let re = i.regexps[&ptr.unwrap()].clone();
-    let chars: Vec<char> = s.chars().collect();
-    let limit = match arg(a, 1) {
-        Value::Undefined => usize::MAX,
-        v => ab(i.to_number(&v))? as usize,
+    let schars: Vec<char> = s.chars().collect();
+    let size = schars.len();
+    // SpeciesConstructor(rx, %RegExp%), then a sticky-flagged splitter constructed from it.
+    let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "RegExp"))?;
+    let c = species_constructor(i, &this, &default_ctor)?;
+    let flags_v = ab(i.get_member(&this, "flags"))?;
+    let flags = ab(i.to_string(&flags_v))?;
+    let unicode = flags.contains('u') || flags.contains('v');
+    let new_flags = if flags.contains('y') {
+        flags.to_string()
+    } else {
+        format!("{flags}y")
     };
-    let mut out = Vec::new();
-    let mut last = 0;
-    let mut pos = 0;
-    while pos <= chars.len() && out.len() < limit {
-        match re.exec_at(&chars, pos) {
-            Some(caps) => {
-                let (mstart, mend) = caps[0].unwrap();
-                if mend == last && mstart == last {
-                    pos += 1;
-                    continue;
-                }
-                if mstart >= chars.len() {
-                    break;
-                }
-                out.push(Value::from_string(
-                    chars[last..mstart].iter().collect::<String>(),
-                ));
-                for g in 1..=re.ngroups {
-                    out.push(match caps[g] {
-                        Some((x, y)) => Value::from_string(chars[x..y].iter().collect::<String>()),
-                        None => Value::Undefined,
-                    });
-                }
-                last = mend;
-                pos = if mend > mstart { mend } else { mend + 1 };
+    let splitter = ab(i.construct(c, &[this.clone(), Value::from_string(new_flags)]))?;
+    let limit = match arg(a, 1) {
+        Value::Undefined => u32::MAX as usize,
+        v => {
+            let n = ab(i.to_number(&v))?;
+            if n.is_nan() || n <= 0.0 {
+                0
+            } else {
+                (n as u64 % (1u64 << 32)) as usize
             }
-            None => break,
         }
+    };
+    let mut out: Vec<Value> = Vec::new();
+    if limit == 0 {
+        return Ok(i.make_array(out));
     }
-    if out.len() < limit {
-        out.push(Value::from_string(chars[last..].iter().collect::<String>()));
+    if size == 0 {
+        let z = regexp_exec_abstract(i, &splitter, s.clone())?;
+        if !matches!(z, Value::Null) {
+            return Ok(i.make_array(out));
+        }
+        out.push(Value::Str(s));
+        return Ok(i.make_array(out));
     }
+    let mut p = 0usize;
+    let mut q = 0usize;
+    while q < size {
+        ab(i.set_member(&splitter, "lastIndex", Value::Num(q as f64)))?;
+        let z = regexp_exec_abstract(i, &splitter, s.clone())?;
+        if matches!(z, Value::Null) {
+            q = advance_string_index(q, &s, unicode);
+            continue;
+        }
+        let li_v = ab(i.get_member(&splitter, "lastIndex"))?;
+        let e = to_length_val(i, &li_v)?.min(size);
+        if e == p {
+            q = advance_string_index(q, &s, unicode);
+            continue;
+        }
+        out.push(Value::from_string(schars[p..q].iter().collect::<String>()));
+        if out.len() == limit {
+            return Ok(i.make_array(out));
+        }
+        p = e;
+        let len_v = ab(i.get_member(&z, "length"))?;
+        let ncaptures = to_length_val(i, &len_v)?.saturating_sub(1);
+        for n in 1..=ncaptures {
+            let cap = ab(i.get_member(&z, &n.to_string()))?;
+            out.push(cap);
+            if out.len() == limit {
+                return Ok(i.make_array(out));
+            }
+        }
+        q = p;
+    }
+    out.push(Value::from_string(
+        schars[p..size].iter().collect::<String>(),
+    ));
     Ok(i.make_array(out))
 }
 
@@ -10651,6 +10897,94 @@ fn install_iterator(it: &mut Interp) {
     set_to_string_tag(it, &arr_iter_proto, "Array Iterator");
     it.extra_protos
         .insert("%ArrayIteratorPrototype%", arr_iter_proto);
+
+    // %RegExpStringIteratorPrototype%: the prototype of the iterator returned by
+    // `RegExp.prototype[@@matchAll]` and `String.prototype.matchAll`.
+    let rsi_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
+    set_to_string_tag(it, &rsi_proto, "RegExp String Iterator");
+    it.def_method(&rsi_proto, "next", 0, regexp_string_iterator_next);
+    it.extra_protos
+        .insert("%RegExpStringIteratorPrototype%", rsi_proto);
+}
+
+/// CreateRegExpStringIterator: a lazy iterator over a regex's matches in a string. Its state lives in
+/// internal properties; `next` drives it via RegExpExec.
+fn create_regexp_string_iterator(
+    i: &Interp,
+    matcher: Value,
+    s: Rc<str>,
+    global: bool,
+    unicode: bool,
+) -> Value {
+    let obj = Object::new(
+        i.extra_protos
+            .get("%RegExpStringIteratorPrototype%")
+            .cloned(),
+    );
+    set_internal(&obj, "__rsi_regexp", matcher);
+    set_internal(&obj, "__rsi_string", Value::Str(s));
+    set_internal(&obj, "__rsi_global", Value::Bool(global));
+    set_internal(&obj, "__rsi_unicode", Value::Bool(unicode));
+    set_internal(&obj, "__rsi_done", Value::Bool(false));
+    Value::Obj(obj)
+}
+
+fn regexp_string_iterator_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let o = match &this {
+        Value::Obj(o) if o.borrow().props.contains("__rsi_regexp") => o.clone(),
+        _ => return Err(i.make_error("TypeError", "next called on a non-RegExp-String-Iterator")),
+    };
+    let done = o
+        .borrow()
+        .props
+        .get("__rsi_done")
+        .map(|p| matches!(p.value, Value::Bool(true)))
+        .unwrap_or(true);
+    if done {
+        return Ok(i.iter_result_obj(Value::Undefined, true));
+    }
+    let r = o.borrow().props.get("__rsi_regexp").unwrap().value.clone();
+    let s = match o
+        .borrow()
+        .props
+        .get("__rsi_string")
+        .map(|p| p.value.clone())
+    {
+        Some(Value::Str(s)) => s,
+        _ => Rc::from(""),
+    };
+    let global = matches!(
+        o.borrow()
+            .props
+            .get("__rsi_global")
+            .map(|p| p.value.clone()),
+        Some(Value::Bool(true))
+    );
+    let unicode = matches!(
+        o.borrow()
+            .props
+            .get("__rsi_unicode")
+            .map(|p| p.value.clone()),
+        Some(Value::Bool(true))
+    );
+    let m = regexp_exec_abstract(i, &r, s.clone())?;
+    if matches!(m, Value::Null) {
+        set_internal(&o, "__rsi_done", Value::Bool(true));
+        return Ok(i.iter_result_obj(Value::Undefined, true));
+    }
+    if global {
+        let m0_v = ab(i.get_member(&m, "0"))?;
+        let m0 = ab(i.to_string(&m0_v))?;
+        if m0.is_empty() {
+            let li_v = ab(i.get_member(&r, "lastIndex"))?;
+            let li = to_length_val(i, &li_v)?;
+            let next = advance_string_index(li, &s, unicode);
+            ab(i.set_member(&r, "lastIndex", Value::Num(next as f64)))?;
+        }
+    } else {
+        set_internal(&o, "__rsi_done", Value::Bool(true));
+    }
+    Ok(i.iter_result_obj(m, false))
 }
 
 /// `Array.fromAsync(source, mapFn?, thisArg?)`: build an array from a sync/async iterable or an
@@ -12173,41 +12507,50 @@ fn install_string(it: &mut Interp) {
         })
     });
     it.def_method(&sp, "matchAll", 1, |i, this, a| {
-        // If the argument is a RegExp, its flags must include "g" (else TypeError).
-        if let Value::Obj(o) = &arg(a, 0) {
-            if let Some(re) = i.regexps.get(&(Rc::as_ptr(o) as usize)) {
-                if !re.flags.contains('g') {
+        // RequireObjectCoercible(this).
+        if matches!(this, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "String.prototype.matchAll called on null or undefined",
+            ));
+        }
+        let regexp = arg(a, 0);
+        if !matches!(regexp, Value::Undefined | Value::Null) {
+            // A RegExp argument must be global; then dispatch to its @@matchAll if present.
+            if arg_is_regexp(i, &regexp)? {
+                let flags = ab(i.get_member(&regexp, "flags"))?;
+                if matches!(flags, Value::Undefined | Value::Null) {
+                    return Err(i.make_error("TypeError", "regexp.flags is null or undefined"));
+                }
+                let fs = ab(i.to_string(&flags))?;
+                if !fs.contains('g') {
                     return Err(i.make_error(
                         "TypeError",
                         "String.prototype.matchAll called with a non-global RegExp",
                     ));
                 }
             }
+            if let Some(key) = well_known_key(i, "matchAll") {
+                let matcher = ab(i.get_member(&regexp, &key))?;
+                if !matches!(matcher, Value::Undefined | Value::Null) {
+                    if !matcher.is_callable() {
+                        return Err(i.make_error("TypeError", "@@matchAll is not callable"));
+                    }
+                    return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
+                }
+            }
         }
+        // Otherwise build a global RegExp from the argument and invoke its @@matchAll.
         let s = this_string(i, &this)?;
-        let re_obj = coerce_regexp(i, arg(a, 0))?;
-        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
-        let chars: Vec<char> = s.chars().collect();
-        let all = regex_find_all(&re, &chars);
-        let mut results = Vec::new();
-        for caps in all {
-            let (x, y) = caps[0].unwrap();
-            let mut items = vec![Value::from_string(chars[x..y].iter().collect::<String>())];
-            for g in 1..=re.ngroups {
-                items.push(match caps[g] {
-                    Some((aa, bb)) => Value::from_string(chars[aa..bb].iter().collect::<String>()),
-                    None => Value::Undefined,
-                });
-            }
-            let m = i.make_array(items);
-            if let Value::Obj(o) = &m {
-                set_data(o, "index", Value::Num(x as f64));
-                set_data(o, "input", Value::Str(s.clone()));
-            }
-            results.push(m);
-        }
-        let arr = i.make_array(results);
-        Ok(make_array_iterator(i, arr, 0))
+        let pattern = if matches!(regexp, Value::Undefined) {
+            String::new()
+        } else {
+            ab(i.to_string(&regexp))?.to_string()
+        };
+        let rx = ab(i.make_regexp(&pattern, "g"))?;
+        let key = well_known_key(i, "matchAll").unwrap();
+        let matcher = ab(i.get_member(&rx, &key))?;
+        ab(i.call(matcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "replace", 2, |i, this, args| {
         let s = this_string(i, &this)?.to_string();

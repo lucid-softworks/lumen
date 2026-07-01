@@ -5337,3 +5337,50 @@ fn typedarray_from_of_validation() {
     // A throwing @@iterator getter propagates.
     assert_eq!(throws("var s={}; Object.defineProperty(s,Symbol.iterator,{get(){throw new TypeError('x');}}); Int8Array.from(s)"), "TypeError");
 }
+
+#[test]
+fn regexp_symbol_methods_are_generic() {
+    // @@replace / @@split / @@match / @@search operate through `exec` on a generic object, so a
+    // fake matcher with a custom `exec` works.
+    assert_eq!(
+        run("var calls=0; var fake={ exec(s){ calls++; return calls===1?Object.assign(['b'],{index:1,length:1}):null; }, global:true, flags:'g' }; RegExp.prototype[Symbol.replace].call(fake, 'abc', 'X')"),
+        "aXc"
+    );
+    // @@search returns the match index and restores lastIndex.
+    assert_eq!(run("/c/[Symbol.search]('abcabc')"), "2");
+    assert_eq!(run("/x/[Symbol.search]('abc')"), "-1");
+}
+
+#[test]
+fn regexp_match_and_matchall() {
+    assert_eq!(run("'a1b2c3'.match(/\\d/g).join(',')"), "1,2,3");
+    // matchAll yields a lazy RegExp String Iterator whose results carry groups.
+    assert_eq!(
+        run("[...'a1b2'.matchAll(/(?<d>\\d)/g)].map(m=>m.groups.d).join(',')"),
+        "1,2"
+    );
+    assert_eq!(
+        run("Object.prototype.toString.call('x'.matchAll(/x/g))"),
+        "[object RegExp String Iterator]"
+    );
+}
+
+#[test]
+fn regexp_split_uses_species_and_captures() {
+    assert_eq!(run("'a,b,c'.split(/,/).join('|')"), "a|b|c");
+    // Capturing groups are spliced into the result.
+    assert_eq!(run("'a1b2c'.split(/(\\d)/).join('|')"), "a|1|b|2|c");
+    // A limit truncates the result.
+    assert_eq!(run("'a,b,c,d'.split(/,/, 2).length"), "2");
+}
+
+#[test]
+fn regexp_replace_dollar_substitutions() {
+    assert_eq!(
+        run("'John Smith'.replace(/(\\w+)\\s(\\w+)/, '$2 $1')"),
+        "Smith John"
+    );
+    assert_eq!(run("'abc'.replace(/b/, \"[$`|$&|$']\")"), "a[a|b|c]c");
+    // Named-group substitution.
+    assert_eq!(run("'2020'.replace(/(?<y>\\d{4})/, '$<y>!')"), "2020!");
+}
