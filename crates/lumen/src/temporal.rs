@@ -2914,44 +2914,28 @@ fn diff_date_cal(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDuratio
     let addc = |y: i64, m: i64| {
         cal_add_c(cal, a, IsoDuration { years: y, months: m, ..Default::default() }, dir)
     };
-    // Largest year magnitude such that `a + dir*years` has not passed `b`.
+    let a_dom = cal_fields(cal, a).2;
+    let passed = |x: IsoDate| if dir > 0 { cmp_date(x, b) > 0 } else { cmp_date(x, b) < 0 };
+    // A whole unit reached exactly at `b` only via day-clamping (`a`'s day doesn't fit the shorter
+    // target month) is not complete — the same clamp-backoff `diff_date` applies to the ISO calendar.
+    let clamped_at = |m: IsoDate| cmp_date(m, b) == 0 && cal_fields(cal, m).2 < a_dom;
+    // Largest year magnitude that has not passed `b`, backing off a clamped exact landing.
     let mut years = 0i64;
     if largest == "year" {
-        loop {
-            let c = addc(years + 1, 0);
-            let passed = if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 };
-            if passed {
-                break;
-            }
+        while !passed(addc(years + 1, 0)) {
             years += 1;
         }
-    }
-    // Then the largest month magnitude on top of those years.
-    let mut months = 0i64;
-    loop {
-        let c = addc(years, months + 1);
-        let passed = if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 };
-        if passed {
-            break;
+        if years > 0 && clamped_at(addc(years, 0)) {
+            years -= 1;
         }
+    }
+    // Then the largest month magnitude on top of those years, again backing off a clamped landing.
+    let mut months = 0i64;
+    while !passed(addc(years, months + 1)) {
         months += 1;
     }
-    // Clamp-backoff (as in `diff_date`): if the last month landed exactly on `b` only because `a`'s
-    // day-of-month was clamped to a shorter target month, that month is not whole — drop it.
-    let a_dom = cal_fields(cal, a).2;
-    let mid = addc(years, months);
-    if cmp_date(mid, b) == 0 && cal_fields(cal, mid).2 < a_dom {
-        if months > 0 {
-            months -= 1;
-        } else if largest == "year" && years > 0 {
-            years -= 1;
-            while {
-                let c = addc(years, months + 1);
-                !(if dir > 0 { cmp_date(c, b) > 0 } else { cmp_date(c, b) < 0 })
-            } {
-                months += 1;
-            }
-        }
+    if months > 0 && clamped_at(addc(years, months)) {
+        months -= 1;
     }
     let mid = addc(years, months);
     let days = epoch_days(b) - epoch_days(mid);
