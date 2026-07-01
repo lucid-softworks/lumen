@@ -20,7 +20,50 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         Ok(i.make_array(vec![Value::Obj(ob)]))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
+    it.def_method(&proto, "formatRange", 2, |i, this, a| {
+        let (s, e) = range_dates(i, &arg(a, 0), &arg(a, 1))?;
+        let a1 = do_format(i, &this, &Value::Num(s))?;
+        if s == e {
+            return Ok(Value::from_string(a1));
+        }
+        let a2 = do_format(i, &this, &Value::Num(e))?;
+        Ok(Value::from_string(format!("{a1}\u{2009}\u{2013}\u{2009}{a2}")))
+    });
+    it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
+        let (s, e) = range_dates(i, &arg(a, 0), &arg(a, 1))?;
+        let a1 = do_format(i, &this, &Value::Num(s))?;
+        let mk = |i: &mut Interp, src: &str, val: &str| {
+            let ob = i.new_object();
+            set_data(&ob, "type", Value::str("literal"));
+            set_data(&ob, "value", Value::from_string(val.to_string()));
+            set_data(&ob, "source", Value::str(src));
+            Value::Obj(ob)
+        };
+        let mut parts = vec![mk(i, if s == e { "shared" } else { "startRange" }, &a1)];
+        if s != e {
+            let a2 = do_format(i, &this, &Value::Num(e))?;
+            parts.push(mk(i, "shared", "\u{2009}\u{2013}\u{2009}"));
+            parts.push(mk(i, "endRange", &a2));
+        }
+        Ok(i.make_array(parts))
+    });
     install_format_getter(it, &proto);
+}
+
+/// ToDateTimeFormattable + ordering for a range: both endpoints ToNumber; NaN or start > end throws.
+fn range_dates(i: &mut Interp, a: &Value, b: &Value) -> Result<(f64, f64), Value> {
+    if matches!(a, Value::Undefined) || matches!(b, Value::Undefined) {
+        return Err(i.make_error("TypeError", "formatRange requires two dates"));
+    }
+    let s = ab(i.to_number(a))?;
+    let e = ab(i.to_number(b))?;
+    if !s.is_finite() || !e.is_finite() {
+        return Err(i.make_error("RangeError", "Invalid time value"));
+    }
+    if s > e {
+        return Err(i.make_error("RangeError", "start date is after end date"));
+    }
+    Ok((s, e))
 }
 
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
@@ -63,7 +106,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 
     // Spec option read order: calendar, numberingSystem, hour12, hourCycle, timeZone, then the
     // component options, then formatMatcher, dateStyle, timeStyle.
-    let calendar = get_option(i, &options, "calendar", &[], None)?;
+    let calendar = get_option(i, &options, "calendar", &[], None)?.map(|c| {
+        // A deprecated calendar id canonicalizes (e.g. ethiopic-amete-alem -> ethioaa).
+        let lc = c.to_lowercase();
+        crate::intl::tags::canonical_ca(&lc).unwrap_or(lc)
+    });
     if let Some(c) = &calendar {
         if !valid_type_id(c) {
             return Err(i.make_error("RangeError", format!("invalid calendar: {c}")));
@@ -183,9 +230,18 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     put(&obj, "__dtf_tzname", &tz_name);
     put(&obj, "__dtf_datestyle", &date_style);
     put(&obj, "__dtf_timestyle", &time_style);
-    put(&obj, "__dtf_hourcycle", &hour_cycle);
-    if let Some(h) = hour12 {
-        set_builtin(&obj, "__dtf_hour12", Value::Bool(h));
+    // hourCycle / hour12 are resolved only when an hour is shown (explicit hour, or a timeStyle).
+    let shows_hour = hour.is_some() || time_style.is_some();
+    if shows_hour {
+        // hour12 overrides hourCycle: true → h12, false → h23.
+        let hc = if let Some(h12) = hour12 {
+            if h12 { "h12" } else { "h23" }.to_string()
+        } else {
+            hour_cycle.clone().unwrap_or_else(|| "h23".to_string())
+        };
+        let h12 = matches!(hc.as_str(), "h11" | "h12");
+        set_builtin(&obj, "__dtf_hourcycle", Value::from_string(hc));
+        set_builtin(&obj, "__dtf_hour12", Value::Bool(h12));
     }
     // Default components when nothing was requested: year/month/day numeric.
     if !has_explicit && date_style.is_none() && time_style.is_none() {
@@ -344,7 +400,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let res = i.new_object();
     let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
         if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {
-            set_builtin(res, k, v);
+            set_data(res, k, v);
         }
         let _ = i;
     };
@@ -352,6 +408,8 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     put(i, &res, "calendar", "__dtf_ca");
     put(i, &res, "numberingSystem", "__dtf_nu");
     put(i, &res, "timeZone", "__dtf_tz");
+    put(i, &res, "hourCycle", "__dtf_hourcycle");
+    put(i, &res, "hour12", "__dtf_hour12");
     put(i, &res, "weekday", "__dtf_weekday");
     put(i, &res, "era", "__dtf_era");
     put(i, &res, "year", "__dtf_year");

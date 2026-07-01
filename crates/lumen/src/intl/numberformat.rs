@@ -768,7 +768,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let res = i.new_object();
     let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
         if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {
-            set_builtin(res, k, v);
+            set_data(res, k, v);
         }
         let _ = i;
     };

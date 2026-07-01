@@ -10,6 +10,11 @@ pub fn is_structurally_valid_tag(tag: &str) -> bool {
     aliases::grandfathered(&tag.to_ascii_lowercase()).is_some() || parse(tag).is_some()
 }
 
+/// Canonicalize a `ca` (calendar) keyword type, applying the CLDR type alias if any.
+pub fn canonical_ca(ty: &str) -> Option<String> {
+    aliases::unicode_type_alias("ca", ty).map(|s| s.to_string())
+}
+
 fn is_alpha(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
 }
