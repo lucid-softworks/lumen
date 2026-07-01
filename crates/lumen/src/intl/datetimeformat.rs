@@ -114,6 +114,12 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
     if matches!(a, Value::Undefined) || matches!(b, Value::Undefined) {
         return Err(i.make_error("TypeError", "formatRange requires two dates"));
     }
+    // ToDateTimeFormattable each endpoint IN ORDER: a Temporal value keeps its type, a non-Temporal
+    // is ToNumber-coerced now (its valueOf side-effects must run before the kind-mismatch check).
+    let ta = range_type_tag(i, a);
+    let na = if ta == 0 { Some(ab(i.to_number(a))?) } else { None };
+    let tb = range_type_tag(i, b);
+    let nb = if tb == 0 { Some(ab(i.to_number(b))?) } else { None };
     // Two Temporal endpoints must share a calendar (RangeError otherwise).
     let cal_of = |i: &Interp, v: &Value| -> Option<String> {
         let ptr = Rc::as_ptr(v.as_obj()?) as usize;
@@ -128,20 +134,24 @@ fn range_dates(i: &mut Interp, o: &Gc, a: &Value, b: &Value) -> Result<(f64, f64
             return Err(i.make_error("RangeError", "formatRange endpoints have different calendars"));
         }
     }
-    // The two endpoints must be the same type — a plain number/Date pairs only with another
-    // number/Date, and a Temporal value only with the same Temporal type (kind alone is too coarse:
-    // it lumps number/Date/Instant together).
-    if range_type_tag(i, a) != range_type_tag(i, b) {
+    // The two endpoints must be the same type (checked AFTER coercion, before TimeClip).
+    if ta != tb {
         return Err(i.make_error("TypeError", "formatRange endpoints must be the same type"));
     }
-    let (s, ks) = dtf_ms_kind(i, o, a)?;
-    let (e, ke) = dtf_ms_kind(i, o, b)?;
-    if ks != ke {
-        return Err(i.make_error("TypeError", "formatRange endpoints must be the same type"));
-    }
-    if !s.is_finite() || !e.is_finite() {
-        return Err(i.make_error("RangeError", "Invalid time value"));
-    }
+    // TimeClip a coerced number; a Temporal reads its own fields (no re-coercion).
+    let resolve = |i: &mut Interp, v: &Value, n: Option<f64>| -> Result<(f64, u8), Value> {
+        match n {
+            Some(x) => {
+                if !x.is_finite() || x.abs() > 8.64e15 {
+                    return Err(i.make_error("RangeError", "Invalid time value"));
+                }
+                Ok((x.trunc() + 0.0, 0))
+            }
+            None => dtf_ms_kind(i, o, v),
+        }
+    };
+    let (s, _) = resolve(i, a, na)?;
+    let (e, ks) = resolve(i, b, nb)?;
     Ok((s, e, ks))
 }
 
