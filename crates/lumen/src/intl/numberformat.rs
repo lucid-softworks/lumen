@@ -146,7 +146,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     .unwrap();
 
     // digit options (minInt, min/maxFrac, min/maxSig), then the rounding options.
-    let digits = read_digit_options(i, &options, &style, &notation)?;
+    let cur_digits = currency
+        .as_deref()
+        .map(|c| currency_fraction_digits(&c.to_uppercase()))
+        .unwrap_or(2);
+    let digits = read_digit_options(i, &options, &style, cur_digits)?;
 
     let rounding_increment = {
         let v = ab(i.get_member(&options, "roundingIncrement"))?;
@@ -238,7 +242,17 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     Ok(Value::Obj(obj))
 }
 
-fn read_digit_options(i: &mut Interp, options: &Value, style: &str, _notation: &str) -> Result<DigitOpts, Value> {
+/// The CLDR default fraction-digit count for a currency (ISO 4217 minor units).
+fn currency_fraction_digits(code: &str) -> u32 {
+    match code {
+        "JPY" | "KRW" | "CLP" | "ISK" | "HUF" | "VND" | "TWD" | "UGX" | "XOF" | "XAF" | "XPF"
+        | "PYG" | "RWF" | "DJF" | "GNF" | "KMF" | "VUV" => 0,
+        "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+        _ => 2,
+    }
+}
+
+fn read_digit_options(i: &mut Interp, options: &Value, style: &str, cur_digits: u32) -> Result<DigitOpts, Value> {
     // Read order: minInt, minFrac, maxFrac, minSig, maxSig.
     let min_int = read_range(i, options, "minimumIntegerDigits", 1, 21, 1)?;
     let mnfd = read_range_opt(i, options, "minimumFractionDigits", 0, 100)?;
@@ -247,7 +261,7 @@ fn read_digit_options(i: &mut Interp, options: &Value, style: &str, _notation: &
     let max_sig = read_range_opt(i, options, "maximumSignificantDigits", 1, 21)?;
 
     let (default_min_frac, default_max_frac) = if style == "currency" {
-        (2, 2)
+        (cur_digits, cur_digits)
     } else if style == "percent" {
         (0, 0)
     } else {
