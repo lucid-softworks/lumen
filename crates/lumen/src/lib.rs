@@ -40,6 +40,8 @@ mod tz;
 mod tzdata;
 #[rustfmt::skip]
 mod umalqura;
+#[rustfmt::skip]
+mod units;
 mod unicode_props;
 mod value;
 

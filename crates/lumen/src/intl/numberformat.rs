@@ -426,11 +426,11 @@ fn is_well_formed_currency(c: &str) -> bool {
     c.len() == 3 && c.bytes().all(|b| b.is_ascii_alphabetic())
 }
 fn is_well_formed_unit(u: &str) -> bool {
-    // "unit" or "unit-per-unit"; each a 3-8 (roughly) identifier of alpha/-.
-    let simple = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-');
+    // A sanctioned single unit, or "X-per-Y" with both X and Y sanctioned (IsWellFormedUnitIdentifier).
+    let sanctioned = |s: &str| crate::units::SANCTIONED_UNITS.contains(&s);
     match u.split_once("-per-") {
-        Some((a, b)) => simple(a) && simple(b),
-        None => simple(u),
+        Some((a, b)) => sanctioned(a) && sanctioned(b),
+        None => sanctioned(u),
     }
 }
 
