@@ -2668,7 +2668,7 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
 /// or an ISO date/time string whose `[...]` annotation is itself a valid zone. RangeError otherwise.
 fn validate_tz_string(i: &Interp, s: &str) -> Result<(), Value> {
     let t = s.trim();
-    if t.starts_with('+') || t.starts_with('-') {
+    if is_pure_offset(t) {
         return normalize_tz(i, t).map(|_| ());
     }
     if crate::tz::canonicalize(t).is_some() {
@@ -4393,13 +4393,27 @@ fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
 /// a RangeError.
 fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
     let t = s.trim();
-    if t.starts_with('+') || t.starts_with('-') {
+    if is_pure_offset(t) {
         return Ok(Rc::from(offset_string(tz_offset_ns(t)).as_str()));
     }
     if let Some(canon) = crate::tz::canonicalize(t) {
         return Ok(Rc::from(canon));
     }
     Err(i.make_error("RangeError", format!("unknown time zone: {t}")))
+}
+
+/// Whether `s` is a bare UTC-offset identifier (`±HH`, `±HH:MM[:SS[.fff]]`, or the colon-less basic
+/// forms) — as opposed to, say, a negative-year ISO date-time string that also starts with `-`.
+fn is_pure_offset(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 3 || (b[0] != b'+' && b[0] != b'-') {
+        return false;
+    }
+    let rest = &s[1..];
+    rest.as_bytes()[0].is_ascii_digit()
+        && rest.as_bytes()[1].is_ascii_digit()
+        && rest.bytes().all(|c| c.is_ascii_digit() || c == b':' || c == b'.')
+        && rest.len() <= 15
 }
 
 fn parse_fixed_offset(tz: &str) -> Option<i64> {
