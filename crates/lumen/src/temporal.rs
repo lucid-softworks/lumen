@@ -3465,6 +3465,36 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let o = to_monthday(i, &arg(a, 0), &Value::Undefined)?;
         Ok(Value::Bool(d.month == o.month && d.day == o.day))
     });
+    it.def_method(&proto, "with", 1, |i, t, a| {
+        let md = as_monthday(i, &t)?;
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
+        let month = field_int(i, &f, "month", md.month as i64)?;
+        let day = field_int(i, &f, "day", md.day as i64)?;
+        let ovf = to_overflow(i, &arg(a, 1))?;
+        // Keep the reference ISO year; regulate the merged month/day.
+        let d = build_date_ovf(i, md.year, month, day, ovf)?;
+        let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
+        set_cal(i, &v, cal_of(i, &t));
+        Ok(v)
+    });
+    it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
+        let md = as_monthday(i, &t)?;
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "toPlainDate() argument must be an object"));
+        }
+        // The year is required to complete a date from a month-day.
+        let yv = getm(i, &f, "year")?;
+        if matches!(yv, Value::Undefined) {
+            return Err(i.make_error("TypeError", "toPlainDate() requires a year"));
+        }
+        let year = to_int(i, &yv)?;
+        let d = build_date(i, year, md.month as i64, md.day as i64)?;
+        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
+    });
     let ctor = add_ctor(it, ns, "PlainMonthDay", 2, proto, |i, _t, a| {
         require_new(i)?;
         let month = to_int(i, &arg(a, 0))?;
@@ -4925,6 +4955,23 @@ fn install_now(it: &mut Interp, ns: &Gc) {
     // pass even though absolute-time tests do not.
     it.def_method(&now, "instant", 0, |i, _t, _| {
         Ok(make(i, "Temporal.Instant", Temporal::Instant(0)))
+    });
+    it.def_method(&now, "timeZoneId", 0, |_i, _t, _| Ok(Value::str("UTC")));
+    it.def_method(&now, "zonedDateTimeISO", 0, |i, _t, a| {
+        // The system zone (default UTC) at the fixed epoch.
+        let tz = match arg(a, 0) {
+            Value::Undefined => Rc::from("UTC"),
+            v => {
+                let s = i.to_string(&v).map_err(unab)?;
+                normalize_tz(i, &s)?
+            }
+        };
+        let off = zone_offset(&tz, 0);
+        Ok(make(
+            i,
+            "Temporal.ZonedDateTime",
+            Temporal::Zoned { epoch_ns: 0, offset_ns: off, tz },
+        ))
     });
     it.def_method(&now, "plainDateISO", 0, |i, _t, _| {
         Ok(make(
