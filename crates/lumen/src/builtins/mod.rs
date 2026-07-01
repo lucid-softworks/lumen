@@ -982,6 +982,10 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    // IsImmutableBuffer is checked before ToIndex(byteOffset)/ToNumber(value) read any arguments.
+    if i.immutable_buffers.contains(&buf) {
+        return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+    }
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
@@ -1058,6 +1062,9 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
+    if i.immutable_buffers.contains(&buf) {
+        return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+    }
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
@@ -2138,6 +2145,15 @@ fn install_array_buffer(it: &mut Interp) {
             !i.array_buffers.contains_key(&(Rc::as_ptr(o) as usize)),
         ))
     });
+    ab_getter(it, &proto, "immutable", |i, this, _| {
+        let o = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        Ok(Value::Bool(
+            i.immutable_buffers.contains(&(Rc::as_ptr(o) as usize)),
+        ))
+    });
     it.def_method(&proto, "slice", 2, |i, this, a| {
         let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
         let bytes = ptr
@@ -2185,6 +2201,47 @@ fn install_array_buffer(it: &mut Interp) {
     });
     it.def_method(&proto, "transfer", 1, ab_transfer);
     it.def_method(&proto, "transferToFixedLength", 1, ab_transfer);
+    // Immutable-ArrayBuffer proposal: move the bytes into a fresh immutable buffer (detaching the
+    // source), or copy a range into an immutable buffer (leaving the source intact).
+    it.def_method(&proto, "transferToImmutable", 1, |i, this, a| {
+        let bv = ab_transfer(i, this, a)?;
+        if let Value::Obj(o) = &bv {
+            i.immutable_buffers.insert(Rc::as_ptr(o) as usize);
+        }
+        Ok(bv)
+    });
+    it.def_method(&proto, "sliceToImmutable", 2, |i, this, a| {
+        let ptr = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .map(|o| Rc::as_ptr(o) as usize)
+            .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
+        if !i.array_buffers.contains_key(&ptr) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+        }
+        let len = i.array_buffers[&ptr].len() as i64;
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        let end = match arg(a, 1) {
+            Value::Undefined => len,
+            v => norm_index(ab(i.to_number(&v))?, len, len),
+        };
+        // Coercing start/end may have detached the source buffer.
+        let bytes = i
+            .array_buffers
+            .get(&ptr)
+            .ok_or_else(|| i.make_error("TypeError", "ArrayBuffer is detached"))?;
+        let slice = if begin < end {
+            bytes[begin as usize..end as usize].to_vec()
+        } else {
+            Vec::new()
+        };
+        let (bv, bp) = make_array_buffer(i, slice.len());
+        if let Some(buf) = i.array_buffers.get_mut(&bp) {
+            buf.copy_from_slice(&slice);
+        }
+        i.immutable_buffers.insert(bp);
+        Ok(bv)
+    });
     let ctor = it.make_native("ArrayBuffer", 1, |i, _t, a| {
         if !i.constructing {
             return Err(i.make_error("TypeError", "ArrayBuffer constructor requires 'new'"));
@@ -12209,7 +12266,7 @@ fn install_math(it: &mut Interp) {
     unary!("fround", |x: f64| x as f32 as f64);
     unary!(
         "f16round",
-        |x: f64| crate::value::f16_to_f32(crate::value::f32_to_f16(x as f32)) as f64
+        |x: f64| crate::value::f16_to_f32(crate::value::f64_to_f16(x)) as f64
     );
     unary!("clz32", |x: f64| (to_uint32(x)).leading_zeros() as f64);
     it.def_method(&math, "sumPrecise", 1, |i, _t, a| {

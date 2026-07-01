@@ -5101,3 +5101,42 @@ fn dataview_length_tracking_and_toprimitive() {
         "1"
     );
 }
+
+#[test]
+fn immutable_array_buffer() {
+    // transferToImmutable produces an immutable buffer and detaches the source.
+    assert_eq!(
+        run("var a=new ArrayBuffer(8); var i=a.transferToImmutable(); [i.immutable, a.detached, i.byteLength].join(',')"),
+        "true,true,8"
+    );
+    // Writing to an immutable buffer via a DataView throws TypeError (before reading arguments).
+    assert_eq!(
+        throws("var i=(new ArrayBuffer(8)).transferToImmutable(); new DataView(i).setInt8(0,1)"),
+        "TypeError"
+    );
+    // Reads still work.
+    assert_eq!(
+        run("var i=(new ArrayBuffer(8)).transferToImmutable(); new DataView(i).getInt8(0)"),
+        "0"
+    );
+    // sliceToImmutable copies a range without detaching the source.
+    assert_eq!(
+        run("var a=new ArrayBuffer(8); new DataView(a).setInt8(2,7); var s=a.sliceToImmutable(2,4); [s.immutable,s.byteLength,a.detached,new DataView(s).getInt8(0)].join(',')"),
+        "true,2,false,7"
+    );
+}
+
+#[test]
+fn float16_rounds_once() {
+    // 2^-25 + ε must round up to the smallest f16 subnormal (2^-24), not double-round to zero.
+    assert_eq!(
+        run("var dv=new DataView(new ArrayBuffer(8)); dv.setFloat16(0, 2.980232238769532e-8); dv.getFloat16(0)"),
+        "5.960464477539063e-8"
+    );
+    // Exactly 2^-25 ties to even → zero.
+    assert_eq!(
+        run("var dv=new DataView(new ArrayBuffer(8)); dv.setFloat16(0, 2.9802322387695312e-8); dv.getFloat16(0)"),
+        "0"
+    );
+    assert_eq!(run("Math.f16round(1.337)"), "1.3369140625");
+}

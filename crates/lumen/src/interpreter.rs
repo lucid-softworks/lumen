@@ -319,6 +319,9 @@ pub struct Interp {
     /// SharedArrayBuffer pointers → their global shared-memory id (`array_buffers` keeps a
     /// same-length placeholder so detach/length checks still work; the bytes live in the registry).
     pub shared_buffers: HashMap<usize, u64>,
+    /// Immutable ArrayBuffer pointers (created via `transferToImmutable`/`sliceToImmutable`): their
+    /// bytes can be read but never written, resized, detached, or transferred.
+    pub immutable_buffers: std::collections::HashSet<usize>,
     /// Whether this agent may block in `Atomics.wait` (false for the main agent, true for the
     /// worker agents spawned by `$262.agent.start`).
     pub can_block: bool,
@@ -672,6 +675,7 @@ impl Interp {
             extra_protos: HashMap::new(),
             array_buffers: HashMap::new(),
             shared_buffers: HashMap::new(),
+            immutable_buffers: std::collections::HashSet::new(),
             can_block: true,
             pending_async_waits: Vec::new(),
             agent: None,

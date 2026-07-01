@@ -279,7 +279,7 @@ impl TaKind {
             TaKind::U16 => (int(n) as u16).to_le_bytes().to_vec(),
             TaKind::I32 => (int(n) as i32).to_le_bytes().to_vec(),
             TaKind::U32 => (int(n) as u32).to_le_bytes().to_vec(),
-            TaKind::F16 => f32_to_f16(n as f32).to_le_bytes().to_vec(),
+            TaKind::F16 => f64_to_f16(n).to_le_bytes().to_vec(),
             TaKind::F32 => (n as f32).to_le_bytes().to_vec(),
             TaKind::F64 => n.to_le_bytes().to_vec(),
             TaKind::I64 | TaKind::U64 => self.write_bigint(int(n) as i128),
@@ -504,41 +504,47 @@ pub fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-/// IEEE-754 single-precision to half-precision (binary16), round-to-nearest-even.
-pub fn f32_to_f16(value: f32) -> u16 {
+/// IEEE-754 double-precision to half-precision (binary16), round-to-nearest-even, rounding **once**.
+/// Going through `f32` first would double-round — e.g. `2^-25 + ε` collapses to an exact tie at
+/// `f32` and then rounds to zero instead of up to the smallest subnormal.
+pub fn f64_to_f16(value: f64) -> u16 {
     let x = value.to_bits();
-    let sign = ((x >> 16) & 0x8000) as u16;
-    let mant = (x & 0x7f_ffff) as i32;
-    let exp = ((x >> 23) & 0xff) as i32;
-    if exp == 0xff {
+    let sign = ((x >> 48) & 0x8000) as u16;
+    let exp = ((x >> 52) & 0x7ff) as i32;
+    let mant = x & 0x000f_ffff_ffff_ffff; // 52-bit fraction
+    if exp == 0x7ff {
         return if mant != 0 {
-            sign | 0x7e00
+            sign | 0x7e00 // NaN
         } else {
-            sign | 0x7c00
+            sign | 0x7c00 // infinity
         };
     }
-    let half_exp = exp - 127 + 15;
+    if exp == 0 && mant == 0 {
+        return sign; // signed zero
+    }
+    let half_exp = exp - 1023 + 15;
     if half_exp >= 0x1f {
         return sign | 0x7c00; // overflow → infinity
     }
     if half_exp <= 0 {
-        if half_exp < -10 {
-            return sign; // underflow → zero
+        // Subnormal half (or underflow to zero). Drop the low bits of the full significand,
+        // rounding to nearest even. `exp == 0` doubles are far below f16 range → they fall out as 0.
+        let m = if exp == 0 { mant } else { mant | (1u64 << 52) };
+        let shift = 43 - half_exp; // 52-bit fraction → 10-bit fraction, minus the exponent deficit
+        if shift >= 64 {
+            return sign;
         }
-        // Subnormal: shift the implicit-1 mantissa, rounding to nearest even.
-        let m = mant | 0x80_0000;
-        let shift = 14 - half_exp;
         let mut h = (m >> shift) as u16;
         let round_bit = (m >> (shift - 1)) & 1;
-        let sticky = (m & ((1 << (shift - 1)) - 1)) != 0;
+        let sticky = (m & ((1u64 << (shift - 1)) - 1)) != 0;
         if round_bit != 0 && (sticky || (h & 1) != 0) {
             h += 1;
         }
         return sign | h;
     }
-    let mut h = (((half_exp as u32) << 10) | ((mant >> 13) as u32)) as u16;
-    let round_bit = (mant >> 12) & 1;
-    let sticky = (mant & 0xfff) != 0;
+    let mut h = (((half_exp as u32) << 10) | ((mant >> 42) as u32)) as u16;
+    let round_bit = (mant >> 41) & 1;
+    let sticky = (mant & ((1u64 << 41) - 1)) != 0;
     if round_bit != 0 && (sticky || (h & 1) != 0) {
         h = h.wrapping_add(1); // carry into exponent is intentional
     }
