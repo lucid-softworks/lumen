@@ -6893,21 +6893,35 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let opts = arg(a, 0);
-        let smallest = opt_str(i, &opts, "smallestUnit", "")?;
-        let unit = if smallest == "day" {
-            86_400_000_000_000
-        } else {
-            unit_ns(&smallest)
-                .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
-        };
+        let smallest = sing(&opt_str(i, &opts, "smallestUnit", "")?).to_string();
         let incr_raw = opt_num(i, &opts, "roundingIncrement", 1)?;
         let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
-        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
+        check_increment(i, &smallest, incr_raw)?;
         let incr = incr_raw as i128;
+        if smallest == "day" {
+            // Round to the nearest local day boundary; a DST day is 23/25h long, not a fixed 24h.
+            let (d, _) = zoned_local(e, o);
+            let sod = |dd: IsoDate| -> i128 {
+                let mid = dt_ns(dd, IsoTime { hour: 0, minute: 0, second: 0, ms: 0, us: 0, ns: 0 });
+                mid - offset_for_local(&tz, mid) as i128
+            };
+            let today = sod(d);
+            let (ny, nm, nda) = civil_from_days(epoch_days(d) + 1);
+            let tomorrow = sod(IsoDate { year: ny, month: nm, day: nda });
+            let denom = (tomorrow - today) as f64;
+            let frac = if denom == 0.0 { 0.0 } else { (e - today) as f64 / denom };
+            let up = round_up_magnitude(&mode, frac, true, false);
+            let epoch = if up { tomorrow } else { today };
+            let off = zone_offset(&tz, epoch);
+            return Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: epoch, offset_ns: off, tz }));
+        }
+        let unit = unit_ns(&smallest).ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
         let local = e + o as i128;
         let rounded = round_ns(local, unit * incr, &mode);
-        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - o as i128, offset_ns: o, tz, }))
+        // Re-resolve the offset for the rounded wall-clock time (it may cross a DST transition).
+        let off = offset_for_local(&tz, rounded);
+        Ok(make_like(i, &t, "Temporal.ZonedDateTime", Temporal::Zoned { epoch_ns: rounded - off as i128, offset_ns: off, tz }))
     });
 
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
