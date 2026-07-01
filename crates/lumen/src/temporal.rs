@@ -422,17 +422,90 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
 
 /// The (era code, era year) for a proleptic-Gregorian year in a given calendar. Only the era-based
 /// calendars (gregory/japanese) expose an era here; others (incl. iso8601) return `(None, None)`.
-fn era_of(cal: &str, year: i64) -> (Option<&'static str>, Option<i64>) {
+/// (era, eraYear) for an arithmetic calendar at an ISO date. `None` for calendars without eras.
+fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
     match cal {
-        "gregory" | "japanese" => {
-            if year >= 1 {
-                (Some("ce"), Some(year))
+        "gregory" => {
+            if d.year >= 1 {
+                (Some("ce"), Some(d.year))
             } else {
-                (Some("bce"), Some(1 - year))
+                (Some("bce"), Some(1 - d.year))
+            }
+        }
+        "japanese" => japanese_era(d),
+        "buddhist" => (Some("be"), Some(d.year + 543)),
+        "roc" => {
+            let y = d.year - 1911;
+            if y >= 1 {
+                (Some("minguo"), Some(y))
+            } else {
+                (Some("before-roc"), Some(1 - y))
             }
         }
         _ => (None, None),
     }
+}
+
+/// The Japanese era (and 1-based era year) in effect on an ISO date; pre-Meiji falls back to
+/// gregorian ce/bce. Era-start dates per the modern Japanese calendar.
+fn japanese_era(d: IsoDate) -> (Option<&'static str>, Option<i64>) {
+    let e = epoch_days(d);
+    let start = |y, m, day| days_from_civil(y, m, day);
+    if e >= start(2019, 5, 1) {
+        (Some("reiwa"), Some(d.year - 2019 + 1))
+    } else if e >= start(1989, 1, 8) {
+        (Some("heisei"), Some(d.year - 1989 + 1))
+    } else if e >= start(1926, 12, 25) {
+        (Some("showa"), Some(d.year - 1926 + 1))
+    } else if e >= start(1912, 7, 30) {
+        (Some("taisho"), Some(d.year - 1912 + 1))
+    } else if e >= start(1868, 9, 8) {
+        (Some("meiji"), Some(d.year - 1868 + 1))
+    } else if d.year >= 1 {
+        (Some("ce"), Some(d.year))
+    } else {
+        (Some("bce"), Some(1 - d.year))
+    }
+}
+
+/// The calendar-year number a receiver's `.year` reports (ISO/gregory/japanese use the ISO year).
+fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
+    match cal {
+        "buddhist" => d.year + 543,
+        "roc" => d.year - 1911,
+        _ => d.year,
+    }
+}
+
+/// Back-convert a calendar year field to the ISO (proleptic Gregorian) year.
+fn cal_year_to_iso(cal: &str, year: i64) -> i64 {
+    match cal {
+        "buddhist" => year - 543,
+        "roc" => year + 1911,
+        _ => year,
+    }
+}
+
+/// The ISO year for an `(era, eraYear)` pair in an arithmetic calendar, if recognized.
+fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
+    match (cal, era) {
+        ("gregory" | "japanese", "ce" | "gregory" | "ad") => Some(era_year),
+        ("gregory" | "japanese", "bce" | "gregory-inverse" | "bc") => Some(1 - era_year),
+        ("japanese", "reiwa") => Some(2019 + era_year - 1),
+        ("japanese", "heisei") => Some(1989 + era_year - 1),
+        ("japanese", "showa") => Some(1926 + era_year - 1),
+        ("japanese", "taisho") => Some(1912 + era_year - 1),
+        ("japanese", "meiji") => Some(1868 + era_year - 1),
+        ("buddhist", "be") => Some(era_year - 543),
+        ("roc", "minguo" | "roc") => Some(1911 + era_year),
+        ("roc", "before-roc" | "roc-inverse") => Some(1912 - era_year),
+        _ => None,
+    }
+}
+
+/// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
+fn cal_uses_era(cal: &str) -> bool {
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc")
 }
 
 /// Record the calendar id on a just-created Temporal object.
@@ -462,13 +535,6 @@ fn to_int_integral(i: &mut Interp, v: &Value) -> Result<i64, Value> {
     Ok(n as i64)
 }
 /// Read a Duration property-bag field via ToIntegerIfIntegral, defaulting when absent.
-fn dur_field(i: &mut Interp, o: &Value, k: &str, default: i64) -> Result<i64, Value> {
-    let v = getm(i, o, k)?;
-    match v {
-        Value::Undefined => Ok(default),
-        _ => to_int_integral(i, &v),
-    }
-}
 /// Read a positional Duration constructor argument via ToIntegerIfIntegral, defaulting to 0.
 fn dur_arg(i: &mut Interp, v: &Value) -> Result<i64, Value> {
     match v {
@@ -1206,15 +1272,16 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     it.extra_protos.insert("Temporal.PlainDate", proto.clone());
 
     def_getter(it, &proto, "year", |i, t, _| {
-        Ok(Value::Num(as_date(i, &t)?.year as f64))
+        let d = as_date(i, &t)?;
+        Ok(Value::Num(cal_year_num(&cal_of(i, &t), d) as f64))
     });
     def_getter(it, &proto, "era", |i, t, _| {
-        let y = as_date(i, &t)?.year;
-        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+        let d = as_date(i, &t)?;
+        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
-        let y = as_date(i, &t)?.year;
-        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        let d = as_date(i, &t)?;
+        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_date(i, &t)?.month as f64))
@@ -2279,7 +2346,7 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
     // PrepareTemporalFields reads (and coerces) fields in alphabetical order, calling each field's
     // valueOf/toString as it is read: day, [era, eraYear], month, monthCode, year. Required-field
     // errors are only raised after every field has been read.
-    let uses_era = matches!(cal, "gregory" | "japanese");
+    let uses_era = cal_uses_era(cal);
     let day_f = getm(i, v, "day")?;
     let day = match day_f {
         Value::Undefined => None,
@@ -2343,6 +2410,31 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
             Some(n)
         }
     };
+    // Reconcile year / era+eraYear BEFORE month (a missing year is a TypeError that the spec raises
+    // before a month/monthCode conflict). An era, when present, must be valid for the calendar even
+    // if a `year` field also supplies the value.
+    let era_iso = if uses_era {
+        match (&era, era_year) {
+            (Some(e), Some(ey)) => Some(
+                cal_era_to_iso(cal, e, ey)
+                    .ok_or_else(|| i.make_error("RangeError", format!("invalid era: {e}")))?,
+            ),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(i.make_error("TypeError", "era and eraYear must be provided together"))
+            }
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
+    let year = if let Some(y) = year_opt {
+        cal_year_to_iso(cal, y)
+    } else if let Some(ei) = era_iso {
+        ei
+    } else {
+        return Err(i.make_error("TypeError", "year is required"));
+    };
+
     let month = match (month, mc_num) {
         (Some(a), Some(b)) => {
             if a != b {
@@ -2353,23 +2445,6 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         (Some(a), None) => a,
         (None, Some(b)) => b,
         (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
-    };
-
-    // Reconcile year / era+eraYear.
-    let year = if let Some(y) = year_opt {
-        y
-    } else if uses_era {
-        match (era, era_year) {
-            (Some(e), Some(ey)) => match e.as_str() {
-                "ce" | "gregory" | "ad" | "reiwa" | "heisei" | "showa" | "taisho" | "meiji" => ey,
-                "bce" | "gregory-inverse" | "bc" => 1 - ey,
-                _ => return Err(i.make_error("RangeError", format!("invalid era: {e}"))),
-            },
-            (None, None) => return Err(i.make_error("TypeError", "year is required")),
-            _ => return Err(i.make_error("TypeError", "era and eraYear must be provided together")),
-        }
-    } else {
-        return Err(i.make_error("TypeError", "year is required"));
     };
 
     let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
@@ -2973,15 +3048,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         .insert("Temporal.PlainDateTime", proto.clone());
 
     def_getter(it, &proto, "year", |i, t, _| {
-        Ok(Value::Num(as_datetime(i, &t)?.0.year as f64))
+        let d = as_datetime(i, &t)?.0;
+        Ok(Value::Num(cal_year_num(&cal_of(i, &t), d) as f64))
     });
     def_getter(it, &proto, "era", |i, t, _| {
-        let y = as_datetime(i, &t)?.0.year;
-        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+        let d = as_datetime(i, &t)?.0;
+        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
-        let y = as_datetime(i, &t)?.0.year;
-        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        let d = as_datetime(i, &t)?.0;
+        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_datetime(i, &t)?.0.month as f64))
@@ -3314,15 +3390,16 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.extra_protos
         .insert("Temporal.PlainYearMonth", proto.clone());
     def_getter(it, &proto, "year", |i, t, _| {
-        Ok(Value::Num(as_yearmonth(i, &t)?.year as f64))
+        let d = as_yearmonth(i, &t)?;
+        Ok(Value::Num(cal_year_num(&cal_of(i, &t), d) as f64))
     });
     def_getter(it, &proto, "era", |i, t, _| {
-        let y = as_yearmonth(i, &t)?.year;
-        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+        let d = as_yearmonth(i, &t)?;
+        Ok(cal_era(&cal_of(i, &t), d).0.map(Value::str).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
-        let y = as_yearmonth(i, &t)?.year;
-        Ok(era_of(&cal_of(i, &t), y).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
+        let d = as_yearmonth(i, &t)?;
+        Ok(cal_era(&cal_of(i, &t), d).1.map(|e| Value::Num(e as f64)).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "month", |i, t, _| {
         Ok(Value::Num(as_yearmonth(i, &t)?.month as f64))
@@ -4634,16 +4711,17 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             });
         };
     }
-    date_get!("year", |d: IsoDate| Value::Num(d.year as f64));
+    def_getter(it, &proto, "year", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        Ok(Value::Num(cal_year_num(&cal_of(i, &t), zoned_local(e, o).0) as f64))
+    });
     def_getter(it, &proto, "era", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        let y = zoned_local(e, o).0.year;
-        Ok(era_of(&cal_of(i, &t), y).0.map(Value::str).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0).0.map(Value::str).unwrap_or(Value::Undefined))
     });
     def_getter(it, &proto, "eraYear", |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        let y = zoned_local(e, o).0.year;
-        Ok(era_of(&cal_of(i, &t), y).1.map(|v| Value::Num(v as f64)).unwrap_or(Value::Undefined))
+        Ok(cal_era(&cal_of(i, &t), zoned_local(e, o).0).1.map(|v| Value::Num(v as f64)).unwrap_or(Value::Undefined))
     });
     date_get!("month", |d: IsoDate| Value::Num(d.month as f64));
     date_get!("day", |d: IsoDate| Value::Num(d.day as f64));
