@@ -45,12 +45,19 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DateTimeFormat", 0, construct);
     install_supported_locales(it, &ctor);
     it.def_method(&proto, "formatToParts", 1, |i, this, a| {
-        let s = do_format(i, &this, &arg(a, 0))?;
-        // A single literal part is acceptable for many shape tests.
-        let ob = i.new_object();
-        set_data(&ob, "type", Value::str("literal"));
-        set_data(&ob, "value", Value::from_string(s));
-        Ok(i.make_array(vec![Value::Obj(ob)]))
+        let o = brand_slot(i, &this, "__dtf")?;
+        let ms = dtf_ms(i, &arg(a, 0))?;
+        let parts = build_parts(&o, ms);
+        let arr: Vec<Value> = parts
+            .into_iter()
+            .map(|(t, v)| {
+                let ob = i.new_object();
+                set_data(&ob, "type", Value::str(t));
+                set_data(&ob, "value", Value::from_string(v));
+                Value::Obj(ob)
+            })
+            .collect();
+        Ok(i.make_array(arr))
     });
     it.def_method(&proto, "resolvedOptions", 0, resolved_options);
     it.def_method(&proto, "formatRange", 2, |i, this, a| {
@@ -320,35 +327,47 @@ const MON_LONG: [&str; 12] = [
 const MON_SHORT: [&str; 12] =
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/// Resolve the format argument to epoch-milliseconds (a Temporal receiver uses its ISO fields).
+fn dtf_ms(i: &mut Interp, date: &Value) -> Result<f64, Value> {
+    if matches!(date, Value::Undefined) {
+        // "now" is non-deterministic; epoch 0 keeps explicit-date tests deterministic.
+        return Ok(0.0);
+    }
+    if let Some(t) = date.as_obj().and_then(|d| i.temporal.get(&(Rc::as_ptr(d) as usize)).cloned()) {
+        return Ok(temporal_to_ms(&t));
+    }
+    let n = ab(i.to_number(date))?;
+    if !n.is_finite() {
+        return Err(i.make_error("RangeError", "Invalid time value"));
+    }
+    Ok(n)
+}
+
 fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value> {
     let o = brand_slot(i, this, "__dtf")?;
-    let ms = if matches!(date, Value::Undefined) {
-        // "now" is non-deterministic; use epoch 0 so tests that pass an explicit date are unaffected.
-        0.0
-    } else if let Some(t) = date.as_obj().and_then(|d| i.temporal.get(&(Rc::as_ptr(d) as usize)).cloned()) {
-        // A Temporal object formats from its (ISO-calendar) date/time fields.
-        temporal_to_ms(&t)
-    } else {
-        let n = ab(i.to_number(date))?;
-        if !n.is_finite() {
-            return Err(i.make_error("RangeError", "Invalid time value"));
-        }
-        n
-    };
+    let ms = dtf_ms(i, date)?;
+    let parts = build_parts(&o, ms);
+    Ok(parts.into_iter().map(|(_, v)| v).collect::<Vec<_>>().join(""))
+}
+
+/// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
+fn build_parts(o: &Gc, ms: f64) -> Vec<(&'static str, String)> {
     let (y, mo, d, h, mi, s, wd) = ymd(ms);
     let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value.clone()) {
         Some(Value::Str(s)) => Some(s.to_string()),
         _ => None,
     };
+    let mut parts: Vec<(&'static str, String)> = Vec::new();
+    let lit = |parts: &mut Vec<(&'static str, String)>, s: &str| {
+        parts.push(("literal", s.to_string()));
+    };
 
-    let mut date_parts: Vec<String> = Vec::new();
-    // weekday
-    let mut prefix = String::new();
     if let Some(w) = get("__dtf_weekday") {
         let name = if w == "long" { WD_LONG[wd as usize] } else { WD_SHORT[wd as usize] };
-        prefix = format!("{name}, ");
+        parts.push(("weekday", name.to_string()));
+        lit(&mut parts, ", ");
     }
-    // date: month/day/year in en order M/D/Y (numeric) or "Month D, Y".
+
     let month_str = get("__dtf_month").map(|m| match m.as_str() {
         "long" => MON_LONG[(mo - 1) as usize].to_string(),
         "short" => MON_SHORT[(mo - 1) as usize].to_string(),
@@ -358,77 +377,88 @@ fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value
     });
     let day_str = get("__dtf_day").map(|dd| if dd == "2-digit" { format!("{d:02}") } else { format!("{d}") });
     let year_str = get("__dtf_year").map(|yy| if yy == "2-digit" { format!("{:02}", (y % 100 + 100) % 100) } else { format!("{y}") });
-
     let named_month = matches!(get("__dtf_month").as_deref(), Some("long" | "short" | "narrow"));
+    let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
+
     if named_month {
         if let Some(m) = &month_str {
-            let mut ds = m.clone();
-            if let Some(dd) = &day_str {
-                ds = format!("{ds} {dd}");
-            }
-            if let Some(yy) = &year_str {
-                ds = format!("{ds}, {yy}");
-            }
-            date_parts.push(ds);
-        }
-    } else {
-        // numeric M/D/Y
-        let mut nums: Vec<String> = Vec::new();
-        if let Some(m) = &month_str {
-            nums.push(m.clone());
+            parts.push(("month", m.clone()));
         }
         if let Some(dd) = &day_str {
-            nums.push(dd.clone());
+            lit(&mut parts, " ");
+            parts.push(("day", dd.clone()));
         }
         if let Some(yy) = &year_str {
-            nums.push(yy.clone());
+            lit(&mut parts, ", ");
+            parts.push(("year", yy.clone()));
         }
-        if !nums.is_empty() {
-            date_parts.push(nums.join("/"));
+    } else if have_date {
+        // numeric M/D/Y
+        let mut first = true;
+        if let Some(m) = &month_str {
+            parts.push(("month", m.clone()));
+            first = false;
+        }
+        if let Some(dd) = &day_str {
+            if !first {
+                lit(&mut parts, "/");
+            }
+            parts.push(("day", dd.clone()));
+            first = false;
+        }
+        if let Some(yy) = &year_str {
+            if !first {
+                lit(&mut parts, "/");
+            }
+            parts.push(("year", yy.clone()));
         }
     }
 
-    // time
-    let mut time_str = String::new();
-    if get("__dtf_hour").is_some() || get("__dtf_minute").is_some() || get("__dtf_second").is_some() {
-        let h12mode = o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone());
-        let use12 = !matches!(h12mode, Some(Value::Bool(false)));
+    let have_time = get("__dtf_hour").is_some() || get("__dtf_minute").is_some() || get("__dtf_second").is_some();
+    if have_time {
+        if have_date {
+            lit(&mut parts, ", ");
+        }
+        let use12 = !matches!(o.borrow().props.get("__dtf_hour12").map(|p| p.value.clone()), Some(Value::Bool(false)));
         let (disp_h, ampm) = if use12 {
             let ap = if h < 12 { "AM" } else { "PM" };
-            let hh = if h % 12 == 0 { 12 } else { h % 12 };
-            (hh, Some(ap))
+            (if h % 12 == 0 { 12 } else { h % 12 }, Some(ap))
         } else {
             (h, None)
         };
-        let mut ts = String::new();
+        let mut first = true;
         if get("__dtf_hour").is_some() {
-            ts.push_str(&if get("__dtf_hour").as_deref() == Some("2-digit") {
-                format!("{disp_h:02}")
-            } else {
-                format!("{disp_h}")
-            });
+            parts.push(("hour", if get("__dtf_hour").as_deref() == Some("2-digit") { format!("{disp_h:02}") } else { format!("{disp_h}") }));
+            first = false;
         }
         if get("__dtf_minute").is_some() {
-            ts.push_str(&format!(":{mi:02}"));
+            if !first {
+                lit(&mut parts, ":");
+            }
+            parts.push(("minute", format!("{mi:02}")));
+            first = false;
         }
         if get("__dtf_second").is_some() {
-            ts.push_str(&format!(":{s:02}"));
+            if !first {
+                lit(&mut parts, ":");
+            }
+            parts.push(("second", format!("{s:02}")));
         }
         if let Some(ap) = ampm {
-            ts.push_str(&format!(" {ap}"));
+            lit(&mut parts, " ");
+            parts.push(("dayPeriod", ap.to_string()));
         }
-        time_str = ts;
     }
 
-    let mut out = prefix;
-    let body = match (date_parts.is_empty(), time_str.is_empty()) {
-        (false, false) => format!("{}, {}", date_parts.join(" "), time_str),
-        (false, true) => date_parts.join(" "),
-        (true, false) => time_str,
-        (true, true) => format!("{mo}/{d}/{y}"),
-    };
-    out.push_str(&body);
-    Ok(out)
+    if parts.is_empty() {
+        // Default numeric date.
+        parts.push(("month", format!("{mo}")));
+        lit(&mut parts, "/");
+        parts.push(("day", format!("{d}")));
+        lit(&mut parts, "/");
+        parts.push(("year", format!("{y}")));
+    }
+    parts
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
