@@ -1232,6 +1232,10 @@ impl Interp {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::BigInt(n) => Ok(Value::BigInt(*n)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
+            Expr::ToStr(inner) => {
+                let v = self.eval(inner, env)?;
+                Ok(Value::Str(self.to_string(&v)?))
+            }
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Null => Ok(Value::Null),
             Expr::Undefined => Ok(Value::Undefined),

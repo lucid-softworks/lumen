@@ -1901,7 +1901,8 @@ impl Parser {
                         }],
                         next_scope_is_fn_boundary: false,
                     };
-                    sub.parse_expr()?
+                    // A substitution is ToString'd (string hint), not concatenated raw.
+                    Expr::ToStr(Box::new(sub.parse_expr()?))
                 }
             };
             expr = Some(match expr {

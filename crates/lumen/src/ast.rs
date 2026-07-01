@@ -211,6 +211,9 @@ pub enum Expr {
     Num(f64),
     BigInt(i128),
     Str(Rc<str>),
+    /// A template-literal substitution: evaluate the inner expression and apply ToString (which uses
+    /// the `string` hint — toString before valueOf — unlike `+` which uses the `default` hint).
+    ToStr(Box<Expr>),
     Bool(bool),
     Null,
     Undefined,
