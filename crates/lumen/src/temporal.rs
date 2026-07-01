@@ -3243,20 +3243,13 @@ fn ym_ref_of(cal: &str, iso: IsoDate) -> IsoDate {
     let (y, m, d) = civil_from_days(epoch_days(iso) - (day_of - 1));
     IsoDate { year: y, month: m, day: d }
 }
-/// The ISO date of the last day of `iso`'s calendar month.
-fn cal_month_last(cal: &str, iso: IsoDate) -> IsoDate {
-    let f = cal_fields(cal, iso);
-    let (day_of, dim) = (f.2, f.3);
-    let (y, m, d) = civil_from_days(epoch_days(iso) + (dim - day_of));
-    IsoDate { year: y, month: m, day: d }
-}
 /// Add/subtract a duration to a PlainYearMonth in its calendar: anchored at the month's first day
 /// (or last day when moving backwards), then reduced back to the resulting year-month.
-fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, _ovf: Overflow) -> Result<IsoDate, Value> {
-    let eff = sign * duration_sign(dur);
-    let start = if eff < 0 { cal_month_last(cal, d) } else { ym_ref_of(cal, d) };
-    // The anchor day is synthetic, so it is always constrained (only the resulting year-month is kept).
-    let result = add_to_date(i, start, dur, sign, Overflow::Constrain, cal)?;
+fn ym_add(i: &mut Interp, cal: &str, d: IsoDate, dur: IsoDuration, sign: i64, ovf: Overflow) -> Result<IsoDate, Value> {
+    // Anchor at day 1: it fits every month, so the synthetic day never triggers a day-overflow reject,
+    // while a `reject` overflow still fires for a leap month absent in the target year (an independent
+    // check in the calendar add).
+    let result = add_to_date(i, ym_ref_of(cal, d), dur, sign, ovf, cal)?;
     Ok(ym_ref_of(cal, result))
 }
 
