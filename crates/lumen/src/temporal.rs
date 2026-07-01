@@ -4402,18 +4402,20 @@ fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
     Err(i.make_error("RangeError", format!("unknown time zone: {t}")))
 }
 
-/// Whether `s` is a bare UTC-offset identifier (`±HH`, `±HH:MM[:SS[.fff]]`, or the colon-less basic
-/// forms) — as opposed to, say, a negative-year ISO date-time string that also starts with `-`.
+/// Whether `s` is a minute-precision UTC-offset identifier: `±HH`, `±HHMM`, or `±HH:MM`. Sub-minute
+/// (seconds/fraction) offsets are not valid time-zone identifiers, and a longer string such as a
+/// negative-year ISO date-time (which also starts with `-`) is not an offset.
 fn is_pure_offset(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() < 3 || (b[0] != b'+' && b[0] != b'-') {
+    if b.is_empty() || (b[0] != b'+' && b[0] != b'-') {
         return false;
     }
     let rest = &s[1..];
-    rest.as_bytes()[0].is_ascii_digit()
-        && rest.as_bytes()[1].is_ascii_digit()
-        && rest.bytes().all(|c| c.is_ascii_digit() || c == b':' || c == b'.')
-        && rest.len() <= 15
+    let all_digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
+    match rest.split_once(':') {
+        Some((h, m)) => h.len() == 2 && m.len() == 2 && all_digits(h) && all_digits(m),
+        None => (rest.len() == 2 || rest.len() == 4) && all_digits(rest),
+    }
 }
 
 fn parse_fixed_offset(tz: &str) -> Option<i64> {
