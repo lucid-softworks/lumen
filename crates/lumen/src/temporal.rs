@@ -6184,6 +6184,37 @@ fn local_to_epoch(i: &Interp, tz: &str, local_ns: i128, disamb: &str) -> Result<
         },
     }
 }
+/// InterpretISODateTimeOffset: resolve a local wall-clock time (+ optional supplied UTC offset) to an
+/// (epoch_ns, offset_ns) pair under the `offset` (use/ignore/prefer/reject) and `disambiguation`
+/// options.
+fn interpret_offset(
+    i: &Interp,
+    tz: &str,
+    local: i128,
+    has_offset: bool,
+    offset_ns: i64,
+    offset_opt: &str,
+    disamb: &str,
+) -> Result<(i128, i64), Value> {
+    if !has_offset || offset_opt == "ignore" {
+        let epoch = local_to_epoch(i, tz, local, disamb)?;
+        return Ok((epoch, (local - epoch) as i64));
+    }
+    if offset_opt == "use" {
+        return Ok((local - offset_ns as i128, offset_ns));
+    }
+    // "prefer"/"reject": use the supplied offset if it is valid for one of the possible instants.
+    for inst in possible_epochs(tz, local) {
+        if (local - inst) as i64 == offset_ns {
+            return Ok((inst, offset_ns));
+        }
+    }
+    if offset_opt == "reject" {
+        return Err(i.make_error("RangeError", "offset does not match the time zone"));
+    }
+    let epoch = local_to_epoch(i, tz, local, disamb)?;
+    Ok((epoch, (local - epoch) as i64))
+}
 /// The offset (ns) for interpreting a local wall-clock time under the default "compatible"
 /// disambiguation.
 fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
@@ -6358,12 +6389,21 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 ns: 0,
             });
             let local = dt_ns(date, time);
-            let off = match p.offset {
-                Off::Z => 0,
-                Off::Num(n) => n,
-                Off::None => offset_for_local(&tz, local),
+            let disamb = opt_str(i, opts, "disambiguation", "compatible")?;
+            // A string with an offset defaults to `offset: reject`; the fixed-offset zone case ("Z" or
+            // a numeric-offset id) always uses the annotation's own offset.
+            let offset_opt = opt_str(i, opts, "offset", "reject")?;
+            let (has_off, off_ns) = match p.offset {
+                Off::Z => (true, 0),
+                Off::Num(n) => (true, n),
+                Off::None => (false, 0),
             };
-            Ok((local - off as i128, off, tz))
+            if parse_fixed_offset(&tz).is_some() {
+                let off = zone_offset(&tz, local) ; // fixed offset zone
+                return Ok((local - off as i128, off, tz));
+            }
+            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, &offset_opt, &disamb)?;
+            Ok((epoch, off, tz))
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
@@ -6377,15 +6417,33 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             };
             let tz = normalize_tz(i, &tz_raw)?;
             let zcal = input_cal(i, v)?;
+            // The bag's own `offset` field (a "+HH:MM" string), if present.
+            let offv = getm(i, v, "offset")?;
+            let (has_off, off_ns) = match &offv {
+                Value::Undefined => (false, 0),
+                _ => {
+                    let s = i.to_string(&offv).map_err(unab)?;
+                    if !(s.starts_with('+') || s.starts_with('-')) {
+                        return Err(i.make_error("RangeError", "invalid offset string"));
+                    }
+                    (true, tz_offset_ns(&s))
+                }
+            };
             let snap = snapshot_date_fields(i, v)?;
             let (traw, _) = read_time_raw(i, v)?;
+            let disamb = opt_str(i, opts, "disambiguation", "compatible")?;
+            let offset_opt = opt_str(i, opts, "offset", "reject")?;
             let ovf = to_overflow(i, opts)?;
             let draw = read_date_raw_cal(i, &snap, &zcal, ovf)?;
             let date = regulate_date(i, draw, ovf)?;
             let time = regulate_time(i, traw, ovf)?;
             let local = dt_ns(date, time);
-            let off = offset_for_local(&tz, local);
-            Ok((local - off as i128, off, tz))
+            if parse_fixed_offset(&tz).is_some() {
+                let off = zone_offset(&tz, local);
+                return Ok((local - off as i128, off, tz));
+            }
+            let (epoch, off) = interpret_offset(i, &tz, local, has_off, off_ns, &offset_opt, &disamb)?;
+            Ok((epoch, off, tz))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
     }
