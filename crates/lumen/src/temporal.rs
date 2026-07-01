@@ -377,10 +377,13 @@ fn build_time_ovf(
 /// The recognised BCP-47 calendar identifiers. Date arithmetic uses the proleptic ISO/Gregorian
 /// calendar for all of them (exact for iso8601/gregory; the others are accepted so construction and
 /// `calendarId` round-trip, even though their field output is not yet calendar-specific).
+// The calendars Temporal itself accepts. Note "islamic", "islamic-rgsa", and "islamicc" are NOT
+// here: "islamicc" is only an alias (→ islamic-civil), and "islamic"/"islamic-rgsa" are recognized
+// solely by Intl.DateTimeFormat, so Temporal rejects them.
 const KNOWN_CALENDARS: &[&str] = &[
     "iso8601", "gregory", "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic",
-    "hebrew", "indian", "islamic", "islamic-umalqura", "islamic-tbla", "islamic-civil",
-    "islamic-rgsa", "islamicc", "japanese", "persian", "roc",
+    "hebrew", "indian", "islamic-umalqura", "islamic-tbla", "islamic-civil", "japanese", "persian",
+    "roc",
 ];
 
 /// Validate a constructor's calendar argument and return its canonical id. `undefined` → "iso8601".
@@ -389,28 +392,15 @@ fn check_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> 
     match v {
         Value::Undefined => Ok(std::rc::Rc::from("iso8601")),
         Value::Str(s) => {
-            let lc = s.to_lowercase();
-            // CLDR calendar aliases → canonical id.
-            let canon = match lc.as_str() {
-                "islamicc" => "islamic-civil",
-                "ethiopic-amete-alem" => "ethioaa",
-                "gregorian" => "gregory",
-                other => other,
-            };
-            if KNOWN_CALENDARS.contains(&canon) {
+            // A bare (CLDR-aliased) calendar id...
+            if let Some(canon) = canon_cal(s) {
                 return Ok(std::rc::Rc::from(canon));
             }
-            // Not a bare id: the string may be an ISO date/time whose `[u-ca=...]` annotation (or the
-            // implicit "iso8601") supplies the calendar.
+            // ...or an ISO date/time whose `[u-ca=...]` annotation (or the implicit "iso8601")
+            // supplies the calendar.
             if let Some(parsed) = parse_iso(s) {
                 let cal = parsed.calendar.unwrap_or_else(|| "iso8601".to_string());
-                let canon = match cal.as_str() {
-                    "islamicc" => "islamic-civil",
-                    "ethiopic-amete-alem" => "ethioaa",
-                    "gregorian" => "gregory",
-                    other => other,
-                };
-                if KNOWN_CALENDARS.contains(&canon) {
+                if let Some(canon) = canon_cal(&cal) {
                     return Ok(std::rc::Rc::from(canon));
                 }
             }
@@ -2020,9 +2010,21 @@ fn matches_month_day(core: &str) -> bool {
 }
 
 /// Whether an effective calendar annotation is acceptable (only the ISO 8601 calendar is supported).
+/// Canonicalize a calendar identifier (applying Temporal's aliases) to a known id, or `None` if it
+/// is not a calendar Temporal accepts.
+fn canon_cal(name: &str) -> Option<&'static str> {
+    let lc = name.to_lowercase();
+    let mapped = match lc.as_str() {
+        "islamicc" => "islamic-civil",
+        "ethiopic-amete-alem" => "ethioaa",
+        "gregorian" => "gregory",
+        other => other,
+    };
+    KNOWN_CALENDARS.iter().copied().find(|&k| k == mapped)
+}
 fn cal_ok(cal: &Option<String>) -> bool {
     match cal {
-        Some(c) => KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()),
+        Some(c) => canon_cal(c).is_some(),
         None => true,
     }
 }
@@ -3352,7 +3354,7 @@ fn regulate_high(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Re
 /// matched case-insensitively against "iso8601"; otherwise the id may be a full ISO date/datetime
 /// string whose optional `[u-ca=...]` annotation must itself resolve to the ISO calendar.
 fn canon_calendar(i: &Interp, s: &str) -> Result<(), Value> {
-    if KNOWN_CALENDARS.contains(&s.to_lowercase().as_str()) {
+    if canon_cal(s).is_some() {
         return Ok(());
     }
     if parse_iso(s).is_some() {
@@ -3395,7 +3397,7 @@ fn calendar_annotation(s: &str) -> Option<String> {
 /// the annotation, if present, must resolve to the ISO calendar (case-insensitive).
 fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
     match calendar_annotation(s) {
-        Some(cal) if !cal.eq_ignore_ascii_case("iso8601") => {
+        Some(cal) if canon_cal(&cal).is_none() => {
             Err(i.make_error("RangeError", format!("unknown calendar: {cal}")))
         }
         _ => Ok(()),
@@ -3788,10 +3790,8 @@ fn input_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
     }
     Ok(match v {
         Value::Str(s) => match parse_iso(s).and_then(|p| p.calendar) {
-            Some(c) if KNOWN_CALENDARS.contains(&c.to_lowercase().as_str()) => {
-                std::rc::Rc::from(c.to_lowercase().as_str())
-            }
-            _ => std::rc::Rc::from("iso8601"),
+            Some(c) => std::rc::Rc::from(canon_cal(&c).unwrap_or("iso8601")),
+            None => std::rc::Rc::from("iso8601"),
         },
         Value::Obj(_) => {
             let c = getm(i, v, "calendar")?;
