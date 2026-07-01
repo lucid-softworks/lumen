@@ -268,6 +268,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         || day_period.is_some()
         || frac_sec.is_some();
     let resolved = resolve_locale(i, &requested, &["ca", "nu", "hc"]);
+    // The `-u-hc-` locale-extension hour cycle (the `hourCycle` option, read later, overrides it).
+    let hc_ext = resolved.keywords.iter().find(|(k, _)| k == "hc").map(|(_, v)| v.clone());
 
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.DateTimeFormat") {
@@ -334,7 +336,8 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
                 "h23".to_string()
             }
         } else {
-            hour_cycle.clone().unwrap_or_else(|| "h23".to_string())
+            // The `hourCycle` option wins, then the locale's `-u-hc-` extension, then h23.
+            hour_cycle.clone().or_else(|| hc_ext.clone()).unwrap_or_else(|| "h23".to_string())
         };
         let h12 = matches!(hc.as_str(), "h11" | "h12");
         set_builtin(&obj, "__dtf_hourcycle", Value::from_string(hc));
