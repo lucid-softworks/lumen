@@ -3478,6 +3478,10 @@ impl Interp {
         // A `@@toPrimitive` method takes precedence over valueOf/toString.
         if let Some(key) = self.well_known_sym_key("toPrimitive") {
             let f = self.get_member(&Value::Obj(obj.clone()), &key)?;
+            // GetMethod: a present-but-non-callable @@toPrimitive (not undefined/null) is a TypeError.
+            if !matches!(f, Value::Undefined | Value::Null) && !f.is_callable() {
+                return Err(self.throw("TypeError", "@@toPrimitive is not callable"));
+            }
             if f.is_callable() {
                 let hint_str = match hint {
                     Hint::String => "string",

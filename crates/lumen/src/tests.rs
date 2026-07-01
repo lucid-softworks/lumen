@@ -5071,3 +5071,33 @@ fn atomics_wait_async() {
         "true"
     );
 }
+
+#[test]
+fn dataview_length_tracking_and_toprimitive() {
+    // A length-tracking DataView over a resizable buffer follows the buffer's current length.
+    assert_eq!(
+        run("var b=new ArrayBuffer(8,{maxByteLength:16}); var dv=new DataView(b); var a=dv.byteLength; b.resize(16); a+','+dv.byteLength"),
+        "8,16"
+    );
+    // A shrunk resizable buffer makes an out-of-bounds fixed-length view throw on access.
+    assert_eq!(
+        throws("var b=new ArrayBuffer(16,{maxByteLength:16}); var dv=new DataView(b,8,8); b.resize(4); dv.getInt8(0)"),
+        "TypeError"
+    );
+    // @@toStringTag and getter names.
+    assert_eq!(run("DataView.prototype[Symbol.toStringTag]"), "DataView");
+    assert_eq!(
+        run("Object.getOwnPropertyDescriptor(DataView.prototype,'byteLength').get.name"),
+        "get byteLength"
+    );
+    // A present-but-non-callable @@toPrimitive is a TypeError (via ToIndex(byteOffset)).
+    assert_eq!(
+        throws("var dv=new DataView(new ArrayBuffer(8)); dv.getInt8({[Symbol.toPrimitive]:1})"),
+        "TypeError"
+    );
+    // A detached buffer is still an ArrayBuffer: ToNumber(byteOffset) runs before the detach throw.
+    assert_eq!(
+        run("var n=0; var ab=new ArrayBuffer(8); var t=ab.transfer(); var o={valueOf(){n++;return 0;}}; try{new DataView(ab,o);}catch(e){} n"),
+        "1"
+    );
+}

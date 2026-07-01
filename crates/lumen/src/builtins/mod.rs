@@ -895,7 +895,7 @@ fn install_agent(it: &mut Interp, host: &Gc) {
     set_data(host, "agent", Value::Obj(agent));
 }
 
-fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value> {
+fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize, bool), Value> {
     let ptr =
         map_ptr(this).ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))?;
     i.data_views
@@ -903,35 +903,65 @@ fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize), Value>
         .copied()
         .ok_or_else(|| i.make_error("TypeError", "receiver is not a DataView"))
 }
+
+/// The DataView's current byte length, or `None` when its buffer is detached or (over a resizable
+/// buffer) the view is now out of bounds.
+fn dv_view_len(i: &Interp, buf: usize, off: usize, len: usize, track: bool) -> Option<usize> {
+    let blen = i.array_buffers.get(&buf)?.len();
+    if track {
+        if off > blen {
+            None
+        } else {
+            Some(blen - off)
+        }
+    } else if off + len > blen {
+        None
+    } else {
+        Some(len)
+    }
+}
 fn dv_buffer_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     dv_info(i, &this)?;
     ab(i.get_member(&this, "__dv_buffer"))
 }
 fn dv_bytelength_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let (buf, _off, len) = dv_info(i, &this)?;
-    if !i.array_buffers.contains_key(&buf) {
-        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    let (buf, off, len, track) = dv_info(i, &this)?;
+    match dv_view_len(i, buf, off, len, track) {
+        Some(l) => Ok(Value::Num(l as f64)),
+        None => Err(i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        )),
     }
-    Ok(Value::Num(len as f64))
 }
 fn dv_byteoffset_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let (buf, off, _len) = dv_info(i, &this)?;
-    if !i.array_buffers.contains_key(&buf) {
-        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
+    let (buf, off, len, track) = dv_info(i, &this)?;
+    if dv_view_len(i, buf, off, len, track).is_none() {
+        return Err(i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        ));
     }
     Ok(Value::Num(off as f64))
 }
 
 fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i
+    let (buf, off, len, track) = *i
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
     let es = kind.elsize();
-    if byte_off.checked_add(es).is_none_or(|e| e > len) {
+    // GetViewByteLength: re-derived after coercion (a detached/out-of-bounds view throws TypeError).
+    let vlen = dv_view_len(i, buf, off, len, track).ok_or_else(|| {
+        i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        )
+    })?;
+    if byte_off.checked_add(es).is_none_or(|e| e > vlen) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -948,19 +978,22 @@ fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
 
 fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i
+    let (buf, off, len, track) = *i
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_number(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
-    // Coercing the index/value can detach the buffer.
-    if !i.array_buffers.contains_key(&buf) {
-        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
-    }
+    // Coercing the index/value can detach or resize the buffer — re-derive the view length.
+    let vlen = dv_view_len(i, buf, off, len, track).ok_or_else(|| {
+        i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        )
+    })?;
     let es = kind.elsize();
-    if byte_off.checked_add(es).is_none_or(|e| e > len) {
+    if byte_off.checked_add(es).is_none_or(|e| e > vlen) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = kind.write(value);
@@ -988,13 +1021,19 @@ fn to_index(i: &mut Interp, v: &Value) -> Result<usize, Value> {
 
 fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i
+    let (buf, off, len, track) = *i
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let little = i.to_boolean(&arg(args, 1));
-    if byte_off.checked_add(8).is_none_or(|e| e > len) {
+    let vlen = dv_view_len(i, buf, off, len, track).ok_or_else(|| {
+        i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        )
+    })?;
+    if byte_off.checked_add(8).is_none_or(|e| e > vlen) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
@@ -1015,17 +1054,20 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
 
 fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
-    let (buf, off, len) = *i
+    let (buf, off, len, track) = *i
         .data_views
         .get(&ptr)
         .ok_or_else(|| i.make_error("TypeError", "not a DataView"))?;
     let byte_off = to_index(i, &arg(args, 0))?;
     let value = ab(i.to_bigint(&arg(args, 1)))?;
     let little = i.to_boolean(&arg(args, 2));
-    if !i.array_buffers.contains_key(&buf) {
-        return Err(i.make_error("TypeError", "DataView's buffer is detached"));
-    }
-    if byte_off.checked_add(8).is_none_or(|e| e > len) {
+    let vlen = dv_view_len(i, buf, off, len, track).ok_or_else(|| {
+        i.make_error(
+            "TypeError",
+            "DataView's buffer is detached or out of bounds",
+        )
+    })?;
+    if byte_off.checked_add(8).is_none_or(|e| e > vlen) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let mut bytes = (value as u64).to_le_bytes().to_vec();
@@ -1054,7 +1096,7 @@ fn install_dataview(it: &mut Interp) {
         ("byteLength", dv_bytelength_get),
         ("byteOffset", dv_byteoffset_get),
     ] {
-        let g = it.make_native(name, 0, getter);
+        let g = it.make_native(&format!("get {name}"), 0, getter);
         proto.borrow_mut().props.insert(
             name,
             Property {
@@ -1068,6 +1110,8 @@ fn install_dataview(it: &mut Interp) {
             },
         );
     }
+    // DataView.prototype[@@toStringTag] = "DataView" (non-writable, non-enumerable, configurable).
+    set_to_string_tag(it, &proto, "DataView");
     macro_rules! dvm {
         ($getname:expr, $setname:expr, $kind:expr) => {
             it.def_method(&proto, $getname, 1, |i, this, a| dv_get(i, &this, a, $kind));
@@ -1100,43 +1144,65 @@ fn install_dataview(it: &mut Interp) {
         if !i.constructing {
             return Err(i.make_error("TypeError", "DataView constructor requires 'new'"));
         }
-        let bp = match arg(a, 0) {
-            Value::Obj(o) if i.array_buffers.contains_key(&(Rc::as_ptr(&o) as usize)) => {
-                Rc::as_ptr(&o) as usize
+        // An ArrayBuffer object is identified by its [[ArrayBufferData]] slot (the internal
+        // `__abMaxByteLength` marker), which survives detachment — a detached buffer is still an
+        // ArrayBuffer, so ToNumber(byteOffset) must run before the detached check throws.
+        let (bv, bp) = match arg(a, 0) {
+            Value::Obj(o) if o.borrow().props.contains("__abMaxByteLength") => {
+                (Value::Obj(o.clone()), Rc::as_ptr(&o) as usize)
             }
             _ => return Err(i.make_error("TypeError", "DataView requires an ArrayBuffer")),
         };
-        let buflen = i.array_buffers[&bp].len();
-        let off_n = match arg(a, 1) {
-            Value::Undefined => 0.0,
-            v => ab(i.to_number(&v))?,
+        // ToIndex(byteOffset) may run user code that detaches/resizes the buffer.
+        let offset = match arg(a, 1) {
+            Value::Undefined => 0,
+            v => to_index(i, &v)?,
         };
-        let off_n = if off_n.is_nan() { 0.0 } else { off_n.trunc() };
-        if off_n < 0.0 || !off_n.is_finite() {
-            return Err(i.make_error("RangeError", "invalid DataView byteOffset"));
+        let has_len = !matches!(arg(a, 2), Value::Undefined);
+        let len_arg = if has_len {
+            Some(to_index(i, &arg(a, 2))?)
+        } else {
+            None
+        };
+        // Re-read the (possibly mutated) buffer state after all coercions.
+        if !i.array_buffers.contains_key(&bp) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
         }
-        let offset = off_n as usize;
+        let buflen = i.array_buffers[&bp].len();
         if offset > buflen {
             return Err(i.make_error("RangeError", "DataView byteOffset is out of bounds"));
         }
-        let len = match arg(a, 2) {
-            Value::Undefined => buflen - offset,
-            v => {
-                let n = ab(i.to_number(&v))?;
-                let n = if n.is_nan() { 0.0 } else { n.trunc() };
-                if n < 0.0 || !n.is_finite() {
-                    return Err(i.make_error("RangeError", "invalid DataView byteLength"));
-                }
-                let l = n as usize;
+        let rv = ab(i.get_member(&bv, "resizable"))?;
+        let resizable = i.to_boolean(&rv);
+        if let Some(l) = len_arg {
+            if offset + l > buflen {
+                return Err(i.make_error("RangeError", "DataView byteLength is out of bounds"));
+            }
+        }
+        // OrdinaryCreateFromConstructor does Get(newTarget, "prototype"), which can run a custom
+        // proto getter that detaches or resizes the buffer — re-validate everything afterwards.
+        let obj = new_from_ctor(i, "DataView")?;
+        if !i.array_buffers.contains_key(&bp) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+        }
+        let buflen = i.array_buffers[&bp].len();
+        if offset > buflen {
+            return Err(i.make_error("RangeError", "DataView byteOffset is out of bounds"));
+        }
+        let len = match len_arg {
+            Some(l) => {
                 if offset + l > buflen {
                     return Err(i.make_error("RangeError", "DataView byteLength is out of bounds"));
                 }
                 l
             }
+            None => buflen - offset,
         };
-        let obj = new_from_ctor(i, "DataView")?;
+        // A length-tracking DataView (no explicit byteLength) over a resizable buffer follows the
+        // buffer's current length; its stored `len` is only the initial snapshot.
+        let track = !has_len && resizable;
         let p = Rc::as_ptr(&obj) as usize;
-        i.data_views.insert(p, (bp, offset, len));
+        i.data_views.insert(p, (bp, offset, len, track));
         // buffer/byteOffset/byteLength are accessor getters on the prototype, not own properties;
         // only the buffer object itself is kept (hidden) for the `buffer` getter.
         set_internal(&obj, "__dv_buffer", arg(a, 0));

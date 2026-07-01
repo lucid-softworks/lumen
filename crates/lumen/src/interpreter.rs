@@ -336,7 +336,8 @@ pub struct Interp {
     /// ShadowRealm object's pointer. Only primitive completion values cross the boundary.
     pub shadow_realms: HashMap<usize, Box<Interp>>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
-    pub data_views: HashMap<usize, (usize, usize, usize)>,
+    /// DataView state: (buffer ptr, byteOffset, byteLength, is-length-tracking).
+    pub data_views: HashMap<usize, (usize, usize, usize, bool)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
     pub regexps: HashMap<usize, Rc<crate::regex::Regex>>,
     /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
