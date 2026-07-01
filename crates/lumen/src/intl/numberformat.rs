@@ -953,7 +953,9 @@ fn assemble_number(i: &mut Interp, o: &Gc, x: f64) -> String {
         "unit" => {
             let unit = get_str(o, "__nf_unit");
             let disp = get_str(o, "__nf_unitdisplay");
-            num = format!("{sign}{}", unit_wrap(&num, &unit, &disp));
+            // English long names pluralize unless the value is exactly one.
+            let plural = value.abs() != 1.0;
+            num = format!("{sign}{}", unit_wrap(&num, &unit, &disp, plural));
         }
         _ => {
             num = format!("{sign}{num}");
@@ -996,13 +998,27 @@ fn unit_short_name(u: &str) -> Option<&'static str> {
     })
 }
 
-fn unit_wrap(num: &str, unit: &str, display: &str) -> String {
+fn unit_wrap(num: &str, unit: &str, display: &str, plural: bool) -> String {
     if display == "long" {
-        return format!("{num} {unit}");
+        return format!("{num} {}", unit_long_en(unit, plural));
     }
     match unit_short_name(unit) {
         Some(n) => format!("{num} {n}"),
         None => format!("{num} {unit}"),
+    }
+}
+
+/// The English long display name of a sanctioned unit (regular +s plural; "X-per-Y" pluralizes the
+/// numerator and keeps a singular denominator).
+fn unit_long_en(unit: &str, plural: bool) -> String {
+    if let Some((a, b)) = unit.split_once("-per-") {
+        return format!("{} per {}", unit_long_en(a, plural), unit_long_en(b, false));
+    }
+    let name = unit.replace('-', " ");
+    if plural {
+        format!("{name}s")
+    } else {
+        name
     }
 }
 
