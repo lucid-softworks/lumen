@@ -463,6 +463,10 @@ fn cal_era(cal: &str, d: IsoDate) -> (Option<&'static str>, Option<i64>) {
         }
         "indian" => (Some("shaka"), Some(from_indian(d).0)),
         "hebrew" => (Some("am"), Some(hebrew_from_iso(d).0)),
+        "persian" => {
+            let y = from_persian(d).0;
+            if y >= 1 { (Some("ap"), Some(y)) } else { (Some("bp"), Some(1 - y)) }
+        }
         _ => (None, None),
     }
 }
@@ -662,10 +666,124 @@ fn hebrew_ord_from_code(y: i64, code: &str) -> Option<i64> {
     Some(if leap && n >= 6 { n + 1 } else { n })
 }
 
+// ===== Persian (Solar Hijri, astronomical) ====================================================
+// The Iranian national calendar: the year begins on the day (Tehran local time) of the March
+// equinox — Nowruz is that day if the equinox falls before local noon, else the next day. The
+// equinox instant is computed with Meeus' periodic formula (accurate to seconds for 1000–3000 CE)
+// and reduced to universal time via ΔT (Espenak–Meeus polynomials).
+fn delta_t_seconds(year: i64) -> f64 {
+    let y = year as f64;
+    if (2005..=2050).contains(&year) {
+        let t = y - 2000.0;
+        62.92 + 0.32217 * t + 0.005589 * t * t
+    } else if (1986..2005).contains(&year) {
+        let t = y - 2000.0;
+        63.86 + 0.3345 * t - 0.060374 * t.powi(2) + 0.0017275 * t.powi(3)
+            + 0.000651814 * t.powi(4) + 0.00002373599 * t.powi(5)
+    } else if (1961..1986).contains(&year) {
+        let t = y - 1975.0;
+        45.45 + 1.067 * t - t * t / 260.0 - t.powi(3) / 718.0
+    } else if (1941..1961).contains(&year) {
+        let t = y - 1950.0;
+        29.07 + 0.407 * t - t * t / 233.0 + t.powi(3) / 2547.0
+    } else if (1920..1941).contains(&year) {
+        let t = y - 1920.0;
+        21.20 + 0.84493 * t - 0.076100 * t * t + 0.0020936 * t.powi(3)
+    } else if (1900..1920).contains(&year) {
+        let t = y - 1900.0;
+        -2.79 + 1.494119 * t - 0.0598939 * t * t + 0.0061966 * t.powi(3) - 0.000197 * t.powi(4)
+    } else if (1860..1900).contains(&year) {
+        let t = y - 1860.0;
+        7.62 + 0.5737 * t - 0.251754 * t * t + 0.01680668 * t.powi(3) - 0.0004473624 * t.powi(4)
+            + t.powi(5) / 233174.0
+    } else if (1800..1860).contains(&year) {
+        let t = y - 1800.0;
+        13.72 - 0.332447 * t + 0.0068612 * t * t + 0.0041116 * t.powi(3) - 0.00037436 * t.powi(4)
+            + 0.0000121272 * t.powi(5) - 0.0000001699 * t.powi(6) + 0.000000000875 * t.powi(7)
+    } else {
+        // Coarse fallback (Espenak) for years outside the fitted range.
+        let u = (y - 1820.0) / 100.0;
+        -20.0 + 32.0 * u * u
+    }
+}
+/// The March-equinox instant of a Gregorian year as a Julian Ephemeris Day (dynamical time).
+fn march_equinox_jde(year: i64) -> f64 {
+    let yy = (year as f64 - 2000.0) / 1000.0;
+    let jde0 = 2451623.80984 + 365242.37404 * yy + 0.05169 * yy.powi(2)
+        - 0.00411 * yy.powi(3) - 0.00057 * yy.powi(4);
+    let t = (jde0 - 2451545.0) / 36525.0;
+    let w = (35999.373 * t - 2.47).to_radians();
+    let dl = 1.0 + 0.0334 * w.cos() + 0.0007 * (2.0 * w).cos();
+    // Meeus Table 27.A periodic terms (A, B, C); S = Σ A·cos(B + C·T) in degrees.
+    const TERMS: [(f64, f64, f64); 24] = [
+        (485.0, 324.96, 1934.136), (203.0, 337.23, 32964.467), (199.0, 342.08, 20.186),
+        (182.0, 27.85, 445267.112), (156.0, 73.14, 45036.886), (136.0, 171.52, 22518.443),
+        (77.0, 222.54, 65928.934), (74.0, 296.72, 3034.906), (70.0, 243.58, 9037.513),
+        (58.0, 119.81, 33718.147), (52.0, 297.17, 150.678), (50.0, 21.02, 2281.226),
+        (45.0, 247.54, 29929.562), (44.0, 325.15, 31555.956), (29.0, 60.93, 4443.417),
+        (18.0, 155.12, 67555.328), (17.0, 288.79, 4562.452), (16.0, 198.04, 62894.029),
+        (14.0, 199.76, 31436.921), (12.0, 95.39, 14577.848), (12.0, 287.11, 31931.756),
+        (12.0, 320.81, 34777.259), (9.0, 227.73, 1222.114), (8.0, 15.45, 16859.074),
+    ];
+    let s: f64 = TERMS.iter().map(|(a, b, c)| a * (b + c * t).to_radians().cos()).sum();
+    jde0 + (0.00001 * s) / dl
+}
+/// The epoch-day (days from 1970-01-01) of Nowruz for a Persian year.
+fn persian_new_year(py: i64) -> i64 {
+    let greg_year = py + 621;
+    let jde = march_equinox_jde(greg_year);
+    let ut = jde - delta_t_seconds(greg_year) / 86400.0; // JD in universal time
+    let tehran = ut + 3.5 / 24.0; // Tehran standard time (UTC+3:30)
+    let ed = tehran - 2440587.5; // epoch-days as a real moment
+    let day = ed.floor() as i64;
+    if ed - day as f64 <= 0.5 {
+        day // equinox before local noon → Nowruz today
+    } else {
+        day + 1
+    }
+}
+fn persian_leap(py: i64) -> bool {
+    persian_new_year(py + 1) - persian_new_year(py) == 366
+}
+fn persian_month_len(py: i64, m: i64) -> i64 {
+    if m <= 6 {
+        31
+    } else if m <= 11 {
+        30
+    } else if persian_leap(py) {
+        30
+    } else {
+        29
+    }
+}
+fn from_persian(iso: IsoDate) -> (i64, i64, i64) {
+    let ed = epoch_days(iso);
+    let mut py = iso.year - 621;
+    while persian_new_year(py) > ed {
+        py -= 1;
+    }
+    while persian_new_year(py + 1) <= ed {
+        py += 1;
+    }
+    let doy = ed - persian_new_year(py); // 0-based
+    let (month, mstart) = if doy < 186 {
+        (doy / 31 + 1, (doy / 31) * 31)
+    } else {
+        let m = (doy - 186) / 30 + 7;
+        (m, 186 + (m - 7) * 30)
+    };
+    (py, month, doy - mstart + 1)
+}
+fn to_persian(py: i64, m: i64, d: i64) -> IsoDate {
+    let offset = if m <= 7 { 31 * (m - 1) } else { 30 * (m - 1) + 6 };
+    let (yy, mm, dd) = civil_from_days(persian_new_year(py) + offset + (d - 1));
+    IsoDate { year: yy, month: mm, day: dd }
+}
+
 /// Whether a calendar has its own month structure (not the Gregorian months), so date arithmetic
 /// must add years/months in the calendar's own terms.
 fn is_month_structure(cal: &str) -> bool {
-    is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew"
+    is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew" || cal == "persian"
 }
 /// The ISO date for a month-structure calendar's (year, month, day).
 fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
@@ -675,6 +793,8 @@ fn cal_to_iso(cal: &str, y: i64, m: i64, d: i64) -> IsoDate {
         to_islamic(y, m, d, islamic_epoch(cal))
     } else if cal == "hebrew" {
         hebrew_to_iso(y, m, d)
+    } else if cal == "persian" {
+        to_persian(y, m, d)
     } else {
         to_indian(y, m, d)
     }
@@ -693,6 +813,8 @@ fn cal_month_len(cal: &str, y: i64, m: i64) -> i64 {
         islamic_month_len(m, islamic_leap(y))
     } else if cal == "hebrew" {
         hebrew_month_len(y, m)
+    } else if cal == "persian" {
+        persian_month_len(y, m)
     } else {
         indian_month_len(m, is_leap(y + 78))
     }
@@ -848,6 +970,12 @@ fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64, bo
         let doy = (1..m).map(|mm| indian_month_len(mm, leap)).sum::<i64>() + d;
         let diy = if leap { 366 } else { 365 };
         (y, m, d, dim, 12, doy, diy, leap)
+    } else if cal == "persian" {
+        let (y, m, d) = from_persian(iso);
+        let dim = persian_month_len(y, m);
+        let leap = persian_leap(y);
+        let doy = (1..m).map(|mm| persian_month_len(y, mm)).sum::<i64>() + d;
+        (y, m, d, dim, 12, doy, if leap { 366 } else { 365 }, leap)
     } else if cal == "hebrew" {
         let (y, m, d) = hebrew_from_iso(iso);
         let mpy = hebrew_months_in_year(y);
@@ -889,6 +1017,7 @@ fn cal_year_num(cal: &str, d: IsoDate) -> i64 {
         _ if is_islamic(cal) => from_islamic(d, islamic_epoch(cal)).0,
         "indian" => from_indian(d).0,
         "hebrew" => hebrew_from_iso(d).0,
+        "persian" => from_persian(d).0,
         _ => d.year,
     }
 }
@@ -921,7 +1050,7 @@ fn cal_era_to_iso(cal: &str, era: &str, era_year: i64) -> Option<i64> {
 
 /// Whether a calendar numbers years via eras (so era/eraYear fields resolve the year).
 fn cal_uses_era(cal: &str) -> bool {
-    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew"
+    matches!(cal, "gregory" | "japanese" | "buddhist" | "roc") || is_13month(cal) || is_islamic(cal) || cal == "indian" || cal == "hebrew" || cal == "persian"
 }
 
 /// The amete-mihret / coptic year for a 13-month calendar from a `year` field or `(era, eraYear)`.
@@ -1876,9 +2005,12 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         Ok(make_like(i, &t, "Temporal.PlainMonthDay", Temporal::MonthDay(d)))
     });
-    it.def_method(&proto, "withCalendar", 1, |i, t, _| {
+    it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let d = as_date(i, &t)?;
-        Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(d)))
+        let cal = check_calendar(i, &arg(a, 0))?;
+        let v = make(i, "Temporal.PlainDate", Temporal::Date(d));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let d = as_date(i, &t)?;
@@ -3014,6 +3146,31 @@ fn read_date_raw_cal(i: &mut Interp, v: &Value, cal: &str) -> Result<(i64, i64, 
         let iso = to_indian(sy, month, day);
         return Ok((iso.year, iso.month as i64, iso.day as i64));
     }
+    // Persian (Solar Hijri): (year | era ap/bp, month, day) → ISO.
+    if cal == "persian" {
+        let py = if let Some(y) = year_opt {
+            y
+        } else {
+            match (era.as_deref(), era_year) {
+                (Some("ap"), Some(ey)) => ey,
+                (Some("bp"), Some(ey)) => 1 - ey,
+                _ => return Err(i.make_error("TypeError", "year is required")),
+            }
+        };
+        let month = match (month, mc_num) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(i.make_error("RangeError", "month and monthCode disagree"))
+            }
+            (Some(a), _) => a,
+            (None, Some(b)) => b,
+            (None, None) => return Err(i.make_error("TypeError", "month or monthCode is required")),
+        };
+        let day = day.ok_or_else(|| i.make_error("TypeError", "day is required"))?;
+        let month = month.clamp(1, 12);
+        let day = day.clamp(1, persian_month_len(py, month));
+        let iso = to_persian(py, month, day);
+        return Ok((iso.year, iso.month as i64, iso.day as i64));
+    }
     // Reconcile year / era+eraYear BEFORE month (a missing year is a TypeError that the spec raises
     // before a month/monthCode conflict). An era, when present, must be valid for the calendar even
     // if a `year` field also supplies the value.
@@ -3817,9 +3974,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
         Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(nd, tm)))
     });
-    it.def_method(&proto, "withCalendar", 1, |i, t, _| {
+    it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        Ok(make_like(i, &t, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
+        let cal = check_calendar(i, &arg(a, 0))?;
+        let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
+        set_cal(i, &v, cal);
+        Ok(v)
     });
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
