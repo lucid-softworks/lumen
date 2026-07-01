@@ -2435,11 +2435,20 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let d = as_date(i, &t)?;
         Ok(Value::Num(cal_fields(&cal_of(i, &t), d).5 as f64))
     });
+    // Week numbering is defined only for the ISO calendar; other calendars return undefined.
     def_getter(it, &proto, "weekOfYear", |i, t, _| {
-        Ok(Value::Num(iso_week(as_date(i, &t)?).0 as f64))
+        let d = as_date(i, &t)?;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        Ok(Value::Num(iso_week(d).0 as f64))
     });
     def_getter(it, &proto, "yearOfWeek", |i, t, _| {
-        Ok(Value::Num(iso_week(as_date(i, &t)?).1 as f64))
+        let d = as_date(i, &t)?;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        Ok(Value::Num(iso_week(d).1 as f64))
     });
     def_getter(it, &proto, "daysInWeek", |i, t, _| {
         as_date(i, &t)?;
@@ -6694,8 +6703,23 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     calf_get!("daysInMonth", |f: CF| Value::Num(f.3 as f64));
     calf_get!("daysInYear", |f: CF| Value::Num(f.6 as f64));
     calf_get!("inLeapYear", |f: CF| Value::Bool(f.7));
-    date_get!("weekOfYear", |d: IsoDate| Value::Num(iso_week(d).0 as f64));
-    date_get!("yearOfWeek", |d: IsoDate| Value::Num(iso_week(d).1 as f64));
+    // Week numbering is ISO-calendar-only; other calendars return undefined.
+    def_getter(it, &proto, "weekOfYear", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        let (d, _tm) = zoned_local(e, o);
+        Ok(Value::Num(iso_week(d).0 as f64))
+    });
+    def_getter(it, &proto, "yearOfWeek", |i, t, _| {
+        let (e, o, _) = as_zoned(i, &t)?;
+        if &*cal_of(i, &t) != "iso8601" {
+            return Ok(Value::Undefined);
+        }
+        let (d, _tm) = zoned_local(e, o);
+        Ok(Value::Num(iso_week(d).1 as f64))
+    });
     date_get!("daysInWeek", |_d: IsoDate| Value::Num(7.0));
     calf_get!("monthsInYear", |f: CF| Value::Num(f.4 as f64));
     def_getter(it, &proto, "hoursInDay", |i, t, _| {
