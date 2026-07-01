@@ -4,7 +4,7 @@ use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
+use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
 use crate::interpreter::Interp;
 use crate::value::{set_data, set_builtin, Gc, Value};
 
@@ -73,6 +73,16 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         }
     };
     let resolved = resolve_locale(i, &requested, &["co", "kn", "kf"]);
+    let kw = |k: &str| resolved.keywords.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+    // The option wins over the locale's -u- keyword; a bare -u-kn (empty value) means numeric=true.
+    let numeric = numeric.unwrap_or_else(|| match kw("kn") {
+        Some(v) => v != "false",
+        None => false,
+    });
+    let case_first = case_first.or_else(|| kw("kf")).unwrap_or_else(|| "false".to_string());
+    let collation = kw("co")
+        .filter(|c| c != "standard" && c != "search")
+        .unwrap_or_else(|| "default".to_string());
 
     let obj = i.new_object();
     if let Some(proto) = instance_proto(i, "Intl.Collator") {
@@ -83,13 +93,9 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     set_builtin(&obj, "__co_usage", Value::from_string(usage));
     set_builtin(&obj, "__co_sensitivity", Value::from_string(sensitivity));
     set_builtin(&obj, "__co_ignorepunct", Value::Bool(ignore_punct));
-    set_builtin(&obj, "__co_numeric", Value::Bool(numeric.unwrap_or(false)));
-    set_builtin(&obj, "__co_collation", Value::str("default"));
-    if let Some(cf) = case_first {
-        set_builtin(&obj, "__co_casefirst", Value::from_string(cf));
-    } else {
-        set_builtin(&obj, "__co_casefirst", Value::str("false"));
-    }
+    set_builtin(&obj, "__co_numeric", Value::Bool(numeric));
+    set_builtin(&obj, "__co_collation", Value::from_string(collation));
+    set_builtin(&obj, "__co_casefirst", Value::from_string(case_first));
     Ok(Value::Obj(obj))
 }
 

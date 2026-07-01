@@ -3,24 +3,35 @@
 /// The four list patterns (two, start, middle, end) for a (language, type, style). Falls back to
 /// English when the language is unknown. `{0}`/`{1}` are the placeholders.
 pub fn list_patterns(lang: &str, kind: &str, style: &str) -> [&'static str; 4] {
+    const COMMA: [&str; 4] = ["{0}, {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"];
+    const SPACE: [&str; 4] = ["{0} {1}", "{0} {1}", "{0} {1}", "{0} {1}"];
+    // The `unit` type: narrow is space-joined everywhere; short/long is comma-joined, except a few
+    // languages (Spanish) whose `unit-long` uses the conjunction form.
+    if kind == "unit" {
+        return match (lang, style) {
+            (_, "narrow") => SPACE,
+            ("es", "long") => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0} y {1}"],
+            _ => COMMA,
+        };
+    }
     if lang == "es" {
         return match (kind, style) {
             ("conjunction", "long") => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0} y {1}"],
             ("conjunction", _) => ["{0} y {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
             ("disjunction", "long") => ["{0} o {1}", "{0}, {1}", "{0}, {1}", "{0} o {1}"],
             ("disjunction", _) => ["{0} o {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
-            (_, _) => ["{0}, {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
+            (_, _) => COMMA,
         };
     }
     // English (and the default for any language we do not yet ship list data for).
     match (kind, style) {
         ("conjunction", "long") => ["{0} and {1}", "{0}, {1}", "{0}, {1}", "{0}, and {1}"],
         ("conjunction", "short") => ["{0} & {1}", "{0}, {1}", "{0}, {1}", "{0}, & {1}"],
-        ("conjunction", "narrow") => ["{0} {1}", "{0} {1}", "{0} {1}", "{0} {1}"],
+        ("conjunction", "narrow") => SPACE,
         ("disjunction", "long") => ["{0} or {1}", "{0}, {1}", "{0}, {1}", "{0}, or {1}"],
         ("disjunction", "short") => ["{0} or {1}", "{0}, {1}", "{0}, {1}", "{0}, or {1}"],
         ("disjunction", "narrow") => ["{0} or {1}", "{0}, {1}", "{0}, {1}", "{0}, or {1}"],
-        (_, _) => ["{0}, {1}", "{0}, {1}", "{0}, {1}", "{0}, {1}"],
+        (_, _) => COMMA,
     }
 }
 

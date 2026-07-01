@@ -222,6 +222,16 @@ pub(crate) fn coerce_options(i: &mut Interp, options: &Value) -> Result<Value, V
     }
 }
 
+/// GetOptionsObject: `undefined` → a fresh null-prototype object; an object is used as-is; any other
+/// value is a TypeError. Used by the newer services (ListFormat, PluralRules, …).
+pub(crate) fn get_options_object(i: &mut Interp, options: &Value) -> Result<Value, Value> {
+    match options {
+        Value::Undefined => Ok(Value::Obj(Object::new(None))),
+        Value::Obj(_) => Ok(options.clone()),
+        _ => Err(i.make_error("TypeError", "options must be an object or undefined")),
+    }
+}
+
 /// ToLength on an already-evaluated value.
 pub(crate) fn to_length(i: &mut Interp, v: &Value) -> Result<usize, Value> {
     let n = ab(i.to_number(v))?;

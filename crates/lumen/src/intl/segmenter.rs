@@ -4,7 +4,7 @@ use super::service::{
     brand_slot, get_option, instance_proto, install_supported_locales, read_locale_matcher,
     resolve_locale,
 };
-use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
+use super::{ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service};
 use crate::interpreter::Interp;
 use crate::value::{set_data, set_builtin, Gc, Value};
 
