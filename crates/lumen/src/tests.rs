@@ -917,8 +917,10 @@ fn temporal_named_timezones() {
         "05:30:00"
     );
     assert_eq!(run("new Temporal.ZonedDateTime(0n,'Asia/Tokyo').hour"), "9");
+    // Nepal is +05:45, but only since 1986-01-01 (it was +05:30 before, incl. at epoch 0), so use a
+    // 2000-01-01T00:00:00Z instant to exercise the quarter-hour offset.
     assert_eq!(
-        run("new Temporal.ZonedDateTime(0n,'Asia/Katmandu').minute"),
+        run("new Temporal.ZonedDateTime(946684800000000000n,'Asia/Katmandu').minute"),
         "45"
     );
     // DST: 2021-07-01 is summer -> America/New_York is EDT (-4); winter -> EST (-5).
