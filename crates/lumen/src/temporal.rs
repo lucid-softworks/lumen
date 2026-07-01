@@ -3715,18 +3715,34 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let f = arg(a, 0);
-        let nd = IsoDuration {
-            years: dur_field(i, &f, "years", d.years)?,
-            months: dur_field(i, &f, "months", d.months)?,
-            weeks: dur_field(i, &f, "weeks", d.weeks)?,
-            days: dur_field(i, &f, "days", d.days)?,
-            hours: dur_field(i, &f, "hours", d.hours)?,
-            minutes: dur_field(i, &f, "minutes", d.minutes)?,
-            seconds: dur_field(i, &f, "seconds", d.seconds)?,
-            ms: dur_field(i, &f, "milliseconds", d.ms)?,
-            us: dur_field(i, &f, "microseconds", d.us)?,
-            ns: dur_field(i, &f, "nanoseconds", d.ns)?,
+        if !matches!(f, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        }
+        // ToTemporalPartialDurationRecord: read alphabetically; at least one field must be present.
+        let mut any = false;
+        let mut read = |i: &mut Interp, key: &str, cur: i64| -> Result<i64, Value> {
+            let fv = getm(i, &f, key)?;
+            if matches!(fv, Value::Undefined) {
+                Ok(cur)
+            } else {
+                any = true;
+                to_int_integral(i, &fv)
+            }
         };
+        let days = read(i, "days", d.days)?;
+        let hours = read(i, "hours", d.hours)?;
+        let us = read(i, "microseconds", d.us)?;
+        let ms = read(i, "milliseconds", d.ms)?;
+        let minutes = read(i, "minutes", d.minutes)?;
+        let months = read(i, "months", d.months)?;
+        let ns = read(i, "nanoseconds", d.ns)?;
+        let seconds = read(i, "seconds", d.seconds)?;
+        let weeks = read(i, "weeks", d.weeks)?;
+        let years = read(i, "years", d.years)?;
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one duration field"));
+        }
+        let nd = IsoDuration { years, months, weeks, days, hours, minutes, seconds, ms, us, ns };
         validate_duration(i, nd)?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(nd)))
     });
@@ -4320,10 +4336,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     let ctor = add_ctor(it, ns, "Instant", 1, proto, |i, _t, a| {
         require_new(i)?;
-        let ns = match arg(a, 0) {
-            Value::BigInt(n) => n,
-            v => to_int(i, &v)? as i128,
-        };
+        let ns = to_epoch_bigint(i, &arg(a, 0))?;
         let ns = check_instant(i, ns)?;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
@@ -4341,10 +4354,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
     it.def_method(&ctor, "fromEpochNanoseconds", 1, |i, _t, a| {
-        let ns = match arg(a, 0) {
-            Value::BigInt(n) => n,
-            v => to_int(i, &v)? as i128,
-        };
+        let ns = to_epoch_bigint(i, &arg(a, 0))?;
         let ns = check_instant(i, ns)?;
         Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
     });
@@ -4370,6 +4380,20 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
         }
     }
 }
+/// ToBigInt for an epoch-nanosecond argument: BigInt/boolean/numeric-string only; number, null,
+/// undefined, symbol, and object are a TypeError.
+fn to_epoch_bigint(i: &mut Interp, v: &Value) -> Result<i128, Value> {
+    match v {
+        Value::BigInt(n) => Ok(*n),
+        Value::Bool(b) => Ok(*b as i128),
+        Value::Str(s) => s
+            .trim()
+            .parse::<i128>()
+            .map_err(|_| i.make_error("SyntaxError", "cannot convert string to a BigInt")),
+        _ => Err(i.make_error("TypeError", "epochNanoseconds must be a BigInt")),
+    }
+}
+
 /// Reject an epoch-nanosecond value outside Temporal's representable instant range (±8.64e21).
 fn check_instant(i: &Interp, ns: i128) -> Result<i128, Value> {
     if ns.abs() > 8_640_000_000_000_000_000_000 {
