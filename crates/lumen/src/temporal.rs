@@ -1090,7 +1090,7 @@ pub fn install(it: &mut Interp) {
     // toLocaleString aliases toString (lumen has no Intl).
     // Duration keeps its plain toString for toLocaleString (Intl.DurationFormat is separate); the
     // date/time types format through Intl.DateTimeFormat, which understands Temporal receivers.
-    for name in ["Duration", "ZonedDateTime"] {
+    for name in ["Duration"] {
         if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
             let ts = proto.borrow().props.get("toString").cloned();
             if let Some(p) = ts {
@@ -1098,7 +1098,7 @@ pub fn install(it: &mut Interp) {
             }
         }
     }
-    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant"] {
+    for name in ["PlainDate", "PlainTime", "PlainDateTime", "PlainYearMonth", "PlainMonthDay", "Instant", "ZonedDateTime"] {
         if let Some(proto) = it.extra_protos.get(format!("Temporal.{name}").as_str()).cloned() {
             it.def_method(&proto, "toLocaleString", 0, |i, this, a| {
                 let intl = i.get_member(&Value::Obj(i.global.clone()), "Intl").map_err(unab)?;

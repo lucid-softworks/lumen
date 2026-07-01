@@ -36,7 +36,9 @@ fn temporal_to_ms(t: &crate::temporal::Temporal) -> f64 {
         T::DateTime(d, tm) => date_ms(d) + time_ms(tm),
         T::Time(tm) => time_ms(tm),
         T::Instant(ns) => (*ns / 1_000_000) as f64,
-        T::Zoned { epoch_ns, .. } => (*epoch_ns / 1_000_000) as f64,
+        // A ZonedDateTime formats at its *local* wall-clock time (epoch + offset), since our
+        // DateTimeFormat renders components in UTC.
+        T::Zoned { epoch_ns, offset_ns, .. } => ((*epoch_ns + *offset_ns as i128) / 1_000_000) as f64,
         T::Duration(_) => 0.0,
     }
 }
