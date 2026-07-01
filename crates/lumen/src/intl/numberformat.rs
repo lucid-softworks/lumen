@@ -1111,6 +1111,8 @@ fn format_number(i: &mut Interp, this: &Value, x: &Value) -> Result<Value, Value
 fn suffix_type_of(o: &Gc) -> String {
     if get_str(o, "__nf_style") == "unit" {
         "unit".to_string()
+    } else if get_str(o, "__nf_style") == "currency" {
+        "currency".to_string()
     } else if get_str(o, "__nf_notation") == "compact" {
         "compact".to_string()
     } else {
@@ -1308,16 +1310,22 @@ fn decompose_parts(s: &str, suffix_type: &str, dec: char, grp: char) -> Vec<(&'s
     // Trailing affix (percent sign, unit, compact suffix, or literal).
     let suffix: String = bytes[idx..].iter().collect();
     if !suffix.is_empty() {
-        if suffix_type == "unit" {
-            // The leading separator space(s) are a literal; the rest is one unit part (internal
-            // spaces, e.g. "kilometers per hour", stay within the unit).
+        if suffix_type == "unit" || suffix_type == "currency" {
+            // The leading separator space(s) are a literal; the rest is the unit/currency symbol
+            // (a trailing ")" from accounting notation stays a literal).
+            let tag = if suffix_type == "unit" { "unit" } else { "currency" };
             let trimmed = suffix.trim_start_matches([' ', '\u{a0}']);
             let lead = &suffix[..suffix.len() - trimmed.len()];
             if !lead.is_empty() {
                 parts.push(("literal", lead.to_string()));
             }
-            if !trimmed.is_empty() {
-                parts.push(("unit", trimmed.to_string()));
+            if let Some(rest) = trimmed.strip_suffix(')') {
+                if !rest.is_empty() {
+                    parts.push((tag, rest.to_string()));
+                }
+                parts.push(("literal", ")".to_string()));
+            } else if !trimmed.is_empty() {
+                parts.push((tag, trimmed.to_string()));
             }
         } else if suffix.contains('%') {
             parts.push(("percentSign", suffix));
