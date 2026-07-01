@@ -2321,12 +2321,8 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
             return Err(i.make_error("RangeError", "invalid TypedArray index"));
         }
         let actual = actual as usize;
-        let new_ta = ta_species_create(i, this, info.kind, &[Value::Num(len as f64)], true)?;
-        let new_info = map_ptr(&new_ta)
-            .and_then(|p| i.typed_arrays.get(&p).copied())
-            .ok_or_else(|| {
-                i.make_error("TypeError", "with: species did not return a TypedArray")
-            })?;
+        // `with` uses TypedArrayCreateSameType — it ignores `@@species`.
+        let (new_ta, new_info) = ta_create_same(i, info.kind, len)?;
         for k in 0..len {
             let val = if k == actual {
                 coerced.clone()
@@ -2369,6 +2365,115 @@ fn ta_delegate(i: &mut Interp, this: &Value, method: &str, args: &[Value]) -> Re
         return Ok(new_ta);
     }
     Ok(result)
+}
+
+/// Construct a fresh TypedArray of the same element kind via its intrinsic constructor (ignoring
+/// `@@species`), as `TypedArrayCreateSameType` does for toSorted/toReversed/with.
+fn ta_create_same(i: &mut Interp, kind: TaKind, len: usize) -> Result<(Value, TaInfo), Value> {
+    let ctor = ab(i.get_member(&Value::Obj(i.global.clone()), kind.name()))?;
+    let r = ab(i.construct(ctor, &[Value::Num(len as f64)]))?;
+    let info = map_ptr(&r)
+        .and_then(|p| i.typed_arrays.get(&p).copied())
+        .ok_or_else(|| i.make_error("TypeError", "TypedArray constructor did not return a view"))?;
+    Ok((r, info))
+}
+
+/// CompareTypedArrayElements default (no comparefn): a total order over numbers where NaN sorts last
+/// and -0 precedes +0.
+fn ta_default_cmp_num(a: f64, b: f64) -> i32 {
+    if a.is_nan() {
+        return if b.is_nan() { 0 } else { 1 };
+    }
+    if b.is_nan() {
+        return -1;
+    }
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        // Equal magnitude: distinguish -0 (< +0).
+        match (a.is_sign_negative(), b.is_sign_negative()) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// SortCompare for a TypedArray element pair: a user comparefn (result ToNumber, NaN treated as 0)
+/// or the default numeric order.
+fn ta_sort_compare(
+    i: &mut Interp,
+    a: &Value,
+    b: &Value,
+    cmp: &Value,
+    is_bigint: bool,
+) -> Result<i32, Value> {
+    if cmp.is_callable() {
+        let r = ab(i.call(cmp.clone(), Value::Undefined, &[a.clone(), b.clone()]))?;
+        let n = ab(i.to_number(&r))?;
+        return Ok(if n.is_nan() {
+            0
+        } else if n < 0.0 {
+            -1
+        } else if n > 0.0 {
+            1
+        } else {
+            0
+        });
+    }
+    if is_bigint {
+        let (x, y) = match (a, b) {
+            (Value::BigInt(x), Value::BigInt(y)) => (*x, *y),
+            _ => (0, 0),
+        };
+        Ok(x.cmp(&y) as i32)
+    } else {
+        let x = if let Value::Num(x) = a { *x } else { f64::NAN };
+        let y = if let Value::Num(y) = b { *y } else { f64::NAN };
+        Ok(ta_default_cmp_num(x, y))
+    }
+}
+
+/// A stable merge sort that propagates a throwing comparefn.
+fn ta_merge_sort(
+    i: &mut Interp,
+    vals: &mut [Value],
+    cmp: &Value,
+    is_bigint: bool,
+) -> Result<(), Value> {
+    let n = vals.len();
+    if n < 2 {
+        return Ok(());
+    }
+    let mid = n / 2;
+    let mut left = vals[..mid].to_vec();
+    let mut right = vals[mid..].to_vec();
+    ta_merge_sort(i, &mut left, cmp, is_bigint)?;
+    ta_merge_sort(i, &mut right, cmp, is_bigint)?;
+    let (mut li, mut ri, mut k) = (0usize, 0usize, 0usize);
+    while li < left.len() && ri < right.len() {
+        if ta_sort_compare(i, &left[li], &right[ri], cmp, is_bigint)? <= 0 {
+            vals[k] = left[li].clone();
+            li += 1;
+        } else {
+            vals[k] = right[ri].clone();
+            ri += 1;
+        }
+        k += 1;
+    }
+    while li < left.len() {
+        vals[k] = left[li].clone();
+        li += 1;
+        k += 1;
+    }
+    while ri < right.len() {
+        vals[k] = right[ri].clone();
+        ri += 1;
+        k += 1;
+    }
+    Ok(())
 }
 
 /// ToIntegerOrInfinity then clamp to a relative index in `[0, len]` (negatives count from the end).
@@ -2699,6 +2804,38 @@ fn ta_native(
                 }
             }
             Ok(this.clone())
+        })()),
+        "sort" | "toSorted" => Some((|| {
+            let cmp = arg(args, 0);
+            if !matches!(cmp, Value::Undefined) && !cmp.is_callable() {
+                return Err(i.make_error("TypeError", "comparefn must be a function"));
+            }
+            let in_place = method == "sort";
+            if in_place && i.immutable_buffers.contains(&info.buffer) {
+                return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
+            }
+            let mut vals: Vec<Value> = (0..len).map(|k| i.ta_read(&info, k)).collect();
+            ta_merge_sort(i, &mut vals, &cmp, info.kind.is_bigint())?;
+            if in_place {
+                for (k, v) in vals.iter().enumerate() {
+                    ab(i.ta_store(&info, k, v))?;
+                }
+                Ok(this.clone())
+            } else {
+                let (new_ta, new_info) = ta_create_same(i, info.kind, len)?;
+                for (k, v) in vals.iter().enumerate() {
+                    ab(i.ta_store(&new_info, k, v))?;
+                }
+                Ok(new_ta)
+            }
+        })()),
+        "toReversed" => Some((|| {
+            let (new_ta, new_info) = ta_create_same(i, info.kind, len)?;
+            for k in 0..len {
+                let v = i.ta_read(&info, len - 1 - k);
+                ab(i.ta_store(&new_info, k, &v))?;
+            }
+            Ok(new_ta)
         })()),
         "join" => Some((|| {
             let sep = match args.first() {

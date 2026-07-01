@@ -5194,3 +5194,33 @@ fn typedarray_set_semantics() {
     assert_eq!(throws("new Int8Array(4).set([1],-1)"), "RangeError");
     assert_eq!(throws("new Int8Array(2).set([1,2,3])"), "RangeError");
 }
+
+#[test]
+fn typedarray_sort_semantics() {
+    // Default comparator is numeric, not lexicographic.
+    assert_eq!(
+        run("new Int32Array([10,4,6,8]).sort().join(',')"),
+        "4,6,8,10"
+    );
+    // NaN sorts last, -0 before +0.
+    assert_eq!(
+        run("var a=new Float64Array([NaN,1,-0]); a.sort(); 1/a[0]"),
+        "-Infinity"
+    );
+    // toSorted/toReversed return a new same-type array without mutating the source.
+    assert_eq!(
+        run("var a=new Uint8Array([3,1,2]); var b=a.toSorted(); a.join(',')+'|'+b.join(',')"),
+        "3,1,2|1,2,3"
+    );
+    assert_eq!(
+        run("new Uint8Array([1,2,3]).toReversed().join(',')"),
+        "3,2,1"
+    );
+    // Custom comparefn.
+    assert_eq!(
+        run("new Int32Array([1,2,3]).sort((a,b)=>b-a).join(',')"),
+        "3,2,1"
+    );
+    // Sorting an immutable-backed array throws.
+    assert_eq!(throws("var i=(new Int32Array([3,1,2])).buffer.transferToImmutable(); new Int32Array(i).sort()"), "TypeError");
+}
