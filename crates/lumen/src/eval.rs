@@ -310,6 +310,36 @@ impl Interp {
         completion
     }
 
+    /// Run one `for-of` iteration: bind the element and execute the body. For a `using`/`await using`
+    /// binding (`dispose` is `Some`), the element is a per-iteration disposal resource — its dispose
+    /// method runs (awaited for `await using`) at the end of the iteration.
+    fn for_of_iteration(
+        &mut self,
+        left: &Pattern,
+        v: Value,
+        mode: BindMode,
+        body: &Stmt,
+        iter_env: &Env,
+        dispose: Option<bool>,
+    ) -> Completion {
+        match dispose {
+            None => {
+                self.bind_pattern(left, v, iter_env, mode)?;
+                self.exec_stmt(body, iter_env)
+            }
+            Some(is_async) => {
+                self.using_stack.push(Vec::new());
+                let step = (|me: &mut Self| -> Completion {
+                    me.add_disposable(&v, is_async)?;
+                    me.bind_pattern(left, v.clone(), iter_env, mode)?;
+                    me.exec_stmt(body, iter_env)
+                })(self);
+                let frame = self.using_stack.pop().unwrap_or_default();
+                self.dispose_frame_maybe_async(frame, step, is_async)
+            }
+        }
+    }
+
     /// Dispose a frame, awaiting each `@@asyncDispose` result when `is_async` (an `await using`
     /// boundary). For a sync boundary this is exactly `dispose_frame`.
     pub(crate) fn dispose_frame_maybe_async(
@@ -785,6 +815,13 @@ impl Interp {
             Some(DeclKind::Var) | None => BindMode::Var,
             Some(k) => BindMode::Lexical(k == DeclKind::Const),
         };
+        // A `for (using x of y)` / `for await (await using x of y)` head disposes each element at
+        // the end of its iteration.
+        let dispose = match decl {
+            Some(DeclKind::Using) => Some(false),
+            Some(DeclKind::AwaitUsing) => Some(true),
+            _ => None,
+        };
         if of && is_await {
             // `for await (x of asyncIterable)`: drive the @@asyncIterator (or a sync iterator over
             // promises), awaiting each `next()` result and value.
@@ -809,8 +846,7 @@ impl Interp {
                 let raw = me.get_member(&res, "value")?;
                 let v = me.await_value(raw)?;
                 let iter_env = new_scope(Some(env.clone()));
-                me.bind_pattern(left, v, &iter_env, mode)?;
-                let bv = me.exec_stmt(body, &iter_env)?;
+                let bv = me.for_of_iteration(left, v, mode, body, &iter_env, dispose)?;
                 Ok(LoopStep::Continue(bv))
             });
         }
@@ -828,8 +864,7 @@ impl Interp {
                     }
                 };
                 let iter_env = new_scope(Some(env.clone()));
-                me.bind_pattern(left, v, &iter_env, mode)?;
-                let bv = me.exec_stmt(body, &iter_env)?;
+                let bv = me.for_of_iteration(left, v, mode, body, &iter_env, dispose)?;
                 Ok(LoopStep::Continue(bv))
             });
             if !exhausted {
