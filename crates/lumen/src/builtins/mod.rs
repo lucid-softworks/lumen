@@ -9941,6 +9941,12 @@ fn grow_array_length(i: &mut Interp, o: &Gc, array_index: Option<u32>) {
 /// Array exotic `length` define: validate the new length is a valid uint32, honor a non-writable
 /// `length`, and drop the now-out-of-range index properties.
 fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abrupt> {
+    // `length` is a non-configurable, non-enumerable data property: it can't become an accessor,
+    // configurable, or enumerable.
+    if d.is_accessor() || matches!(d.configurable, Some(true)) || matches!(d.enumerable, Some(true))
+    {
+        return Ok(false);
+    }
     let len_writable = o
         .borrow()
         .props

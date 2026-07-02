@@ -6208,5 +6208,8 @@ fn proxy_get_set_symbol_trap_key() {
         "true"
     );
     // String-wrapper length/index forward through a nested proxy's [[Get]].
-    assert_eq!(run("var p=new Proxy(new Proxy(new String('str'),{}),{get:null}); p.length+','+p[0]"), "3,s");
+    assert_eq!(
+        run("var p=new Proxy(new Proxy(new String('str'),{}),{get:null}); p.length+','+p[0]"),
+        "3,s"
+    );
 }
