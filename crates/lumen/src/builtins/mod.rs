@@ -2519,23 +2519,55 @@ fn install_array_buffer(it: &mut Interp) {
         if !i.array_buffers.contains_key(&ptr) {
             return Err(i.make_error("TypeError", "Cannot slice a detached ArrayBuffer"));
         }
-        let bytes = i.array_buffers[&ptr].clone();
-        let len = bytes.len() as i64;
+        let len = i.array_buffers[&ptr].len() as i64;
         let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
         let end = match arg(a, 1) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        let slice = if begin < end {
-            bytes[begin as usize..end as usize].to_vec()
-        } else {
-            Vec::new()
+        let new_len = (end - begin).max(0) as usize;
+        // SpeciesConstructor(O, %ArrayBuffer%) creates the result buffer, then it is validated.
+        let ab_ctor = i
+            .global
+            .borrow()
+            .props
+            .get("ArrayBuffer")
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined);
+        let ctor = species_constructor(i, &this, &ab_ctor)?;
+        let new_buf = ab(i.construct(ctor, &[Value::Num(new_len as f64)]))?;
+        let nptr = match &new_buf {
+            Value::Obj(no) if no.borrow().props.contains("__abMaxByteLength") => {
+                Rc::as_ptr(no) as usize
+            }
+            _ => {
+                return Err(i.make_error("TypeError", "slice species did not create an ArrayBuffer"))
+            }
         };
-        let (bv, bp) = make_array_buffer(i, slice.len());
-        if let Some(buf) = i.array_buffers.get_mut(&bp) {
-            buf.copy_from_slice(&slice);
+        if i.shared_buffers.contains_key(&nptr) {
+            return Err(i.make_error("TypeError", "slice species returned a SharedArrayBuffer"));
         }
-        Ok(bv)
+        if !i.array_buffers.contains_key(&nptr) {
+            return Err(i.make_error("TypeError", "slice species returned a detached ArrayBuffer"));
+        }
+        if nptr == ptr {
+            return Err(i.make_error("TypeError", "slice species returned the same ArrayBuffer"));
+        }
+        if i.array_buffers[&nptr].len() < new_len {
+            return Err(i.make_error("TypeError", "slice species buffer is too small"));
+        }
+        // The species constructor may have detached the source.
+        if !i.array_buffers.contains_key(&ptr) {
+            return Err(i.make_error("TypeError", "source ArrayBuffer was detached during slice"));
+        }
+        let src = i.array_buffers[&ptr].clone();
+        if begin < end {
+            let slice = src[begin as usize..end as usize].to_vec();
+            if let Some(buf) = i.array_buffers.get_mut(&nptr) {
+                buf[..slice.len()].copy_from_slice(&slice);
+            }
+        }
+        Ok(new_buf)
     });
     it.def_method(&proto, "resize", 1, |i, this, a| {
         let o = this
@@ -2639,8 +2671,12 @@ fn install_array_buffer(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "isView", 1, |i, _t, a| {
+        // A view is a TypedArray or a DataView (identified by its `__dv_buffer` internal slot).
         let is_view = match arg(a, 0) {
-            Value::Obj(o) => i.typed_arrays.contains_key(&(Rc::as_ptr(&o) as usize)),
+            Value::Obj(o) => {
+                i.typed_arrays.contains_key(&(Rc::as_ptr(&o) as usize))
+                    || o.borrow().props.contains("__dv_buffer")
+            }
             _ => false,
         };
         Ok(Value::Bool(is_view))

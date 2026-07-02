@@ -6230,3 +6230,15 @@ fn array_buffer_slice_and_transfer_detach() {
     // A normal slice copies the range.
     assert_eq!(run("var b=new ArrayBuffer(4); new Uint8Array(b).set([1,2,3,4]); [...new Uint8Array(b.slice(1,3))].join(',')"), "2,3");
 }
+
+#[test]
+fn array_buffer_slice_species_and_isview() {
+    // slice goes through SpeciesConstructor and validates it.
+    assert_eq!(run("var b=new ArrayBuffer(4); b.constructor={[Symbol.species]:5}; try{b.slice();'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("var b=new ArrayBuffer(4); b.constructor={[Symbol.species]:function(){}}; try{b.slice();'no'}catch(e){e.constructor.name}"), "TypeError");
+    // A custom species is honored.
+    assert_eq!(run("var b=new ArrayBuffer(4); var C=function(n){return new ArrayBuffer(n)}; C[Symbol.species]=C; b.constructor=C; b.slice(0,2).byteLength"), "2");
+    // isView recognizes DataViews.
+    assert_eq!(run("ArrayBuffer.isView(new DataView(new ArrayBuffer(8)))"), "true");
+    assert_eq!(run("ArrayBuffer.isView(new Int8Array(4))+','+ArrayBuffer.isView({})"), "true,false");
+}
