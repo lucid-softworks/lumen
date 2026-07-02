@@ -1101,8 +1101,21 @@ impl Interp {
     // ----- property access --------------------------------------------------------------------
 
     /// Get `base[key]`, walking the prototype chain and invoking getters. Primitive bases are
-    /// handled by routing to their wrapper prototype (and string index/length specially).
+    /// handled by routing to their wrapper prototype (and string index/length specially). The
+    /// receiver defaults to `base`.
     pub fn get_member(&mut self, base: &Value, key: &str) -> Result<Value, Abrupt> {
+        self.get_member_recv(base, key, base.clone())
+    }
+
+    /// [[Get]](P, Receiver): like [`get_member`] but with an explicit `receiver` — the `this` a
+    /// getter is invoked with, the proxy `get` trap's Receiver argument, and what a forwarded
+    /// `[[Get]]` carries through a proxy target chain.
+    pub fn get_member_recv(
+        &mut self,
+        base: &Value,
+        key: &str,
+        receiver: Value,
+    ) -> Result<Value, Abrupt> {
         match base {
             Value::Undefined | Value::Null => Err(self.throw(
                 "TypeError",
@@ -1119,15 +1132,15 @@ impl Interp {
                     });
                 }
                 let proto = self.string_proto.clone();
-                self.get_from_chain(&proto, key, base)
+                self.get_from_chain(&proto, key, &receiver)
             }
             Value::Num(_) => {
                 let proto = self.number_proto.clone();
-                self.get_from_chain(&proto, key, base)
+                self.get_from_chain(&proto, key, &receiver)
             }
             Value::Bool(_) => {
                 let proto = self.boolean_proto.clone();
-                self.get_from_chain(&proto, key, base)
+                self.get_from_chain(&proto, key, &receiver)
             }
             Value::Sym(s) => {
                 if key == "description" {
@@ -1138,10 +1151,10 @@ impl Interp {
                         .unwrap_or(Value::Undefined));
                 }
                 let proto = self.symbol_proto.clone();
-                self.get_from_chain(&proto, key, base)
+                self.get_from_chain(&proto, key, &receiver)
             }
             Value::BigInt(_) => match self.extra_protos.get("BigInt").cloned() {
-                Some(proto) => self.get_from_chain(&proto, key, base),
+                Some(proto) => self.get_from_chain(&proto, key, &receiver),
                 None => Ok(Value::Undefined),
             },
             Value::Obj(o) => {
@@ -1177,7 +1190,8 @@ impl Interp {
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let trap = self.get_member(&handler, "get")?;
                         if matches!(trap, Value::Undefined | Value::Null) {
-                            return self.get_member(&target, key);
+                            // Forward to the target's [[Get]], preserving the original Receiver.
+                            return self.get_member_recv(&target, key, receiver);
                         }
                         if !trap.is_callable() {
                             return Err(self.throw("TypeError", "proxy 'get' trap is not callable"));
@@ -1185,7 +1199,7 @@ impl Interp {
                         let res = self.call(
                             trap,
                             handler,
-                            &[target.clone(), Value::str(key), base.clone()],
+                            &[target.clone(), Value::str(key), receiver.clone()],
                         )?;
                         self.proxy_get_invariant(&target, key, &res)?;
                         return Ok(res);
@@ -1224,7 +1238,7 @@ impl Interp {
                         _ => {}
                     }
                 }
-                self.get_from_chain(&o, key, base)
+                self.get_from_chain(&o, key, &receiver)
             }
         }
     }
@@ -1240,7 +1254,7 @@ impl Interp {
                 }
                 let trap = self.get_member(&handler, "get")?;
                 if matches!(trap, Value::Undefined | Value::Null) {
-                    return self.get_member(&target, key);
+                    return self.get_member_recv(&target, key, receiver.clone());
                 }
                 if !trap.is_callable() {
                     return Err(self.throw("TypeError", "proxy 'get' trap is not callable"));

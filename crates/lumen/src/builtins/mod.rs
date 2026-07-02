@@ -7335,7 +7335,8 @@ fn reflect_ordinary_get(
     let mut current = target.clone();
     loop {
         if proxy_pair(i, &current).is_some() {
-            return ab(i.get_member(&current, key));
+            // A proxy's [[Get]](P, Receiver) threads the explicit receiver.
+            return ab(i.get_member_recv(&current, key, receiver.clone()));
         }
         let obj = match &current {
             Value::Obj(o) => o.clone(),

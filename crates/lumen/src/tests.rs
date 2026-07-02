@@ -6097,3 +6097,22 @@ fn string_split_delegate() {
     assert_eq!(run("'x'.split({[Symbol.split](s){return ['S']}})[0]"), "S");
     assert_eq!(run("'abc'.split('').join('-')"), "a-b-c");
 }
+
+#[test]
+fn proxy_get_receiver() {
+    // A missing `get` trap forwards to the target's [[Get]] with the original Receiver, so a target
+    // getter's `this` is the proxy (or the inheriting object), not the target.
+    assert_eq!(
+        run("var t={get attr(){return this}}; var p=new Proxy(t,{}); p.attr===p"),
+        "true"
+    );
+    assert_eq!(
+        run("var t={get attr(){return this}}; var pp=Object.create(new Proxy(t,{})); pp.attr===pp"),
+        "true"
+    );
+    // Reflect.get with an explicit receiver threads it through the proxy.
+    assert_eq!(
+        run("var t={get a(){return this.v}}; var p=new Proxy(t,{}); Reflect.get(p,'a',{v:9})"),
+        "9"
+    );
+}
