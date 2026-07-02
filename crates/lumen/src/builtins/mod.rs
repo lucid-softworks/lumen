@@ -5491,6 +5491,8 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
     let ptr = Rc::as_ptr(&obj) as usize;
     let mut entries: Vec<(Value, Value)> = Vec::new();
     for v in values {
+        // Set records canonicalize -0 to +0.
+        let v = canonicalize_map_key(v);
         if !entries.iter().any(|(k, _)| same_value_zero(k, &v)) {
             entries.push((v.clone(), v));
         }
@@ -5943,8 +5945,17 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         )
     };
     it.def_method(&proto, "values", 0, values_fn);
-    it.def_method(&proto, "keys", 0, keys_fn);
     it.def_method(&proto, "entries", 0, entries_fn);
+    if is_set {
+        // Set.prototype.keys is the *same* function object as Set.prototype.values.
+        let _ = keys_fn;
+        let values_prop = proto.borrow().props.get("values").cloned();
+        if let Some(p) = values_prop {
+            proto.borrow_mut().props.insert("keys", p);
+        }
+    } else {
+        it.def_method(&proto, "keys", 0, keys_fn);
+    }
 
     // `size` accessor.
     // Map.prototype.size and Set.prototype.size each brand-check their own kind (a Set passed to
