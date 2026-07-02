@@ -1752,6 +1752,11 @@ impl Parser {
                 }
                 Expr::NewTarget
             } else {
+                // `new await …` is a SyntaxError where `await` is the keyword: an await expression is
+                // a UnaryExpression, not the MemberExpression that `new` requires.
+                if self.in_async && self.is_ident_word("await") && !self.cur_escaped() {
+                    return self.err("'await' expression cannot be the operand of 'new'");
+                }
                 let callee = self.parse_member_expr()?;
                 // `new import(...)` is a SyntaxError — an ImportCall (`import()`) is a CallExpression,
                 // so it can't be the MemberExpression base of `new` (even under property access).

@@ -888,7 +888,45 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
         Ok(Value::Undefined)
     });
     install_agent(it, &host);
+    set_builtin(&host, "AbstractModuleSource", make_abstract_module_source(it));
     Value::Obj(host)
+}
+
+/// The %AbstractModuleSource% intrinsic exposed as `$262.AbstractModuleSource`: an abstract
+/// constructor (throws when called), whose `.prototype` carries the `@@toStringTag` getter used by
+/// module-source objects. lumen has no concrete module-source objects, so the getter always yields
+/// `undefined`.
+fn make_abstract_module_source(it: &mut Interp) -> Value {
+    let ctor = it.make_native("AbstractModuleSource", 0, |i, _t, _a| {
+        Err(i.make_error("TypeError", "Abstract class AbstractModuleSource not directly constructable"))
+    });
+    let proto = Object::new(Some(it.object_proto.clone()));
+    // `@@toStringTag` getter: returns the source's name for a real module-source object, else undefined.
+    if let Some(key) = well_known_key(it, "toStringTag") {
+        let getter = it.make_native("get [Symbol.toStringTag]", 0, |_i, _t, _a| Ok(Value::Undefined));
+        proto.borrow_mut().props.insert(
+            key,
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(getter)),
+                set: None,
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
+    proto.borrow_mut().props.insert(
+        "constructor",
+        Property::data(Value::Obj(ctor.clone()), true, false, true),
+    );
+    // `.prototype` is non-writable, non-enumerable, non-configurable.
+    ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(proto), false, false, false),
+    );
+    Value::Obj(ctor)
 }
 
 /// Reconstruct a SharedArrayBuffer object in this agent that aliases the global shared block `id`.
