@@ -310,6 +310,39 @@ impl Interp {
         completion
     }
 
+    /// Dispose a frame, awaiting each `@@asyncDispose` result when `is_async` (an `await using`
+    /// boundary). For a sync boundary this is exactly `dispose_frame`.
+    pub(crate) fn dispose_frame_maybe_async(
+        &mut self,
+        mut frame: Vec<Disposable>,
+        result: Completion,
+        is_async: bool,
+    ) -> Completion {
+        if !is_async {
+            return self.dispose_frame(frame, result);
+        }
+        let mut completion = result;
+        while let Some(r) = frame.pop() {
+            let disposed = self
+                .call(r.method.clone(), r.value.clone(), &[])
+                .and_then(|p| self.await_value(p));
+            match disposed {
+                Ok(_) => {}
+                Err(Abrupt::Throw(new_err)) => {
+                    completion = match completion {
+                        Err(Abrupt::Throw(prev)) => {
+                            Err(Abrupt::Throw(self.make_suppressed(new_err, prev)))
+                        }
+                        Ok(_) => Err(Abrupt::Throw(new_err)),
+                        Err(other) => Err(other),
+                    };
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        completion
+    }
+
     /// Build a `SuppressedError(error, suppressed)`.
     fn make_suppressed(&mut self, error: Value, suppressed: Value) -> Value {
         let err = self.make_error("SuppressedError", "");
@@ -636,10 +669,44 @@ impl Interp {
         label: Option<&str>,
     ) -> Completion {
         let loop_env = new_scope(Some(env.clone()));
+        // A `for (using x = r; …)` head is a disposal boundary: its resources are disposed once,
+        // when the whole loop completes (normally or abruptly).
+        let dispose_async = match init.as_deref() {
+            Some(ForInit::VarDecl {
+                kind: DeclKind::Using,
+                ..
+            }) => Some(false),
+            Some(ForInit::VarDecl {
+                kind: DeclKind::AwaitUsing,
+                ..
+            }) => Some(true),
+            _ => None,
+        };
+        if dispose_async.is_some() {
+            self.using_stack.push(Vec::new());
+        }
+        let result = self.exec_c_for_body(init, test, update, body, &loop_env, label);
+        if let Some(is_async) = dispose_async {
+            let frame = self.using_stack.pop().unwrap_or_default();
+            return self.dispose_frame_maybe_async(frame, result, is_async);
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_c_for_body(
+        &mut self,
+        init: &Option<Box<ForInit>>,
+        test: &Option<Expr>,
+        update: &Option<Expr>,
+        body: &Stmt,
+        loop_env: &Env,
+        label: Option<&str>,
+    ) -> Completion {
         if let Some(init) = init {
             match init.as_ref() {
                 ForInit::Expr(e) => {
-                    self.eval(e, &loop_env)?;
+                    self.eval(e, loop_env)?;
                 }
                 ForInit::VarDecl { kind, decls } => {
                     if matches!(kind, DeclKind::Let | DeclKind::Const) {
@@ -665,18 +732,24 @@ impl Interp {
                         DeclKind::Var => BindMode::Var,
                         k => BindMode::Lexical(*k == DeclKind::Const),
                     };
+                    let is_using = matches!(kind, DeclKind::Using | DeclKind::AwaitUsing);
+                    let is_async = matches!(kind, DeclKind::AwaitUsing);
                     for (pat, e) in decls {
                         let v = match e {
-                            Some(e) => self.eval(e, &loop_env)?,
+                            Some(e) => self.eval(e, loop_env)?,
                             None => Value::Undefined,
                         };
-                        self.bind_pattern(pat, v, &loop_env, mode)?;
+                        // A `using`/`await using` init captures its dispose method now.
+                        if is_using {
+                            self.add_disposable(&v, is_async)?;
+                        }
+                        self.bind_pattern(pat, v, loop_env, mode)?;
                     }
                 }
             }
         }
         let mut first = true;
-        self.run_loop(label, &loop_env, |me, env| {
+        self.run_loop(label, loop_env, |me, env| {
             if !first {
                 if let Some(u) = update {
                     me.eval(u, env)?;
