@@ -6697,3 +6697,11 @@ fn object_literal_proto_setter() {
         "7"
     );
 }
+
+#[test]
+fn iterator_take_closes_on_bad_limit() {
+    // A bad take/drop limit closes the underlying iterator (its return() is called).
+    assert_eq!(run("var c=0;var o={__proto__:Iterator.prototype,get next(){throw 1},return(){c++;return{}}};try{o.take(NaN)}catch(e){}String(c)"), "1");
+    assert_eq!(run("var c=0;var o={__proto__:Iterator.prototype,get next(){throw 1},return(){c++;return{}}};try{o.take(-1)}catch(e){}String(c)"), "1");
+    assert_eq!(run("var c=0;var o={__proto__:Iterator.prototype,get next(){throw 1},return(){c++;return{}}};var n='';try{o.take(NaN)}catch(e){n=e.constructor.name}n"), "RangeError");
+}
