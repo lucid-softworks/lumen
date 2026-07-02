@@ -12774,7 +12774,13 @@ fn install_string(it: &mut Interp) {
     it.def_method(&ctor, "fromCharCode", 1, |i, _this, args| {
         let mut s = String::new();
         for a in args {
-            let n = ab(i.to_number(a))? as u32;
+            // Each argument is ToUint16'd (so -1 -> 0xFFFF, 0x10000 -> 0), not truncated.
+            let num = ab(i.to_number(a))?;
+            let n = if num.is_finite() {
+                num.trunc().rem_euclid(65536.0) as u32
+            } else {
+                0
+            };
             s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
         }
         Ok(Value::from_string(s))

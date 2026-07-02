@@ -5710,3 +5710,12 @@ fn to_property_key_symbol_result() {
         "9"
     );
 }
+
+#[test]
+fn string_from_char_code_touint16() {
+    // fromCharCode ToUint16's each argument.
+    assert_eq!(run("String.fromCharCode(-1).charCodeAt(0)"), "65535");
+    assert_eq!(run("String.fromCharCode(65537).charCodeAt(0)"), "1");
+    assert_eq!(run("String.fromCharCode(65).charCodeAt(0)"), "65");
+    assert_eq!(run("String.fromCharCode(NaN).charCodeAt(0)"), "0");
+}
