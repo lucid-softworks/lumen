@@ -6377,6 +6377,26 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn simple_assignment_reference_before_rhs() {
+    // `base[prop()] = rhs()`: the LHS reference (base + key expression) is evaluated before the RHS.
+    assert_eq!(
+        run("var order='';var b={};function p(){order+='p';return 'k'}function r(){order+='r';return 1}b[p()]=r();order"),
+        "pr"
+    );
+    // Deferred ToPropertyKey: PutValue's ToObject(null) throws TypeError before the key's toString
+    // runs (the RHS is still evaluated first, per `=` order).
+    assert_eq!(
+        run("var hit=false;var k={toString(){hit=true;return 'x'}};var b=null;var name='none';try{b[k]=1}catch(e){name=e.constructor.name}name+':'+hit"),
+        "TypeError:false"
+    );
+    // A member base with a side effect is evaluated once.
+    assert_eq!(
+        run("var n=0;var o={};function base(){n++;return o}base().x=5;n+':'+o.x"),
+        "1:5"
+    );
+}
+
+#[test]
 fn array_destructuring_assignment_iterator_close() {
     // Normal completion with more elements left: IteratorClose runs and a throwing `return`
     // propagates (destructuring throws that error).

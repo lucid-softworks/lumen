@@ -3420,6 +3420,15 @@ impl Interp {
         env: &Env,
     ) -> Result<Value, Abrupt> {
         if op == "=" {
+            // A destructuring target evaluates the RHS first, then iterates the pattern.
+            if matches!(target, Expr::Array(_) | Expr::Object(_)) {
+                let v = self.eval(value, env)?;
+                self.assign_to_target(target, v.clone(), env)?;
+                return Ok(v);
+            }
+            // A simple target evaluates its Reference (base + computed key expression) BEFORE the
+            // RHS; ToPropertyKey and the base's RequireObjectCoercible are deferred to PutValue.
+            let mut lref = self.resolve_reference(target, env)?;
             let v = self.eval(value, env)?;
             // `f = function(){}` names the anonymous function after the target identifier.
             if let Expr::Ident(n) = target {
@@ -3427,7 +3436,7 @@ impl Interp {
                     self.set_fn_name(&v, n);
                 }
             }
-            self.assign_to_target(target, v.clone(), env)?;
+            self.put_reference(&mut lref, v.clone())?;
             return Ok(v);
         }
         // The LHS reference is resolved once and reused for GetValue + PutValue, so a `with`-object
