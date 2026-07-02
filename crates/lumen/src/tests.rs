@@ -6239,6 +6239,22 @@ fn array_buffer_slice_species_and_isview() {
     // A custom species is honored.
     assert_eq!(run("var b=new ArrayBuffer(4); var C=function(n){return new ArrayBuffer(n)}; C[Symbol.species]=C; b.constructor=C; b.slice(0,2).byteLength"), "2");
     // isView recognizes DataViews.
-    assert_eq!(run("ArrayBuffer.isView(new DataView(new ArrayBuffer(8)))"), "true");
-    assert_eq!(run("ArrayBuffer.isView(new Int8Array(4))+','+ArrayBuffer.isView({})"), "true,false");
+    assert_eq!(
+        run("ArrayBuffer.isView(new DataView(new ArrayBuffer(8)))"),
+        "true"
+    );
+    assert_eq!(
+        run("ArrayBuffer.isView(new Int8Array(4))+','+ArrayBuffer.isView({})"),
+        "true,false"
+    );
+}
+
+#[test]
+fn array_buffer_species_and_transfer_resizable() {
+    // ArrayBuffer[@@species] returns `this`.
+    assert_eq!(run("ArrayBuffer[Symbol.species]===ArrayBuffer"), "true");
+    // transfer preserves the source's resizability; transferToFixedLength does not.
+    assert_eq!(run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transfer(6).resizable"), "true");
+    assert_eq!(run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transferToFixedLength(6).resizable"), "false");
+    assert_eq!(run("var b=new ArrayBuffer(4); b.transfer().resizable"), "false");
 }

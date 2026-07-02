@@ -2370,11 +2370,24 @@ fn uri_decode(s: &str) -> Option<String> {
 /// ArrayBuffer.prototype.transfer / transferToFixedLength: move the bytes into a fresh fixed-length
 /// buffer and detach the source (a TypeError if it's already detached).
 fn ab_transfer(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    ab_transfer_impl(i, this, a, false)
+}
+fn ab_transfer_fixed(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    ab_transfer_impl(i, this, a, true)
+}
+/// ArrayBuffer.prototype.transfer / transferToFixedLength: copy into a new buffer of `newLength` and
+/// detach the source. `transfer` preserves the source's resizability (its maxByteLength);
+/// `transferToFixedLength` always produces a fixed-length buffer.
+fn ab_transfer_impl(i: &mut Interp, this: Value, a: &[Value], fixed: bool) -> Result<Value, Value> {
     let o = this
         .as_obj()
+        .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
         .cloned()
         .ok_or_else(|| i.make_error("TypeError", "not an ArrayBuffer"))?;
     let ptr = Rc::as_ptr(&o) as usize;
+    if i.shared_buffers.contains_key(&ptr) {
+        return Err(i.make_error("TypeError", "transfer requires a non-shared ArrayBuffer"));
+    }
     if !i.array_buffers.contains_key(&ptr) {
         return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
     }
@@ -2388,15 +2401,26 @@ fn ab_transfer(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value>
             n as usize
         }
     };
+    // transfer() preserves the source's resizability; transferToFixedLength() is always fixed.
+    let src_resizable = matches!(i.get_member(&this, "resizable"), Ok(Value::Bool(true)));
+    let src_max = match i.get_member(&this, "maxByteLength") {
+        Ok(Value::Num(n)) => n as usize,
+        _ => new_len,
+    };
     let bytes = i.array_buffers[&ptr].clone();
     let (bv, bp) = make_array_buffer(i, new_len);
     if let Some(buf) = i.array_buffers.get_mut(&bp) {
         let n = bytes.len().min(new_len);
         buf[..n].copy_from_slice(&bytes[..n]);
     }
+    if !fixed && src_resizable {
+        if let Value::Obj(nb) = &bv {
+            set_internal(nb, "__abMaxByteLength", Value::Num(src_max as f64));
+            set_internal(nb, "__abResizable", Value::Bool(true));
+        }
+    }
     // Detach the source (drop its backing store; detached/byteLength derive from the side table).
     i.array_buffers.remove(&ptr);
-    let _ = &o;
     Ok(bv)
 }
 
@@ -2592,7 +2616,7 @@ fn install_array_buffer(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     it.def_method(&proto, "transfer", 1, ab_transfer);
-    it.def_method(&proto, "transferToFixedLength", 1, ab_transfer);
+    it.def_method(&proto, "transferToFixedLength", 1, ab_transfer_fixed);
     // Immutable-ArrayBuffer proposal: move the bytes into a fresh immutable buffer (detaching the
     // source), or copy a range into an immutable buffer (leaving the source intact).
     it.def_method(&proto, "transferToImmutable", 1, |i, this, a| {
@@ -2681,6 +2705,7 @@ fn install_array_buffer(it: &mut Interp) {
         };
         Ok(Value::Bool(is_view))
     });
+    install_species(it, &ctor); // ArrayBuffer[@@species] returns `this`
     set_builtin(&it.global, "ArrayBuffer", Value::Obj(ctor));
 }
 
