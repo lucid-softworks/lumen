@@ -4915,7 +4915,16 @@ impl Interp {
                                 if let Some((src_env, local)) = &bd.import_ref {
                                     Some((src_env.clone(), local.clone()))
                                 } else {
-                                    if !bd.mutable && bd.initialized {
+                                    // A let/const still in its temporal dead zone: assigning to it
+                                    // is a ReferenceError (this path is assignment, never the
+                                    // declaration's own initialization).
+                                    if !bd.initialized {
+                                        return Err(self.throw(
+                                            "ReferenceError",
+                                            format!("cannot access '{name}' before initialization"),
+                                        ));
+                                    }
+                                    if !bd.mutable {
                                         return Err(self.throw(
                                             "TypeError",
                                             format!("assignment to constant '{name}'"),

@@ -6377,6 +6377,21 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn assignment_to_tdz_binding_throws() {
+    // Assigning to a let/const still in its temporal dead zone is a ReferenceError.
+    assert_eq!(throws("(function(){ x = 1; let x; })()"), "ReferenceError");
+    assert_eq!(
+        throws("(function(){ ({x} = {x:1}); let x; })()"),
+        "ReferenceError"
+    );
+    assert_eq!(
+        throws("(function(){ [x] = [1]; let x; })()"),
+        "ReferenceError"
+    );
+    assert_eq!(throws("(function(){ x += 1; let x; })()"), "ReferenceError");
+}
+
+#[test]
 fn destructuring_assignment_target_reference_order() {
     // The destructuring target's Reference is evaluated before the source element is read.
     assert_eq!(
