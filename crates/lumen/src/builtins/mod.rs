@@ -13068,32 +13068,45 @@ fn install_string(it: &mut Interp) {
         }
     });
     it.def_method(&sp, "replaceAll", 2, |i, this, args| {
-        let s = this_string(i, &this)?.to_string();
+        // RequireObjectCoercible(this) — but keep the raw receiver O for @@replace, which runs
+        // BEFORE ToString(this).
+        if matches!(this, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "String.prototype.replaceAll called on null or undefined",
+            ));
+        }
         let search = arg(args, 0);
-        if let Value::Obj(_) = &search {
-            // A RegExp search value must be global.
-            if let Value::Obj(o) = &search {
-                if let Some(re) = i.regexps.get(&(Rc::as_ptr(o) as usize)) {
-                    if !re.global {
-                        return Err(i.make_error(
-                            "TypeError",
-                            "replaceAll must be called with a global RegExp",
-                        ));
-                    }
+        // Only an *Object* searchValue is inspected for regexp-ness / @@replace; a primitive's
+        // Symbol.replace is never accessed.
+        if matches!(search, Value::Obj(_)) {
+            // A RegExp search value must be global: read `flags`, require it coercible, and check
+            // for "g" — a non-global (or missing-flags) regexp is a TypeError.
+            if arg_is_regexp(i, &search)? {
+                let flags = ab(i.get_member(&search, "flags"))?;
+                if matches!(flags, Value::Undefined | Value::Null) {
+                    return Err(i.make_error("TypeError", "regexp flags is null or undefined"));
                 }
-            }
-            // Delegate to the search value's @@replace method when present (handles custom objects).
-            if let Some(key) = well_known_key(i, "replace") {
-                let replacer = ab(i.get_member(&search, &key))?;
-                if replacer.is_callable() {
-                    return ab(i.call(
-                        replacer,
-                        search.clone(),
-                        &[Value::from_string(s.clone()), arg(args, 1)],
+                let flags_str = ab(i.to_string(&flags))?;
+                if !flags_str.contains('g') {
+                    return Err(i.make_error(
+                        "TypeError",
+                        "replaceAll must be called with a global RegExp",
                     ));
                 }
             }
+            // GetMethod(search, @@replace): if present, delegate with the raw receiver O.
+            if let Some(key) = well_known_key(i, "replace") {
+                let replacer = ab(i.get_member(&search, &key))?;
+                if !matches!(replacer, Value::Undefined | Value::Null) {
+                    if !replacer.is_callable() {
+                        return Err(i.make_error("TypeError", "@@replace is not callable"));
+                    }
+                    return ab(i.call(replacer, search.clone(), &[this.clone(), arg(args, 1)]));
+                }
+            }
         }
+        let s = this_string(i, &this)?.to_string();
         let pat = ab(i.to_string(&arg(args, 0)))?;
         let repl = arg(args, 1);
         if pat.is_empty() {

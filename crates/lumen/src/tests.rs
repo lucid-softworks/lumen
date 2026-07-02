@@ -6050,8 +6050,29 @@ fn function_bind_length_and_tostring() {
     // bind length: max(0, ToInteger(own length) - boundArgs); only own Number lengths count.
     assert_eq!(run("function f(a,b,c){}; f.bind().length"), "3");
     assert_eq!(run("function f(a,b,c){}; f.bind(null,1).length"), "2");
-    assert_eq!(run("var f=function(){}; Object.defineProperty(f,'length',{value:NaN}); f.bind().length"), "0");
+    assert_eq!(
+        run("var f=function(){}; Object.defineProperty(f,'length',{value:NaN}); f.bind().length"),
+        "0"
+    );
     assert_eq!(run("var f=function(){}; Object.defineProperty(f,'length',{value:Infinity}); f.bind(null,1).length"), "Infinity");
     // Function.prototype.toString throws for a non-callable receiver.
-    assert_eq!(run("try{Function.prototype.toString.call({});'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(
+        run("try{Function.prototype.toString.call({});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn string_replace_all_spec_order() {
+    // A non-global regexp searchValue is a TypeError.
+    assert_eq!(
+        run("try{'aaa'.replaceAll(/a/,'b');'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // A global regexp routes through @@replace.
+    assert_eq!(run("'a1b1c'.replaceAll(/1/g,'X')"), "aXbXc");
+    // A primitive searchValue's Symbol.replace is never accessed.
+    assert_eq!(run("'a1b1c'.replaceAll(1,'X')"), "aXbXc");
+    // String search still works.
+    assert_eq!(run("'a.b.c'.replaceAll('.','-')"), "a-b-c");
 }
