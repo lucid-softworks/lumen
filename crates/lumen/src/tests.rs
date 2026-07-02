@@ -6173,10 +6173,40 @@ fn proxy_define_property_invariants() {
 #[test]
 fn set_returns_boolean() {
     // [[Set]] reports failure as a boolean (Reflect.set / proxy trap), while an assignment throws.
-    assert_eq!(run("var o={get x(){return 1}}; Reflect.set(o,'x',2)"), "false");
-    assert_eq!(run("Reflect.set(new Proxy(new Proxy(/x/g,{}),{}),'global',true)"), "false");
-    assert_eq!(run("var o={a:1}; Reflect.set(new Proxy(o,{}),'a',2)"), "true");
-    assert_eq!(run("Object.freeze({}); var o=Object.freeze({b:1}); Reflect.set(o,'b',9)"), "false");
+    assert_eq!(
+        run("var o={get x(){return 1}}; Reflect.set(o,'x',2)"),
+        "false"
+    );
+    assert_eq!(
+        run("Reflect.set(new Proxy(new Proxy(/x/g,{}),{}),'global',true)"),
+        "false"
+    );
+    assert_eq!(
+        run("var o={a:1}; Reflect.set(new Proxy(o,{}),'a',2)"),
+        "true"
+    );
+    assert_eq!(
+        run("Object.freeze({}); var o=Object.freeze({b:1}); Reflect.set(o,'b',9)"),
+        "false"
+    );
     // A strict assignment to a getter-only property still throws.
-    assert_eq!(run("'use strict'; var o={get x(){}}; try{o.x=1;'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(
+        run("'use strict'; var o={get x(){}}; try{o.x=1;'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn proxy_get_set_symbol_trap_key() {
+    // get/set traps receive the original symbol key, not a stringified form.
+    assert_eq!(
+        run("var s=Symbol(); var t=new Proxy({},{get(_,k){return k===s?42:0}}); var p=new Proxy(t,{get:null}); p[s]"),
+        "42"
+    );
+    assert_eq!(
+        run("var s=Symbol(); var got; var p=new Proxy({},{set(_,k,v){got=(k===s);return true}}); p[s]=1; String(got)"),
+        "true"
+    );
+    // String-wrapper length/index forward through a nested proxy's [[Get]].
+    assert_eq!(run("var p=new Proxy(new Proxy(new String('str'),{}),{get:null}); p.length+','+p[0]"), "3,s");
 }

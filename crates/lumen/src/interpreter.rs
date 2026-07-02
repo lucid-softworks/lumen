@@ -1199,7 +1199,11 @@ impl Interp {
                         let res = self.call(
                             trap,
                             handler,
-                            &[target.clone(), Value::str(key), receiver.clone()],
+                            &[
+                                target.clone(),
+                                self.sym_from_key(key).unwrap_or_else(|| Value::str(key)),
+                                receiver.clone(),
+                            ],
                         )?;
                         self.proxy_get_invariant(&target, key, &res)?;
                         return Ok(res);
@@ -1262,7 +1266,11 @@ impl Interp {
                 let res = self.call(
                     trap,
                     handler,
-                    &[target.clone(), Value::str(key), receiver.clone()],
+                    &[
+                        target.clone(),
+                        self.sym_from_key(key).unwrap_or_else(|| Value::str(key)),
+                        receiver.clone(),
+                    ],
                 )?;
                 self.proxy_get_invariant(&target, key, &res)?;
                 return Ok(res);
@@ -1342,7 +1350,7 @@ impl Interp {
                     handler,
                     &[
                         target.clone(),
-                        Value::str(key),
+                        self.sym_from_key(key).unwrap_or_else(|| Value::str(key)),
                         value.clone(),
                         receiver.clone(),
                     ],
@@ -1396,7 +1404,7 @@ impl Interp {
                     handler,
                     &[
                         target.clone(),
-                        Value::str(key),
+                        self.sym_from_key(key).unwrap_or_else(|| Value::str(key)),
                         value.clone(),
                         receiver.clone(),
                     ],
