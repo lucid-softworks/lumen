@@ -8801,6 +8801,42 @@ fn install_object(it: &mut Interp) {
         }
         ab(i.call(to_string, this, &[]))
     });
+    // Object.prototype.__proto__ — an accessor (Annex B) over [[GetPrototypeOf]]/[[SetPrototypeOf]].
+    {
+        let getter = it.make_native("get __proto__", 0, |i, this, _| {
+            // RequireObjectCoercible, then ToObject before reading the prototype.
+            let o = to_object_arg(i, this, "get __proto__")?;
+            js_get_prototype_of(i, &Value::Obj(o))
+        });
+        let setter = it.make_native("set __proto__", 1, |i, this, args| {
+            if matches!(this, Value::Undefined | Value::Null) {
+                return Err(i.make_error("TypeError", "__proto__ set on null or undefined"));
+            }
+            let v = arg(args, 0);
+            // Only an Object receiver with an Object/Null value actually changes the prototype;
+            // everything else is a silent no-op.
+            if let Value::Obj(_) = &this {
+                if matches!(v, Value::Obj(_) | Value::Null) {
+                    if !js_set_prototype_of(i, &this, &v)? {
+                        return Err(i.make_error("TypeError", "cyclic __proto__ value"));
+                    }
+                }
+            }
+            Ok(Value::Undefined)
+        });
+        op.borrow_mut().props.insert(
+            "__proto__",
+            Property {
+                value: Value::Undefined,
+                get: Some(Value::Obj(getter)),
+                set: Some(Value::Obj(setter)),
+                accessor: true,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+    }
 
     let ctor = it.make_native("Object", 1, |i, _this, args| {
         Ok(match arg(args, 0) {

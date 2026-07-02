@@ -5719,3 +5719,18 @@ fn string_from_char_code_touint16() {
     assert_eq!(run("String.fromCharCode(65).charCodeAt(0)"), "65");
     assert_eq!(run("String.fromCharCode(NaN).charCodeAt(0)"), "0");
 }
+
+#[test]
+fn object_proto_accessor() {
+    // Object.prototype.__proto__ is an accessor over the prototype.
+    assert_eq!(run("var p={x:1}; var o={}; o.__proto__=p; o.x"), "1");
+    assert_eq!(run("var p={}; var o=Object.create(p); o.__proto__===p"), "true");
+    assert_eq!(run("({}).__proto__===Object.prototype"), "true");
+    // The descriptor on Object.prototype is a configurable accessor.
+    assert_eq!(
+        run("var d=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__'); typeof d.get+','+typeof d.set+','+d.configurable"),
+        "function,function,true"
+    );
+    // Setting a non-object/null value is a silent no-op.
+    assert_eq!(run("var o={}; o.__proto__=5; Object.getPrototypeOf(o)===Object.prototype"), "true");
+}
