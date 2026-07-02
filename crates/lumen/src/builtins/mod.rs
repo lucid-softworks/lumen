@@ -2390,6 +2390,16 @@ fn install_array_buffer(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("ArrayBuffer", proto.clone());
     // byteLength/maxByteLength/resizable/detached are accessor getters on the prototype.
+    // ArrayBuffer.prototype accessors/methods require a non-shared buffer: reject a SharedArrayBuffer
+    // `this` with a TypeError (both buffer kinds carry `__abMaxByteLength`, so brand alone isn't enough).
+    fn reject_shared_buffer(i: &Interp, this: &Value) -> Result<(), Value> {
+        if let Value::Obj(o) = this {
+            if i.shared_buffers.contains_key(&(Rc::as_ptr(o) as usize)) {
+                return Err(i.make_error("TypeError", "requires a non-shared ArrayBuffer"));
+            }
+        }
+        Ok(())
+    }
     let ab_getter = |it: &mut Interp, proto: &Gc, name: &str, f: NativeFn| {
         let g = it.make_native(&format!("get {name}"), 0, f);
         proto.borrow_mut().props.insert(
@@ -2406,6 +2416,7 @@ fn install_array_buffer(it: &mut Interp) {
         );
     };
     ab_getter(it, &proto, "byteLength", |i, this, _| {
+        reject_shared_buffer(i, &this)?;
         let p = this
             .as_obj()
             .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
@@ -2417,6 +2428,7 @@ fn install_array_buffer(it: &mut Interp) {
         ))
     });
     ab_getter(it, &proto, "maxByteLength", |i, this, _| {
+        reject_shared_buffer(i, &this)?;
         match this.as_obj().and_then(|o| {
             o.borrow()
                 .props
@@ -2435,6 +2447,7 @@ fn install_array_buffer(it: &mut Interp) {
         }
     });
     ab_getter(it, &proto, "resizable", |i, this, _| {
+        reject_shared_buffer(i, &this)?;
         match this.as_obj().and_then(|o| {
             o.borrow()
                 .props
@@ -2446,6 +2459,7 @@ fn install_array_buffer(it: &mut Interp) {
         }
     });
     ab_getter(it, &proto, "detached", |i, this, _| {
+        reject_shared_buffer(i, &this)?;
         let o = this
             .as_obj()
             .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
@@ -2455,6 +2469,7 @@ fn install_array_buffer(it: &mut Interp) {
         ))
     });
     ab_getter(it, &proto, "immutable", |i, this, _| {
+        reject_shared_buffer(i, &this)?;
         let o = this
             .as_obj()
             .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
