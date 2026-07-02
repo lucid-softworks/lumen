@@ -3875,7 +3875,14 @@ impl Interp {
         if let Value::Sym(s) = v {
             return Ok(Interp::sym_key(s));
         }
-        Ok(self.to_string(v)?.to_string())
+        // ToPropertyKey: ToPrimitive(hint String) first — a Symbol result stays a symbol key (rather
+        // than being stringified, which would throw), so `obj[wrapperWhoseToStringReturnsASymbol]`
+        // is a symbol-keyed access.
+        let prim = self.to_primitive(v, Hint::String)?;
+        if let Value::Sym(s) = &prim {
+            return Ok(Interp::sym_key(s));
+        }
+        Ok(self.to_string(&prim)?.to_string())
     }
 
     /// The internal property key for a well-known symbol (e.g. `Symbol.toPrimitive`).

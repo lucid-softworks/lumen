@@ -5696,3 +5696,17 @@ fn object_to_locale_string() {
         "X"
     );
 }
+
+#[test]
+fn to_property_key_symbol_result() {
+    // ToPropertyKey does ToPrimitive(String) then keeps a Symbol result as a symbol key.
+    assert_eq!(
+        run("var s=Symbol('k'); var o={}; o[s]=42; var w={[Symbol.toPrimitive](){return s}}; o[w]"),
+        "42"
+    );
+    // A non-symbol key still coerces via toString.
+    assert_eq!(
+        run("var o={}; o[{toString(){return 'x'}}]=9; o.x"),
+        "9"
+    );
+}
