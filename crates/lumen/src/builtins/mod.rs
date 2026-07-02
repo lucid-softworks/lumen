@@ -12824,6 +12824,25 @@ fn install_string(it: &mut Interp) {
         Ok(Value::from_string(s.repeat(count)))
     });
     it.def_method(&sp, "split", 2, |i, this, args| {
+        // RequireObjectCoercible(this), then dispatch to an Object separator's @@split.
+        if matches!(this, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "String.prototype.split called on null or undefined",
+            ));
+        }
+        let separator = arg(args, 0);
+        if matches!(separator, Value::Obj(_)) {
+            if let Some(key) = well_known_key(i, "split") {
+                let splitter = ab(i.get_member(&separator, &key))?;
+                if !matches!(splitter, Value::Undefined | Value::Null) {
+                    if !splitter.is_callable() {
+                        return Err(i.make_error("TypeError", "@@split is not callable"));
+                    }
+                    return ab(i.call(splitter, separator.clone(), &[this.clone(), arg(args, 1)]));
+                }
+            }
+        }
         let s = this_string(i, &this)?;
         if s.len() > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "string too large to split in this engine"));

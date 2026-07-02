@@ -6088,3 +6088,12 @@ fn string_match_search_delegate() {
     assert_eq!(run("'x'.search({[Symbol.search](s){return 42}})"), "42");
     assert_eq!(run("'x'.match({[Symbol.match](s){return 'M'}})"), "M");
 }
+
+#[test]
+fn string_split_delegate() {
+    // split builds through @@split for regexps and honors a custom @@split.
+    assert_eq!(run("'a,b,c'.split(',').join('|')"), "a|b|c");
+    assert_eq!(run("'a1b2c'.split(/[0-9]/).join('|')"), "a|b|c");
+    assert_eq!(run("'x'.split({[Symbol.split](s){return ['S']}})[0]"), "S");
+    assert_eq!(run("'abc'.split('').join('-')"), "a-b-c");
+}
