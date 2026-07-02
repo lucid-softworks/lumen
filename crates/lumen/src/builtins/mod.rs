@@ -8481,12 +8481,29 @@ fn install_function_proto(it: &mut Interp) {
     }
     it.extra_protos
         .insert("%ThrowTypeError%", throw_type_error.clone());
+    // Legacy Function.prototype.caller / .arguments accessors: a strict-mode function (or a bound /
+    // native / non-function receiver) poisons access with a TypeError; a non-strict function yields
+    // `null` (the live call stack is not reflected). This matches web reality, not the pure poison.
+    let legacy_caller = it.make_native("get", 0, |i, this, _a| {
+        let non_strict = matches!(
+            this.as_obj().map(|o| o.borrow().call.clone()),
+            Some(crate::value::Callable::User(ref f, _)) if !f.is_strict
+        );
+        if non_strict {
+            Ok(Value::Null)
+        } else {
+            Err(i.make_error(
+                "TypeError",
+                "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
+            ))
+        }
+    });
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
             Property {
                 value: Value::Undefined,
-                get: Some(Value::Obj(throw_type_error.clone())),
+                get: Some(Value::Obj(legacy_caller.clone())),
                 set: Some(Value::Obj(throw_type_error.clone())),
                 accessor: true,
                 writable: false,

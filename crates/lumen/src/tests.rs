@@ -1501,11 +1501,17 @@ fn regex_validation() {
 }
 #[test]
 fn poison_pill() {
-    assert_eq!(throws("function f(){}; f.caller"), "TypeError");
-    assert_eq!(throws("function f(){}; f.arguments"), "TypeError");
-    assert_eq!(throws("(function(){}).caller"), "TypeError");
+    // A non-strict function's legacy caller/arguments yield null (the call stack isn't reflected).
+    assert_eq!(run("function f(){}; String(f.caller)"), "null");
+    assert_eq!(run("function f(){}; String(f.arguments)"), "null");
+    assert_eq!(run("String((function(){}).caller)"), "null");
+    // A strict-mode function poisons access with a TypeError.
     assert_eq!(
         throws("'use strict'; function f(){ return f.caller; }; f()"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("var f=(function(){'use strict';return function g(){}})(); f.arguments"),
         "TypeError"
     );
     // normal function members still work
