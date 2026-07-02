@@ -6044,3 +6044,14 @@ fn proxy_set_receiver_and_strict_delete() {
         "a,b"
     );
 }
+
+#[test]
+fn function_bind_length_and_tostring() {
+    // bind length: max(0, ToInteger(own length) - boundArgs); only own Number lengths count.
+    assert_eq!(run("function f(a,b,c){}; f.bind().length"), "3");
+    assert_eq!(run("function f(a,b,c){}; f.bind(null,1).length"), "2");
+    assert_eq!(run("var f=function(){}; Object.defineProperty(f,'length',{value:NaN}); f.bind().length"), "0");
+    assert_eq!(run("var f=function(){}; Object.defineProperty(f,'length',{value:Infinity}); f.bind(null,1).length"), "Infinity");
+    // Function.prototype.toString throws for a non-callable receiver.
+    assert_eq!(run("try{Function.prototype.toString.call({});'no'}catch(e){e.constructor.name}"), "TypeError");
+}

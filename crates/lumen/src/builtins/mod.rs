@@ -8012,11 +8012,17 @@ fn install_function_proto(it: &mut Interp) {
         } else {
             args[1..].to_vec()
         };
-        // length = max(0, ToInteger(target.length) - boundArgs); name = "bound " + target.name.
-        let target_len = ab(i.get_member(&this, "length"))?;
-        let l = match target_len {
-            Value::Num(n) if n.is_finite() => (n.trunc() as i64 - bound_args.len() as i64).max(0),
-            _ => 0,
+        // length: 0 unless the target has an OWN `length` that is a Number; then +Infinity stays,
+        // and a finite value becomes max(0, ToInteger(len) - boundArgs). name = "bound " + target.name.
+        let has_own_len = matches!(&this, Value::Obj(o) if o.borrow().props.contains("length"));
+        let l: f64 = if has_own_len {
+            match ab(i.get_member(&this, "length"))? {
+                Value::Num(n) if n == f64::INFINITY => f64::INFINITY,
+                Value::Num(n) if n.is_finite() => (n.trunc() - bound_args.len() as f64).max(0.0),
+                _ => 0.0,
+            }
+        } else {
+            0.0
         };
         let target_name = ab(i.get_member(&this, "name"))?;
         let name = match &target_name {
@@ -8030,17 +8036,23 @@ fn install_function_proto(it: &mut Interp) {
             args: bound_args,
         };
         obj.borrow_mut().is_constructor = true;
-        obj.borrow_mut().props.insert(
-            "length",
-            Property::data(Value::Num(l as f64), false, false, true),
-        );
+        obj.borrow_mut()
+            .props
+            .insert("length", Property::data(Value::Num(l), false, false, true));
         obj.borrow_mut().props.insert(
             "name",
             Property::data(Value::from_string(name), false, false, true),
         );
         Ok(Value::Obj(obj))
     });
-    it.def_method(&fp, "toString", 0, |_i, _this, _args| {
+    it.def_method(&fp, "toString", 0, |i, this, _args| {
+        // Function.prototype.toString requires a callable `this` (a function or a callable proxy).
+        if !this.is_callable() {
+            return Err(i.make_error(
+                "TypeError",
+                "Function.prototype.toString requires that 'this' be a function",
+            ));
+        }
         Ok(Value::str("function () { [native code] }"))
     });
 
