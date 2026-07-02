@@ -11724,9 +11724,25 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
         }
         let mut out: Vec<Value> = Vec::new();
         // Prefer @@asyncIterator, then a sync iterator; otherwise treat `source` as array-like.
-        let async_it = match well_known_key(i, "asyncIterator") {
-            Some(k) => ab(i.get_member(&source, &k))?,
-            None => Value::Undefined,
+        // GetMethod: a present-but-non-callable @@asyncIterator/@@iterator is a TypeError.
+        let get_method = |i: &mut Interp, key: &str| -> Result<Value, Value> {
+            let m = match well_known_key(i, key) {
+                Some(k) => ab(i.get_member(&source, &k))?,
+                None => Value::Undefined,
+            };
+            if matches!(m, Value::Undefined | Value::Null) {
+                Ok(Value::Undefined)
+            } else if !m.is_callable() {
+                Err(i.make_error("TypeError", "iterator method is not callable"))
+            } else {
+                Ok(m)
+            }
+        };
+        let async_it = get_method(i, "asyncIterator")?;
+        let sync_it = if async_it.is_callable() {
+            Value::Undefined
+        } else {
+            get_method(i, "iterator")?
         };
         if async_it.is_callable() {
             let iter = ab(i.call(async_it, source.clone(), &[]))?;
@@ -11748,33 +11764,56 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
                 out.push(v);
                 k += 1.0;
             }
-        } else if matches!(source, Value::Str(_)) || i.has_iterator(&source) {
-            for (k, raw) in ab(i.iterate(&source))?.into_iter().enumerate() {
-                let mut v = ab(i.await_value(raw))?;
-                if mapfn.is_callable() {
-                    let mapped =
-                        ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
-                    v = ab(i.await_value(mapped))?;
+        } else if sync_it.is_callable() {
+            // Step the sync iterator manually so an abrupt map/await closes it (IfAbruptClose).
+            let iter = ab(i.call(sync_it, source.clone(), &[]))?;
+            let next = ab(i.get_member(&iter, "next"))?;
+            let mut k = 0.0;
+            loop {
+                let res = ab(i.call(next.clone(), iter.clone(), &[]))?;
+                if !matches!(res, Value::Obj(_)) {
+                    return Err(i.make_error("TypeError", "iterator result is not an object"));
                 }
-                out.push(v);
-            }
-        } else if let Value::Obj(o) = &source {
-            let len = ab(i.to_length(&o.clone()))?;
-            for k in 0..len {
-                let raw = ab(i.get_member(&source, &k.to_string()))?;
-                let mut v = ab(i.await_value(raw))?;
-                if mapfn.is_callable() {
-                    let mapped =
-                        ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
-                    v = ab(i.await_value(mapped))?;
+                let done = ab(i.get_member(&res, "done"))?;
+                if i.to_boolean(&done) {
+                    break;
                 }
-                out.push(v);
+                let raw = ab(i.get_member(&res, "value"))?;
+                let step = (|i: &mut Interp| -> Result<Value, Value> {
+                    let mut v = ab(i.await_value(raw))?;
+                    if mapfn.is_callable() {
+                        let mapped =
+                            ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k)]))?;
+                        v = ab(i.await_value(mapped))?;
+                    }
+                    Ok(v)
+                })(i);
+                match step {
+                    Ok(v) => out.push(v),
+                    Err(e) => {
+                        i.iterator_close(&iter);
+                        return Err(e);
+                    }
+                }
+                k += 1.0;
             }
         } else {
-            return Err(i.make_error(
-                "TypeError",
-                "Array.fromAsync requires an iterable or array-like",
-            ));
+            // Not (async/sync) iterable: treat as array-like. ToObject wraps primitives
+            // (a number/boolean/symbol/bigint has no `length`, yielding an empty array);
+            // null/undefined throw a TypeError.
+            let o = to_object_arg(i, source.clone(), "Array.fromAsync")?;
+            let ov = Value::Obj(o.clone());
+            let len = ab(i.to_length(&o))?;
+            for k in 0..len {
+                let raw = ab(i.get_member(&ov, &k.to_string()))?;
+                let mut v = ab(i.await_value(raw))?;
+                if mapfn.is_callable() {
+                    let mapped =
+                        ab(i.call(mapfn.clone(), this_arg.clone(), &[v, Value::Num(k as f64)]))?;
+                    v = ab(i.await_value(mapped))?;
+                }
+                out.push(v);
+            }
         }
         Ok(i.make_array(out))
     })();

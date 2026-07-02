@@ -6310,6 +6310,35 @@ fn array_flat_flatmap_species_and_throw() {
 }
 
 #[test]
+fn array_from_async_getmethod_and_arraylike() {
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) {
+            Ok(Completion::Value(v)) => v,
+            Ok(Completion::Throw { name, .. }) => format!("T:{name}"),
+            Err(_) => "P".into(),
+        }
+    }
+    // Array.fromAsync on a non-iterable primitive ToObjects it -> empty array (no throw).
+    assert_eq!(
+        two(
+            "globalThis.r='x';Array.fromAsync(5).then(a=>{globalThis.r=a.length})",
+            "r"
+        ),
+        "0"
+    );
+    // A present-but-non-callable @@iterator is a GetMethod TypeError -> promise rejects.
+    assert_eq!(
+        two(
+            "globalThis.r='x';var o={};o[Symbol.iterator]=true;Array.fromAsync(o).catch(e=>{globalThis.r=e.constructor.name})",
+            "r"
+        ),
+        "TypeError"
+    );
+}
+
+#[test]
 fn slice_nan_end_is_zero() {
     // ToIntegerOrInfinity(NaN) === 0, so a NaN end argument yields an empty slice.
     assert_eq!(run("'abcd'.slice(0, NaN)"), "");
