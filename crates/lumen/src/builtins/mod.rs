@@ -8558,13 +8558,39 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
             return proxy_own_keys(i, &t2, &h2);
         }
         return Ok(match target {
-            Value::Obj(t) => t
-                .borrow()
-                .props
-                .keys()
-                .into_iter()
-                .map(Value::Str)
-                .collect(),
+            Value::Obj(t) => {
+                // OrdinaryOwnPropertyKeys order: array-index keys ascending, then other string keys in
+                // insertion order, then symbol keys (as their Symbol values) in insertion order.
+                let keys = t.borrow().props.keys();
+                let mut indices: Vec<u32> = Vec::new();
+                let mut strings: Vec<Rc<str>> = Vec::new();
+                let mut symbols: Vec<Rc<str>> = Vec::new();
+                for k in keys {
+                    if Interp::is_sym_key(&k) {
+                        symbols.push(k);
+                    } else if let Ok(n) = k.parse::<u32>() {
+                        if n != u32::MAX && n.to_string() == *k {
+                            indices.push(n);
+                        } else {
+                            strings.push(k);
+                        }
+                    } else {
+                        strings.push(k);
+                    }
+                }
+                indices.sort_unstable();
+                let mut out: Vec<Value> = indices
+                    .into_iter()
+                    .map(|n| Value::from_string(n.to_string()))
+                    .collect();
+                out.extend(strings.into_iter().map(Value::Str));
+                out.extend(
+                    symbols
+                        .into_iter()
+                        .map(|k| i.sym_from_key(&k).unwrap_or(Value::Str(k))),
+                );
+                out
+            }
             _ => Vec::new(),
         });
     }
