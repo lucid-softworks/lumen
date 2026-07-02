@@ -2458,12 +2458,15 @@ impl Parser {
             self.advance();
             is_static = true;
         }
-        // `static { ... }` initialization block — a super-property context.
+        // `static { ... }` initialization block — a super-property context and function-like code
+        // where `new.target` is valid (evaluates to undefined).
         if is_static && self.is_punct("{") {
             self.advance();
             let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+            let snt = std::mem::replace(&mut self.allow_new_target, true);
             let body = self.parse_block_body();
             self.super_prop_ok = ssuper;
+            self.allow_new_target = snt;
             let body = body?;
             let func = Function {
                 name: None,
