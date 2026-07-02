@@ -862,6 +862,106 @@ impl Interp {
         }
     }
 
+    /// Await `v` from inside a coroutine (parks until it settles), surfacing the resume signal.
+    fn coro_await(&mut self, v: Value) -> Completion {
+        match crate::coroutine::coroutine_await(self, v) {
+            crate::coroutine::Resume::Next(x) => Ok(x),
+            crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
+            crate::coroutine::Resume::Return(rv) => Err(Abrupt::Return(rv)),
+        }
+    }
+
+    /// AsyncGeneratorYield for `yield*` delegation: await `value`, suspend producing it, and return
+    /// the driver's resume signal to continue the delegation loop.
+    fn async_gen_yield_resume(&mut self, value: Value) -> Result<crate::coroutine::Resume, Abrupt> {
+        let value = self.coro_await(value)?;
+        Ok(crate::coroutine::coroutine_yield(self, value))
+    }
+
+    /// `yield* iterable` inside an *async* generator (14.4.14, async path): drive the inner async
+    /// iterator (or a sync one wrapped async-from-sync), awaiting each step result and value, and
+    /// re-yielding through AsyncGeneratorYield.
+    fn yield_delegate_async(&mut self, value: &Value) -> Completion {
+        use crate::coroutine::Resume;
+        // GetIterator(value, async): prefer @@asyncIterator; else a sync iterator whose values are
+        // awaited (CreateAsyncFromSyncIterator).
+        let akey = crate::builtins::async_iterator_key(self);
+        let amethod = match &akey {
+            Some(k) => self.get_member(value, k)?,
+            None => Value::Undefined,
+        };
+        let (iterator, next, from_sync) = if amethod.is_callable() {
+            let it = self.call(amethod, value.clone(), &[])?;
+            let n = self.get_member(&it, "next")?;
+            (it, n, false)
+        } else {
+            let (it, n) = self.get_iterator(value)?;
+            (it, n, true)
+        };
+        // Read a settled iterator result: await the call result; validate it is an object; for a
+        // sync source also await the `value` field. Returns (done, value).
+        macro_rules! settle {
+            ($result:expr) => {{
+                let r = self.coro_await($result)?;
+                if !matches!(r, Value::Obj(_)) {
+                    return Err(self.throw("TypeError", "iterator result is not an object"));
+                }
+                let done = self.get_member(&r, "done")?;
+                let mut v = self.get_member(&r, "value")?;
+                if from_sync {
+                    v = self.coro_await(v)?;
+                }
+                (self.to_boolean(&done), v)
+            }};
+        }
+        let mut received = Resume::Next(Value::Undefined);
+        loop {
+            match received {
+                Resume::Next(v) => {
+                    let result = self.call(next.clone(), iterator.clone(), &[v])?;
+                    let (done, inner) = settle!(result);
+                    if done {
+                        return Ok(inner);
+                    }
+                    received = self.async_gen_yield_resume(inner)?;
+                }
+                Resume::Throw(e) => {
+                    let throw = self.get_member(&iterator, "throw")?;
+                    if !throw.is_callable() {
+                        // No `throw` method: close the iterator (awaiting the close) then TypeError.
+                        let ret = self.get_member(&iterator, "return")?;
+                        if ret.is_callable() {
+                            if let Ok(r) = self.call(ret, iterator.clone(), &[]) {
+                                let _ = self.coro_await(r);
+                            }
+                        }
+                        return Err(
+                            self.throw("TypeError", "the delegated iterator has no 'throw' method")
+                        );
+                    }
+                    let result = self.call(throw, iterator.clone(), &[e])?;
+                    let (done, inner) = settle!(result);
+                    if done {
+                        return Ok(inner);
+                    }
+                    received = self.async_gen_yield_resume(inner)?;
+                }
+                Resume::Return(v) => {
+                    let ret = self.get_member(&iterator, "return")?;
+                    if !ret.is_callable() {
+                        return Err(Abrupt::Return(self.coro_await(v)?));
+                    }
+                    let result = self.call(ret, iterator.clone(), &[v])?;
+                    let (done, inner) = settle!(result);
+                    if done {
+                        return Err(Abrupt::Return(inner));
+                    }
+                    received = self.async_gen_yield_resume(inner)?;
+                }
+            }
+        }
+    }
+
     /// GetIterator: returns (iterator, next-method).
     pub(crate) fn get_iterator(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
         // A primitive string iterates by code point (it has no own @@iterator method here).
@@ -1438,7 +1538,11 @@ impl Interp {
                     return Err(self.throw("SyntaxError", "yield outside a generator"));
                 }
                 if *delegate {
-                    self.yield_delegate(&value)
+                    if crate::coroutine::in_async_gen() {
+                        self.yield_delegate_async(&value)
+                    } else {
+                        self.yield_delegate(&value)
+                    }
                 } else {
                     self.yield_one(value)
                 }

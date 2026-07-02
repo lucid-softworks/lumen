@@ -6402,6 +6402,35 @@ fn super_call_in_ordinary_function_is_early_error() {
 }
 
 #[test]
+fn async_generator_yield_star_delegation() {
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) {
+            Ok(Completion::Value(v)) => v,
+            Ok(Completion::Throw { name, .. }) => format!("T:{name}"),
+            Err(_) => "P".into(),
+        }
+    }
+    // yield* over a sync iterable inside an async generator, collected async.
+    assert_eq!(
+        two(
+            "globalThis.out=[];async function* g(){yield* [1,2,3]}async function run(){for await(var x of g())globalThis.out.push(x)}run().then(()=>{globalThis.out=globalThis.out.join(',')})",
+            "out"
+        ),
+        "1,2,3"
+    );
+    // yield* over an inner async generator.
+    assert_eq!(
+        two(
+            "globalThis.out=[];async function* inner(){yield 'a';yield 'b'}async function* g(){yield* inner();yield 'c'}async function run(){for await(var x of g())globalThis.out.push(x)}run().then(()=>{globalThis.out=globalThis.out.join(',')})",
+            "out"
+        ),
+        "a,b,c"
+    );
+}
+
+#[test]
 fn async_generator_yield_awaits_operand() {
     fn two(setup: &str, read: &str) -> String {
         let mut e = Engine::new();
