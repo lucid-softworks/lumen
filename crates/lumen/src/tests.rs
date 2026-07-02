@@ -6714,3 +6714,16 @@ fn field_initializer_new_target() {
         "undefined"
     );
 }
+
+#[test]
+fn static_block_forbids_arguments() {
+    assert!(Engine::new()
+        .eval("class C{static{arguments}}", false)
+        .is_err());
+    // super.prop and new.target are still allowed in a static block.
+    assert_eq!(run("class B{static m(){return 5}}class C extends B{static y;static{C.y=super.m()}}String(C.y)"), "5");
+    assert_eq!(
+        run("var r;class C{static{r=String(new.target)}}r"),
+        "undefined"
+    );
+}

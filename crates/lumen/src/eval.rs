@@ -4753,6 +4753,12 @@ pub(crate) fn field_init_error(e: &Expr) -> Option<&'static str> {
     fi_expr(e, true)
 }
 
+/// A `static { … }` block may not contain `arguments` or a `super(...)` call (the scan stops at
+/// nested ordinary functions and classes).
+pub(crate) fn static_block_error(func: &crate::ast::Function) -> Option<&'static str> {
+    fi_stmts(&func.body, true)
+}
+
 /// A non-constructor method body may not contain a `super(...)` call (only a derived constructor
 /// can). Descends into arrow functions (which inherit the method's super context).
 /// A non-constructor method may not contain a `super(...)` call in its parameter list *or* its body.

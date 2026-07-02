@@ -2946,6 +2946,14 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
                 }
             }
         }
+        // A `static { … }` block may not contain `arguments` (nor a `super(...)` call).
+        if matches!(m.kind, MemberKind::StaticBlock) {
+            if let Some(func) = &m.func {
+                if let Some(msg) = crate::eval::static_block_error(func) {
+                    return Err(msg.into());
+                }
+            }
+        }
         if let PropKey::Ident(name) = &m.key {
             if name.starts_with('#') {
                 if name == "#constructor" {
