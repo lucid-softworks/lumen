@@ -6914,17 +6914,18 @@ fn install_promise(it: &mut Interp) {
                 return Ok(result);
             }
         };
-        let items = match i.iterate(&arg(a, 0)) {
-            Ok(items) => items,
+        let (iter, next) = match i.get_iterator(&arg(a, 0)) {
+            Ok(it) => it,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
                 let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
-        for item in items {
-            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
-                Ok(p) => p,
+        loop {
+            let item = match i.iterator_step(&iter, &next) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
                 Err(e) => {
                     let _ = i.call(
                         reject_fn.clone(),
@@ -6934,7 +6935,37 @@ fn install_promise(it: &mut Interp) {
                     return Ok(result);
                 }
             };
-            if !combinator_then(i, &reject_fn, p, resolve_fn.clone(), reject_fn.clone()) {
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            let then = match i.get_member(&p, "then") {
+                Ok(t) => t,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            if let Err(e) = i.call(then, p, &[resolve_fn.clone(), reject_fn.clone()]) {
+                i.iterator_close(&iter);
+                let _ = i.call(
+                    reject_fn.clone(),
+                    Value::Undefined,
+                    &[crate::interpreter::abrupt_value(e)],
+                );
                 return Ok(result);
             }
         }
@@ -6952,27 +6983,39 @@ fn install_promise(it: &mut Interp) {
                 return Ok(result);
             }
         };
-        let items = match i.iterate(&arg(a, 0)) {
-            Ok(items) => items,
+        let (iter, next) = match i.get_iterator(&arg(a, 0)) {
+            Ok(it) => it,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
                 let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
-        let n = items.len();
-        let results = i.make_array(vec![Value::Undefined; n]);
+        let results = i.make_array(vec![]);
         let state = i.new_object();
         set_internal(&state, "__results", results.clone());
-        set_internal(&state, "__remaining", Value::Num(n as f64));
-        if n == 0 {
-            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
-            return Ok(result);
-        }
-        for (idx, item) in items.into_iter().enumerate() {
+        set_internal(&state, "__remaining", Value::Num(1.0));
+        let mut idx = 0usize;
+        loop {
+            let item = match i.iterator_step(&iter, &next) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+            let rem = ab(i.to_number(&rem_v))?;
+            set_internal(&state, "__remaining", Value::Num(rem + 1.0));
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
+                    i.iterator_close(&iter);
                     let _ = i.call(
                         reject_fn.clone(),
                         Value::Undefined,
@@ -7004,9 +7047,35 @@ fn install_promise(it: &mut Interp) {
                     resolve_fn.clone(),
                 ],
             );
-            if !combinator_then(i, &reject_fn, p, on_f, on_r) {
+            let then = match i.get_member(&p, "then") {
+                Ok(t) => t,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            if let Err(e) = i.call(then, p, &[on_f, on_r]) {
+                i.iterator_close(&iter);
+                let _ = i.call(
+                    reject_fn.clone(),
+                    Value::Undefined,
+                    &[crate::interpreter::abrupt_value(e)],
+                );
                 return Ok(result);
             }
+            idx += 1;
+        }
+        ab(i.set_member(&results, "length", Value::Num(idx as f64)))?;
+        let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+        let rem = ab(i.to_number(&rem_v))?;
+        set_internal(&state, "__remaining", Value::Num(rem - 1.0));
+        if rem - 1.0 == 0.0 {
+            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
         }
         Ok(result)
     });
@@ -7022,28 +7091,39 @@ fn install_promise(it: &mut Interp) {
                 return Ok(result);
             }
         };
-        let items = match i.iterate(&arg(a, 0)) {
-            Ok(items) => items,
+        let (iter, next) = match i.get_iterator(&arg(a, 0)) {
+            Ok(it) => it,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
                 let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
-        let n = items.len();
-        let errors = i.make_array(vec![Value::Undefined; n]);
+        let errors = i.make_array(vec![]);
         let state = i.new_object();
         set_internal(&state, "__errors", errors.clone());
-        set_internal(&state, "__remaining", Value::Num(n as f64));
-        if n == 0 {
-            let agg = make_aggregate_error(i, errors)?;
-            let _ = i.call(reject_fn, Value::Undefined, &[agg]);
-            return Ok(result);
-        }
-        for (idx, item) in items.into_iter().enumerate() {
+        set_internal(&state, "__remaining", Value::Num(1.0));
+        let mut idx = 0usize;
+        loop {
+            let item = match i.iterator_step(&iter, &next) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+            let rem = ab(i.to_number(&rem_v))?;
+            set_internal(&state, "__remaining", Value::Num(rem + 1.0));
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
+                    i.iterator_close(&iter);
                     let _ = i.call(
                         reject_fn.clone(),
                         Value::Undefined,
@@ -7064,11 +7144,37 @@ fn install_promise(it: &mut Interp) {
                     reject_fn.clone(),
                 ],
             );
-            // First fulfillment resolves the result (its own [[AlreadyResolved]] lives in the
-            // capability's resolve function).
-            if !combinator_then(i, &reject_fn, p, resolve_fn.clone(), on_r) {
+            let then = match i.get_member(&p, "then") {
+                Ok(t) => t,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            // First fulfillment resolves the result (its [[AlreadyResolved]] lives in resolve_fn).
+            if let Err(e) = i.call(then, p, &[resolve_fn.clone(), on_r]) {
+                i.iterator_close(&iter);
+                let _ = i.call(
+                    reject_fn.clone(),
+                    Value::Undefined,
+                    &[crate::interpreter::abrupt_value(e)],
+                );
                 return Ok(result);
             }
+            idx += 1;
+        }
+        ab(i.set_member(&errors, "length", Value::Num(idx as f64)))?;
+        let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+        let rem = ab(i.to_number(&rem_v))?;
+        set_internal(&state, "__remaining", Value::Num(rem - 1.0));
+        if rem - 1.0 == 0.0 {
+            let agg = make_aggregate_error(i, errors)?;
+            let _ = i.call(reject_fn, Value::Undefined, &[agg]);
         }
         Ok(result)
     });
