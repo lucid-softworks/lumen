@@ -7789,6 +7789,18 @@ fn global_fn(it: &Interp, name: &str, len: usize, f: NativeFn) {
 
 fn install_function_proto(it: &mut Interp) {
     let fp = it.function_proto.clone();
+    // %Function.prototype% is itself a callable function object that accepts any arguments and
+    // returns undefined, with length 0 and the empty name.
+    {
+        let mut b = fp.borrow_mut();
+        b.call = crate::value::Callable::Native(|_i, _this, _args| Ok(Value::Undefined));
+        b.props.insert(
+            "length",
+            Property::data(Value::Num(0.0), false, false, true),
+        );
+        b.props
+            .insert("name", Property::data(Value::str(""), false, false, true));
+    }
     it.def_method(&fp, "call", 1, |i, this, args| {
         let this_arg = arg(args, 0);
         let rest = if args.is_empty() { &[][..] } else { &args[1..] };
