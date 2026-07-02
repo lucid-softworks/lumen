@@ -6402,6 +6402,36 @@ fn super_call_in_ordinary_function_is_early_error() {
 }
 
 #[test]
+fn promise_all_race_use_constructor_capability() {
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) {
+            Ok(Completion::Value(v)) => v,
+            Ok(Completion::Throw { name, .. }) => format!("T:{name}"),
+            Err(_) => "P".into(),
+        }
+    }
+    // Promise.all routes through a custom constructor's capability resolve, and the resolve-element
+    // function's [[AlreadyCalled]] guard makes a second onFulfilled a no-op.
+    assert_eq!(
+        two(
+            "globalThis.count=0;function C(ex){function res(v){globalThis.count++}ex(res,function(){})}C.resolve=function(v){return v};var p1={then:function(f){f('a');f('b')}};Promise.all.call(C,[p1])",
+            "count"
+        ),
+        "1"
+    );
+    // Native Promise.all still resolves with the values array.
+    assert_eq!(
+        two(
+            "globalThis.r='x';Promise.all([1,Promise.resolve(2),3]).then(a=>{globalThis.r=a.join(',')})",
+            "r"
+        ),
+        "1,2,3"
+    );
+}
+
+#[test]
 fn function_expression_name_is_non_strict_immutable() {
     // Reassigning a named function expression's own name is a silent no-op in sloppy mode.
     assert_eq!(run("var f=function g(){g=1;return g};f()===f"), "true");

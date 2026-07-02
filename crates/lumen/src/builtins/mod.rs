@@ -6485,6 +6485,16 @@ fn get_promise_resolve(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
 /// NewPromiseCapability(C): `new C(executor)`, capturing the resolve/reject functions the executor is
 /// called with (and validating they're callable). Returns the result promise built by `C`.
 fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> {
+    new_promise_capability_full(i, ctor).map(|(p, _, _)| p)
+}
+
+/// NewPromiseCapability returning `(promise, resolve, reject)`. The resolve/reject are the
+/// constructor's own capability functions, so a combinator that resolves through them works with a
+/// subclass / foreign Promise constructor (not just the native machinery).
+fn new_promise_capability_full(
+    i: &mut Interp,
+    ctor: &Value,
+) -> Result<(Value, Value, Value), Value> {
     if !ctor.is_callable() {
         return Err(i.make_error(
             "TypeError",
@@ -6500,24 +6510,36 @@ fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> 
     if !resolve.is_callable() || !reject.is_callable() {
         return Err(i.make_error("TypeError", "promise capability functions are not callable"));
     }
-    Ok(promise)
+    Ok((promise, resolve, reject))
 }
 
 /// `Promise.all` per-element fulfill reaction. `args = [resultPromise, index, value]`.
 fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    let result = arg(args, 0);
+    let state = arg(args, 0);
     let idx = ab(i.to_number(&arg(args, 1)))? as usize;
-    let value = arg(args, 2);
-    let results = ab(i.get_member(&result, "__results"))?;
+    let already = arg(args, 2);
+    let resolve_fn = arg(args, 3);
+    let value = arg(args, 4);
+    // [[AlreadyCalled]]: a second settlement of the same element is a no-op.
+    if let Value::Obj(o) = &already {
+        if matches!(
+            o.borrow().props.get("__called").map(|p| &p.value),
+            Some(Value::Bool(true))
+        ) {
+            return Ok(Value::Undefined);
+        }
+        set_internal(o, "__called", Value::Bool(true));
+    }
+    let results = ab(i.get_member(&state, "__results"))?;
     // CreateDataProperty: a direct own data property, so Array.prototype index setters aren't invoked.
     if let Value::Obj(o) = &results {
         crate::value::set_data(o, &idx.to_string(), value);
     }
-    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem_v = ab(i.get_member(&state, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
-    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    ab(i.set_member(&state, "__remaining", Value::Num(rem)))?;
     if rem == 0.0 {
-        i.resolve_promise(&result, results);
+        ab(i.call(resolve_fn, Value::Undefined, &[results]))?;
     }
     Ok(Value::Undefined)
 }
@@ -6525,12 +6547,12 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
 /// Subscribe a Promise combinator's element handlers via the resolved item's user-visible `.then`
 /// (per spec). A throwing `.then` getter/call rejects the combinator's result promise. Returns
 /// `false` if the combinator should bail out (already rejected).
-fn combinator_then(i: &mut Interp, result: &Value, next: Value, on_f: Value, on_r: Value) -> bool {
+fn combinator_then(i: &mut Interp, reject: &Value, next: Value, on_f: Value, on_r: Value) -> bool {
     let then = match i.get_member(&next, "then") {
         Ok(t) => t,
         Err(e) => {
             let r = crate::interpreter::abrupt_value(e);
-            i.reject_promise(result, r);
+            let _ = i.call(reject.clone(), Value::Undefined, &[r]);
             return false;
         }
     };
@@ -6538,7 +6560,7 @@ fn combinator_then(i: &mut Interp, result: &Value, next: Value, on_f: Value, on_
         Ok(_) => true,
         Err(e) => {
             let r = crate::interpreter::abrupt_value(e);
-            i.reject_promise(result, r);
+            let _ = i.call(reject.clone(), Value::Undefined, &[r]);
             false
         }
     }
@@ -6752,15 +6774,17 @@ fn install_promise(it: &mut Interp) {
         Ok(cap)
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
+        // NewPromiseCapability(C): resolve/reject route through C's own capability so a subclass or
+        // foreign Promise constructor works, not just the native machinery.
+        let (result, resolve_fn, reject_fn) = match new_promise_capability_full(i, &t) {
+            Ok(c) => c,
             Err(e) => return Err(e),
         };
-        // GetPromiseResolve and the iteration may throw — those reject the result promise.
+        // GetPromiseResolve and the iteration may throw — those reject via the capability.
         let promise_resolve = match get_promise_resolve(i, &t) {
             Ok(r) => r,
             Err(e) => {
-                i.reject_promise(&result, e);
+                let _ = i.call(reject_fn, Value::Undefined, &[e]);
                 return Ok(result);
             }
         };
@@ -6768,47 +6792,61 @@ fn install_promise(it: &mut Interp) {
             Ok(items) => items,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
-                i.reject_promise(&result, reason);
+                let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
         let n = items.len();
         let results = i.make_array(vec![Value::Undefined; n]);
-        set_internal_obj(&result, "__results", results.clone());
-        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        // State lives on a private object (the result promise may be foreign/frozen).
+        let state = i.new_object();
+        set_internal(&state, "__results", results.clone());
+        set_internal(&state, "__remaining", Value::Num(n as f64));
         if n == 0 {
-            i.resolve_promise(&result, results);
+            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
-                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
                     return Ok(result);
                 }
             };
+            // Each element's resolve function has its own [[AlreadyCalled]] record.
+            let already = i.new_object();
+            set_internal(&already, "__called", Value::Bool(false));
             let on_f = make_bound(
                 i,
                 promise_all_element,
-                vec![result.clone(), Value::Num(idx as f64)],
+                vec![
+                    Value::Obj(state.clone()),
+                    Value::Num(idx as f64),
+                    Value::Obj(already),
+                    resolve_fn.clone(),
+                ],
             );
-            let on_r = i.make_resolver(&result, false);
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            if !combinator_then(i, &reject_fn, p, on_f, reject_fn.clone()) {
                 return Ok(result);
             }
         }
         Ok(result)
     });
     it.def_method(&ctor, "race", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
+        // Race settles the result promise with the first element to settle, through C's capability.
+        let (result, resolve_fn, reject_fn) = match new_promise_capability_full(i, &t) {
+            Ok(c) => c,
             Err(e) => return Err(e),
         };
         let promise_resolve = match get_promise_resolve(i, &t) {
             Ok(r) => r,
             Err(e) => {
-                i.reject_promise(&result, e);
+                let _ = i.call(reject_fn, Value::Undefined, &[e]);
                 return Ok(result);
             }
         };
@@ -6816,7 +6854,7 @@ fn install_promise(it: &mut Interp) {
             Ok(items) => items,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
-                i.reject_promise(&result, reason);
+                let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
@@ -6824,13 +6862,15 @@ fn install_promise(it: &mut Interp) {
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
-                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
                     return Ok(result);
                 }
             };
-            let on_f = i.make_resolver(&result, true);
-            let on_r = i.make_resolver(&result, false);
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            if !combinator_then(i, &reject_fn, p, resolve_fn.clone(), reject_fn.clone()) {
                 return Ok(result);
             }
         }
@@ -6882,7 +6922,8 @@ fn install_promise(it: &mut Interp) {
                 promise_settled_reject,
                 vec![result.clone(), Value::Num(idx as f64)],
             );
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            let overall_reject = i.make_resolver(&result, false);
+            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
                 return Ok(result);
             }
         }
@@ -6931,7 +6972,8 @@ fn install_promise(it: &mut Interp) {
                 promise_any_reject,
                 vec![result.clone(), Value::Num(idx as f64)],
             );
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            let overall_reject = i.make_resolver(&result, false);
+            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
                 return Ok(result);
             }
         }
@@ -6982,7 +7024,7 @@ fn install_promise(it: &mut Interp) {
                 vec![result.clone(), Value::str(&*k)],
             );
             let on_r = i.make_resolver(&result, false);
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            if !combinator_then(i, &on_r.clone(), p, on_f, on_r) {
                 return Ok(result);
             }
         }
@@ -7040,7 +7082,8 @@ fn install_promise(it: &mut Interp) {
                 promise_keyed_settle_r,
                 vec![result.clone(), Value::str(&*k)],
             );
-            if !combinator_then(i, &result, p, on_f, on_r) {
+            let overall_reject = i.make_resolver(&result, false);
+            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
                 return Ok(result);
             }
         }
