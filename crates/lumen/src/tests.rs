@@ -6004,3 +6004,20 @@ fn throw_type_error_intrinsic() {
         "TypeError"
     );
 }
+
+#[test]
+fn generator_prototype_chain() {
+    // A generator function's .prototype chains to %GeneratorPrototype% ("Generator").
+    assert_eq!(run("Object.getPrototypeOf(function*(){}.prototype)[Symbol.toStringTag]"), "Generator");
+    // An async generator function has a .prototype whose chain reaches %AsyncIteratorPrototype%.
+    assert_eq!(run("typeof (async function*(){}).prototype"), "object");
+    assert_eq!(
+        run("var p=Object.getPrototypeOf(Object.getPrototypeOf((async function*(){}).prototype)); typeof p[Symbol.asyncIterator]"),
+        "function"
+    );
+    // %AsyncIteratorPrototype%[@@asyncIterator] returns this.
+    assert_eq!(
+        run("var P=Object.getPrototypeOf(Object.getPrototypeOf((async function*(){}).prototype)); var o={}; Object.setPrototypeOf(o,P); o[Symbol.asyncIterator]()===o"),
+        "true"
+    );
+}

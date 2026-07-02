@@ -1080,16 +1080,26 @@ impl Interp {
                 Property::data(Value::from_string(name), false, false, true),
             );
         }
-        // A `prototype` is present on ordinary functions and on generators (even generator methods);
-        // arrows, async functions, and concise methods/getters/setters have none. Only ordinary
-        // functions are constructors (generators/async are not, despite generators having a prototype).
-        let has_prototype = !is_arrow && !is_async && (!is_method || is_generator);
+        // A `prototype` is present on ordinary functions and on generators — sync OR async (even
+        // generator methods); arrows, plain async functions, and concise methods/getters/setters have
+        // none. A generator's `.prototype` chains to %GeneratorPrototype% / %AsyncGeneratorPrototype%
+        // (an ordinary function's is a plain object). Only ordinary functions are constructors.
+        let has_prototype = !is_arrow && (is_generator || (!is_async && !is_method));
         if has_prototype {
-            let proto = self.new_object();
-            proto
-                .borrow_mut()
-                .props
-                .insert("constructor", Property::builtin(Value::Obj(obj.clone())));
+            let proto_parent = match (is_generator, is_async) {
+                (true, false) => self.extra_protos.get("%GeneratorPrototype%").cloned(),
+                (true, true) => self.extra_protos.get("%AsyncGeneratorPrototype%").cloned(),
+                _ => None,
+            }
+            .or_else(|| Some(self.object_proto.clone()));
+            let proto = Object::new(proto_parent);
+            // A generator's `.prototype` has no own `constructor` (the methods live on the intrinsic).
+            if !is_generator {
+                proto
+                    .borrow_mut()
+                    .props
+                    .insert("constructor", Property::builtin(Value::Obj(obj.clone())));
+            }
             obj.borrow_mut().props.insert(
                 "prototype",
                 Property::data(Value::Obj(proto), true, false, false),

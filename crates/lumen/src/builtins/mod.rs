@@ -11299,6 +11299,55 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&rsi_proto, "next", 0, regexp_string_iterator_next);
     it.extra_protos
         .insert("%RegExpStringIteratorPrototype%", rsi_proto);
+
+    // %AsyncIteratorPrototype%: [@@asyncIterator]() returns this, plus [@@asyncDispose] (which calls
+    // the iterator's return()). The prototype of every built-in async iterator.
+    let async_iter_proto = Object::new(Some(it.object_proto.clone()));
+    if let Some(k) = well_known_key(it, "asyncIterator") {
+        let f = it.make_native("[Symbol.asyncIterator]", 0, return_this);
+        async_iter_proto
+            .borrow_mut()
+            .props
+            .insert(k, Property::builtin(Value::Obj(f)));
+    }
+    if let Some(k) = well_known_key(it, "asyncDispose") {
+        let f = it.make_native("[Symbol.asyncDispose]", 0, async_dispose_via_return);
+        async_iter_proto
+            .borrow_mut()
+            .props
+            .insert(k, Property::builtin(Value::Obj(f)));
+    }
+    it.extra_protos
+        .insert("%AsyncIteratorPrototype%", async_iter_proto.clone());
+
+    // %GeneratorPrototype% (proto %IteratorPrototype%) and %AsyncGeneratorPrototype% (proto
+    // %AsyncIteratorPrototype%): the [[Prototype]] of a generator function's `.prototype`.
+    let gen_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
+    set_to_string_tag(it, &gen_proto, "Generator");
+    it.extra_protos.insert("%GeneratorPrototype%", gen_proto);
+    let async_gen_proto = Object::new(Some(async_iter_proto));
+    set_to_string_tag(it, &async_gen_proto, "AsyncGenerator");
+    it.extra_protos
+        .insert("%AsyncGeneratorPrototype%", async_gen_proto);
+}
+
+/// %AsyncIteratorPrototype%[@@asyncDispose]: return a promise that runs the iterator's `return()`
+/// (if any) and resolves to undefined.
+fn async_dispose_via_return(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let promise = i.new_promise();
+    let ret = ab(i.get_member(&this, "return"))?;
+    if ret.is_callable() {
+        match i.call(ret, this, &[]) {
+            Ok(_) => {}
+            Err(e) => {
+                let reason = crate::interpreter::abrupt_value(e);
+                i.reject_promise(&promise, reason);
+                return Ok(promise);
+            }
+        }
+    }
+    i.resolve_promise(&promise, Value::Undefined);
+    Ok(promise)
 }
 
 /// CreateRegExpStringIterator: a lazy iterator over a regex's matches in a string. Its state lives in
