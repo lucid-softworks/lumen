@@ -944,18 +944,33 @@ impl Parser {
         } else if self.is_ident_word("let") && self.starts_let_decl() {
             self.advance();
             Some(DeclKind::Let)
+        } else if self.is_ident_word("using") && self.starts_using_decl() {
+            self.advance();
+            Some(DeclKind::Using)
+        } else if self.is_ident_word("await") && self.in_async && self.starts_await_using() {
+            self.advance(); // await
+            self.advance(); // using
+            Some(DeclKind::AwaitUsing)
         } else {
             None
         };
 
         if let Some(kind) = decl_kind {
+            let is_using = matches!(kind, DeclKind::Using | DeclKind::AwaitUsing);
             let first = self.parse_binding_pattern()?;
             if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
                 let of = self.is_ident_word("of") && !self.cur_escaped();
+                // `using`/`await using` are only valid in a for-of head, never for-in.
+                if is_using && !of {
+                    return self.err("'using' declaration is not allowed in a for-in head");
+                }
                 self.advance();
-                // A let/const for-in/of head binds into the shared loop scope: its bound names must
-                // be unique and must not clash with a `var` in the body.
-                if matches!(kind, DeclKind::Let | DeclKind::Const) {
+                // A let/const/using for-in/of head binds into the shared loop scope: its bound names
+                // must be unique and must not clash with a `var` in the body.
+                if matches!(
+                    kind,
+                    DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing
+                ) {
                     let mut names = Vec::new();
                     pattern_names(&first, &mut names);
                     for n in &names {
