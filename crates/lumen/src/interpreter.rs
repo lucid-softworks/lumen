@@ -1467,11 +1467,41 @@ impl Interp {
             let new_len = n as usize;
             let old_len = self.array_length(obj);
             if new_len < old_len {
-                // Drop the index properties now out of range in a single O(n) rebuild — never loop
-                // over the (possibly huge) numeric range, and never remove one-at-a-time (O(n²)).
-                obj.borrow_mut()
+                // Delete out-of-range indices from the top down, stopping at a non-configurable one
+                // (ArraySetLength). Collect + sort descending so the scan is O(n log n), never O(n²).
+                let mut indices: Vec<usize> = obj
+                    .borrow()
                     .props
-                    .retain(|k| k.parse::<usize>().map(|i| i < new_len).unwrap_or(true));
+                    .keys()
+                    .iter()
+                    .filter_map(|k| k.parse::<usize>().ok())
+                    .filter(|&idx| idx >= new_len)
+                    .collect();
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+                for idx in indices {
+                    let configurable = obj
+                        .borrow()
+                        .props
+                        .get(&idx.to_string())
+                        .map(|p| p.configurable)
+                        .unwrap_or(true);
+                    if configurable {
+                        obj.borrow_mut().props.remove(&idx.to_string());
+                    } else {
+                        // length settles just past the blocking element; a strict assignment throws.
+                        obj.borrow_mut().props.insert(
+                            "length",
+                            Property::data(Value::Num((idx + 1) as f64), true, false, false),
+                        );
+                        if self.strict {
+                            return Err(self.throw(
+                                "TypeError",
+                                "cannot delete non-configurable array element via length",
+                            ));
+                        }
+                        return Ok(());
+                    }
+                }
             }
             obj.borrow_mut().props.insert(
                 "length",

@@ -5866,9 +5866,36 @@ fn typed_array_bytes_per_element_descriptor() {
 #[test]
 fn date_to_temporal_instant() {
     // A valid Date yields a Temporal.Instant at ms×10^6 ns.
-    assert_eq!(run("new Date(0).toTemporalInstant().epochMilliseconds"), "0");
-    assert_eq!(run("new Date(1000).toTemporalInstant().epochMilliseconds"), "1000");
+    assert_eq!(
+        run("new Date(0).toTemporalInstant().epochMilliseconds"),
+        "0"
+    );
+    assert_eq!(
+        run("new Date(1000).toTemporalInstant().epochMilliseconds"),
+        "1000"
+    );
     // An invalid Date is a RangeError; a non-Date receiver is a TypeError.
-    assert_eq!(run("try{new Date(NaN).toTemporalInstant();'no'}catch(e){e.constructor.name}"), "RangeError");
-    assert_eq!(run("try{Date.prototype.toTemporalInstant.call({});'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(
+        run("try{new Date(NaN).toTemporalInstant();'no'}catch(e){e.constructor.name}"),
+        "RangeError"
+    );
+    assert_eq!(
+        run("try{Date.prototype.toTemporalInstant.call({});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn array_length_shrink_stops_at_non_configurable() {
+    // Reducing length past a non-configurable element throws and length settles just past it.
+    assert_eq!(
+        run("var a=[0,1]; Object.defineProperty(a,'1',{configurable:false}); try{Object.defineProperty(a,'length',{value:1});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("var a=[0,1]; Object.defineProperty(a,'1',{configurable:false}); try{a.length=1;}catch(e){} a.length"),
+        "2"
+    );
+    // A normal shrink still works.
+    assert_eq!(run("var a=[1,2,3,4]; a.length=2; a.join(',')"), "1,2");
 }

@@ -9760,12 +9760,38 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
     if !len_writable && new_len != old_len {
         return Ok(false);
     }
-    if new_len < old_len {
-        o.borrow_mut()
-            .props
-            .retain(|k| k.parse::<usize>().map(|idx| idx < new_len).unwrap_or(true));
-    }
     let writable = d.writable.unwrap_or(len_writable);
+    if new_len < old_len {
+        // ArraySetLength deletes elements from the top down; a non-configurable element blocks the
+        // shrink, so length only drops to just past it and the operation reports failure.
+        let mut indices: Vec<usize> = o
+            .borrow()
+            .props
+            .keys()
+            .iter()
+            .filter_map(|k| k.parse::<usize>().ok())
+            .filter(|&idx| idx >= new_len)
+            .collect();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in indices {
+            let configurable = o
+                .borrow()
+                .props
+                .get(&idx.to_string())
+                .map(|p| p.configurable)
+                .unwrap_or(true);
+            if configurable {
+                o.borrow_mut().props.remove(&idx.to_string());
+            } else {
+                // Stop here: length settles at idx+1; length stays writable unless explicitly frozen.
+                o.borrow_mut().props.insert(
+                    "length",
+                    Property::data(Value::Num((idx + 1) as f64), writable, false, false),
+                );
+                return Ok(false);
+            }
+        }
+    }
     o.borrow_mut().props.insert(
         "length",
         Property::data(Value::Num(new_len as f64), writable, false, false),
