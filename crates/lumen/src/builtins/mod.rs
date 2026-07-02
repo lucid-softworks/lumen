@@ -5316,8 +5316,19 @@ fn collection_for_each(
         return Err(i.make_error("TypeError", "forEach callback is not callable"));
     }
     let cb_this = arg(a, 1);
-    let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
-    for (k, v) in snap {
+    // Iterate the LIVE backing list by index (positions are stable — deletes leave tombstones), so
+    // entries appended during the callback are visited and deleted entries are skipped.
+    let mut idx = 0usize;
+    loop {
+        let entry = i.map_data.get(&ptr).and_then(|e| e.get(idx).cloned());
+        idx += 1;
+        let (k, v) = match entry {
+            Some(kv) => kv,
+            None => break,
+        };
+        if is_tombstone(i, &k) {
+            continue;
+        }
         ab(i.call(cb.clone(), cb_this.clone(), &[v, k, this.clone()]))?;
     }
     Ok(Value::Undefined)
@@ -5364,26 +5375,39 @@ fn map_set_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value,
             _ => 0.0,
         }
     };
-    let idx = num(obj, "__ci_index") as usize;
+    let mut idx = num(obj, "__ci_index") as usize;
     let kind = num(obj, "__ci_kind") as u8;
-    let entry = map_ptr(&coll)
-        .and_then(|p| i.map_data.get(&p))
-        .and_then(|e| e.get(idx).cloned());
-    match entry {
-        Some((k, v)) => {
-            set_internal(obj, "__ci_index", Value::Num((idx + 1) as f64));
-            let val = match kind {
-                1 => k,
-                2 => i.make_array(vec![k, v]),
-                _ => v,
-            };
-            Ok(iter_result(i, val, false))
+    let coll_ptr = map_ptr(&coll);
+    // Skip tombstoned (deleted) slots so the iterator observes a live view.
+    loop {
+        let entry = coll_ptr
+            .and_then(|p| i.map_data.get(&p))
+            .and_then(|e| e.get(idx).cloned());
+        match entry {
+            Some((k, v)) => {
+                idx += 1;
+                if is_tombstone(i, &k) {
+                    continue;
+                }
+                set_internal(obj, "__ci_index", Value::Num(idx as f64));
+                let val = match kind {
+                    1 => k,
+                    2 => i.make_array(vec![k, v]),
+                    _ => v,
+                };
+                return Ok(iter_result(i, val, false));
+            }
+            None => {
+                set_internal(obj, "__ci_index", Value::Num(idx as f64));
+                return Ok(iter_result(i, Value::Undefined, true));
+            }
         }
-        None => Ok(iter_result(i, Value::Undefined, true)),
     }
 }
 
 fn install_collections(it: &mut Interp) {
+    // A unique private object used as the deleted-entry tombstone key (see map_tombstone).
+    it.extra_protos.insert("%MapTombstone%", Object::new(None));
     // %MapIteratorPrototype% / %SetIteratorPrototype%: distinct iterator prototypes (proto is
     // %IteratorPrototype%) with the right @@toStringTag and a live `next`.
     for (key, tag) in [
@@ -5723,18 +5747,38 @@ fn collection_ctor(
     Ok(mv)
 }
 
+/// The Map/Set tombstone sentinel key: a unique engine-private object placed at a deleted entry's
+/// slot so positions stay stable (live iteration observes additions and skips deletions, per spec).
+fn map_tombstone(i: &Interp) -> Value {
+    match i.extra_protos.get("%MapTombstone%") {
+        Some(o) => Value::Obj(o.clone()),
+        None => Value::Undefined,
+    }
+}
+
+fn is_tombstone(i: &Interp, k: &Value) -> bool {
+    matches!(
+        (k.as_obj(), i.extra_protos.get("%MapTombstone%")),
+        (Some(a), Some(b)) if Rc::ptr_eq(&a, b)
+    )
+}
+
+/// Count the live (non-tombstone) entries of a collection.
+fn coll_live_len(i: &Interp, ptr: usize) -> usize {
+    i.map_data
+        .get(&ptr)
+        .map(|e| e.iter().filter(|(k, _)| !is_tombstone(i, k)).count())
+        .unwrap_or(0)
+}
+
 fn map_size(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-    Ok(Value::Num(
-        i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
-    ))
+    Ok(Value::Num(coll_live_len(i, ptr) as f64))
 }
 
 fn set_size(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-    Ok(Value::Num(
-        i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
-    ))
+    Ok(Value::Num(coll_live_len(i, ptr) as f64))
 }
 
 /// CoerceKey for Map/Set: `-0` is canonicalized to `+0` so a stored key (and any key handed to a
@@ -5819,27 +5863,41 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         }
     };
     it.def_method(&proto, "has", 1, has_fn);
+    // Delete marks the matching entry with a tombstone (keeping its slot) so a concurrent forEach /
+    // iterator sees stable positions; the entry is otherwise treated as absent everywhere.
     let delete_fn: NativeFn = if is_set {
         |i, this, a| {
             let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-            let key = arg(a, 0);
+            let key = canonicalize_map_key(arg(a, 0));
+            let tomb = map_tombstone(i);
             let mut removed = false;
             if let Some(e) = i.map_data.get_mut(&ptr) {
-                let before = e.len();
-                e.retain(|(k, _)| !same_value_zero(k, &key));
-                removed = e.len() < before;
+                for slot in e.iter_mut() {
+                    if same_value_zero(&slot.0, &key) {
+                        slot.0 = tomb.clone();
+                        slot.1 = Value::Undefined;
+                        removed = true;
+                        break;
+                    }
+                }
             }
             Ok(Value::Bool(removed))
         }
     } else {
         |i, this, a| {
             let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            let key = arg(a, 0);
+            let key = canonicalize_map_key(arg(a, 0));
+            let tomb = map_tombstone(i);
             let mut removed = false;
             if let Some(e) = i.map_data.get_mut(&ptr) {
-                let before = e.len();
-                e.retain(|(k, _)| !same_value_zero(k, &key));
-                removed = e.len() < before;
+                for slot in e.iter_mut() {
+                    if same_value_zero(&slot.0, &key) {
+                        slot.0 = tomb.clone();
+                        slot.1 = Value::Undefined;
+                        removed = true;
+                        break;
+                    }
+                }
             }
             Ok(Value::Bool(removed))
         }
