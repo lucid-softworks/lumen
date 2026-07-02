@@ -5734,3 +5734,15 @@ fn object_proto_accessor() {
     // Setting a non-object/null value is a silent no-op.
     assert_eq!(run("var o={}; o.__proto__=5; Object.getPrototypeOf(o)===Object.prototype"), "true");
 }
+
+#[test]
+fn set_map_brand_checks() {
+    // Set.prototype methods reject a Map receiver and vice-versa (distinct [[SetData]]/[[MapData]]).
+    assert_eq!(run("try{Set.prototype.forEach.call(new Map(),()=>{});'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("try{Set.prototype.clear.call(new Map());'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("try{Set.prototype.union.call(new Map(),new Set());'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("try{Map.prototype.entries.call(new Set());'no'}catch(e){e.constructor.name}"), "TypeError");
+    // Same-kind still works.
+    assert_eq!(run("var s=new Set([1,2]); var n=0; s.forEach(v=>n+=v); n"), "3");
+    assert_eq!(run("[...new Set([1,2]).union(new Set([2,3]))].join(',')"), "1,2,3");
+}

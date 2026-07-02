@@ -5142,6 +5142,32 @@ fn coll_ptr_kind(i: &Interp, this: &Value, want: Option<&str>) -> Result<usize, 
 }
 
 /// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
+/// Like [`collection_iter`] but brand-checks the exact collection kind ("Set" / "Map").
+fn collection_iter_kind(i: &mut Interp, this: &Value, kind: u8, want: &str) -> Result<Value, Value> {
+    coll_ptr_kind(i, this, Some(want))?;
+    collection_iter(i, this, kind)
+}
+
+/// forEach shared by Map/Set, brand-checking the exact kind.
+fn collection_for_each(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+    want: Option<&str>,
+) -> Result<Value, Value> {
+    let ptr = coll_ptr_kind(i, &this, want)?;
+    let cb = arg(a, 0);
+    if !cb.is_callable() {
+        return Err(i.make_error("TypeError", "forEach callback is not callable"));
+    }
+    let cb_this = arg(a, 1);
+    let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
+    for (k, v) in snap {
+        ab(i.call(cb.clone(), cb_this.clone(), &[v, k, this.clone()]))?;
+    }
+    Ok(Value::Undefined)
+}
+
 fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
     let ptr = coll_ptr(i, this)?;
     let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
@@ -5216,11 +5242,9 @@ fn install_map_methods(it: &mut Interp) {
 
 /// The receiver Set's values (deduped insertion order). Errors if `this` isn't a Set.
 fn set_values(i: &mut Interp, this: &Value) -> Result<Vec<Value>, Value> {
-    let ptr = map_ptr(this).filter(|p| i.map_data.contains_key(p));
-    match ptr {
-        Some(p) => Ok(i.map_data[&p].iter().map(|(k, _)| k.clone()).collect()),
-        None => Err(i.make_error("TypeError", "method called on an incompatible receiver")),
-    }
+    // Requires a real Set [[SetData]] slot — a Map (which shares the map_data table) is rejected.
+    let p = coll_ptr_kind(i, this, Some("Set"))?;
+    Ok(i.map_data[&p].iter().map(|(k, _)| k.clone()).collect())
 }
 /// Build a fresh Set from `values` (deduped via SameValueZero).
 fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
@@ -5584,30 +5608,44 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
         }
     };
     it.def_method(&proto, "delete", 1, delete_fn);
-    it.def_method(&proto, "clear", 0, |i, this, _| {
-        let ptr = coll_ptr(i, &this)?;
-        if let Some(e) = i.map_data.get_mut(&ptr) {
-            e.clear();
+    // clear/forEach/values/keys/entries/size are shared shapes but must brand-check the exact kind
+    // (Set.prototype.clear rejects a Map and vice-versa), so select a kind-specific fn pointer.
+    let clear_fn: NativeFn = if is_set {
+        |i, this, _| {
+            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
+            i.map_data.get_mut(&ptr).map(|e| e.clear());
+            Ok(Value::Undefined)
         }
-        Ok(Value::Undefined)
-    });
-    it.def_method(&proto, "forEach", 1, |i, this, a| {
-        let ptr = coll_ptr(i, &this)?;
-        let cb = arg(a, 0);
-        let cb_this = arg(a, 1);
-        let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
-        for (k, v) in snap {
-            ab(i.call(cb.clone(), cb_this.clone(), &[v, k, this.clone()]))?;
+    } else {
+        |i, this, _| {
+            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
+            i.map_data.get_mut(&ptr).map(|e| e.clear());
+            Ok(Value::Undefined)
         }
-        Ok(Value::Undefined)
-    });
-    it.def_method(&proto, "values", 0, |i, this, _| {
-        collection_iter(i, &this, 0)
-    });
-    it.def_method(&proto, "keys", 0, |i, this, _| collection_iter(i, &this, 1));
-    it.def_method(&proto, "entries", 0, |i, this, _| {
-        collection_iter(i, &this, 2)
-    });
+    };
+    it.def_method(&proto, "clear", 0, clear_fn);
+    let for_each_fn: NativeFn = if is_set {
+        |i, this, a| collection_for_each(i, this, a, Some("Set"))
+    } else {
+        |i, this, a| collection_for_each(i, this, a, Some("Map"))
+    };
+    it.def_method(&proto, "forEach", 1, for_each_fn);
+    let (values_fn, keys_fn, entries_fn): (NativeFn, NativeFn, NativeFn) = if is_set {
+        (
+            |i, this, _| collection_iter_kind(i, &this, 0, "Set"),
+            |i, this, _| collection_iter_kind(i, &this, 1, "Set"),
+            |i, this, _| collection_iter_kind(i, &this, 2, "Set"),
+        )
+    } else {
+        (
+            |i, this, _| collection_iter_kind(i, &this, 0, "Map"),
+            |i, this, _| collection_iter_kind(i, &this, 1, "Map"),
+            |i, this, _| collection_iter_kind(i, &this, 2, "Map"),
+        )
+    };
+    it.def_method(&proto, "values", 0, values_fn);
+    it.def_method(&proto, "keys", 0, keys_fn);
+    it.def_method(&proto, "entries", 0, entries_fn);
 
     // `size` accessor.
     let size_getter = it.make_native("get size", 0, |i, this, _| {
