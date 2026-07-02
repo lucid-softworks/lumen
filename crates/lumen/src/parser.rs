@@ -1041,6 +1041,10 @@ impl Parser {
     fn parse_module_export_name(&mut self) -> Result<String, ParseError> {
         match self.cur().clone() {
             Tok::Str(s) => {
+                // A StringLiteral ModuleExportName must be well-formed Unicode (no lone surrogates).
+                if self.toks[self.pos].lone_surrogate {
+                    return self.err("module export name must be well-formed Unicode");
+                }
                 self.advance();
                 Ok(s)
             }

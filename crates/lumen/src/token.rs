@@ -14,6 +14,9 @@ pub struct Token {
     /// The identifier contained a `\u` escape — so it can't be recognized as a contextual keyword
     /// (`async`/`get`/`set`/`of`/`static`/…).
     pub escaped: bool,
+    /// A string literal that contains a lone (unpaired) surrogate code point — well-formed enough to
+    /// be a JS string, but not a valid ModuleExportName.
+    pub lone_surrogate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

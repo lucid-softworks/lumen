@@ -18,6 +18,8 @@ struct Lexer<'a> {
     nl_pending: bool,
     /// Set while reading a string that contained a legacy octal / `\8` / `\9` escape.
     pending_legacy: bool,
+    /// Set while reading a string that contained a lone (unpaired) surrogate `\u` escape.
+    pending_lone_surrogate: bool,
     /// One entry per open `{`: `true` if it opened a block/function body (statement position),
     /// `false` if an object literal (expression position). Used to disambiguate a `/` after `}`.
     brace_stack: Vec<bool>,
@@ -40,6 +42,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
         out: Vec::new(),
         nl_pending: false,
         pending_legacy: false,
+        pending_lone_surrogate: false,
         brace_stack: Vec::new(),
         last_close_block: false,
         pending_fn: Vec::new(),
@@ -159,12 +162,19 @@ impl<'a> Lexer<'a> {
             nl_before: nl,
             legacy_octal: false,
             escaped: false,
+            lone_surrogate: false,
         });
     }
     /// Flag the most recently pushed token as having contained a `\u` escape.
     fn mark_escaped(&mut self) {
         if let Some(t) = self.out.last_mut() {
             t.escaped = true;
+        }
+    }
+    /// Flag the most recently pushed token as containing a lone surrogate.
+    fn mark_lone_surrogate(&mut self) {
+        if let Some(t) = self.out.last_mut() {
+            t.lone_surrogate = true;
         }
     }
     /// Flag the most recently pushed token as a legacy-octal construct.
@@ -334,6 +344,7 @@ impl<'a> Lexer<'a> {
         self.bump();
         let mut s = String::new();
         self.pending_legacy = false;
+        self.pending_lone_surrogate = false;
         loop {
             match self.bump() {
                 None => return Err(self.err("unterminated string literal")),
@@ -349,6 +360,10 @@ impl<'a> Lexer<'a> {
         if self.pending_legacy {
             self.mark_legacy_octal();
             self.pending_legacy = false;
+        }
+        if self.pending_lone_surrogate {
+            self.mark_lone_surrogate();
+            self.pending_lone_surrogate = false;
         }
         Ok(())
     }
@@ -643,7 +658,60 @@ impl<'a> Lexer<'a> {
             }
         }
         let n = u32::from_str_radix(&hex, 16).map_err(|_| self.err("bad \\u escape"))?;
-        out.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+        if let Some(c) = char::from_u32(n) {
+            out.push(c);
+            return Ok(());
+        }
+        // `n` is a surrogate code point. A high surrogate followed by a `\u` low surrogate combines
+        // into a single astral code point; anything else is a lone surrogate (representable as a JS
+        // string but flagged so it can be rejected as a ModuleExportName).
+        if (0xD800..=0xDBFF).contains(&n) && self.peek() == Some('\\') && self.peek2() == Some('u') {
+            let save = self.pos;
+            self.bump(); // '\'
+            self.bump(); // 'u'
+            let mut lo = String::new();
+            let mut ok = true;
+            if self.peek() == Some('{') {
+                self.bump();
+                while let Some(c) = self.peek() {
+                    if c == '}' {
+                        break;
+                    }
+                    lo.push(c);
+                    self.bump();
+                }
+                if self.bump() != Some('}') {
+                    ok = false;
+                }
+            } else {
+                for _ in 0..4 {
+                    match self.peek() {
+                        Some(c) if c.is_ascii_hexdigit() => {
+                            lo.push(c);
+                            self.bump();
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            let low = if ok {
+                u32::from_str_radix(&lo, 16).ok()
+            } else {
+                None
+            };
+            if let Some(low) = low.filter(|l| (0xDC00..=0xDFFF).contains(l)) {
+                let cp = 0x10000 + ((n - 0xD800) << 10) + (low - 0xDC00);
+                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                return Ok(());
+            }
+            // Not a valid low surrogate: rewind and treat the high surrogate as lone.
+            self.pos = save;
+        }
+        self.pending_lone_surrogate = true;
+        out.push('\u{FFFD}');
         Ok(())
     }
 
