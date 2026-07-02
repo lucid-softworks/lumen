@@ -6310,6 +6310,29 @@ fn array_flat_flatmap_species_and_throw() {
 }
 
 #[test]
+fn array_species_create_constructor_validation() {
+    // A null/primitive `constructor` is not undefined -> IsConstructor check fails -> TypeError.
+    assert_eq!(
+        run("var a=[1];a.constructor=null;try{a.map(x=>x);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("var a=[1];a.constructor=42;try{a.filter(x=>true);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // A species of null falls back to the default Array.
+    assert_eq!(
+        run("var a=[1,2];a.constructor={[Symbol.species]:null};a.map(x=>x).length"),
+        "2"
+    );
+    // undefined constructor -> default Array (no throw).
+    assert_eq!(
+        run("var a=[1,2];a.constructor=undefined;a.map(x=>x+1).join(',')"),
+        "2,3"
+    );
+}
+
+#[test]
 fn array_species_result_uses_create_data_prop_or_throw() {
     // map/filter/concat/splice write results via CreateDataPropertyOrThrow: a non-extensible
     // species result makes the write throw a TypeError.

@@ -5158,14 +5158,21 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
     if !is_array {
         return Ok(make_sparse_array(i, len));
     }
-    let ctor = ab(i.get_member(original, "constructor"))?;
-    let mut species = Value::Undefined;
-    if matches!(&ctor, Value::Obj(_)) {
+    let mut c = ab(i.get_member(original, "constructor"))?;
+    // If C is undefined, use the default %Array%. A non-object, non-undefined C
+    // (e.g. null or a primitive) is not skipped — it falls through to the IsConstructor check.
+    if matches!(c, Value::Undefined) {
+        return Ok(make_sparse_array(i, len));
+    }
+    if matches!(&c, Value::Obj(_)) {
         if let Some(key) = well_known_key(i, "species") {
-            species = ab(i.get_member(&ctor, &key))?;
+            c = ab(i.get_member(&c, &key))?;
+        }
+        if matches!(c, Value::Null) {
+            c = Value::Undefined;
         }
     }
-    if matches!(species, Value::Undefined | Value::Null) {
+    if matches!(c, Value::Undefined) {
         return Ok(make_sparse_array(i, len));
     }
     let array_ctor = i
@@ -5174,15 +5181,15 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
         .props
         .get("Array")
         .map(|p| p.value.clone());
-    if let (Value::Obj(s), Some(Value::Obj(ac))) = (&species, &array_ctor) {
+    if let (Value::Obj(s), Some(Value::Obj(ac))) = (&c, &array_ctor) {
         if Rc::ptr_eq(s, ac) {
             return Ok(make_sparse_array(i, len));
         }
     }
-    if !species.is_callable() {
+    if !c.is_callable() {
         return Err(i.make_error("TypeError", "Array @@species is not a constructor"));
     }
-    ab(i.construct(species, &[Value::Num(len as f64)]))
+    ab(i.construct(c, &[Value::Num(len as f64)]))
 }
 
 /// Own enumerable string keys in spec [[OwnPropertyKeys]] order (array-index ascending first).
