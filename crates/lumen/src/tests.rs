@@ -5958,3 +5958,31 @@ fn shadow_realm_wrapped_function_copies_name_length() {
         "false,true"
     );
 }
+
+#[test]
+fn map_set_iterators() {
+    // Map/Set iterators have the right @@toStringTag and iterate live.
+    assert_eq!(
+        run("var m=new Map([['a',1],['b',2]]); [...m.entries()].map(e=>e.join(':')).join(',')"),
+        "a:1,b:2"
+    );
+    assert_eq!(
+        run("var s=new Set([1,2,3]); [...s.values()].join(',')"),
+        "1,2,3"
+    );
+    assert_eq!(
+        run("var m=new Map(); m.entries()[Symbol.toStringTag]"),
+        "Map Iterator"
+    );
+    assert_eq!(
+        run("var s=new Set(); s.values()[Symbol.toStringTag]"),
+        "Set Iterator"
+    );
+    // Map iterator next() brand-checks its receiver.
+    assert_eq!(
+        run("var it=new Map().entries(); try{it.next.call({});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // Entries appended during iteration are observed.
+    assert_eq!(run("var m=new Map([[0,0]]); var out=[]; for(var[k]of m){out.push(k); if(k<3)m.set(k+1,0);} out.join(',')"), "0,1,2,3");
+}

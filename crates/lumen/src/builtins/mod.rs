@@ -5206,21 +5206,77 @@ fn collection_for_each(
 }
 
 fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
-    let ptr = coll_ptr(i, this)?;
-    let snap = i.map_data.get(&ptr).cloned().unwrap_or_default();
-    let mut arr = Vec::with_capacity(snap.len());
-    for (k, v) in snap {
-        arr.push(match kind {
-            1 => k,
-            2 => i.make_array(vec![k, v]),
-            _ => v,
-        });
+    coll_ptr(i, this)?; // brand check (a real Map/Set)
+    let is_set = this
+        .as_obj()
+        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value.clone()))
+        .map(|v| matches!(v, Value::Str(ref s) if &**s == "Set"))
+        .unwrap_or(false);
+    let key = if is_set {
+        "%SetIteratorPrototype%"
+    } else {
+        "%MapIteratorPrototype%"
+    };
+    let proto = i
+        .extra_protos
+        .get(key)
+        .cloned()
+        .or_else(|| i.extra_protos.get("%IteratorPrototype%").cloned());
+    let obj = Object::new(proto);
+    set_builtin(&obj, "__ci_coll", this.clone());
+    set_builtin(&obj, "__ci_index", Value::Num(0.0));
+    set_builtin(&obj, "__ci_kind", Value::Num(kind as f64));
+    Ok(Value::Obj(obj))
+}
+
+/// `next()` for a Map/Set iterator: reads the live backing entries at the current index (so entries
+/// appended during iteration are observed). The `__ci_coll` slot is the brand.
+fn map_set_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let coll = this
+        .as_obj()
+        .and_then(|o| o.borrow().props.get("__ci_coll").map(|p| p.value.clone()));
+    let coll = match coll {
+        Some(c) => c,
+        None => return Err(i.make_error("TypeError", "not a Map/Set Iterator")),
+    };
+    let obj = this.as_obj().unwrap();
+    let num = |o: &Gc, k: &str| -> f64 {
+        match o.borrow().props.get(k).map(|p| p.value.clone()) {
+            Some(Value::Num(n)) => n,
+            _ => 0.0,
+        }
+    };
+    let idx = num(obj, "__ci_index") as usize;
+    let kind = num(obj, "__ci_kind") as u8;
+    let entry = map_ptr(&coll)
+        .and_then(|p| i.map_data.get(&p))
+        .and_then(|e| e.get(idx).cloned());
+    match entry {
+        Some((k, v)) => {
+            set_internal(obj, "__ci_index", Value::Num((idx + 1) as f64));
+            let val = match kind {
+                1 => k,
+                2 => i.make_array(vec![k, v]),
+                _ => v,
+            };
+            Ok(iter_result(i, val, false))
+        }
+        None => Ok(iter_result(i, Value::Undefined, true)),
     }
-    let arrv = i.make_array(arr);
-    Ok(make_array_iterator(i, arrv, 0))
 }
 
 fn install_collections(it: &mut Interp) {
+    // %MapIteratorPrototype% / %SetIteratorPrototype%: distinct iterator prototypes (proto is
+    // %IteratorPrototype%) with the right @@toStringTag and a live `next`.
+    for (key, tag) in [
+        ("%MapIteratorPrototype%", "Map Iterator"),
+        ("%SetIteratorPrototype%", "Set Iterator"),
+    ] {
+        let proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
+        set_to_string_tag(it, &proto, tag);
+        it.def_method(&proto, "next", 0, map_set_iter_next);
+        it.extra_protos.insert(key, proto);
+    }
     install_map_like(it, "Map", false, map_ctor);
     install_map_like(it, "Set", true, set_ctor);
     install_weak(it, "WeakMap", false, weakmap_ctor);
