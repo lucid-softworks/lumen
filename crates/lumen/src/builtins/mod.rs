@@ -8754,6 +8754,14 @@ fn install_object(it: &mut Interp) {
         Ok(Value::str(format!("[object {tag}]")))
     });
     it.def_method(&op, "valueOf", 0, |_i, this, _args| Ok(this));
+    // Object.prototype.toLocaleString(): the default just invokes `this.toString()`.
+    it.def_method(&op, "toLocaleString", 0, |i, this, _args| {
+        let to_string = ab(i.get_member(&this, "toString"))?;
+        if !to_string.is_callable() {
+            return Err(i.make_error("TypeError", "toString is not callable"));
+        }
+        ab(i.call(to_string, this, &[]))
+    });
 
     let ctor = it.make_native("Object", 1, |i, _this, args| {
         Ok(match arg(args, 0) {

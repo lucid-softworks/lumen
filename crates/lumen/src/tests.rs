@@ -5684,3 +5684,15 @@ fn array_like_near_integer_limit() {
         "a,b"
     );
 }
+
+#[test]
+fn object_to_locale_string() {
+    // Object.prototype.toLocaleString delegates to toString.
+    assert_eq!(run("({}).toLocaleString()"), "[object Object]");
+    assert_eq!(run("[1,2].toLocaleString()"), "1,2");
+    assert_eq!(run("(5).toLocaleString.call(5) === (5).toString()"), "true");
+    assert_eq!(
+        run("var o={toString(){return 'X'}}; o.toLocaleString()"),
+        "X"
+    );
+}
