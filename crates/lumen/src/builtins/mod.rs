@@ -2156,6 +2156,15 @@ fn install_shared_array_buffer(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("SharedArrayBuffer", proto.clone());
     // byteLength/maxByteLength/growable accessor getters on the prototype.
+    // SharedArrayBuffer.prototype accessors require a shared buffer: reject a plain ArrayBuffer
+    // `this` with a TypeError (the shared side table is the discriminator).
+    fn require_shared_buffer(i: &Interp, this: &Value) -> Result<(), Value> {
+        let shared = matches!(this, Value::Obj(o) if i.shared_buffers.contains_key(&(Rc::as_ptr(o) as usize)));
+        if !shared {
+            return Err(i.make_error("TypeError", "requires a SharedArrayBuffer"));
+        }
+        Ok(())
+    }
     let sab_getter = |it: &mut Interp, proto: &Gc, name: &str, f: NativeFn| {
         let g = it.make_native(&format!("get {name}"), 0, f);
         proto.borrow_mut().props.insert(
@@ -2172,6 +2181,7 @@ fn install_shared_array_buffer(it: &mut Interp) {
         );
     };
     sab_getter(it, &proto, "byteLength", |i, this, _| {
+        require_shared_buffer(i, &this)?;
         let p = this
             .as_obj()
             .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
@@ -2182,6 +2192,7 @@ fn install_shared_array_buffer(it: &mut Interp) {
         ))
     });
     sab_getter(it, &proto, "maxByteLength", |i, this, _| {
+        require_shared_buffer(i, &this)?;
         this.as_obj()
             .and_then(|o| {
                 o.borrow()
@@ -2192,6 +2203,7 @@ fn install_shared_array_buffer(it: &mut Interp) {
             .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))
     });
     sab_getter(it, &proto, "growable", |i, this, _| {
+        require_shared_buffer(i, &this)?;
         this.as_obj()
             .and_then(|o| {
                 o.borrow()
