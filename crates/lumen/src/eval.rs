@@ -101,7 +101,13 @@ impl Interp {
                     }
                     Err(e) => {
                         if !done {
-                            self.iterator_close(&iter);
+                            if matches!(e, Abrupt::Throw(_)) {
+                                self.iterator_close(&iter);
+                            } else {
+                                // A non-throw completion (return/break/continue): a throwing or
+                                // non-object `return` replaces it; otherwise it propagates.
+                                self.iterator_close_normal(&iter)?;
+                            }
                         }
                         Err(e)
                     }
@@ -3639,7 +3645,13 @@ impl Interp {
                     }
                     Err(e) => {
                         if !done {
-                            self.iterator_close(&iter_close);
+                            if matches!(e, Abrupt::Throw(_)) {
+                                self.iterator_close(&iter_close);
+                            } else {
+                                // A non-throw completion (return/break/continue): a throwing or
+                                // non-object `return` replaces it; otherwise it propagates.
+                                self.iterator_close_normal(&iter_close)?;
+                            }
                         }
                         Err(e)
                     }
