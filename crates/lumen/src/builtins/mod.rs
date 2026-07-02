@@ -5663,10 +5663,11 @@ fn install_set_methods(it: &mut Interp) {
         }
     });
     it.def_method(&sp, "symmetricDifference", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
-        // Start from this Set; toggle each of the other's keys (remove if present, else append).
+        // GetSetRecord (which may mutate the receiver via getters) precedes the snapshot; then
+        // toggle each of the other's keys (remove if present, else append).
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
-        let mut out = vals;
+        let mut out = set_values(i, &this)?;
         let mut seen_other: Vec<Value> = Vec::new();
         for k in set_like_keys(i, &keys, &arg(a, 0))? {
             if seen_other.iter().any(|v| same_value_zero(v, &k)) {
