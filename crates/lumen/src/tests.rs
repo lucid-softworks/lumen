@@ -6377,6 +6377,31 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn super_call_in_ordinary_function_is_early_error() {
+    // A super() call in a function/generator/async(-generator) that is not a derived constructor
+    // is an early SyntaxError.
+    assert!(Engine::new()
+        .eval("(function(){ super(); })", false)
+        .is_err());
+    assert!(Engine::new()
+        .eval("(function*(){ super(); })", false)
+        .is_err());
+    assert!(Engine::new()
+        .eval("(async function*(){ super(); })", false)
+        .is_err());
+    // A derived-class constructor's super() is still valid.
+    assert_eq!(
+        run("class B{constructor(){this.v=1}}class D extends B{constructor(){super()}}new D().v"),
+        "1"
+    );
+    // A nested arrow inherits, a nested class constructor is its own context (both fine).
+    assert_eq!(
+        run("class B{constructor(){this.v=2}}class D extends B{constructor(){(()=>super())()}}new D().v"),
+        "2"
+    );
+}
+
+#[test]
 fn generator_prototype_constructor_links() {
     // %Generator%/%AsyncGenerator% (the function .prototype) <-> their instance prototype.
     assert_eq!(run("function* g(){}Object.getPrototypeOf(g).prototype===Object.getPrototypeOf(g.prototype)"), "true");

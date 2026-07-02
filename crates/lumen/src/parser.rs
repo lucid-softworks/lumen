@@ -2306,7 +2306,7 @@ impl Parser {
         if let Some(dup) = params_body_lexical_clash(&params, &body) {
             return self.err(format!("Identifier '{dup}' has already been declared"));
         }
-        Ok(Function {
+        let func = Function {
             name,
             params,
             body,
@@ -2316,7 +2316,13 @@ impl Parser {
             is_generator,
             is_async,
             is_method: false,
-        })
+        };
+        // A function declaration/expression is never a derived constructor, so a `super(...)` call
+        // in its body or parameters is an early SyntaxError.
+        if let Some(msg) = crate::eval::method_super_call_error_full(&func) {
+            return self.err(msg);
+        }
+        Ok(func)
     }
 
     // ----- classes ----------------------------------------------------------------------------
