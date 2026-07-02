@@ -3474,17 +3474,30 @@ impl Interp {
                 let iter_close = iter.clone();
                 let mut done = false;
                 let result = (|me: &mut Self| -> Result<(), Abrupt> {
+                    // A throw from `next` (IteratorStep) marks the record done, so IteratorClose
+                    // is skipped; a throw from a target assignment leaves it not-done (still closes).
+                    macro_rules! step {
+                        () => {
+                            match me.iterator_step(&iter, &next) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    done = true;
+                                    return Err(e);
+                                }
+                            }
+                        };
+                    }
                     for el in elems {
                         match el {
                             ArrayElem::Hole => {
-                                if !done && me.iterator_step(&iter, &next)?.is_none() {
+                                if !done && step!().is_none() {
                                     done = true;
                                 }
                             }
                             ArrayElem::Spread(t) => {
                                 let mut rest = Vec::new();
                                 while !done {
-                                    match me.iterator_step(&iter, &next)? {
+                                    match step!() {
                                         Some(x) => rest.push(x),
                                         None => done = true,
                                     }
@@ -3496,7 +3509,7 @@ impl Interp {
                                 let v = if done {
                                     Value::Undefined
                                 } else {
-                                    match me.iterator_step(&iter, &next)? {
+                                    match step!() {
                                         Some(x) => x,
                                         None => {
                                             done = true;
@@ -3510,10 +3523,22 @@ impl Interp {
                     }
                     Ok(())
                 })(self);
-                if !done {
-                    self.iterator_close(&iter_close);
+                // IteratorClose: on normal completion propagate its abrupt (a throwing/non-object
+                // `return`); on abrupt completion close but keep the original error.
+                match result {
+                    Ok(()) => {
+                        if !done {
+                            self.iterator_close_normal(&iter_close)?;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        if !done {
+                            self.iterator_close(&iter_close);
+                        }
+                        Err(e)
+                    }
                 }
-                result
             }
             Expr::Object(props) => {
                 if matches!(value, Value::Undefined | Value::Null) {

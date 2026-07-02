@@ -6377,6 +6377,26 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn array_destructuring_assignment_iterator_close() {
+    // Normal completion with more elements left: IteratorClose runs and a throwing `return`
+    // propagates (destructuring throws that error).
+    assert_eq!(
+        run("var rc=0;var it={next(){return{done:false,value:1}},return(){rc++;throw new Error('x')}};var iter={[Symbol.iterator](){return it}};var _;try{[_]=iter}catch(e){}rc+''"),
+        "1"
+    );
+    // `return` returning a non-object -> TypeError from IteratorClose on normal completion.
+    assert_eq!(
+        run("var it={next(){return{done:false,value:1}},return(){return 5}};var iter={[Symbol.iterator](){return it}};var _;var name='none';try{[_]=iter}catch(e){name=e.constructor.name}name"),
+        "TypeError"
+    );
+    // A throwing target assignment closes the iterator but keeps the original error.
+    assert_eq!(
+        run("var rc=0;var it={next(){return{done:false,value:1}},return(){rc++;return{}}};var iter={[Symbol.iterator](){return it}};var name='none';try{[({}).nope.x]=iter}catch(e){name=e.constructor.name}name+':'+rc"),
+        "TypeError:1"
+    );
+}
+
+#[test]
 fn compound_assignment_resolves_reference_once() {
     // `with` + compound assignment: the LHS reference is resolved once, so a getter that deletes
     // the binding between GetValue and PutValue still writes back to the original object.
