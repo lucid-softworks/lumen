@@ -718,7 +718,7 @@ impl Interp {
         if let Value::Obj(o) = &rhs {
             let ptr = std::rc::Rc::as_ptr(o) as usize;
             if self.is_namespace(ptr) {
-                for k in self.enum_keys(&rhs) {
+                for k in self.enum_keys(&rhs)? {
                     if let Some(res) = self.namespace_own_property(ptr, &k) {
                         res?;
                     }
@@ -726,7 +726,7 @@ impl Interp {
             }
         }
         let items: Vec<Value> = self
-            .enum_keys(&rhs)
+            .enum_keys(&rhs)?
             .into_iter()
             .map(Value::from_string)
             .collect();
@@ -940,7 +940,7 @@ impl Interp {
         false
     }
 
-    fn enum_keys(&self, v: &Value) -> Vec<String> {
+    fn enum_keys(&mut self, v: &Value) -> Result<Vec<String>, Abrupt> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         let mut cur = match v {
@@ -948,22 +948,50 @@ impl Interp {
             _ => None,
         };
         while let Some(o) = cur {
-            // for-in visits own enumerable string keys in spec order, then up the prototype chain.
-            let b = o.borrow();
-            for k in b.props.ordered_keys() {
-                if Interp::is_sym_key(&k) {
-                    continue;
+            let ov = Value::Obj(o.clone());
+            // A proxy level enumerates via its [[OwnPropertyKeys]] filtered by [[GetOwnProperty]]'s
+            // enumerable flag, then walks its [[GetPrototypeOf]].
+            if self.proxies.contains_key(&(Rc::as_ptr(&o) as usize)) {
+                let keys =
+                    crate::builtins::proxy_enum_string_keys(self, &ov).map_err(Abrupt::Throw)?;
+                for k in keys {
+                    if let Value::Str(ks) = k {
+                        if seen.insert(ks.to_string()) {
+                            out.push(ks.to_string());
+                        }
+                    }
                 }
-                let enumerable = b.props.get(&k).map(|p| p.enumerable).unwrap_or(false);
-                if enumerable && seen.insert(k.to_string()) {
-                    out.push(k.to_string());
+                let parent =
+                    crate::builtins::js_get_prototype_of(self, &ov).map_err(Abrupt::Throw)?;
+                cur = match parent {
+                    Value::Obj(p) => Some(p),
+                    _ => None,
+                };
+                continue;
+            }
+            // for-in visits own enumerable string keys in spec order, then up the prototype chain.
+            let (level, parent) = {
+                let b = o.borrow();
+                let level: Vec<(String, bool)> = b
+                    .props
+                    .ordered_keys()
+                    .into_iter()
+                    .filter(|k| !Interp::is_sym_key(k))
+                    .map(|k| {
+                        let e = b.props.get(&k).map(|p| p.enumerable).unwrap_or(false);
+                        (k.to_string(), e)
+                    })
+                    .collect();
+                (level, b.proto.clone())
+            };
+            for (k, enumerable) in level {
+                if enumerable && seen.insert(k.clone()) {
+                    out.push(k);
                 }
             }
-            let parent = b.proto.clone();
-            drop(b);
             cur = parent;
         }
-        out
+        Ok(out)
     }
 
     fn exec_try(

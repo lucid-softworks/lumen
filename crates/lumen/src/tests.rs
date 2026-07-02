@@ -6116,3 +6116,16 @@ fn proxy_get_receiver() {
         "9"
     );
 }
+
+#[test]
+fn proxy_for_in_and_has_own() {
+    // for-in over a proxy enumerates via [[OwnPropertyKeys]] + enumerable, through a proxy target.
+    assert_eq!(
+        run("var o={a:1,b:2}; var p=new Proxy(new Proxy(o,{}),{}); var out=[]; for(var k in p)out.push(k); out.sort().join(',')"),
+        "a,b"
+    );
+    // hasOwnProperty + propertyIsEnumerable go through the proxy's [[GetOwnProperty]].
+    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); Object.prototype.hasOwnProperty.call(p,'a')"), "true");
+    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); p.propertyIsEnumerable('a')"), "true");
+    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); Object.getOwnPropertyDescriptor(p,'a').enumerable"), "true");
+}

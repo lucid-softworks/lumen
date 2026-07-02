@@ -8828,7 +8828,7 @@ fn proxy_define_property(
 
 /// A proxy's own enumerable string keys (for Object.keys/values/entries): the ownKeys trap result
 /// filtered by each key's [[GetOwnProperty]] enumerable flag.
-fn proxy_enum_string_keys(i: &mut Interp, proxy: &Value) -> Result<Vec<Value>, Value> {
+pub(crate) fn proxy_enum_string_keys(i: &mut Interp, proxy: &Value) -> Result<Vec<Value>, Value> {
     let (target, handler) = proxy_pair(i, proxy).unwrap();
     let keys = proxy_own_keys(i, &target, &handler)?;
     let mut out = Vec::new();
@@ -8890,6 +8890,11 @@ fn install_object(it: &mut Interp) {
                 crate::value::TaIndex::Exotic => return Ok(Value::Bool(false)),
                 crate::value::TaIndex::Ordinary => {}
             }
+        }
+        // A proxy's [[GetOwnProperty]] goes through its trap (recursing for a proxy target).
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            let desc = proxy_gopd_value(i, &target, &handler, &key)?;
+            return Ok(Value::Bool(!matches!(desc, Value::Undefined)));
         }
         // A module namespace's [[GetOwnProperty]] reads live and throws for an uninitialized export.
         let ptr = Rc::as_ptr(&o) as usize;
@@ -8997,6 +9002,18 @@ fn install_object(it: &mut Interp) {
                     ab(res)?;
                     return Ok(Value::Bool(true));
                 }
+            }
+            // A proxy reads [[GetOwnProperty]]'s enumerable flag through its trap.
+            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+                let desc = proxy_gopd_value(i, &target, &handler, &key)?;
+                let e = match desc {
+                    Value::Undefined => false,
+                    d => {
+                        let ev = ab(i.get_member(&d, "enumerable"))?;
+                        i.to_boolean(&ev)
+                    }
+                };
+                return Ok(Value::Bool(e));
             }
         }
         let e = this_obj(&this)
