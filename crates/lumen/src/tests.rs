@@ -5846,7 +5846,11 @@ fn new_target_not_leaked_into_nested_native_call() {
 fn typed_array_bytes_per_element_descriptor() {
     // BYTES_PER_ELEMENT is a non-writable, non-enumerable, non-configurable constant on both the
     // constructor and its prototype.
-    for (ctor, size) in [("Int8Array", "1"), ("Float64Array", "8"), ("Uint16Array", "2")] {
+    for (ctor, size) in [
+        ("Int8Array", "1"),
+        ("Float64Array", "8"),
+        ("Uint16Array", "2"),
+    ] {
         assert_eq!(run(&format!("{ctor}.BYTES_PER_ELEMENT")), size);
         assert_eq!(
             run(&format!("var d=Object.getOwnPropertyDescriptor({ctor},'BYTES_PER_ELEMENT'); d.writable+','+d.enumerable+','+d.configurable")),
@@ -5857,4 +5861,14 @@ fn typed_array_bytes_per_element_descriptor() {
             format!("{size},false")
         );
     }
+}
+
+#[test]
+fn date_to_temporal_instant() {
+    // A valid Date yields a Temporal.Instant at ms×10^6 ns.
+    assert_eq!(run("new Date(0).toTemporalInstant().epochMilliseconds"), "0");
+    assert_eq!(run("new Date(1000).toTemporalInstant().epochMilliseconds"), "1000");
+    // An invalid Date is a RangeError; a non-Date receiver is a TypeError.
+    assert_eq!(run("try{new Date(NaN).toTemporalInstant();'no'}catch(e){e.constructor.name}"), "RangeError");
+    assert_eq!(run("try{Date.prototype.toTemporalInstant.call({});'no'}catch(e){e.constructor.name}"), "TypeError");
 }

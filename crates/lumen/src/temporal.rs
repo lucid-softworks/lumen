@@ -133,6 +133,16 @@ fn make(i: &mut Interp, proto: &str, data: Temporal) -> Value {
     i.temporal.insert(p, data);
     Value::Obj(obj)
 }
+
+/// `Date.prototype.toTemporalInstant`: a Temporal.Instant at the Date's epoch (`ms × 10^6` ns).
+/// A non-integral / NaN millisecond value (an invalid Date) is a RangeError.
+pub(crate) fn instant_from_epoch_ms(i: &mut Interp, ms: f64) -> Result<Value, Value> {
+    if !ms.is_finite() || ms.fract() != 0.0 {
+        return Err(i.make_error("RangeError", "invalid Date has no Temporal.Instant"));
+    }
+    let ns = (ms as i128) * 1_000_000;
+    Ok(make(i, "Temporal.Instant", Temporal::Instant(ns)))
+}
 fn arg(a: &[Value], n: usize) -> Value {
     a.get(n).cloned().unwrap_or(Value::Undefined)
 }

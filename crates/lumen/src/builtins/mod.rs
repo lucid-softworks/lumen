@@ -4660,6 +4660,11 @@ fn install_date(it: &mut Interp) {
         let t = date_ms(i, &this)?;
         Ok(Value::Num(if t.is_nan() { f64::NAN } else { 0.0 }))
     });
+    it.def_method(&proto, "toTemporalInstant", 0, |i, this, _| {
+        // RequireInternalSlot([[DateValue]]) then a Temporal.Instant at ms×10^6 ns.
+        let ms = date_ms(i, &this)?;
+        crate::temporal::instant_from_epoch_ms(i, ms)
+    });
     // Local and UTC accessors are identical (offset 0).
     for (name, sel) in [
         ("getFullYear", 0u8),
