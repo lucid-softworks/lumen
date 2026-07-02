@@ -6705,3 +6705,12 @@ fn iterator_take_closes_on_bad_limit() {
     assert_eq!(run("var c=0;var o={__proto__:Iterator.prototype,get next(){throw 1},return(){c++;return{}}};try{o.take(-1)}catch(e){}String(c)"), "1");
     assert_eq!(run("var c=0;var o={__proto__:Iterator.prototype,get next(){throw 1},return(){c++;return{}}};var n='';try{o.take(NaN)}catch(e){n=e.constructor.name}n"), "RangeError");
 }
+
+#[test]
+fn field_initializer_new_target() {
+    assert_eq!(run("class C{x=new.target}String(new C().x)"), "undefined");
+    assert_eq!(
+        run("class C{x=eval('new.target')}String(new C().x)"),
+        "undefined"
+    );
+}

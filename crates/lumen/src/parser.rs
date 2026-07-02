@@ -2551,11 +2551,14 @@ impl Parser {
                 decorators,
             }])
         } else {
-            // Field declaration. A field initializer is a super-property context.
+            // Field declaration. A field initializer is a super-property context and function-like
+            // code where `new.target` is valid (it evaluates to undefined).
             let value = if self.eat_punct("=") {
                 let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+                let snt = std::mem::replace(&mut self.allow_new_target, true);
                 let v = self.parse_assign();
                 self.super_prop_ok = ssuper;
+                self.allow_new_target = snt;
                 Some(v?)
             } else {
                 None
