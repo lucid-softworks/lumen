@@ -343,6 +343,7 @@ impl Interp {
                                 Binding {
                                     value: Value::Undefined,
                                     mutable: true,
+                                    strict_immutable: false,
                                     initialized: false,
                                     import_ref: None,
                                     deletable: false,
@@ -359,6 +360,7 @@ impl Interp {
                             Binding {
                                 value: f,
                                 mutable: true,
+                                strict_immutable: false,
                                 initialized: true,
                                 import_ref: None,
                                 deletable: false,
@@ -374,6 +376,7 @@ impl Interp {
                             Binding {
                                 value: Value::Undefined,
                                 mutable: true,
+                                strict_immutable: false,
                                 initialized: false,
                                 import_ref: None,
                                 deletable: false,
@@ -649,6 +652,7 @@ impl Interp {
                                     Binding {
                                         value: Value::Undefined,
                                         mutable: true,
+                                        strict_immutable: false,
                                         initialized: false,
                                         import_ref: None,
                                         deletable: false,
@@ -1242,6 +1246,7 @@ impl Interp {
             Binding {
                 value,
                 mutable: !is_const,
+                strict_immutable: is_const,
                 initialized: true,
                 import_ref: None,
                 deletable: false,
@@ -1373,9 +1378,14 @@ impl Interp {
                 let mut b = s.borrow_mut();
                 if let Some(binding) = b.vars.get_mut(name) {
                     if !binding.mutable && binding.initialized {
-                        return Err(
-                            self.throw("TypeError", format!("assignment to constant '{name}'"))
-                        );
+                        // A const always throws; a non-strict immutable binding (a named function
+                        // expression's own name) is a silent no-op in sloppy code.
+                        if binding.strict_immutable || self.strict {
+                            return Err(
+                                self.throw("TypeError", format!("assignment to constant '{name}'"))
+                            );
+                        }
+                        return Ok(());
                     }
                     binding.value = value;
                     binding.initialized = true;
@@ -4432,6 +4442,7 @@ fn bind(env: &Env, name: &str, value: Value) {
         Binding {
             value,
             mutable: true,
+            strict_immutable: false,
             initialized: true,
             import_ref: None,
             deletable: false,
@@ -5052,10 +5063,16 @@ impl Interp {
                                         ));
                                     }
                                     if !bd.mutable {
-                                        return Err(self.throw(
-                                            "TypeError",
-                                            format!("assignment to constant '{name}'"),
-                                        ));
+                                        // A const (strict immutable) always throws; a named
+                                        // function-expression's own name (non-strict immutable)
+                                        // is a silent no-op in sloppy code, a throw under strict.
+                                        if bd.strict_immutable || self.strict {
+                                            return Err(self.throw(
+                                                "TypeError",
+                                                format!("assignment to constant '{name}'"),
+                                            ));
+                                        }
+                                        return Ok(());
                                     }
                                     bd.value = value;
                                     bd.initialized = true;

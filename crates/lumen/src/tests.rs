@@ -6402,6 +6402,19 @@ fn super_call_in_ordinary_function_is_early_error() {
 }
 
 #[test]
+fn function_expression_name_is_non_strict_immutable() {
+    // Reassigning a named function expression's own name is a silent no-op in sloppy mode.
+    assert_eq!(run("var f=function g(){g=1;return g};f()===f"), "true");
+    // Under strict mode it throws a TypeError.
+    assert_eq!(
+        throws("'use strict';var f=function g(){g=1};f()"),
+        "TypeError"
+    );
+    // A const always throws, even in sloppy mode.
+    assert_eq!(throws("const x=1;x=2"), "TypeError");
+}
+
+#[test]
 fn async_generator_yield_star_delegation() {
     fn two(setup: &str, read: &str) -> String {
         let mut e = Engine::new();

@@ -265,6 +265,7 @@ impl Interp {
                     Binding {
                         value: Value::Undefined,
                         mutable: false,
+                        strict_immutable: true,
                         initialized: false,
                         import_ref: None,
                         deletable: false,
@@ -307,6 +308,7 @@ impl Interp {
                     Binding {
                         value: Value::Undefined,
                         mutable: false,
+                        strict_immutable: true,
                         initialized: true,
                         import_ref: Some((src_env, src_local)),
                         deletable: false,

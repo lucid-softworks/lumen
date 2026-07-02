@@ -158,6 +158,11 @@ pub struct Binding {
     /// `true` for a `var`/function binding created by a sloppy `eval` (CreateMutableBinding with
     /// `deletable` set): `delete <name>` may remove it, unlike ordinary declarations.
     pub deletable: bool,
+    /// For an *immutable* binding (`mutable == false`): whether it was created strict. A `const`
+    /// (CreateImmutableBinding(_, true)) always throws on reassignment; a named function
+    /// expression's own name (CreateImmutableBinding(_, false)) is a silent no-op in sloppy code
+    /// and throws only under strict mode. Irrelevant when `mutable` is true.
+    pub strict_immutable: bool,
 }
 
 impl Binding {
@@ -168,6 +173,8 @@ impl Binding {
             initialized,
             import_ref: None,
             deletable: false,
+            // An immutable binding created through this helper (const/TDZ) is strict by default.
+            strict_immutable: !mutable,
         }
     }
 }
@@ -640,6 +647,7 @@ impl Interp {
             Binding {
                 value: g,
                 mutable: false,
+                strict_immutable: true,
                 initialized: true,
                 import_ref: None,
                 deletable: false,
@@ -810,6 +818,7 @@ impl Interp {
             Binding {
                 value: g,
                 mutable: false,
+                strict_immutable: true,
                 initialized: true,
                 import_ref: None,
                 deletable: false,
@@ -2073,6 +2082,7 @@ impl Interp {
                 Binding {
                     value: this_val,
                     mutable: false,
+                    strict_immutable: true,
                     initialized: true,
                     import_ref: None,
                     deletable: false,
@@ -2105,6 +2115,7 @@ impl Interp {
                 Binding {
                     value: args_arr,
                     mutable: true,
+                    strict_immutable: false,
                     initialized: true,
                     import_ref: None,
                     deletable: false,
@@ -2121,6 +2132,9 @@ impl Interp {
                             initialized: true,
                             import_ref: None,
                             deletable: false,
+                            // A function-expression self-name is a non-strict immutable binding:
+                            // reassigning it is a silent no-op in sloppy code.
+                            strict_immutable: false,
                         },
                     );
                 }
@@ -2822,6 +2836,7 @@ impl Interp {
                     Binding {
                         value: f,
                         mutable: true,
+                        strict_immutable: false,
                         initialized: true,
                         import_ref: None,
                         deletable: false,
@@ -2860,6 +2875,7 @@ impl Interp {
                         Binding {
                             value: f,
                             mutable: true,
+                            strict_immutable: false,
                             initialized: true,
                             import_ref: None,
                             deletable: false,
@@ -2940,6 +2956,7 @@ impl Interp {
                                 Binding {
                                     value: Value::Undefined,
                                     mutable: true,
+                                    strict_immutable: false,
                                     initialized: true,
                                     import_ref: None,
                                     deletable: false,
@@ -2980,6 +2997,7 @@ impl Interp {
                                     Binding {
                                         value: Value::Undefined,
                                         mutable: true,
+                                        strict_immutable: false,
                                         initialized: true,
                                         import_ref: None,
                                         deletable: false,
@@ -3005,6 +3023,7 @@ impl Interp {
                         Binding {
                             value: Value::Undefined,
                             mutable: true,
+                            strict_immutable: false,
                             initialized: true,
                             import_ref: None,
                             deletable: false,
