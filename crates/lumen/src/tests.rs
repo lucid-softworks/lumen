@@ -5841,3 +5841,20 @@ fn new_target_not_leaked_into_nested_native_call() {
         "5"
     );
 }
+
+#[test]
+fn typed_array_bytes_per_element_descriptor() {
+    // BYTES_PER_ELEMENT is a non-writable, non-enumerable, non-configurable constant on both the
+    // constructor and its prototype.
+    for (ctor, size) in [("Int8Array", "1"), ("Float64Array", "8"), ("Uint16Array", "2")] {
+        assert_eq!(run(&format!("{ctor}.BYTES_PER_ELEMENT")), size);
+        assert_eq!(
+            run(&format!("var d=Object.getOwnPropertyDescriptor({ctor},'BYTES_PER_ELEMENT'); d.writable+','+d.enumerable+','+d.configurable")),
+            "false,false,false"
+        );
+        assert_eq!(
+            run(&format!("var d=Object.getOwnPropertyDescriptor({ctor}.prototype,'BYTES_PER_ELEMENT'); d.value+','+d.configurable")),
+            format!("{size},false")
+        );
+    }
+}

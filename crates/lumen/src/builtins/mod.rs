@@ -3984,10 +3984,10 @@ fn install_typed_arrays(it: &mut Interp) {
     for (kind, ctor_fn) in kinds {
         let proto = Object::new(Some(ta_proto.clone()));
         it.extra_protos.insert(kind.name(), proto.clone());
-        set_builtin(
-            &proto,
+        // BYTES_PER_ELEMENT is a non-writable, non-enumerable, non-configurable constant.
+        proto.borrow_mut().props.insert(
             "BYTES_PER_ELEMENT",
-            Value::Num(kind.elsize() as f64),
+            Property::data(Value::Num(kind.elsize() as f64), false, false, false),
         );
         let ctor = it.make_native(kind.name(), 3, ctor_fn);
         ctor.borrow_mut().proto = Some(ta_ctor.clone()); // [[Prototype]] is %TypedArray%
@@ -3999,7 +3999,10 @@ fn install_typed_arrays(it: &mut Interp) {
             .borrow_mut()
             .props
             .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-        set_builtin(&ctor, "BYTES_PER_ELEMENT", Value::Num(kind.elsize() as f64));
+        ctor.borrow_mut().props.insert(
+            "BYTES_PER_ELEMENT",
+            Property::data(Value::Num(kind.elsize() as f64), false, false, false),
+        );
         // from/of are inherited from %TypedArray% (they construct through `this`), not own here.
         set_builtin(&it.global, kind.name(), Value::Obj(ctor));
     }
