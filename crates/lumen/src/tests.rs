@@ -6254,7 +6254,45 @@ fn array_buffer_species_and_transfer_resizable() {
     // ArrayBuffer[@@species] returns `this`.
     assert_eq!(run("ArrayBuffer[Symbol.species]===ArrayBuffer"), "true");
     // transfer preserves the source's resizability; transferToFixedLength does not.
-    assert_eq!(run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transfer(6).resizable"), "true");
-    assert_eq!(run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transferToFixedLength(6).resizable"), "false");
-    assert_eq!(run("var b=new ArrayBuffer(4); b.transfer().resizable"), "false");
+    assert_eq!(
+        run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transfer(6).resizable"),
+        "true"
+    );
+    assert_eq!(
+        run("var b=new ArrayBuffer(4,{maxByteLength:8}); b.transferToFixedLength(6).resizable"),
+        "false"
+    );
+    assert_eq!(
+        run("var b=new ArrayBuffer(4); b.transfer().resizable"),
+        "false"
+    );
+}
+
+#[test]
+fn shared_array_buffer_slice_species() {
+    // SAB slice requires a SharedArrayBuffer, goes through species, and copies the range.
+    assert_eq!(run("var s=new SharedArrayBuffer(4); new Uint8Array(s).set([1,2,3,4]); [...new Uint8Array(s.slice(1,3))].join(',')"), "2,3");
+    assert_eq!(run("try{SharedArrayBuffer.prototype.slice.call(new ArrayBuffer(4));'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(run("var s=new SharedArrayBuffer(4); s.constructor={[Symbol.species]:5}; try{s.slice();'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(
+        run("SharedArrayBuffer[Symbol.species]===SharedArrayBuffer"),
+        "true"
+    );
+}
+
+#[test]
+fn slice_nan_end_is_zero() {
+    // ToIntegerOrInfinity(NaN) === 0, so a NaN end argument yields an empty slice.
+    assert_eq!(run("'abcd'.slice(0, NaN)"), "");
+    assert_eq!(run("[1,2,3].slice(0, NaN).length"), "0");
+    assert_eq!(
+        run("var b=new ArrayBuffer(4); b.slice(0, NaN).byteLength"),
+        "0"
+    );
+    assert_eq!(
+        run("var s=new SharedArrayBuffer(8); s.slice(0, NaN).byteLength"),
+        "0"
+    );
+    // Infinite end clamps to the length.
+    assert_eq!(run("'abcd'.slice(0, Infinity)"), "abcd");
 }

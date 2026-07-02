@@ -2256,27 +2256,76 @@ fn install_shared_array_buffer(it: &mut Interp) {
         );
     }
     it.def_method(&proto, "slice", 2, |i, this, a| {
-        let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
-        let bytes = ptr
-            .and_then(|p| i.array_buffers.get(&p))
-            .cloned()
-            .unwrap_or_default();
-        let len = bytes.len() as i64;
-        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        // RequireInternalSlot + IsSharedArrayBuffer(O).
+        let o = this
+            .as_obj()
+            .filter(|o| i.shared_buffers.contains_key(&(Rc::as_ptr(o) as usize)))
+            .ok_or_else(|| {
+                i.make_error(
+                    "TypeError",
+                    "SharedArrayBuffer.prototype.slice requires a SharedArrayBuffer",
+                )
+            })?;
+        let ptr = Rc::as_ptr(o) as usize;
+        let len = i.array_buffers.get(&ptr).map(|b| b.len()).unwrap_or(0) as i64;
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len);
         let end = match arg(a, 1) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
-        let slice = if begin < end {
-            bytes[begin as usize..end as usize].to_vec()
-        } else {
-            Vec::new()
+        let new_len = (end - begin).max(0) as usize;
+        // SpeciesConstructor(O, %SharedArrayBuffer%) makes the result, validated as a distinct,
+        // large-enough SharedArrayBuffer.
+        let sab_ctor = i
+            .global
+            .borrow()
+            .props
+            .get("SharedArrayBuffer")
+            .map(|p| p.value.clone())
+            .unwrap_or(Value::Undefined);
+        let ctor = species_constructor(i, &this, &sab_ctor)?;
+        let new_buf = ab(i.construct(ctor, &[Value::Num(new_len as f64)]))?;
+        let nptr = match &new_buf {
+            Value::Obj(no) if i.shared_buffers.contains_key(&(Rc::as_ptr(no) as usize)) => {
+                Rc::as_ptr(no) as usize
+            }
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "slice species did not create a SharedArrayBuffer",
+                ))
+            }
         };
-        let (bv, bp) = make_array_buffer(i, slice.len());
-        if let Some(buf) = i.array_buffers.get_mut(&bp) {
-            buf.copy_from_slice(&slice);
+        if nptr == ptr {
+            return Err(i.make_error(
+                "TypeError",
+                "slice species returned the same SharedArrayBuffer",
+            ));
         }
-        Ok(bv)
+        // The new buffer must be at least `new_len` bytes.
+        let dst_byte_len = i.array_buffers.get(&nptr).map(|b| b.len()).unwrap_or(0);
+        if dst_byte_len < new_len {
+            return Err(i.make_error("TypeError", "slice species buffer is too small"));
+        }
+        // A SharedArrayBuffer's bytes live in the process-global shared block keyed by `__sab_id`.
+        let src_id = match i.get_member(&this, "__sab_id") {
+            Ok(Value::Num(n)) => n as u64,
+            _ => return Err(i.make_error("TypeError", "not a SharedArrayBuffer")),
+        };
+        let src = crate::interpreter::shared_mem_get(src_id)
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        if begin < end && (end as usize) <= src.len() {
+            let slice = src[begin as usize..end as usize].to_vec();
+            if let Ok(Value::Num(dst_id)) = i.get_member(&new_buf, "__sab_id") {
+                if let Some(m) = crate::interpreter::shared_mem_get(dst_id as u64) {
+                    let mut buf = m.lock().unwrap();
+                    let n = slice.len().min(buf.len());
+                    buf[..n].copy_from_slice(&slice[..n]);
+                }
+            }
+        }
+        Ok(new_buf)
     });
     let ctor = it.make_native("SharedArrayBuffer", 1, |i, _t, a| {
         if !i.constructing {
@@ -2325,6 +2374,7 @@ fn install_shared_array_buffer(it: &mut Interp) {
         .borrow_mut()
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    install_species(it, &ctor); // SharedArrayBuffer[@@species] returns `this`
     set_builtin(&it.global, "SharedArrayBuffer", Value::Obj(ctor));
 }
 
@@ -2544,10 +2594,10 @@ fn install_array_buffer(it: &mut Interp) {
             return Err(i.make_error("TypeError", "Cannot slice a detached ArrayBuffer"));
         }
         let len = i.array_buffers[&ptr].len() as i64;
-        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len);
         let end = match arg(a, 1) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
         let new_len = (end - begin).max(0) as usize;
         // SpeciesConstructor(O, %ArrayBuffer%) creates the result buffer, then it is validated.
@@ -2636,10 +2686,10 @@ fn install_array_buffer(it: &mut Interp) {
             return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
         }
         let len = i.array_buffers[&ptr].len() as i64;
-        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
+        let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len);
         let end = match arg(a, 1) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
         // Coercing start/end may have detached the source buffer.
         let bytes = i
@@ -10203,10 +10253,10 @@ fn install_array(it: &mut Interp) {
         // The total length may be near 2^53 for an array-like; only the copied span (end-start) is
         // bounded by the engine's materialization cap.
         let len = ab(i.to_length(&o))? as i64;
-        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
         let end = match arg(args, 1) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
         let count = (end - start).max(0) as usize;
         if count > MAX_ARRAY_OP_LEN {
@@ -10568,10 +10618,10 @@ fn install_array(it: &mut Interp) {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.to_length(&o))? as i64;
         let v = arg(args, 0);
-        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
+        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len);
         let end = match arg(args, 2) {
             Value::Undefined => len,
-            x => norm_index(ab(i.to_number(&x))?, len, len),
+            x => norm_index(ab(i.to_number(&x))?, len),
         };
         // Only the filled span is bounded by the engine cap; the total length may be near 2^53.
         if (end - start).max(0) as usize > MAX_ARRAY_OP_LEN {
@@ -10726,7 +10776,7 @@ fn install_array(it: &mut Interp) {
     it.def_method(&ap, "toSpliced", 2, |i, this, args| {
         let mut items = collect_items(i, &this)?;
         let len = items.len() as i64;
-        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0) as usize;
+        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len) as usize;
         let del = if args.len() < 2 {
             items.len() - start
         } else {
@@ -10782,11 +10832,11 @@ fn install_array(it: &mut Interp) {
     it.def_method(&ap, "copyWithin", 2, |i, this, args| {
         let o = arr_to_object(i, &this)?;
         let len = ab(i.to_length(&o))? as i64;
-        let target = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
-        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
+        let target = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
+        let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len);
         let end = match arg(args, 2) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
         // count = min(end - start, len - target); a source hole deletes the target index. Only the
         // copied span is bounded by the engine cap; the total length may be near 2^53.
@@ -11064,7 +11114,7 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     // The total length may be near 2^53 for an array-like; only the elements actually moved are
     // bounded by the engine's materialization cap.
     let len = ab(i.to_length(&o))? as i64;
-    let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+    let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
     let delete_count = if args.is_empty() {
         0
     } else if args.len() < 2 {
@@ -12535,11 +12585,20 @@ fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value
     Ok(Value::Obj(result))
 }
 
-fn norm_index(n: f64, len: i64, default: i64) -> i64 {
+fn norm_index(n: f64, len: i64) -> i64 {
+    // ToIntegerOrInfinity: NaN maps to 0 (undefined args are handled by callers).
     if n.is_nan() {
-        return default;
+        return 0;
     }
-    let i = n as i64;
+    let i = if n.is_infinite() {
+        if n > 0.0 {
+            len
+        } else {
+            -len - 1
+        }
+    } else {
+        n as i64
+    };
     if i < 0 {
         (len + i).max(0)
     } else {
@@ -12813,10 +12872,10 @@ fn install_string(it: &mut Interp) {
         let s = this_string(i, &this)?;
         let chars: Vec<char> = s.chars().collect();
         let len = chars.len() as i64;
-        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
+        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
         let end = match arg(args, 1) {
             Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len, len),
+            v => norm_index(ab(i.to_number(&v))?, len),
         };
         let out: String = if start < end {
             chars[start as usize..end as usize].iter().collect()
