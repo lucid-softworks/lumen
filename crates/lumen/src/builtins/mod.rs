@@ -6811,28 +6811,27 @@ fn install_promise(it: &mut Interp) {
                 return Ok(result);
             }
         };
-        let items = match i.iterate(&arg(a, 0)) {
-            Ok(items) => items,
+        // Iterate lazily so a throwing C.resolve / `.then` closes the iterator (IteratorClose).
+        let (iter, next) = match i.get_iterator(&arg(a, 0)) {
+            Ok(it) => it,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
                 let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
-        let n = items.len();
-        let results = i.make_array(vec![Value::Undefined; n]);
-        // State lives on a private object (the result promise may be foreign/frozen).
+        let results = i.make_array(vec![]);
         let state = i.new_object();
         set_internal(&state, "__results", results.clone());
-        set_internal(&state, "__remaining", Value::Num(n as f64));
-        if n == 0 {
-            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
-            return Ok(result);
-        }
-        for (idx, item) in items.into_iter().enumerate() {
-            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
-                Ok(p) => p,
+        // remainingElementsCount starts at 1; each element increments, the loop end decrements once.
+        set_internal(&state, "__remaining", Value::Num(1.0));
+        let mut idx = 0usize;
+        loop {
+            let item = match i.iterator_step(&iter, &next) {
+                Ok(Some(v)) => v,
+                Ok(None) => break,
                 Err(e) => {
+                    // A throw from the iterator marks it done — no IteratorClose.
                     let _ = i.call(
                         reject_fn.clone(),
                         Value::Undefined,
@@ -6841,7 +6840,21 @@ fn install_promise(it: &mut Interp) {
                     return Ok(result);
                 }
             };
-            // Each element's resolve function has its own [[AlreadyCalled]] record.
+            let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+            let rem = ab(i.to_number(&rem_v))?;
+            set_internal(&state, "__remaining", Value::Num(rem + 1.0));
+            let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
+                Ok(p) => p,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
             let already = i.new_object();
             set_internal(&already, "__called", Value::Bool(false));
             let on_f = make_bound(
@@ -6854,9 +6867,37 @@ fn install_promise(it: &mut Interp) {
                     resolve_fn.clone(),
                 ],
             );
-            if !combinator_then(i, &reject_fn, p, on_f, reject_fn.clone()) {
+            // Subscribe via the resolved value's `.then`; a throwing getter/call closes the iterator.
+            let then = match i.get_member(&p, "then") {
+                Ok(t) => t,
+                Err(e) => {
+                    i.iterator_close(&iter);
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
+                    return Ok(result);
+                }
+            };
+            if let Err(e) = i.call(then, p, &[on_f, reject_fn.clone()]) {
+                i.iterator_close(&iter);
+                let _ = i.call(
+                    reject_fn.clone(),
+                    Value::Undefined,
+                    &[crate::interpreter::abrupt_value(e)],
+                );
                 return Ok(result);
             }
+            idx += 1;
+        }
+        // The values array's length is the element count (CreateDataProperty set each index).
+        ab(i.set_member(&results, "length", Value::Num(idx as f64)))?;
+        let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+        let rem = ab(i.to_number(&rem_v))?;
+        set_internal(&state, "__remaining", Value::Num(rem - 1.0));
+        if rem - 1.0 == 0.0 {
+            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
         }
         Ok(result)
     });
