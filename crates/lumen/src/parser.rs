@@ -14,7 +14,7 @@ pub struct ParseError {
 /// Parse a complete script. `strict` seeds strict mode (e.g. for the strict test262 variant); a
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
-    parse_script_eval(src, strict, false)
+    parse_script_eval(src, strict, false, false)
 }
 
 /// Parse eval code. Like [`parse_script`], but `allow_new_target` permits a top-level `new.target`
@@ -23,6 +23,7 @@ pub fn parse_script_eval(
     src: &str,
     strict: bool,
     allow_new_target: bool,
+    allow_super: bool,
 ) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError {
         message: e.message,
@@ -49,6 +50,7 @@ pub fn parse_script_eval(
         next_scope_is_fn_boundary: false,
         allow_new_target,
         top_level: false,
+        super_prop_ok: allow_super,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -85,6 +87,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         next_scope_is_fn_boundary: false,
         allow_new_target: false,
         top_level: false,
+        super_prop_ok: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -272,6 +275,10 @@ struct Parser {
     /// True while parsing a top-level `ModuleItem` / script statement — the only position where an
     /// `import`/`export` declaration is grammatically valid. Nested statement contexts clear it.
     top_level: bool,
+    /// True where a `SuperProperty` (`super.x` / `super[e]`) is syntactically allowed: inside a
+    /// method body, class field initializer, or class static block. An ordinary function clears it;
+    /// an arrow inherits it. `super` outside any such context is a SyntaxError.
+    super_prop_ok: bool,
 }
 
 #[derive(Default)]
@@ -1894,6 +1901,17 @@ impl Parser {
             }
             Tok::Keyword("super") => {
                 self.advance();
+                // `super` is only valid as a SuperProperty (`super.x` / `super[e]`) or a SuperCall
+                // (`super(...)`). A SuperProperty requires a method/field/static-block context; a bare
+                // `super` (neither form) is always a SyntaxError. (SuperCall validity — a derived
+                // constructor — is checked later.)
+                if self.is_punct(".") || self.is_punct("[") {
+                    if !self.super_prop_ok {
+                        return self.err("'super' keyword unexpected here");
+                    }
+                } else if !self.is_punct("(") {
+                    return self.err("'super' keyword unexpected here");
+                }
                 Ok(Expr::Super)
             }
             // `import(specifier)` (dynamic import), `import.meta`, or the phased forms
@@ -1998,6 +2016,7 @@ impl Parser {
                         next_scope_is_fn_boundary: false,
                         allow_new_target: self.allow_new_target,
                         top_level: false,
+                        super_prop_ok: self.super_prop_ok,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     Expr::ToStr(Box::new(sub.parse_expr()?))
@@ -2051,6 +2070,7 @@ impl Parser {
                         next_scope_is_fn_boundary: false,
                         allow_new_target: self.allow_new_target,
                         top_level: false,
+                        super_prop_ok: self.super_prop_ok,
                     };
                     subs.push(sub.parse_expr()?);
                 }
@@ -2253,8 +2273,12 @@ impl Parser {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
+        // An ordinary function body is not a super-property context (a nested arrow would inherit
+        // from here, correctly seeing no super).
+        let ssuper = std::mem::replace(&mut self.super_prop_ok, false);
         let params = self.parse_params()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
+        self.super_prop_ok = ssuper;
         self.in_generator = sg;
         self.in_async = sa;
         let strict = is_strict || self.strict;
@@ -2407,10 +2431,13 @@ impl Parser {
             self.advance();
             is_static = true;
         }
-        // `static { ... }` initialization block.
+        // `static { ... }` initialization block — a super-property context.
         if is_static && self.is_punct("{") {
             self.advance();
-            let body = self.parse_block_body()?;
+            let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+            let body = self.parse_block_body();
+            self.super_prop_ok = ssuper;
+            let body = body?;
             let func = Function {
                 name: None,
                 params: Vec::new(),
@@ -2497,9 +2524,12 @@ impl Parser {
                 decorators,
             }])
         } else {
-            // Field declaration.
+            // Field declaration. A field initializer is a super-property context.
             let value = if self.eat_punct("=") {
-                Some(self.parse_assign()?)
+                let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+                let v = self.parse_assign();
+                self.super_prop_ok = ssuper;
+                Some(v?)
             } else {
                 None
             };
@@ -2527,14 +2557,18 @@ impl Parser {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
+        // A method body (and any parameter default) is a super-property context.
+        let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
         let params = self.parse_params()?;
         // A method has UniqueFormalParameters: duplicate parameter names are always an error.
         if let Some(dup) = duplicate_name(&param_names(&params)) {
             self.in_generator = sg;
             self.in_async = sa;
+            self.super_prop_ok = ssuper;
             return self.err(format!("duplicate parameter name '{dup}'"));
         }
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
+        self.super_prop_ok = ssuper;
         self.in_generator = sg;
         self.in_async = sa;
         if let Some(dup) = params_body_lexical_clash(&params, &body) {

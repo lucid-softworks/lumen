@@ -2119,7 +2119,9 @@ impl Interp {
         let base_strict = direct && self.strict;
         // `new.target` is valid at the top level of a direct eval whose caller is in function code.
         let allow_new_target = direct && self.in_function_code(caller_env);
-        let body = crate::parser::parse_script_eval(code, base_strict, allow_new_target)
+        // A direct eval may contain a SuperProperty; the runtime `super_base` lookup enforces that a
+        // home object is actually in scope (throwing SyntaxError otherwise), so parse permissively.
+        let body = crate::parser::parse_script_eval(code, base_strict, allow_new_target, direct)
             .map_err(|e| self.throw("SyntaxError", e.message))?;
         // A direct `eval` inherits the caller's super-call context: a `super(...)` in the eval is an
         // early SyntaxError unless the eval sits directly inside a derived constructor body. (Caught

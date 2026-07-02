@@ -5646,3 +5646,23 @@ fn module_tdz_across_import() {
         "ReferenceError"
     );
 }
+
+#[test]
+fn super_property_context() {
+    // `super` outside a method / field / static block is a SyntaxError (parse error).
+    assert!(Engine::new().eval("super.x", false).is_err());
+    // A bare `super` (neither property nor call) is always a SyntaxError.
+    assert!(Engine::new().eval("function f(){ super }", false).is_err());
+    // `super.x` in a plain function (not a method) is a SyntaxError.
+    assert!(Engine::new()
+        .eval("function f(){ return super.x; }", false)
+        .is_err());
+    // `super.x` inside a method body parses (it is a super-property context).
+    assert!(Engine::new()
+        .eval("({ m(){ return super.v; } })", false)
+        .is_ok());
+    // A class method and a field initializer are also super-property contexts.
+    assert!(Engine::new()
+        .eval("class C extends Object { m(){ return super.x; } f = super.y; }", false)
+        .is_ok());
+}
