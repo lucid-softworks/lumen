@@ -7342,6 +7342,38 @@ fn json_create_data_prop(i: &mut Interp, holder: &Value, key: &str, v: Value) ->
     Ok(())
 }
 
+/// CreateDataPropertyOrThrow: like `json_create_data_prop` but a false [[DefineOwnProperty]]
+/// result (e.g. a non-extensible target) throws a TypeError instead of being ignored.
+fn json_create_data_prop_or_throw(
+    i: &mut Interp,
+    holder: &Value,
+    key: &str,
+    v: Value,
+) -> Result<(), Value> {
+    let desc = i.new_object();
+    set_data(&desc, "value", v);
+    set_data(&desc, "writable", Value::Bool(true));
+    set_data(&desc, "enumerable", Value::Bool(true));
+    set_data(&desc, "configurable", Value::Bool(true));
+    let ok = if let Some((target, handler)) = proxy_pair(i, holder) {
+        ab(proxy_define_property(
+            i,
+            &target,
+            &handler,
+            key,
+            &Value::Obj(desc),
+        ))?
+    } else if let Value::Obj(o) = holder {
+        ab(define_own_property(i, o, key, &Value::Obj(desc)))?
+    } else {
+        false
+    };
+    if !ok {
+        return Err(i.make_error("TypeError", "cannot create data property"));
+    }
+    Ok(())
+}
+
 /// InternalizeJSONProperty: recursively walk the parsed value, applying the reviver bottom-up. The
 /// optional record carries primitive source text for the reviver's `context.source`.
 fn internalize_json_property(
@@ -10292,11 +10324,12 @@ fn install_array(it: &mut Interp) {
                 }
             }
         };
+        let ov = Value::Obj(o.clone());
         for k in from..len {
             if !i.has_property(&o, &k.to_string()) {
                 continue; // indexOf skips holes
             }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             if i.strict_equals(&v, &target) {
                 return Ok(Value::Num(k as f64));
             }
@@ -10323,8 +10356,9 @@ fn install_array(it: &mut Interp) {
                 }
             }
         };
+        let ov = Value::Obj(o.clone());
         while k < len {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             if same_value_zero(&v, &target) {
                 return Ok(Value::Bool(true));
             }
@@ -10334,6 +10368,7 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "join", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         let sep = match arg(args, 0) {
             Value::Undefined => ",".to_string(),
@@ -10341,7 +10376,7 @@ fn install_array(it: &mut Interp) {
         };
         let mut parts = Vec::with_capacity(len);
         for k in 0..len {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             parts.push(match v {
                 Value::Undefined | Value::Null => String::new(),
                 other => ab(i.to_string(&other))?.to_string(),
@@ -10409,15 +10444,16 @@ fn install_array(it: &mut Interp) {
             ));
         }
         let cb_this = arg(args, 1);
+        let ov = Value::Obj(o.clone());
         for k in 0..len {
             if !i.has_property(&o, &k.to_string()) {
                 continue; // skip array holes
             }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             ab(i.call(
                 cb.clone(),
                 cb_this.clone(),
-                &[v, Value::Num(k as f64), this.clone()],
+                &[v, Value::Num(k as f64), ov.clone()],
             ))?;
         }
         Ok(Value::Undefined)
@@ -10430,16 +10466,17 @@ fn install_array(it: &mut Interp) {
             return Err(i.make_error("TypeError", "Array.prototype.map callback is not callable"));
         }
         let cb_this = arg(args, 1);
+        let ov = Value::Obj(o.clone());
         let result = array_species_create(i, &this, len)?;
         for k in 0..len {
             if !i.has_property(&o, &k.to_string()) {
                 continue; // holes stay holes in the result
             }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             let mapped = ab(i.call(
                 cb.clone(),
                 cb_this.clone(),
-                &[v, Value::Num(k as f64), this.clone()],
+                &[v, Value::Num(k as f64), ov.clone()],
             ))?;
             ab(i.set_member(&result, &k.to_string(), mapped))?;
         }
@@ -10456,17 +10493,18 @@ fn install_array(it: &mut Interp) {
             ));
         }
         let cb_this = arg(args, 1);
+        let ov = Value::Obj(o.clone());
         let result = array_species_create(i, &this, 0)?;
         let mut to = 0usize;
         for k in 0..len {
             if !i.has_property(&o, &k.to_string()) {
                 continue;
             }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             let keep = ab(i.call(
                 cb.clone(),
                 cb_this.clone(),
-                &[v.clone(), Value::Num(k as f64), this.clone()],
+                &[v.clone(), Value::Num(k as f64), ov.clone()],
             ))?;
             if i.to_boolean(&keep) {
                 ab(i.set_member(&result, &to.to_string(), v))?;
@@ -10485,6 +10523,7 @@ fn install_array(it: &mut Interp) {
                 "Array.prototype.reduce callback is not callable",
             ));
         }
+        let ov = Value::Obj(o.clone());
         let mut k = 0;
         let mut acc;
         if args.len() >= 2 {
@@ -10498,7 +10537,7 @@ fn install_array(it: &mut Interp) {
                     );
                 }
                 if i.has_property(&o, &k.to_string()) {
-                    acc = ab(i.get_member(&this, &k.to_string()))?;
+                    acc = ab(i.get_member(&ov, &k.to_string()))?;
                     k += 1;
                     break;
                 }
@@ -10507,11 +10546,11 @@ fn install_array(it: &mut Interp) {
         }
         while k < len {
             if i.has_property(&o, &k.to_string()) {
-                let v = ab(i.get_member(&this, &k.to_string()))?;
+                let v = ab(i.get_member(&ov, &k.to_string()))?;
                 acc = ab(i.call(
                     cb.clone(),
                     Value::Undefined,
-                    &[acc, v, Value::Num(k as f64), this.clone()],
+                    &[acc, v, Value::Num(k as f64), ov.clone()],
                 ))?;
             }
             k += 1;
@@ -10565,13 +10604,14 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "toLocaleString", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         let mut out = String::new();
         for k in 0..len {
             if k > 0 {
                 out.push(',');
             }
-            let el = ab(i.get_member(&this, &k.to_string()))?;
+            let el = ab(i.get_member(&ov, &k.to_string()))?;
             if !matches!(el, Value::Undefined | Value::Null) {
                 // ToString(? Invoke(element, "toLocaleString")).
                 let tls = ab(i.get_member(&el, "toLocaleString"))?;
@@ -10594,7 +10634,7 @@ fn install_array(it: &mut Interp) {
         if idx < 0 || idx >= len {
             return Ok(Value::Undefined);
         }
-        ab(i.get_member(&this, &idx.to_string()))
+        ab(i.get_member(&Value::Obj(o.clone()), &idx.to_string()))
     });
     it.def_method(&ap, "find", 1, |i, this, args| {
         array_find(i, this, args, true, false)
@@ -10654,8 +10694,9 @@ fn install_array(it: &mut Interp) {
         } else {
             len - 1
         };
+        let ov = Value::Obj(o.clone());
         while k >= 0 {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
             if i.strict_equals(&v, &target) {
                 return Ok(Value::Num(k as f64));
             }
@@ -10664,18 +10705,30 @@ fn install_array(it: &mut Interp) {
         Ok(Value::Num(-1.0))
     });
     it.def_method(&ap, "flat", 0, |i, this, args| {
-        arr_require_coercible(i, &this)?;
+        let o = arr_to_object(i, &this)?;
+        let source_len = ab(i.to_length(&o))?;
+        // ToIntegerOrInfinity(depth); undefined defaults to 1.
         let depth = match arg(args, 0) {
-            Value::Undefined => 1.0,
-            v => ab(i.to_number(&v))?,
+            Value::Undefined => 1i64,
+            v => {
+                let n = ab(i.to_number(&v))?;
+                if n.is_nan() || n <= 0.0 {
+                    0
+                } else if n == f64::INFINITY {
+                    i64::MAX
+                } else {
+                    n as i64
+                }
+            }
         };
-        let mut out = Vec::new();
-        array_flatten(i, &this, depth as i64, &mut out)?;
-        Ok(i.make_array(out))
+        let a = array_species_create(i, &this, 0)?;
+        let ov = Value::Obj(o.clone());
+        flatten_into(i, &a, &ov, source_len, 0, depth, None, &Value::Undefined)?;
+        Ok(a)
     });
     it.def_method(&ap, "flatMap", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.checked_array_len(&o))?;
+        let len = ab(i.to_length(&o))?;
         let cb = arg(args, 0);
         if !cb.is_callable() {
             return Err(i.make_error(
@@ -10684,25 +10737,10 @@ fn install_array(it: &mut Interp) {
             ));
         }
         let cb_this = arg(args, 1);
-        // The mapper runs only on present indices; its result is then flattened one level.
-        let mut out = Vec::new();
-        for k in 0..len {
-            if !ab(i.js_has_property(&this, &k.to_string()))? {
-                continue;
-            }
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            let mapped = ab(i.call(
-                cb.clone(),
-                cb_this.clone(),
-                &[v, Value::Num(k as f64), this.clone()],
-            ))?;
-            if json_is_array(i, &mapped)? {
-                array_flatten(i, &mapped, 0, &mut out)?;
-            } else {
-                out.push(mapped);
-            }
-        }
-        Ok(i.make_array(out))
+        let a = array_species_create(i, &this, 0)?;
+        let ov = Value::Obj(o.clone());
+        flatten_into(i, &a, &ov, len, 0, 1, Some(&cb), &cb_this)?;
+        Ok(a)
     });
     it.def_method(&ap, "splice", 2, array_splice);
     it.def_method(&ap, "sort", 1, |i, this, args| {
@@ -10796,6 +10834,7 @@ fn install_array(it: &mut Interp) {
                 "Array.prototype.reduceRight callback is not callable",
             ));
         }
+        let ov = Value::Obj(o.clone());
         let mut acc;
         let mut k = len as i64 - 1;
         if args.len() >= 2 {
@@ -10809,7 +10848,7 @@ fn install_array(it: &mut Interp) {
                     );
                 }
                 if i.has_property(&o, &k.to_string()) {
-                    acc = ab(i.get_member(&this, &k.to_string()))?;
+                    acc = ab(i.get_member(&ov, &k.to_string()))?;
                     k -= 1;
                     break;
                 }
@@ -10818,11 +10857,11 @@ fn install_array(it: &mut Interp) {
         }
         while k >= 0 {
             if i.has_property(&o, &k.to_string()) {
-                let v = ab(i.get_member(&this, &k.to_string()))?;
+                let v = ab(i.get_member(&ov, &k.to_string()))?;
                 acc = ab(i.call(
                     cb.clone(),
                     Value::Undefined,
-                    &[acc, v, Value::Num(k as f64), this.clone()],
+                    &[acc, v, Value::Num(k as f64), ov.clone()],
                 ))?;
             }
             k -= 1;
@@ -11026,16 +11065,20 @@ fn array_find(
     from_last: bool,
 ) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
+    let ov = Value::Obj(o.clone());
     let len = ab(i.to_length(&o))?;
     let cb = arg(args, 0);
+    if !cb.is_callable() {
+        return Err(i.make_error("TypeError", "predicate is not callable"));
+    }
     let cb_this = arg(args, 1);
     for step in 0..len {
         let k = if from_last { len - 1 - step } else { step };
-        let v = ab(i.get_member(&this, &k.to_string()))?;
+        let v = ab(i.get_member(&ov, &k.to_string()))?;
         let r = ab(i.call(
             cb.clone(),
             cb_this.clone(),
-            &[v.clone(), Value::Num(k as f64), this.clone()],
+            &[v.clone(), Value::Num(k as f64), ov.clone()],
         ))?;
         if i.to_boolean(&r) {
             return Ok(if want_value { v } else { Value::Num(k as f64) });
@@ -11061,15 +11104,16 @@ fn array_some_every(
         return Err(i.make_error("TypeError", "predicate is not callable"));
     }
     let cb_this = arg(args, 1);
+    let ov = Value::Obj(o.clone());
     for k in 0..len {
         if !i.has_property(&o, &k.to_string()) {
             continue; // skip holes
         }
-        let v = ab(i.get_member(&this, &k.to_string()))?;
+        let v = ab(i.get_member(&ov, &k.to_string()))?;
         let r = ab(i.call(
             cb.clone(),
             cb_this.clone(),
-            &[v, Value::Num(k as f64), this.clone()],
+            &[v, Value::Num(k as f64), ov.clone()],
         ))?;
         let b = i.to_boolean(&r);
         if every && !b {
@@ -11082,31 +11126,54 @@ fn array_some_every(
     Ok(Value::Bool(every))
 }
 
-fn array_flatten(
+/// FlattenIntoArray: write `source`'s (mapped, one-level-per-depth flattened) elements onto
+/// `target` starting at `start`, via CreateDataPropertyOrThrow. Returns the next target index.
+#[allow(clippy::too_many_arguments)]
+fn flatten_into(
     i: &mut Interp,
-    arr: &Value,
+    target: &Value,
+    source: &Value,
+    source_len: usize,
+    start: usize,
     depth: i64,
-    out: &mut Vec<Value>,
-) -> Result<(), Value> {
-    let o = match arr {
-        Value::Obj(o) => o.clone(),
-        _ => return Ok(()),
-    };
-    let len = ab(i.checked_array_len(&o))?;
-    for k in 0..len {
-        // FlattenIntoArray skips holes (HasProperty), recursing into nested arrays.
-        if !ab(i.js_has_property(arr, &k.to_string()))? {
-            continue;
+    mapper: Option<&Value>,
+    mapper_this: &Value,
+) -> Result<usize, Value> {
+    let mut target_index = start;
+    for k in 0..source_len {
+        if !ab(i.js_has_property(source, &k.to_string()))? {
+            continue; // FlattenIntoArray skips holes
         }
-        let v = ab(i.get_member(arr, &k.to_string()))?;
-        let is_arr = json_is_array(i, &v)?;
-        if depth > 0 && is_arr {
-            array_flatten(i, &v, depth - 1, out)?;
+        let mut element = ab(i.get_member(source, &k.to_string()))?;
+        if let Some(m) = mapper {
+            element = ab(i.call(
+                m.clone(),
+                mapper_this.clone(),
+                &[element, Value::Num(k as f64), source.clone()],
+            ))?;
+        }
+        if depth > 0 && json_is_array(i, &element)? {
+            let len_val = ab(i.get_member(&element, "length"))?;
+            let el_len = to_length_val(i, &len_val)?;
+            target_index = flatten_into(
+                i,
+                target,
+                &element,
+                el_len,
+                target_index,
+                depth - 1,
+                None,
+                &Value::Undefined,
+            )?;
         } else {
-            out.push(v);
+            if target_index >= 9_007_199_254_740_991 {
+                return Err(i.make_error("TypeError", "flattened array length exceeds 2^53 - 1"));
+            }
+            json_create_data_prop_or_throw(i, target, &target_index.to_string(), element)?;
+            target_index += 1;
         }
     }
-    Ok(())
+    Ok(target_index)
 }
 
 fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {

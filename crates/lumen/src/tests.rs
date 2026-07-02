@@ -6281,6 +6281,35 @@ fn shared_array_buffer_slice_species() {
 }
 
 #[test]
+fn array_iteration_uses_toobject_receiver() {
+    // Array.prototype.map.call(primitive, cb): the callback's `this`-object arg is ToObject(this),
+    // i.e. a wrapper, not the raw primitive.
+    assert_eq!(
+        run("Boolean.prototype[0]=true;Boolean.prototype.length=1;String(Array.prototype.map.call(false,function(v,i,o){return o instanceof Boolean}))"),
+        "true"
+    );
+    // find/some/every throw TypeError on a non-callable predicate even for empty array-likes.
+    assert_eq!(
+        run("try{[].find(1);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn array_flat_flatmap_species_and_throw() {
+    // flat/flatMap honor ArraySpeciesCreate and CreateDataPropertyOrThrow.
+    assert_eq!(run("[1,[2,[3]]].flat().join(',')"), "1,2,3");
+    assert_eq!(run("[1,[2,[3]]].flat(2).join(',')"), "1,2,3");
+    assert_eq!(
+        run("[1,2].flatMap(function(x){return [x,x*2]}).join(',')"),
+        "1,2,2,4"
+    );
+    assert_eq!(run("[1,[2]].flat(Infinity).length"), "2");
+    // Non-extensible species result -> CreateDataPropertyOrThrow throws.
+    assert_eq!(run("var a=[1];a.constructor={[Symbol.species]:function(){var o=[];Object.preventExtensions(o);return o}};try{a.flat();'no'}catch(e){e.constructor.name}"), "TypeError");
+}
+
+#[test]
 fn slice_nan_end_is_zero() {
     // ToIntegerOrInfinity(NaN) === 0, so a NaN end argument yields an empty slice.
     assert_eq!(run("'abcd'.slice(0, NaN)"), "");
