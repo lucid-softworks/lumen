@@ -175,7 +175,16 @@ impl Engine {
     fn describe_throw(&mut self, thrown: Value) -> Completion {
         // Pull the constructor name + message off an Error object; fall back to the rendered value.
         let name = match self.interp.get_member(&thrown, "name") {
-            Ok(Value::Undefined) | Err(_) => String::new(),
+            Ok(Value::Undefined) | Err(_) => {
+                // No own/inherited `name` (e.g. Test262Error): use the constructor's name.
+                match self.interp.get_member(&thrown, "constructor") {
+                    Ok(ctor @ Value::Obj(_)) => match self.interp.get_member(&ctor, "name") {
+                        Ok(Value::Undefined) | Err(_) => String::new(),
+                        Ok(v) => self.render(&v),
+                    },
+                    _ => String::new(),
+                }
+            }
             Ok(v) => self.render(&v),
         };
         let message = match &thrown {

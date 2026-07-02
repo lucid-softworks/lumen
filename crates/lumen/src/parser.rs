@@ -48,6 +48,7 @@ pub fn parse_script_eval(
         }],
         next_scope_is_fn_boundary: false,
         allow_new_target,
+        top_level: false,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -83,6 +84,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         }],
         next_scope_is_fn_boundary: false,
         allow_new_target: false,
+        top_level: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -267,6 +269,9 @@ struct Parser {
     /// (direct eval in function code). `return`/`super()` stay gated separately, since they remain
     /// illegal in eval code even there.
     allow_new_target: bool,
+    /// True while parsing a top-level `ModuleItem` / script statement — the only position where an
+    /// `import`/`export` declaration is grammatically valid. Nested statement contexts clear it.
+    top_level: bool,
 }
 
 #[derive(Default)]
@@ -445,6 +450,7 @@ impl Parser {
     fn parse_stmts_until_eof(&mut self) -> Result<Vec<Stmt>, ParseError> {
         let mut out = Vec::new();
         while !self.at_eof() {
+            self.top_level = true;
             out.push(self.parse_stmt()?);
         }
         Ok(out)
@@ -453,6 +459,11 @@ impl Parser {
     // ----- statements -------------------------------------------------------------------------
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        // `import`/`export` declarations are valid only as top-level ModuleItems. Capture the flag
+        // and clear it: any statement we recurse into (block, if/loop body, label, switch case) is a
+        // nested context where an import/export declaration is a SyntaxError.
+        let at_top = self.top_level;
+        self.top_level = false;
         match self.cur().clone() {
             Tok::Punct("{") => {
                 self.advance();
@@ -561,13 +572,25 @@ impl Parser {
             Tok::Keyword("try") => self.parse_try(),
             // `import …` declaration (but `import(` / `import.meta` are expressions).
             Tok::Keyword("import")
-                if self.module
+                if at_top
+                    && self.module
                     && !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
             {
                 self.parse_import()
             }
-            Tok::Keyword("export") if self.module => self.parse_export(),
-            Tok::Keyword("export") => self.err("'export' is only valid in a module"),
+            Tok::Keyword("export") if at_top && self.module => self.parse_export(),
+            // An `export`/`import` declaration nested in a statement position is a SyntaxError.
+            Tok::Keyword("export")
+                if !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
+            {
+                self.err("'export' declaration may only appear at the top level of a module")
+            }
+            Tok::Keyword("import")
+                if self.module
+                    && !matches!(self.peek_kind(1), Tok::Punct("(") | Tok::Punct(".")) =>
+            {
+                self.err("'import' declaration may only appear at the top level of a module")
+            }
             Tok::Keyword("switch") => self.parse_switch(),
             Tok::Keyword("debugger") => {
                 self.advance();
@@ -1040,25 +1063,42 @@ impl Parser {
             }
             _ => return self.err("expected a module specifier string"),
         };
-        self.skip_import_attributes();
+        self.parse_import_attributes()?;
         Ok(spec)
     }
-    /// Consume (and ignore) an import-attributes clause: `with { … }` or `assert { … }`.
-    fn skip_import_attributes(&mut self) {
-        if self.is_kw("with") || self.is_ident_word("assert") {
-            self.advance();
-            if self.eat_punct("{") {
-                let mut depth = 1;
-                while depth > 0 && !self.at_eof() {
-                    if self.is_punct("{") {
-                        depth += 1;
-                    } else if self.is_punct("}") {
-                        depth -= 1;
-                    }
+    /// Parse (and validate) an optional import-attributes clause: `with { key: "value", … }` (or the
+    /// legacy `assert { … }`). The attribute values must be string literals and the keys must be
+    /// unique — a duplicate key is an early SyntaxError.
+    fn parse_import_attributes(&mut self) -> Result<(), ParseError> {
+        if !self.is_kw("with") && !self.is_ident_word("assert") {
+            return Ok(());
+        }
+        self.advance(); // 'with' / 'assert'
+        self.expect_punct("{")?;
+        let mut keys: Vec<String> = Vec::new();
+        while !self.is_punct("}") {
+            let key = match self.cur().clone() {
+                Tok::Str(s) => {
                     self.advance();
+                    s
                 }
+                _ => self.parse_property_name_ident()?,
+            };
+            if keys.contains(&key) {
+                return self.err(format!("duplicate import attribute key '{key}'"));
+            }
+            keys.push(key);
+            self.expect_punct(":")?;
+            if !matches!(self.cur(), Tok::Str(_)) {
+                return self.err("import attribute value must be a string literal");
+            }
+            self.advance();
+            if !self.eat_punct(",") {
+                break;
             }
         }
+        self.expect_punct("}")?;
+        Ok(())
     }
 
     /// Parse the `( specifier [, options] )` of a dynamic-import call (any phase). The optional
@@ -1080,6 +1120,7 @@ impl Parser {
         if let Tok::Str(s) = self.cur().clone() {
             self.advance();
             let source = Rc::from(s.as_str());
+            self.parse_import_attributes()?;
             self.consume_semicolon()?;
             return Ok(Stmt::Import(ImportDecl {
                 source,
@@ -1101,11 +1142,22 @@ impl Parser {
         } else if self.is_punct("{") {
             self.advance();
             while !self.is_punct("}") {
+                let imported_is_string = matches!(self.cur(), Tok::Str(_));
                 let imported = self.parse_module_export_name()?;
                 let local = if self.is_ident_word("as") {
                     self.advance();
                     self.parse_binding_ident_name()?
                 } else {
+                    // Without `as`, the imported name is also the local BindingIdentifier: it must be
+                    // a plain identifier (not a string module export name) and a legal strict binding.
+                    if imported_is_string {
+                        return self.err("imported binding name must be an identifier");
+                    }
+                    if is_strict_reserved_binding(&imported) {
+                        return self.err(format!(
+                            "'{imported}' cannot be used as a binding in strict mode"
+                        ));
+                    }
                     imported.clone()
                 };
                 specs.push(ImportSpec::Named { imported, local });
@@ -1158,8 +1210,16 @@ impl Parser {
         if self.is_punct("{") {
             self.advance();
             let mut specs = Vec::new();
+            // Track which `local` names were string literals: without a `from` clause, a local name
+            // must be a plain IdentifierReference (a string module export name is only valid as the
+            // re-exported *source* name of an `export … from`).
+            let mut string_locals: Vec<String> = Vec::new();
             while !self.is_punct("}") {
+                let local_is_string = matches!(self.cur(), Tok::Str(_));
                 let local = self.parse_module_export_name()?;
+                if local_is_string {
+                    string_locals.push(local.clone());
+                }
                 let exported = if self.is_ident_word("as") {
                     self.advance();
                     self.parse_module_export_name()?
@@ -1178,6 +1238,13 @@ impl Parser {
             } else {
                 None
             };
+            if source.is_none() {
+                if let Some(name) = string_locals.first() {
+                    return self.err(format!(
+                        "'{name}' is a string literal and cannot be an exported local binding"
+                    ));
+                }
+            }
             self.consume_semicolon()?;
             return Ok(Stmt::ExportNamed { specs, source });
         }
@@ -1518,8 +1585,12 @@ impl Parser {
     }
 
     fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
-        // `await expr` (only a keyword inside an async function body).
+        // `await expr` (only a keyword inside an async function body / module top level). A `\u`-
+        // escaped spelling is never the `await` keyword, so it can't form an await expression.
         if self.in_async && self.is_ident_word("await") {
+            if self.cur_escaped() {
+                return self.err("'await' keyword must not contain escape sequences");
+            }
             if self.in_params {
                 return self.err("await expression is not allowed in formal parameters");
             }
@@ -1917,6 +1988,7 @@ impl Parser {
                         }],
                         next_scope_is_fn_boundary: false,
                         allow_new_target: self.allow_new_target,
+                        top_level: false,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     Expr::ToStr(Box::new(sub.parse_expr()?))
@@ -1969,6 +2041,7 @@ impl Parser {
                         }],
                         next_scope_is_fn_boundary: false,
                         allow_new_target: self.allow_new_target,
+                        top_level: false,
                     };
                     subs.push(sub.parse_expr()?);
                 }

@@ -5885,6 +5885,12 @@ fn install_reflect(it: &mut Interp) {
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             return proxy_gopd_value(i, &target, &handler, &key);
         }
+        let ptr = Rc::as_ptr(&o) as usize;
+        if i.is_namespace(ptr) {
+            if let Some(res) = i.namespace_own_property(ptr, &key) {
+                return Ok(descriptor_from_prop(i, ab(res)?));
+            }
+        }
         let prop = o.borrow().props.get(&key).cloned();
         Ok(prop
             .map(|p| descriptor_from_prop(i, p))
@@ -7129,6 +7135,13 @@ fn reflect_ordinary_get(
             Value::Obj(o) => o.clone(),
             _ => return Ok(Value::Undefined),
         };
+        // A module namespace's [[Get]] reads the export's live value (throwing for a TDZ binding).
+        let ptr = Rc::as_ptr(&obj) as usize;
+        if i.is_namespace(ptr) {
+            if let Some(res) = i.namespace_own_property(ptr, key) {
+                return Ok(ab(res)?.value);
+            }
+        }
         let own = obj.borrow().props.get(key).cloned();
         match own {
             Some(p) if p.accessor => {
@@ -7162,6 +7175,12 @@ fn reflect_ordinary_set(
     // Integer-indexed exotic [[Set]]: a canonical numeric index on a TypedArray is handled by
     // TypedArraySetElement (which coerces the value unconditionally, writing only when the index is
     // in range) and never falls back to creating an ordinary shadowing property.
+    // A module namespace exotic object's [[Set]] always returns false.
+    if let Value::Obj(o) = target {
+        if i.is_namespace(Rc::as_ptr(o) as usize) {
+            return Ok(false);
+        }
+    }
     if let Some(info) = map_ptr(target).and_then(|p| i.typed_arrays.get(&p).copied()) {
         if i.canonical_numeric_index(key).is_some() {
             let same =
@@ -8566,6 +8585,14 @@ fn install_object(it: &mut Interp) {
                 crate::value::TaIndex::Ordinary => {}
             }
         }
+        // A module namespace's [[GetOwnProperty]] reads live and throws for an uninitialized export.
+        let ptr = Rc::as_ptr(&o) as usize;
+        if i.is_namespace(ptr) {
+            if let Some(res) = i.namespace_own_property(ptr, &key) {
+                ab(res)?;
+                return Ok(Value::Bool(true));
+            }
+        }
         let has = o.borrow().props.contains(&key);
         Ok(Value::Bool(has))
     });
@@ -8657,6 +8684,15 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&op, "propertyIsEnumerable", 1, |i, this, args| {
         let key = ab(i.to_property_key(&arg(args, 0)))?;
+        if let Some(o) = this_obj(&this) {
+            let ptr = Rc::as_ptr(&o) as usize;
+            if i.is_namespace(ptr) {
+                if let Some(res) = i.namespace_own_property(ptr, &key) {
+                    ab(res)?;
+                    return Ok(Value::Bool(true));
+                }
+            }
+        }
         let e = this_obj(&this)
             .and_then(|o| o.borrow().props.get(&key).map(|p| p.enumerable))
             .unwrap_or(false);
@@ -8739,7 +8775,18 @@ fn install_object(it: &mut Interp) {
             let keys = proxy_enum_string_keys(i, &Value::Obj(o.clone()))?;
             return Ok(i.make_array(keys));
         }
-        let keys: Vec<Value> = ordered_enum_keys(&o).into_iter().map(Value::Str).collect();
+        let names = ordered_enum_keys(&o);
+        // A module namespace's Object.keys reads each binding's [[GetOwnProperty]], throwing for an
+        // uninitialized export.
+        let ptr = Rc::as_ptr(&o) as usize;
+        if i.is_namespace(ptr) {
+            for k in &names {
+                if let Some(res) = i.namespace_own_property(ptr, k) {
+                    ab(res)?;
+                }
+            }
+        }
+        let keys: Vec<Value> = names.into_iter().map(Value::Str).collect();
         Ok(i.make_array(keys))
     });
     it.def_method(&ctor, "getOwnPropertyNames", 1, |i, _this, args| {
@@ -8915,6 +8962,12 @@ fn install_object(it: &mut Interp) {
         }
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             return proxy_gopd_value(i, &target, &handler, &key);
+        }
+        let ptr = Rc::as_ptr(&o) as usize;
+        if i.is_namespace(ptr) {
+            if let Some(res) = i.namespace_own_property(ptr, &key) {
+                return Ok(descriptor_from_prop(i, ab(res)?));
+            }
         }
         let prop = o.borrow().props.get(&key).cloned();
         match prop {
@@ -9272,6 +9325,27 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
     let d = build_partial(i, desc)?;
+    // Module namespace [[DefineOwnProperty]]: a String key is only redefinable to a descriptor that
+    // matches the export's fixed shape (writable, enumerable, non-configurable, same value); adding
+    // a new String key fails. Symbol keys fall through to the ordinary algorithm.
+    let ptr = Rc::as_ptr(o) as usize;
+    if i.is_namespace(ptr) && !Interp::is_sym_key(key) {
+        return match i.namespace_own_property(ptr, key) {
+            Some(res) => {
+                let cur = res?;
+                let ok = d.configurable != Some(true)
+                    && d.enumerable != Some(false)
+                    && !d.is_accessor()
+                    && d.writable != Some(false)
+                    && match &d.value {
+                        Some(v) => same_value(v, &cur.value),
+                        None => true,
+                    };
+                Ok(ok)
+            }
+            None => Ok(false),
+        };
+    }
     // TypedArray integer-index [[DefineOwnProperty]]: a valid in-range index accepts only a
     // configurable+enumerable+writable data descriptor and writes the value; a canonical-numeric
     // non-index can't be defined; both never touch the property map.

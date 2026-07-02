@@ -81,7 +81,11 @@ impl<'a> Lexer<'a> {
             Some(
                 Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Template(_) | Tok::Regex { .. },
             ) => false,
-            Some(Tok::Ident(_)) => false,
+            // `await`/`yield` are contextual: when they are keywords (module top level, async or
+            // generator bodies) they prefix an expression, so a following `/` starts a regex. They
+            // are `Ident` tokens here since the lexer lacks that context; allow the regex form —
+            // division right after a bare `await`/`yield` *identifier* is vanishingly rare.
+            Some(Tok::Ident(w)) => matches!(w.as_str(), "await" | "yield"),
             Some(Tok::Keyword(k)) => !matches!(*k, "this" | "super" | "true" | "false" | "null"),
             // A `/` after `)` or `]` is division; after `}` it depends on whether the `}` closed a
             // block (statement → regex) or an object literal (value → division).

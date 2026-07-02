@@ -388,12 +388,16 @@ pub struct Interp {
     pub import_base: String,
     /// Loaded module namespace objects, keyed by canonical specifier (for `import()` + caching).
     pub modules: std::collections::HashMap<String, Value>,
+    /// Full module records (parsed body, environment, resolved export tables, evaluation status),
+    /// keyed by canonical specifier. Drives the two-phase Instantiate/Evaluate module linking.
+    pub(crate) module_recs: std::collections::HashMap<String, crate::modules::ModuleRec>,
     /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
     #[allow(clippy::type_complexity)]
     pub module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
-    /// Live module-namespace state keyed by the namespace object's pointer: the module's scope plus
-    /// its `export name → local name` map (for direct exports), so namespace reads stay live.
-    pub module_ns: HashMap<usize, (Env, HashMap<String, String>)>,
+    /// Live module-namespace state keyed by the namespace object's pointer: for each exported name,
+    /// how to read its current value (a live binding in some module scope, or a static value for a
+    /// star-as namespace re-export). Namespace property reads consult this so they stay live.
+    pub module_ns: HashMap<usize, HashMap<String, crate::modules::NsBinding>>,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
     pub map_data: HashMap<usize, Vec<(Value, Value)>>,
@@ -766,6 +770,7 @@ impl Interp {
             import_meta: None,
             import_base: String::new(),
             modules: std::collections::HashMap::new(),
+            module_recs: std::collections::HashMap::new(),
             module_loader: None,
             module_ns: HashMap::new(),
             map_data: HashMap::new(),
@@ -1146,12 +1151,17 @@ impl Interp {
                         }
                     }
                 }
-                // Module namespace: direct exports read live from the module's scope.
+                // Module namespace: exports read live from the exporting module's scope (or a stored
+                // static value for a star-as namespace re-export).
                 if !self.module_ns.is_empty() {
-                    if let Some((mod_env, map)) = self.module_ns.get(&ptr) {
-                        if let Some(local) = map.get(key) {
-                            let (mod_env, local) = (mod_env.clone(), local.clone());
-                            return self.get_var(&local, &mod_env);
+                    if let Some(map) = self.module_ns.get(&ptr) {
+                        if let Some(binding) = map.get(key) {
+                            match binding.clone() {
+                                crate::modules::NsBinding::Live(mod_env, local) => {
+                                    return self.get_var(&local, &mod_env);
+                                }
+                                crate::modules::NsBinding::Static(v) => return Ok(v),
+                            }
                         }
                     }
                 }
@@ -1268,6 +1278,17 @@ impl Interp {
         };
 
         let ptr = Rc::as_ptr(&obj) as usize;
+        // A module namespace exotic object's [[Set]] always fails: in strict code (all module code
+        // is strict) the assignment throws a TypeError; a sloppy caller sees an inert no-op.
+        if self.is_namespace(ptr) {
+            if self.strict {
+                return Err(self.throw(
+                    "TypeError",
+                    format!("Cannot assign to read only property '{key}' of module namespace object"),
+                ));
+            }
+            return Ok(());
+        }
         // Proxy: invoke the `set` trap, or forward to the target.
         if !self.proxies.is_empty() {
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
@@ -1893,6 +1914,21 @@ impl Interp {
         // a separate parameter Environment Record — not a variable environment — so its body's `var`
         // hoisting sits in a distinct scope below it (and a direct `eval` in a parameter default
         // cannot leak declarations into the body). Otherwise a single variable environment suffices.
+        // A named function *declaration* already has a (mutable) binding of its own name in the
+        // enclosing scope, so it must NOT get the immutable self-reference below (that would make
+        // `function f(){ f = 1 }` throw). A function *expression*'s name is not otherwise in scope,
+        // so it does. Detect the declaration case: the name already resolves to this same function.
+        let self_ref_needed = func.name.as_ref().is_some_and(|name| {
+            let mut cur = Some(closure.clone());
+            while let Some(s) = cur {
+                let b = s.borrow();
+                if let Some(binding) = b.vars.get(name) {
+                    return !matches!(&binding.value, Value::Obj(o) if Rc::ptr_eq(o, fn_obj));
+                }
+                cur = b.parent.clone();
+            }
+            true
+        });
         let has_param_exprs = params_have_expr(&func.params);
         let scope = if has_param_exprs {
             // Chain: callee base (variable env) → parameter env → body variable env. A direct `eval`
@@ -1950,7 +1986,7 @@ impl Interp {
                 },
             );
             // Expose the callee for named function expressions / recursion via `name`.
-            if let Some(name) = &func.name {
+            if let (true, Some(name)) = (self_ref_needed, &func.name) {
                 if !scope.borrow().vars.contains_key(name) {
                     scope.borrow_mut().vars.insert(
                         name.clone(),
@@ -2635,22 +2671,29 @@ impl Interp {
         for stmt in stmts {
             self.hoist_stmt(stmt, scope);
         }
-        // Function declarations are also initialised eagerly (in source order, after var names).
+        // Function declarations are also initialised eagerly (in source order, after var names). An
+        // anonymous `export default function(){}` is a HoistableDeclaration too, bound to `*default*`.
         for stmt in stmts {
             if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
-                if let Some(name) = &func.name {
-                    let f = self.make_function(func.clone(), scope.clone());
-                    scope.borrow_mut().vars.insert(
-                        name.clone(),
-                        Binding {
-                            value: f,
-                            mutable: true,
-                            initialized: true,
-                            import_ref: None,
-                            deletable: false,
-                        },
-                    );
+                let name = match &func.name {
+                    Some(n) => n.clone(),
+                    None if matches!(stmt, Stmt::ExportDefault(_)) => "*default*".to_string(),
+                    None => continue,
+                };
+                let f = self.make_function(func.clone(), scope.clone());
+                if name == "*default*" {
+                    self.set_fn_name(&f, "default");
                 }
+                scope.borrow_mut().vars.insert(
+                    name,
+                    Binding {
+                        value: f,
+                        mutable: true,
+                        initialized: true,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
             }
         }
         // Annex B.3.3: in sloppy mode, a function declared inside a block is also bound in the

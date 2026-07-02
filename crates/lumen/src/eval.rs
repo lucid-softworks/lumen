@@ -139,6 +139,13 @@ impl Interp {
     pub(crate) fn eval_in_scope(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
         self.hoist(body, env, true);
         self.declare_block_lexicals(body, env, false);
+        self.run_stmt_list(body, env)
+    }
+
+    /// Run a statement list that has already had its bindings instantiated (hoisting + lexical
+    /// declaration done by the caller). Used by module evaluation, where the module's environment is
+    /// set up during the separate Instantiate phase before any body runs.
+    pub(crate) fn run_stmt_list(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
         let has_using = body.iter().any(stmt_declares_using);
         if has_using {
             self.using_stack.push(Vec::new());
@@ -484,6 +491,24 @@ impl Interp {
             Stmt::ExportDefault(inner) => match &**inner {
                 Stmt::Expr(e) => {
                     let v = self.eval(e, env)?;
+                    // NamedEvaluation: an anonymous function/class default export is named "default".
+                    if is_anonymous_fn(e) {
+                        self.set_fn_name(&v, "default");
+                    }
+                    self.init_lexical("*default*", v, false, env);
+                    Ok(Value::Undefined)
+                }
+                // `export default function(){}` / `class{}` with no name: the value is bound to the
+                // synthetic `*default*` local (which the "default" export resolves to).
+                Stmt::FuncDecl(f) if f.name.is_none() => {
+                    let v = self.make_function(f.clone(), env.clone());
+                    self.set_fn_name(&v, "default");
+                    self.init_lexical("*default*", v, false, env);
+                    Ok(Value::Undefined)
+                }
+                Stmt::ClassDecl(c) if c.name.is_none() => {
+                    let v = self.eval_class(c, env)?;
+                    self.set_fn_name(&v, "default");
                     self.init_lexical("*default*", v, false, env);
                     Ok(Value::Undefined)
                 }
@@ -688,6 +713,18 @@ impl Interp {
             return result;
         }
         // for-in: enumerable string keys along the prototype chain (own first, deduped).
+        // A module namespace's [[GetOwnProperty]] runs during enumeration, so an uninitialized export
+        // makes the loop throw ReferenceError before any iteration.
+        if let Value::Obj(o) = &rhs {
+            let ptr = std::rc::Rc::as_ptr(o) as usize;
+            if self.is_namespace(ptr) {
+                for k in self.enum_keys(&rhs) {
+                    if let Some(res) = self.namespace_own_property(ptr, &k) {
+                        res?;
+                    }
+                }
+            }
+        }
         let items: Vec<Value> = self
             .enum_keys(&rhs)
             .into_iter()
@@ -1026,15 +1063,26 @@ impl Interp {
         );
     }
 
-    /// Whether `name` resolves to a declared-but-uninitialized (TDZ) lexical binding.
+    /// Whether `name` resolves to a declared-but-uninitialized (TDZ) lexical binding — following a
+    /// live module import through to the exporter's binding (so `typeof importedName` throws when the
+    /// exporter has not yet initialized it).
     fn binding_in_tdz(&self, name: &str, env: &Env) -> bool {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
-            let b = s.borrow();
-            if let Some(binding) = b.vars.get(name) {
-                return !binding.initialized;
+            let (import_ref, uninit, found) = {
+                let b = s.borrow();
+                match b.vars.get(name) {
+                    Some(binding) => (binding.import_ref.clone(), !binding.initialized, true),
+                    None => (None, false, false),
+                }
+            };
+            if found {
+                if let Some((src_env, local)) = import_ref {
+                    return self.binding_in_tdz(&local, &src_env);
+                }
+                return uninit;
             }
-            cur = b.parent.clone();
+            cur = s.borrow().parent.clone();
         }
         false
     }

@@ -5478,3 +5478,171 @@ fn eval_new_target_and_super_property() {
         "SyntaxError"
     );
 }
+
+// --- ES modules ------------------------------------------------------------------------------
+
+/// Evaluate an in-memory module graph. `files[0]` is the entry module; every specifier is matched
+/// verbatim against a file key. The entry writes its observable results to `globalThis`, which a
+/// follow-up script read returns.
+fn run_module(files: &[(&str, &str)], read: &str) -> String {
+    let owned: Vec<(String, String)> =
+        files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let entry = owned[0].clone();
+    let table = owned.clone();
+    let loader = move |spec: &str, _referrer: &str| {
+        table.iter().find(|(k, _)| k == spec).cloned()
+    };
+    let mut engine = Engine::new();
+    match engine.eval_module(&entry.1, &entry.0, loader).expect("parse") {
+        Completion::Value(_) => {}
+        Completion::Throw { name, message } => panic!("module threw {name}: {message}"),
+    }
+    match engine.eval(read, false).expect("parse") {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("read threw {name}: {message}"),
+    }
+}
+
+/// Evaluate an entry module expected to throw during linking/evaluation; returns the error name.
+fn module_throws(files: &[(&str, &str)]) -> String {
+    let owned: Vec<(String, String)> =
+        files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let entry = owned[0].clone();
+    let table = owned.clone();
+    let loader = move |spec: &str, _referrer: &str| {
+        table.iter().find(|(k, _)| k == spec).cloned()
+    };
+    let mut engine = Engine::new();
+    match engine.eval_module(&entry.1, &entry.0, loader).expect("parse") {
+        Completion::Value(_) => panic!("expected module to throw"),
+        Completion::Throw { name, .. } => name,
+    }
+}
+
+#[test]
+fn module_named_and_default_exports() {
+    assert_eq!(
+        run_module(
+            &[
+                ("main", "import def, { a, b as c } from 'dep'; globalThis.r = def + ':' + a + ':' + c;"),
+                ("dep", "export const a = 1; export const b = 2; export default 'D';"),
+            ],
+            "r"
+        ),
+        "D:1:2"
+    );
+}
+
+#[test]
+fn module_live_bindings() {
+    // An imported binding observes the exporter's later mutation.
+    assert_eq!(
+        run_module(
+            &[
+                ("main", "import { n, bump } from 'dep'; const before = n; bump(); globalThis.r = before + ',' + n;"),
+                ("dep", "export let n = 0; export function bump(){ n++; }"),
+            ],
+            "r"
+        ),
+        "0,1"
+    );
+}
+
+#[test]
+fn module_default_expression_self_import() {
+    // `export default <expr>` bound to *default*, observed via a self-import.
+    assert_eq!(
+        run_module(
+            &[(
+                "main",
+                "export default (function f(){ return 7; }); import d from 'main'; globalThis.r = d();",
+            )],
+            "r"
+        ),
+        "7"
+    );
+}
+
+#[test]
+fn module_namespace_object() {
+    let src = &[(
+        "main",
+        "import * as ns from 'dep'; globalThis.r = Object.keys(ns).join(',') + '|' + ns[Symbol.toStringTag];",
+    ), (
+        "dep",
+        "export const b = 2; export const a = 1; export default 9;",
+    )];
+    // Namespace keys are sorted; @@toStringTag is "Module".
+    assert_eq!(run_module(src, "r"), "a,b,default|Module");
+}
+
+#[test]
+fn module_namespace_is_frozen() {
+    let src = &[
+        ("main", "import * as ns from 'dep'; globalThis.set = Reflect.set(ns, 'a', 5); globalThis.a = ns.a;"),
+        ("dep", "export const a = 1;"),
+    ];
+    assert_eq!(run_module(src, "set"), "false");
+    assert_eq!(run_module(src, "a"), "1");
+}
+
+#[test]
+fn module_circular_imports() {
+    // A classic cycle: each module imports a function from the other; functions are hoisted.
+    assert_eq!(
+        run_module(
+            &[
+                ("a", "import { b } from 'b'; export function a(){ return 'a'; } globalThis.r = b();"),
+                ("b", "import { a } from 'a'; export function b(){ return 'b' + a(); }"),
+            ],
+            "r"
+        ),
+        "ba"
+    );
+}
+
+#[test]
+fn module_star_reexport() {
+    assert_eq!(
+        run_module(
+            &[
+                ("main", "import { x, y } from 'agg'; globalThis.r = x + ',' + y;"),
+                ("agg", "export * from 'one'; export * from 'two';"),
+                ("one", "export const x = 10;"),
+                ("two", "export const y = 20;"),
+            ],
+            "r"
+        ),
+        "10,20"
+    );
+}
+
+#[test]
+fn module_missing_export_is_syntax_error() {
+    assert_eq!(
+        module_throws(&[
+            ("main", "import { nope } from 'dep';"),
+            ("dep", "export const yes = 1;"),
+        ]),
+        "SyntaxError"
+    );
+}
+
+#[test]
+fn module_tdz_across_import() {
+    // In a cycle, `dep` (evaluated first) reads `main`'s not-yet-initialized `const A` through a
+    // re-export, so the access is a temporal-dead-zone ReferenceError.
+    assert_eq!(
+        run_module(
+            &[
+                ("main", "import { B } from 'dep'; export const A = 1;"),
+                (
+                    "dep",
+                    "export { A as B } from 'main'; try { B; globalThis.r = 'no'; } catch (e) { globalThis.r = e.name; }",
+                ),
+            ],
+            "r"
+        ),
+        "ReferenceError"
+    );
+}
