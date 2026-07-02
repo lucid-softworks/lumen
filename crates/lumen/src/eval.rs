@@ -794,6 +794,17 @@ impl Interp {
 
     /// `yield value`: park the coroutine, then resume per the driver's signal.
     fn yield_one(&mut self, value: Value) -> Completion {
+        // AsyncGeneratorYield: an async generator awaits its operand before suspending, so a
+        // rejected/thrown awaited value makes the `yield` itself complete abruptly.
+        let value = if crate::coroutine::in_async_gen() {
+            match crate::coroutine::coroutine_await(self, value) {
+                crate::coroutine::Resume::Next(v) => v,
+                crate::coroutine::Resume::Throw(e) => return Err(Abrupt::Throw(e)),
+                crate::coroutine::Resume::Return(v) => return Err(Abrupt::Return(v)),
+            }
+        } else {
+            value
+        };
         match crate::coroutine::coroutine_yield(self, value) {
             crate::coroutine::Resume::Next(v) => Ok(v),
             crate::coroutine::Resume::Return(v) => Err(Abrupt::Return(v)),

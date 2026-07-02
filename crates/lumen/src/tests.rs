@@ -6402,6 +6402,35 @@ fn super_call_in_ordinary_function_is_early_error() {
 }
 
 #[test]
+fn async_generator_yield_awaits_operand() {
+    fn two(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let _ = e.eval(setup, false);
+        match e.eval(read, false) {
+            Ok(Completion::Value(v)) => v,
+            Ok(Completion::Throw { name, .. }) => format!("T:{name}"),
+            Err(_) => "P".into(),
+        }
+    }
+    // yield Promise.reject(x) -> the awaited rejection rejects next().
+    assert_eq!(
+        two(
+            "globalThis.r='x';async function* g(){yield Promise.reject('boom')}var it=g();it.next().then(()=>{globalThis.r='resolved'},e=>{globalThis.r='rej:'+e})",
+            "r"
+        ),
+        "rej:boom"
+    );
+    // yield of a fulfilled promise unwraps to its value.
+    assert_eq!(
+        two(
+            "globalThis.r='x';async function* g(){yield Promise.resolve(42)}var it=g();it.next().then(v=>{globalThis.r=v.value})",
+            "r"
+        ),
+        "42"
+    );
+}
+
+#[test]
 fn generator_prototype_constructor_links() {
     // %Generator%/%AsyncGenerator% (the function .prototype) <-> their instance prototype.
     assert_eq!(run("function* g(){}Object.getPrototypeOf(g).prototype===Object.getPrototypeOf(g.prototype)"), "true");

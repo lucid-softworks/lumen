@@ -2240,6 +2240,7 @@ impl Interp {
                 i.seed_param_vars(ps, &scope);
             }
             i.declare_block_lexicals(&func.body, &scope, false);
+            crate::coroutine::set_async_gen(is_async);
             let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
             for stmt in &func.body {
                 match i.exec_stmt(stmt, &scope) {

@@ -68,11 +68,24 @@ struct Yielder {
 
 thread_local! {
     static YIELDER: RefCell<Option<Yielder>> = const { RefCell::new(None) };
+    /// Set on the coroutine thread when the body is an *async* generator, so `yield` knows to
+    /// `Await` its operand (AsyncGeneratorYield) before suspending.
+    static ASYNC_GEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether the current thread is executing a generator body (so `yield` is legal here).
 pub fn in_coroutine() -> bool {
     YIELDER.with(|y| y.borrow().is_some())
+}
+
+/// Mark the running coroutine thread as an async generator body.
+pub fn set_async_gen(v: bool) {
+    ASYNC_GEN.with(|c| c.set(v));
+}
+
+/// Whether the running coroutine is an async generator (its `yield` awaits the operand).
+pub fn in_async_gen() -> bool {
+    ASYNC_GEN.with(|c| c.get())
 }
 
 /// The driver side of one generator, stored on the generator object in `Interp.generators`.
