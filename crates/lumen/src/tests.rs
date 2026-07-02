@@ -6145,10 +6145,27 @@ fn proxy_for_in_and_has_own() {
 fn proxy_has_string_wrapper_and_symbol_key() {
     // `in`/Reflect.has forward a String wrapper's exotic length/index through a proxy target.
     assert_eq!(run("'length' in new String('str')"), "true");
-    assert_eq!(run("0 in new Proxy(new Proxy(new String('str'),{}),{})"), "true");
+    assert_eq!(
+        run("0 in new Proxy(new Proxy(new String('str'),{}),{})"),
+        "true"
+    );
     // The has trap receives the original property key: a symbol stays a symbol.
     assert_eq!(
         run("var s=Symbol(); var t=new Proxy({},{has(_,k){return k===s}}); var p=new Proxy(t,{}); Reflect.has(p,s)"),
         "true"
+    );
+}
+
+#[test]
+fn proxy_define_property_invariants() {
+    // A trap can't report a non-configurable target property as configurable.
+    assert_eq!(
+        run("var t={}; Object.defineProperty(t,'foo',{value:1,configurable:false}); var p=new Proxy(t,{defineProperty(){return true}}); try{Object.defineProperty(p,'foo',{value:1,configurable:true});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // A non-configurable writable data target can't be reported non-writable (step 16.c).
+    assert_eq!(
+        run("var p=new Proxy({},{defineProperty(t,k){Object.defineProperty(t,k,{configurable:false,writable:true});return true}}); try{Reflect.defineProperty(p,'x',{writable:false});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
     );
 }

@@ -8803,6 +8803,14 @@ fn proxy_define_property(
                         "proxy 'defineProperty' made a configurable target property non-configurable",
                     ));
                 }
+                // IsCompatiblePropertyDescriptor: a non-configurable target property can't be
+                // redefined as configurable.
+                if !p.configurable && matches!(pd.configurable, Some(true)) {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' made a non-configurable target property configurable",
+                    ));
+                }
                 if !p.configurable && !p.accessor && !p.writable {
                     if matches!(pd.writable, Some(true)) {
                         return Err(i.throw(
@@ -8819,6 +8827,17 @@ fn proxy_define_property(
                             ));
                         }
                     }
+                }
+                // Step 16.c: a non-configurable *writable* data target can't be reported non-writable.
+                if !p.configurable
+                    && !p.accessor
+                    && p.writable
+                    && matches!(pd.writable, Some(false))
+                {
+                    return Err(i.throw(
+                        "TypeError",
+                        "proxy 'defineProperty' reported a non-configurable writable property as non-writable",
+                    ));
                 }
             }
         }
