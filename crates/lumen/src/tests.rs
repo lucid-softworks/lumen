@@ -6377,6 +6377,24 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn object_rest_destructuring_assignment() {
+    // Rest copies own enumerable properties (CopyDataProperties): symbols included, spec key order.
+    assert_eq!(
+        run("var s=Symbol('x');var o={2:'b',a:1};o[s]=9;var r;({...r}=o);Object.keys(r).join(',')+'|'+(r[s]===9)"),
+        "2,a|true"
+    );
+    // Rest of a string primitive copies its index properties.
+    assert_eq!(run("var r;({...r}='hi');r[0]+r[1]"), "hi");
+    // Rest target may be a member expression (valid destructuring-assignment target).
+    assert_eq!(
+        run("var host={};var v={x:1,y:2};({...host.rest}=v);host.rest.x+','+host.rest.y"),
+        "1,2"
+    );
+    // A rest that is not the last property is an early SyntaxError.
+    assert!(Engine::new().eval("var a,b;({...a,b}={})", false).is_err());
+}
+
+#[test]
 fn simple_assignment_reference_before_rhs() {
     // `base[prop()] = rhs()`: the LHS reference (base + key expression) is evaluated before the RHS.
     assert_eq!(

@@ -127,21 +127,40 @@ impl Interp {
                     self.bind_pattern(&prop.value, v, env, mode)?;
                 }
                 if let Some(rest_name) = &objpat.rest {
+                    // CopyDataProperties into the rest object: [[OwnPropertyKeys]] order (indices,
+                    // strings, then symbols), symbols included, string primitives copy indices.
                     let obj = self.new_object();
-                    if let Value::Obj(src) = &value {
-                        let keys: Vec<_> = src
-                            .borrow()
-                            .props
-                            .iter()
-                            .filter(|(_, p)| p.enumerable)
-                            .map(|(k, _)| k.clone())
-                            .collect();
-                        for k in keys {
-                            if !used.iter().any(|u| u.as_str() == &*k) {
-                                let v = self.get_member(&value, &k)?;
-                                set_data(&obj, &k, v);
+                    match &value {
+                        Value::Obj(src) => {
+                            let keys = src.borrow().props.ordered_keys();
+                            for k in keys {
+                                if used.iter().any(|u| u.as_str() == &*k) {
+                                    continue;
+                                }
+                                let enumerable = src
+                                    .borrow()
+                                    .props
+                                    .get(&k)
+                                    .map(|p| p.enumerable)
+                                    .unwrap_or(false);
+                                if enumerable {
+                                    let v = self.get_member(&value, &k)?;
+                                    obj.borrow_mut()
+                                        .props
+                                        .insert(k, crate::value::Property::plain(v));
+                                }
                             }
                         }
+                        Value::Str(s) => {
+                            for (idx, ch) in s.chars().enumerate() {
+                                let k = idx.to_string();
+                                if used.contains(&k) {
+                                    continue;
+                                }
+                                set_data(&obj, &k, Value::from_string(ch.to_string()));
+                            }
+                        }
+                        _ => {}
                     }
                     self.bind_pattern(
                         &Pattern::Ident(rest_name.clone()),
@@ -3588,28 +3607,49 @@ impl Interp {
                             self.assign_destructure_elem(t, v, env)?;
                         }
                         PropDef::Spread(t) => {
+                            // CopyDataProperties(rest, ToObject(value), excludedNames = taken).
+                            // Own keys are visited in [[OwnPropertyKeys]] order (indices ascending,
+                            // then strings, then symbols); symbols are copied too.
                             let rest = self.new_object();
-                            if let Value::Obj(src) = &value {
-                                let keys: Vec<Rc<str>> = src.borrow().props.keys();
-                                for k in keys {
-                                    if Interp::is_sym_key(&k)
-                                        || taken.iter().any(|x| x.as_str() == &*k)
-                                    {
-                                        continue;
-                                    }
-                                    let enumerable = src
-                                        .borrow()
-                                        .props
-                                        .get(&k)
-                                        .map(|p| p.enumerable)
-                                        .unwrap_or(false);
-                                    if enumerable {
-                                        let v = self.get_member(&value, &k)?;
-                                        rest.borrow_mut()
+                            match &value {
+                                Value::Obj(src) => {
+                                    let keys: Vec<Rc<str>> = src.borrow().props.ordered_keys();
+                                    for k in keys {
+                                        if taken.iter().any(|x| x.as_str() == &*k) {
+                                            continue;
+                                        }
+                                        let enumerable = src
+                                            .borrow()
                                             .props
-                                            .insert(k, crate::value::Property::plain(v));
+                                            .get(&k)
+                                            .map(|p| p.enumerable)
+                                            .unwrap_or(false);
+                                        if enumerable {
+                                            let v = self.get_member(&value, &k)?;
+                                            rest.borrow_mut()
+                                                .props
+                                                .insert(k, crate::value::Property::plain(v));
+                                        }
                                     }
                                 }
+                                // ToObject(string): copy the enumerable index properties.
+                                Value::Str(s) => {
+                                    for (idx, ch) in s.chars().enumerate() {
+                                        let k = idx.to_string();
+                                        if taken.contains(&k) {
+                                            continue;
+                                        }
+                                        rest.borrow_mut().props.insert(
+                                            Rc::from(k.as_str()),
+                                            crate::value::Property::plain(Value::from_string(
+                                                ch.to_string(),
+                                            )),
+                                        );
+                                    }
+                                }
+                                // Other primitives (number/boolean/symbol/bigint) wrap to an object
+                                // with no own enumerable properties.
+                                _ => {}
                             }
                             self.assign_to_target(t, Value::Obj(rest), env)?;
                         }

@@ -1448,7 +1448,7 @@ impl Parser {
                 // assignment target — but only if it is a *valid* destructuring pattern.
                 let destructuring = op == "=" && matches!(left, Expr::Array(_) | Expr::Object(_));
                 if destructuring {
-                    if expr_to_pattern(&left).is_none() {
+                    if !is_valid_assign_pattern(&left) {
                         return self.err("invalid destructuring assignment target");
                     }
                 } else if !is_valid_assign_target(&left) {
@@ -2799,6 +2799,51 @@ fn is_assign_op(op: &str) -> bool {
 
 fn is_valid_assign_target(e: &Expr) -> bool {
     matches!(e, Expr::Ident(_) | Expr::Member { .. } | Expr::Index { .. })
+}
+
+/// Whether an array/object literal is a valid *destructuring assignment* pattern. Unlike a binding
+/// pattern (see `expr_to_pattern`), an object `AssignmentRestProperty` target may be any
+/// `LeftHandSideExpression` that is not itself a nested pattern (e.g. a member expression), and
+/// element/property targets may be member expressions too.
+fn is_valid_assign_pattern(e: &Expr) -> bool {
+    match e {
+        Expr::Ident(_) => true,
+        Expr::Member {
+            optional: false, ..
+        }
+        | Expr::Index {
+            optional: false, ..
+        } => true,
+        Expr::Array(elems) => elems.iter().enumerate().all(|(idx, el)| match el {
+            ArrayElem::Hole => true,
+            ArrayElem::Spread(t) => {
+                idx == elems.len() - 1
+                    && !matches!(t, Expr::Assign { op: "=", .. })
+                    && is_valid_assign_pattern(t)
+            }
+            ArrayElem::Item(Expr::Assign {
+                op: "=", target, ..
+            }) => is_valid_assign_pattern(target),
+            ArrayElem::Item(t) => is_valid_assign_pattern(t),
+        }),
+        Expr::Object(props) => props.iter().enumerate().all(|(idx, p)| match p {
+            PropDef::KeyValue {
+                value: Expr::Assign {
+                    op: "=", target, ..
+                },
+                ..
+            } => is_valid_assign_pattern(target),
+            PropDef::KeyValue { value, .. } => is_valid_assign_pattern(value),
+            // Rest must be last and its target must not be a nested pattern.
+            PropDef::Spread(t) => {
+                idx == props.len() - 1
+                    && !matches!(t, Expr::Array(_) | Expr::Object(_))
+                    && is_valid_assign_pattern(t)
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
 }
 
 fn key_is(key: &PropKey, name: &str) -> bool {
