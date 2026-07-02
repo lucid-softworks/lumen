@@ -5723,6 +5723,20 @@ fn collection_ctor(
     Ok(mv)
 }
 
+fn map_size(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
+    Ok(Value::Num(
+        i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
+    ))
+}
+
+fn set_size(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
+    Ok(Value::Num(
+        i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
+    ))
+}
+
 /// CoerceKey for Map/Set: `-0` is canonicalized to `+0` so a stored key (and any key handed to a
 /// callback or iterated) is `+0`, per spec.
 fn canonicalize_map_key(k: Value) -> Value {
@@ -5875,12 +5889,9 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     it.def_method(&proto, "entries", 0, entries_fn);
 
     // `size` accessor.
-    let size_getter = it.make_native("get size", 0, |i, this, _| {
-        let ptr = coll_ptr(i, &this)?;
-        Ok(Value::Num(
-            i.map_data.get(&ptr).map(|e| e.len()).unwrap_or(0) as f64,
-        ))
-    });
+    // Map.prototype.size and Set.prototype.size each brand-check their own kind (a Set passed to
+    // Map.prototype.size, or vice versa, is a TypeError — it lacks the right internal slot).
+    let size_getter = it.make_native("get size", 0, if is_set { set_size } else { map_size });
     proto.borrow_mut().props.insert(
         "size",
         Property {
