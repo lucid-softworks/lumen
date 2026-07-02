@@ -6169,3 +6169,14 @@ fn proxy_define_property_invariants() {
         "TypeError"
     );
 }
+
+#[test]
+fn set_returns_boolean() {
+    // [[Set]] reports failure as a boolean (Reflect.set / proxy trap), while an assignment throws.
+    assert_eq!(run("var o={get x(){return 1}}; Reflect.set(o,'x',2)"), "false");
+    assert_eq!(run("Reflect.set(new Proxy(new Proxy(/x/g,{}),{}),'global',true)"), "false");
+    assert_eq!(run("var o={a:1}; Reflect.set(new Proxy(o,{}),'a',2)"), "true");
+    assert_eq!(run("Object.freeze({}); var o=Object.freeze({b:1}); Reflect.set(o,'b',9)"), "false");
+    // A strict assignment to a getter-only property still throws.
+    assert_eq!(run("'use strict'; var o={get x(){}}; try{o.x=1;'no'}catch(e){e.constructor.name}"), "TypeError");
+}

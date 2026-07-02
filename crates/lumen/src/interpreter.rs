@@ -1286,18 +1286,19 @@ impl Interp {
     /// properties, and array `length`/index bookkeeping. The receiver defaults to `base`.
     pub fn set_member(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Abrupt> {
         self.set_member_recv(base, key, value, base.clone())
+            .map(|_| ())
     }
 
-    /// [[Set]](P, V, Receiver): like [`set_member`] but with an explicit `receiver` — the object a
-    /// setter is invoked on, the proxy `set` trap's Receiver argument, and what a forwarded `[[Set]]`
-    /// carries through a proxy target chain.
+    /// [[Set]](P, V, Receiver): like [`set_member`] but with an explicit `receiver` and returning the
+    /// [[Set]] success boolean. The receiver is the object a setter is invoked on, the proxy `set`
+    /// trap's Receiver argument, and what a forwarded `[[Set]]` carries through a proxy target chain.
     pub fn set_member_recv(
         &mut self,
         base: &Value,
         key: &str,
         value: Value,
         receiver: Value,
-    ) -> Result<(), Abrupt> {
+    ) -> Result<bool, Abrupt> {
         let obj = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null => {
@@ -1308,7 +1309,7 @@ impl Interp {
             }
             // Setting a property on a primitive is a no-op in sloppy mode (and TypeError in strict,
             // which we approximate as a no-op for now).
-            _ => return Ok(()),
+            _ => return Ok(true),
         };
 
         let ptr = Rc::as_ptr(&obj) as usize;
@@ -1323,7 +1324,7 @@ impl Interp {
                     ),
                 ));
             }
-            return Ok(());
+            return Ok(false);
         }
         // Proxy: invoke the `set` trap, or forward to the target.
         if !self.proxies.is_empty() {
@@ -1347,10 +1348,11 @@ impl Interp {
                     ],
                 )?;
                 // A successful `set` can't contradict a non-configurable property on the target.
-                if self.to_boolean(&ok) {
+                let success = self.to_boolean(&ok);
+                if success {
                     self.proxy_set_invariant(&target, key, &value)?;
                 }
-                return Ok(());
+                return Ok(success);
             }
         }
         // TypedArray integer-index writes go straight to the backing buffer; a canonical-numeric key
@@ -1359,7 +1361,7 @@ impl Interp {
             match self.ta_index_kind(&info, key) {
                 TaIndex::Element(idx) => {
                     self.ta_store(&info, idx, &value)?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 TaIndex::Exotic => {
                     if info.kind.is_bigint() {
@@ -1367,7 +1369,7 @@ impl Interp {
                     } else {
                         self.to_number(&value)?;
                     }
-                    return Ok(());
+                    return Ok(true);
                 }
                 TaIndex::Ordinary => {}
             }
@@ -1399,10 +1401,11 @@ impl Interp {
                         receiver.clone(),
                     ],
                 )?;
-                if self.to_boolean(&ok) {
+                let success = self.to_boolean(&ok);
+                if success {
                     self.proxy_set_invariant(&target, key, &value)?;
                 }
-                return Ok(());
+                return Ok(success);
             }
             // A TypedArray reached via the prototype chain: its integer-indexed elements are its own
             // properties, so the search must stop here (never consulting the TA prototype's
@@ -1412,7 +1415,7 @@ impl Interp {
                 if let Some(info) = self.typed_arrays.get(&optr).copied() {
                     match self.ta_index_kind(&info, key) {
                         TaIndex::Element(_) => break,
-                        TaIndex::Exotic => return Ok(()),
+                        TaIndex::Exotic => return Ok(true),
                         TaIndex::Ordinary => {}
                     }
                 }
@@ -1423,7 +1426,7 @@ impl Interp {
                     return match p.set {
                         Some(setter) => {
                             self.call(setter, receiver.clone(), &[value])?;
-                            Ok(())
+                            Ok(true)
                         }
                         None => {
                             if self.strict {
@@ -1432,7 +1435,7 @@ impl Interp {
                                     format!("cannot set getter-only property '{key}'"),
                                 ))
                             } else {
-                                Ok(())
+                                Ok(false)
                             }
                         }
                     };
@@ -1445,7 +1448,7 @@ impl Interp {
                                 format!("cannot assign to read-only property '{key}'"),
                             ));
                         }
-                        return Ok(());
+                        return Ok(false);
                     }
                     break; // own writable data property — update below
                 }
@@ -1456,7 +1459,7 @@ impl Interp {
                             format!("cannot assign to read-only property '{key}'"),
                         ));
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 break; // inherited writable data property — create own on receiver
             }
@@ -1478,12 +1481,12 @@ impl Interp {
                         return Err(self
                             .throw("TypeError", "cannot add property, object is not extensible"));
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 obj.borrow_mut().props.insert(key, Property::plain(value));
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn array_set(&mut self, obj: &Gc, key: &str, value: Value) -> Result<(), Abrupt> {

@@ -6023,8 +6023,19 @@ fn install_reflect(it: &mut Interp) {
                 }
                 return Ok(Value::Bool(ok));
             }
-            ab(i.set_member(&ptarget, &key, value))?;
-            return Ok(Value::Bool(true));
+            // Missing/undefined trap: forward to the target's [[Set]] with the original receiver,
+            // returning its actual success boolean. [[Set]] reports failure as `false` (never a strict
+            // PutValue throw), so evaluate it in a non-strict context.
+            let receiver = if a.len() > 3 {
+                arg(a, 3)
+            } else {
+                target.clone()
+            };
+            let saved = i.strict;
+            i.strict = false;
+            let r = i.set_member_recv(&ptarget, &key, value, receiver);
+            i.strict = saved;
+            return Ok(Value::Bool(ab(r)?));
         }
         let receiver = if a.len() > 3 {
             arg(a, 3)
@@ -7419,8 +7430,8 @@ fn reflect_ordinary_set(
     let mut current = target.clone();
     loop {
         if proxy_pair(i, &current).is_some() {
-            ab(i.set_member(&current, key, value))?;
-            return Ok(true);
+            // A proxy's [[Set]] returns its own success boolean (via the trap or a forwarded [[Set]]).
+            return ab(i.set_member_recv(&current, key, value, receiver.clone()));
         }
         let obj = match &current {
             Value::Obj(o) => o.clone(),
