@@ -2033,8 +2033,28 @@ impl Interp {
                     deletable: false,
                 },
             );
-            // A minimal `arguments` array (not the live mapped object).
+            // A minimal `arguments` array (not the live mapped object). A strict function's
+            // `arguments` exposes `callee` as the %ThrowTypeError% poison accessor.
             let args_arr = self.make_array(args.to_vec());
+            if func.is_strict {
+                if let (Value::Obj(ao), Some(tte)) = (
+                    &args_arr,
+                    self.extra_protos.get("%ThrowTypeError%").cloned(),
+                ) {
+                    ao.borrow_mut().props.insert(
+                        "callee",
+                        crate::value::Property {
+                            value: Value::Undefined,
+                            get: Some(Value::Obj(tte.clone())),
+                            set: Some(Value::Obj(tte)),
+                            accessor: true,
+                            writable: false,
+                            enumerable: false,
+                            configurable: false,
+                        },
+                    );
+                }
+            }
             scope.borrow_mut().vars.insert(
                 "arguments".to_string(),
                 Binding {

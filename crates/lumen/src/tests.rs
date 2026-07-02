@@ -5986,3 +5986,21 @@ fn map_set_iterators() {
     // Entries appended during iteration are observed.
     assert_eq!(run("var m=new Map([[0,0]]); var out=[]; for(var[k]of m){out.push(k); if(k<3)m.set(k+1,0);} out.join(',')"), "0,1,2,3");
 }
+
+#[test]
+fn throw_type_error_intrinsic() {
+    // A strict function's arguments exposes `callee` as the %ThrowTypeError% poison accessor.
+    assert_eq!(
+        run("var a=(function(){'use strict';return arguments})(); var d=Object.getOwnPropertyDescriptor(a,'callee'); typeof d.get+','+(d.get===d.set)+','+d.configurable"),
+        "function,true,false"
+    );
+    // %ThrowTypeError% is a frozen, length-0, empty-named function that throws on call.
+    assert_eq!(
+        run("var T=Object.getOwnPropertyDescriptor((function(){'use strict';return arguments})(),'callee').get; T.name+','+T.length+','+Object.isExtensible(T)"),
+        ",0,false"
+    );
+    assert_eq!(
+        run("var T=Object.getOwnPropertyDescriptor((function(){'use strict';return arguments})(),'callee').get; try{T();'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}

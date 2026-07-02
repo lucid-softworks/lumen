@@ -8044,14 +8044,27 @@ fn install_function_proto(it: &mut Interp) {
         Ok(Value::str("function () { [native code] }"))
     });
 
-    // The %ThrowTypeError% poison pill: `caller`/`arguments` accessors on Function.prototype that
-    // throw on get or set (CallerArguments restriction).
+    // The %ThrowTypeError% poison pill: a single frozen function (length 0, name "") reused as the
+    // `caller`/`arguments` accessors on Function.prototype and `callee` on strict arguments objects.
     let throw_type_error = it.make_native("", 0, |i, _t, _a| {
         Err(i.make_error(
             "TypeError",
             "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
         ))
     });
+    {
+        let mut b = throw_type_error.borrow_mut();
+        // length/name are non-configurable, and the function is frozen + non-extensible.
+        b.props.insert(
+            "length",
+            Property::data(Value::Num(0.0), false, false, false),
+        );
+        b.props
+            .insert("name", Property::data(Value::str(""), false, false, false));
+        b.extensible = false;
+    }
+    it.extra_protos
+        .insert("%ThrowTypeError%", throw_type_error.clone());
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
