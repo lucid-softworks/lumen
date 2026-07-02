@@ -5485,15 +5485,18 @@ fn eval_new_target_and_super_property() {
 /// verbatim against a file key. The entry writes its observable results to `globalThis`, which a
 /// follow-up script read returns.
 fn run_module(files: &[(&str, &str)], read: &str) -> String {
-    let owned: Vec<(String, String)> =
-        files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let owned: Vec<(String, String)> = files
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     let entry = owned[0].clone();
     let table = owned.clone();
-    let loader = move |spec: &str, _referrer: &str| {
-        table.iter().find(|(k, _)| k == spec).cloned()
-    };
+    let loader = move |spec: &str, _referrer: &str| table.iter().find(|(k, _)| k == spec).cloned();
     let mut engine = Engine::new();
-    match engine.eval_module(&entry.1, &entry.0, loader).expect("parse") {
+    match engine
+        .eval_module(&entry.1, &entry.0, loader)
+        .expect("parse")
+    {
         Completion::Value(_) => {}
         Completion::Throw { name, message } => panic!("module threw {name}: {message}"),
     }
@@ -5505,15 +5508,18 @@ fn run_module(files: &[(&str, &str)], read: &str) -> String {
 
 /// Evaluate an entry module expected to throw during linking/evaluation; returns the error name.
 fn module_throws(files: &[(&str, &str)]) -> String {
-    let owned: Vec<(String, String)> =
-        files.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let owned: Vec<(String, String)> = files
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     let entry = owned[0].clone();
     let table = owned.clone();
-    let loader = move |spec: &str, _referrer: &str| {
-        table.iter().find(|(k, _)| k == spec).cloned()
-    };
+    let loader = move |spec: &str, _referrer: &str| table.iter().find(|(k, _)| k == spec).cloned();
     let mut engine = Engine::new();
-    match engine.eval_module(&entry.1, &entry.0, loader).expect("parse") {
+    match engine
+        .eval_module(&entry.1, &entry.0, loader)
+        .expect("parse")
+    {
         Completion::Value(_) => panic!("expected module to throw"),
         Completion::Throw { name, .. } => name,
     }
@@ -5524,8 +5530,14 @@ fn module_named_and_default_exports() {
     assert_eq!(
         run_module(
             &[
-                ("main", "import def, { a, b as c } from 'dep'; globalThis.r = def + ':' + a + ':' + c;"),
-                ("dep", "export const a = 1; export const b = 2; export default 'D';"),
+                (
+                    "main",
+                    "import def, { a, b as c } from 'dep'; globalThis.r = def + ':' + a + ':' + c;"
+                ),
+                (
+                    "dep",
+                    "export const a = 1; export const b = 2; export default 'D';"
+                ),
             ],
             "r"
         ),
@@ -5592,8 +5604,14 @@ fn module_circular_imports() {
     assert_eq!(
         run_module(
             &[
-                ("a", "import { b } from 'b'; export function a(){ return 'a'; } globalThis.r = b();"),
-                ("b", "import { a } from 'a'; export function b(){ return 'b' + a(); }"),
+                (
+                    "a",
+                    "import { b } from 'b'; export function a(){ return 'a'; } globalThis.r = b();"
+                ),
+                (
+                    "b",
+                    "import { a } from 'a'; export function b(){ return 'b' + a(); }"
+                ),
             ],
             "r"
         ),
@@ -5606,7 +5624,10 @@ fn module_star_reexport() {
     assert_eq!(
         run_module(
             &[
-                ("main", "import { x, y } from 'agg'; globalThis.r = x + ',' + y;"),
+                (
+                    "main",
+                    "import { x, y } from 'agg'; globalThis.r = x + ',' + y;"
+                ),
                 ("agg", "export * from 'one'; export * from 'two';"),
                 ("one", "export const x = 10;"),
                 ("two", "export const y = 20;"),
@@ -5663,7 +5684,10 @@ fn super_property_context() {
         .is_ok());
     // A class method and a field initializer are also super-property contexts.
     assert!(Engine::new()
-        .eval("class C extends Object { m(){ return super.x; } f = super.y; }", false)
+        .eval(
+            "class C extends Object { m(){ return super.x; } f = super.y; }",
+            false
+        )
         .is_ok());
 }
 
@@ -5705,10 +5729,7 @@ fn to_property_key_symbol_result() {
         "42"
     );
     // A non-symbol key still coerces via toString.
-    assert_eq!(
-        run("var o={}; o[{toString(){return 'x'}}]=9; o.x"),
-        "9"
-    );
+    assert_eq!(run("var o={}; o[{toString(){return 'x'}}]=9; o.x"), "9");
 }
 
 #[test]
@@ -5724,7 +5745,10 @@ fn string_from_char_code_touint16() {
 fn object_proto_accessor() {
     // Object.prototype.__proto__ is an accessor over the prototype.
     assert_eq!(run("var p={x:1}; var o={}; o.__proto__=p; o.x"), "1");
-    assert_eq!(run("var p={}; var o=Object.create(p); o.__proto__===p"), "true");
+    assert_eq!(
+        run("var p={}; var o=Object.create(p); o.__proto__===p"),
+        "true"
+    );
     assert_eq!(run("({}).__proto__===Object.prototype"), "true");
     // The descriptor on Object.prototype is a configurable accessor.
     assert_eq!(
@@ -5732,17 +5756,38 @@ fn object_proto_accessor() {
         "function,function,true"
     );
     // Setting a non-object/null value is a silent no-op.
-    assert_eq!(run("var o={}; o.__proto__=5; Object.getPrototypeOf(o)===Object.prototype"), "true");
+    assert_eq!(
+        run("var o={}; o.__proto__=5; Object.getPrototypeOf(o)===Object.prototype"),
+        "true"
+    );
 }
 
 #[test]
 fn set_map_brand_checks() {
     // Set.prototype methods reject a Map receiver and vice-versa (distinct [[SetData]]/[[MapData]]).
-    assert_eq!(run("try{Set.prototype.forEach.call(new Map(),()=>{});'no'}catch(e){e.constructor.name}"), "TypeError");
-    assert_eq!(run("try{Set.prototype.clear.call(new Map());'no'}catch(e){e.constructor.name}"), "TypeError");
-    assert_eq!(run("try{Set.prototype.union.call(new Map(),new Set());'no'}catch(e){e.constructor.name}"), "TypeError");
-    assert_eq!(run("try{Map.prototype.entries.call(new Set());'no'}catch(e){e.constructor.name}"), "TypeError");
+    assert_eq!(
+        run("try{Set.prototype.forEach.call(new Map(),()=>{});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("try{Set.prototype.clear.call(new Map());'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("try{Set.prototype.union.call(new Map(),new Set());'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("try{Map.prototype.entries.call(new Set());'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
     // Same-kind still works.
-    assert_eq!(run("var s=new Set([1,2]); var n=0; s.forEach(v=>n+=v); n"), "3");
-    assert_eq!(run("[...new Set([1,2]).union(new Set([2,3]))].join(',')"), "1,2,3");
+    assert_eq!(
+        run("var s=new Set([1,2]); var n=0; s.forEach(v=>n+=v); n"),
+        "3"
+    );
+    assert_eq!(
+        run("[...new Set([1,2]).union(new Set([2,3]))].join(',')"),
+        "1,2,3"
+    );
 }

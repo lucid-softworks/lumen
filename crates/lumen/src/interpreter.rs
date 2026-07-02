@@ -1284,7 +1284,9 @@ impl Interp {
             if self.strict {
                 return Err(self.throw(
                     "TypeError",
-                    format!("Cannot assign to read only property '{key}' of module namespace object"),
+                    format!(
+                        "Cannot assign to read only property '{key}' of module namespace object"
+                    ),
                 ));
             }
             return Ok(());

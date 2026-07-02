@@ -665,7 +665,8 @@ impl<'a> Lexer<'a> {
         // `n` is a surrogate code point. A high surrogate followed by a `\u` low surrogate combines
         // into a single astral code point; anything else is a lone surrogate (representable as a JS
         // string but flagged so it can be rejected as a ModuleExportName).
-        if (0xD800..=0xDBFF).contains(&n) && self.peek() == Some('\\') && self.peek2() == Some('u') {
+        if (0xD800..=0xDBFF).contains(&n) && self.peek() == Some('\\') && self.peek2() == Some('u')
+        {
             let save = self.pos;
             self.bump(); // '\'
             self.bump(); // 'u'

@@ -101,8 +101,8 @@ impl Interp {
             Some(s) => s,
             None => return Err(self.throw("TypeError", format!("module not found: {key}"))),
         };
-        let body = crate::parser::parse_module(&src)
-            .map_err(|e| self.throw("SyntaxError", e.message))?;
+        let body =
+            crate::parser::parse_module(&src).map_err(|e| self.throw("SyntaxError", e.message))?;
         let body = Rc::new(body);
 
         // Resolve every dependency specifier to a canonical key up front (fetching its source), so
@@ -128,9 +128,10 @@ impl Interp {
         // before we recurse into dependencies so an import cycle resolves back to it.
         let env = new_scope(Some(self.global_env.clone()));
         // Top-level `this` in a module is `undefined` (not the global object).
-        env.borrow_mut()
-            .vars
-            .insert("this".to_string(), Binding::data(Value::Undefined, false, true));
+        env.borrow_mut().vars.insert(
+            "this".to_string(),
+            Binding::data(Value::Undefined, false, true),
+        );
         let ns_obj = Object::new(None);
         let ns = Value::Obj(ns_obj.clone());
         self.modules.insert(key.to_string(), ns.clone());
@@ -221,7 +222,11 @@ impl Interp {
     }
 
     /// Fetch a dependency's `(canonical_key, source)` via the host loader.
-    fn fetch_module(&mut self, specifier: &str, referrer: &str) -> Result<(String, String), Abrupt> {
+    fn fetch_module(
+        &mut self,
+        specifier: &str,
+        referrer: &str,
+    ) -> Result<(String, String), Abrupt> {
         let loader = match &self.module_loader {
             Some(l) => l.clone(),
             None => return Err(self.throw("TypeError", "no module loader configured")),
@@ -294,13 +299,7 @@ impl Interp {
 
     /// Wire `local` to the binding that `dep` exports as `name` (a link-time SyntaxError if the
     /// export is missing or ambiguous).
-    fn link_named(
-        &mut self,
-        env: &Env,
-        local: &str,
-        dep: &str,
-        name: &str,
-    ) -> Result<(), Abrupt> {
+    fn link_named(&mut self, env: &Env, local: &str, dep: &str, name: &str) -> Result<(), Abrupt> {
         match self.resolve_export(dep, name, &mut Vec::new()) {
             Resolution::Local(src_env, src_local) => {
                 env.borrow_mut().vars.insert(
@@ -468,10 +467,9 @@ impl Interp {
                 }
                 Resolution::Ns(v) => {
                     live.insert(name.clone(), NsBinding::Static(v.clone()));
-                    ns.borrow_mut().props.insert(
-                        name.as_str(),
-                        Property::data(v, true, true, false),
-                    );
+                    ns.borrow_mut()
+                        .props
+                        .insert(name.as_str(), Property::data(v, true, true, false));
                 }
                 // Ambiguous / unresolvable star names are omitted from the namespace.
                 _ => {}
@@ -481,7 +479,12 @@ impl Interp {
         if let Some(tag) = crate::builtins::to_string_tag_key(self) {
             ns.borrow_mut().props.insert(
                 tag,
-                Property::data(Value::from_string("Module".to_string()), false, false, false),
+                Property::data(
+                    Value::from_string("Module".to_string()),
+                    false,
+                    false,
+                    false,
+                ),
             );
         }
         ns.borrow_mut().extensible = false;
@@ -633,7 +636,12 @@ fn build_export_tables(body: &[Stmt], resolved: &HashMap<String, String>) -> Exp
     let mut indirect: HashMap<String, (String, String)> = HashMap::new();
     let mut star_as: HashMap<String, String> = HashMap::new();
     let mut stars: Vec<String> = Vec::new();
-    let key_of = |src: &str| resolved.get(src).cloned().unwrap_or_else(|| src.to_string());
+    let key_of = |src: &str| {
+        resolved
+            .get(src)
+            .cloned()
+            .unwrap_or_else(|| src.to_string())
+    };
 
     for stmt in body {
         match stmt {
@@ -676,10 +684,8 @@ fn build_export_tables(body: &[Stmt], resolved: &HashMap<String, String>) -> Exp
                 for spec in specs {
                     match source {
                         Some(src) => {
-                            indirect.insert(
-                                spec.exported.clone(),
-                                (key_of(src), spec.local.clone()),
-                            );
+                            indirect
+                                .insert(spec.exported.clone(), (key_of(src), spec.local.clone()));
                         }
                         None => {
                             local_exports.insert(spec.exported.clone(), spec.local.clone());

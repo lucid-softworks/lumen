@@ -888,7 +888,11 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
         Ok(Value::Undefined)
     });
     install_agent(it, &host);
-    set_builtin(&host, "AbstractModuleSource", make_abstract_module_source(it));
+    set_builtin(
+        &host,
+        "AbstractModuleSource",
+        make_abstract_module_source(it),
+    );
     Value::Obj(host)
 }
 
@@ -898,12 +902,17 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
 /// `undefined`.
 fn make_abstract_module_source(it: &mut Interp) -> Value {
     let ctor = it.make_native("AbstractModuleSource", 0, |i, _t, _a| {
-        Err(i.make_error("TypeError", "Abstract class AbstractModuleSource not directly constructable"))
+        Err(i.make_error(
+            "TypeError",
+            "Abstract class AbstractModuleSource not directly constructable",
+        ))
     });
     let proto = Object::new(Some(it.object_proto.clone()));
     // `@@toStringTag` getter: returns the source's name for a real module-source object, else undefined.
     if let Some(key) = well_known_key(it, "toStringTag") {
-        let getter = it.make_native("get [Symbol.toStringTag]", 0, |_i, _t, _a| Ok(Value::Undefined));
+        let getter = it.make_native("get [Symbol.toStringTag]", 0, |_i, _t, _a| {
+            Ok(Value::Undefined)
+        });
         proto.borrow_mut().props.insert(
             key,
             Property {
@@ -5143,7 +5152,12 @@ fn coll_ptr_kind(i: &Interp, this: &Value, want: Option<&str>) -> Result<usize, 
 
 /// Build an iterator over a Map/Set's snapshot. `kind`: 0 = values, 1 = keys, 2 = [key,value].
 /// Like [`collection_iter`] but brand-checks the exact collection kind ("Set" / "Map").
-fn collection_iter_kind(i: &mut Interp, this: &Value, kind: u8, want: &str) -> Result<Value, Value> {
+fn collection_iter_kind(
+    i: &mut Interp,
+    this: &Value,
+    kind: u8,
+    want: &str,
+) -> Result<Value, Value> {
     coll_ptr_kind(i, this, Some(want))?;
     collection_iter(i, this, kind)
 }
@@ -5613,13 +5627,17 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     let clear_fn: NativeFn = if is_set {
         |i, this, _| {
             let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-            i.map_data.get_mut(&ptr).map(|e| e.clear());
+            if let Some(e) = i.map_data.get_mut(&ptr) {
+                e.clear();
+            }
             Ok(Value::Undefined)
         }
     } else {
         |i, this, _| {
             let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            i.map_data.get_mut(&ptr).map(|e| e.clear());
+            if let Some(e) = i.map_data.get_mut(&ptr) {
+                e.clear();
+            }
             Ok(Value::Undefined)
         }
     };
@@ -8853,12 +8871,11 @@ fn install_object(it: &mut Interp) {
             let v = arg(args, 0);
             // Only an Object receiver with an Object/Null value actually changes the prototype;
             // everything else is a silent no-op.
-            if let Value::Obj(_) = &this {
-                if matches!(v, Value::Obj(_) | Value::Null) {
-                    if !js_set_prototype_of(i, &this, &v)? {
-                        return Err(i.make_error("TypeError", "cyclic __proto__ value"));
-                    }
-                }
+            if matches!(&this, Value::Obj(_))
+                && matches!(v, Value::Obj(_) | Value::Null)
+                && !js_set_prototype_of(i, &this, &v)?
+            {
+                return Err(i.make_error("TypeError", "cyclic __proto__ value"));
             }
             Ok(Value::Undefined)
         });
