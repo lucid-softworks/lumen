@@ -6727,3 +6727,28 @@ fn static_block_forbids_arguments() {
         "undefined"
     );
 }
+
+#[test]
+fn private_member_brand_check() {
+    assert_eq!(
+        throws("class C{#x=1;static g(o){return o.#x}}C.g({})"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("class C{set #p(v){}static s(o){o.#p=1}}C.s({})"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("class C{#x=1;static c(o){o.#x+=1}}C.c({})"),
+        "TypeError"
+    );
+    // Valid brand access still works.
+    assert_eq!(
+        run("class C{#x=1;get(){return this.#x}}String(new C().get())"),
+        "1"
+    );
+    assert_eq!(
+        run("class C{#x=1;inc(){this.#x++;return this.#x}}String(new C().inc())"),
+        "2"
+    );
+}

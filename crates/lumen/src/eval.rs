@@ -1461,6 +1461,29 @@ impl Interp {
         None
     }
 
+    /// PrivateGet: read a private field/method after a brand check. An object that was not
+    /// constructed with this private name in scope (`#x` absent) is a TypeError, not `undefined`.
+    fn get_private_member(&mut self, base: &Value, name: &str) -> Completion {
+        match base {
+            Value::Obj(o) if self.has_property(o, name) => self.get_member(base, name),
+            _ => Err(self.throw(
+                "TypeError",
+                format!("cannot read private member {name} from an object whose class did not declare it"),
+            )),
+        }
+    }
+
+    /// PrivateSet: write a private field (or invoke a private setter) after a brand check.
+    fn set_private_member(&mut self, base: &Value, name: &str, value: Value) -> Result<(), Abrupt> {
+        match base {
+            Value::Obj(o) if self.has_property(o, name) => self.set_member(base, name, value),
+            _ => Err(self.throw(
+                "TypeError",
+                format!("cannot write private member {name} to an object whose class did not declare it"),
+            )),
+        }
+    }
+
     /// The object `super.x` reads/writes through: `GetPrototypeOf([[HomeObject]])` when a home
     /// object is in scope (object-literal & class methods bound via `%homeobject%`), else the
     /// statically-resolved `%superproto%` carried by older class-method environments.
@@ -1797,6 +1820,9 @@ impl Interp {
                 if *optional && matches!(base, Value::Undefined | Value::Null) {
                     self.short_circuit = true;
                     return Ok(Value::Undefined);
+                }
+                if prop.starts_with('#') {
+                    return self.get_private_member(&base, prop);
                 }
                 self.get_member(&base, prop)
             }
@@ -5152,6 +5178,9 @@ impl Interp {
             },
             Reference::Prop(base, key) => {
                 let k = self.ref_prop_key(&base.clone(), key)?;
+                if k.starts_with('#') {
+                    return self.get_private_member(&base.clone(), &k);
+                }
                 self.get_member(base, &k)
             }
             Reference::Super {
@@ -5242,6 +5271,9 @@ impl Interp {
             },
             Reference::Prop(base, key) => {
                 let k = self.ref_prop_key(&base.clone(), key)?;
+                if k.starts_with('#') {
+                    return self.set_private_member(&base.clone(), &k, value);
+                }
                 self.set_member(base, &k, value)
             }
             Reference::Super {
