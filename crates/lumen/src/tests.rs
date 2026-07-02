@@ -6377,6 +6377,21 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn get_iterator_reads_next_lazily() {
+    // GetIterator only reads `next`; a missing/non-callable `next` fails when called, not at open.
+    // Here the pattern completes without ever stepping (empty pattern), so no error occurs.
+    assert_eq!(
+        run("var it={};var o={[Symbol.iterator](){return it}};var x=([]=o,'ok');x"),
+        "ok"
+    );
+    // Actually stepping a next-less iterator throws a TypeError (next is not a function).
+    assert_eq!(
+        run("var it={};var o={[Symbol.iterator](){return it}};var n='none';try{var[a]=o}catch(e){n=e.constructor.name}n"),
+        "TypeError"
+    );
+}
+
+#[test]
 fn super_assignment_null_base_throws() {
     // `super.x = v` with a null home-object prototype: ToObject(super base) throws TypeError,
     // but only after the RHS is evaluated.

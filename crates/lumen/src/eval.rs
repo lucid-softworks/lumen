@@ -871,10 +871,9 @@ impl Interp {
             return Err(self.throw("TypeError", "value is not iterable"));
         }
         let iter = self.call(itfn, v.clone(), &[])?;
+        // GetIterator only *reads* `next`; it is validated as callable when actually called
+        // (IteratorNext), so a missing/non-callable `next` doesn't fail at open time.
         let next = self.get_member(&iter, "next")?;
-        if !next.is_callable() {
-            return Err(self.throw("TypeError", "iterator.next is not a function"));
-        }
         Ok((iter, next))
     }
     /// IteratorStep: `Some(value)` or `None` when done.
