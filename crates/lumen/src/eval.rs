@@ -4773,7 +4773,7 @@ enum Reference {
     Super {
         proto: Value,
         receiver: Value,
-        key: String,
+        key: RefKey,
     },
 }
 
@@ -4815,7 +4815,7 @@ impl Interp {
                     return Ok(Reference::Super {
                         proto,
                         receiver,
-                        key: prop.clone(),
+                        key: RefKey::Static(prop.clone()),
                     });
                 }
                 let base = self.eval(obj, env)?;
@@ -4825,12 +4825,12 @@ impl Interp {
                 if matches!(**obj, Expr::Super) {
                     let proto = self.super_base(env)?;
                     let receiver = self.get_var("this", env)?;
+                    // ToPropertyKey is deferred to GetValue/PutValue (after both sides evaluate).
                     let idx = self.eval(index, env)?;
-                    let key = self.to_property_key(&idx)?;
                     return Ok(Reference::Super {
                         proto,
                         receiver,
-                        key,
+                        key: RefKey::Raw(idx),
                     });
                 }
                 // The index expression is evaluated now, but ToPropertyKey is deferred to GetValue.
@@ -4843,23 +4843,26 @@ impl Interp {
         }
     }
 
-    /// Coerce a member reference's property key, deferring `ToPropertyKey` until after the base's
-    /// RequireObjectCoercible check and caching the result so it runs at most once.
-    fn ref_prop_key(&mut self, base: &Value, key: &mut RefKey) -> Result<String, Abrupt> {
+    /// Coerce a reference key via `ToPropertyKey`, caching the result so it runs at most once.
+    fn coerce_ref_key(&mut self, key: &mut RefKey) -> Result<String, Abrupt> {
         match key {
             RefKey::Static(s) => Ok(s.clone()),
             RefKey::Raw(v) => {
-                if matches!(base, Value::Null | Value::Undefined) {
-                    return Err(
-                        self.throw("TypeError", "cannot access property of null or undefined")
-                    );
-                }
                 let v = v.clone();
                 let k = self.to_property_key(&v)?;
                 *key = RefKey::Static(k.clone());
                 Ok(k)
             }
         }
+    }
+
+    /// Coerce a member reference's property key, deferring `ToPropertyKey` until after the base's
+    /// RequireObjectCoercible check and caching the result so it runs at most once.
+    fn ref_prop_key(&mut self, base: &Value, key: &mut RefKey) -> Result<String, Abrupt> {
+        if matches!(key, RefKey::Raw(_)) && matches!(base, Value::Null | Value::Undefined) {
+            return Err(self.throw("TypeError", "cannot access property of null or undefined"));
+        }
+        self.coerce_ref_key(key)
     }
 
     /// GetValue on a resolved reference.
@@ -4899,7 +4902,12 @@ impl Interp {
                 proto,
                 receiver,
                 key,
-            } => self.get_member_recv(proto, key, receiver.clone()),
+            } => {
+                let k = self.coerce_ref_key(key)?;
+                let proto = proto.clone();
+                let receiver = receiver.clone();
+                self.get_member_recv(&proto, &k, receiver)
+            }
         }
     }
 
@@ -4969,7 +4977,11 @@ impl Interp {
                 let k = self.ref_prop_key(&base.clone(), key)?;
                 self.set_member(base, &k, value)
             }
-            Reference::Super { receiver, key, .. } => self.set_member(receiver, key, value),
+            Reference::Super { receiver, key, .. } => {
+                let k = self.coerce_ref_key(key)?;
+                let receiver = receiver.clone();
+                self.set_member(&receiver, &k, value)
+            }
         }
     }
 }
