@@ -6310,6 +6310,21 @@ fn array_flat_flatmap_species_and_throw() {
 }
 
 #[test]
+fn array_species_result_uses_create_data_prop_or_throw() {
+    // map/filter/concat/splice write results via CreateDataPropertyOrThrow: a non-extensible
+    // species result makes the write throw a TypeError.
+    let mk = |m: &str| {
+        format!(
+            "var a=[1,2,3];a.constructor={{[Symbol.species]:function(){{var o=[];Object.preventExtensions(o);return o}}}};try{{a.{m};'no'}}catch(e){{e.constructor.name}}"
+        )
+    };
+    assert_eq!(run(&mk("map(x=>x)")), "TypeError");
+    assert_eq!(run(&mk("filter(x=>true)")), "TypeError");
+    assert_eq!(run(&mk("splice(0,1)")), "TypeError");
+    assert_eq!(run(&mk("concat([4])")), "TypeError");
+}
+
+#[test]
 fn array_from_async_getmethod_and_arraylike() {
     fn two(setup: &str, read: &str) -> String {
         let mut e = Engine::new();

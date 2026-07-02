@@ -10421,12 +10421,12 @@ fn install_array(it: &mut Interp) {
                         &key,
                     ) {
                         let elem = ab(i.get_member(v, &key))?;
-                        json_create_data_prop(i, &result, &n.to_string(), elem)?;
+                        json_create_data_prop_or_throw(i, &result, &n.to_string(), elem)?;
                     }
                     n += 1; // increment for holes too, preserving their position
                 }
             } else {
-                json_create_data_prop(i, &result, &n.to_string(), v.clone())?;
+                json_create_data_prop_or_throw(i, &result, &n.to_string(), v.clone())?;
                 n += 1;
             }
         }
@@ -10478,7 +10478,7 @@ fn install_array(it: &mut Interp) {
                 cb_this.clone(),
                 &[v, Value::Num(k as f64), ov.clone()],
             ))?;
-            ab(i.set_member(&result, &k.to_string(), mapped))?;
+            json_create_data_prop_or_throw(i, &result, &k.to_string(), mapped)?;
         }
         Ok(result)
     });
@@ -10507,7 +10507,7 @@ fn install_array(it: &mut Interp) {
                 &[v.clone(), Value::Num(k as f64), ov.clone()],
             ))?;
             if i.to_boolean(&keep) {
-                ab(i.set_member(&result, &to.to_string(), v))?;
+                json_create_data_prop_or_throw(i, &result, &to.to_string(), v)?;
                 to += 1;
             }
         }
@@ -11209,7 +11209,7 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
         let from = (start + k).to_string();
         if i.has_property(&o, &from) {
             let v = ab(i.get_member(&this, &from))?;
-            json_create_data_prop(i, &removed, &k.to_string(), v)?;
+            json_create_data_prop_or_throw(i, &removed, &k.to_string(), v)?;
         }
     }
     ab(i.set_member(&removed, "length", Value::Num(delete_count as f64)))?;
