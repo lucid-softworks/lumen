@@ -6377,6 +6377,20 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn destructuring_assignment_target_reference_order() {
+    // The destructuring target's Reference is evaluated before the source element is read.
+    assert_eq!(
+        run("var log='';function tgt(){log+='t';return {set q(v){log+='set'}}}var o={get p(){log+='p'}};({p:tgt().q}=o);log"),
+        "tpset"
+    );
+    // Array element: target reference before the iterator step.
+    assert_eq!(
+        run("var log='';var it={next(){log+='n';return{done:false,value:1}}};var src={[Symbol.iterator](){return it}};function tgt(){log+='t';return{}}[tgt().x]=src;log"),
+        "tn"
+    );
+}
+
+#[test]
 fn object_rest_destructuring_assignment() {
     // Rest copies own enumerable properties (CopyDataProperties): symbols included, spec key order.
     assert_eq!(

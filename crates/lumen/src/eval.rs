@@ -3540,6 +3540,22 @@ impl Interp {
                             }
                         };
                     }
+                    // One iterator element (undefined past the end).
+                    macro_rules! next_value {
+                        () => {
+                            if done {
+                                Value::Undefined
+                            } else {
+                                match step!() {
+                                    Some(x) => x,
+                                    None => {
+                                        done = true;
+                                        Value::Undefined
+                                    }
+                                }
+                            }
+                        };
+                    }
                     for el in elems {
                         match el {
                             ArrayElem::Hole => {
@@ -3548,29 +3564,65 @@ impl Interp {
                                 }
                             }
                             ArrayElem::Spread(t) => {
-                                let mut rest = Vec::new();
-                                while !done {
-                                    match step!() {
-                                        Some(x) => rest.push(x),
-                                        None => done = true,
-                                    }
-                                }
-                                let arr = me.make_array(rest);
-                                me.assign_to_target(t, arr, env)?;
-                            }
-                            ArrayElem::Item(t) => {
-                                let v = if done {
-                                    Value::Undefined
-                                } else {
-                                    match step!() {
-                                        Some(x) => x,
-                                        None => {
-                                            done = true;
-                                            Value::Undefined
+                                // A non-literal rest target's Reference is evaluated BEFORE the
+                                // iterator is drained (AssignmentRestElement step 1).
+                                if matches!(t, Expr::Array(_) | Expr::Object(_)) {
+                                    let mut rest = Vec::new();
+                                    while !done {
+                                        match step!() {
+                                            Some(x) => rest.push(x),
+                                            None => done = true,
                                         }
                                     }
+                                    let arr = me.make_array(rest);
+                                    me.assign_to_target(t, arr, env)?;
+                                } else {
+                                    let mut lref = me.resolve_reference(t, env)?;
+                                    let mut rest = Vec::new();
+                                    while !done {
+                                        match step!() {
+                                            Some(x) => rest.push(x),
+                                            None => done = true,
+                                        }
+                                    }
+                                    let arr = me.make_array(rest);
+                                    me.put_reference(&mut lref, arr)?;
+                                }
+                            }
+                            ArrayElem::Item(t) => {
+                                // Split an optional `= default`; a non-literal target's Reference is
+                                // evaluated BEFORE the iterator step (AssignmentElement step 1).
+                                let (core, default) = match t {
+                                    Expr::Assign {
+                                        op: "=",
+                                        target,
+                                        value,
+                                    } => (&**target, Some(&**value)),
+                                    _ => (t, None),
                                 };
-                                me.assign_destructure_elem(t, v, env)?;
+                                if matches!(core, Expr::Array(_) | Expr::Object(_)) {
+                                    let mut v = next_value!();
+                                    if matches!(v, Value::Undefined) {
+                                        if let Some(d) = default {
+                                            v = me.eval(d, env)?;
+                                        }
+                                    }
+                                    me.assign_to_target(core, v, env)?;
+                                } else {
+                                    let mut lref = me.resolve_reference(core, env)?;
+                                    let mut v = next_value!();
+                                    if matches!(v, Value::Undefined) {
+                                        if let Some(d) = default {
+                                            v = me.eval(d, env)?;
+                                            if let (Expr::Ident(n), true) =
+                                                (core, is_anonymous_fn(d))
+                                            {
+                                                me.set_fn_name(&v, n);
+                                            }
+                                        }
+                                    }
+                                    me.put_reference(&mut lref, v)?;
+                                }
                             }
                         }
                     }
@@ -3601,10 +3653,40 @@ impl Interp {
                 for prop in props {
                     match prop {
                         PropDef::KeyValue { key, value: t } => {
+                            // KeyedDestructuringAssignmentEvaluation: evaluate the property name,
+                            // then the target Reference, THEN GetV(value, name) — for a non-literal
+                            // target the reference is evaluated before the source is read.
                             let k = self.propkey_to_string(key, env)?;
-                            let v = self.get_member(&value, &k)?;
-                            taken.push(k);
-                            self.assign_destructure_elem(t, v, env)?;
+                            taken.push(k.clone());
+                            let (core, default) = match t {
+                                Expr::Assign {
+                                    op: "=",
+                                    target,
+                                    value,
+                                } => (&**target, Some(&**value)),
+                                _ => (t, None),
+                            };
+                            if matches!(core, Expr::Array(_) | Expr::Object(_)) {
+                                let mut v = self.get_member(&value, &k)?;
+                                if matches!(v, Value::Undefined) {
+                                    if let Some(d) = default {
+                                        v = self.eval(d, env)?;
+                                    }
+                                }
+                                self.assign_to_target(core, v, env)?;
+                            } else {
+                                let mut lref = self.resolve_reference(core, env)?;
+                                let mut v = self.get_member(&value, &k)?;
+                                if matches!(v, Value::Undefined) {
+                                    if let Some(d) = default {
+                                        v = self.eval(d, env)?;
+                                        if let (Expr::Ident(n), true) = (core, is_anonymous_fn(d)) {
+                                            self.set_fn_name(&v, n);
+                                        }
+                                    }
+                                }
+                                self.put_reference(&mut lref, v)?;
+                            }
                         }
                         PropDef::Spread(t) => {
                             // CopyDataProperties(rest, ToObject(value), excludedNames = taken).
@@ -3659,29 +3741,6 @@ impl Interp {
                 Ok(())
             }
             _ => Err(self.throw("ReferenceError", "invalid assignment target")),
-        }
-    }
-
-    /// Assign one destructured element, honoring a `target = default` cover.
-    fn assign_destructure_elem(&mut self, t: &Expr, v: Value, env: &Env) -> Result<(), Abrupt> {
-        if let Expr::Assign {
-            op: "=",
-            target,
-            value: dflt,
-        } = t
-        {
-            let v = if matches!(v, Value::Undefined) {
-                let dv = self.eval(dflt, env)?;
-                if let (Expr::Ident(n), true) = (&**target, is_anonymous_fn(dflt)) {
-                    self.set_fn_name(&dv, n);
-                }
-                dv
-            } else {
-                v
-            };
-            self.assign_to_target(target, v, env)
-        } else {
-            self.assign_to_target(t, v, env)
         }
     }
 
