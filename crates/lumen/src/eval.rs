@@ -3396,19 +3396,21 @@ impl Interp {
         arg: &Expr,
         env: &Env,
     ) -> Result<Value, Abrupt> {
-        let old = self.eval(arg, env)?;
+        // Resolve the reference once, then GetValue/PutValue through it (spec Reference semantics).
+        let mut lref = self.resolve_reference(arg, env)?;
+        let old = self.get_reference(&mut lref)?;
         if let Value::BigInt(n) = old {
             let new = if op == "++" {
                 n.wrapping_add(1)
             } else {
                 n.wrapping_sub(1)
             };
-            self.assign_to_target(arg, Value::BigInt(new), env)?;
+            self.put_reference(&mut lref, Value::BigInt(new))?;
             return Ok(Value::BigInt(if prefix { new } else { n }));
         }
         let n = self.to_number(&old)?;
         let new = if op == "++" { n + 1.0 } else { n - 1.0 };
-        self.assign_to_target(arg, Value::Num(new), env)?;
+        self.put_reference(&mut lref, Value::Num(new))?;
         Ok(Value::Num(if prefix { new } else { n }))
     }
 
