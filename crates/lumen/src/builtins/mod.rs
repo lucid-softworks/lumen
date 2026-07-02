@@ -6618,9 +6618,21 @@ fn promise_keyed_settle_r(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Valu
 }
 
 fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Value, Value> {
-    let result = arg(args, 0);
+    let state = arg(args, 0);
     let idx = ab(i.to_number(&arg(args, 1)))? as usize;
-    let value = arg(args, 2);
+    let already = arg(args, 2);
+    let resolve_fn = arg(args, 3);
+    let value = arg(args, 4);
+    // The fulfill and reject functions for one index share this [[AlreadyCalled]] record.
+    if let Value::Obj(o) = &already {
+        if matches!(
+            o.borrow().props.get("__called").map(|p| &p.value),
+            Some(Value::Bool(true))
+        ) {
+            return Ok(Value::Undefined);
+        }
+        set_internal(o, "__called", Value::Bool(true));
+    }
     let status = i.new_object();
     set_data(
         &status,
@@ -6628,15 +6640,15 @@ fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Va
         Value::str(if fulfilled { "fulfilled" } else { "rejected" }),
     );
     set_data(&status, if fulfilled { "value" } else { "reason" }, value);
-    let results = ab(i.get_member(&result, "__results"))?;
+    let results = ab(i.get_member(&state, "__results"))?;
     if let Value::Obj(o) = &results {
         crate::value::set_data(o, &idx.to_string(), Value::Obj(status));
     }
-    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem_v = ab(i.get_member(&state, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
-    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    ab(i.set_member(&state, "__remaining", Value::Num(rem)))?;
     if rem == 0.0 {
-        i.resolve_promise(&result, results);
+        ab(i.call(resolve_fn, Value::Undefined, &[results]))?;
     }
     Ok(Value::Undefined)
 }
@@ -6647,17 +6659,28 @@ fn promise_settled_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Valu
     promise_settled(i, a, false)
 }
 fn promise_any_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    let result = arg(a, 0);
+    let state = arg(a, 0);
     let idx = ab(i.to_number(&arg(a, 1)))? as usize;
-    let reason = arg(a, 2);
-    let errors = ab(i.get_member(&result, "__errors"))?;
+    let already = arg(a, 2);
+    let reject_fn = arg(a, 3);
+    let reason = arg(a, 4);
+    if let Value::Obj(o) = &already {
+        if matches!(
+            o.borrow().props.get("__called").map(|p| &p.value),
+            Some(Value::Bool(true))
+        ) {
+            return Ok(Value::Undefined);
+        }
+        set_internal(o, "__called", Value::Bool(true));
+    }
+    let errors = ab(i.get_member(&state, "__errors"))?;
     ab(i.set_member(&errors, &idx.to_string(), reason))?;
-    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    let rem_v = ab(i.get_member(&state, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
-    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    ab(i.set_member(&state, "__remaining", Value::Num(rem)))?;
     if rem == 0.0 {
         let agg = make_aggregate_error(i, errors)?;
-        i.reject_promise(&result, agg);
+        ab(i.call(reject_fn, Value::Undefined, &[agg]))?;
     }
     Ok(Value::Undefined)
 }
@@ -6877,14 +6900,14 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allSettled", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
+        let (result, resolve_fn, reject_fn) = match new_promise_capability_full(i, &t) {
+            Ok(c) => c,
             Err(e) => return Err(e),
         };
         let promise_resolve = match get_promise_resolve(i, &t) {
             Ok(r) => r,
             Err(e) => {
-                i.reject_promise(&result, e);
+                let _ = i.call(reject_fn, Value::Undefined, &[e]);
                 return Ok(result);
             }
         };
@@ -6892,52 +6915,69 @@ fn install_promise(it: &mut Interp) {
             Ok(items) => items,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
-                i.reject_promise(&result, reason);
+                let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
         let n = items.len();
         let results = i.make_array(vec![Value::Undefined; n]);
-        set_internal_obj(&result, "__results", results.clone());
-        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        let state = i.new_object();
+        set_internal(&state, "__results", results.clone());
+        set_internal(&state, "__remaining", Value::Num(n as f64));
         if n == 0 {
-            i.resolve_promise(&result, results);
+            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
-                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
                     return Ok(result);
                 }
             };
+            // The fulfill and reject element functions for one index share one [[AlreadyCalled]].
+            let already = i.new_object();
+            set_internal(&already, "__called", Value::Bool(false));
             let on_f = make_bound(
                 i,
                 promise_settled_fulfill,
-                vec![result.clone(), Value::Num(idx as f64)],
+                vec![
+                    Value::Obj(state.clone()),
+                    Value::Num(idx as f64),
+                    Value::Obj(already.clone()),
+                    resolve_fn.clone(),
+                ],
             );
             let on_r = make_bound(
                 i,
                 promise_settled_reject,
-                vec![result.clone(), Value::Num(idx as f64)],
+                vec![
+                    Value::Obj(state.clone()),
+                    Value::Num(idx as f64),
+                    Value::Obj(already),
+                    resolve_fn.clone(),
+                ],
             );
-            let overall_reject = i.make_resolver(&result, false);
-            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
+            if !combinator_then(i, &reject_fn, p, on_f, on_r) {
                 return Ok(result);
             }
         }
         Ok(result)
     });
     it.def_method(&ctor, "any", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
+        let (result, resolve_fn, reject_fn) = match new_promise_capability_full(i, &t) {
+            Ok(c) => c,
             Err(e) => return Err(e),
         };
         let promise_resolve = match get_promise_resolve(i, &t) {
             Ok(r) => r,
             Err(e) => {
-                i.reject_promise(&result, e);
+                let _ = i.call(reject_fn, Value::Undefined, &[e]);
                 return Ok(result);
             }
         };
@@ -6945,35 +6985,47 @@ fn install_promise(it: &mut Interp) {
             Ok(items) => items,
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
-                i.reject_promise(&result, reason);
+                let _ = i.call(reject_fn, Value::Undefined, &[reason]);
                 return Ok(result);
             }
         };
         let n = items.len();
         let errors = i.make_array(vec![Value::Undefined; n]);
-        set_internal_obj(&result, "__errors", errors.clone());
-        set_internal_obj(&result, "__remaining", Value::Num(n as f64));
+        let state = i.new_object();
+        set_internal(&state, "__errors", errors.clone());
+        set_internal(&state, "__remaining", Value::Num(n as f64));
         if n == 0 {
             let agg = make_aggregate_error(i, errors)?;
-            i.reject_promise(&result, agg);
+            let _ = i.call(reject_fn, Value::Undefined, &[agg]);
             return Ok(result);
         }
         for (idx, item) in items.into_iter().enumerate() {
             let p = match i.call(promise_resolve.clone(), t.clone(), &[item]) {
                 Ok(p) => p,
                 Err(e) => {
-                    i.reject_promise(&result, crate::interpreter::abrupt_value(e));
+                    let _ = i.call(
+                        reject_fn.clone(),
+                        Value::Undefined,
+                        &[crate::interpreter::abrupt_value(e)],
+                    );
                     return Ok(result);
                 }
             };
-            let on_f = i.make_resolver(&result, true);
+            let already = i.new_object();
+            set_internal(&already, "__called", Value::Bool(false));
             let on_r = make_bound(
                 i,
                 promise_any_reject,
-                vec![result.clone(), Value::Num(idx as f64)],
+                vec![
+                    Value::Obj(state.clone()),
+                    Value::Num(idx as f64),
+                    Value::Obj(already),
+                    reject_fn.clone(),
+                ],
             );
-            let overall_reject = i.make_resolver(&result, false);
-            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
+            // First fulfillment resolves the result (its own [[AlreadyResolved]] lives in the
+            // capability's resolve function).
+            if !combinator_then(i, &reject_fn, p, resolve_fn.clone(), on_r) {
                 return Ok(result);
             }
         }
