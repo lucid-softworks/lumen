@@ -32,10 +32,23 @@ impl Interp {
                 let (iter, next) = self.get_iterator(&value)?;
                 let mut done = false;
                 let result = (|me: &mut Self| -> Result<(), Abrupt> {
+                    // A throw from `next` marks the record done (IteratorClose skipped); a throw from
+                    // binding a sub-pattern leaves it not-done, so the iterator is still closed.
+                    macro_rules! step {
+                        () => {
+                            match me.iterator_step(&iter, &next) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    done = true;
+                                    return Err(e);
+                                }
+                            }
+                        };
+                    }
                     for el in elems {
                         match el {
                             ArrayPatElem::Hole => {
-                                if !done && me.iterator_step(&iter, &next)?.is_none() {
+                                if !done && step!().is_none() {
                                     done = true;
                                 }
                             }
@@ -43,7 +56,7 @@ impl Interp {
                                 let mut v = if done {
                                     Value::Undefined
                                 } else {
-                                    match me.iterator_step(&iter, &next)? {
+                                    match step!() {
                                         Some(x) => x,
                                         None => {
                                             done = true;
@@ -66,7 +79,7 @@ impl Interp {
                             ArrayPatElem::Rest(pattern) => {
                                 let mut rest = Vec::new();
                                 while !done {
-                                    match me.iterator_step(&iter, &next)? {
+                                    match step!() {
                                         Some(x) => rest.push(x),
                                         None => done = true,
                                     }
@@ -78,11 +91,21 @@ impl Interp {
                     }
                     Ok(())
                 })(self);
-                if !done {
-                    self.iterator_close(&iter);
+                // IteratorClose: propagate its abrupt on normal completion, swallow on abrupt.
+                match result {
+                    Ok(()) => {
+                        if !done {
+                            self.iterator_close_normal(&iter)?;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        if !done {
+                            self.iterator_close(&iter);
+                        }
+                        Err(e)
+                    }
                 }
-                result?;
-                Ok(())
             }
             Pattern::Object(objpat) => {
                 if matches!(value, Value::Undefined | Value::Null) {
