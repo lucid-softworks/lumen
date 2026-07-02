@@ -3127,7 +3127,13 @@ impl Interp {
                 if let Value::Obj(o) = &base {
                     let ptr = Rc::as_ptr(o) as usize;
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
-                        return Ok(Value::Bool(self.proxy_delete(target, handler, prop)?));
+                        let ok = self.proxy_delete(target, handler, prop)?;
+                        if !ok && self.strict {
+                            return Err(
+                                self.throw("TypeError", format!("cannot delete property '{prop}'"))
+                            );
+                        }
+                        return Ok(Value::Bool(ok));
                     }
                     let configurable = o
                         .borrow()
@@ -3157,7 +3163,13 @@ impl Interp {
                 if let Value::Obj(o) = &base {
                     let ptr = Rc::as_ptr(o) as usize;
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
-                        return Ok(Value::Bool(self.proxy_delete(target, handler, &key)?));
+                        let ok = self.proxy_delete(target, handler, &key)?;
+                        if !ok && self.strict {
+                            return Err(
+                                self.throw("TypeError", format!("cannot delete property '{key}'"))
+                            );
+                        }
+                        return Ok(Value::Bool(ok));
                     }
                     // A TypedArray integer index can't be deleted ([[Delete]] → false; strict throws);
                     // a canonical-numeric non-index reports success.

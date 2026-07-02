@@ -6024,3 +6024,23 @@ fn generator_prototype_chain() {
         "true"
     );
 }
+
+#[test]
+fn proxy_set_receiver_and_strict_delete() {
+    // A missing/null `set` trap forwards to the target's [[Set]] with the original Receiver, so a
+    // target setter sees `this` === the proxy.
+    assert_eq!(
+        run("var ctx; var t={set attr(v){ctx=this}}; var p=new Proxy(t,{set:null}); p.attr=1; ctx===p"),
+        "true"
+    );
+    // A strict `delete` through a proxy whose [[Delete]] returns false throws a TypeError.
+    assert_eq!(
+        run("'use strict'; var f=function(){}; var p=new Proxy(new Proxy(f,{}),{}); try{delete p.prototype;'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // Object.keys forwards ownKeys + enumerability through a proxy target.
+    assert_eq!(
+        run("var o={a:1,b:2}; var p=new Proxy(new Proxy(o,{}),{ownKeys:null}); Object.keys(p).join(',')"),
+        "a,b"
+    );
+}

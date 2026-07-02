@@ -1269,8 +1269,21 @@ impl Interp {
     }
 
     /// Set `base[key] = value`, honouring setters, accessor-only properties, read-only data
-    /// properties, and array `length`/index bookkeeping.
+    /// properties, and array `length`/index bookkeeping. The receiver defaults to `base`.
     pub fn set_member(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Abrupt> {
+        self.set_member_recv(base, key, value, base.clone())
+    }
+
+    /// [[Set]](P, V, Receiver): like [`set_member`] but with an explicit `receiver` — the object a
+    /// setter is invoked on, the proxy `set` trap's Receiver argument, and what a forwarded `[[Set]]`
+    /// carries through a proxy target chain.
+    pub fn set_member_recv(
+        &mut self,
+        base: &Value,
+        key: &str,
+        value: Value,
+        receiver: Value,
+    ) -> Result<(), Abrupt> {
         let obj = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null => {
@@ -1303,8 +1316,8 @@ impl Interp {
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                 let trap = self.get_member(&handler, "set")?;
                 if matches!(trap, Value::Undefined | Value::Null) {
-                    // Forward to the target's [[Set]] (recursing for a proxy target).
-                    return self.set_member(&target, key, value);
+                    // Forward to the target's [[Set]], preserving the original Receiver.
+                    return self.set_member_recv(&target, key, value, receiver);
                 }
                 if !trap.is_callable() {
                     return Err(self.throw("TypeError", "proxy 'set' trap is not callable"));
@@ -1312,7 +1325,12 @@ impl Interp {
                 let ok = self.call(
                     trap,
                     handler,
-                    &[target.clone(), Value::str(key), value.clone(), base.clone()],
+                    &[
+                        target.clone(),
+                        Value::str(key),
+                        value.clone(),
+                        receiver.clone(),
+                    ],
                 )?;
                 // A successful `set` can't contradict a non-configurable property on the target.
                 if self.to_boolean(&ok) {
@@ -1352,7 +1370,7 @@ impl Interp {
                 }
                 let trap = self.get_member(&handler, "set")?;
                 if matches!(trap, Value::Undefined | Value::Null) {
-                    return self.set_member(&target, key, value);
+                    return self.set_member_recv(&target, key, value, receiver);
                 }
                 if !trap.is_callable() {
                     return Err(self.throw("TypeError", "proxy 'set' trap is not callable"));
@@ -1360,7 +1378,12 @@ impl Interp {
                 let ok = self.call(
                     trap,
                     handler,
-                    &[target.clone(), Value::str(key), value.clone(), base.clone()],
+                    &[
+                        target.clone(),
+                        Value::str(key),
+                        value.clone(),
+                        receiver.clone(),
+                    ],
                 )?;
                 if self.to_boolean(&ok) {
                     self.proxy_set_invariant(&target, key, &value)?;
@@ -1385,7 +1408,7 @@ impl Interp {
                 if p.accessor {
                     return match p.set {
                         Some(setter) => {
-                            self.call(setter, base.clone(), &[value])?;
+                            self.call(setter, receiver.clone(), &[value])?;
                             Ok(())
                         }
                         None => {

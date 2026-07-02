@@ -8854,6 +8854,9 @@ fn proxy_key_enumerable(
         }
         let enum_v = ab(i.get_member(&res, "enumerable"))?;
         Ok(i.to_boolean(&enum_v))
+    } else if let Some((t2, h2)) = proxy_pair(i, target) {
+        // Absent gOPD trap over a proxy target: forward to the target's [[GetOwnProperty]].
+        proxy_key_enumerable(i, &t2, &h2, key)
     } else if let Value::Obj(t) = target {
         Ok(t.borrow()
             .props
