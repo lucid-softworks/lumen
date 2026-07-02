@@ -5424,7 +5424,8 @@ fn install_map_methods(it: &mut Interp) {
     });
     it.def_method(&mp, "getOrInsertComputed", 2, |i, this, a| {
         let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-        let key = arg(a, 0);
+        // CoerceKey: -0 is canonicalized to +0 (so the callback and stored key see +0).
+        let key = canonicalize_map_key(arg(a, 0));
         let cb = arg(a, 1);
         if !cb.is_callable() {
             return Err(i.make_error("TypeError", "callback is not callable"));
@@ -5436,17 +5437,19 @@ fn install_map_methods(it: &mut Interp) {
             return Ok(v.clone());
         }
         let value = ab(i.call(cb, Value::Undefined, std::slice::from_ref(&key)))?;
-        // Re-check (the callback may have mutated the map), then insert.
-        if let Some((_, v)) = i.map_data[&ptr]
-            .iter()
-            .find(|(k, _)| same_value_zero(k, &key))
+        // The callback may have inserted the key; the computed value overwrites that mutation.
+        if let Some(entry) = i
+            .map_data
+            .get_mut(&ptr)
+            .and_then(|d| d.iter_mut().find(|(k, _)| same_value_zero(k, &key)))
         {
-            return Ok(v.clone());
+            entry.1 = value.clone();
+        } else {
+            i.map_data
+                .entry(ptr)
+                .or_default()
+                .push((key, value.clone()));
         }
-        i.map_data
-            .entry(ptr)
-            .or_default()
-            .push((key, value.clone()));
         Ok(value)
     });
 }
@@ -5720,6 +5723,15 @@ fn collection_ctor(
     Ok(mv)
 }
 
+/// CoerceKey for Map/Set: `-0` is canonicalized to `+0` so a stored key (and any key handed to a
+/// callback or iterated) is `+0`, per spec.
+fn canonicalize_map_key(k: Value) -> Value {
+    match k {
+        Value::Num(n) if n == 0.0 && n.is_sign_negative() => Value::Num(0.0),
+        other => other,
+    }
+}
+
 /// Map and Set share almost everything; `is_set` flips key/value handling and method names.
 fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
     let proto = Object::new(Some(it.object_proto.clone()));
@@ -5728,7 +5740,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     let adder: NativeFn = if is_set {
         |i, this, a| {
             let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-            let key = arg(a, 0);
+            let key = canonicalize_map_key(arg(a, 0));
             let e = i.map_data.entry(ptr).or_default();
             if !e.iter().any(|(k, _)| same_value_zero(k, &key)) {
                 e.push((key.clone(), key));
@@ -5738,7 +5750,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
     } else {
         |i, this, a| {
             let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            let (key, val) = (arg(a, 0), arg(a, 1));
+            let (key, val) = (canonicalize_map_key(arg(a, 0)), arg(a, 1));
             let e = i.map_data.entry(ptr).or_default();
             if let Some(slot) = e.iter_mut().find(|(k, _)| same_value_zero(k, &key)) {
                 slot.1 = val;
@@ -6052,17 +6064,19 @@ fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: Nati
                 return Ok(v.clone());
             }
             let value = ab(i.call(cb, Value::Undefined, std::slice::from_ref(&key)))?;
-            // The callback may have mutated the map; re-check before inserting.
-            if let Some((_, v)) = i.map_data[&ptr]
-                .iter()
-                .find(|(k, _)| same_value_zero(k, &key))
+            // The callback may have inserted the key; the computed value overwrites that mutation.
+            if let Some(entry) = i
+                .map_data
+                .get_mut(&ptr)
+                .and_then(|d| d.iter_mut().find(|(k, _)| same_value_zero(k, &key)))
             {
-                return Ok(v.clone());
+                entry.1 = value.clone();
+            } else {
+                i.map_data
+                    .entry(ptr)
+                    .or_default()
+                    .push((key, value.clone()));
             }
-            i.map_data
-                .entry(ptr)
-                .or_default()
-                .push((key, value.clone()));
             Ok(value)
         });
     }
