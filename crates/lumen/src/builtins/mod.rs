@@ -11608,14 +11608,34 @@ fn install_iterator(it: &mut Interp) {
     it.def_method(&gen_proto, "next", 1, generator_next);
     it.def_method(&gen_proto, "return", 1, generator_return);
     it.def_method(&gen_proto, "throw", 1, generator_throw);
+    // %Generator% (= %GeneratorFunction.prototype%) .prototype === %GeneratorPrototype%, and the
+    // latter's .constructor points back — both { writable: false, enumerable: false, configurable: true }.
+    link_generator_proto(it, "%GeneratorFunction.prototype%", &gen_proto);
     it.extra_protos.insert("%GeneratorPrototype%", gen_proto);
     let async_gen_proto = Object::new(Some(async_iter_proto));
     set_to_string_tag(it, &async_gen_proto, "AsyncGenerator");
     it.def_method(&async_gen_proto, "next", 1, async_generator_next);
     it.def_method(&async_gen_proto, "return", 1, async_generator_return);
     it.def_method(&async_gen_proto, "throw", 1, async_generator_throw);
+    link_generator_proto(it, "%AsyncGeneratorFunction.prototype%", &async_gen_proto);
     it.extra_protos
         .insert("%AsyncGeneratorPrototype%", async_gen_proto);
+}
+
+/// Wire the `.prototype` ↔ `.constructor` pair between a `%(Async)GeneratorFunction.prototype%`
+/// intrinsic (`%Generator%`/`%AsyncGenerator%`) and its instance prototype.
+fn link_generator_proto(it: &mut Interp, gen_ctor_key: &str, inst_proto: &Gc) {
+    let Some(gen_ctor) = it.extra_protos.get(gen_ctor_key).cloned() else {
+        return;
+    };
+    gen_ctor.borrow_mut().props.insert(
+        "prototype",
+        Property::data(Value::Obj(inst_proto.clone()), false, false, true),
+    );
+    inst_proto.borrow_mut().props.insert(
+        "constructor",
+        Property::data(Value::Obj(gen_ctor), false, false, true),
+    );
 }
 
 /// %AsyncIteratorPrototype%[@@asyncDispose]: return a promise that runs the iterator's `return()`

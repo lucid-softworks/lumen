@@ -6377,6 +6377,22 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn generator_prototype_constructor_links() {
+    // %Generator%/%AsyncGenerator% (the function .prototype) <-> their instance prototype.
+    assert_eq!(run("function* g(){}Object.getPrototypeOf(g).prototype===Object.getPrototypeOf(g.prototype)"), "true");
+    assert_eq!(
+        run("function* g(){}g.prototype.constructor===Object.getPrototypeOf(g)"),
+        "true"
+    );
+    assert_eq!(
+        run("async function* g(){}g.prototype.constructor===Object.getPrototypeOf(g)"),
+        "true"
+    );
+    // The constructor link (on %GeneratorPrototype%) is non-enumerable, non-writable, configurable.
+    assert_eq!(run("function* g(){}var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(g.prototype),'constructor');[d.writable,d.enumerable,d.configurable].join(',')"), "false,false,true");
+}
+
+#[test]
 fn get_iterator_reads_next_lazily() {
     // GetIterator only reads `next`; a missing/non-callable `next` fails when called, not at open.
     // Here the pattern completes without ever stepping (empty pattern), so no error occurs.
