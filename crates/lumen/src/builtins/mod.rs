@@ -10895,6 +10895,7 @@ fn install_iterator(it: &mut Interp) {
         make_iter_helper(i, t, "flatMap", arg(a, 0))
     });
     it.def_method(&proto, "toArray", 0, |i, this, _| {
+        require_iterator_object(i, &this)?;
         let mut out = Vec::new();
         while let Some(v) = step_iter(i, &this)? {
             out.push(v);
@@ -10902,6 +10903,7 @@ fn install_iterator(it: &mut Interp) {
         Ok(i.make_array(out))
     });
     it.def_method(&proto, "forEach", 1, |i, this, a| {
+        require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
             i.iterator_close(&this);
@@ -10921,6 +10923,7 @@ fn install_iterator(it: &mut Interp) {
         Ok(Value::Undefined)
     });
     it.def_method(&proto, "reduce", 1, |i, this, a| {
+        require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
             i.iterator_close(&this);
@@ -10959,6 +10962,7 @@ fn install_iterator(it: &mut Interp) {
         iter_some_every(i, t, a, false)
     });
     it.def_method(&proto, "find", 1, |i, this, a| {
+        require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
             i.iterator_close(&this);
@@ -11276,6 +11280,7 @@ fn array_from_async(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
 }
 
 fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Result<Value, Value> {
+    require_iterator_object(i, &this)?;
     let f = arg(a, 0);
     if !f.is_callable() {
         // A non-callable predicate still closes the underlying iterator.
@@ -11301,6 +11306,15 @@ fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Resu
 }
 
 /// Step an iterator object (`this`) once: `Some(value)` or `None` when done.
+/// GetIteratorDirect's receiver check: an Iterator.prototype helper requires an Object `this`.
+fn require_iterator_object(i: &Interp, this: &Value) -> Result<(), Value> {
+    if matches!(this, Value::Obj(_)) {
+        Ok(())
+    } else {
+        Err(i.make_error("TypeError", "Iterator method called on a non-object"))
+    }
+}
+
 fn step_iter(i: &mut Interp, src: &Value) -> Result<Option<Value>, Value> {
     let next = ab(i.get_member(src, "next"))?;
     step_iter_with(i, src, &next)
@@ -11326,6 +11340,10 @@ fn step_iter_with(i: &mut Interp, src: &Value, next: &Value) -> Result<Option<Va
 
 /// Build a lazy iterator-helper (map/filter/take/drop/flatMap) wrapping `source`.
 fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Result<Value, Value> {
+    // GetIteratorDirect requires an Object receiver (checked before the callable/limit checks).
+    if !matches!(source, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "Iterator helper called on a non-object"));
+    }
     if matches!(kind, "map" | "filter" | "flatMap") && !f.is_callable() {
         // A non-callable mapper/predicate still closes the underlying iterator.
         i.iterator_close(&source);

@@ -5810,3 +5810,16 @@ fn promise_internal_function_shapes() {
         ",1"
     );
 }
+
+#[test]
+fn iterator_helpers_require_object_this() {
+    // Iterator.prototype helpers throw TypeError when `this` is not an object (GetIteratorDirect).
+    for m in ["map", "filter", "take", "drop", "flatMap"] {
+        let src = format!("try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}");
+        assert_eq!(run(&src), "TypeError", "lazy helper {m}");
+    }
+    for m in ["forEach", "reduce", "some", "every", "find", "toArray"] {
+        let src = format!("try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}");
+        assert_eq!(run(&src), "TypeError", "eager helper {m}");
+    }
+}
