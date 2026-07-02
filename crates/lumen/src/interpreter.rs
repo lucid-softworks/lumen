@@ -1776,9 +1776,13 @@ impl Interp {
 
         let call = obj.borrow().call.clone();
         // A plain call is never constructing (only `new` sets the flag). Clearing it here keeps a
-        // wrapper constructor invoked as a function — `Number(x)` — from boxing.
+        // wrapper constructor invoked as a function — `Number(x)` — from boxing. `new.target` is
+        // likewise cleared so a native constructor called *as a function* during an outer `new`
+        // (e.g. `new F(){ Function('a','b') }`) doesn't inherit the outer new.target.
         let saved_ctor = self.constructing;
+        let saved_nt = self.new_target.clone();
         self.constructing = false;
+        self.new_target = Value::Undefined;
         let r = match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
             Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),
@@ -1815,6 +1819,7 @@ impl Interp {
             }
         };
         self.constructing = saved_ctor;
+        self.new_target = saved_nt;
         r
     }
 

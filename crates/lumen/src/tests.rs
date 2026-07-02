@@ -5815,11 +5815,29 @@ fn promise_internal_function_shapes() {
 fn iterator_helpers_require_object_this() {
     // Iterator.prototype helpers throw TypeError when `this` is not an object (GetIteratorDirect).
     for m in ["map", "filter", "take", "drop", "flatMap"] {
-        let src = format!("try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}");
+        let src = format!(
+            "try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}"
+        );
         assert_eq!(run(&src), "TypeError", "lazy helper {m}");
     }
     for m in ["forEach", "reduce", "some", "every", "find", "toArray"] {
-        let src = format!("try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}");
+        let src = format!(
+            "try{{Iterator.prototype.{m}.call(5, ()=>{{}}); 'no'}}catch(e){{e.constructor.name}}"
+        );
         assert_eq!(run(&src), "TypeError", "eager helper {m}");
     }
+}
+
+#[test]
+fn new_target_not_leaked_into_nested_native_call() {
+    // A native constructor (Function) invoked as a plain function inside an outer `new` must not
+    // inherit the outer new.target — its result's prototype stays %Function.prototype%.
+    assert_eq!(
+        run("function FACTORY(){ this.f = Function('a','return a'); } var o=new FACTORY(); typeof o.f.apply"),
+        "function"
+    );
+    assert_eq!(
+        run("function F(){ this.g = Function('a,b','return a+b'); } (new F()).g(2,3)"),
+        "5"
+    );
 }
