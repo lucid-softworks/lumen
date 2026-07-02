@@ -5791,3 +5791,22 @@ fn set_map_brand_checks() {
         "1,2,3"
     );
 }
+
+#[test]
+fn promise_internal_function_shapes() {
+    // The internal resolve/reject functions are anonymous built-ins (own name "", length 1).
+    assert_eq!(
+        run("var f; new Promise(function(res,rej){f=res}); f.name+','+f.length"),
+        ",1"
+    );
+    // Their name/length are own, non-enumerable, configurable data properties.
+    assert_eq!(
+        run("var f; new Promise(function(res){f=res}); var d=Object.getOwnPropertyDescriptor(f,'name'); d.value+','+d.enumerable+','+d.configurable"),
+        ",false,true"
+    );
+    // Promise.all element resolve function: name "" length 1.
+    assert_eq!(
+        run("var order=[]; var thenable={then(res){order.push(res)}}; Promise.all([thenable]); var f=order[0]; f.name+','+f.length"),
+        ",1"
+    );
+}

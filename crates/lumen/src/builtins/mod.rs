@@ -6172,13 +6172,29 @@ fn proxy_uncallable(i: &mut Interp, _t: Value, _a: &[Value]) -> Result<Value, Va
 /// A bound handler `(target, this=Undefined, [bound...])` used to thread per-element state into a
 /// `Promise.all` reaction without closures.
 fn make_bound(i: &Interp, target: NativeFn, bound_args: Vec<Value>) -> Value {
+    make_bound_len(i, target, bound_args, 1.0)
+}
+
+/// Like [`make_bound`] but with an explicit observable `length`. These internal closures are
+/// anonymous built-in functions, so they carry own `name` (the empty string) and `length` data
+/// properties (both non-writable, non-enumerable, configurable), which test262's verifyProperty checks.
+fn make_bound_len(i: &Interp, target: NativeFn, bound_args: Vec<Value>, length: f64) -> Value {
     let t = i.make_native("", 1, target);
     let obj = Object::new(Some(i.function_proto.clone()));
-    obj.borrow_mut().call = Callable::Bound {
-        target: t,
-        this: Value::Undefined,
-        args: bound_args,
-    };
+    {
+        let mut b = obj.borrow_mut();
+        b.call = Callable::Bound {
+            target: t,
+            this: Value::Undefined,
+            args: bound_args,
+        };
+        b.props.insert(
+            "length",
+            Property::data(Value::Num(length), false, false, true),
+        );
+        b.props
+            .insert("name", Property::data(Value::str(""), false, false, true));
+    }
     Value::Obj(obj)
 }
 
@@ -6268,7 +6284,8 @@ fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> 
         ));
     }
     let cap = i.new_object();
-    let executor = make_bound(i, capability_executor, vec![Value::Obj(cap.clone())]);
+    // GetCapabilitiesExecutor is an anonymous built-in function of length 2.
+    let executor = make_bound_len(i, capability_executor, vec![Value::Obj(cap.clone())], 2.0);
     let promise = ab(i.construct(ctor.clone(), &[executor]))?;
     let resolve = ab(i.get_member(&Value::Obj(cap.clone()), "__resolve"))?;
     let reject = ab(i.get_member(&Value::Obj(cap.clone()), "__reject"))?;
