@@ -5375,6 +5375,13 @@ fn map_set_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value,
             _ => 0.0,
         }
     };
+    // A once-exhausted iterator stays done, even if the collection later grows.
+    if matches!(
+        obj.borrow().props.get("__ci_done").map(|p| &p.value),
+        Some(Value::Bool(true))
+    ) {
+        return Ok(iter_result(i, Value::Undefined, true));
+    }
     let mut idx = num(obj, "__ci_index") as usize;
     let kind = num(obj, "__ci_kind") as u8;
     let coll_ptr = map_ptr(&coll);
@@ -5399,6 +5406,7 @@ fn map_set_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value,
             }
             None => {
                 set_internal(obj, "__ci_index", Value::Num(idx as f64));
+                set_internal(obj, "__ci_done", Value::Bool(true));
                 return Ok(iter_result(i, Value::Undefined, true));
             }
         }
