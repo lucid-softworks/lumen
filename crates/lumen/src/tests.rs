@@ -5917,3 +5917,19 @@ fn atomics_wait_notify_validation_order() {
         "TypeError"
     );
 }
+
+#[test]
+fn generator_function_intrinsics() {
+    // Each function kind's [[Prototype]] is its own intrinsic whose constructor is the matching
+    // dynamic-function constructor (reachable only via the prototype chain).
+    assert_eq!(run("Object.getPrototypeOf(function*(){}).constructor.name"), "GeneratorFunction");
+    assert_eq!(run("Object.getPrototypeOf(async function(){}).constructor.name"), "AsyncFunction");
+    assert_eq!(run("Object.getPrototypeOf(async function*(){}).constructor.name"), "AsyncGeneratorFunction");
+    // The intrinsic constructors dynamically compile the right kind of function.
+    assert_eq!(run("var GF=Object.getPrototypeOf(function*(){}).constructor; var g=GF('yield 1;'); g().next().value"), "1");
+    assert_eq!(run("var AF=Object.getPrototypeOf(async function(){}).constructor; typeof AF('return 1')().then"), "function");
+    // @@toStringTag on the prototype objects.
+    assert_eq!(run("Object.getPrototypeOf(function*(){})[Symbol.toStringTag]"), "GeneratorFunction");
+    // Still functions (inherit call/apply from %Function.prototype%).
+    assert_eq!(run("(function*(){}) instanceof Function"), "true");
+}

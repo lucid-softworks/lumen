@@ -1047,17 +1047,27 @@ impl Interp {
     }
 
     pub fn make_function(&self, func: Rc<Function>, env: Env) -> Value {
-        let obj = Object::new(Some(self.function_proto.clone()));
+        let is_arrow = func.is_arrow;
+        let is_method = func.is_method;
+        let is_generator = func.is_generator;
+        let is_async = func.is_async;
+        // A generator / async / async-generator function object's [[Prototype]] is the matching
+        // intrinsic (%GeneratorFunction.prototype% etc.), not %Function.prototype%. Non-arrow only.
+        let fn_proto = match (is_arrow, is_async, is_generator) {
+            (false, false, true) => self.extra_protos.get("%GeneratorFunction.prototype%"),
+            (false, true, false) => self.extra_protos.get("%AsyncFunction.prototype%"),
+            (false, true, true) => self.extra_protos.get("%AsyncGeneratorFunction.prototype%"),
+            _ => None,
+        }
+        .cloned()
+        .unwrap_or_else(|| self.function_proto.clone());
+        let obj = Object::new(Some(fn_proto));
         let arity = func
             .params
             .iter()
             .take_while(|p| p.default.is_none() && !p.rest)
             .count();
         let name = func.name.clone().unwrap_or_default();
-        let is_arrow = func.is_arrow;
-        let is_method = func.is_method;
-        let is_generator = func.is_generator;
-        let is_async = func.is_async;
         {
             let mut b = obj.borrow_mut();
             b.call = Callable::User(func, env);

@@ -150,6 +150,8 @@ pub fn install(it: &mut Interp) {
     install_object(it);
     // Symbol before Array/String so `Symbol.iterator` exists when they define `@@iterator`.
     install_symbol(it);
+    // After Symbol so the intrinsics' @@toStringTag resolves.
+    install_generator_function_ctors(it);
     // Function.prototype[@@hasInstance] (default OrdinaryHasInstance) — installed after Symbol so the
     // well-known key exists; non-writable/non-configurable.
     if let Some(key) = well_known_key(it, "hasInstance") {
@@ -8012,37 +8014,7 @@ fn install_function_proto(it: &mut Interp) {
     // The `Function` constructor: `Function(p1, p2, ..., body)` compiles a new function in the
     // global scope. We synthesize source and reuse the in-crate parser (no eval engine needed).
     let ctor = it.make_native("Function", 1, |i, _this, args| {
-        let (params, body) = if args.is_empty() {
-            (String::new(), String::new())
-        } else {
-            let body = ab(i.to_string(args.last().unwrap()))?.to_string();
-            let mut ps = Vec::new();
-            for a in &args[..args.len() - 1] {
-                ps.push(ab(i.to_string(a))?.to_string());
-            }
-            (ps.join(","), body)
-        };
-        let src = format!("function anonymous({params}\n) {{\n{body}\n}}");
-        let program = crate::parser::parse_script(&src, false)
-            .map_err(|e| i.make_error("SyntaxError", e.message))?;
-        match program.into_iter().next() {
-            Some(crate::ast::Stmt::FuncDecl(f)) => {
-                let env = i.global_env.clone();
-                let func = i.make_function(f, env);
-                // GetPrototypeFromConstructor(new.target, %Function.prototype%): a cross-realm
-                // `new other.Function()` gets other realm's Function.prototype as its [[Prototype]].
-                let nt = i.new_target.clone();
-                if matches!(nt, Value::Obj(_)) {
-                    if let Value::Obj(p) = ab(i.get_member(&nt, "prototype"))? {
-                        if let Value::Obj(fo) = &func {
-                            fo.borrow_mut().proto = Some(p);
-                        }
-                    }
-                }
-                Ok(func)
-            }
-            _ => Err(i.make_error("SyntaxError", "Function constructor: invalid body")),
-        }
+        create_dynamic_function(i, args, "function")
     });
     // `Function.prototype` is the shared function prototype, so `f instanceof Function` holds for
     // every function (their [[Prototype]] is `function_proto`).
@@ -8054,7 +8026,96 @@ fn install_function_proto(it: &mut Interp) {
     fp.borrow_mut()
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
-    set_builtin(&it.global, "Function", Value::Obj(ctor));
+    set_builtin(&it.global, "Function", Value::Obj(ctor.clone()));
+}
+
+/// The %GeneratorFunction% / %AsyncFunction% / %AsyncGeneratorFunction% intrinsics. Each is a
+/// constructor (reachable only as `theFn.constructor`, not a global) whose [[Prototype]] is
+/// %Function%, with a `.prototype` object stored in extra_protos so `make_function` installs it as
+/// the [[Prototype]] of the corresponding kind of function. Runs after Symbol so @@toStringTag works.
+fn install_generator_function_ctors(it: &mut Interp) {
+    let fp = it.function_proto.clone();
+    let function_ctor = match it
+        .global
+        .borrow()
+        .props
+        .get("Function")
+        .map(|p| p.value.clone())
+    {
+        Some(Value::Obj(o)) => o,
+        _ => return,
+    };
+    for (tag, make_fn) in [
+        (
+            "GeneratorFunction",
+            (|i: &mut Interp, _t: Value, a: &[Value]| create_dynamic_function(i, a, "function*"))
+                as NativeFn,
+        ),
+        (
+            "AsyncFunction",
+            (|i: &mut Interp, _t: Value, a: &[Value]| {
+                create_dynamic_function(i, a, "async function")
+            }) as NativeFn,
+        ),
+        (
+            "AsyncGeneratorFunction",
+            (|i: &mut Interp, _t: Value, a: &[Value]| {
+                create_dynamic_function(i, a, "async function*")
+            }) as NativeFn,
+        ),
+    ] {
+        // The constructor's `.prototype` object; its [[Prototype]] is %Function.prototype%.
+        let kind_proto = Object::new(Some(fp.clone()));
+        set_to_string_tag(it, &kind_proto, tag);
+        let key: &'static str = Box::leak(format!("%{tag}.prototype%").into_boxed_str());
+        it.extra_protos.insert(key, kind_proto.clone());
+        let kind_ctor = it.make_native(tag, 1, make_fn);
+        kind_ctor.borrow_mut().proto = Some(function_ctor.clone()); // [[Prototype]] is %Function%
+        kind_ctor.borrow_mut().props.insert(
+            "prototype",
+            Property::data(Value::Obj(kind_proto.clone()), false, false, false),
+        );
+        kind_proto.borrow_mut().props.insert(
+            "constructor",
+            Property::data(Value::Obj(kind_ctor), false, false, true),
+        );
+    }
+}
+
+/// Shared CreateDynamicFunction for the Function/Generator/Async/AsyncGenerator constructors:
+/// synthesize `<prefix> anonymous(<params>) { <body> }`, parse it, and build the function object.
+fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Result<Value, Value> {
+    let (params, body) = if args.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let body = ab(i.to_string(args.last().unwrap()))?.to_string();
+        let mut ps = Vec::new();
+        for a in &args[..args.len() - 1] {
+            ps.push(ab(i.to_string(a))?.to_string());
+        }
+        (ps.join(","), body)
+    };
+    let src = format!("{prefix} anonymous({params}\n) {{\n{body}\n}}");
+    let program = crate::parser::parse_script(&src, false)
+        .map_err(|e| i.make_error("SyntaxError", e.message))?;
+    match program.into_iter().next() {
+        Some(crate::ast::Stmt::FuncDecl(f)) => {
+            let env = i.global_env.clone();
+            let func = i.make_function(f, env);
+            // GetPrototypeFromConstructor(new.target, ...): a cross-realm `new other.Function()` gets
+            // other realm's prototype as its [[Prototype]].
+            let nt = i.new_target.clone();
+            if matches!(nt, Value::Obj(_)) {
+                if let Value::Obj(p) = ab(i.get_member(&nt, "prototype"))? {
+                    if let Value::Obj(fo) = &func {
+                        fo.borrow_mut().proto = Some(p);
+                    }
+                }
+            }
+            Ok(func)
+        }
+        _ => Err(i.make_error("SyntaxError", "Function constructor: invalid body")),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
