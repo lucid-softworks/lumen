@@ -12163,11 +12163,18 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
         i.iterator_close(&source);
         return Err(i.make_error("TypeError", "Iterator helper argument is not callable"));
     }
-    // take/drop validate the limit (ToNumber → NaN or negative is a RangeError) BEFORE
-    // GetIteratorDirect, per the spec's operation order.
+    // take/drop validate the limit (ToNumber → NaN or negative is a RangeError) before reading the
+    // source's `next`; any validation failure closes the underlying iterator (calls its `return`).
     let limit = if matches!(kind, "take" | "drop") {
-        let raw = ab(i.to_number(&f))?;
+        let raw = match i.to_number(&f) {
+            Ok(n) => n,
+            Err(e) => {
+                i.iterator_close(&source);
+                return Err(crate::interpreter::abrupt_value(e));
+            }
+        };
         if raw.is_nan() || raw < 0.0 {
+            i.iterator_close(&source);
             return Err(i.make_error("RangeError", "limit must be a non-negative number"));
         }
         Some(raw.trunc())

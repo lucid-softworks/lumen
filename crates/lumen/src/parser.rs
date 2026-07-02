@@ -2192,7 +2192,13 @@ impl Parser {
                     proto_seen = true;
                 }
                 let value = self.parse_assign()?;
-                props.push(PropDef::KeyValue { key, value });
+                // The colon-form `__proto__:` sets the prototype (as a value literal); a
+                // destructuring pattern reinterprets it as a normal keyed target later.
+                if is_proto {
+                    props.push(PropDef::Proto(value));
+                } else {
+                    props.push(PropDef::KeyValue { key, value });
+                }
             } else {
                 // Shorthand `{ x }`, or CoverInitializedName `{ x = default }` (only meaningful in
                 // a destructuring assignment target). Only valid when key is a plain identifier.
@@ -2840,6 +2846,11 @@ fn is_valid_assign_pattern(e: &Expr) -> bool {
                 ..
             } => is_valid_assign_pattern(target),
             PropDef::KeyValue { value, .. } => is_valid_assign_pattern(value),
+            // `__proto__: t` as a pattern is a plain keyed target (`t` may itself carry a default).
+            PropDef::Proto(Expr::Assign {
+                op: "=", target, ..
+            }) => is_valid_assign_pattern(target),
+            PropDef::Proto(value) => is_valid_assign_pattern(value),
             // Rest must be last and its target must not be a nested pattern.
             PropDef::Spread(t) => {
                 idx == props.len() - 1
@@ -3210,7 +3221,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
                         pn_params(&func.params, st)?;
                         pn_stmts(&func.body, st)?;
                     }
-                    PropDef::Spread(e) => pn_expr(e, st)?,
+                    PropDef::Spread(e) | PropDef::Proto(e) => pn_expr(e, st)?,
                 }
             }
         }
@@ -3391,6 +3402,22 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                         };
                         pat.props.push(ObjPatProp {
                             key: key.clone(),
+                            value,
+                            default,
+                        });
+                    }
+                    // As a pattern, `__proto__: target` is a plain keyed property named "__proto__".
+                    PropDef::Proto(value) => {
+                        let (value, default) = match value {
+                            Expr::Assign {
+                                op: "=",
+                                target,
+                                value: d,
+                            } => (expr_to_pattern(target)?, Some((**d).clone())),
+                            v => (expr_to_pattern(v)?, None),
+                        };
+                        pat.props.push(ObjPatProp {
+                            key: PropKey::Ident("__proto__".to_string()),
                             value,
                             default,
                         });

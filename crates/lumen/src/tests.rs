@@ -6671,3 +6671,29 @@ fn slice_nan_end_is_zero() {
     // Infinite end clamps to the length.
     assert_eq!(run("'abcd'.slice(0, Infinity)"), "abcd");
 }
+
+#[test]
+fn object_literal_proto_setter() {
+    // Colon-form __proto__ sets the prototype.
+    assert_eq!(
+        run("var o={__proto__:Array.prototype};Object.getPrototypeOf(o)===Array.prototype"),
+        "true"
+    );
+    assert_eq!(
+        run("var o={__proto__:null};Object.getPrototypeOf(o)"),
+        "null"
+    );
+    // A non-object/null value is ignored (no property, default proto).
+    assert_eq!(run("var o={__proto__:5};[o.hasOwnProperty('__proto__'),Object.getPrototypeOf(o)===Object.prototype].join(',')"), "false,true");
+    // Quoted key also sets the proto; computed and shorthand do NOT.
+    assert_eq!(
+        run("var o={'__proto__':Array.prototype};Object.getPrototypeOf(o)===Array.prototype"),
+        "true"
+    );
+    assert_eq!(run("var o={['__proto__']:5};o.__proto__"), "5");
+    // Destructuring: __proto__ is a normal keyed read.
+    assert_eq!(
+        run("var x;({__proto__:x}={['__proto__']:7});String(x)"),
+        "7"
+    );
+}

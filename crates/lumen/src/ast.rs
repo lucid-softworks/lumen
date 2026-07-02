@@ -351,6 +351,11 @@ pub enum PropDef {
         func: Rc<Function>,
     },
     Spread(Expr),
+    /// The colon-form `__proto__: value` in an object literal — sets `[[Prototype]]` (when the
+    /// value is an Object or Null) rather than creating a property. Only the non-computed,
+    /// non-shorthand, non-method form. As a destructuring pattern it degrades to a normal
+    /// `__proto__` keyed target.
+    Proto(Expr),
 }
 
 #[derive(Debug, Clone)]

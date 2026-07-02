@@ -1829,6 +1829,16 @@ impl Interp {
                         }
                     }
                 }
+                // `__proto__: value` sets the prototype when value is an Object or Null; any other
+                // value type is ignored (no property is created).
+                PropDef::Proto(e) => {
+                    let v = self.eval(e, env)?;
+                    match v {
+                        Value::Obj(p) => obj.borrow_mut().proto = Some(p),
+                        Value::Null => obj.borrow_mut().proto = None,
+                        _ => {}
+                    }
+                }
             }
         }
         Ok(Value::Obj(obj))
@@ -3788,11 +3798,18 @@ impl Interp {
                 let mut taken: Vec<String> = Vec::new();
                 for prop in props {
                     match prop {
-                        PropDef::KeyValue { key, value: t } => {
+                        PropDef::KeyValue { .. } | PropDef::Proto(_) => {
                             // KeyedDestructuringAssignmentEvaluation: evaluate the property name,
                             // then the target Reference, THEN GetV(value, name) — for a non-literal
-                            // target the reference is evaluated before the source is read.
-                            let k = self.propkey_to_string(key, env)?;
+                            // target the reference is evaluated before the source is read. As a
+                            // pattern, `__proto__: t` is a normal keyed target (not a proto-setter).
+                            let (k, t) = match prop {
+                                PropDef::KeyValue { key, value } => {
+                                    (self.propkey_to_string(key, env)?, value)
+                                }
+                                PropDef::Proto(value) => ("__proto__".to_string(), value),
+                                _ => unreachable!(),
+                            };
                             taken.push(k.clone());
                             let (core, default) = match t {
                                 Expr::Assign {
@@ -4679,7 +4696,7 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
         }
         Expr::Object(props) => props.iter().find_map(|p| match p {
             PropDef::KeyValue { key, value } => fi_key(key, args).or_else(|| fi_expr(value, args)),
-            PropDef::Spread(e) => fi_expr(e, args),
+            PropDef::Spread(e) | PropDef::Proto(e) => fi_expr(e, args),
             // Methods/getters/setters open their own context (only their computed key inherits).
             PropDef::Method { key, .. }
             | PropDef::Getter { key, .. }
