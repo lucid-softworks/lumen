@@ -6076,3 +6076,15 @@ fn string_replace_all_spec_order() {
     // String search still works.
     assert_eq!(run("'a.b.c'.replaceAll('.','-')"), "a-b-c");
 }
+
+#[test]
+fn string_match_search_delegate() {
+    // match/search build a RegExp from a non-regexp arg and go through @@match/@@search.
+    assert_eq!(run("'abc123'.match(/[0-9]+/)[0]"), "123");
+    assert_eq!(run("'abc'.match('b')[0]"), "b");
+    assert_eq!(run("'abcdef'.search('cd')"), "2");
+    assert_eq!(run("'abcdef'.search(/xy/)"), "-1");
+    // An object regexp with a custom @@search is honored.
+    assert_eq!(run("'x'.search({[Symbol.search](s){return 42}})"), "42");
+    assert_eq!(run("'x'.match({[Symbol.match](s){return 'M'}})"), "M");
+}

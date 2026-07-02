@@ -2144,17 +2144,6 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
 }
 
 /// Coerce `v` to a RegExp object (returning it unchanged if already one).
-fn coerce_regexp(i: &mut Interp, v: Value) -> Result<Value, Value> {
-    match &v {
-        Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) => Ok(v),
-        Value::Undefined => ab(i.make_regexp("", "")),
-        _ => {
-            let s = ab(i.to_string(&v))?.to_string();
-            ab(i.make_regexp(&s, ""))
-        }
-    }
-}
-
 /// All non-overlapping matches of `re` in `chars`, each as capture spans.
 fn regex_find_all(re: &crate::regex::Regex, chars: &[char]) -> Vec<Vec<Option<(usize, usize)>>> {
     let mut out = Vec::new();
@@ -12950,37 +12939,68 @@ fn install_string(it: &mut Interp) {
         string_pad(i, this, args, false)
     });
     it.def_method(&sp, "match", 1, |i, this, a| {
-        let s = this_string(i, &this)?;
-        let re_obj = coerce_regexp(i, arg(a, 0))?;
-        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
-        let chars: Vec<char> = s.chars().collect();
-        if re.global {
-            ab(i.set_member(&re_obj, "lastIndex", Value::Num(0.0)))?;
-            let all = regex_find_all(&re, &chars);
-            if all.is_empty() {
-                return Ok(Value::Null);
-            }
-            let items: Vec<Value> = all
-                .iter()
-                .map(|c| {
-                    let (x, y) = c[0].unwrap();
-                    Value::from_string(chars[x..y].iter().collect::<String>())
-                })
-                .collect();
-            Ok(i.make_array(items))
-        } else {
-            regexp_exec(i, re_obj, &[Value::Str(s)])
+        // RequireObjectCoercible(this), then dispatch to an Object regexp's @@match.
+        if matches!(this, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "String.prototype.match called on null or undefined",
+            ));
         }
+        let regexp = arg(a, 0);
+        if matches!(regexp, Value::Obj(_)) {
+            if let Some(key) = well_known_key(i, "match") {
+                let matcher = ab(i.get_member(&regexp, &key))?;
+                if !matches!(matcher, Value::Undefined | Value::Null) {
+                    if !matcher.is_callable() {
+                        return Err(i.make_error("TypeError", "@@match is not callable"));
+                    }
+                    return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
+                }
+            }
+        }
+        // Otherwise build a RegExp from the argument and invoke its @@match.
+        let s = this_string(i, &this)?;
+        let pattern = if matches!(regexp, Value::Undefined) {
+            String::new()
+        } else {
+            ab(i.to_string(&regexp))?.to_string()
+        };
+        let rx = ab(i.make_regexp(&pattern, ""))?;
+        let key = well_known_key(i, "match").unwrap();
+        let matcher = ab(i.get_member(&rx, &key))?;
+        ab(i.call(matcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "search", 1, |i, this, a| {
+        // RequireObjectCoercible(this), then dispatch to an Object regexp's @@search.
+        if matches!(this, Value::Undefined | Value::Null) {
+            return Err(i.make_error(
+                "TypeError",
+                "String.prototype.search called on null or undefined",
+            ));
+        }
+        let regexp = arg(a, 0);
+        if matches!(regexp, Value::Obj(_)) {
+            if let Some(key) = well_known_key(i, "search") {
+                let searcher = ab(i.get_member(&regexp, &key))?;
+                if !matches!(searcher, Value::Undefined | Value::Null) {
+                    if !searcher.is_callable() {
+                        return Err(i.make_error("TypeError", "@@search is not callable"));
+                    }
+                    return ab(i.call(searcher, regexp.clone(), std::slice::from_ref(&this)));
+                }
+            }
+        }
+        // Otherwise build a RegExp from the argument and invoke its @@search.
         let s = this_string(i, &this)?;
-        let re_obj = coerce_regexp(i, arg(a, 0))?;
-        let re = i.regexps[&map_ptr(&re_obj).unwrap()].clone();
-        let chars: Vec<char> = s.chars().collect();
-        Ok(match re.exec_at(&chars, 0) {
-            Some(c) => Value::Num(c[0].unwrap().0 as f64),
-            None => Value::Num(-1.0),
-        })
+        let pattern = if matches!(regexp, Value::Undefined) {
+            String::new()
+        } else {
+            ab(i.to_string(&regexp))?.to_string()
+        };
+        let rx = ab(i.make_regexp(&pattern, ""))?;
+        let key = well_known_key(i, "search").unwrap();
+        let searcher = ab(i.get_member(&rx, &key))?;
+        ab(i.call(searcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "matchAll", 1, |i, this, a| {
         // RequireObjectCoercible(this).
