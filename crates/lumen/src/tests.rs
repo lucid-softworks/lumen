@@ -6008,7 +6008,10 @@ fn throw_type_error_intrinsic() {
 #[test]
 fn generator_prototype_chain() {
     // A generator function's .prototype chains to %GeneratorPrototype% ("Generator").
-    assert_eq!(run("Object.getPrototypeOf(function*(){}.prototype)[Symbol.toStringTag]"), "Generator");
+    assert_eq!(
+        run("Object.getPrototypeOf(function*(){}.prototype)[Symbol.toStringTag]"),
+        "Generator"
+    );
     // An async generator function has a .prototype whose chain reaches %AsyncIteratorPrototype%.
     assert_eq!(run("typeof (async function*(){}).prototype"), "object");
     assert_eq!(

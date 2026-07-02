@@ -11321,12 +11321,19 @@ fn install_iterator(it: &mut Interp) {
         .insert("%AsyncIteratorPrototype%", async_iter_proto.clone());
 
     // %GeneratorPrototype% (proto %IteratorPrototype%) and %AsyncGeneratorPrototype% (proto
-    // %AsyncIteratorPrototype%): the [[Prototype]] of a generator function's `.prototype`.
+    // %AsyncIteratorPrototype%): the [[Prototype]] of a generator function's `.prototype`, carrying
+    // next/return/throw (which brand-check the receiver via the generators table).
     let gen_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
     set_to_string_tag(it, &gen_proto, "Generator");
+    it.def_method(&gen_proto, "next", 1, generator_next);
+    it.def_method(&gen_proto, "return", 1, generator_return);
+    it.def_method(&gen_proto, "throw", 1, generator_throw);
     it.extra_protos.insert("%GeneratorPrototype%", gen_proto);
     let async_gen_proto = Object::new(Some(async_iter_proto));
     set_to_string_tag(it, &async_gen_proto, "AsyncGenerator");
+    it.def_method(&async_gen_proto, "next", 1, async_generator_next);
+    it.def_method(&async_gen_proto, "return", 1, async_generator_return);
+    it.def_method(&async_gen_proto, "throw", 1, async_generator_throw);
     it.extra_protos
         .insert("%AsyncGeneratorPrototype%", async_gen_proto);
 }
