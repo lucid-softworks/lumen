@@ -1893,22 +1893,35 @@ impl Interp {
     }
 
     /// Make a ShadowRealm wrapped function: a caller-realm callable around `target` in `realm`.
-    pub fn make_wrapped_shadow(&self, realm: usize, target: Value) -> Value {
+    /// CopyNameAndLength copies the target's `length` (a non-negative integer) and `name` (a string,
+    /// else "") — a throwing `length`/`name` getter propagates.
+    pub fn make_wrapped_shadow(&mut self, realm: usize, target: Value) -> Result<Value, Abrupt> {
         let f = Object::new(Some(self.function_proto.clone()));
+        f.borrow_mut().call = Callable::WrappedShadow {
+            realm,
+            target: Box::new(target.clone()),
+        };
+        let length = match self.get_member(&target, "length")? {
+            Value::Num(n) if n.is_finite() => n.trunc().max(0.0),
+            Value::Num(n) if n == f64::INFINITY => f64::INFINITY,
+            _ => 0.0,
+        };
+        let name = match self.get_member(&target, "name")? {
+            Value::Str(s) => s.to_string(),
+            _ => String::new(),
+        };
         {
             let mut b = f.borrow_mut();
-            b.call = Callable::WrappedShadow {
-                realm,
-                target: Box::new(target),
-            };
             b.props.insert(
                 "length",
-                Property::data(Value::Num(0.0), false, false, true),
+                Property::data(Value::Num(length), false, false, true),
             );
-            b.props
-                .insert("name", Property::data(Value::str(""), false, false, true));
+            b.props.insert(
+                "name",
+                Property::data(Value::from_string(name), false, false, true),
+            );
         }
-        Value::Obj(f)
+        Ok(Value::Obj(f))
     }
 
     /// Call a ShadowRealm wrapped function: marshal primitive args into the sub-realm, call `target`
@@ -1939,7 +1952,7 @@ impl Interp {
         self.shadow_realms.insert(realm, sub);
         match result {
             Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
-            Ok(v) if v.is_callable() => Ok(self.make_wrapped_shadow(realm, v)),
+            Ok(v) if v.is_callable() => self.make_wrapped_shadow(realm, v),
             Ok(_) => Err(self.throw("TypeError", "a wrapped function returned a non-primitive")),
             Err(_) => Err(self.throw(
                 "TypeError",
