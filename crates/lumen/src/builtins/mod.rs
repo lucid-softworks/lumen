@@ -12329,9 +12329,6 @@ pub(crate) fn async_gen_react_reject(
     i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
     Ok(Value::Undefined)
 }
-pub(crate) fn return_this_pub(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
-    return_this(i, this, a)
-}
 pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
     well_known_key(i, "asyncIterator")
 }

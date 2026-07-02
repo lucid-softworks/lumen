@@ -990,34 +990,21 @@ impl Interp {
 
     /// Build the generator/iterator object whose `next`/`return`/`throw` drive its coroutine (stored
     /// separately in `self.generators`).
-    fn make_generator(&mut self, is_async: bool) -> Value {
-        let proto = self
-            .extra_protos
-            .get("%IteratorPrototype%")
-            .cloned()
-            .or_else(|| Some(self.object_proto.clone()));
-        let obj = Object::new(proto);
-        if is_async {
-            // Async generator: next/return/throw return promises, and it's an async-iterable.
-            self.def_method(&obj, "next", 0, crate::builtins::async_generator_next);
-            self.def_method(&obj, "return", 1, crate::builtins::async_generator_return);
-            self.def_method(&obj, "throw", 1, crate::builtins::async_generator_throw);
-            if let Some(key) = crate::builtins::async_iterator_key(self) {
-                let f = self.make_native(
-                    "[Symbol.asyncIterator]",
-                    0,
-                    crate::builtins::return_this_pub,
-                );
-                obj.borrow_mut()
-                    .props
-                    .insert(key.as_str(), Property::builtin(Value::Obj(f)));
-            }
+    fn make_generator(&mut self, is_async: bool, gen_proto: Option<Value>) -> Value {
+        // GetPrototypeFromConstructor: the instance's [[Prototype]] is the generator function's
+        // `.prototype` (which chains to %GeneratorPrototype% / %AsyncGeneratorPrototype%, where
+        // next/return/throw and @@asyncIterator live), else the intrinsic directly.
+        let intrinsic = if is_async {
+            "%AsyncGeneratorPrototype%"
         } else {
-            self.def_method(&obj, "next", 0, crate::builtins::generator_next);
-            self.def_method(&obj, "return", 1, crate::builtins::generator_return);
-            self.def_method(&obj, "throw", 1, crate::builtins::generator_throw);
+            "%GeneratorPrototype%"
+        };
+        let proto = match gen_proto {
+            Some(Value::Obj(o)) => Some(o),
+            _ => self.extra_protos.get(intrinsic).cloned(),
         }
-        Value::Obj(obj)
+        .or_else(|| Some(self.object_proto.clone()));
+        Value::Obj(Object::new(proto))
     }
 
     pub fn make_native(&self, name: &str, len: usize, f: NativeFn) -> Gc {
@@ -2137,7 +2124,13 @@ impl Interp {
 
         // Generators (sync and async) suspend at each yield on their own coroutine; see run_generator.
         if func.is_generator {
-            let gen = self.run_generator(func, &body, param_seed);
+            // The generator object's [[Prototype]] comes from the function's own `.prototype`.
+            let gen_proto = fn_obj
+                .borrow()
+                .props
+                .get("prototype")
+                .map(|p| p.value.clone());
+            let gen = self.run_generator(func, &body, param_seed, gen_proto);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             return gen;
@@ -2186,6 +2179,7 @@ impl Interp {
         func: &Rc<Function>,
         scope: &Env,
         param_seed: Option<Env>,
+        gen_proto: Option<Value>,
     ) -> Result<Value, Abrupt> {
         let func = func.clone();
         let scope = scope.clone();
@@ -2218,7 +2212,7 @@ impl Interp {
         });
         let ptr = self as *mut Interp;
         let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
-        let obj = self.make_generator(is_async);
+        let obj = self.make_generator(is_async, gen_proto);
         if let Value::Obj(o) = &obj {
             self.generators.insert(Rc::as_ptr(o) as usize, coro);
         }
