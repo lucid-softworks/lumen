@@ -4903,6 +4903,11 @@ impl Interp {
                 receiver,
                 key,
             } => {
+                // PutValue/GetValue step: ToObject(V.[[Base]]) — a null/undefined super base
+                // (a null home-object prototype) throws a TypeError.
+                if matches!(proto, Value::Null | Value::Undefined) {
+                    return Err(self.throw("TypeError", "cannot read property of null super base"));
+                }
                 let k = self.coerce_ref_key(key)?;
                 let proto = proto.clone();
                 let receiver = receiver.clone();
@@ -4977,7 +4982,14 @@ impl Interp {
                 let k = self.ref_prop_key(&base.clone(), key)?;
                 self.set_member(base, &k, value)
             }
-            Reference::Super { receiver, key, .. } => {
+            Reference::Super {
+                proto,
+                receiver,
+                key,
+            } => {
+                if matches!(proto, Value::Null | Value::Undefined) {
+                    return Err(self.throw("TypeError", "cannot set property on null super base"));
+                }
                 let k = self.coerce_ref_key(key)?;
                 let receiver = receiver.clone();
                 self.set_member(&receiver, &k, value)

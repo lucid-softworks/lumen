@@ -6377,6 +6377,16 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn super_assignment_null_base_throws() {
+    // `super.x = v` with a null home-object prototype: ToObject(super base) throws TypeError,
+    // but only after the RHS is evaluated.
+    assert_eq!(
+        run("var count=0;class C{static m(){super.x=(count+=1)}}Object.setPrototypeOf(C,null);var n='none';try{C.m()}catch(e){n=e.constructor.name}n+':'+count"),
+        "TypeError:1"
+    );
+}
+
+#[test]
 fn assignment_to_tdz_binding_throws() {
     // Assigning to a let/const still in its temporal dead zone is a ReferenceError.
     assert_eq!(throws("(function(){ x = 1; let x; })()"), "ReferenceError");
