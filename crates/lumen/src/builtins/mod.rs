@@ -5757,10 +5757,10 @@ fn map_tombstone(i: &Interp) -> Value {
 }
 
 fn is_tombstone(i: &Interp, k: &Value) -> bool {
-    matches!(
-        (k.as_obj(), i.extra_protos.get("%MapTombstone%")),
-        (Some(a), Some(b)) if Rc::ptr_eq(&a, b)
-    )
+    match (k.as_obj(), i.extra_protos.get("%MapTombstone%")) {
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
 }
 
 /// Count the live (non-tombstone) entries of a collection.
