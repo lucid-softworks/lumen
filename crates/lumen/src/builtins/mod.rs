@@ -5649,15 +5649,25 @@ fn install_set_methods(it: &mut Interp) {
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
-        coll_ptr_kind(i, &this, Some("Set"))?;
+        let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, _keys, other_size) = set_record(i, &arg(a, 0))?;
-        let vals = set_values(i, &this)?;
-        // A larger set cannot be a subset; otherwise every element must be in the other.
-        if (vals.len() as f64) > other_size {
+        // A larger set cannot be a subset; otherwise every element must be in the other. The
+        // receiver's data is walked LIVE by index (the `has` callback may delete entries).
+        if (coll_live_len(i, ptr) as f64) > other_size {
             return Ok(Value::Bool(false));
         }
-        for v in vals {
-            if !set_like_has(i, &has, &arg(a, 0), &v)? {
+        let mut idx = 0usize;
+        loop {
+            let entry = i.map_data.get(&ptr).and_then(|e| e.get(idx).cloned());
+            idx += 1;
+            let (k, _) = match entry {
+                Some(kv) => kv,
+                None => break,
+            };
+            if is_tombstone(i, &k) {
+                continue;
+            }
+            if !set_like_has(i, &has, &arg(a, 0), &k)? {
                 return Ok(Value::Bool(false));
             }
         }
@@ -5679,13 +5689,23 @@ fn install_set_methods(it: &mut Interp) {
         Ok(Value::Bool(true))
     });
     it.def_method(&sp, "isDisjointFrom", 1, |i, this, a| {
-        coll_ptr_kind(i, &this, Some("Set"))?;
+        let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
         let vals = set_values(i, &this)?;
-        if (vals.len() as f64) <= other_size {
-            // Iterate this Set, probing the other's `has`.
-            for v in vals {
-                if set_like_has(i, &has, &arg(a, 0), &v)? {
+        if (coll_live_len(i, ptr) as f64) <= other_size {
+            // Walk this Set LIVE by index (the `has` callback may mutate it), probing the other.
+            let mut idx = 0usize;
+            loop {
+                let entry = i.map_data.get(&ptr).and_then(|e| e.get(idx).cloned());
+                idx += 1;
+                let (k, _) = match entry {
+                    Some(kv) => kv,
+                    None => break,
+                };
+                if is_tombstone(i, &k) {
+                    continue;
+                }
+                if set_like_has(i, &has, &arg(a, 0), &k)? {
                     return Ok(Value::Bool(false));
                 }
             }
