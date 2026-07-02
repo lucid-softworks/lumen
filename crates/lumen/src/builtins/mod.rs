@@ -5561,8 +5561,11 @@ fn set_like_keys(i: &mut Interp, keys: &Value, other: &Value) -> Result<Vec<Valu
 fn install_set_methods(it: &mut Interp) {
     let sp = it.extra_protos.get("Set").cloned().unwrap();
     it.def_method(&sp, "union", 1, |i, this, a| {
-        let mut vals = set_values(i, &this)?;
+        // GetSetRecord (which may run `has`/`size`/`keys` getters that mutate this Set) happens
+        // BEFORE the result is snapshotted from O.[[SetData]], per spec.
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
+        let mut vals = set_values(i, &this)?;
         for k in set_like_keys(i, &keys, &arg(a, 0))? {
             if !vals.iter().any(|v| same_value_zero(v, &k)) {
                 vals.push(k);
@@ -5571,8 +5574,9 @@ fn install_set_methods(it: &mut Interp) {
         Ok(new_set(i, vals))
     });
     it.def_method(&sp, "intersection", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        let vals = set_values(i, &this)?;
         let mut out = Vec::new();
         if (vals.len() as f64) <= other_size {
             // Iterate this Set, probing the other's `has`.
@@ -5596,8 +5600,9 @@ fn install_set_methods(it: &mut Interp) {
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "difference", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        let vals = set_values(i, &this)?;
         if (vals.len() as f64) <= other_size {
             // Iterate this Set, dropping elements the other's `has` reports.
             let mut out = Vec::new();
@@ -5636,8 +5641,9 @@ fn install_set_methods(it: &mut Interp) {
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, _keys, other_size) = set_record(i, &arg(a, 0))?;
+        let vals = set_values(i, &this)?;
         // A larger set cannot be a subset; otherwise every element must be in the other.
         if (vals.len() as f64) > other_size {
             return Ok(Value::Bool(false));
@@ -5650,8 +5656,9 @@ fn install_set_methods(it: &mut Interp) {
         Ok(Value::Bool(true))
     });
     it.def_method(&sp, "isSupersetOf", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        let vals = set_values(i, &this)?;
         // A smaller set cannot be a superset; otherwise every other key must be in this.
         if (vals.len() as f64) < other_size {
             return Ok(Value::Bool(false));
@@ -5664,8 +5671,9 @@ fn install_set_methods(it: &mut Interp) {
         Ok(Value::Bool(true))
     });
     it.def_method(&sp, "isDisjointFrom", 1, |i, this, a| {
-        let vals = set_values(i, &this)?;
+        coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
+        let vals = set_values(i, &this)?;
         if (vals.len() as f64) <= other_size {
             // Iterate this Set, probing the other's `has`.
             for v in vals {
