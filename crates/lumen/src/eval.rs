@@ -1281,11 +1281,11 @@ impl Interp {
             if !trap.is_callable() {
                 return Err(self.throw("TypeError", "proxy 'has' trap is not callable"));
             }
-            let res = self.call(
-                trap,
-                handler,
-                &[target.clone(), Value::from_string(key.to_string())],
-            )?;
+            // The trap receives the original property key — a symbol stays a symbol.
+            let key_val = self
+                .sym_from_key(key)
+                .unwrap_or_else(|| Value::from_string(key.to_string()));
+            let res = self.call(trap, handler, &[target.clone(), key_val])?;
             let present = self.to_boolean(&res);
             if !present {
                 if let Value::Obj(t) = &target {
@@ -1307,6 +1307,17 @@ impl Interp {
                 TaIndex::Element(_) => return Ok(true),
                 TaIndex::Exotic => return Ok(false),
                 TaIndex::Ordinary => {}
+            }
+        }
+        // A String wrapper's `length` and in-range indices are own exotic properties.
+        if let crate::value::Exotic::StrWrap(s) = o.borrow().exotic.clone() {
+            if key == "length" {
+                return Ok(true);
+            }
+            if let Ok(idx) = key.parse::<usize>() {
+                if idx < s.chars().count() {
+                    return Ok(true);
+                }
             }
         }
         if o.borrow().props.contains(key) {

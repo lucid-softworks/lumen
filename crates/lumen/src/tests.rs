@@ -6125,7 +6125,30 @@ fn proxy_for_in_and_has_own() {
         "a,b"
     );
     // hasOwnProperty + propertyIsEnumerable go through the proxy's [[GetOwnProperty]].
-    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); Object.prototype.hasOwnProperty.call(p,'a')"), "true");
-    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); p.propertyIsEnumerable('a')"), "true");
-    assert_eq!(run("var o={a:1}; var p=new Proxy(o,{}); Object.getOwnPropertyDescriptor(p,'a').enumerable"), "true");
+    assert_eq!(
+        run("var o={a:1}; var p=new Proxy(o,{}); Object.prototype.hasOwnProperty.call(p,'a')"),
+        "true"
+    );
+    assert_eq!(
+        run("var o={a:1}; var p=new Proxy(o,{}); p.propertyIsEnumerable('a')"),
+        "true"
+    );
+    assert_eq!(
+        run(
+            "var o={a:1}; var p=new Proxy(o,{}); Object.getOwnPropertyDescriptor(p,'a').enumerable"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn proxy_has_string_wrapper_and_symbol_key() {
+    // `in`/Reflect.has forward a String wrapper's exotic length/index through a proxy target.
+    assert_eq!(run("'length' in new String('str')"), "true");
+    assert_eq!(run("0 in new Proxy(new Proxy(new String('str'),{}),{})"), "true");
+    // The has trap receives the original property key: a symbol stays a symbol.
+    assert_eq!(
+        run("var s=Symbol(); var t=new Proxy({},{has(_,k){return k===s}}); var p=new Proxy(t,{}); Reflect.has(p,s)"),
+        "true"
+    );
 }
