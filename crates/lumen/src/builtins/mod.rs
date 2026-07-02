@@ -2504,11 +2504,22 @@ fn install_array_buffer(it: &mut Interp) {
         ))
     });
     it.def_method(&proto, "slice", 2, |i, this, a| {
-        let ptr = this.as_obj().map(|o| Rc::as_ptr(o) as usize);
-        let bytes = ptr
-            .and_then(|p| i.array_buffers.get(&p))
-            .cloned()
-            .unwrap_or_default();
+        // RequireInternalSlot([[ArrayBufferData]]), reject a shared buffer, then a detached one.
+        reject_shared_buffer(i, &this)?;
+        let o = this
+            .as_obj()
+            .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
+            .ok_or_else(|| {
+                i.make_error(
+                    "TypeError",
+                    "ArrayBuffer.prototype.slice requires an ArrayBuffer",
+                )
+            })?;
+        let ptr = Rc::as_ptr(o) as usize;
+        if !i.array_buffers.contains_key(&ptr) {
+            return Err(i.make_error("TypeError", "Cannot slice a detached ArrayBuffer"));
+        }
+        let bytes = i.array_buffers[&ptr].clone();
         let len = bytes.len() as i64;
         let begin = norm_index(ab(i.to_number(&arg(a, 0)))?, len, 0);
         let end = match arg(a, 1) {

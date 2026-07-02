@@ -6213,3 +6213,20 @@ fn proxy_get_set_symbol_trap_key() {
         "3,s"
     );
 }
+
+#[test]
+fn array_buffer_slice_and_transfer_detach() {
+    // transfer detaches the source; slicing a detached buffer throws TypeError.
+    assert_eq!(
+        run("var s=new ArrayBuffer(4); var d=s.transfer(5); s.byteLength+','+d.byteLength"),
+        "0,5"
+    );
+    assert_eq!(run("var s=new ArrayBuffer(4); s.transfer(); try{s.slice();'no'}catch(e){e.constructor.name}"), "TypeError");
+    // slice requires an ArrayBuffer receiver and rejects a SharedArrayBuffer.
+    assert_eq!(
+        run("try{ArrayBuffer.prototype.slice.call({});'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // A normal slice copies the range.
+    assert_eq!(run("var b=new ArrayBuffer(4); new Uint8Array(b).set([1,2,3,4]); [...new Uint8Array(b.slice(1,3))].join(',')"), "2,3");
+}
