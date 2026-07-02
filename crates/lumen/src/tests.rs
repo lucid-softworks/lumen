@@ -5899,3 +5899,21 @@ fn array_length_shrink_stops_at_non_configurable() {
     // A normal shrink still works.
     assert_eq!(run("var a=[1,2,3,4]; a.length=2; a.join(',')"), "1,2");
 }
+
+#[test]
+fn atomics_wait_notify_validation_order() {
+    // wait/notify reject a non-Int32/BigInt64 array with TypeError before coercing the index.
+    assert_eq!(
+        run("var poison={valueOf(){throw new Error('x')}}; try{Atomics.notify(new Float64Array(4), poison);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("try{Atomics.notify(new Int8Array(4), 0);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+    // wait needs a shared buffer (a non-shared Int32Array is a TypeError).
+    assert_eq!(
+        run("try{Atomics.wait(new Int32Array(4), 0, 0);'no'}catch(e){e.constructor.name}"),
+        "TypeError"
+    );
+}

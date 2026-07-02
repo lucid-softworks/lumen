@@ -682,16 +682,33 @@ fn install_atomics(it: &mut Interp) {
         let n = ab(i.to_number(&arg(a, 0)))?;
         Ok(Value::Bool(matches!(n as i64, 1 | 2 | 4 | 8)))
     });
-    it.def_method(&atomics, "wait", 4, |i, _t, a| {
-        let (info, idx) = target(i, a)?;
-        // Waitable types are only Int32Array and BigInt64Array, over a *shared* buffer.
-        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
-            return Err(i.make_error(
+    // ValidateIntegerTypedArray(ta, waitable=true): only a non-detached Int32Array / BigInt64Array,
+    // checked BEFORE any index/value coercion (so a poisoned index doesn't run first).
+    fn require_waitable(i: &mut Interp, ta: &Value) -> Result<TaInfo, Value> {
+        let err = || {
+            i.make_error(
                 "TypeError",
-                "Atomics.wait requires an Int32 or BigInt64 array",
-            ));
+                "Atomics.wait/notify requires an Int32Array or BigInt64Array",
+            )
+        };
+        let info = map_ptr(ta)
+            .and_then(|p| i.typed_arrays.get(&p).copied())
+            .ok_or_else(err)?;
+        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
+            return Err(err());
         }
-        let id = match i.shared_buffers.get(&info.buffer) {
+        // A detached buffer (regular buffer removed from the store) has no [[ArrayBufferData]].
+        if !i.array_buffers.contains_key(&info.buffer)
+            && !i.shared_buffers.contains_key(&info.buffer)
+        {
+            return Err(i.make_error("TypeError", "Atomics.wait/notify: buffer is detached"));
+        }
+        Ok(info)
+    }
+    it.def_method(&atomics, "wait", 4, |i, _t, a| {
+        let winfo = require_waitable(i, &arg(a, 0))?;
+        // Atomics.wait needs a *shared* buffer — checked before ValidateAtomicAccess (index coercion).
+        let id = match i.shared_buffers.get(&winfo.buffer) {
             Some(&id) => id,
             None => {
                 return Err(i.make_error(
@@ -700,6 +717,7 @@ fn install_atomics(it: &mut Interp) {
                 ))
             }
         };
+        let (info, idx) = target(i, a)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         // timeout: ToNumber (NaN → +Infinity), clamped at 0.
         let q = ab(i.to_number(&arg(a, 3)))?;
@@ -723,13 +741,8 @@ fn install_atomics(it: &mut Interp) {
         Ok(Value::str(if woken { "ok" } else { "timed-out" }))
     });
     it.def_method(&atomics, "notify", 3, |i, _t, a| {
+        require_waitable(i, &arg(a, 0))?;
         let (info, idx) = target(i, a)?;
-        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
-            return Err(i.make_error(
-                "TypeError",
-                "Atomics.notify requires an Int32 or BigInt64 array",
-            ));
-        }
         // count = ToIntegerOrInfinity(arg2), default +Infinity (= all); negative clamps to 0.
         let count: i64 = match arg(a, 2) {
             Value::Undefined => -1,
