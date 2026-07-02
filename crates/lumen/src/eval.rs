@@ -3407,9 +3407,12 @@ impl Interp {
             self.assign_to_target(target, v.clone(), env)?;
             return Ok(v);
         }
+        // The LHS reference is resolved once and reused for GetValue + PutValue, so a `with`-object
+        // getter that mutates the binding (or a member base with side effects) is evaluated once.
+        let mut lref = self.resolve_reference(target, env)?;
         // Logical assignment (&&=, ||=, ??=) short-circuits.
         if matches!(op, "&&=" | "||=" | "??=") {
-            let cur = self.eval(target, env)?;
+            let cur = self.get_reference(&mut lref)?;
             let do_assign = match op {
                 "&&=" => self.to_boolean(&cur),
                 "||=" => !self.to_boolean(&cur),
@@ -3420,15 +3423,21 @@ impl Interp {
                 return Ok(cur);
             }
             let v = self.eval(value, env)?;
-            self.assign_to_target(target, v.clone(), env)?;
+            // `x ||= function(){}` names the anonymous function after an identifier target.
+            if let Expr::Ident(n) = target {
+                if is_anonymous_fn(value) {
+                    self.set_fn_name(&v, n);
+                }
+            }
+            self.put_reference(&mut lref, v.clone())?;
             return Ok(v);
         }
         // Compound arithmetic/bitwise: a op= b  ≡  a = a <op> b.
-        let cur = self.eval(target, env)?;
+        let cur = self.get_reference(&mut lref)?;
         let rhs = self.eval(value, env)?;
         let bin_op = &op[..op.len() - 1];
         let result = self.binary(bin_op, cur, rhs)?;
-        self.assign_to_target(target, result.clone(), env)?;
+        self.put_reference(&mut lref, result.clone())?;
         Ok(result)
     }
 
@@ -4562,4 +4571,226 @@ fn parse_number(s: &str) -> f64 {
             .unwrap_or(f64::NAN);
     }
     t.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// Where an identifier `Reference`'s binding lives, resolved exactly once.
+enum RefBase {
+    /// A binding in this environment's `vars`.
+    Scope(Env),
+    /// A `with (obj)` object environment record that has the name.
+    With(Value),
+    /// A property of the global object.
+    Global,
+    /// Not found anywhere: GetValue throws ReferenceError; PutValue creates a global (sloppy).
+    Unresolvable,
+}
+
+/// A member reference's property key. For a computed `base[expr]` the key stays a `Raw` value
+/// until the first GetValue/PutValue, so `ToPropertyKey` runs *after* the base's
+/// RequireObjectCoercible check (a null base throws before the key's `toString` runs) and only once.
+enum RefKey {
+    Static(String),
+    Raw(Value),
+}
+
+/// A resolved reference — computed once so a compound/logical assignment reuses the same base
+/// for both GetValue and PutValue (matching spec Reference semantics), rather than re-resolving.
+enum Reference {
+    Var(RefBase, String),
+    /// `base.key` (Static) or `base[expr]` (Raw, coerced lazily).
+    Prop(Value, RefKey),
+    /// `super.key`: reads through `proto` with `receiver` as the this-value, writes to `receiver`.
+    Super {
+        proto: Value,
+        receiver: Value,
+        key: String,
+    },
+}
+
+impl Interp {
+    /// Evaluate `target` to a `Reference` exactly once (its base object/binding location and,
+    /// for member/index targets, its property key).
+    fn resolve_reference(&mut self, target: &Expr, env: &Env) -> Result<Reference, Abrupt> {
+        match target {
+            Expr::Ident(name) => {
+                let mut cur = Some(env.clone());
+                while let Some(s) = cur {
+                    let (has_binding, with_obj, parent) = {
+                        let b = s.borrow();
+                        (
+                            b.vars.contains_key(name),
+                            b.with_obj.clone(),
+                            b.parent.clone(),
+                        )
+                    };
+                    if has_binding {
+                        return Ok(Reference::Var(RefBase::Scope(s), name.clone()));
+                    }
+                    if let Some(obj @ Value::Obj(_)) = &with_obj {
+                        if self.js_has_property(obj, name)? {
+                            return Ok(Reference::Var(RefBase::With(obj.clone()), name.clone()));
+                        }
+                    }
+                    cur = parent;
+                }
+                if self.has_property(&self.global.clone(), name) {
+                    return Ok(Reference::Var(RefBase::Global, name.clone()));
+                }
+                Ok(Reference::Var(RefBase::Unresolvable, name.clone()))
+            }
+            Expr::Member { obj, prop, .. } => {
+                if matches!(**obj, Expr::Super) {
+                    let proto = self.super_base(env)?;
+                    let receiver = self.get_var("this", env)?;
+                    return Ok(Reference::Super {
+                        proto,
+                        receiver,
+                        key: prop.clone(),
+                    });
+                }
+                let base = self.eval(obj, env)?;
+                Ok(Reference::Prop(base, RefKey::Static(prop.clone())))
+            }
+            Expr::Index { obj, index, .. } => {
+                if matches!(**obj, Expr::Super) {
+                    let proto = self.super_base(env)?;
+                    let receiver = self.get_var("this", env)?;
+                    let idx = self.eval(index, env)?;
+                    let key = self.to_property_key(&idx)?;
+                    return Ok(Reference::Super {
+                        proto,
+                        receiver,
+                        key,
+                    });
+                }
+                // The index expression is evaluated now, but ToPropertyKey is deferred to GetValue.
+                let base = self.eval(obj, env)?;
+                let idx = self.eval(index, env)?;
+                Ok(Reference::Prop(base, RefKey::Raw(idx)))
+            }
+            // Other targets never reach compound/logical assignment (a SyntaxError at parse).
+            _ => Err(self.throw("ReferenceError", "invalid assignment target")),
+        }
+    }
+
+    /// Coerce a member reference's property key, deferring `ToPropertyKey` until after the base's
+    /// RequireObjectCoercible check and caching the result so it runs at most once.
+    fn ref_prop_key(&mut self, base: &Value, key: &mut RefKey) -> Result<String, Abrupt> {
+        match key {
+            RefKey::Static(s) => Ok(s.clone()),
+            RefKey::Raw(v) => {
+                if matches!(base, Value::Null | Value::Undefined) {
+                    return Err(
+                        self.throw("TypeError", "cannot access property of null or undefined")
+                    );
+                }
+                let v = v.clone();
+                let k = self.to_property_key(&v)?;
+                *key = RefKey::Static(k.clone());
+                Ok(k)
+            }
+        }
+    }
+
+    /// GetValue on a resolved reference.
+    fn get_reference(&mut self, r: &mut Reference) -> Result<Value, Abrupt> {
+        match r {
+            Reference::Var(base, name) => match base {
+                RefBase::Scope(s) => {
+                    let (initialized, value, import) = {
+                        let b = s.borrow();
+                        match b.vars.get(name) {
+                            Some(bd) => (bd.initialized, bd.value.clone(), bd.import_ref.clone()),
+                            None => return self.get_var(name, s),
+                        }
+                    };
+                    if !initialized {
+                        return Err(self.throw(
+                            "ReferenceError",
+                            format!("cannot access '{name}' before initialization"),
+                        ));
+                    }
+                    if let Some((src_env, local)) = import {
+                        return self.get_var(&local, &src_env);
+                    }
+                    Ok(value)
+                }
+                RefBase::With(obj) => self.get_member(obj, name),
+                RefBase::Global => self.get_member(&Value::Obj(self.global.clone()), name),
+                RefBase::Unresolvable => {
+                    Err(self.throw("ReferenceError", format!("{name} is not defined")))
+                }
+            },
+            Reference::Prop(base, key) => {
+                let k = self.ref_prop_key(&base.clone(), key)?;
+                self.get_member(base, &k)
+            }
+            Reference::Super {
+                proto,
+                receiver,
+                key,
+            } => self.get_member_recv(proto, key, receiver.clone()),
+        }
+    }
+
+    /// PutValue on a resolved reference.
+    fn put_reference(&mut self, r: &mut Reference, value: Value) -> Result<(), Abrupt> {
+        match r {
+            Reference::Var(base, name) => match base {
+                RefBase::Scope(s) => {
+                    let redirect = {
+                        let mut b = s.borrow_mut();
+                        match b.vars.get_mut(name) {
+                            Some(bd) => {
+                                if let Some((src_env, local)) = &bd.import_ref {
+                                    Some((src_env.clone(), local.clone()))
+                                } else {
+                                    if !bd.mutable && bd.initialized {
+                                        return Err(self.throw(
+                                            "TypeError",
+                                            format!("assignment to constant '{name}'"),
+                                        ));
+                                    }
+                                    bd.value = value;
+                                    bd.initialized = true;
+                                    return Ok(());
+                                }
+                            }
+                            None => None,
+                        }
+                    };
+                    match redirect {
+                        Some((src_env, local)) => self.assign_var(&local, value, &src_env),
+                        None => self.assign_var(name, value, s),
+                    }
+                }
+                RefBase::With(obj) => {
+                    // Object env record SetMutableBinding: if the binding's property no longer
+                    // exists (e.g. a getter deleted it) and we're strict, throw ReferenceError.
+                    if self.strict && !self.js_has_property(obj, name)? {
+                        return Err(self.throw("ReferenceError", format!("{name} is not defined")));
+                    }
+                    self.set_member(obj, name, value)
+                }
+                RefBase::Global => {
+                    let g = Value::Obj(self.global.clone());
+                    if self.strict && !self.has_property(&self.global.clone(), name) {
+                        return Err(self.throw("ReferenceError", format!("{name} is not defined")));
+                    }
+                    self.set_member(&g, name, value)
+                }
+                RefBase::Unresolvable => {
+                    if self.strict {
+                        return Err(self.throw("ReferenceError", format!("{name} is not defined")));
+                    }
+                    self.set_member(&Value::Obj(self.global.clone()), name, value)
+                }
+            },
+            Reference::Prop(base, key) => {
+                let k = self.ref_prop_key(&base.clone(), key)?;
+                self.set_member(base, &k, value)
+            }
+            Reference::Super { receiver, key, .. } => self.set_member(receiver, key, value),
+        }
+    }
 }

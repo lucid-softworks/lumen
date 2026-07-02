@@ -6377,6 +6377,31 @@ fn array_from_async_getmethod_and_arraylike() {
 }
 
 #[test]
+fn compound_assignment_resolves_reference_once() {
+    // `with` + compound assignment: the LHS reference is resolved once, so a getter that deletes
+    // the binding between GetValue and PutValue still writes back to the original object.
+    assert_eq!(
+        run("var x=0;var scope={get x(){delete this.x;return 2}};with(scope){x^=3}scope.x"),
+        "1"
+    );
+    // A computed member base is evaluated once (no double side effect).
+    assert_eq!(
+        run("var n=0;var o={v:5};function base(){n++;return o}base()[('v')]+=1;n+''"),
+        "1"
+    );
+    // Deferred ToPropertyKey: a null base throws TypeError before the key's toString runs.
+    assert_eq!(
+        run("var hit=false;var k={toString(){hit=true;return 'x'}};var b=null;try{b[k]^=1}catch(e){}String(hit)"),
+        "false"
+    );
+    // Strict PutValue on a deleted global accessor throws ReferenceError.
+    assert_eq!(
+        throws("'use strict';Object.defineProperty(globalThis,'gx',{configurable:true,get(){delete globalThis.gx;return 2}});gx^=3"),
+        "ReferenceError"
+    );
+}
+
+#[test]
 fn slice_nan_end_is_zero() {
     // ToIntegerOrInfinity(NaN) === 0, so a NaN end argument yields an empty slice.
     assert_eq!(run("'abcd'.slice(0, NaN)"), "");
