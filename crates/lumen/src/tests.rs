@@ -5666,3 +5666,21 @@ fn super_property_context() {
         .eval("class C extends Object { m(){ return super.x; } f = super.y; }", false)
         .is_ok());
 }
+
+#[test]
+fn array_like_near_integer_limit() {
+    // Generic Array methods on an array-like with a huge `length` operate on the bounded working
+    // span near the limit without hitting the engine's materialization cap.
+    assert_eq!(
+        run("var o={length: 2**53-1, '9007199254740990':'x'}; Array.prototype.pop.call(o); o.length"),
+        "9007199254740990"
+    );
+    assert_eq!(
+        run("var o={length: 2**53-2}; Array.prototype.push.call(o, 1); o.length"),
+        "9007199254740991"
+    );
+    assert_eq!(
+        run("var o={length: 2**53+2, '9007199254740989':'a','9007199254740990':'b'}; Array.prototype.slice.call(o, 9007199254740989).join(',')"),
+        "a,b"
+    );
+}

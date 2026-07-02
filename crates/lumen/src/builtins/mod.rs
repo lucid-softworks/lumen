@@ -9653,7 +9653,9 @@ fn install_array(it: &mut Interp) {
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let mut len = ab(i.checked_array_len(&o))? as u64;
+        // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
+        // engine's materialization cap).
+        let mut len = ab(i.to_length(&o))? as u64;
         // The resulting length may not exceed 2^53-1.
         if len + args.len() as u64 > 9007199254740991 {
             return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
@@ -9668,8 +9670,10 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.checked_array_len(&o))?;
+        // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
+        let len = ab(i.to_length(&o))?;
         if len == 0 {
+            ab(i.set_member(&this, "length", Value::Num(0.0)))?;
             return Ok(Value::Undefined);
         }
         let last = ab(i.get_member(&this, &(len - 1).to_string()))?;
@@ -9708,13 +9712,18 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "slice", 2, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.checked_array_len(&o))? as i64;
+        // The total length may be near 2^53 for an array-like; only the copied span (end-start) is
+        // bounded by the engine's materialization cap.
+        let len = ab(i.to_length(&o))? as i64;
         let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
         let end = match arg(args, 1) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
         let count = (end - start).max(0) as usize;
+        if count > MAX_ARRAY_OP_LEN {
+            return Err(i.make_error("RangeError", "array length exceeds engine limit"));
+        }
         let result = array_species_create(i, &this, count)?;
         let mut k = start;
         let mut to = 0usize;
@@ -10069,13 +10078,17 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "fill", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.checked_array_len(&o))? as i64;
+        let len = ab(i.to_length(&o))? as i64;
         let v = arg(args, 0);
         let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
         let end = match arg(args, 2) {
             Value::Undefined => len,
             x => norm_index(ab(i.to_number(&x))?, len, len),
         };
+        // Only the filled span is bounded by the engine cap; the total length may be near 2^53.
+        if (end - start).max(0) as usize > MAX_ARRAY_OP_LEN {
+            return Err(i.make_error("RangeError", "array length exceeds engine limit"));
+        }
         for k in start..end {
             ab(i.set_member(&this, &k.to_string(), v.clone()))?;
         }
@@ -10280,15 +10293,19 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "copyWithin", 2, |i, this, args| {
         let o = arr_to_object(i, &this)?;
-        let len = ab(i.checked_array_len(&o))? as i64;
+        let len = ab(i.to_length(&o))? as i64;
         let target = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
         let start = norm_index(ab(i.to_number(&arg(args, 1)))?, len, 0);
         let end = match arg(args, 2) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len, len),
         };
-        // count = min(end - start, len - target); a source hole deletes the target index.
+        // count = min(end - start, len - target); a source hole deletes the target index. Only the
+        // copied span is bounded by the engine cap; the total length may be near 2^53.
         let count = (end - start).min(len - target).max(0);
+        if count as usize > MAX_ARRAY_OP_LEN {
+            return Err(i.make_error("RangeError", "array length exceeds engine limit"));
+        }
         let mut snapshot: Vec<Option<Value>> = Vec::with_capacity(count as usize);
         for off in 0..count {
             let k = (start + off).to_string();
@@ -10556,7 +10573,9 @@ fn array_flatten(
 
 fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
-    let len = ab(i.checked_array_len(&o))? as i64;
+    // The total length may be near 2^53 for an array-like; only the elements actually moved are
+    // bounded by the engine's materialization cap.
+    let len = ab(i.to_length(&o))? as i64;
     let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len, 0);
     let delete_count = if args.is_empty() {
         0
@@ -10570,6 +10589,15 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     } else {
         Vec::new()
     };
+    // Work = removed elements + (if the gap changes size) the trailing elements shifted.
+    let shift = if items.len() as i64 != delete_count {
+        (len - delete_count - start).max(0)
+    } else {
+        0
+    };
+    if (delete_count.max(0) + shift) as usize > MAX_ARRAY_OP_LEN {
+        return Err(i.make_error("RangeError", "array length exceeds engine limit"));
+    }
     // The removed array (ArraySpeciesCreate) preserves holes via HasProperty.
     let removed = array_species_create(i, &this, delete_count.max(0) as usize)?;
     for k in 0..delete_count {
