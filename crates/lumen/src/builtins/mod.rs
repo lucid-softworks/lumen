@@ -5543,6 +5543,39 @@ fn set_like_has(i: &mut Interp, has: &Value, other: &Value, v: &Value) -> Result
     let r = ab(i.call(has.clone(), other.clone(), std::slice::from_ref(v)))?;
     Ok(i.to_boolean(&r))
 }
+/// Open a set-like's keys iterator record: `(iterator, nextMethod)`.
+fn set_like_open(i: &mut Interp, keys: &Value, other: &Value) -> Result<(Value, Value), Value> {
+    let iter = ab(i.call(keys.clone(), other.clone(), &[]))?;
+    let next = ab(i.get_member(&iter, "next"))?;
+    if !next.is_callable() {
+        return Err(i.make_error("TypeError", "set-like keys iterator has no next method"));
+    }
+    Ok((iter, next))
+}
+
+/// Step a set-like keys iterator: `Some(value)` or `None` when done. `-0` is canonicalized to `+0`.
+fn set_like_next(i: &mut Interp, iter: &Value, next: &Value) -> Result<Option<Value>, Value> {
+    let r = ab(i.call(next.clone(), iter.clone(), &[]))?;
+    if !matches!(r, Value::Obj(_)) {
+        return Err(i.make_error("TypeError", "iterator result is not an object"));
+    }
+    let done = ab(i.get_member(&r, "done"))?;
+    if i.to_boolean(&done) {
+        Ok(None)
+    } else {
+        Ok(Some(canonicalize_map_key(ab(i.get_member(&r, "value"))?)))
+    }
+}
+
+/// IteratorClose a set-like keys iterator on early exit (swallowing errors).
+fn set_like_close(i: &mut Interp, iter: &Value) {
+    if let Ok(ret) = i.get_member(iter, "return") {
+        if ret.is_callable() {
+            let _ = i.call(ret, iter.clone(), &[]);
+        }
+    }
+}
+
 fn set_like_keys(i: &mut Interp, keys: &Value, other: &Value) -> Result<Vec<Value>, Value> {
     // `keys` returns an iterator *record*: step its `next` directly rather than calling GetIterator
     // (the result need not be iterable itself).
@@ -5677,12 +5710,15 @@ fn install_set_methods(it: &mut Interp) {
         coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, other_size) = set_record(i, &arg(a, 0))?;
         let vals = set_values(i, &this)?;
-        // A smaller set cannot be a superset; otherwise every other key must be in this.
+        // A smaller set cannot be a superset; otherwise every other key must be in this. The other's
+        // keys are iterated lazily and the iterator is closed if a missing key exits early.
         if (vals.len() as f64) < other_size {
             return Ok(Value::Bool(false));
         }
-        for k in set_like_keys(i, &keys, &arg(a, 0))? {
+        let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
+        while let Some(k) = set_like_next(i, &iter, &next)? {
             if !vals.iter().any(|v| same_value_zero(v, &k)) {
+                set_like_close(i, &iter);
                 return Ok(Value::Bool(false));
             }
         }
@@ -5710,9 +5746,11 @@ fn install_set_methods(it: &mut Interp) {
                 }
             }
         } else {
-            // Iterate the other's keys, probing this Set directly.
-            for k in set_like_keys(i, &keys, &arg(a, 0))? {
+            // Iterate the other's keys lazily, probing this Set; close the iterator on early exit.
+            let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
+            while let Some(k) = set_like_next(i, &iter, &next)? {
                 if vals.iter().any(|v| same_value_zero(v, &k)) {
+                    set_like_close(i, &iter);
                     return Ok(Value::Bool(false));
                 }
             }
