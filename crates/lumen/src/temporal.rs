@@ -2988,7 +2988,19 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         };
         let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
-            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+            Value::Obj(_) => match get(i, &tzv) {
+                Some(Temporal::Zoned { tz, .. }) => tz,
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
+            },
+            _ => {
+                return Err(
+                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                )
+            }
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let time = match timev {
@@ -3242,11 +3254,12 @@ fn time_diff(
     since: bool,
     auto_rank: i32,
 ) -> Result<IsoDuration, Value> {
-    let largest_raw = opt_str(i, opts, "smallestUnit", "nanosecond")?;
-    let smallest = sing(&largest_raw).to_string();
+    // GetDifferenceSettings: read all options in alphabetical order, then validate.
+    let largest_opt = opt_str(i, opts, "largestUnit", "auto")?;
+    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
+    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
     let srank = time_unit_rank(&smallest)
         .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a time unit"))?;
-    let largest_opt = opt_str(i, opts, "largestUnit", "auto")?;
     let largest_name = sing(&largest_opt).to_string();
     let lrank = if largest_name == "auto" {
         srank.max(auto_rank) // auto ⇒ the type default, but never narrower than smallestUnit
@@ -3260,7 +3273,6 @@ fn time_diff(
             "largestUnit cannot be smaller than smallestUnit",
         ));
     }
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     check_increment(i, &smallest, incr)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
     check_mode(i, &mode)?;
@@ -4101,8 +4113,8 @@ fn read_datetime_diff(
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    check_mode(i, &mode)?;
     let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
+    check_mode(i, &mode)?;
     let srank =
         unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
     let lrank = if largest_raw == "auto" {
@@ -4158,11 +4170,11 @@ fn ym_add(
 /// Read `until`/`since` options for a PlainYearMonth difference: (largest, smallest, mode). Only
 /// `year`/`month` units are allowed and `roundingIncrement` must be 1.
 fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String), Value> {
+    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let smallest = sing(&opt_str(i, opts, "smallestUnit", "month")?).to_string();
     if !matches!(smallest.as_str(), "year" | "month") {
         return Err(i.make_error("RangeError", "smallestUnit must be year or month"));
     }
-    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let largest = if largest_raw == "auto" {
         "year".to_string()
     } else {
@@ -4192,8 +4204,8 @@ fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, 
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
     let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    check_mode(i, &mode)?;
     let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
+    check_mode(i, &mode)?;
     let srank = date_unit_rank(&smallest)
         .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a date unit"))?;
     let lrank = if largest_raw == "auto" {
@@ -5250,14 +5262,21 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let (o, shorthand) = round_opts(&arg(a, 0));
+        // Options are read in alphabetical order before any validation.
+        let incr_raw = match shorthand {
+            Some(_) => 1,
+            None => opt_num(i, &o, "roundingIncrement", 1)?,
+        };
+        let mode = match shorthand {
+            Some(_) => "halfExpand".to_string(),
+            None => opt_str(i, &o, "roundingMode", "halfExpand")?,
+        };
         let smallest = match shorthand {
             Some(s) => s,
             None => opt_str(i, &o, "smallestUnit", "")?,
         };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
-        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
-        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
         check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
         let incr = incr_raw as i128;
@@ -5572,7 +5591,19 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let tzv = arg(a, 0);
         let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
-            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+            Value::Obj(_) => match get(i, &tzv) {
+                Some(Temporal::Zoned { tz, .. }) => tz,
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
+            },
+            _ => {
+                return Err(
+                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                )
+            }
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let disamb = opt_str(i, &arg(a, 1), "disambiguation", "compatible")?;
@@ -7219,7 +7250,19 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         let tzv = arg(a, 0);
         let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
-            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+            Value::Obj(_) => match get(i, &tzv) {
+                Some(Temporal::Zoned { tz, .. }) => tz,
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
+            },
+            _ => {
+                return Err(
+                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                )
+            }
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let offset = zone_offset(&tz, e);
@@ -7258,14 +7301,21 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
         let (o, shorthand) = round_opts(&arg(a, 0));
+        // Options are read in alphabetical order before any validation.
+        let incr_raw = match shorthand {
+            Some(_) => 1,
+            None => opt_num(i, &o, "roundingIncrement", 1)?,
+        };
+        let mode = match shorthand {
+            Some(_) => "halfExpand".to_string(),
+            None => opt_str(i, &o, "roundingMode", "halfExpand")?,
+        };
         let smallest = match shorthand {
             Some(s) => s,
             None => opt_str(i, &o, "smallestUnit", "")?,
         };
         let unit = unit_ns(&smallest)
             .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
-        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
-        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
         check_mode(i, &mode)?;
         // Instant rounding: the increment times the unit must evenly divide a 24-hour solar day
         // (inclusive — a full day is allowed).
@@ -7719,7 +7769,20 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
             }
             let tz_raw: Rc<str> = match &tzv {
                 Value::Str(s) => s.clone(),
-                _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+                Value::Obj(_) => match get(i, &tzv) {
+                    Some(Temporal::Zoned { tz, .. }) => tz,
+                    _ => {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "time zone must be a string or a ZonedDateTime",
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
             };
             let tz = normalize_tz(i, &tz_raw)?;
             let zcal = input_cal(i, v)?;
@@ -8346,7 +8409,19 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let tz_raw: Rc<str> = match &tzv {
             Value::Str(s) => s.clone(),
             Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
-            _ => Rc::from(i.to_string(&tzv).map_err(unab)?.as_ref()),
+            Value::Obj(_) => match get(i, &tzv) {
+                Some(Temporal::Zoned { tz, .. }) => tz,
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
+            },
+            _ => {
+                return Err(
+                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                )
+            }
         };
         let tz = normalize_tz(i, &tz_raw)?;
         let cal = check_calendar(i, &arg(a, 2))?;
@@ -8392,10 +8467,12 @@ fn now_validate_zone(i: &mut Interp, v: &Value) -> Result<(), Value> {
     match v {
         Value::Undefined => Ok(()),
         Value::Str(s) => validate_tz_string(i, s),
-        _ => {
-            let s = i.to_string(v).map_err(unab)?;
-            validate_tz_string(i, &s)
-        }
+        // A ZonedDateTime carries its own zone; any other object or primitive is a TypeError.
+        Value::Obj(_) => match get(i, v) {
+            Some(Temporal::Zoned { .. }) => Ok(()),
+            _ => Err(i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")),
+        },
+        _ => Err(i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")),
     }
 }
 
@@ -8409,11 +8486,21 @@ fn install_now(it: &mut Interp, ns: &Gc) {
     it.def_method(&now, "timeZoneId", 0, |_i, _t, _| Ok(Value::str("UTC")));
     it.def_method(&now, "zonedDateTimeISO", 0, |i, _t, a| {
         // The system zone (default UTC) at the fixed epoch.
-        let tz = match arg(a, 0) {
+        let tz: Rc<str> = match arg(a, 0) {
             Value::Undefined => Rc::from("UTC"),
-            v => {
-                let s = i.to_string(&v).map_err(unab)?;
-                normalize_tz(i, &s)?
+            Value::Str(s) => normalize_tz(i, &s)?,
+            v @ Value::Obj(_) => match get(i, &v) {
+                Some(Temporal::Zoned { tz, .. }) => tz,
+                _ => {
+                    return Err(
+                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                    )
+                }
+            },
+            _ => {
+                return Err(
+                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
+                )
             }
         };
         let off = zone_offset(&tz, 0);
