@@ -54,6 +54,7 @@ pub fn parse_script_eval(
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
+        in_static_block: false,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -94,6 +95,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
+        in_static_block: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -191,6 +193,13 @@ fn params_body_lexical_clash(params: &[Param], body: &[Stmt]) -> Option<String> 
     for stmt in body {
         collect_top_decl(stmt, &mut lexical, &mut vars);
     }
+    // A body-top-level function declaration is var-scoped inside a *function body* (unlike module
+    // top level): it may legally share a parameter's name.
+    lexical.retain(|l| {
+        !body
+            .iter()
+            .any(|s| matches!(s, Stmt::FuncDecl(f) if f.name.as_deref() == Some(l.as_str())))
+    });
     if lexical.is_empty() {
         return None;
     }
@@ -299,6 +308,9 @@ struct Parser {
     /// Set for the immediately following `parse_stmt` when it parses a single-statement body
     /// (`if`/loop/`with`/label): there, `let` only commits to a declaration before `[`.
     single_stmt: bool,
+    /// Inside a `static { … }` class block, where `await` is reserved entirely (neither an
+    /// identifier nor an await expression). Cleared by nested function boundaries.
+    in_static_block: bool,
 }
 
 #[derive(Default)]
@@ -493,7 +505,9 @@ impl Parser {
             if !semi && !asi {
                 return false;
             }
-            if str_val == "use strict" {
+            // The directive must be the exact code units `use strict` — a string that used
+            // escapes or line continuations does not count.
+            if str_val == "use strict" && !tok.escaped {
                 return true;
             }
             i += if semi { 2 } else { 1 };
@@ -1610,10 +1624,15 @@ impl Parser {
             return Ok(arrow);
         }
         let proto_mark = self.proto_dups.len();
-        let left = self.parse_cond()?;
+        let mut left = self.parse_cond()?;
         if let Tok::Punct(op) = self.cur() {
             let op = *op;
             if is_assign_op(op) {
+                // `undefined` is an ordinary identifier as an assignment target: the write fails
+                // at runtime (strict TypeError on the non-writable global), not at parse.
+                if matches!(left, Expr::Undefined) {
+                    left = Expr::Ident("undefined".to_string());
+                }
                 self.advance();
                 let value = self.parse_assign()?;
                 // Plain `=` also accepts an array/object literal reinterpreted as a destructuring
@@ -1810,6 +1829,9 @@ impl Parser {
             }
             if self.in_params {
                 return self.err("await expression is not allowed in formal parameters");
+            }
+            if self.in_static_block {
+                return self.err("await is not allowed in a class static block");
             }
             self.advance();
             let arg = self.parse_unary()?;
@@ -2189,7 +2211,7 @@ impl Parser {
                 if name == "yield" && self.in_generator {
                     return self.err("'yield' is not a valid identifier in a generator");
                 }
-                if name == "await" && self.in_async {
+                if name == "await" && (self.in_async || self.in_static_block) {
                     return self.err("'await' is not a valid identifier here");
                 }
                 match name.as_str() {
@@ -2250,6 +2272,7 @@ impl Parser {
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
+                        in_static_block: false,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     let e = sub.parse_expr()?;
@@ -2311,6 +2334,7 @@ impl Parser {
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
+                        in_static_block: false,
                     };
                     let e = sub.parse_expr()?;
                     self.proto_dups.append(&mut sub.proto_dups);
@@ -2545,11 +2569,13 @@ impl Parser {
         self.in_generator = is_generator;
         self.in_async = is_async;
         // An ordinary function body is not a super-property context (a nested arrow would inherit
-        // from here, correctly seeing no super).
+        // from here, correctly seeing no super) — and it leaves a static block's await reservation.
         let ssuper = std::mem::replace(&mut self.super_prop_ok, false);
+        let ssb = std::mem::replace(&mut self.in_static_block, false);
         let params = self.parse_params()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
         self.super_prop_ok = ssuper;
+        self.in_static_block = ssb;
         self.in_generator = sg;
         self.in_async = sa;
         let strict = is_strict || self.strict;
@@ -2715,9 +2741,11 @@ impl Parser {
             self.advance();
             let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
             let snt = std::mem::replace(&mut self.allow_new_target, true);
+            let ssb = std::mem::replace(&mut self.in_static_block, true);
             let body = self.parse_block_body();
             self.super_prop_ok = ssuper;
             self.allow_new_target = snt;
+            self.in_static_block = ssb;
             let body = body?;
             let func = Function {
                 name: None,

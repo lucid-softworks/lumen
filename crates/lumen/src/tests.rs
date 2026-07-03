@@ -7713,3 +7713,61 @@ fn dynamic_import_top_level_await() {
         Completion::Throw { name, message } => panic!("threw {name}: {message}"),
     }
 }
+
+#[test]
+fn small_area_conformance_fixes() {
+    // U+FEFF is whitespace anywhere in the source.
+    assert_eq!(run("var re = /x/g\u{FEFF}; typeof re"), "object");
+    // A computed static class member key evaluating to "prototype" is a TypeError.
+    assert_eq!(
+        throws("var k = 'prototype'; class C { static [k]() {} }"),
+        "TypeError"
+    );
+    assert_eq!(
+        run("class C { static ['ok']() { return 1; } } String(C.ok())"),
+        "1"
+    );
+    // WeakRef exposes no own properties for its target.
+    assert_eq!(
+        run("String(Object.getOwnPropertyNames(new WeakRef({})).length)"),
+        "0"
+    );
+    assert_eq!(
+        run("var o = {}; String(new WeakRef(o).deref() === o)"),
+        "true"
+    );
+    // An escaped "use strict" is not a directive; a clean one after other directives is.
+    assert_eq!(
+        run("function f() { 'use\\u0020strict'; return this !== undefined; } String(f())"),
+        "true"
+    );
+    // `undefined = v` parses; strict mode throws at runtime.
+    assert_eq!(throws("'use strict'; undefined = 12;"), "TypeError");
+    assert_eq!(run("undefined = 12; 'ok'"), "ok");
+    // `await` is fully reserved in class static blocks (but fine in nested functions).
+    assert!(Engine::new()
+        .eval("class C { static { await; } }", false)
+        .is_err());
+    assert!(Engine::new()
+        .eval("class C { static { await 1; } }", false)
+        .is_err());
+    assert_eq!(
+        run("class C { static { function g(await) { return await; } C.v = g(5); } } String(C.v)"),
+        "5"
+    );
+    // A body-top function declaration may share a parameter's name.
+    assert_eq!(
+        run("function f(x) { return typeof x; function x() {} } f(1)"),
+        "function"
+    );
+    // A regex may open right after a class declaration's body.
+    assert_eq!(run("class A {}/1/.source"), "1");
+    // ...while division after an object literal (value position) still wins.
+    assert_eq!(run("var n = 6, r = { v: 4 } / n / 2; String(r)"), "NaN");
+    // A setter on a wrapper prototype runs for a primitive base, receiver included.
+    assert_eq!(
+        run("var got; Object.defineProperty(Number.prototype, 'p', { set(v) { got = typeof this + ':' + v; } });
+             (5).p = 7; got"),
+        "object:7" // sloppy-mode receiver boxing; the setter itself ran with the primitive base
+    );
+}

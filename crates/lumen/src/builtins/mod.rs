@@ -506,10 +506,18 @@ fn install_async_disposable_stack(it: &mut Interp) {
 fn install_weak_refs(it: &mut Interp) {
     let wr_proto = Object::new(Some(it.object_proto.clone()));
     it.def_method(&wr_proto, "deref", 0, |i, this, _| {
-        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__target")) {
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("\u{0}weakref-target")) {
             return Err(i.make_error("TypeError", "deref called on a non-WeakRef"));
         }
-        ab(i.get_member(&this, "__target"))
+        Ok(this
+            .as_obj()
+            .and_then(|o| {
+                o.borrow()
+                    .props
+                    .get("\u{0}weakref-target")
+                    .map(|p| p.value.clone())
+            })
+            .unwrap_or(Value::Undefined))
     });
     let wr_ctor = it.make_native("WeakRef", 1, |i, _t, a| {
         if !i.constructing {
@@ -520,7 +528,8 @@ fn install_weak_refs(it: &mut Interp) {
             return Err(i.make_error("TypeError", "WeakRef target must be an object or symbol"));
         }
         let obj = new_from_ctor(i, "WeakRef")?;
-        set_internal(&obj, "__target", target);
+        // The key is \0-prefixed so it is invisible to every own-property enumeration path.
+        set_internal(&obj, "\u{0}weakref-target", target);
         Ok(Value::Obj(obj))
     });
     it.extra_protos.insert("WeakRef", wr_proto.clone());

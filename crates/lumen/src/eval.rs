@@ -121,6 +121,18 @@ impl Interp {
                 for prop in &objpat.props {
                     let key = self.eval_prop_key(&prop.key, env)?;
                     used.push(key.clone());
+                    // KeyedBindingInitialization order for a var-mode identifier target:
+                    // ResolveBinding *before* GetV (observable through a `with` env's has trap).
+                    let var_ref = if matches!(mode, BindMode::Var) {
+                        if let Pattern::Ident(name) = &prop.value {
+                            let e = Expr::Ident(name.clone());
+                            Some(self.resolve_reference(&e, env)?)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     let mut v = self.get_member(&value, &key)?;
                     if matches!(v, Value::Undefined) {
                         if let Some(d) = &prop.default {
@@ -130,7 +142,10 @@ impl Interp {
                             }
                         }
                     }
-                    self.bind_pattern(&prop.value, v, env, mode)?;
+                    match var_ref {
+                        Some(mut r) => self.put_reference(&mut r, v)?,
+                        None => self.bind_pattern(&prop.value, v, env, mode)?,
+                    }
                 }
                 if let Some(rest_name) = &objpat.rest {
                     // CopyDataProperties into the rest object: [[OwnPropertyKeys]] order (indices,
@@ -3108,6 +3123,14 @@ impl Interp {
                 continue;
             }
             let key = self.eval_prop_key(&m.key, env)?;
+            // A *computed* static member key evaluating to "prototype" is a runtime TypeError
+            // (the syntactic form is already an early error).
+            if m.is_static && key == "prototype" && matches!(m.key, PropKey::Computed(_)) {
+                return Err(self.throw(
+                    "TypeError",
+                    "classes may not have a static property named 'prototype'",
+                ));
+            }
             let is_private = key.starts_with('#');
             let key = if is_private {
                 self.resolve_private(&key, &class_env)
@@ -3276,6 +3299,9 @@ impl Interp {
                     let scope = new_scope(Some(static_env.clone()));
                     bind(&scope, "this", ctor_val.clone());
                     if let Some(func) = &m.func {
+                        // A static block instantiates its declarations like a function body.
+                        self.hoist(&func.body, &scope, &[]);
+                        self.declare_block_lexicals(&func.body, &scope, false);
                         for stmt in &func.body {
                             self.exec_stmt(stmt, &scope)?;
                         }

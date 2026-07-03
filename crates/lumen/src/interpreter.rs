@@ -1457,9 +1457,49 @@ impl Interp {
                     format!("cannot set property '{key}' of {}", type_name(base)),
                 ))
             }
-            // Setting a property on a primitive fails (ToObject's wrapper is a throwaway): a silent
-            // no-op in sloppy mode, a TypeError in strict mode.
+            // Setting a property on a primitive: an accessor (or proxy) on the wrapper
+            // prototype chain still handles the write, with the primitive as receiver; otherwise
+            // the write fails — a silent no-op in sloppy mode, a TypeError in strict mode.
             _ => {
+                let proto = match base {
+                    Value::Str(_) => Some(self.string_proto.clone()),
+                    Value::Num(_) => Some(self.number_proto.clone()),
+                    Value::Bool(_) => Some(self.boolean_proto.clone()),
+                    Value::Sym(_) => Some(self.symbol_proto.clone()),
+                    Value::BigInt(_) => self.extra_protos.get("BigInt").cloned(),
+                    _ => None,
+                };
+                let mut cur = proto;
+                while let Some(o) = cur {
+                    // A proxy on the chain (or any accessor) takes over with the original receiver.
+                    if self.proxies.contains_key(&(Rc::as_ptr(&o) as usize)) {
+                        return self.set_member_recv(&Value::Obj(o), key, value, receiver);
+                    }
+                    let prop = o.borrow().props.get(key).cloned();
+                    if let Some(p) = prop {
+                        if p.accessor {
+                            return match p.set {
+                                Some(setter) => {
+                                    self.call(setter, receiver.clone(), &[value])?;
+                                    Ok(true)
+                                }
+                                None => {
+                                    if self.strict {
+                                        Err(self.throw(
+                                            "TypeError",
+                                            format!("cannot set getter-only property '{key}'"),
+                                        ))
+                                    } else {
+                                        Ok(false)
+                                    }
+                                }
+                            };
+                        }
+                        break;
+                    }
+                    let parent = o.borrow().proto.clone();
+                    cur = parent;
+                }
                 if self.strict {
                     return Err(self.throw(
                         "TypeError",

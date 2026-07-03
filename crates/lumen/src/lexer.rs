@@ -32,6 +32,9 @@ struct Lexer<'a> {
     /// *expression* (so its body `}` is followed by division), `false` if a *declaration* (its `}`
     /// ends a statement, so a `/` after it is a regex).
     pending_fn: Vec<bool>,
+    /// Set when a `class` keyword is pushed: the next `{` is the class body, classified by
+    /// whether the class was a declaration (statement position) or an expression.
+    pending_class: Option<bool>,
 }
 
 /// Tokenize `src`. A lex error is reported as a SyntaxError by the caller.
@@ -55,6 +58,7 @@ pub fn tokenize_goal(src: &str, html_comments: bool) -> Result<Vec<Token>, LexEr
         brace_stack: Vec::new(),
         last_close_block: false,
         pending_fn: Vec::new(),
+        pending_class: None,
     };
     lx.run()?;
     Ok(lx.out)
@@ -134,6 +138,23 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether a `class` keyword (about to be pushed) sits in statement position (a declaration —
+    /// so its body's closing `}` ends a statement and a following `/` starts a regex).
+    fn class_is_declaration(&self) -> bool {
+        match self.out.last().map(|t| &t.kind) {
+            None => true,
+            Some(Tok::Punct(p)) => match *p {
+                ";" | "{" => true,
+                "}" => self.last_close_block,
+                _ => false,
+            },
+            Some(Tok::Keyword(k)) => {
+                matches!(*k, "else" | "do" | "try" | "finally" | "export" | "default")
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a `function` keyword (about to be pushed) sits in statement position (a declaration)
     /// rather than expression position.
     fn function_is_declaration(&self) -> bool {
@@ -157,8 +178,16 @@ impl<'a> Lexer<'a> {
                 let is_expr = !self.function_is_declaration();
                 self.pending_fn.push(is_expr);
             }
+            Tok::Keyword(k) if *k == "class" => {
+                self.pending_class = Some(self.class_is_declaration());
+            }
             Tok::Punct(p) if *p == "{" => {
-                let ends_stmt = self.brace_ends_statement();
+                // A pending `class` head claims this `{` as its body: the closing `}` sits at
+                // statement position exactly when the class is a declaration.
+                let ends_stmt = match self.pending_class.take() {
+                    Some(is_decl) => is_decl,
+                    None => self.brace_ends_statement(),
+                };
                 self.brace_stack.push(ends_stmt);
             }
             Tok::Punct(p) if *p == "}" => {
@@ -210,7 +239,8 @@ impl<'a> Lexer<'a> {
             if is_line_terminator(c) {
                 self.nl_pending = true;
                 self.bump();
-            } else if c.is_whitespace() {
+            } else if c.is_whitespace() || c == '\u{FEFF}' {
+                // ZWNBSP (U+FEFF) is JS whitespace anywhere in the source, not just as a BOM.
                 self.bump();
             } else if c == '/' && self.peek2() == Some('/') {
                 self.skip_line_comment();
@@ -371,13 +401,17 @@ impl<'a> Lexer<'a> {
     fn read_string(&mut self, quote: char) -> Result<(), LexError> {
         self.bump();
         let mut s = String::new();
+        let mut had_escape = false;
         self.pending_legacy = false;
         self.pending_lone_surrogate = false;
         loop {
             match self.bump() {
                 None => return Err(self.err("unterminated string literal")),
                 Some(c) if c == quote => break,
-                Some('\\') => self.read_escape(&mut s)?,
+                Some('\\') => {
+                    had_escape = true;
+                    self.read_escape(&mut s)?
+                }
                 // U+2028/U+2029 may appear literally in a string (json-superset); only CR/LF end it.
                 Some(c @ ('\u{2028}' | '\u{2029}')) => s.push(c),
                 Some(c) if is_line_terminator(c) => {
@@ -387,6 +421,10 @@ impl<'a> Lexer<'a> {
             }
         }
         self.push(Tok::Str(s));
+        // A directive prologue string that used escapes never matches "use strict".
+        if had_escape {
+            self.mark_escaped();
+        }
         if self.pending_legacy {
             self.mark_legacy_octal();
             self.pending_legacy = false;
