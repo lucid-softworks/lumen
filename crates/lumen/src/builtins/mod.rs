@@ -3825,7 +3825,10 @@ ta_methods! {
 fn can_be_held_weakly(i: &Interp, v: &Value) -> bool {
     match v {
         Value::Obj(_) => true,
-        Value::Sym(s) => !i.sym_for.values().any(|r| Rc::ptr_eq(r, s)),
+        Value::Sym(s) => {
+            let _ = i;
+            !crate::interpreter::sym_for_contains(s)
+        }
         _ => false,
     }
 }
@@ -9537,6 +9540,7 @@ fn install_shadow_realm(it: &mut Interp) {
     it.extra_protos.insert("ShadowRealm", proto.clone());
     set_to_string_tag(it, &proto, "ShadowRealm");
     it.def_method(&proto, "evaluate", 1, shadow_evaluate);
+    it.def_method(&proto, "importValue", 2, shadow_import_value);
 
     let ctor = it.make_native("ShadowRealm", 0, |i, _t, _a| {
         if !i.constructing {
@@ -9584,24 +9588,95 @@ fn shadow_evaluate(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
         Ok(b) => b,
         Err(e) => return Err(i.make_error("SyntaxError", e.message)),
     };
-    let mut sub = i.shadow_realms.remove(&ptr).unwrap();
-    let result = sub.run_body(&body, false);
-    i.shadow_realms.insert(ptr, sub);
+    let subptr = &mut **i.shadow_realms.get_mut(&ptr).unwrap() as *mut Interp;
+    // SAFETY: pinned Box target; re-entrant evaluation is sequenced by the JS call stack.
+    let sub: &mut Interp = unsafe { &mut *subptr };
+    let result = {
+        // PerformShadowRealmEval: like eval code — `var`s instantiate in the realm's global,
+        // lexicals live in a fresh declarative environment per evaluation.
+        sub.strict = matches!(
+            body.first(),
+            Some(crate::ast::Stmt::Expr(crate::ast::Expr::Str(d))) if &**d == "use strict"
+        );
+        let genv = sub.global_env.clone();
+        let scope = crate::interpreter::new_scope(Some(genv.clone()));
+        sub.hoist(&body, &genv, &[]);
+        sub.declare_block_lexicals(&body, &scope, false);
+        let r = sub.run_stmt_list(&body, &scope).map(|v| match v {
+            Value::Empty => Value::Undefined,
+            other => other,
+        });
+        sub.drain_microtasks();
+        r
+    };
     match result {
-        // Primitive values (number/string/bool/null/undefined/bigint/symbol) are self-contained and
-        // cross the realm boundary directly.
-        Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
-        Ok(v) if v.is_callable() => ab(i.make_wrapped_shadow(ptr, v)),
-        Ok(_) => Err(i.make_error(
-            "TypeError",
-            "ShadowRealm.prototype.evaluate result must be a primitive",
-        )),
+        // Primitives cross the realm boundary directly; callables wrap; other objects throw.
+        Ok(v) => ab(i.make_shadow_result(ptr, v)),
         // An error thrown inside the shadow realm is re-thrown as a TypeError of the calling realm.
         Err(_) => Err(i.make_error(
             "TypeError",
             "ShadowRealm evaluate: the provided source threw an error",
         )),
     }
+}
+
+/// ShadowRealm.prototype.importValue: load `specifier` as a module inside the sub-realm and
+/// marshal its `exportName` export out (primitive or wrapped callable).
+fn shadow_import_value(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    // Brand check, specifier ToString, and exportName validation all throw synchronously.
+    let ptr = map_ptr(&this)
+        .filter(|p| i.shadow_realms.contains_key(p))
+        .ok_or_else(|| {
+            i.make_error(
+                "TypeError",
+                "ShadowRealm.prototype.importValue called on a non-ShadowRealm",
+            )
+        })?;
+    let spec = ab(i.to_string(&arg(a, 0)))?.to_string();
+    let name = match arg(a, 1) {
+        Value::Str(s) => s.to_string(),
+        _ => return Err(i.make_error("TypeError", "importValue exportName must be a string")),
+    };
+    let promise = i.new_promise();
+    let outcome = (|i: &mut Interp| -> Result<Value, Value> {
+        let loader = i
+            .module_loader
+            .clone()
+            .ok_or_else(|| i.make_error("TypeError", "no module loader available"))?;
+        let base = i.import_base.clone();
+        let (key, src) = loader(&spec, &base)
+            .ok_or_else(|| i.make_error("TypeError", format!("module not found: {spec}")))?;
+        let subptr = &mut **i.shadow_realms.get_mut(&ptr).unwrap() as *mut Interp;
+        // SAFETY: pinned Box target (see shadow_evaluate).
+        let sub: &mut Interp = unsafe { &mut *subptr };
+        sub.module_loader = Some(loader);
+        sub.import_base = base;
+        let loaded = {
+            let r = sub.load_module(&key, &src);
+            sub.drain_microtasks();
+            r
+        };
+        let ns = sub.module_namespace(&key);
+        let value = match (&loaded, ns) {
+            (Ok(_), Some(ns)) => sub.get_member(&ns, &name),
+            _ => {
+                return Err(i.make_error("TypeError", "importValue: module evaluation failed"));
+            }
+        };
+        match value {
+            Ok(Value::Undefined) => Err(i.make_error(
+                "TypeError",
+                format!("importValue: no export named '{name}'"),
+            )),
+            Ok(v) => ab(i.make_shadow_result(ptr, v)),
+            Err(_) => Err(i.make_error("TypeError", "importValue: export access failed")),
+        }
+    })(i);
+    match outcome {
+        Ok(v) => i.resolve_promise(&promise, v),
+        Err(e) => i.reject_promise(&promise, e),
+    }
+    Ok(promise)
 }
 
 /// `(info, detached)` for a TypedArray receiver, or a TypeError (brand check for the meta getters).
@@ -9996,6 +10071,21 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
 /// Proxy `[[DefineOwnProperty]]`: call the trap (ToBoolean its result) or forward to the target.
 /// Proxy `[[GetOwnProperty]]`: the trap result as a descriptor object (or undefined), enforcing the
 /// absent-property invariant; a missing trap forwards to the target (recursing for a proxy target).
+/// Trap-aware HasOwnProperty (for CopyNameAndLength across realm boundaries).
+pub(crate) fn has_own_property_trapped(
+    i: &mut Interp,
+    v: &Value,
+    key: &str,
+) -> Result<bool, Value> {
+    if let Some((t, h)) = proxy_pair(i, v) {
+        return Ok(!matches!(
+            proxy_gopd_value(i, &t, &h, key)?,
+            Value::Undefined
+        ));
+    }
+    Ok(matches!(v, Value::Obj(o) if o.borrow().props.contains(key)))
+}
+
 fn proxy_gopd_value(
     i: &mut Interp,
     target: &Value,
@@ -15964,12 +16054,12 @@ fn install_symbol(it: &mut Interp) {
 
     it.def_method(&ctor, "for", 1, |i, _this, args| {
         let key = ab(i.to_string(&arg(args, 0)))?.to_string();
-        if let Some(d) = i.sym_for.get(&key).cloned() {
+        if let Some(d) = crate::interpreter::sym_for_get(&key) {
             return Ok(Value::Sym(d));
         }
         let sym = i.new_symbol(Some(Rc::from(key.as_str())));
         if let Value::Sym(d) = &sym {
-            i.sym_for.insert(key, d.clone());
+            crate::interpreter::sym_for_insert(key, d.clone());
         }
         Ok(sym)
     });
@@ -15977,12 +16067,9 @@ fn install_symbol(it: &mut Interp) {
         let Value::Sym(s) = arg(args, 0) else {
             return Err(i.make_error("TypeError", "Symbol.keyFor: argument is not a Symbol"));
         };
-        for (k, d) in &i.sym_for {
-            if d.id == s.id {
-                return Ok(Value::from_string(k.clone()));
-            }
-        }
-        Ok(Value::Undefined)
+        Ok(crate::interpreter::sym_for_key_of(&s)
+            .map(Value::from_string)
+            .unwrap_or(Value::Undefined))
     });
     set_builtin(&it.global, "Symbol", Value::Obj(ctor));
 

@@ -95,6 +95,15 @@ pub enum Callable {
         realm: usize,
         target: Box<Value>,
     },
+    /// The inverse: a function living *inside* a ShadowRealm whose `target` is a callable of the
+    /// host realm. `realm` is this sub-realm's key in the host's map and `parent` is the host
+    /// interpreter's stable address (hosts are either the engine root or boxed sub-realms, both
+    /// pinned in memory while any of their sub-realm objects exist).
+    WrappedCross {
+        realm: usize,
+        parent: usize,
+        target: Box<Value>,
+    },
     /// An auto-accessor's synthesized getter: reads the private backing field (brand-checked) off
     /// the receiver.
     AccessorGet(Rc<str>),

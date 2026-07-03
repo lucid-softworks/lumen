@@ -33,7 +33,7 @@ pub enum NsBinding {
 pub(crate) struct ModuleRec {
     body: Rc<Vec<Stmt>>,
     env: Env,
-    ns: Value,
+    pub ns: Value,
     meta: Value,
     /// Dependency keys in source order (drives depth-first evaluation).
     dep_keys: Vec<String>,

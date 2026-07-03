@@ -8472,3 +8472,63 @@ fn utf16_semantics() {
         "false"
     );
 }
+#[test]
+fn shadow_realm_cross_calls() {
+    assert_eq!(
+        run("const r = new ShadowRealm();
+             const take = r.evaluate('(fn) => { globalThis.f = fn; return typeof globalThis.f; }');
+             let hits = 0;
+             const t = take(() => { hits += 1; return 7; });
+             const fire = r.evaluate('() => globalThis.f()');
+             const out = fire();
+             t + ':' + out + ':' + hits"),
+        "function:7:1"
+    );
+    assert_eq!(
+        run("globalThis.count = 0;
+             const realm1 = new ShadowRealm();
+             const r1wrapped = realm1.evaluate('globalThis.count = 0; () => globalThis.count += 1;');
+             const realm2Evaluate = realm1.evaluate(
+               'const realm2 = new ShadowRealm(); (str) => realm2.evaluate(str);'
+             );
+             const r2wrapper = realm2Evaluate('globalThis.wrapped = undefined; globalThis.count = 0; (fn) => globalThis.wrapped = fn;');
+             r2wrapper(r1wrapped);
+             const r2fire = realm2Evaluate('() => { globalThis.wrapped(); }');
+             r2fire();
+             const c = realm1.evaluate('globalThis.count');
+             '' + c + ':' + globalThis.count"),
+        "1:0"
+    );
+}
+#[test]
+fn shadow_realm_eval_scoping() {
+    assert_eq!(
+        run("const r2 = new ShadowRealm();
+             r2.evaluate(`
+               const hasOwn = Object.prototype.hasOwnProperty;
+               const savedGlobal = globalThis;
+               const names = Object.keys(Object.getOwnPropertyDescriptors(globalThis));
+               const keep = ['undefined','Infinity','NaN'];
+               const remaining = names.filter(name => {
+                 if (keep.includes(name)) return false;
+                 if (name !== 'globalThis') {
+                   delete globalThis[name];
+                   return hasOwn.call(globalThis, name);
+                 }
+               });
+               delete globalThis['globalThis'];
+               if (hasOwn.call(savedGlobal, 'globalThis')) remaining.push('globalThis');
+               remaining.join(', ');
+             `)"),
+        ""
+    );
+    assert_eq!(
+        run("const r = new ShadowRealm();
+             r.evaluate(`
+               const entries = Object.entries(Object.getOwnPropertyDescriptors(globalThis));
+               entries.filter(e => e[1].configurable === false).map(([n]) => n)
+                 .filter(n => !['undefined','Infinity','NaN'].includes(n)).join(', ');
+             `)"),
+        ""
+    );
+}

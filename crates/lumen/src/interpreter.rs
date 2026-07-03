@@ -269,6 +269,45 @@ pub(crate) fn update_abrupt_empty(a: Abrupt, v: Value) -> Abrupt {
     }
 }
 
+thread_local! {
+    /// The GlobalSymbolRegistry (`Symbol.for`): shared by every realm (incl. ShadowRealms).
+    static SYM_FOR: std::cell::RefCell<HashMap<String, Rc<crate::value::SymbolData>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Reset the `Symbol.for` registry (a fresh Engine starts a fresh agent, but ShadowRealms and
+/// synthesized realms inside one engine keep sharing it).
+pub(crate) fn sym_for_reset() {
+    SYM_FOR.with(|m| m.borrow_mut().clear());
+}
+
+/// Look up a `Symbol.for` registry entry.
+pub(crate) fn sym_for_get(key: &str) -> Option<Rc<crate::value::SymbolData>> {
+    SYM_FOR.with(|m| m.borrow().get(key).cloned())
+}
+
+/// Register a `Symbol.for` symbol.
+pub(crate) fn sym_for_insert(key: String, sym: Rc<crate::value::SymbolData>) {
+    SYM_FOR.with(|m| {
+        m.borrow_mut().insert(key, sym);
+    });
+}
+
+/// Whether `sym` is a registered `Symbol.for` symbol (Symbol.keyFor's check).
+pub(crate) fn sym_for_contains(sym: &Rc<crate::value::SymbolData>) -> bool {
+    SYM_FOR.with(|m| m.borrow().values().any(|r| Rc::ptr_eq(r, sym)))
+}
+
+/// The registry key of a registered symbol, if any.
+pub(crate) fn sym_for_key_of(sym: &Rc<crate::value::SymbolData>) -> Option<String> {
+    SYM_FOR.with(|m| {
+        m.borrow()
+            .iter()
+            .find(|(_, r)| Rc::ptr_eq(r, sym))
+            .map(|(k, _)| k.clone())
+    })
+}
+
 /// Extract the thrown value from an abrupt completion (non-throw completions surface as undefined).
 pub fn abrupt_value(a: Abrupt) -> Value {
     match a {
@@ -411,7 +450,7 @@ pub struct Interp {
     /// recovered for `Object.getOwnPropertySymbols`). `sym_for` backs the `Symbol.for` registry.
     pub sym_counter: u64,
     pub sym_registry: HashMap<u64, Rc<SymbolData>>,
-    pub sym_for: HashMap<String, Rc<SymbolData>>,
+
     pub console: Vec<String>,
     /// Current strict-mode flag (pushed/popped around function bodies).
     pub strict: bool,
@@ -844,7 +883,6 @@ impl Interp {
             error_protos: HashMap::new(),
             sym_counter: 0,
             sym_registry: HashMap::new(),
-            sym_for: HashMap::new(),
             console: Vec::new(),
             strict: false,
             depth: 0,
@@ -2308,6 +2346,83 @@ impl Interp {
             Callable::WrappedShadow { realm, target } => {
                 self.call_wrapped_shadow(realm, *target, args)
             }
+            Callable::WrappedCross {
+                realm,
+                parent,
+                target,
+            } => {
+                if std::env::var("LUMEN_DBG").is_ok() {
+                    eprintln!(
+                        "DBG cross enter realm={realm} parent={parent:x} self={:p} tkind={}",
+                        self as *const Interp,
+                        match &*target {
+                            Value::Obj(o) => match &o.borrow().call {
+                                Callable::User(..) => "user",
+                                Callable::WrappedShadow { .. } => "wshadow",
+                                Callable::WrappedCross { .. } => "wcross",
+                                Callable::Native(_) => "native",
+                                _ => "other",
+                            },
+                            _ => "nonobj",
+                        }
+                    );
+                }
+                // SAFETY: the host Interp (engine root or a boxed sub-realm) is pinned in memory
+                // while any of its sub-realm's objects — including this wrapper — exist, and it
+                // is suspended (not mutably borrowed) whenever sub-realm code runs.
+                let host: &mut Interp = unsafe { &mut *(parent as *mut Interp) };
+                let mut out_args = Vec::with_capacity(args.len());
+                for a in args {
+                    if a.is_callable() {
+                        match host.make_wrapped_shadow(realm, a.clone()) {
+                            Ok(w) => out_args.push(w),
+                            Err(_) => {
+                                return Err(self.throw(
+                                    "TypeError",
+                                    "cannot wrap the callable argument for the host realm",
+                                ))
+                            }
+                        }
+                    } else if matches!(a, Value::Obj(_)) {
+                        return Err(self.throw(
+                            "TypeError",
+                            "wrapped function arguments must be primitives or callables",
+                        ));
+                    } else {
+                        out_args.push(a.clone());
+                    }
+                }
+                match host.call(*target, Value::Undefined, &out_args) {
+                    Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
+                    Ok(v) if v.is_callable() => Ok(self.make_wrapped_cross(realm, parent, v)),
+                    Ok(_) => {
+                        Err(self.throw("TypeError", "a wrapped function returned a non-primitive"))
+                    }
+                    Err(e) => {
+                        if std::env::var("LUMEN_DBG").is_ok() {
+                            eprintln!(
+                                "DBG cross err: {:?}",
+                                match &e {
+                                    Abrupt::Throw(Value::Str(s)) => format!("str {s}"),
+                                    Abrupt::Throw(Value::Obj(o)) => format!(
+                                        "obj {:?}",
+                                        o.borrow()
+                                            .props
+                                            .get("message")
+                                            .map(|p| p.value.clone())
+                                            .and_then(|v| match v {
+                                                Value::Str(s) => Some(s.to_string()),
+                                                _ => None,
+                                            })
+                                    ),
+                                    _ => "non-throw".to_string(),
+                                }
+                            );
+                        }
+                        Err(self.throw("TypeError", "a wrapped function threw in the host realm"))
+                    }
+                }
+            }
             // Auto-accessor get/set: the receiver must *own* the private backing field (so a static
             // accessor reached through a subclass, which doesn't carry the slot, throws).
             Callable::AccessorGet(key) => self.accessor_load(&this, &key),
@@ -2364,20 +2479,72 @@ impl Interp {
     /// Make a ShadowRealm wrapped function: a caller-realm callable around `target` in `realm`.
     /// CopyNameAndLength copies the target's `length` (a non-negative integer) and `name` (a string,
     /// else "") — a throwing `length`/`name` getter propagates.
+    /// The namespace object of a loaded module (for ShadowRealm.importValue).
+    pub(crate) fn module_namespace(&self, key: &str) -> Option<Value> {
+        self.module_recs.get(key).map(|m| m.ns.clone())
+    }
+
+    /// Marshal an evaluate/importValue result out of the shadow realm `realm`.
+    pub(crate) fn make_shadow_result(&mut self, realm: usize, v: Value) -> Result<Value, Abrupt> {
+        self.marshal_from_shadow(realm, v)
+    }
+
+    /// Marshal one value crossing OUT of a shadow realm into this (host) realm.
+    fn marshal_from_shadow(&mut self, realm: usize, v: Value) -> Result<Value, Abrupt> {
+        if !matches!(v, Value::Obj(_)) {
+            return Ok(v);
+        }
+        if v.is_callable() {
+            return self.make_wrapped_shadow(realm, v);
+        }
+        Err(self.throw(
+            "TypeError",
+            "only primitives and callables may cross a ShadowRealm boundary",
+        ))
+    }
+
     pub fn make_wrapped_shadow(&mut self, realm: usize, target: Value) -> Result<Value, Abrupt> {
         let f = Object::new(Some(self.function_proto.clone()));
         f.borrow_mut().call = Callable::WrappedShadow {
             realm,
             target: Box::new(target.clone()),
         };
-        let length = match self.get_member(&target, "length")? {
-            Value::Num(n) if n.is_finite() => n.trunc().max(0.0),
-            Value::Num(n) if n == f64::INFINITY => f64::INFINITY,
-            _ => 0.0,
+        // CopyNameAndLength: the Gets run in the realm that owns `target` (its proxy state
+        // lives there); an abrupt Get is a TypeError of the calling realm.
+        let bad = |i: &mut Interp| {
+            i.throw(
+                "TypeError",
+                "wrapped function name/length are not accessible",
+            )
         };
-        let name = match self.get_member(&target, "name")? {
-            Value::Str(s) => s.to_string(),
-            _ => String::new(),
+        let (length_r, name_r) = match self.shadow_realms.remove(&realm) {
+            Some(mut sub) => {
+                // HasOwnProperty first (its [[GetOwnProperty]] trap is observable and may throw).
+                let l = match crate::builtins::has_own_property_trapped(&mut sub, &target, "length")
+                {
+                    Ok(true) => sub.get_member(&target, "length"),
+                    Ok(false) => Ok(Value::Num(0.0)),
+                    Err(e) => Err(Abrupt::Throw(e)),
+                };
+                let n = sub.get_member(&target, "name");
+                self.shadow_realms.insert(realm, sub);
+                (l, n)
+            }
+            None => (
+                self.get_member(&target, "length"),
+                self.get_member(&target, "name"),
+            ),
+        };
+        let length = match length_r {
+            Ok(Value::Num(n)) if n.is_finite() => n.trunc().max(0.0),
+            Ok(Value::Num(n)) if n == f64::INFINITY => f64::INFINITY,
+            Ok(_) => 0.0,
+            Err(_) => return Err(bad(self)),
+        };
+        let name = match name_r {
+            Ok(Value::Str(s)) => s.to_string(),
+            Ok(_) => String::new(),
+            Err(_) => return Err(bad(self)),
         };
         {
             let mut b = f.borrow_mut();
@@ -2401,33 +2568,102 @@ impl Interp {
         target: Value,
         args: &[Value],
     ) -> Result<Value, Abrupt> {
-        // Only primitive arguments may cross into the shadow realm; callables wrap, objects throw.
-        let mut inner_args = Vec::with_capacity(args.len());
-        for a in args {
-            if matches!(a, Value::Obj(_)) {
-                return Err(self.throw(
-                    "TypeError",
-                    "ShadowRealm wrapped function: only primitive arguments are supported",
-                ));
-            }
-            inner_args.push(a.clone());
-        }
-        let mut sub = match self.shadow_realms.remove(&realm) {
-            Some(s) => s,
+        // The sub-interpreter is used in place (Box targets are pinned), so re-entrant calls —
+        // host code invoked from inside the realm calling back into it — work.
+        let subptr = match self.shadow_realms.get_mut(&realm) {
+            Some(b) => &mut **b as *mut Interp,
             None => return Err(self.throw("TypeError", "the ShadowRealm is no longer available")),
         };
-        let result = sub.call(target, Value::Undefined, &inner_args);
-        sub.drain_microtasks();
-        self.shadow_realms.insert(realm, sub);
-        match result {
-            Ok(v) if !matches!(v, Value::Obj(_)) => Ok(v),
-            Ok(v) if v.is_callable() => self.make_wrapped_shadow(realm, v),
-            Ok(_) => Err(self.throw("TypeError", "a wrapped function returned a non-primitive")),
-            Err(_) => Err(self.throw(
-                "TypeError",
-                "a wrapped function threw inside the ShadowRealm",
-            )),
+        // SAFETY: pinned Box target; any aliasing re-entry is sequenced by the JS call stack.
+        let sub: &mut Interp = unsafe { &mut *subptr };
+        let parent_ptr = self as *mut Interp as usize;
+        // Primitive arguments cross directly; callables wrap as sub-realm functions that
+        // re-enter this realm; other objects throw.
+        let mut inner_args = Vec::with_capacity(args.len());
+        for a in args {
+            if a.is_callable() {
+                inner_args.push(sub.make_wrapped_cross(realm, parent_ptr, a.clone()));
+            } else if matches!(a, Value::Obj(_)) {
+                return Err(self.throw(
+                    "TypeError",
+                    "ShadowRealm wrapped function: arguments must be primitives or callables",
+                ));
+            } else {
+                inner_args.push(a.clone());
+            }
         }
+        let result = {
+            let r = sub.call(target, Value::Undefined, &inner_args);
+            sub.drain_microtasks();
+            r
+        };
+        match result {
+            Ok(v) => self
+                .marshal_from_shadow(realm, v)
+                .map_err(|_| {
+                    abrupt_value(
+                        self.throw("TypeError", "a wrapped function returned a non-primitive"),
+                    )
+                })
+                .map_err(Abrupt::Throw),
+            Err(e) => {
+                if std::env::var("LUMEN_DBG").is_ok() {
+                    eprintln!(
+                        "DBG cws err: {:?}",
+                        match &e {
+                            Abrupt::Throw(Value::Str(s)) => format!("str {s}"),
+                            Abrupt::Throw(Value::Obj(o)) => format!(
+                                "obj {:?} {:?}",
+                                o.borrow()
+                                    .props
+                                    .get("name")
+                                    .map(|p| p.value.clone())
+                                    .and_then(|v| match v {
+                                        Value::Str(s) => Some(s.to_string()),
+                                        _ => None,
+                                    }),
+                                o.borrow()
+                                    .props
+                                    .get("message")
+                                    .map(|p| p.value.clone())
+                                    .and_then(|v| match v {
+                                        Value::Str(s) => Some(s.to_string()),
+                                        _ => None,
+                                    })
+                            ),
+                            _ => "non-throw".to_string(),
+                        }
+                    );
+                }
+                Err(self.throw(
+                    "TypeError",
+                    "a wrapped function threw inside the ShadowRealm",
+                ))
+            }
+        }
+    }
+
+    /// Create the sub-realm-side wrapper for a host callable.
+    pub(crate) fn make_wrapped_cross(
+        &mut self,
+        realm: usize,
+        parent: usize,
+        target: Value,
+    ) -> Value {
+        let f = Object::new(Some(self.function_proto.clone()));
+        f.borrow_mut().call = Callable::WrappedCross {
+            realm,
+            parent,
+            target: Box::new(target),
+        };
+        f.borrow_mut().props.insert(
+            "length",
+            Property::data(Value::Num(0.0), false, false, true),
+        );
+        f.borrow_mut()
+            .props
+            .insert("name", Property::data(Value::str(""), false, false, true));
+        Value::Obj(f)
     }
 
     pub(crate) fn call_user(
@@ -3318,6 +3554,7 @@ impl Interp {
             }
             Callable::None
             | Callable::WrappedShadow { .. }
+            | Callable::WrappedCross { .. }
             | Callable::AccessorGet(_)
             | Callable::AccessorSet(_)
             | Callable::PropGet(_)
@@ -3326,19 +3563,6 @@ impl Interp {
     }
 
     // ----- program / statement execution ------------------------------------------------------
-
-    /// Run an already-parsed program body to completion (running the microtask checkpoint), under a
-    /// given strict mode. Used to evaluate code inside a ShadowRealm's isolated interpreter.
-    pub fn run_body(&mut self, body: &[Stmt], strict: bool) -> Result<Value, Value> {
-        let saved = self.strict;
-        let directive =
-            matches!(body.first(), Some(Stmt::Expr(Expr::Str(s))) if &**s == "use strict");
-        self.strict = strict || directive;
-        let r = self.run_program(body);
-        self.drain_microtasks();
-        self.strict = saved;
-        r
-    }
 
     /// Proxy `[[Get]]` invariant: a non-configurable non-writable data property on the target must be
     /// reported with its actual value; a non-configurable accessor with no getter must report

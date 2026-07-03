@@ -85,6 +85,7 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Engine {
+        interpreter::sym_for_reset();
         Engine {
             interp: Interp::new(),
         }
