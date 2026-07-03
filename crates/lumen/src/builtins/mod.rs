@@ -14868,7 +14868,19 @@ fn install_math(it: &mut Interp) {
     unary!("abs", f64::abs);
     unary!("floor", f64::floor);
     unary!("ceil", f64::ceil);
-    unary!("round", |x: f64| (x + 0.5).floor());
+    // Math.round ties toward +Inf, but preserves a negative sign: a value in [-0.5, 0) rounds to -0.
+    unary!("round", |x: f64| {
+        if x.is_nan() || x.is_infinite() || x == 0.0 {
+            x
+        } else {
+            let r = (x + 0.5).floor();
+            if r == 0.0 && x < 0.0 {
+                -0.0
+            } else {
+                r
+            }
+        }
+    });
     unary!("trunc", f64::trunc);
     unary!("sqrt", f64::sqrt);
     unary!("cbrt", f64::cbrt);
@@ -14978,9 +14990,18 @@ fn install_math(it: &mut Interp) {
     unary!("asin", f64::asin);
     unary!("acos", f64::acos);
     it.def_method(&math, "pow", 2, |i, _t, a| {
-        Ok(Value::Num(
-            ab(i.to_number(&arg(a, 0)))?.powf(ab(i.to_number(&arg(a, 1)))?),
-        ))
+        let base = ab(i.to_number(&arg(a, 0)))?;
+        let exp = ab(i.to_number(&arg(a, 1)))?;
+        // Number::exponentiate special cases Rust's powf doesn't share: a NaN exponent is NaN even
+        // for base 1, and a base of ±1 with an infinite exponent is NaN.
+        let r = if exp.is_nan() {
+            f64::NAN
+        } else if base.abs() == 1.0 && exp.is_infinite() {
+            f64::NAN
+        } else {
+            base.powf(exp)
+        };
+        Ok(Value::Num(r))
     });
     it.def_method(&math, "atan2", 2, |i, _t, a| {
         Ok(Value::Num(
@@ -14988,26 +15009,33 @@ fn install_math(it: &mut Interp) {
         ))
     });
     it.def_method(&math, "max", 2, |i, _t, a| {
-        let mut m = f64::NEG_INFINITY;
+        // ToNumber every argument first (side effects in order), then reduce. +0 is larger than -0.
+        let mut nums = Vec::with_capacity(a.len());
         for v in a {
-            let n = ab(i.to_number(v))?;
+            nums.push(ab(i.to_number(v))?);
+        }
+        let mut m = f64::NEG_INFINITY;
+        for &n in &nums {
             if n.is_nan() {
                 return Ok(Value::Num(f64::NAN));
             }
-            if n > m {
+            if n > m || (n == 0.0 && m == 0.0 && n.is_sign_positive() && m.is_sign_negative()) {
                 m = n;
             }
         }
         Ok(Value::Num(m))
     });
     it.def_method(&math, "min", 2, |i, _t, a| {
-        let mut m = f64::INFINITY;
+        let mut nums = Vec::with_capacity(a.len());
         for v in a {
-            let n = ab(i.to_number(v))?;
+            nums.push(ab(i.to_number(v))?);
+        }
+        let mut m = f64::INFINITY;
+        for &n in &nums {
             if n.is_nan() {
                 return Ok(Value::Num(f64::NAN));
             }
-            if n < m {
+            if n < m || (n == 0.0 && m == 0.0 && n.is_sign_negative() && m.is_sign_positive()) {
                 m = n;
             }
         }
