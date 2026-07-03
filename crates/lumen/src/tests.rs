@@ -7175,3 +7175,53 @@ fn private_names_are_per_class_evaluation() {
         "1"
     );
 }
+
+#[test]
+fn fn_name_symbol_keys() {
+    // NamedEvaluation with a symbol key: "[description]", or "" without one.
+    assert_eq!(
+        run("const s = Symbol('test262'); ({ [s]: function(){} })[s].name"),
+        "[test262]"
+    );
+    assert_eq!(
+        run("const s = Symbol(); String(({ [s]: function(){} })[s].name)"),
+        ""
+    );
+    assert_eq!(run("const s = Symbol('m'); ({ [s]() {} })[s].name"), "[m]");
+    assert_eq!(
+        run("const s = Symbol('a');
+             Object.getOwnPropertyDescriptor({ get [s]() {} }, s).get.name"),
+        "get [a]"
+    );
+    assert_eq!(run("({ id: function(){} }).id.name"), "id");
+}
+
+#[test]
+fn private_set_method_and_getter_only() {
+    // PrivateSet on a private method is a TypeError (methods are not writable)...
+    assert_eq!(
+        throws("class C { #m() {} static w(o) { o.#m = 1; } } C.w(new C())"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("class C { #m() {} static w(o) { o.#m += 1; } } C.w(new C())"),
+        "TypeError"
+    );
+    // ...as is writing through a getter-only private accessor (never a sloppy no-op).
+    assert_eq!(
+        throws("class C { get #x() { return 1; } static w(o) { o.#x = 2; } } C.w(new C())"),
+        "TypeError"
+    );
+    // A private setter still works, and fields stay writable.
+    assert_eq!(
+        run(
+            "class C { #v = 0; set #x(v) { this.#v = v; } get #x() { return this.#v; }
+             static rw(o) { o.#x = 5; return o.#x; } } String(C.rw(new C()))"
+        ),
+        "5"
+    );
+    assert_eq!(
+        run("class C { #f = 1; static rw(o) { o.#f += 2; return o.#f; } } String(C.rw(new C()))"),
+        "3"
+    );
+}

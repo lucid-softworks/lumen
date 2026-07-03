@@ -1538,17 +1538,44 @@ impl Interp {
         }
     }
 
-    /// PrivateSet: write a private field (or invoke a private setter) after a brand check.
+    /// PrivateSet: write a private field (or invoke a private setter) after a brand check. A
+    /// private *method* (non-writable) or a getter-only private accessor is a TypeError — never a
+    /// silent sloppy-mode no-op.
     fn set_private_member(&mut self, base: &Value, name: &str, value: Value) -> Result<(), Abrupt> {
+        let shown = private_display(name).to_string();
         match base {
-            Value::Obj(o) if self.has_property(o, name) => self.set_member(base, name, value),
-            _ => {
-                let shown = private_display(name);
-                Err(self.throw(
-                    "TypeError",
-                    format!("cannot write private member {shown} to an object whose class did not declare it"),
-                ))
+            Value::Obj(o) if self.has_property(o, name) => {
+                let mut cur = Some(o.clone());
+                while let Some(c) = cur {
+                    let found = c.borrow().props.get(name).cloned();
+                    if let Some(p) = found {
+                        if p.accessor {
+                            let Some(setter) = p.set.clone() else {
+                                return Err(self.throw(
+                                    "TypeError",
+                                    format!("private accessor {shown} has no setter"),
+                                ));
+                            };
+                            self.call(setter, base.clone(), &[value])?;
+                            return Ok(());
+                        }
+                        if !p.writable {
+                            return Err(self.throw(
+                                "TypeError",
+                                format!("private method {shown} is not writable"),
+                            ));
+                        }
+                        return self.set_member(base, name, value);
+                    }
+                    let parent = c.borrow().proto.clone();
+                    cur = parent;
+                }
+                self.set_member(base, name, value)
             }
+            _ => Err(self.throw(
+                "TypeError",
+                format!("cannot write private member {shown} to an object whose class did not declare it"),
+            )),
         }
     }
 
@@ -1960,6 +1987,22 @@ impl Interp {
         Ok(arr)
     }
 
+    /// The NamedEvaluation name for a property key: a symbol key names the function "[desc]"
+    /// (or "" without a description); a string key is used as-is.
+    fn fn_name_for_key(&self, key: &str) -> String {
+        if Interp::is_sym_key(key) {
+            match self.sym_from_key(key) {
+                Some(Value::Sym(d)) => match &d.description {
+                    Some(desc) => format!("[{desc}]"),
+                    None => String::new(),
+                },
+                _ => String::new(),
+            }
+        } else {
+            key.to_string()
+        }
+    }
+
     /// NamedEvaluation: give an anonymous function/class the binding/property name it's assigned to,
     /// unless it already has a non-empty name.
     pub(crate) fn set_fn_name(&mut self, v: &Value, name: &str) {
@@ -1994,26 +2037,30 @@ impl Interp {
                     let k = self.eval_prop_key(key, env)?;
                     let v = self.eval(value, env)?;
                     if is_anonymous_fn(value) {
-                        self.set_fn_name(&v, &k);
+                        let name = self.fn_name_for_key(&k);
+                        self.set_fn_name(&v, &name);
                     }
                     obj.borrow_mut().props.insert(k, Property::plain(v));
                 }
                 PropDef::Method { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
                     let f = self.make_function(func.clone(), home_env.clone());
-                    self.set_fn_name(&f, &k);
+                    let name = self.fn_name_for_key(&k);
+                    self.set_fn_name(&f, &name);
                     obj.borrow_mut().props.insert(k, Property::plain(f));
                 }
                 PropDef::Getter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
                     let f = self.make_function(func.clone(), home_env.clone());
-                    self.set_fn_name(&f, &format!("get {k}"));
+                    let name = self.fn_name_for_key(&k);
+                    self.set_fn_name(&f, &format!("get {name}"));
                     self.define_accessor(&obj, &k, Some(f), None);
                 }
                 PropDef::Setter { key, func } => {
                     let k = self.eval_prop_key(key, env)?;
                     let f = self.make_function(func.clone(), home_env.clone());
-                    self.set_fn_name(&f, &format!("set {k}"));
+                    let name = self.fn_name_for_key(&k);
+                    self.set_fn_name(&f, &format!("set {name}"));
                     self.define_accessor(&obj, &k, None, Some(f));
                 }
                 PropDef::Spread(e) => {
@@ -3000,14 +3047,10 @@ impl Interp {
                 MemberKind::Method => {
                     let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
                     if let Value::Obj(fo) = &f {
+                        let name = self.fn_name_for_key(private_display(&key));
                         fo.borrow_mut().props.insert(
                             "name",
-                            Property::data(
-                                Value::from_string(private_display(&key).to_string()),
-                                false,
-                                false,
-                                true,
-                            ),
+                            Property::data(Value::from_string(name), false, false, true),
                         );
                     }
                     if !m.decorators.is_empty() {
@@ -3027,7 +3070,13 @@ impl Interp {
                             sink,
                         )?;
                     }
-                    target.borrow_mut().props.insert(key, Property::builtin(f));
+                    let prop = if is_private {
+                        // A private method is not writable: PrivateSet on it must TypeError.
+                        Property::data(f, false, false, false)
+                    } else {
+                        Property::builtin(f)
+                    };
+                    target.borrow_mut().props.insert(key, prop);
                 }
                 MemberKind::Get | MemberKind::Set => {
                     let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
