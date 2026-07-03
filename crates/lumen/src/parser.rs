@@ -32,6 +32,7 @@ pub fn parse_script_eval(
     let mut p = Parser {
         toks: tokens,
         pos: 0,
+        src_chars: Rc::new(src.chars().collect()),
         strict,
         depth: 0,
         in_generator: false,
@@ -84,6 +85,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
+        src_chars: Rc::new(src.chars().collect()),
         strict: true,
         depth: 0,
         in_generator: false,
@@ -273,6 +275,8 @@ const MAX_PARSE_DEPTH: u32 = 1200;
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// The source as chars, for slicing function source text by token offsets.
+    src_chars: Rc<Vec<char>>,
     strict: bool,
     depth: u32,
     /// Whether the body currently being parsed is a generator / async function — controls whether
@@ -340,6 +344,26 @@ struct DeclScope {
 }
 
 impl Parser {
+    fn cur_start(&self) -> u32 {
+        self.toks.get(self.pos).map(|t| t.start).unwrap_or(0)
+    }
+    fn prev_end(&self) -> u32 {
+        if self.pos == 0 {
+            0
+        } else {
+            self.toks[self.pos - 1].end
+        }
+    }
+    /// The source text between two char offsets (a function's `toString` view).
+    fn src_slice(&self, start: u32, end: u32) -> Option<Rc<str>> {
+        let (s, e) = (start as usize, end as usize);
+        if s <= e && e <= self.src_chars.len() {
+            Some(Rc::from(self.src_chars[s..e].iter().collect::<String>()))
+        } else {
+            None
+        }
+    }
+
     fn cur(&self) -> &Tok {
         &self.toks[self.pos].kind
     }
@@ -610,7 +634,7 @@ impl Parser {
                 self.parse_var_decl(DeclKind::AwaitUsing)
             }
             Tok::Keyword("function") => {
-                let f = self.parse_function(false, false)?;
+                let f = self.parse_function(false, false, self.cur_start())?;
                 // An Annex B substatement-position function (`if (x) function f(){}`) binds in
                 // its own implicit block: its name never conflicts with enclosing declarations.
                 if !single_stmt {
@@ -626,8 +650,9 @@ impl Parser {
                     && !self.cur_escaped()
                     && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
+                let start = self.cur_start();
                 self.advance();
-                let f = self.parse_function(true, false)?;
+                let f = self.parse_function(true, false, start)?;
                 if !single_stmt {
                     if let Some(n) = &f.name {
                         self.declare_fn_decl(n, f.is_async, f.is_generator)?;
@@ -1413,8 +1438,9 @@ impl Parser {
                 || (self.is_ident_word("async")
                     && matches!(self.peek_kind(1), Tok::Keyword("function")))
             {
+                let start = self.cur_start();
                 let is_async = self.eat_ident_word("async");
-                Stmt::FuncDecl(Rc::new(self.parse_function(is_async, false)?))
+                Stmt::FuncDecl(Rc::new(self.parse_function(is_async, false, start)?))
             } else if self.is_kw("class") {
                 Stmt::ClassDecl(Rc::new(self.parse_class()?))
             } else {
@@ -2180,7 +2206,7 @@ impl Parser {
                 Ok(Expr::This)
             }
             Tok::Keyword("function") => {
-                let f = self.parse_function(false, true)?;
+                let f = self.parse_function(false, true, self.cur_start())?;
                 Ok(Expr::Func(Rc::new(f)))
             }
             Tok::Keyword("class") | Tok::Punct("@") => {
@@ -2243,8 +2269,9 @@ impl Parser {
                     && !self.cur_escaped()
                     && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
+                let start = self.cur_start();
                 self.advance();
-                let f = self.parse_function(true, true)?;
+                let f = self.parse_function(true, true, start)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
             Tok::Ident(name) => {
@@ -2299,6 +2326,7 @@ impl Parser {
                     let mut sub = Parser {
                         toks: tokens,
                         pos: 0,
+                        src_chars: Rc::new(src.chars().collect()),
                         strict: self.strict,
                         depth: self.depth,
                         in_generator: self.in_generator,
@@ -2362,6 +2390,7 @@ impl Parser {
                     let mut sub = Parser {
                         toks: tokens,
                         pos: 0,
+                        src_chars: Rc::new(src.chars().collect()),
                         strict: self.strict,
                         depth: self.depth,
                         in_generator: self.in_generator,
@@ -2447,6 +2476,8 @@ impl Parser {
                 }
                 continue;
             }
+            // The property-definition start: a method's `toString` source begins here.
+            let member_start = self.cur_start();
             // get/set accessors
             if (self.is_ident_word("get") || self.is_ident_word("set"))
                 && !self.cur_escaped()
@@ -2458,7 +2489,7 @@ impl Parser {
                 let is_get = self.is_ident_word("get");
                 self.advance();
                 let key = self.parse_prop_key()?;
-                let func = self.parse_accessor_function(is_get)?;
+                let func = self.parse_accessor_function(is_get, member_start)?;
                 props.push(if is_get {
                     PropDef::Getter {
                         key,
@@ -2494,9 +2525,9 @@ impl Parser {
             if self.is_punct("(") {
                 // Method shorthand.
                 let func = if is_async || is_generator {
-                    self.parse_method_function_kind(is_generator, is_async)?
+                    self.parse_method_function_kind(is_generator, is_async, member_start)?
                 } else {
-                    self.parse_method_function()?
+                    self.parse_method_function(member_start)?
                 };
                 // An object-literal method is never a derived constructor, so `super(...)` is illegal.
                 if let Some(msg) = crate::eval::method_super_call_error_full(&func) {
@@ -2597,7 +2628,12 @@ impl Parser {
 
     // ----- functions --------------------------------------------------------------------------
 
-    fn parse_function(&mut self, is_async: bool, is_expr: bool) -> Result<Function, ParseError> {
+    fn parse_function(
+        &mut self,
+        is_async: bool,
+        is_expr: bool,
+        start: u32,
+    ) -> Result<Function, ParseError> {
         self.eat_kw("function");
         let is_generator = self.eat_punct("*");
         let name = if let Tok::Ident(n) = self.cur().clone() {
@@ -2665,6 +2701,7 @@ impl Parser {
             is_async,
             is_method: false,
             is_fn_expr: is_expr,
+            source: self.src_slice(start, self.prev_end()),
         };
         // A function declaration/expression is never a derived constructor, so a `super(...)` call
         // in its body or parameters is an early SyntaxError.
@@ -2727,6 +2764,7 @@ impl Parser {
     }
 
     fn parse_class(&mut self) -> Result<Class, ParseError> {
+        let class_start = self.cur_start();
         let decorators = self.parse_decorators()?;
         self.eat_kw("class");
         let name = if let Tok::Ident(n) = self.cur().clone() {
@@ -2754,6 +2792,17 @@ impl Parser {
         }
         self.strict = saved;
         self.expect_punct("}")?;
+        // The class constructor's `toString` is the whole class's source text.
+        let class_src = self.src_slice(class_start, self.prev_end());
+        for m in &mut members {
+            if matches!(m.kind, MemberKind::Constructor) {
+                if let Some(f) = &mut m.func {
+                    if let Some(fm) = Rc::get_mut(f) {
+                        fm.source = class_src.clone();
+                    }
+                }
+            }
+        }
         validate_class(&members).map_err(|m| ParseError {
             message: m,
             line: self.line(),
@@ -2809,6 +2858,7 @@ impl Parser {
                 is_async: false,
                 is_method: false,
                 is_fn_expr: false,
+                source: None,
             };
             return Ok(vec![ClassMember {
                 key: PropKey::Ident(String::new()),
@@ -2839,6 +2889,8 @@ impl Parser {
                 decorators,
             }]);
         }
+        // The MethodDefinition start (excludes `static`): `toString` source begins here.
+        let member_start = self.cur_start();
         let mut kind = MemberKind::Method;
         if (self.is_ident_word("get") || self.is_ident_word("set"))
             && !self.cur_escaped()
@@ -2862,7 +2914,7 @@ impl Parser {
         let key = self.parse_prop_key()?;
 
         if self.is_punct("(") {
-            let mut func = self.parse_method_function_kind(is_generator, is_async)?;
+            let mut func = self.parse_method_function_kind(is_generator, is_async, member_start)?;
             if matches!(kind, MemberKind::Get | MemberKind::Set) {
                 check_accessor_arity(&func, kind == MemberKind::Get).map_err(|m| ParseError {
                     message: m,
@@ -2909,14 +2961,15 @@ impl Parser {
         }
     }
 
-    fn parse_method_function(&mut self) -> Result<Function, ParseError> {
-        self.parse_method_function_kind(false, false)
+    fn parse_method_function(&mut self, start: u32) -> Result<Function, ParseError> {
+        self.parse_method_function_kind(false, false, start)
     }
 
     fn parse_method_function_kind(
         &mut self,
         is_generator: bool,
         is_async: bool,
+        start: u32,
     ) -> Result<Function, ParseError> {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
@@ -2949,11 +3002,16 @@ impl Parser {
             is_async,
             is_method: true,
             is_fn_expr: false,
+            source: self.src_slice(start, self.prev_end()),
         })
     }
 
-    fn parse_accessor_function(&mut self, is_get: bool) -> Result<Function, ParseError> {
-        let f = self.parse_method_function()?;
+    fn parse_accessor_function(
+        &mut self,
+        is_get: bool,
+        start: u32,
+    ) -> Result<Function, ParseError> {
+        let f = self.parse_method_function(start)?;
         check_accessor_arity(&f, is_get).map_err(|m| ParseError {
             message: m,
             line: self.line(),
@@ -3041,6 +3099,7 @@ impl Parser {
     // ----- arrow functions --------------------------------------------------------------------
 
     fn try_parse_arrow(&mut self) -> Result<Option<Expr>, ParseError> {
+        let arrow_start = self.cur_start();
         // Optional `async` prefix (on the same line) for an async arrow.
         let async_arrow = self.is_ident_word("async")
             && !self
@@ -3065,7 +3124,7 @@ impl Parser {
                     default: None,
                     rest: false,
                 }];
-                return Ok(Some(self.finish_arrow(params, async_arrow)?));
+                return Ok(Some(self.finish_arrow(params, async_arrow, arrow_start)?));
             }
         }
         // `( params ) => ...`
@@ -3081,14 +3140,19 @@ impl Parser {
                     }
                     let params = self.parse_params()?;
                     self.expect_punct("=>")?;
-                    return Ok(Some(self.finish_arrow(params, async_arrow)?));
+                    return Ok(Some(self.finish_arrow(params, async_arrow, arrow_start)?));
                 }
             }
         }
         Ok(None)
     }
 
-    fn finish_arrow(&mut self, params: Vec<Param>, is_async: bool) -> Result<Expr, ParseError> {
+    fn finish_arrow(
+        &mut self,
+        params: Vec<Param>,
+        is_async: bool,
+        start: u32,
+    ) -> Result<Expr, ParseError> {
         // Arrow parameters must always be unique (the list is treated as if it had a `[+Strict]`).
         if let Some(dup) = duplicate_name(&param_names(&params)) {
             return self.err(format!("duplicate parameter name '{dup}'"));
@@ -3108,6 +3172,7 @@ impl Parser {
                 is_async,
                 is_method: false,
                 is_fn_expr: false,
+                source: self.src_slice(start, self.prev_end()),
             }
         } else {
             let expr = self.parse_assign()?;
@@ -3122,6 +3187,7 @@ impl Parser {
                 is_async,
                 is_method: false,
                 is_fn_expr: false,
+                source: self.src_slice(start, self.prev_end()),
             }
         };
         self.in_async = sa;

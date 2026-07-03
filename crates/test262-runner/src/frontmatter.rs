@@ -33,6 +33,8 @@ impl Frontmatter {
             Some(y) => y,
             None => return fm,
         };
+        // A handful of tests use CR (alone) as their line terminator.
+        let yaml = yaml.replace('\r', "\n");
         let lines: Vec<&str> = yaml.lines().collect();
         let mut i = 0;
         while i < lines.len() {

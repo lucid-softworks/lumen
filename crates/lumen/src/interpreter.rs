@@ -516,6 +516,7 @@ pub struct Interp {
     /// The global environment's [[VarNames]]: names declared by `var`/function in global code, for
     /// GlobalDeclarationInstantiation's cross-script clash checks.
     pub global_var_names: std::collections::HashSet<String>,
+
     /// GC pins: one `Gc` clone per object that has an entry in a pointer-keyed side table
     /// (typed_arrays, promises, array_buffers, …). The pin keeps the object from being freed by
     /// plain refcounting — which would let a later allocation reuse its address and inherit the
@@ -539,6 +540,10 @@ pub struct Interp {
     pub new_target: Value,
     /// The `new.target` to install for the next constructor invocation (set by `construct`).
     pub pending_new_target: Value,
+    /// The caller's realm during a cross-realm [[Construct]]: the spec pops the callee context
+    /// before throwing a derived constructor's return/`this` validation errors, so those errors
+    /// belong to the caller's realm.
+    pub(crate) ctor_caller_realm: Option<RealmState>,
     /// Additional realms created via `$262.createRealm()`, keyed by the realm's global-object pointer.
     /// Each holds its own intrinsics; the shared side tables (proxies, buffers, …) and well-known
     /// symbols are common, so objects cross realm boundaries freely.
@@ -717,6 +722,12 @@ impl Interp {
     /// `$262.createRealm()`: build a fresh realm (its own global + intrinsics) and register it. The
     /// well-known symbols are shared with the creating realm so `@@iterator` etc. match cross-realm.
     pub fn create_realm(&mut self) -> Value {
+        // Register the creating (main) realm too, so cross-realm dispatch can switch BACK to it
+        // and resolve its intrinsics like any other realm's.
+        if self.realms.is_empty() {
+            let main = self.snapshot_realm();
+            self.realms.insert(Rc::as_ptr(&main.global) as usize, main);
+        }
         let saved = self.snapshot_realm();
         let saved_iter = self.iterator_sym.clone();
         // The main realm's well-known symbols, to graft onto the new realm's Symbol constructor.
@@ -916,6 +927,7 @@ impl Interp {
             proxies: HashMap::new(),
             new_target: Value::Undefined,
             pending_new_target: Value::Undefined,
+            ctor_caller_realm: None,
             realms: HashMap::new(),
             promises: HashMap::new(),
             temporal: HashMap::new(),
@@ -1445,6 +1457,27 @@ impl Interp {
             let prop = obj.borrow().props.get(key).cloned();
             if let Some(p) = prop {
                 if p.accessor {
+                    // Legacy `fn.caller` / `fn.arguments`: reading the poisoned
+                    // %Function.prototype% accessor through an ordinary sloppy function
+                    // yields undefined instead of throwing.
+                    if matches!(key, "caller" | "arguments")
+                        && self.is_throw_type_error(&p.get)
+                        && !Rc::ptr_eq(
+                            &obj,
+                            match receiver {
+                                Value::Obj(r) => r,
+                                _ => &obj,
+                            },
+                        )
+                    {
+                        if let Value::Obj(r) = receiver {
+                            if let Callable::User(f, _) = &r.borrow().call {
+                                if !f.is_strict && !f.is_arrow && !f.is_generator && !f.is_async {
+                                    return Ok(Value::Undefined);
+                                }
+                            }
+                        }
+                    }
                     return match p.get {
                         Some(getter) => self.call(getter, receiver.clone(), &[]),
                         None => Ok(Value::Undefined),
@@ -1455,6 +1488,29 @@ impl Interp {
             cur = obj.borrow().proto.clone();
         }
         Ok(Value::Undefined)
+    }
+
+    /// Throw with the constructing caller's realm's error intrinsics (see `ctor_caller_realm`).
+    fn throw_in_caller_realm(&mut self, kind: &str, msg: &str) -> Abrupt {
+        match self.ctor_caller_realm.take() {
+            Some(caller) => {
+                let cur = self.snapshot_realm();
+                self.restore_realm(&caller);
+                let e = self.throw(kind, msg);
+                self.restore_realm(&cur);
+                self.ctor_caller_realm = Some(caller);
+                e
+            }
+            None => self.throw(kind, msg),
+        }
+    }
+
+    /// Whether `getter` is the %ThrowTypeError% intrinsic.
+    fn is_throw_type_error(&self, getter: &Option<Value>) -> bool {
+        match (getter, self.extra_protos.get("%ThrowTypeError%")) {
+            (Some(Value::Obj(g)), Some(tte)) => Rc::ptr_eq(g, tte),
+            _ => false,
+        }
     }
 
     /// Set `base[key] = value`, honouring setters, accessor-only properties, read-only data
@@ -2223,6 +2279,35 @@ impl Interp {
         r
     }
 
+    /// GetFunctionRealm: the realm-global pointer of `obj`, unwrapping bound functions and
+    /// proxies (a revoked proxy is a TypeError). `None` means the active realm.
+    pub(crate) fn get_function_realm_global(&mut self, obj: &Gc) -> Result<Option<usize>, Abrupt> {
+        let mut cur = obj.clone();
+        for _ in 0..64 {
+            if let Some((target, handler)) = self.proxies.get(&(Rc::as_ptr(&cur) as usize)) {
+                if matches!(handler, Value::Null) {
+                    return Err(self.throw("TypeError", "proxy has been revoked"));
+                }
+                match target.clone() {
+                    Value::Obj(t) => {
+                        cur = t;
+                        continue;
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            let bound = match &cur.borrow().call {
+                Callable::Bound { target, .. } => Some(target.clone()),
+                _ => None,
+            };
+            match bound {
+                Some(t) => cur = t,
+                None => return Ok(self.callee_realm_global(&cur)),
+            }
+        }
+        Ok(None)
+    }
+
     fn call_inner(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
         // A cross-realm callee runs with its own realm's intrinsics active (so a thrown TypeError,
         // a fresh object's prototype, or a global lookup lands in the right realm).
@@ -2246,8 +2331,28 @@ impl Interp {
     }
 
     /// The realm (keyed by its global's pointer) a function belongs to, when it is NOT the active
-    /// realm: resolved by finding which realm's %Function.prototype% sits on its prototype chain.
-    fn callee_realm_global(&self, obj: &Gc) -> Option<usize> {
+    /// realm. A user function's realm is the one whose global scope its environment chain is
+    /// rooted in; anything else is resolved by finding which realm's %Function.prototype% sits on
+    /// its prototype chain.
+    pub(crate) fn callee_realm_global(&self, obj: &Gc) -> Option<usize> {
+        if let Callable::User(_, env) = &obj.borrow().call {
+            let mut root = env.clone();
+            loop {
+                let parent = root.borrow().parent.clone();
+                match parent {
+                    Some(p) => root = p,
+                    None => break,
+                }
+            }
+            for (g, rs) in &self.realms {
+                if Rc::ptr_eq(&root, &rs.global_env) {
+                    if Rc::ptr_eq(&rs.global, &self.global) {
+                        return None;
+                    }
+                    return Some(*g);
+                }
+            }
+        }
         let mut cur = obj.borrow().proto.clone();
         let mut hops = 0;
         while let Some(p) = cur {
@@ -2333,7 +2438,16 @@ impl Interp {
         let r = match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
             Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),
-            Callable::User(func, env) => self.call_user(&func, env, this, args, false, &obj),
+            Callable::User(func, env) => {
+                // A class constructor cannot be [[Call]]ed.
+                if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
+                    return Err(self.throw(
+                        "TypeError",
+                        "Class constructor cannot be invoked without 'new'",
+                    ));
+                }
+                self.call_user(&func, env, this, args, false, &obj)
+            }
             Callable::Bound {
                 target,
                 this: bthis,
@@ -2718,13 +2832,20 @@ impl Interp {
                     prim => crate::builtins::box_primitive_pub(self, prim),
                 }
             };
+            // A derived class constructor's `this` stays in TDZ until `super()` runs.
+            let derived_tdz = is_construct
+                && self
+                    .class_info
+                    .get(&(Rc::as_ptr(fn_obj) as usize))
+                    .map(|ci| ci.derived)
+                    .unwrap_or(false);
             scope.borrow_mut().vars.insert(
                 "this".to_string(),
                 Binding {
                     value: this_val,
                     mutable: false,
                     strict_immutable: true,
-                    initialized: true,
+                    initialized: !derived_tdz,
                     import_ref: None,
                     deletable: false,
                 },
@@ -2933,18 +3054,44 @@ impl Interp {
         }
         // [[Construct]]: a non-object return yields the *current* `this` binding — which a
         // derived constructor's super() may have rebound to a base constructor's returned object.
+        // A derived constructor may only return an object or undefined (TypeError otherwise),
+        // and its `this` must have been initialized by super() (ReferenceError otherwise); both
+        // errors are created in the caller's realm (the callee context has conceptually popped).
         if is_construct && !func.is_arrow {
+            let derived = self
+                .class_info
+                .get(&(Rc::as_ptr(fn_obj) as usize))
+                .map(|c| c.derived)
+                .unwrap_or(false);
             if let Ok(v) = &result {
                 if !matches!(v, Value::Obj(_)) {
-                    let mut cur = Some(body.clone());
-                    while let Some(scope) = cur {
-                        let found = scope.borrow().vars.get("this").map(|b| b.value.clone());
-                        if let Some(t) = found {
-                            result = Ok(t);
-                            break;
+                    if derived && !matches!(v, Value::Undefined | Value::Empty) {
+                        result = Err(self.throw_in_caller_realm(
+                            "TypeError",
+                            "a derived constructor may only return an object or undefined",
+                        ));
+                    } else {
+                        let mut cur = Some(body.clone());
+                        while let Some(scope) = cur {
+                            let found = scope
+                                .borrow()
+                                .vars
+                                .get("this")
+                                .map(|b| (b.value.clone(), b.initialized));
+                            if let Some((t, init)) = found {
+                                result = if derived && !init {
+                                    Err(self.throw_in_caller_realm(
+                                        "ReferenceError",
+                                        "derived constructor returned without calling super()",
+                                    ))
+                                } else {
+                                    Ok(t)
+                                };
+                                break;
+                            }
+                            let parent = scope.borrow().parent.clone();
+                            cur = parent;
                         }
-                        let parent = scope.borrow().parent.clone();
-                        cur = parent;
                     }
                 }
             }
@@ -3428,7 +3575,8 @@ impl Interp {
         args: &[Value],
         new_target: Value,
     ) -> Result<Value, Abrupt> {
-        // A cross-realm constructor runs with its own realm's intrinsics active.
+        // A cross-realm constructor runs with its own realm's intrinsics active. The caller's
+        // realm is remembered for the [[Construct]] errors thrown after the callee context pops.
         if !self.realms.is_empty() {
             if let Value::Obj(o) = &callee {
                 if !self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
@@ -3436,12 +3584,19 @@ impl Interp {
                         let saved = self.snapshot_realm();
                         let target = self.realms[&gptr].snapshot_clone();
                         self.restore_realm(&target);
+                        let saved_ccr =
+                            self.ctor_caller_realm.replace(saved.snapshot_clone());
                         let r = self.construct_dispatch(callee, args, new_target);
+                        self.ctor_caller_realm = saved_ccr;
                         self.restore_realm(&saved);
                         return r;
                     }
                 }
             }
+            let saved_ccr = self.ctor_caller_realm.take();
+            let r = self.construct_dispatch(callee, args, new_target);
+            self.ctor_caller_realm = saved_ccr;
+            return r;
         }
         self.construct_dispatch(callee, args, new_target)
     }
@@ -3513,8 +3668,15 @@ impl Interp {
                 // %Object.prototype% (GetFunctionRealm).
                 let proto = match self.get_member(&new_target, "prototype")? {
                     Value::Obj(p) => Some(p),
-                    _ => crate::builtins::realm_object_proto(self, &new_target)
-                        .or_else(|| Some(self.object_proto.clone())),
+                    _ => {
+                        let realm = match &new_target {
+                            Value::Obj(nt) => self.get_function_realm_global(nt)?,
+                            _ => None,
+                        };
+                        realm
+                            .and_then(|g| self.realms.get(&g).map(|rs| rs.object_proto.clone()))
+                            .or_else(|| Some(self.object_proto.clone()))
+                    }
                 };
                 let this = Object::new(proto);
                 let this_val = Value::Obj(this);
@@ -3523,7 +3685,9 @@ impl Interp {
                 // to `super()`); plain function constructors just run their body.
                 if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
                     let ret = self.run_constructor_on(&callee, &this_val, args)?;
-                    // A constructor that explicitly returns an object overrides the instance.
+                    // A constructor that explicitly returns an object overrides the instance;
+                    // derived-constructor return/`this` validation happens in call_user, which
+                    // can see the `this` binding.
                     Ok(match ret {
                         Value::Obj(_) => ret,
                         _ => this_val,

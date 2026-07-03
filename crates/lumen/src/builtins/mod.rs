@@ -3996,39 +3996,47 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
 /// [[Prototype]] is `new.target`'s realm's intrinsic. The realm is identified by which registered
 /// realm's `Function.prototype` lies on `new.target`'s own prototype chain.
 fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
-    let ntobj = nt.as_obj()?;
-    let mut chain: Vec<Gc> = Vec::new();
-    let mut cur = ntobj.borrow().proto.clone();
-    while let Some(p) = cur {
-        let next = p.borrow().proto.clone();
-        chain.push(p);
-        if chain.len() > 64 {
-            break;
-        }
-        cur = next;
-    }
-    for p in &chain {
-        for rs in i.realms.values() {
-            if Rc::ptr_eq(&rs.function_proto, p) {
-                // Core intrinsics live in named fields; errors in error_protos; the rest in extra_protos.
-                return match default_proto {
-                    "Object" => Some(rs.object_proto.clone()),
-                    "Array" => Some(rs.array_proto.clone()),
-                    "Function" => Some(rs.function_proto.clone()),
-                    "String" => Some(rs.string_proto.clone()),
-                    "Number" => Some(rs.number_proto.clone()),
-                    "Boolean" => Some(rs.boolean_proto.clone()),
-                    "Symbol" => Some(rs.symbol_proto.clone()),
-                    other => rs
-                        .error_protos
-                        .get(other)
-                        .cloned()
-                        .or_else(|| rs.extra_protos.get(other).cloned()),
-                };
+    let mut ntobj: Gc = nt.as_obj()?.clone();
+    // GetFunctionRealm unwraps bound functions and (unrevoked) proxies to their targets.
+    for _ in 0..64 {
+        if let Some((target, handler)) = i.proxies.get(&(Rc::as_ptr(&ntobj) as usize)) {
+            if matches!(handler, Value::Null) {
+                return None;
+            }
+            match target {
+                Value::Obj(t) => {
+                    ntobj = t.clone();
+                    continue;
+                }
+                _ => return None,
             }
         }
+        let bound = match &ntobj.borrow().call {
+            Callable::Bound { target, .. } => Some(target.clone()),
+            _ => None,
+        };
+        match bound {
+            Some(t) => ntobj = t,
+            None => break,
+        }
     }
-    None
+    let g = i.callee_realm_global(&ntobj)?;
+    let rs = i.realms.get(&g)?;
+    // Core intrinsics live in named fields; errors in error_protos; the rest in extra_protos.
+    match default_proto {
+        "Object" => Some(rs.object_proto.clone()),
+        "Array" => Some(rs.array_proto.clone()),
+        "Function" => Some(rs.function_proto.clone()),
+        "String" => Some(rs.string_proto.clone()),
+        "Number" => Some(rs.number_proto.clone()),
+        "Boolean" => Some(rs.boolean_proto.clone()),
+        "Symbol" => Some(rs.symbol_proto.clone()),
+        other => rs
+            .error_protos
+            .get(other)
+            .cloned()
+            .or_else(|| rs.extra_protos.get(other).cloned()),
+    }
 }
 
 pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
@@ -4042,12 +4050,6 @@ pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, V
         _ => i.extra_protos.get(default_proto).cloned(),
     };
     Ok(Object::new(proto))
-}
-
-/// GetFunctionRealm fallback for OrdinaryCreateFromConstructor: `new.target`'s realm's
-/// %Object.prototype% (or None when it's the active realm / unknown).
-pub(crate) fn realm_object_proto(i: &Interp, nt: &Value) -> Option<Gc> {
-    ctor_realm_proto(i, nt, "Object")
 }
 
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
@@ -5237,7 +5239,19 @@ fn parse_iso(s: &str) -> f64 {
     parts_to_ms(y, mo - 1, d, h, mi, s, ml)
 }
 
+fn date_to_string(t: f64) -> String {
+    match (date_str_part(t), time_str_part(t)) {
+        (Some(d), Some(tm)) => format!("{d} {tm}"),
+        _ => "Invalid Date".to_string(),
+    }
+}
+
 fn date_ctor(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    // Called as a function (no `new`), Date ignores its arguments and returns the
+    // current time as a string.
+    if !matches!(i.new_target, Value::Obj(_)) {
+        return Ok(Value::from_string(date_to_string(now_ms())));
+    }
     let ms = match args.len() {
         0 => now_ms(),
         1 => match &args[0] {
@@ -5456,9 +5470,7 @@ fn install_date(it: &mut Interp) {
     });
     it.def_method(&proto, "toString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
-        Ok(Value::from_string(
-            iso_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
-        ))
+        Ok(Value::from_string(date_to_string(t)))
     });
     it.def_method(&proto, "toDateString", 0, |i, this, _| {
         let t = date_ms(i, &this)?;
@@ -9311,6 +9323,15 @@ fn install_function_proto(it: &mut Interp) {
                 "Function.prototype.toString requires that 'this' be a function",
             ));
         }
+        // A user function returns the source text it was parsed from; everything else
+        // (natives, bound functions, proxies) renders as a native function.
+        if let Value::Obj(o) = &this {
+            if let Callable::User(f, _) = &o.borrow().call {
+                if let Some(src) = &f.source {
+                    return Ok(Value::from_string(src.to_string()));
+                }
+            }
+        }
         Ok(Value::str("function () { [native code] }"))
     });
 
@@ -9335,30 +9356,14 @@ fn install_function_proto(it: &mut Interp) {
     }
     it.extra_protos
         .insert("%ThrowTypeError%", throw_type_error.clone());
-    // Function.prototype.caller / .arguments: accessor properties. The getter yields undefined
-    // for an ordinary sloppy function (legacy web compatibility) and throws for strict/built-in
-    // functions; the setter is the %ThrowTypeError% poison.
-    let restricted_getter = it.make_native("get", 0, |i, this, _| {
-        if let Value::Obj(o) = &this {
-            if let Callable::User(f, _) = &o.borrow().call {
-                // Only ordinary sloppy functions get the legacy non-throwing behavior; arrows,
-                // generators, async functions, and strict functions all hit the poison.
-                if !f.is_strict && !f.is_arrow && !f.is_generator && !f.is_async {
-                    return Ok(Value::Undefined);
-                }
-            }
-        }
-        Err(i.make_error(
-            "TypeError",
-            "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
-        ))
-    });
+    // Function.prototype.caller / .arguments: accessor properties whose getter AND setter are
+    // the single %ThrowTypeError% intrinsic (the spec requires the same function object).
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
             Property {
                 value: Value::Undefined,
-                get: Some(Value::Obj(restricted_getter.clone())),
+                get: Some(Value::Obj(throw_type_error.clone())),
                 set: Some(Value::Obj(throw_type_error.clone())),
                 accessor: true,
                 writable: false,
@@ -9445,11 +9450,12 @@ fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Resu
     let (params, body) = if args.is_empty() {
         (String::new(), String::new())
     } else {
-        let body = ab(i.to_string(args.last().unwrap()))?.to_string();
+        // The parameters are stringified left to right BEFORE the body.
         let mut ps = Vec::new();
         for a in &args[..args.len() - 1] {
             ps.push(ab(i.to_string(a))?.to_string());
         }
+        let body = ab(i.to_string(args.last().unwrap()))?.to_string();
         (ps.join(","), body)
     };
     let src = format!("{prefix} anonymous({params}\n) {{\n{body}\n}}");
@@ -10551,6 +10557,24 @@ fn install_object(it: &mut Interp) {
     }
 
     let ctor = it.make_native("Object", 1, |i, _this, args| {
+        // `new Object()` with a newTarget other than %Object% itself (a subclass or a
+        // Reflect.construct target): OrdinaryCreateFromConstructor(newTarget, %Object.prototype%).
+        if i.constructing {
+            if let Value::Obj(nt) = i.new_target.clone() {
+                let is_self = matches!(
+                    i.extra_protos.get("%ObjectCtor%"),
+                    Some(c) if Rc::ptr_eq(c, &nt)
+                );
+                if !is_self {
+                    let proto = match ab(i.get_member(&Value::Obj(nt.clone()), "prototype"))? {
+                        Value::Obj(p) => Some(p),
+                        _ => ctor_realm_proto(i, &Value::Obj(nt), "Object")
+                            .or_else(|| Some(i.object_proto.clone())),
+                    };
+                    return Ok(Value::Obj(Object::new(proto)));
+                }
+            }
+        }
         Ok(match arg(args, 0) {
             Value::Undefined | Value::Null => Value::Obj(i.new_object()),
             Value::Obj(o) => Value::Obj(o),
@@ -10558,6 +10582,7 @@ fn install_object(it: &mut Interp) {
             other => box_primitive(i, other),
         })
     });
+    it.extra_protos.insert("%ObjectCtor%", ctor.clone());
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(op.clone()), false, false, false),

@@ -25,6 +25,8 @@ struct Lexer<'a> {
     /// One entry per open `{`: `true` if it opened a block/function body (statement position),
     /// `false` if an object literal (expression position). Used to disambiguate a `/` after `}`.
     brace_stack: Vec<bool>,
+    /// Char offset where the token currently being scanned began.
+    tok_start: usize,
     /// Classification of the most recently closed `}` (`true` = a block). A `/` after a block-closing
     /// `}` begins a regex; after an object-literal-closing `}` it is division.
     last_close_block: bool,
@@ -56,6 +58,7 @@ pub fn tokenize_goal(src: &str, html_comments: bool) -> Result<Vec<Token>, LexEr
         pending_legacy: false,
         pending_lone_surrogate: false,
         brace_stack: Vec::new(),
+        tok_start: 0,
         last_close_block: false,
         pending_fn: Vec::new(),
         pending_class: None,
@@ -200,6 +203,8 @@ impl<'a> Lexer<'a> {
         self.out.push(Token {
             kind,
             line: self.line,
+            start: self.tok_start as u32,
+            end: self.pos as u32,
             nl_before: nl,
             legacy_octal: false,
             escaped: false,
@@ -236,6 +241,7 @@ impl<'a> Lexer<'a> {
             }
         }
         while let Some(c) = self.peek() {
+            self.tok_start = self.pos;
             if is_line_terminator(c) {
                 self.nl_pending = true;
                 self.bump();
@@ -278,6 +284,7 @@ impl<'a> Lexer<'a> {
                 self.read_punct()?;
             }
         }
+        self.tok_start = self.pos;
         self.push(Tok::Eof);
         Ok(())
     }

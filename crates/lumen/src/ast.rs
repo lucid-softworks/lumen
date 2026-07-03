@@ -392,6 +392,8 @@ pub struct Function {
     /// A function *expression* (`(function f(){})`): its own name binds immutably inside the
     /// function. A declaration's name binds (mutably) in the enclosing scope instead.
     pub is_fn_expr: bool,
+    /// The source text this function was parsed from, for `Function.prototype.toString`.
+    pub source: Option<Rc<str>>,
 }
 
 #[derive(Debug, Clone)]

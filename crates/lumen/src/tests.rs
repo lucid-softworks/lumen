@@ -8532,3 +8532,150 @@ fn shadow_realm_eval_scoping() {
         ""
     );
 }
+#[test]
+fn class_constructor_call_and_return_semantics() {
+    // A class constructor has no [[Call]].
+    assert_eq!(throws("class C {}; C()"), "TypeError");
+    // A derived constructor may only return an object or undefined.
+    assert_eq!(
+        run("class Base {}
+             class D extends Base { constructor() { super(); return 5; } }
+             try { new D(); 'no' } catch (e) { e.constructor.name }"),
+        "TypeError"
+    );
+    // super() may only be called once.
+    assert_eq!(
+        run("class Base {}
+             class D extends Base { constructor() { super(); super(); } }
+             try { new D(); 'no' } catch (e) { e.constructor.name }"),
+        "ReferenceError"
+    );
+    // `this` is in TDZ until super() runs.
+    assert_eq!(
+        run("class Base {}
+             class D extends Base { constructor() { const t = this; super(); } }
+             try { new D(); 'no' } catch (e) { e.constructor.name }"),
+        "ReferenceError"
+    );
+    // Returning (even explicitly) without ever calling super() leaves `this` uninitialized.
+    assert_eq!(
+        run("class Base {}
+             class D extends Base { constructor() { return undefined; } }
+             try { new D(); 'no' } catch (e) { e.constructor.name }"),
+        "ReferenceError"
+    );
+    // A base constructor's primitive return is ignored; an object return wins.
+    assert_eq!(
+        run("class B { constructor() { return 5; } } typeof new B()"),
+        "object"
+    );
+    assert_eq!(
+        run("class B { constructor() { return { x: 7 }; } } String(new B().x)"),
+        "7"
+    );
+}
+
+#[test]
+fn date_called_as_function_returns_string() {
+    assert_eq!(run("typeof Date()"), "string");
+    // Date() ignores its arguments — even through a bound wrapper.
+    assert_eq!(run("var b = Date.bind(null); typeof b(0,0,0)"), "string");
+    // Date.prototype.toString uses the human-readable (non-ISO) format.
+    assert_eq!(
+        run("new Date(0).toString()"),
+        "Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)"
+    );
+}
+
+#[test]
+fn restricted_caller_arguments_shared_accessor() {
+    // getter and setter are the single %ThrowTypeError% intrinsic...
+    assert_eq!(
+        run(
+            "var d = Object.getOwnPropertyDescriptor(Function.prototype, 'caller'); \
+             var a = Object.getOwnPropertyDescriptor(Function.prototype, 'arguments'); \
+             String(d.get === d.set && a.get === a.set && d.get === a.get)"
+        ),
+        "true"
+    );
+    // ...but reading it through an ordinary sloppy function still yields undefined,
+    assert_eq!(run("function f() {} String(f.caller)"), "undefined");
+    // while strict functions and Function.prototype itself throw.
+    assert_eq!(
+        throws("'use strict'; function f() {} f.caller"),
+        "TypeError"
+    );
+    assert_eq!(throws("Function.prototype.caller"), "TypeError");
+}
+
+#[test]
+fn function_to_string_source_text() {
+    assert_eq!(run("({ ['a'](){ } }).a.toString()"), "['a'](){ }");
+    assert_eq!(
+        run("(function  foo ( a,b ) { return a; }).toString()"),
+        "function  foo ( a,b ) { return a; }"
+    );
+    assert_eq!(run("((x)=>x+ 1).toString()"), "(x)=>x+ 1");
+    assert_eq!(run("({ get  p() { return 1; } });
+                    Object.getOwnPropertyDescriptor({ get  p() { return 1; } }, 'p').get.toString()"),
+               "get  p() { return 1; }");
+    // A class constructor stringifies as the whole class.
+    assert_eq!(
+        run("(class A { constructor() {} m() {} }).toString()"),
+        "class A { constructor() {} m() {} }"
+    );
+    // Natives and bound functions render as native code.
+    assert_eq!(run("Math.max.toString()"), "function () { [native code] }");
+    assert_eq!(
+        run("(function f(){}).bind(null).toString()"),
+        "function () { [native code] }"
+    );
+    // Dynamic functions stringify as their synthesized source.
+    assert_eq!(
+        run("Function('a', 'return a').toString()"),
+        "function anonymous(a\n) {\nreturn a\n}"
+    );
+}
+
+#[test]
+fn cross_realm_construct_semantics() {
+    // GetFunctionRealm unwraps bound functions: the fallback prototype comes from the bound
+    // target's realm.
+    assert_eq!(
+        run("const other = $262.createRealm().global;
+             var nt = new other.Function(); nt.prototype = 'str';
+             var bound = Function.prototype.bind.call(nt);
+             var date = Reflect.construct(Date, [], bound);
+             String(Object.getPrototypeOf(date) === other.Date.prototype
+                    && date instanceof other.Date)"),
+        "true"
+    );
+    // A derived constructor's return-validation TypeError is created in the CALLER's realm
+    // (the callee context pops before the throw).
+    assert_eq!(
+        run("var C = $262.createRealm().global.eval(
+                 '0, class extends Object { constructor() { return null; } }');
+             try { new C(); 'no' } catch (e) { String(e.constructor === TypeError) }"),
+        "true"
+    );
+    // A newTarget proxy revoked mid-construction (by its own `prototype` get trap) makes the
+    // GetFunctionRealm fallback throw.
+    assert_eq!(
+        run(
+            "var h = Proxy.revocable(function(){}, { get() { h.revoke(); } });
+             try { new h.proxy(); 'no' } catch (e) { e.constructor.name }"
+        ),
+        "TypeError"
+    );
+}
+
+#[test]
+fn dynamic_function_coerces_params_before_body() {
+    assert_eq!(
+        run("var order = [];
+             var p = { toString() { order.push('p'); return 'a'; } };
+             var body = { toString() { order.push('b'); return 'return a;'; } };
+             new Function(p, body); order.join(',')"),
+        "p,b"
+    );
+}

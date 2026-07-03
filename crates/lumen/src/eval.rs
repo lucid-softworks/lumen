@@ -1928,7 +1928,19 @@ impl Interp {
             Expr::Null => Ok(Value::Null),
             Expr::Undefined => Ok(Value::Undefined),
             Expr::Ident(name) => self.get_var(name, env),
-            Expr::This => self.get_var("this", env).or(Ok(Value::Undefined)),
+            Expr::This => {
+                // A TDZ read (derived constructor before super()) must surface as a
+                // ReferenceError; only a genuinely absent binding reads undefined.
+                let mut cur = Some(env.clone());
+                while let Some(scope) = cur {
+                    if scope.borrow().vars.contains_key("this") {
+                        return self.get_var("this", env);
+                    }
+                    let parent = scope.borrow().parent.clone();
+                    cur = parent;
+                }
+                Ok(Value::Undefined)
+            }
             Expr::Regex { body, flags } => self.make_regexp(body, flags),
             Expr::Array(elems) => self.eval_array(elems, env),
             Expr::Object(props) => self.eval_object(props, env),
@@ -2447,7 +2459,37 @@ impl Interp {
             if matches!(parent, Value::Undefined) {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             }
-            let this = self.get_var("this", env)?;
+            // Read the `this` binding directly (it is in TDZ until this very call completes);
+            // an already-initialized binding means super() ran twice.
+            let this_env = {
+                let mut cur = Some(env.clone());
+                let mut found = None;
+                while let Some(scope) = cur {
+                    if scope.borrow().vars.contains_key("this") {
+                        found = Some(scope);
+                        break;
+                    }
+                    let parent_scope = scope.borrow().parent.clone();
+                    cur = parent_scope;
+                }
+                found
+            };
+            let Some(this_env) = this_env else {
+                return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+            };
+            {
+                let b = this_env.borrow();
+                let bd = b.vars.get("this").unwrap();
+                if bd.initialized {
+                    return Err(self.throw("ReferenceError", "super() may only be called once"));
+                }
+            }
+            let this = this_env
+                .borrow()
+                .vars
+                .get("this")
+                .map(|b| b.value.clone())
+                .unwrap();
             let argv = self.eval_args(args, env)?;
             let returned = self.run_constructor_on(&parent, &this, &argv)?;
             // A base constructor that returns an object overrides `this` for the derived
@@ -2476,6 +2518,9 @@ impl Interp {
                 }
                 _ => this,
             };
+            if let Some(bd) = this_env.borrow_mut().vars.get_mut("this") {
+                bd.initialized = true;
+            }
             let this_ctor = self.get_var("%thisctor%", env)?;
             self.init_instance_fields(&this_ctor, &this)?;
             return Ok(Value::Undefined);
@@ -5087,6 +5132,7 @@ fn default_constructor(derived: bool) -> Function {
         is_async: false,
         is_method: false,
         is_fn_expr: false,
+        source: None,
     }
 }
 
