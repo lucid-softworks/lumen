@@ -14626,13 +14626,27 @@ fn string_to_bigint(s: &str) -> Option<i128> {
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let v = digits.parse::<i128>().ok()?;
-        return Some(if neg { -v } else { v });
+        // Wrap on overflow (mod 2^128), matching the lexer, so BigInt("<huge>") equals the same
+        // literal even beyond i128. (Full arbitrary precision is unimplemented.)
+        let v = bigint_digits_wrapping(digits, 10);
+        return Some(if neg { v.wrapping_neg() } else { v });
     };
     if body.is_empty() || !body.chars().all(|c| c.is_digit(radix)) {
         return None;
     }
-    i128::from_str_radix(body, radix).ok()
+    Some(bigint_digits_wrapping(body, radix))
+}
+
+/// Parse validated `digits` in `radix` to i128, wrapping on overflow (mod 2^128). Mirrors the
+/// lexer's BigInt handling so a `BigInt("…")` string and the equivalent literal compare equal.
+fn bigint_digits_wrapping(digits: &str, radix: u32) -> i128 {
+    let mut acc: i128 = 0;
+    for c in digits.chars() {
+        if let Some(d) = c.to_digit(radix) {
+            acc = acc.wrapping_mul(radix as i128).wrapping_add(d as i128);
+        }
+    }
+    acc
 }
 
 /// ToBigInt: coerce a value to a BigInt primitive (i128), following the spec's allowed conversions.
