@@ -25067,3 +25067,226 @@ pub fn lookup(name: &str, value: Option<&str>) -> Option<Ranges> {
         .ok()
         .map(|i| KEYS[i].1)
 }
+
+/// The exact spellings the spec's property tables allow (canonical names and their UCD aliases).
+/// `\p{…}` matching is *not* UAX44 loose matching: case, underscores, and spelling must match one
+/// of these exactly.
+static BINARY_EXACT: &[&str] = &[
+    "ASCII",
+    "ASCII_Hex_Digit",
+    "AHex",
+    "Alphabetic",
+    "Alpha",
+    "Any",
+    "Assigned",
+    "Bidi_Control",
+    "Bidi_C",
+    "Bidi_Mirrored",
+    "Bidi_M",
+    "Case_Ignorable",
+    "CI",
+    "Cased",
+    "Changes_When_Casefolded",
+    "CWCF",
+    "Changes_When_Casemapped",
+    "CWCM",
+    "Changes_When_Lowercased",
+    "CWL",
+    "Changes_When_NFKC_Casefolded",
+    "CWKCF",
+    "Changes_When_Titlecased",
+    "CWT",
+    "Changes_When_Uppercased",
+    "CWU",
+    "Dash",
+    "Default_Ignorable_Code_Point",
+    "DI",
+    "Deprecated",
+    "Dep",
+    "Diacritic",
+    "Dia",
+    "Emoji",
+    "Emoji_Component",
+    "EComp",
+    "Emoji_Modifier",
+    "EMod",
+    "Emoji_Modifier_Base",
+    "EBase",
+    "Emoji_Presentation",
+    "EPres",
+    "Extended_Pictographic",
+    "ExtPict",
+    "Extender",
+    "Ext",
+    "Grapheme_Base",
+    "Gr_Base",
+    "Grapheme_Extend",
+    "Gr_Ext",
+    "Hex_Digit",
+    "Hex",
+    "ID_Continue",
+    "IDC",
+    "ID_Start",
+    "IDS",
+    "IDS_Binary_Operator",
+    "IDSB",
+    "IDS_Trinary_Operator",
+    "IDST",
+    "Ideographic",
+    "Ideo",
+    "Join_Control",
+    "Join_C",
+    "Logical_Order_Exception",
+    "LOE",
+    "Lowercase",
+    "Lower",
+    "Math",
+    "Noncharacter_Code_Point",
+    "NChar",
+    "Pattern_Syntax",
+    "Pat_Syn",
+    "Pattern_White_Space",
+    "Pat_WS",
+    "Quotation_Mark",
+    "QMark",
+    "Radical",
+    "Regional_Indicator",
+    "RI",
+    "Sentence_Terminal",
+    "STerm",
+    "Soft_Dotted",
+    "SD",
+    "Terminal_Punctuation",
+    "Term",
+    "Unified_Ideograph",
+    "UIdeo",
+    "Uppercase",
+    "Upper",
+    "Variation_Selector",
+    "VS",
+    "White_Space",
+    "space",
+    "XID_Continue",
+    "XIDC",
+    "XID_Start",
+    "XIDS",
+];
+
+/// Exact General_Category value spellings (canonical + UCD aliases).
+static GC_VALUE_EXACT: &[&str] = &[
+    "Cased_Letter",
+    "LC",
+    "Close_Punctuation",
+    "Pe",
+    "Connector_Punctuation",
+    "Pc",
+    "Control",
+    "Cc",
+    "cntrl",
+    "Currency_Symbol",
+    "Sc",
+    "Dash_Punctuation",
+    "Pd",
+    "Decimal_Number",
+    "Nd",
+    "digit",
+    "Enclosing_Mark",
+    "Me",
+    "Final_Punctuation",
+    "Pf",
+    "Format",
+    "Cf",
+    "Initial_Punctuation",
+    "Pi",
+    "Letter",
+    "L",
+    "Letter_Number",
+    "Nl",
+    "Line_Separator",
+    "Zl",
+    "Lowercase_Letter",
+    "Ll",
+    "Mark",
+    "M",
+    "Combining_Mark",
+    "Math_Symbol",
+    "Sm",
+    "Modifier_Letter",
+    "Lm",
+    "Modifier_Symbol",
+    "Sk",
+    "Nonspacing_Mark",
+    "Mn",
+    "Number",
+    "N",
+    "Open_Punctuation",
+    "Ps",
+    "Other",
+    "C",
+    "Other_Letter",
+    "Lo",
+    "Other_Number",
+    "No",
+    "Other_Punctuation",
+    "Po",
+    "Other_Symbol",
+    "So",
+    "Paragraph_Separator",
+    "Zp",
+    "Private_Use",
+    "Co",
+    "Punctuation",
+    "P",
+    "punct",
+    "Separator",
+    "Z",
+    "Space_Separator",
+    "Zs",
+    "Spacing_Mark",
+    "Mc",
+    "Surrogate",
+    "Cs",
+    "Symbol",
+    "S",
+    "Titlecase_Letter",
+    "Lt",
+    "Unassigned",
+    "Cn",
+    "Uppercase_Letter",
+    "Lu",
+];
+
+/// Strict `\p{…}` lookup per the spec's exact-matching tables. Returns the ranges plus whether the
+/// result set must be complemented (for the synthesized `Assigned` = not-Unassigned).
+pub fn lookup_strict(name: &str, value: Option<&str>) -> Option<(bool, Ranges)> {
+    const ASCII_RANGES: Ranges = &[(0, 0x7F)];
+    const ANY_RANGES: Ranges = &[(0, 0x10FFFF)];
+    match value {
+        None => {
+            // A lone name is a binary property or a General_Category value.
+            match name {
+                "ASCII" => return Some((false, ASCII_RANGES)),
+                "Any" => return Some((false, ANY_RANGES)),
+                "Assigned" => return lookup("Cn", None).map(|r| (true, r)),
+                _ => {}
+            }
+            if !BINARY_EXACT.contains(&name) && !GC_VALUE_EXACT.contains(&name) {
+                return None;
+            }
+            lookup(name, None).map(|r| (false, r))
+        }
+        Some(v) => {
+            match name {
+                "General_Category" | "gc" => {
+                    if !GC_VALUE_EXACT.contains(&v) {
+                        return None;
+                    }
+                }
+                // Script values keep the (loose) generated table; the name keys are exact.
+                "Script" | "sc" | "Script_Extensions" | "scx" => {}
+                _ => return None,
+            }
+            lookup(name, Some(v)).map(|r| (false, r))
+        }
+    }
+}

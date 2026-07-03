@@ -593,18 +593,16 @@ impl Parser {
             self.bump();
             cc.negate = true;
         }
-        // A leading ']' is a literal.
-        let mut first = true;
+        // `]` always closes — `[]` is the empty class (matches nothing), `[^]` matches anything.
         loop {
             match self.peek() {
                 None => return Err("unterminated character class".into()),
-                Some(']') if !first => {
+                Some(']') => {
                     self.bump();
                     break;
                 }
                 _ => {}
             }
-            first = false;
             let lo = self.class_atom()?;
             // Range a-z (but `-` at end or before `]` is literal).
             if self.peek() == Some('-') && self.chars.get(self.pos + 1) != Some(&']') {
@@ -737,8 +735,9 @@ impl Parser {
             Some((n, v)) => (n, Some(v)),
             None => (body.as_str(), None),
         };
-        match crate::unicode_props::lookup(name, value) {
-            Some(ranges) => Ok((negate, ranges)),
+        // Exact spellings only — `\p{…}` does not do UAX44 loose matching.
+        match crate::unicode_props::lookup_strict(name, value) {
+            Some((complement, ranges)) => Ok((negate != complement, ranges)),
             None => Err(format!("invalid unicode property {body}")),
         }
     }
@@ -757,7 +756,23 @@ impl Parser {
                     self.bump();
                     if self.peek() == Some('u') {
                         self.bump();
-                        name.push(self.unicode_escape());
+                        let mut cp = self.unicode_escape_u32();
+                        // A `\uD8xx\uDCxx` lead/trail escape pair combines into one code point.
+                        if (0xD800..=0xDBFF).contains(&cp)
+                            && self.peek() == Some('\\')
+                            && self.chars.get(self.pos + 1) == Some(&'u')
+                        {
+                            let save = self.pos;
+                            self.bump();
+                            self.bump();
+                            let trail = self.unicode_escape_u32();
+                            if (0xDC00..=0xDFFF).contains(&trail) {
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (trail - 0xDC00);
+                            } else {
+                                self.pos = save;
+                            }
+                        }
+                        name.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                     } else {
                         return Err("invalid escape in capture group name".into());
                     }
@@ -794,7 +809,26 @@ impl Parser {
             .unwrap_or('\u{FFFD}')
     }
 
+    /// Four hex digits as a raw value (surrogate halves pass through).
+    fn hex4_u32(&mut self) -> u32 {
+        let mut s = String::new();
+        for _ in 0..4 {
+            if let Some(c) = self.peek() {
+                if c.is_ascii_hexdigit() {
+                    s.push(c);
+                    self.bump();
+                }
+            }
+        }
+        u32::from_str_radix(&s, 16).unwrap_or(0xFFFD)
+    }
+
     fn unicode_escape(&mut self) -> char {
+        char::from_u32(self.unicode_escape_u32()).unwrap_or('\u{FFFD}')
+    }
+
+    /// The raw code-point value of a `\u` escape body (surrogate values pass through).
+    fn unicode_escape_u32(&mut self) -> u32 {
         if self.peek() == Some('{') {
             self.bump();
             let mut s = String::new();
@@ -806,12 +840,9 @@ impl Parser {
                 s.push(c);
                 self.bump();
             }
-            u32::from_str_radix(&s, 16)
-                .ok()
-                .and_then(char::from_u32)
-                .unwrap_or('\u{FFFD}')
+            u32::from_str_radix(&s, 16).unwrap_or(0xFFFD)
         } else {
-            self.hex(4)
+            self.hex4_u32()
         }
     }
 

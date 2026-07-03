@@ -7292,3 +7292,41 @@ x"),
     // `a --> b` mid-line is still the two operators.
     assert_eq!(run("var a = 5; var b = 1; String(a-- > b)"), "true");
 }
+
+#[test]
+fn regexp_class_and_property_escapes() {
+    // `[]` is the empty class (never matches); `[^]` matches anything; `[]]` is empty class + ']'.
+    assert_eq!(run("String(/[]/.test('a'))"), "false");
+    assert_eq!(run("String(/[^]/.test('a'))"), "true");
+    assert_eq!(run("String(/[]a/.test('\\0a\\0a'))"), "false");
+    assert_eq!(run("String(/x[]]y/.test('x]y'))"), "false");
+    // \p{...} uses exact spellings — no UAX44 loose matching.
+    assert_eq!(run("String(/\\p{Any}/u.test('a'))"), "true");
+    assert_eq!(run("String(/\\p{ASCII}/u.test('a'))"), "true");
+    assert_eq!(run("String(/\\p{Assigned}/u.test('a'))"), "true");
+    assert_eq!(run("String(/\\P{Assigned}/u.test('\\u{378}'))"), "true");
+    for bad in [
+        "'\\\\p{any}'",
+        "'\\\\p{ASSIGNED}'",
+        "'\\\\p{Ascii}'",
+        "'\\\\p{gC=uppercase_letter}'",
+        "'\\\\p{gc=uppercaseletter}'",
+        "'\\\\p{lowercase}'",
+    ] {
+        assert_eq!(
+            throws(&format!("new RegExp({bad}, 'u')")),
+            "SyntaxError",
+            "should reject {bad}"
+        );
+    }
+    assert_eq!(run("String(/\\p{gc=Lu}/u.test('A'))"), "true");
+    assert_eq!(run("String(/\\p{Script=Latin}/u.test('a'))"), "true");
+}
+
+#[test]
+fn regexp_group_name_surrogate_escapes() {
+    // A lead/trail `\u` escape pair in a group name combines into one code point.
+    assert_eq!(run("String(/(?<a\\uD801\\uDCA4>.)/u.test('a'))"), "true");
+    assert_eq!(run("String(/(?<\\u0041>.)/u.exec('x').groups.A)"), "x");
+    assert_eq!(run("String(/(?<a\\u{104A4}>.)/u.test('a'))"), "true");
+}
