@@ -4103,12 +4103,151 @@ fn diff_zoned(
     out.ms = tb.ms;
     out.us = tb.us;
     out.ns = tb.ns;
+
+    let sm = smallest.strip_suffix('s').unwrap_or(smallest);
+    if sm == "nanosecond" && incr <= 1 {
+        return out;
+    }
+    let positive = e1 <= e2;
+    let mag = if positive { out } else { neg_duration(out) };
+
+    if matches!(sm, "year" | "month" | "week" | "day") {
+        // NudgeToCalendarUnit: truncate at the unit, bracket with one increment above, and
+        // place the target instant between the two boundary instants of the zoned day.
+        let mut low = IsoDuration {
+            years: mag.years,
+            ..Default::default()
+        };
+        if matches!(sm, "month" | "week" | "day") {
+            low.months = mag.months;
+        }
+        if matches!(sm, "week" | "day") {
+            low.weeks = mag.weeks;
+        }
+        if sm == "day" {
+            low.days = mag.days - mag.days.rem_euclid(incr);
+        }
+        let mut high = low;
+        let base_units = match sm {
+            "year" => {
+                low.years -= low.years.rem_euclid(incr);
+                high.years = low.years + incr;
+                low.years / incr
+            }
+            "month" => {
+                low.months -= low.months.rem_euclid(incr);
+                high.months = low.months + incr;
+                low.months / incr
+            }
+            "week" => {
+                low.weeks -= low.weeks.rem_euclid(incr);
+                high.weeks = low.weeks + incr;
+                low.weeks / incr
+            }
+            _ => {
+                high.days = low.days + incr;
+                low.days / incr
+            }
+        };
+        let dir: i64 = if positive { 1 } else { -1 };
+        let boundary_ns = |dur: IsoDuration| -> i128 {
+            let dd = if is_month_structure(cal) {
+                cal_add_c(cal, d1, dur, dir)
+            } else {
+                add_date_dur(d1, mul_duration_sign(dur, dir))
+            };
+            let local = dt_ns(dd, t1);
+            local - offset_for_local(tz, local) as i128
+        };
+        let nl = boundary_ns(low);
+        let nh = boundary_ns(high);
+        let denom = (nh - nl) as f64;
+        let fraction = if denom == 0.0 {
+            0.0
+        } else {
+            ((e2 - nl) as f64 / denom).clamp(0.0, 1.0)
+        };
+        let up = round_up_magnitude(mode, fraction, positive, base_units % 2 == 0);
+        let chosen = if up {
+            // Re-express the shifted boundary greedily so the rounded duration stays exact.
+            let dd = if is_month_structure(cal) {
+                cal_add_c(cal, d1, high, dir)
+            } else {
+                add_date_dur(d1, mul_duration_sign(high, dir))
+            };
+            // diff_date_greedy already returns a direction-signed duration.
+            diff_date_greedy(cal, d1, dd, largest)
+        } else if positive {
+            low
+        } else {
+            neg_duration(low)
+        };
+        return chosen;
+    }
+
+    // A time smallestUnit with a calendar largestUnit: round the time remainder, bubbling a
+    // full day into the date portion.
+    let un = unit_ns(sm).unwrap_or(1);
+    let time_ns = e2 - mid_ns;
+    let mut rounded = round_ns(time_ns, un * incr as i128, mode);
+    let mut date_days = 0i64;
+    const DAY: i128 = 86_400_000_000_000;
+    if rounded.abs() >= DAY {
+        date_days = (rounded / DAY) as i64;
+        rounded %= DAY;
+    }
+    if date_days != 0 {
+        let (ny, nmo, nda) = civil_from_days(epoch_days(d1) + days + date_days);
+        out = diff_date_cal(
+            cal,
+            d1,
+            IsoDate {
+                year: ny,
+                month: nmo,
+                day: nda,
+            },
+            largest,
+        );
+    } else {
+        out.hours = 0;
+        out.minutes = 0;
+        out.seconds = 0;
+        out.ms = 0;
+        out.us = 0;
+        out.ns = 0;
+    }
+    let tb = balance_ns(rounded, "hour");
+    out.hours = tb.hours;
+    out.minutes = tb.minutes;
+    out.seconds = tb.seconds;
+    out.ms = tb.ms;
+    out.us = tb.us;
+    out.ns = tb.ns;
     out
+}
+
+/// Multiply every field of a duration by ±1.
+fn mul_duration_sign(d: IsoDuration, sign: i64) -> IsoDuration {
+    if sign >= 0 {
+        d
+    } else {
+        neg_duration(d)
+    }
 }
 
 fn read_datetime_diff(
     i: &mut Interp,
     opts: &Value,
+) -> Result<(String, String, i64, String), Value> {
+    read_datetime_diff_auto(i, opts, 6)
+}
+
+/// Like `read_datetime_diff` with an explicit `auto` rank for largestUnit (day for
+/// PlainDateTime, hour for ZonedDateTime).
+fn read_datetime_diff_auto(
+    i: &mut Interp,
+    opts: &Value,
+    auto_rank: i32,
 ) -> Result<(String, String, i64, String), Value> {
     let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
     let incr = opt_num(i, opts, "roundingIncrement", 1)?;
@@ -4118,7 +4257,7 @@ fn read_datetime_diff(
     let srank =
         unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
     let lrank = if largest_raw == "auto" {
-        srank.max(6)
+        srank.max(auto_rank)
     } else {
         unit_rank(&largest_raw).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
     };
@@ -8301,7 +8440,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let (largest, smallest, incr, mode) = read_datetime_diff_auto(i, &arg(a, 1), 5)?;
         let dur = diff_zoned(i, e, o, oe, &tz, &cal, &largest, &smallest, incr, &mode);
         Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
     });
@@ -8309,7 +8448,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, o, tz) = as_zoned(i, &t)?;
         let cal = same_calendar(i, &t, &arg(a, 0))?;
         let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
+        let (largest, smallest, incr, mode) = read_datetime_diff_auto(i, &arg(a, 1), 5)?;
         let dur = diff_zoned(
             i,
             e,
