@@ -2576,7 +2576,14 @@ pub fn install(it: &mut Interp) {
                     | Some(Temporal::YearMonth(_))
                     | Some(Temporal::MonthDay(_)) => "date",
                     Some(Temporal::Time(_)) => "time",
-                    _ => "any",
+                    Some(_) => "any",
+                    // Brand check: the receiver must be a Temporal object of this prototype's kind.
+                    None => {
+                        return Err(i.make_error(
+                            "TypeError",
+                            "toLocaleString called on a non-Temporal receiver",
+                        ))
+                    }
                 };
                 if matches!(options, Value::Obj(_)) {
                     let ds = i.get_member(&options, "dateStyle").map_err(unab)?;
@@ -2803,6 +2810,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| {
+        if get(i, &t).is_none() {
+            return Err(i.make_error("TypeError", "calendarId called on a non-Temporal receiver"));
+        }
         Ok(Value::from_string(cal_of(i, &t).to_string()))
     });
     def_getter(it, &proto, "dayOfWeek", |i, t, _| {
@@ -5544,6 +5554,8 @@ fn to_time(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoTime, Value> {
                     ));
                 }
             }
+            // The overflow option is read and validated even though a string never overflows.
+            to_overflow(i, opts)?;
             Ok(t)
         }
         Value::Obj(_) => {
@@ -5597,6 +5609,9 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| {
+        if get(i, &t).is_none() {
+            return Err(i.make_error("TypeError", "calendarId called on a non-Temporal receiver"));
+        }
         Ok(Value::from_string(cal_of(i, &t).to_string()))
     });
     def_getter(it, &proto, "hour", |i, t, _| {
@@ -5975,6 +5990,8 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             if !iso_datetime_within_limits(d, t) {
                 return Err(i.make_error("RangeError", "date-time outside representable range"));
             }
+            // The overflow option is read and validated even though a string never overflows.
+            to_overflow(i, opts)?;
             Ok((d, t))
         }
         Value::Obj(_) => {
@@ -6031,6 +6048,9 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         Ok(Value::from_string(cal_month_code(&cal_of(i, &t), d)))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| {
+        if get(i, &t).is_none() {
+            return Err(i.make_error("TypeError", "calendarId called on a non-Temporal receiver"));
+        }
         Ok(Value::from_string(cal_of(i, &t).to_string()))
     });
     it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
@@ -6272,7 +6292,10 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
     }
     let d = match v {
         Value::Str(s) => {
-            parse_year_month(s).ok_or_else(|| i.make_error("RangeError", "invalid year-month"))?
+            let ym = parse_year_month(s)
+                .ok_or_else(|| i.make_error("RangeError", "invalid year-month"))?;
+            to_overflow(i, opts)?;
+            ym
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
@@ -6323,6 +6346,9 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         Ok(Value::Num(cal_fields(&cal_of(i, &t), d).2 as f64))
     });
     def_getter(it, &proto, "calendarId", |i, t, _| {
+        if get(i, &t).is_none() {
+            return Err(i.make_error("TypeError", "calendarId called on a non-Temporal receiver"));
+        }
         Ok(Value::from_string(cal_of(i, &t).to_string()))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
@@ -6510,7 +6536,10 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
     }
     match v {
         Value::Str(s) => {
-            parse_month_day(s).ok_or_else(|| i.make_error("RangeError", "invalid month-day"))
+            let md = parse_month_day(s)
+                .ok_or_else(|| i.make_error("RangeError", "invalid month-day"))?;
+            to_overflow(i, opts)?;
+            Ok(md)
         }
         Value::Obj(_) => {
             read_calendar(i, v)?;
@@ -8095,6 +8124,9 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     time_get!("microsecond", |t: IsoTime| Value::Num(t.us as f64));
     time_get!("nanosecond", |t: IsoTime| Value::Num(t.ns as f64));
     def_getter(it, &proto, "calendarId", |i, t, _| {
+        if get(i, &t).is_none() {
+            return Err(i.make_error("TypeError", "calendarId called on a non-Temporal receiver"));
+        }
         Ok(Value::from_string(cal_of(i, &t).to_string()))
     });
     def_getter(it, &proto, "epochMilliseconds", |i, t, _| {
