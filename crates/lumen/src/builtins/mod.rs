@@ -5663,23 +5663,38 @@ fn install_set_methods(it: &mut Interp) {
         }
     });
     it.def_method(&sp, "symmetricDifference", 1, |i, this, a| {
-        // GetSetRecord (which may mutate the receiver via getters) precedes the snapshot; then
-        // toggle each of the other's keys (remove if present, else append).
+        // GetSetRecord (which may mutate the receiver via getters) precedes the snapshot. The result
+        // data keeps stable slots: toggling a present key empties its slot, and adding a key reuses
+        // the first empty slot (else appends) — so a removed-then-re-added key keeps its position.
         coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
-        let mut out = set_values(i, &this)?;
-        let mut seen_other: Vec<Value> = Vec::new();
-        for k in set_like_keys(i, &keys, &arg(a, 0))? {
-            if seen_other.iter().any(|v| same_value_zero(v, &k)) {
-                continue;
-            }
-            seen_other.push(k.clone());
-            if let Some(pos) = out.iter().position(|v| same_value_zero(v, &k)) {
-                out.remove(pos);
+        // Each slot remembers its key and whether it is present. Toggling a present key clears it;
+        // re-adding a key reuses *its own* cleared slot; a brand-new key appends.
+        let mut result: Vec<(Value, bool)> = set_values(i, &this)?
+            .into_iter()
+            .map(|v| (v, true))
+            .collect();
+        let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
+        while let Some(k) = set_like_next(i, &iter, &next)? {
+            if let Some(slot) = result
+                .iter_mut()
+                .find(|(v, present)| *present && same_value_zero(v, &k))
+            {
+                slot.1 = false;
+            } else if let Some(slot) = result
+                .iter_mut()
+                .find(|(v, present)| !*present && same_value_zero(v, &k))
+            {
+                slot.1 = true;
             } else {
-                out.push(k);
+                result.push((k, true));
             }
         }
+        let out: Vec<Value> = result
+            .into_iter()
+            .filter(|(_, present)| *present)
+            .map(|(v, _)| v)
+            .collect();
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
