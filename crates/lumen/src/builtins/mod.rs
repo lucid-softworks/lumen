@@ -137,8 +137,14 @@ fn intl_delegate(
     method: &str,
     call_args: &[Value],
 ) -> Result<Value, Value> {
-    let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
-    let ctor = ab(i.get_member(&intl, service))?;
+    // Use the cached intrinsic (immune to tainted Intl globals), falling back to the global.
+    let ctor = match i.extra_protos.get(format!("%Intl.{service}%").as_str()) {
+        Some(c) => Value::Obj(c.clone()),
+        None => {
+            let intl = ab(i.get_member(&Value::Obj(i.global.clone()), "Intl"))?;
+            ab(i.get_member(&intl, service))?
+        }
+    };
     let inst = ab(i.construct(ctor, &[locales, options]))?;
     let f = ab(i.get_member(&inst, method))?;
     ab(i.call(f, inst, call_args))
@@ -553,7 +559,7 @@ fn install_weak_refs(it: &mut Interp) {
     it.def_method(&fr_proto, "register", 2, |i, this, a| {
         // Brand check, then: target must be registerable, distinct from its held value, and any
         // unregister token must itself be registerable.
-        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__fr")) {
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("\u{0}fr")) {
             return Err(i.make_error("TypeError", "register called on a non-FinalizationRegistry"));
         }
         let target = arg(a, 0);
@@ -567,19 +573,39 @@ fn install_weak_refs(it: &mut Interp) {
         if !matches!(token, Value::Undefined) && !can_be_held_weakly(i, &token) {
             return Err(i.make_error("TypeError", "unregister token cannot be held weakly"));
         }
+        // Track the registration so unregister can report whether anything matched. (Cleanup
+        // callbacks never fire — nothing is collected during a run — but the cell bookkeeping
+        // is still observable.)
+        if !matches!(token, Value::Undefined) {
+            if let Value::Obj(o) = &this {
+                i.fr_tokens
+                    .entry(Rc::as_ptr(o) as usize)
+                    .or_default()
+                    .push(token);
+            }
+        }
         Ok(Value::Undefined)
     });
     it.def_method(&fr_proto, "unregister", 1, |i, this, a| {
-        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__fr")) {
+        if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("\u{0}fr")) {
             return Err(i.make_error(
                 "TypeError",
                 "unregister called on a non-FinalizationRegistry",
             ));
         }
-        if !can_be_held_weakly(i, &arg(a, 0)) {
+        let token = arg(a, 0);
+        if !can_be_held_weakly(i, &token) {
             return Err(i.make_error("TypeError", "unregister token cannot be held weakly"));
         }
-        Ok(Value::Bool(false))
+        let mut removed = false;
+        if let Value::Obj(o) = &this {
+            if let Some(tokens) = i.fr_tokens.get_mut(&(Rc::as_ptr(o) as usize)) {
+                let before = tokens.len();
+                tokens.retain(|t| !same_value(t, &token));
+                removed = tokens.len() != before;
+            }
+        }
+        Ok(Value::Bool(removed))
     });
     let fr_ctor = it.make_native("FinalizationRegistry", 1, |i, _t, a| {
         if !i.constructing {
@@ -588,9 +614,8 @@ fn install_weak_refs(it: &mut Interp) {
         if !arg(a, 0).is_callable() {
             return Err(i.make_error("TypeError", "cleanup callback must be callable"));
         }
-        let obj = new_from_ctor(i, "FinalizationRegistry")
-            .unwrap_or_else(|_| Object::new(i.extra_protos.get("FinalizationRegistry").cloned()));
-        set_internal(&obj, "__fr", Value::Bool(true));
+        let obj = new_from_ctor(i, "FinalizationRegistry")?;
+        set_internal(&obj, "\u{0}fr", Value::Bool(true));
         Ok(Value::Obj(obj))
     });
     it.extra_protos
@@ -2356,40 +2381,42 @@ fn install_shared_array_buffer(it: &mut Interp) {
         if !i.constructing {
             return Err(i.make_error("TypeError", "SharedArrayBuffer constructor requires 'new'"));
         }
+        // ToIndex(length), then the options bag's maxByteLength — both *before* object creation
+        // (a poisoned newTarget.prototype getter fires next), with allocation limits checked last.
         let nraw = ab(i.to_number(&arg(a, 0)))?;
         let n = if nraw.is_nan() { 0.0 } else { nraw.trunc() };
-        if n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
+        if !(0.0..=9007199254740991.0).contains(&n) {
             return Err(i.make_error("RangeError", "Invalid SharedArrayBuffer length"));
         }
-        let len = n as usize;
-        // Stamp the SharedArrayBuffer prototype rather than ArrayBuffer's, and back it with a
-        // process-global shared-memory block (so agent threads see the same bytes).
-        let (bv, bp) = make_array_buffer(i, len);
-        if let Value::Obj(o) = &bv {
-            o.borrow_mut().proto = i.extra_protos.get("SharedArrayBuffer").cloned();
-        }
-        let id = crate::interpreter::alloc_shared_mem(len);
-        i.shared_buffers.insert(bp, id);
-        set_internal(
-            &bv.as_obj().cloned().unwrap(),
-            "__sab_id",
-            Value::Num(id as f64),
-        );
-        // The options bag's maxByteLength makes the buffer growable.
+        let mut max: Option<f64> = None;
         if let Value::Obj(_) = arg(a, 1) {
             let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;
             if !matches!(mbl, Value::Undefined) {
                 let m = ab(i.to_number(&mbl))?;
-                if !m.is_finite() || (m as usize) < len || m as usize > MAX_ARRAY_OP_LEN {
+                let m = if m.is_nan() { 0.0 } else { m.trunc() };
+                if !(0.0..=9007199254740991.0).contains(&m) || m < n {
                     return Err(i.make_error("RangeError", "Invalid maxByteLength"));
                 }
-                if let Value::Obj(o) = &bv {
-                    set_internal(o, "__abMaxByteLength", Value::Num(m));
-                    set_internal(o, "__abResizable", Value::Bool(true));
-                }
+                max = Some(m);
             }
         }
-        Ok(bv)
+        // OrdinaryCreateFromConstructor: the prototype comes from newTarget (abrupt propagates).
+        let obj = new_from_ctor(i, "SharedArrayBuffer")?;
+        // Data allocation happens after the object exists — an oversized request fails here.
+        let len = n as usize;
+        if n as u128 > MAX_ARRAY_OP_LEN as u128
+            || max.is_some_and(|m| m as u128 > MAX_ARRAY_OP_LEN as u128)
+        {
+            return Err(i.make_error("RangeError", "SharedArrayBuffer allocation too large"));
+        }
+        let bp = Rc::as_ptr(&obj) as usize;
+        i.array_buffers.insert(bp, vec![0u8; len]);
+        set_internal(&obj, "__abMaxByteLength", Value::Num(max.unwrap_or(n)));
+        set_internal(&obj, "__abResizable", Value::Bool(max.is_some()));
+        let id = crate::interpreter::alloc_shared_mem(len);
+        i.shared_buffers.insert(bp, id);
+        set_internal(&obj, "__sab_id", Value::Num(id as f64));
+        Ok(Value::Obj(obj))
     });
     ctor.borrow_mut().props.insert(
         "prototype",
@@ -3734,7 +3761,7 @@ fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
     None
 }
 
-fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
+pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
@@ -4053,7 +4080,7 @@ fn install_typed_arrays(it: &mut Interp) {
     }
     it.def_method(&ta_proto, "set", 1, ta_set);
     it.def_method(&ta_proto, "subarray", 2, ta_subarray);
-    it.def_method(&ta_proto, "toLocaleString", 0, |i, this, _a| {
+    it.def_method(&ta_proto, "toLocaleString", 0, |i, this, a| {
         // ValidateTypedArray then Invoke `toLocaleString` on each element, joining with ",". The
         // length is captured once; an out-of-bounds/detached receiver throws, but an element that
         // reads back `undefined` after a mid-iteration shrink is skipped.
@@ -4075,7 +4102,7 @@ fn install_typed_arrays(it: &mut Interp) {
             if !tls.is_callable() {
                 return Err(i.make_error("TypeError", "toLocaleString is not a function"));
             }
-            let s = ab(i.call(tls, v, &[]))?;
+            let s = ab(i.call(tls, v, &[arg(a, 0), arg(a, 1)]))?;
             out.push_str(&ab(i.to_string(&s))?);
         }
         Ok(Value::from_string(out))
@@ -7758,13 +7785,13 @@ fn install_json(it: &mut Interp) {
         let o = i.new_object();
         o.borrow_mut().proto = None;
         set_data(&o, "rawJSON", Value::from_string(text.clone()));
-        set_internal(&o, "__raw_json", Value::from_string(text));
+        set_internal(&o, "\u{0}raw_json", Value::from_string(text));
         i.freeze_object(&Value::Obj(o.clone()));
         Ok(Value::Obj(o))
     });
     it.def_method(&j, "isRawJSON", 1, |_i, _t, args| {
         Ok(Value::Bool(
-            matches!(arg(args, 0), Value::Obj(o) if o.borrow().props.contains("__raw_json")),
+            matches!(arg(args, 0), Value::Obj(o) if o.borrow().props.contains("\u{0}raw_json")),
         ))
     });
     set_to_string_tag(it, &j, "JSON");
@@ -8280,16 +8307,22 @@ fn json_str(
     }
     // A JSON.rawJSON object serializes as its stored raw text, verbatim.
     if let Value::Obj(o) = &value {
-        if let Some(Value::Str(raw)) = o.borrow().props.get("__raw_json").map(|p| p.value.clone()) {
+        if let Some(Value::Str(raw)) = o
+            .borrow()
+            .props
+            .get("\u{0}raw_json")
+            .map(|p| p.value.clone())
+        {
             return Ok(Some(raw.to_string()));
         }
     }
-    // A primitive-wrapper object is unwrapped to its primitive (Number/String/Boolean/BigInt data).
+    // A primitive-wrapper object re-coerces through ToNumber/ToString (so an overridden
+    // valueOf/toString is observed); booleans read the wrapped datum directly.
     if let Value::Obj(o) = &value {
         let exotic = o.borrow().exotic.clone();
         match exotic {
-            Exotic::NumWrap(n) => value = Value::Num(n),
-            Exotic::StrWrap(s) => value = Value::Str(s),
+            Exotic::NumWrap(_) => value = Value::Num(ab(i.to_number(&value))?),
+            Exotic::StrWrap(_) => value = Value::Str(ab(i.to_string(&value))?),
             Exotic::BoolWrap(b) => value = Value::Bool(b),
             Exotic::BigIntWrap(_) => {
                 return Err(i.make_error("TypeError", "Do not know how to serialize a BigInt"))
@@ -11155,7 +11188,7 @@ fn install_array(it: &mut Interp) {
             Ok(Value::str("[object Array]"))
         }
     });
-    it.def_method(&ap, "toLocaleString", 0, |i, this, _args| {
+    it.def_method(&ap, "toLocaleString", 0, |i, this, args| {
         let o = arr_to_object(i, &this)?;
         let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
@@ -11166,12 +11199,12 @@ fn install_array(it: &mut Interp) {
             }
             let el = ab(i.get_member(&ov, &k.to_string()))?;
             if !matches!(el, Value::Undefined | Value::Null) {
-                // ToString(? Invoke(element, "toLocaleString")).
+                // ToString(? Invoke(element, "toLocaleString", « locales, options »)).
                 let tls = ab(i.get_member(&el, "toLocaleString"))?;
                 if !tls.is_callable() {
                     return Err(i.make_error("TypeError", "toLocaleString is not a function"));
                 }
-                let s = ab(i.call(tls, el, &[]))?;
+                let s = ab(i.call(tls, el, &[arg(args, 0), arg(args, 1)]))?;
                 out.push_str(&ab(i.to_string(&s))?);
             }
         }
@@ -13335,7 +13368,7 @@ pub(crate) fn async_gen_react_fulfil(
         Value::Num(n) => n as usize,
         _ => return Ok(Value::Undefined),
     };
-    i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Next(arg(a, 2)));
+    i.drive_async_gen_inner(key, arg(a, 1), crate::coroutine::Resume::Next(arg(a, 2)));
     Ok(Value::Undefined)
 }
 pub(crate) fn async_gen_react_reject(
@@ -13347,7 +13380,7 @@ pub(crate) fn async_gen_react_reject(
         Value::Num(n) => n as usize,
         _ => return Ok(Value::Undefined),
     };
-    i.drive_async_gen(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
+    i.drive_async_gen_inner(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
     Ok(Value::Undefined)
 }
 pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
@@ -14930,11 +14963,19 @@ fn this_bigint(i: &mut Interp, this: &Value) -> Result<i128, Value> {
 fn install_bigint(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("BigInt", proto.clone());
-    it.def_method(&proto, "toString", 1, |i, this, a| {
+    it.def_method(&proto, "toString", 0, |i, this, a| {
         let n = this_bigint(i, &this)?;
         let radix = match arg(a, 0) {
             Value::Undefined => 10,
-            v => ab(i.to_number(&v))? as u32,
+            v => {
+                let r = ab(i.to_number(&v))?.trunc();
+                if !(2.0..=36.0).contains(&r) {
+                    return Err(
+                        i.make_error("RangeError", "toString radix must be between 2 and 36")
+                    );
+                }
+                r as u32
+            }
         };
         Ok(Value::from_string(bigint_to_radix(n, radix)))
     });
@@ -14956,21 +14997,25 @@ fn install_bigint(it: &mut Interp) {
         if i.constructing {
             return Err(i.make_error("TypeError", "BigInt is not a constructor"));
         }
-        match arg(a, 0) {
+        // ToPrimitive(value, number) first; a Number primitive then goes through
+        // NumberToBigInt (RangeError for NaN/Infinity/non-integral), unlike plain ToBigInt.
+        let prim = match arg(a, 0) {
+            v @ Value::Obj(_) => ab(i.to_primitive(&v, crate::eval::Hint::Number))?,
+            v => v,
+        };
+        match prim {
             Value::BigInt(n) => Ok(Value::BigInt(n)),
             Value::Num(n) => {
                 if n.is_finite() && n.fract() == 0.0 {
                     Ok(Value::BigInt(n as i128))
                 } else {
-                    Err(i.make_error("RangeError", "The number is not a safe integer"))
+                    Err(i.make_error("RangeError", "The number cannot be converted to a BigInt"))
                 }
             }
             Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
             Value::Str(s) => string_to_bigint(&s)
                 .map(Value::BigInt)
                 .ok_or_else(|| i.make_error("SyntaxError", "Cannot convert string to a BigInt")),
-            // BigInt(obj): ToPrimitive(number) then ToBigInt of the primitive.
-            v @ Value::Obj(_) => Ok(Value::BigInt(to_bigint(i, &v)?)),
             _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
         }
     });

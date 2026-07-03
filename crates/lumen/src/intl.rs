@@ -62,6 +62,26 @@ pub fn install(it: &mut Interp) {
     durationformat::install(it, &intl);
     datetimeformat::install(it, &intl);
 
+    // Cache the service constructors as intrinsics: toLocaleString and friends delegate to
+    // %Intl.NumberFormat% etc. directly, so tainting the Intl globals can't break them.
+    for svc in [
+        "NumberFormat",
+        "DateTimeFormat",
+        "Collator",
+        "ListFormat",
+        "PluralRules",
+        "RelativeTimeFormat",
+        "DisplayNames",
+        "Segmenter",
+        "DurationFormat",
+        "Locale",
+    ] {
+        let ctor = intl.borrow().props.get(svc).map(|p| p.value.clone());
+        if let Some(Value::Obj(c)) = ctor {
+            let key: &'static str = Box::leak(format!("%Intl.{svc}%").into_boxed_str());
+            it.extra_protos.insert(key, c);
+        }
+    }
     it.global
         .borrow_mut()
         .props

@@ -1,8 +1,7 @@
 //! `Intl.DisplayNames` (English data subset).
 
 use super::service::{
-    brand_slot, get_option, install_supported_locales, instance_proto, read_locale_matcher,
-    resolve_locale,
+    brand_slot, get_option, install_supported_locales, read_locale_matcher, resolve_locale,
 };
 use super::{
     ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
@@ -22,6 +21,9 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     if !i.constructing {
         return Err(i.make_error("TypeError", "Intl.DisplayNames requires 'new'"));
     }
+    // OrdinaryCreateFromConstructor first: a poisoned newTarget.prototype getter fires before
+    // any locale/options validation.
+    let obj = crate::builtins::new_from_ctor(i, "Intl.DisplayNames")?;
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     // options is required and must be an object.
     let opt_arg = arg(a, 1);
@@ -64,10 +66,6 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     .unwrap();
     let resolved = resolve_locale(i, &requested, &[]);
 
-    let obj = i.new_object();
-    if let Some(proto) = instance_proto(i, "Intl.DisplayNames")? {
-        obj.borrow_mut().proto = Some(proto);
-    }
     set_builtin(&obj, "__dn", Value::Bool(true));
     set_builtin(&obj, "__dn_locale", Value::from_string(resolved.locale));
     set_builtin(&obj, "__dn_style", Value::from_string(style));

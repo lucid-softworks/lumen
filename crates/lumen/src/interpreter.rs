@@ -535,6 +535,13 @@ pub struct Interp {
     pub(crate) mapped_arguments: HashMap<usize, (Env, Vec<Option<String>>)>,
     /// Source-phase imports: canonical module key → its (cached) ModuleSource object.
     pub(crate) module_source_objs: HashMap<String, Value>,
+    /// FinalizationRegistry registrations (ptr → unregister tokens), for `unregister`'s result.
+    pub(crate) fr_tokens: HashMap<usize, Vec<Value>>,
+    /// Async generators mid-step (running or parked at an `await`): further next/return/throw
+    /// requests queue here (the spec's AsyncGeneratorRequest queue) until the step completes.
+    pub(crate) async_gen_busy: std::collections::HashSet<usize>,
+    pub(crate) async_gen_queue:
+        HashMap<usize, std::collections::VecDeque<(Value, crate::coroutine::Resume)>>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -868,6 +875,9 @@ impl Interp {
             deferred_ns: HashMap::new(),
             mapped_arguments: HashMap::new(),
             module_source_objs: HashMap::new(),
+            fr_tokens: HashMap::new(),
+            async_gen_busy: std::collections::HashSet::new(),
+            async_gen_queue: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -2638,6 +2648,39 @@ impl Interp {
         r: Value,
         signal: crate::coroutine::Resume,
     ) {
+        // A request while a step is in progress (running or awaiting) queues behind it.
+        if self.async_gen_busy.contains(&key) {
+            self.async_gen_queue
+                .entry(key)
+                .or_default()
+                .push_back((r, signal));
+            return;
+        }
+        self.async_gen_busy.insert(key);
+        self.drive_async_gen_inner(key, r, signal);
+    }
+
+    /// The step just completed (resolved or rejected its promise): pump the next queued request,
+    /// or clear the busy flag.
+    fn finish_async_gen_step(&mut self, key: usize) {
+        match self
+            .async_gen_queue
+            .get_mut(&key)
+            .and_then(|q| q.pop_front())
+        {
+            Some((r, signal)) => self.drive_async_gen_inner(key, r, signal),
+            None => {
+                self.async_gen_busy.remove(&key);
+            }
+        }
+    }
+
+    pub(crate) fn drive_async_gen_inner(
+        &mut self,
+        key: usize,
+        r: Value,
+        signal: crate::coroutine::Resume,
+    ) {
         use crate::coroutine::{Resume, Suspend};
         let mut coro = match self.generators.remove(&key) {
             Some(c) => c,
@@ -2660,6 +2703,7 @@ impl Interp {
                     self.resolve_promise(&r, res);
                 }
             }
+            self.finish_async_gen_step(key);
             return;
         }
         let suspend = coro.resume(self, signal);
@@ -2668,8 +2712,11 @@ impl Interp {
             Suspend::Yield(v) => {
                 let res = self.iter_result_obj(v, false);
                 self.resolve_promise(&r, res);
+                self.finish_async_gen_step(key);
             }
             Suspend::Await(x) => {
+                // Still mid-step: the reaction resumes via drive_async_gen_inner, keeping the
+                // request queue intact.
                 let px = self.promise_resolve_value(x);
                 let on_f = self.make_async_gen_reaction(key, &r, true);
                 let on_r = self.make_async_gen_reaction(key, &r, false);
@@ -2678,8 +2725,12 @@ impl Interp {
             Suspend::Done(v) => {
                 let res = self.iter_result_obj(v, true);
                 self.resolve_promise(&r, res);
+                self.finish_async_gen_step(key);
             }
-            Suspend::Throw(e) => self.reject_promise(&r, e),
+            Suspend::Throw(e) => {
+                self.reject_promise(&r, e);
+                self.finish_async_gen_step(key);
+            }
         }
     }
 

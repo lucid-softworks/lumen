@@ -1849,7 +1849,12 @@ impl Parser {
         };
         if let Some(op) = op {
             self.advance();
-            let arg = self.parse_unary()?;
+            let mut arg = self.parse_unary()?;
+            // `undefined` is an ordinary identifier reference as a delete operand (the global
+            // property is non-configurable, so the delete evaluates to false).
+            if op == "delete" && matches!(arg, Expr::Undefined) {
+                arg = Expr::Ident("undefined".to_string());
+            }
             // Deleting a bare variable reference is a SyntaxError in strict mode.
             if op == "delete" && self.strict && matches!(arg, Expr::Ident(_)) {
                 return self.err("delete of an unqualified identifier in strict mode");

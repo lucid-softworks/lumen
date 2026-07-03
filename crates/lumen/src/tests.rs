@@ -7771,3 +7771,70 @@ fn small_area_conformance_fixes() {
         "object:7" // sloppy-mode receiver boxing; the setter itself ran with the primitive base
     );
 }
+
+#[test]
+fn sub_ten_area_fixes() {
+    // BigInt: constructor coercion + toString radix/length.
+    assert_eq!(throws("BigInt(Infinity)"), "RangeError");
+    assert_eq!(throws("BigInt(1.5)"), "RangeError");
+    assert_eq!(run("String(BigInt({ valueOf: () => 42 }))"), "42");
+    assert_eq!(throws("(1n).toString(1)"), "RangeError");
+    assert_eq!(run("String(BigInt.prototype.toString.length)"), "0");
+    // FinalizationRegistry tracks registrations; internal slots stay hidden.
+    assert_eq!(
+        run(
+            "const fr = new FinalizationRegistry(() => {}); const t = {};
+             fr.register({}, 1, t);
+             [fr.unregister(t), fr.unregister(t), Object.getOwnPropertyNames(fr).length].join(',')"
+        ),
+        "true,false,0"
+    );
+    // JSON: rawJSON exposes only its own property; wrappers re-coerce via valueOf/toString.
+    assert_eq!(
+        run("Object.getOwnPropertyNames(JSON.rawJSON('1')).join(',')"),
+        "rawJSON"
+    );
+    assert_eq!(
+        run("var n = new Number(1); n.valueOf = () => 2; JSON.stringify([n])"),
+        "[2]"
+    );
+    // delete undefined is false (non-configurable global).
+    assert_eq!(run("String(delete undefined)"), "false");
+    // SharedArrayBuffer: option validation before allocation, negative maxByteLength rejected.
+    assert_eq!(
+        throws("new SharedArrayBuffer(0, { maxByteLength: -1 })"),
+        "RangeError"
+    );
+    assert_eq!(
+        run("String(new SharedArrayBuffer(4, { maxByteLength: 8 }).growable)"),
+        "true"
+    );
+    // Async generators queue overlapping requests (two nexts issued synchronously).
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    assert_eq!(
+        after(
+            "var out = [];
+             async function* g() { yield 1; }
+             const it = g();
+             it.next().then(r => out.push(r.value, r.done));
+             it.next().then(r => out.push(r.value, r.done));",
+            "out.join(',')"
+        ),
+        "1,false,,true"
+    );
+    // Array.prototype.toLocaleString forwards locales/options to elements.
+    assert_eq!(
+        run(
+            "var got; var el = { toLocaleString(l, o) { got = l + ':' + o.style; return 'x'; } };
+             [el].toLocaleString('th', { style: 'decimal' }); got"
+        ),
+        "th:decimal"
+    );
+}
