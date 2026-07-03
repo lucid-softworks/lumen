@@ -14565,11 +14565,12 @@ fn install_symbol(it: &mut Interp) {
         Ok(sym)
     });
     it.def_method(&ctor, "keyFor", 1, |i, _this, args| {
-        if let Value::Sym(s) = arg(args, 0) {
-            for (k, d) in &i.sym_for {
-                if d.id == s.id {
-                    return Ok(Value::from_string(k.clone()));
-                }
+        let Value::Sym(s) = arg(args, 0) else {
+            return Err(i.make_error("TypeError", "Symbol.keyFor: argument is not a Symbol"));
+        };
+        for (k, d) in &i.sym_for {
+            if d.id == s.id {
+                return Ok(Value::from_string(k.clone()));
             }
         }
         Ok(Value::Undefined)

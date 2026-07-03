@@ -1324,9 +1324,20 @@ impl Interp {
                     format!("cannot set property '{key}' of {}", type_name(base)),
                 ))
             }
-            // Setting a property on a primitive is a no-op in sloppy mode (and TypeError in strict,
-            // which we approximate as a no-op for now).
-            _ => return Ok(true),
+            // Setting a property on a primitive fails (ToObject's wrapper is a throwaway): a silent
+            // no-op in sloppy mode, a TypeError in strict mode.
+            _ => {
+                if self.strict {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!(
+                            "Cannot create property '{key}' on {} value",
+                            type_name(base)
+                        ),
+                    ));
+                }
+                return Ok(false);
+            }
         };
 
         let ptr = Rc::as_ptr(&obj) as usize;
