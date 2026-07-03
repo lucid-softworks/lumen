@@ -7902,3 +7902,38 @@ fn regexp_v_flag_class_sets() {
     assert_eq!(throws("new RegExp('[a--]', 'v')"), "SyntaxError");
     assert_eq!(run("String(/[&]/v.test('&'))"), "true");
 }
+
+#[test]
+fn temporal_duration_arithmetic_and_parsing() {
+    // Fractional ISO components spread exactly into sub-units.
+    assert_eq!(run("Temporal.Duration.from('PT0.5H').toString()"), "PT30M");
+    assert_eq!(
+        run("String(Temporal.Duration.from('PT0.5H').minutes)"),
+        "30"
+    );
+    assert_eq!(
+        run("String(Temporal.Duration.from('PT1.5S').milliseconds)"),
+        "500"
+    );
+    // A fraction is only allowed on the last component; order is enforced.
+    for bad in ["'PT0.5H30M'", "'P1D2Y'", "'P'", "'PT'", "'P1DT'"] {
+        assert_eq!(
+            throws(&format!("Temporal.Duration.from({bad})")),
+            "RangeError",
+            "should reject {bad}"
+        );
+    }
+    // add/subtract balance through total nanoseconds and reject calendar units.
+    assert_eq!(
+        run("Temporal.Duration.from({ hours: 1 }).add({ minutes: -30 }).toString()"),
+        "PT30M"
+    );
+    assert_eq!(
+        run("Temporal.Duration.from({ days: 1 }).subtract({ hours: 36 }).toString()"),
+        "-PT12H"
+    );
+    assert_eq!(
+        throws("Temporal.Duration.from({ years: 1 }).add({ hours: 1 })"),
+        "RangeError"
+    );
+}

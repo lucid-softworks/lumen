@@ -6511,14 +6511,18 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        let r = add_duration(d, o, 1);
+        no_calendar_units(i, &d)?;
+        no_calendar_units(i, &o)?;
+        let r = add_time_durations(&d, &o, 1);
         validate_duration(i, r)?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(r)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_duration(i, &t)?;
         let o = to_duration(i, &arg(a, 0))?;
-        let r = add_duration(d, o, -1);
+        no_calendar_units(i, &d)?;
+        no_calendar_units(i, &o)?;
+        let r = add_time_durations(&d, &o, -1);
         validate_duration(i, r)?;
         Ok(make(i, "Temporal.Duration", Temporal::Duration(r)))
     });
@@ -6529,14 +6533,28 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
             return Err(i.make_error("TypeError", "round() requires an options argument"));
         }
         let (o, shorthand) = round_opts(&arg0);
+        // Options are read in alphabetical order: largestUnit, relativeTo, roundingIncrement,
+        // roundingMode, smallestUnit.
+        let largest_raw = match &shorthand {
+            Some(_) => String::new(),
+            None => opt_str(i, &o, "largestUnit", "")?,
+        };
+        let rel = match &shorthand {
+            Some(_) => None,
+            None => read_relative_to(i, &o)?,
+        };
+        let incr_raw = match &shorthand {
+            Some(_) => 1,
+            None => opt_num(i, &o, "roundingIncrement", 1)?,
+        };
+        let mode = match &shorthand {
+            Some(_) => "halfExpand".to_string(),
+            None => opt_str(i, &o, "roundingMode", "halfExpand")?,
+        };
         let smallest_raw = match &shorthand {
             Some(s) => s.clone(),
             None => opt_str(i, &o, "smallestUnit", "")?,
         };
-        let largest_raw = opt_str(i, &o, "largestUnit", "")?;
-        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
-        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
-        let rel = read_relative_to(i, &o)?;
         check_mode(i, &mode)?;
 
         if smallest_raw.is_empty() && largest_raw.is_empty() {
@@ -6804,20 +6822,6 @@ fn neg_duration(d: IsoDuration) -> IsoDuration {
         ns: -d.ns,
     }
 }
-fn add_duration(a: IsoDuration, b: IsoDuration, sign: i64) -> IsoDuration {
-    IsoDuration {
-        years: a.years + sign * b.years,
-        months: a.months + sign * b.months,
-        weeks: a.weeks + sign * b.weeks,
-        days: a.days + sign * b.days,
-        hours: a.hours + sign * b.hours,
-        minutes: a.minutes + sign * b.minutes,
-        seconds: a.seconds + sign * b.seconds,
-        ms: a.ms + sign * b.ms,
-        us: a.us + sign * b.us,
-        ns: a.ns + sign * b.ns,
-    }
-}
 /// Whole-nanosecond magnitude of a duration's day-and-below portion (used for the range bound).
 fn duration_total_ns(d: IsoDuration) -> i128 {
     d.days as i128 * 86_400_000_000_000
@@ -6831,6 +6835,76 @@ fn duration_total_ns(d: IsoDuration) -> i128 {
 /// IsValidDuration: every non-zero field shares one sign; years/months/weeks have magnitude < 2^32;
 /// and the combined days-and-below seconds total has magnitude < 2^53. (Finiteness/integrality is
 /// already enforced when the fields are read.)
+/// The highest nonzero unit's rank (4=days … 10=nanoseconds) for balancing.
+fn default_largest_time_unit(d: &IsoDuration) -> u8 {
+    if d.days != 0 {
+        4
+    } else if d.hours != 0 {
+        5
+    } else if d.minutes != 0 {
+        6
+    } else if d.seconds != 0 {
+        7
+    } else if d.ms != 0 {
+        8
+    } else if d.us != 0 {
+        9
+    } else {
+        10
+    }
+}
+
+/// Balance a total-nanoseconds time duration up to `largest` (a rank from
+/// `default_largest_time_unit`), leaving higher units zero.
+fn balance_time_ns(total: i128, largest: u8) -> IsoDuration {
+    let mut d = IsoDuration::default();
+    let mut rem = total;
+    let units: [(u8, i128); 6] = [
+        (4, 86_400_000_000_000),
+        (5, 3_600_000_000_000),
+        (6, 60_000_000_000),
+        (7, 1_000_000_000),
+        (8, 1_000_000),
+        (9, 1_000),
+    ];
+    for (rank, ns) in units {
+        if largest <= rank {
+            let q = rem / ns;
+            rem %= ns;
+            match rank {
+                4 => d.days = q as i64,
+                5 => d.hours = q as i64,
+                6 => d.minutes = q as i64,
+                7 => d.seconds = q as i64,
+                8 => d.ms = q as i64,
+                _ => d.us = q as i64,
+            }
+        }
+    }
+    d.ns = rem as i64;
+    d
+}
+
+/// AddDurations for time-only durations: exact total-nanosecond addition, rebalanced to the
+/// larger of the two inputs' largest units (so mixed-sign intermediates balance cleanly).
+fn add_time_durations(a: &IsoDuration, b: &IsoDuration, sign: i128) -> IsoDuration {
+    let total = duration_total_ns(*a) + sign * duration_total_ns(*b);
+    let largest = default_largest_time_unit(a).min(default_largest_time_unit(b));
+    balance_time_ns(total, largest)
+}
+
+/// Duration add/subtract accept no calendar units (years/months/weeks need a relativeTo, which
+/// the current spec no longer supports there).
+fn no_calendar_units(i: &Interp, d: &IsoDuration) -> Result<(), Value> {
+    if d.years != 0 || d.months != 0 || d.weeks != 0 {
+        return Err(i.make_error(
+            "RangeError",
+            "Duration arithmetic with years, months, or weeks requires a relativeTo",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_duration(i: &Interp, d: IsoDuration) -> Result<(), Value> {
     let mut sign = 0i64;
     for v in [
@@ -6915,53 +6989,137 @@ fn to_duration(i: &mut Interp, v: &Value) -> Result<IsoDuration, Value> {
     }
 }
 fn parse_duration_str(s: &str) -> Option<IsoDuration> {
+    // ISO 8601 duration: [±]P nY nM nW nD [T n[.f]H n[.f]M n[.f]S] — units in strictly
+    // descending order, each at most once, a fraction only on the *last* component present,
+    // and at least one component overall (with at least one after a 'T').
     let s = s.trim();
-    let (neg, s) = match s
-        .strip_prefix('-')
-        .or_else(|| s.strip_prefix('+').map(|_| s))
-    {
-        Some(r) if s.starts_with('-') => (true, r),
-        _ => (false, s.trim_start_matches('+')),
+    let (neg, s) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
     };
     let s = s.strip_prefix('P').or_else(|| s.strip_prefix('p'))?;
     let mut d = IsoDuration::default();
-    let (date_part, time_part) = match s.split_once('T').or_else(|| s.split_once('t')) {
+    let (date_part, time_part) = match s.split_once(['T', 't']) {
         Some((dp, tp)) => (dp, Some(tp)),
         None => (s, None),
     };
+    let mut any = false;
+
+    // Date components: digits then a designator; no fractions permitted.
+    let mut order = 0u8; // 1=Y 2=M 3=W 4=D
     let mut num = String::new();
     for c in date_part.chars() {
         if c.is_ascii_digit() {
             num.push(c);
-        } else {
-            let n: i64 = num.parse().ok()?;
-            num.clear();
-            match c {
-                'Y' | 'y' => d.years = n,
-                'W' | 'w' => d.weeks = n,
-                'D' | 'd' => d.days = n,
-                'M' | 'm' => d.months = n,
-                _ => return None,
-            }
+            continue;
+        }
+        if num.is_empty() {
+            return None;
+        }
+        let n: i64 = num.parse().ok()?;
+        num.clear();
+        let rank = match c {
+            'Y' | 'y' => 1,
+            'M' | 'm' => 2,
+            'W' | 'w' => 3,
+            'D' | 'd' => 4,
+            _ => return None,
+        };
+        if rank <= order {
+            return None;
+        }
+        order = rank;
+        any = true;
+        match rank {
+            1 => d.years = n,
+            2 => d.months = n,
+            3 => d.weeks = n,
+            _ => d.days = n,
         }
     }
+    if !num.is_empty() {
+        return None; // trailing digits with no designator
+    }
+
     if let Some(tp) = time_part {
+        let mut t_any = false;
+        let mut t_order = 0u8; // 1=H 2=M 3=S
+        let mut had_fraction = false;
         let mut num = String::new();
+        let mut frac = String::new();
+        let mut in_frac = false;
         for c in tp.chars() {
-            if c.is_ascii_digit() || c == '.' {
-                num.push(c);
-            } else {
-                let base = num.split('.').next().unwrap_or("0");
-                let n: i64 = base.parse().ok()?;
-                num.clear();
-                match c {
-                    'H' | 'h' => d.hours = n,
-                    'M' | 'm' => d.minutes = n,
-                    'S' | 's' => d.seconds = n,
-                    _ => return None,
+            if c.is_ascii_digit() {
+                if in_frac {
+                    frac.push(c);
+                } else {
+                    num.push(c);
                 }
+                continue;
+            }
+            if c == '.' || c == ',' {
+                if in_frac || num.is_empty() {
+                    return None;
+                }
+                in_frac = true;
+                continue;
+            }
+            if num.is_empty() || had_fraction || (in_frac && frac.is_empty()) || frac.len() > 9 {
+                return None; // nothing after a fractional component; 1-9 fraction digits
+            }
+            let n: i64 = num.parse().ok()?;
+            num.clear();
+            let rank = match c {
+                'H' | 'h' => 1,
+                'M' | 'm' => 2,
+                'S' | 's' => 3,
+                _ => return None,
+            };
+            if rank <= t_order {
+                return None;
+            }
+            t_order = rank;
+            t_any = true;
+            let unit_ns: i128 = match rank {
+                1 => 3_600_000_000_000,
+                2 => 60_000_000_000,
+                _ => 1_000_000_000,
+            };
+            match rank {
+                1 => d.hours = n,
+                2 => d.minutes = n,
+                _ => d.seconds = n,
+            }
+            if in_frac {
+                had_fraction = true;
+                in_frac = false;
+                // Spread the fraction exactly into the sub-units.
+                let digits = frac.len() as u32;
+                let f: i128 = frac.parse().ok()?;
+                frac.clear();
+                let mut rem_ns = f * unit_ns / 10i128.pow(digits);
+                if rank == 1 {
+                    d.minutes = (rem_ns / 60_000_000_000) as i64;
+                    rem_ns %= 60_000_000_000;
+                }
+                if rank <= 2 {
+                    d.seconds += (rem_ns / 1_000_000_000) as i64;
+                    rem_ns %= 1_000_000_000;
+                }
+                d.ms = (rem_ns / 1_000_000) as i64;
+                rem_ns %= 1_000_000;
+                d.us = (rem_ns / 1_000) as i64;
+                d.ns = (rem_ns % 1_000) as i64;
             }
         }
+        if !num.is_empty() || in_frac || !t_any {
+            return None; // trailing digits / dangling fraction / bare 'T'
+        }
+        any = true;
+    }
+    if !any {
+        return None;
     }
     if neg {
         d = neg_duration(d);
