@@ -7446,3 +7446,31 @@ fn mapped_arguments_object() {
         "1-2-3"
     );
 }
+
+#[test]
+fn destructuring_and_for_head_early_errors() {
+    // A rest element followed by a comma/elision is invalid in a destructuring pattern...
+    for src in [
+        "var x; [...x,] = [];",
+        "var x; [...x, ,] = [];",
+        "var x; for ([...x,] in [[]]) ;",
+        "'use strict'; [arguments] = [1];",
+        "'use strict'; ({ a: eval } = { a: 1 });",
+        "'use strict'; for ([arguments] of [[1]]) ;",
+    ] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // ...but stays a perfectly good spread in an array literal.
+    assert_eq!(run("[...[1, 2],].join(',')"), "1,2");
+    assert_eq!(run("[...[1], 3].join(',')"), "1,3");
+    // A for-in head's right side is a full Expression (comma allowed).
+    assert_eq!(
+        run("var out = []; for (var k in ({a: 1}, {b: 2})) out.push(k); out.join(',')"),
+        "b"
+    );
+    // Sloppy mode still allows eval/arguments as destructuring targets.
+    assert_eq!(run("var eval2; [eval2] = [3]; String(eval2)"), "3");
+}

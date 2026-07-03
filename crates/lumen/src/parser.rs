@@ -1028,7 +1028,12 @@ impl Parser {
                         self.declare_lexical(n)?;
                     }
                 }
-                let right = self.parse_assign()?;
+                let right = if of {
+                    self.parse_assign()?
+                } else {
+                    // A for-in head's right side is a full Expression (comma allowed).
+                    self.parse_expr_allow_in()?
+                };
                 self.expect_punct(")")?;
                 let body = Box::new(self.parse_loop_body()?);
                 return Ok(Stmt::ForInOf {
@@ -1068,13 +1073,20 @@ impl Parser {
         if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
             let of = self.is_ident_word("of") && !self.cur_escaped();
             self.advance();
-            let right = self.parse_assign()?;
+            let right = if of {
+                self.parse_assign()?
+            } else {
+                self.parse_expr_allow_in()?
+            };
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
             let left = expr_to_pattern(&init_expr).ok_or_else(|| ParseError {
                 message: "invalid for-in/of target".into(),
                 line: self.line(),
             })?;
+            if self.strict && pattern_strict_banned(&init_expr) {
+                return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
+            }
             return Ok(Stmt::ForInOf {
                 decl: None,
                 left,
@@ -1566,6 +1578,9 @@ impl Parser {
                 if destructuring {
                     if !is_valid_assign_pattern(&left) {
                         return self.err("invalid destructuring assignment target");
+                    }
+                    if self.strict && pattern_strict_banned(&left) {
+                        return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
                     }
                     // A pattern may repeat `__proto__:` — forgive dups recorded inside it.
                     self.proto_dups.truncate(proto_mark);
@@ -2273,7 +2288,15 @@ impl Parser {
                 continue;
             }
             if self.eat_punct("...") {
-                elems.push(ArrayElem::Spread(self.parse_assign()?));
+                let inner = self.parse_assign()?;
+                // A spread followed by a comma is a valid literal but can't be a rest element in
+                // a destructuring pattern; the transparent Seq wrapper marks that for validation.
+                let followed = self.is_punct(",");
+                elems.push(ArrayElem::Spread(if followed {
+                    Expr::Seq(vec![inner])
+                } else {
+                    inner
+                }));
             } else {
                 elems.push(ArrayElem::Item(self.parse_assign()?));
             }
@@ -3021,6 +3044,39 @@ fn is_valid_assign_target(e: &Expr) -> bool {
 /// pattern (see `expr_to_pattern`), an object `AssignmentRestProperty` target may be any
 /// `LeftHandSideExpression` that is not itself a nested pattern (e.g. a member expression), and
 /// element/property targets may be member expressions too.
+/// Whether a destructuring assignment pattern targets `eval`/`arguments` (a strict-mode
+/// SyntaxError). Walks target positions only, not keys or defaults.
+fn pattern_strict_banned(e: &Expr) -> bool {
+    let banned = |n: &str| n == "eval" || n == "arguments";
+    match e {
+        Expr::Ident(n) => banned(n),
+        Expr::Array(elems) => elems.iter().any(|el| match el {
+            ArrayElem::Hole => false,
+            ArrayElem::Spread(t) => pattern_strict_banned(t),
+            ArrayElem::Item(Expr::Assign {
+                op: "=", target, ..
+            }) => pattern_strict_banned(target),
+            ArrayElem::Item(t) => pattern_strict_banned(t),
+        }),
+        Expr::Object(props) => props.iter().any(|p| match p {
+            PropDef::KeyValue {
+                value: Expr::Assign {
+                    op: "=", target, ..
+                },
+                ..
+            } => pattern_strict_banned(target),
+            PropDef::KeyValue { value, .. } => pattern_strict_banned(value),
+            PropDef::Proto(Expr::Assign {
+                op: "=", target, ..
+            }) => pattern_strict_banned(target),
+            PropDef::Proto(v) => pattern_strict_banned(v),
+            PropDef::Spread(t) => pattern_strict_banned(t),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 fn is_valid_assign_pattern(e: &Expr) -> bool {
     match e {
         Expr::Ident(_) => true,
