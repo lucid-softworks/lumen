@@ -927,8 +927,9 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
         }
         let body = crate::parser::parse_script(&code, false)
             .map_err(|e| i.make_error("SyntaxError", e.message))?;
-        let env = i.global_env.clone();
-        ab(i.eval_in_scope(&body, &env))
+        // A script runs with full GlobalDeclarationInstantiation (clash checks, global-object
+        // own properties for var/function declarations).
+        i.run_program(&body)
     });
     it.def_method(&host, "detachArrayBuffer", 1, |i, _t, args| {
         if let Value::Obj(o) = arg(args, 0) {

@@ -40,6 +40,7 @@ pub fn parse_script_eval(
         no_in: false,
         module: false,
         fn_depth: 0,
+        nonarrow_fn_depth: 0,
         iter_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
@@ -60,6 +61,16 @@ pub fn parse_script_eval(
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
     validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
+    // A super call is never valid in script/global code (only a derived constructor, or a direct
+    // eval inside one, may contain it).
+    if !allow_super {
+        if let Some(message) = crate::eval::top_level_super_call_error(&body) {
+            return Err(ParseError {
+                message: message.into(),
+                line: 0,
+            });
+        }
+    }
     Ok(body)
 }
 
@@ -81,6 +92,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         no_in: false,
         module: true,
         fn_depth: 0,
+        nonarrow_fn_depth: 0,
         iter_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
@@ -278,6 +290,8 @@ struct Parser {
     /// Context depths for early-error checks: `return` requires a function, `continue` an iteration,
     /// `break` an iteration or switch.
     fn_depth: u32,
+    /// Like `fn_depth`, but arrows are transparent — `new.target` needs an enclosing non-arrow.
+    nonarrow_fn_depth: u32,
     iter_depth: u32,
     switch_depth: u32,
     /// Active labels in scope (reset at function boundaries).
@@ -317,6 +331,9 @@ struct Parser {
 struct DeclScope {
     lexical: Vec<String>,
     var: Vec<String>,
+    /// Sloppy-mode plain function declarations in this block (Annex B): duplicates among
+    /// themselves are fine, but they conflict with same-block lexicals and vars.
+    fn_lexical: Vec<String>,
     /// A `var` hoists up to (and conflicts with lexicals only up to) the nearest such boundary — the
     /// program/function top. Block / `for` / `switch` scopes are not boundaries.
     fn_boundary: bool,
@@ -409,6 +426,22 @@ impl Parser {
             // Block-level functions are lexical; only sloppy plain functions get the Annex B
             // var-like treatment (which permits duplicates and shadowing).
             self.declare_lexical(name)
+        } else if in_block {
+            // Annex B block function: duplicates with other block functions are allowed, but the
+            // name must not collide with a lexical or var declared in the same block.
+            let clash = {
+                let s = self.decl_scopes.last().unwrap();
+                s.lexical.iter().any(|n| n == name) || s.var.iter().any(|n| n == name)
+            };
+            if clash {
+                return self.err(format!("Identifier '{name}' has already been declared"));
+            }
+            self.decl_scopes
+                .last_mut()
+                .unwrap()
+                .fn_lexical
+                .push(name.to_string());
+            Ok(())
         } else {
             self.declare_var(name, false)
         }
@@ -443,13 +476,23 @@ impl Parser {
         });
     }
     fn pop_decl_scope(&mut self) {
-        self.decl_scopes.pop();
+        if let Some(s) = self.decl_scopes.pop() {
+            // VarDeclaredNames accumulate through block scopes (vars hoist), so declarations in
+            // an enclosing block still conflict with them.
+            if !s.fn_boundary {
+                if let Some(parent) = self.decl_scopes.last_mut() {
+                    parent.var.extend(s.var);
+                }
+            }
+        }
     }
     /// Record a lexical (`let`/`const`/`class`) binding; error on redeclaration in this scope.
     fn declare_lexical(&mut self, name: &str) -> Result<(), ParseError> {
         let conflict = {
             let s = self.decl_scopes.last().unwrap();
-            s.lexical.iter().any(|n| n == name) || s.var.iter().any(|n| n == name)
+            s.lexical.iter().any(|n| n == name)
+                || s.var.iter().any(|n| n == name)
+                || s.fn_lexical.iter().any(|n| n == name)
         };
         if conflict {
             return self.err(format!("Identifier '{name}' has already been declared"));
@@ -467,7 +510,8 @@ impl Parser {
     /// false`) only conflicts in its own scope (Annex B.3.3 lets it shadow an enclosing lexical).
     fn declare_var(&mut self, name: &str, hoist_through: bool) -> Result<(), ParseError> {
         for scope in self.decl_scopes.iter().rev() {
-            if scope.lexical.iter().any(|n| n == name) {
+            if scope.lexical.iter().any(|n| n == name) || scope.fn_lexical.iter().any(|n| n == name)
+            {
                 return self.err(format!("Identifier '{name}' has already been declared"));
             }
             if scope.fn_boundary || !hoist_through {
@@ -1996,7 +2040,7 @@ impl Parser {
                     return self.err("expected 'target' after 'new.'");
                 }
                 self.advance();
-                if self.fn_depth == 0 && !self.allow_new_target {
+                if self.nonarrow_fn_depth == 0 && !self.allow_new_target {
                     return self.err("new.target is only valid inside a function");
                 }
                 Expr::NewTarget
@@ -2263,6 +2307,7 @@ impl Parser {
                         no_in: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
+                        nonarrow_fn_depth: self.nonarrow_fn_depth,
                         iter_depth: self.iter_depth,
                         switch_depth: self.switch_depth,
                         labels: Vec::new(),
@@ -2325,6 +2370,7 @@ impl Parser {
                         no_in: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
+                        nonarrow_fn_depth: self.nonarrow_fn_depth,
                         iter_depth: self.iter_depth,
                         switch_depth: self.switch_depth,
                         labels: Vec::new(),
@@ -2578,7 +2624,7 @@ impl Parser {
         let ssuper = std::mem::replace(&mut self.super_prop_ok, false);
         let ssb = std::mem::replace(&mut self.in_static_block, false);
         let params = self.parse_params()?;
-        let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
+        let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
         self.in_static_block = ssb;
         self.in_generator = sg;
@@ -2885,7 +2931,7 @@ impl Parser {
             self.super_prop_ok = ssuper;
             return self.err(format!("duplicate parameter name '{dup}'"));
         }
-        let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
+        let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
         self.in_generator = sg;
         self.in_async = sa;
@@ -2950,6 +2996,7 @@ impl Parser {
     fn parse_function_body(
         &mut self,
         params_simple: bool,
+        is_arrow: bool,
     ) -> Result<(Vec<Stmt>, bool), ParseError> {
         self.expect_punct("{")?;
         let saved_strict = self.strict;
@@ -2970,11 +3017,17 @@ impl Parser {
         let saved_in_params = self.in_params;
         self.in_params = false;
         self.fn_depth += 1;
+        if !is_arrow {
+            self.nonarrow_fn_depth += 1;
+        }
         self.iter_depth = 0;
         self.switch_depth = 0;
         self.next_scope_is_fn_boundary = true;
         let body = self.parse_block_body();
         self.fn_depth -= 1;
+        if !is_arrow {
+            self.nonarrow_fn_depth -= 1;
+        }
         self.iter_depth = siter;
         self.switch_depth = sswitch;
         self.labels = slabels;
@@ -3043,7 +3096,7 @@ impl Parser {
         let sa = self.in_async;
         self.in_async = is_async;
         let result = if self.is_punct("{") {
-            let (body, is_strict) = self.parse_function_body(!params_complex(&params))?;
+            let (body, is_strict) = self.parse_function_body(!params_complex(&params), true)?;
             Function {
                 name: None,
                 params,

@@ -8122,3 +8122,53 @@ fn async_from_sync_close_on_rejection() {
         "0"
     );
 }
+#[test]
+fn global_declaration_instantiation() {
+    assert_eq!(
+        run("let gLet = 1;
+             let r = '';
+             try { $262.evalScript('var gLet;'); r = 'no-throw'; } catch (e) { r = e.constructor.name; }
+             r"),
+        "SyntaxError"
+    );
+    assert_eq!(
+        run("var test262Var;
+             let test262Let;
+             $262.evalScript('var test262Var;');
+             $262.evalScript('function test262Var() {}');
+             let r = '';
+             try { $262.evalScript('var x; var test262Let;'); r = 'no-throw'; } catch (e) { r = e.constructor.name; }
+             let r2 = '';
+             try { x; r2 = 'x-exists'; } catch (e) { r2 = e.constructor.name; }
+             r + ':' + r2"),
+        "SyntaxError:ReferenceError"
+    );
+    // Restricted globals and global-object own properties for script declarations.
+    assert_eq!(throws("$262.evalScript('let undefined;')"), "SyntaxError");
+    assert_eq!(
+        run("$262.evalScript('function gFn() {}');
+             const d = Object.getOwnPropertyDescriptor(globalThis, 'gFn');
+             [typeof d.value, d.writable, d.enumerable, d.configurable].join(',')"),
+        "function,true,true,false"
+    );
+}
+
+#[test]
+fn block_scope_redeclaration_early_errors() {
+    fn parse_err(src: &str) -> bool {
+        Engine::new().eval(src, false).is_err()
+    }
+    assert!(parse_err("{ var f; function f() {} }"));
+    assert!(parse_err("{ function f() {} var f; }"));
+    assert!(parse_err("{ function f() {} { var f; } }"));
+    assert!(parse_err("{ { var f; } function f() {} }"));
+    assert!(parse_err("{ { var f; } let f; }"));
+    assert!(!parse_err("{ function f() {} function f() {} }")); // sloppy duplicates OK
+    assert!(!parse_err("var f; function f() {} ")); // top level OK
+    assert!(!parse_err("let f; { function f() {} }")); // Annex B shadowing OK
+                                                       // super()/new.target restrictions in global code.
+    assert!(parse_err("super();"));
+    assert!(parse_err("() => { super(); };"));
+    assert!(parse_err("() => { new.target; };"));
+    assert!(!parse_err("function g() { () => new.target; }"));
+}

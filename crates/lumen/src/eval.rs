@@ -197,14 +197,6 @@ impl Interp {
         }
     }
 
-    /// Run a parsed script body in `env` (used by `eval`): hoist, declare lexicals, execute, and
-    /// return the completion value (the value of the last value-producing statement).
-    pub(crate) fn eval_in_scope(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
-        self.hoist(body, env, &[]);
-        self.declare_block_lexicals(body, env, false);
-        self.run_stmt_list(body, env)
-    }
-
     /// Run a statement list that has already had its bindings instantiated (hoisting + lexical
     /// declaration done by the caller). Used by module evaluation, where the module's environment is
     /// set up during the separate Instantiate phase before any body runs.
@@ -5189,6 +5181,11 @@ pub(crate) fn static_block_error(func: &crate::ast::Function) -> Option<&'static
 /// A non-constructor method body may not contain a `super(...)` call (only a derived constructor
 /// can). Descends into arrow functions (which inherit the method's super context).
 /// A non-constructor method may not contain a `super(...)` call in its parameter list *or* its body.
+/// Script/global code may not contain a `super(...)` call anywhere outside a class.
+pub(crate) fn top_level_super_call_error(body: &[Stmt]) -> Option<&'static str> {
+    fi_stmts(body, false)
+}
+
 pub(crate) fn method_super_call_error_full(func: &crate::ast::Function) -> Option<&'static str> {
     for p in &func.params {
         if let Some(d) = &p.default {

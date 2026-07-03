@@ -472,6 +472,9 @@ pub struct Interp {
     pub typed_arrays: HashMap<usize, TaInfo>,
     /// Object pointers of async generator instances (the AsyncGenerator brand).
     pub async_gens: std::collections::HashSet<usize>,
+    /// The global environment's [[VarNames]]: names declared by `var`/function in global code, for
+    /// GlobalDeclarationInstantiation's cross-script clash checks.
+    pub global_var_names: std::collections::HashSet<String>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
     pub ta_buffer: HashMap<usize, Value>,
@@ -855,6 +858,7 @@ impl Interp {
             agent: None,
             typed_arrays: HashMap::new(),
             async_gens: std::collections::HashSet::new(),
+            global_var_names: std::collections::HashSet::new(),
             ta_buffer: HashMap::new(),
             shadow_realms: HashMap::new(),
             data_views: HashMap::new(),
@@ -3228,19 +3232,102 @@ impl Interp {
     }
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
+        // GlobalDeclarationInstantiation early checks, before any binding is created. A probe
+        // hoist into a throwaway scope yields this script's VarDeclaredNames.
+        let probe = new_scope(None);
+        self.hoist(body, &probe, &[]);
+        let mut lex_names: Vec<String> = Vec::new();
+        for s in body {
+            match unwrap_export(s) {
+                Stmt::VarDecl {
+                    kind:
+                        crate::ast::DeclKind::Let
+                        | crate::ast::DeclKind::Const
+                        | crate::ast::DeclKind::Using
+                        | crate::ast::DeclKind::AwaitUsing,
+                    decls,
+                } => {
+                    for (pat, _) in decls {
+                        pattern_idents(pat, &mut lex_names);
+                    }
+                }
+                Stmt::ClassDecl(c) => lex_names.extend(c.name.clone()),
+                _ => {}
+            }
+        }
+        for n in &lex_names {
+            // HasVarDeclaration / HasLexicalDeclaration / HasRestrictedGlobalProperty.
+            let restricted = self
+                .global
+                .borrow()
+                .props
+                .get(n.as_str())
+                .is_some_and(|p| !p.configurable);
+            if self.global_env.borrow().vars.contains_key(n)
+                || self.global_var_names.contains(n)
+                || restricted
+            {
+                return Err(self.make_error(
+                    "SyntaxError",
+                    format!("Identifier '{n}' has already been declared"),
+                ));
+            }
+        }
+        let extensible = self.global.borrow().extensible;
+        for (name, binding) in probe.borrow().vars.iter() {
+            if self.global_env.borrow().vars.contains_key(name) {
+                return Err(self.make_error(
+                    "SyntaxError",
+                    format!("Identifier '{name}' has already been declared"),
+                ));
+            }
+            let existing = self
+                .global
+                .borrow()
+                .props
+                .get(name.as_str())
+                .map(|p| (p.configurable, p.accessor, p.writable, p.enumerable));
+            if !matches!(binding.value, Value::Undefined) {
+                // CanDeclareGlobalFunction.
+                let ok = match existing {
+                    Some((true, ..)) => true,
+                    Some((false, accessor, writable, enumerable)) => {
+                        !accessor && writable && enumerable
+                    }
+                    None => extensible,
+                };
+                if !ok {
+                    return Err(self.make_error(
+                        "TypeError",
+                        format!("cannot declare global function '{name}'"),
+                    ));
+                }
+            } else if existing.is_none() && !extensible {
+                // CanDeclareGlobalVar.
+                return Err(self.make_error(
+                    "TypeError",
+                    format!("cannot declare global variable '{name}'"),
+                ));
+            }
+        }
+        let new_vars: Vec<String> = probe.borrow().vars.keys().cloned().collect();
+        self.global_var_names.extend(new_vars.iter().cloned());
         self.hoist(body, &self.global_env.clone(), &[]);
-        // The global Environment Record is object-backed: top-level `var`/`function` bindings (which
-        // `hoist` just placed in `global_env`) become properties of the global object, so they are
-        // visible as `globalThis.<name>` and writes stay in sync.
-        let hoisted: Vec<String> = self.global_env.borrow().vars.keys().cloned().collect();
-        for name in hoisted {
-            let binding = self.global_env.borrow_mut().vars.remove(&name).unwrap();
+        // The global Environment Record is object-backed: this script's `var`/`function` bindings
+        // (which `hoist` just placed in `global_env`) become properties of the global object, so
+        // they are visible as `globalThis.<name>` and writes stay in sync. Only the probe-computed
+        // names move — lexical bindings from earlier scripts stay in the environment.
+        for name in new_vars {
+            let Some(binding) = self.global_env.borrow_mut().vars.remove(&name) else {
+                continue;
+            };
             let existing = self
                 .global
                 .borrow()
                 .props
                 .get(name.as_str())
                 .map(|p| (p.writable, p.configurable));
+            let is_func = !matches!(binding.value, Value::Undefined);
             match existing {
                 None => {
                     self.global.borrow_mut().props.insert(
@@ -3248,12 +3335,18 @@ impl Interp {
                         Property::data(binding.value, true, true, false),
                     );
                 }
-                // A function declaration overwrites an existing writable global; `var` keeps it.
-                Some((true, _)) if !matches!(binding.value, Value::Undefined) => {
+                // CreateGlobalFunctionBinding: a configurable property is fully redefined; a
+                // non-configurable one (already validated writable) just takes the new value.
+                Some((_, true)) if is_func => {
                     self.global.borrow_mut().props.insert(
                         name.as_str(),
                         Property::data(binding.value, true, true, false),
                     );
+                }
+                Some((true, _)) if is_func => {
+                    if let Some(p) = self.global.borrow_mut().props.get_mut(&name) {
+                        p.value = binding.value;
+                    }
                 }
                 _ => {}
             }
