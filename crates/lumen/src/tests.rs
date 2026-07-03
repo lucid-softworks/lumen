@@ -7117,3 +7117,55 @@ fn break_carries_completion_value() {
         "6"
     );
 }
+
+#[test]
+fn private_names_are_per_class_evaluation() {
+    // Two evaluations of the same class source mint distinct private names: an instance of the
+    // first fails the brand check inside the second's methods.
+    assert_eq!(
+        throws(
+            "function make() { return class { #m() { return 1; } static call(o) { return o.#m(); } }; }
+             const C1 = make(), C2 = make();
+             C2.call(new C1())"
+        ),
+        "TypeError"
+    );
+    assert_eq!(
+        run(
+            "function make() { return class { #x = 7; static get(o) { return o.#x; } }; }
+             const C1 = make(), C2 = make();
+             String(C1.get(new C1()))"
+        ),
+        "7"
+    );
+    // #x in o distinguishes evaluations too.
+    assert_eq!(
+        run(
+            "function make() { return class { #x; static has(o) { return #x in o; } }; }
+             const C1 = make(), C2 = make();
+             String(C1.has(new C1()) && !C2.has(new C1()))"
+        ),
+        "true"
+    );
+    // A nested class's private name shadows the outer one: writing through the inner
+    // (getter-only) #x on an outer instance is a brand-check TypeError.
+    assert_eq!(
+        throws(
+            "class Outer {
+               set #x(v) {}
+               static run() {
+                 const outer = new Outer();
+                 class Inner { get #x() { return 1; } static w(o) { o.#x = 2; } }
+                 Inner.w(outer);
+               }
+             }
+             Outer.run()"
+        ),
+        "TypeError"
+    );
+    // Private method names still display their source spelling.
+    assert_eq!(
+        run("class C { #m() {} static n() { return Object.getOwnPropertyNames(C.prototype).length; } } String(C.n())"),
+        "1"
+    );
+}

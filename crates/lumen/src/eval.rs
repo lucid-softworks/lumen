@@ -1500,15 +1500,35 @@ impl Interp {
         None
     }
 
+    /// Resolve a source-level private name (`#x`) to this class evaluation's runtime key through
+    /// the scope chain (each class evaluation binds its private names in its class scope — the
+    /// spec's PrivateEnvironment). An unresolved name keeps its literal spelling.
+    fn resolve_private(&self, name: &str, env: &Env) -> String {
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            let b = s.borrow();
+            if let Some(binding) = b.vars.get(name) {
+                if let Value::Str(k) = &binding.value {
+                    return k.to_string();
+                }
+            }
+            cur = b.parent.clone();
+        }
+        name.to_string()
+    }
+
     /// PrivateGet: read a private field/method after a brand check. An object that was not
     /// constructed with this private name in scope (`#x` absent) is a TypeError, not `undefined`.
     fn get_private_member(&mut self, base: &Value, name: &str) -> Completion {
         match base {
             Value::Obj(o) if self.has_property(o, name) => self.get_member(base, name),
-            _ => Err(self.throw(
-                "TypeError",
-                format!("cannot read private member {name} from an object whose class did not declare it"),
-            )),
+            _ => {
+                let shown = private_display(name);
+                Err(self.throw(
+                    "TypeError",
+                    format!("cannot read private member {shown} from an object whose class did not declare it"),
+                ))
+            }
         }
     }
 
@@ -1516,10 +1536,13 @@ impl Interp {
     fn set_private_member(&mut self, base: &Value, name: &str, value: Value) -> Result<(), Abrupt> {
         match base {
             Value::Obj(o) if self.has_property(o, name) => self.set_member(base, name, value),
-            _ => Err(self.throw(
-                "TypeError",
-                format!("cannot write private member {name} to an object whose class did not declare it"),
-            )),
+            _ => {
+                let shown = private_display(name);
+                Err(self.throw(
+                    "TypeError",
+                    format!("cannot write private member {shown} to an object whose class did not declare it"),
+                ))
+            }
         }
     }
 
@@ -1822,9 +1845,10 @@ impl Interp {
             }
             Expr::PrivateIn { name, obj } => {
                 let o = self.eval(obj, env)?;
+                let k = self.resolve_private(name, env);
                 match o {
                     // Private fields are own props; private methods live on the prototype.
-                    Value::Obj(obj) => Ok(Value::Bool(self.has_property(&obj, name))),
+                    Value::Obj(obj) => Ok(Value::Bool(self.has_property(&obj, &k))),
                     _ => {
                         Err(self
                             .throw("TypeError", "the right-hand side of 'in' must be an object"))
@@ -1861,7 +1885,8 @@ impl Interp {
                     return Ok(Value::Undefined);
                 }
                 if prop.starts_with('#') {
-                    return self.get_private_member(&base, prop);
+                    let k = self.resolve_private(prop, env);
+                    return self.get_private_member(&base, &k);
                 }
                 self.get_member(&base, prop)
             }
@@ -2214,7 +2239,12 @@ impl Interp {
                     self.short_circuit = true;
                     return Ok(Value::Undefined);
                 }
-                let f = self.get_member(&base, prop)?;
+                let f = if prop.starts_with('#') {
+                    let k = self.resolve_private(prop, env);
+                    self.get_private_member(&base, &k)?
+                } else {
+                    self.get_member(&base, prop)?
+                };
                 (f, base)
             }
             Expr::Index {
@@ -2826,6 +2856,22 @@ impl Interp {
 
         // Environments that carry the `super` bindings into methods/fields.
         let class_env = new_scope(Some(env.clone()));
+        // The spec's PrivateEnvironment: each class *evaluation* mints fresh runtime keys for its
+        // private names and binds source name -> key in the class scope. `#x` in this class's code
+        // resolves through the scope chain, so an instance of a different evaluation of the same
+        // class source fails the brand check (and nested classes shadow outer private names).
+        for m in &class.members {
+            let src = match &m.key {
+                PropKey::Ident(n) if n.starts_with('#') => n.clone(),
+                _ => continue,
+            };
+            let seen = class_env.borrow().vars.contains_key(src.as_str());
+            if !seen {
+                self.accessor_seq += 1;
+                let runtime = format!("{}\u{1}{}", src, self.accessor_seq);
+                bind(&class_env, &src, Value::str(runtime.as_str()));
+            }
+        }
         let inst_env = new_scope(Some(class_env.clone()));
         bind(&inst_env, "%superproto%", opt_obj(&proto_parent));
         bind(
@@ -2881,6 +2927,11 @@ impl Interp {
             }
             let key = self.eval_prop_key(&m.key, env)?;
             let is_private = key.starts_with('#');
+            let key = if is_private {
+                self.resolve_private(&key, &class_env)
+            } else {
+                key
+            };
             let menv = if m.is_static { &static_env } else { &inst_env };
             let target = if m.is_static {
                 ctor_obj.clone()
@@ -2945,7 +2996,12 @@ impl Interp {
                     if let Value::Obj(fo) = &f {
                         fo.borrow_mut().props.insert(
                             "name",
-                            Property::data(Value::from_string(key.clone()), false, false, true),
+                            Property::data(
+                                Value::from_string(private_display(&key).to_string()),
+                                false,
+                                false,
+                                true,
+                            ),
                         );
                     }
                     if !m.decorators.is_empty() {
@@ -3178,7 +3234,8 @@ impl Interp {
         let name = if !is_private && Self::is_sym_key(key) {
             self.sym_from_key(key).unwrap_or(Value::Undefined)
         } else {
-            Value::from_string(key.to_string())
+            // A private member's context name is its source spelling, not the runtime key.
+            Value::from_string(private_display(key).to_string())
         };
         let access = self.new_object();
         if matches!(kind, "method" | "getter" | "field" | "accessor") {
@@ -5140,7 +5197,12 @@ impl Interp {
                     });
                 }
                 let base = self.eval(obj, env)?;
-                Ok(Reference::Prop(base, RefKey::Static(prop.clone())))
+                let key = if prop.starts_with('#') {
+                    self.resolve_private(prop, env)
+                } else {
+                    prop.clone()
+                };
+                Ok(Reference::Prop(base, RefKey::Static(key)))
             }
             Expr::Index { obj, index, .. } => {
                 if matches!(**obj, Expr::Super) {
@@ -5329,4 +5391,10 @@ impl Interp {
             }
         }
     }
+}
+
+/// The source spelling of a private name: strips the per-class-evaluation `\u{1}<serial>` suffix
+/// from a runtime key (see `Interp::resolve_private`).
+pub(crate) fn private_display(key: &str) -> &str {
+    key.split('\u{1}').next().unwrap_or(key)
 }
