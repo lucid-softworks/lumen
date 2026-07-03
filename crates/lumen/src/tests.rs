@@ -8205,3 +8205,31 @@ fn disposable_stack_semantics() {
         "b,d,s"
     );
 }
+#[test]
+fn proxy_forwarding_and_newtarget() {
+    // for-of over a proxy of an array
+    assert_eq!(
+        run("const p = new Proxy([1,2,3], {});
+             let out = [];
+             for (const x of p) out.push(x);
+             out.join(',')"),
+        "1,2,3"
+    );
+    // construct through nested trap-less proxies preserves new.target
+    assert_eq!(
+        run("const AT = new Proxy(Array, {});
+             const AP = new Proxy(AT, {});
+             const a = new AP(1,2,3);
+             Array.isArray(a) + ':' + a.join(',')"),
+        "true:1,2,3"
+    );
+    assert_eq!(
+        run(
+            "class MyArray extends Array { get isMyArray() { return true; } }
+             const AP = new Proxy(new Proxy(Array, {}), {});
+             const m = Reflect.construct(AP, [], MyArray);
+             Array.isArray(m) + ':' + (m instanceof MyArray) + ':' + m.isMyArray"
+        ),
+        "true:true:true"
+    );
+}

@@ -1644,6 +1644,22 @@ impl Interp {
             if !Rc::ptr_eq(&o, &obj) {
                 if let Some(info) = self.typed_arrays.get(&optr).copied() {
                     match self.ta_index_kind(&info, key) {
+                        TaIndex::Element(_) | TaIndex::Exotic if matches!(&receiver, Value::Obj(r) if Rc::ptr_eq(r, &o)) =>
+                        {
+                            // The receiver IS this TypedArray: IntegerIndexedElementSet applies
+                            // (coerce, then store or silently drop an out-of-range write).
+                            let num = if info.kind.is_bigint() {
+                                Value::BigInt(self.to_bigint(&value)?)
+                            } else {
+                                Value::Num(self.to_number(&value)?)
+                            };
+                            if let TaIndex::Element(idx) = self.ta_index_kind(&info, key) {
+                                self.ta_store(&info, idx, &num)?;
+                            }
+                            return Ok(true);
+                        }
+                        // Foreign receiver: a valid element behaves as a writable data property
+                        // (create it on the receiver, uncoerced); a numeric non-index is inert.
                         TaIndex::Element(_) => break,
                         TaIndex::Exotic => return Ok(true),
                         TaIndex::Ordinary => {}
@@ -1713,6 +1729,20 @@ impl Interp {
                         ));
                     }
                     return Ok(false);
+                }
+                // A proxy receiver gets the write as CreateDataProperty through its
+                // [[DefineOwnProperty]] trap.
+                if self.proxies.contains_key(&rptr) {
+                    return match crate::builtins::reflect_define_on_receiver(
+                        self, &receiver, key, value,
+                    ) {
+                        Ok(false) if self.strict => Err(self.throw(
+                            "TypeError",
+                            format!("cannot create property '{key}' on the receiver"),
+                        )),
+                        Ok(b) => Ok(b),
+                        Err(v) => Err(Abrupt::Throw(v)),
+                    };
                 }
                 r.clone()
             }
@@ -2063,13 +2093,17 @@ impl Interp {
         // a fresh object's prototype, or a global lookup lands in the right realm).
         if !self.realms.is_empty() {
             if let Value::Obj(o) = &callee {
-                if let Some(gptr) = self.callee_realm_global(o) {
-                    let saved = self.snapshot_realm();
-                    let target = self.realms[&gptr].snapshot_clone();
-                    self.restore_realm(&target);
-                    let r = self.call_dispatch(callee, this, args);
-                    self.restore_realm(&saved);
-                    return r;
+                // A proxy's trap machinery runs in the caller's realm (the trap-arguments array is
+                // a caller-realm Array); invoking the trap function swaps on its own.
+                if !self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
+                    if let Some(gptr) = self.callee_realm_global(o) {
+                        let saved = self.snapshot_realm();
+                        let target = self.realms[&gptr].snapshot_clone();
+                        self.restore_realm(&target);
+                        let r = self.call_dispatch(callee, this, args);
+                        self.restore_realm(&saved);
+                        return r;
+                    }
                 }
             }
         }
@@ -3049,13 +3083,15 @@ impl Interp {
         // A cross-realm constructor runs with its own realm's intrinsics active.
         if !self.realms.is_empty() {
             if let Value::Obj(o) = &callee {
-                if let Some(gptr) = self.callee_realm_global(o) {
-                    let saved = self.snapshot_realm();
-                    let target = self.realms[&gptr].snapshot_clone();
-                    self.restore_realm(&target);
-                    let r = self.construct_dispatch(callee, args, new_target);
-                    self.restore_realm(&saved);
-                    return r;
+                if !self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
+                    if let Some(gptr) = self.callee_realm_global(o) {
+                        let saved = self.snapshot_realm();
+                        let target = self.realms[&gptr].snapshot_clone();
+                        self.restore_realm(&target);
+                        let r = self.construct_dispatch(callee, args, new_target);
+                        self.restore_realm(&saved);
+                        return r;
+                    }
                 }
             }
         }
@@ -3124,10 +3160,13 @@ impl Interp {
                 if func.is_arrow || func.is_method || func.is_generator || func.is_async {
                     return Err(self.throw("TypeError", "this function is not a constructor"));
                 }
-                // OrdinaryCreateFromConstructor: the new instance's prototype comes from new.target.
+                // OrdinaryCreateFromConstructor: the new instance's prototype comes from
+                // new.target; a non-object `prototype` falls back to new.target's realm's
+                // %Object.prototype% (GetFunctionRealm).
                 let proto = match self.get_member(&new_target, "prototype")? {
                     Value::Obj(p) => Some(p),
-                    _ => Some(self.object_proto.clone()),
+                    _ => crate::builtins::realm_object_proto(self, &new_target)
+                        .or_else(|| Some(self.object_proto.clone())),
                 };
                 let this = Object::new(proto);
                 let this_val = Value::Obj(this);

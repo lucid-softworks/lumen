@@ -3942,6 +3942,12 @@ pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, V
     Ok(Object::new(proto))
 }
 
+/// GetFunctionRealm fallback for OrdinaryCreateFromConstructor: `new.target`'s realm's
+/// %Object.prototype% (or None when it's the active realm / unknown).
+pub(crate) fn realm_object_proto(i: &Interp, nt: &Value) -> Option<Gc> {
+    ctor_realm_proto(i, nt, "Object")
+}
+
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
     if !i.constructing {
         return Err(i.make_error("TypeError", "TypedArray constructor requires 'new'"));
@@ -4027,8 +4033,19 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
         }
         Some(other) => {
             // TypedArray / array-like / iterable object: copy element values into a fresh buffer.
-            let items = if i.has_iterator(other) {
-                ab(i.iterate(other))?
+            // GetMethod(@@iterator): a non-callable non-nullish value is a TypeError, and a
+            // callable one is used (so a patched Array.prototype[@@iterator] is honored).
+            let iter_key = well_known_key(i, "iterator");
+            let iter_method = match &iter_key {
+                Some(k) => ab(i.get_member(other, k))?,
+                None => Value::Undefined,
+            };
+            if !matches!(iter_method, Value::Undefined | Value::Null) && !iter_method.is_callable()
+            {
+                return Err(i.make_error("TypeError", "@@iterator is not callable"));
+            }
+            let items = if iter_method.is_callable() {
+                ab(i.iterate_with(other, iter_method))?
             } else {
                 let lenv = ab(i.get_member(other, "length"))?;
                 let n = ab(i.to_number(&lenv))?.max(0.0) as usize;
@@ -4057,11 +4074,13 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
         }
     };
     // The instance prototype comes from new.target.prototype when it's an object (subclassing /
-    // Reflect.construct), else the intrinsic %TypedArray.prototype% for this element type.
+    // Reflect.construct), else the intrinsic %TypedArray.prototype% for this element type in
+    // new.target's realm (GetPrototypeFromConstructor).
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
-            _ => i.extra_protos.get(kind.name()).cloned(),
+            _ => ctor_realm_proto(i, &i.new_target.clone(), kind.name())
+                .or_else(|| i.extra_protos.get(kind.name()).cloned()),
         },
         _ => i.extra_protos.get(kind.name()).cloned(),
     };
@@ -7899,7 +7918,8 @@ fn make_proxy(i: &mut Interp, target: Value, handler: Value) -> Result<Value, Va
     let obj = Object::new(proto);
     if target.is_callable() {
         obj.borrow_mut().call = Callable::Native(proxy_uncallable);
-        obj.borrow_mut().is_constructor = true;
+        // A proxy is a constructor exactly when its target is one.
+        obj.borrow_mut().is_constructor = is_constructor_value(&target);
     }
     let p = Rc::as_ptr(&obj) as usize;
     i.proxies.insert(p, (target, handler));
@@ -8393,39 +8413,42 @@ fn reflect_ordinary_set(
             return Ok(false);
         }
     }
-    if let Some(info) = map_ptr(target).and_then(|p| i.typed_arrays.get(&p).copied()) {
-        if i.canonical_numeric_index(key).is_some() {
-            let same =
-                matches!((target, receiver), (Value::Obj(a), Value::Obj(b)) if Rc::ptr_eq(a, b));
-            if same {
-                if info.kind.is_bigint() {
-                    let n = ab(i.to_bigint(&value))?;
-                    if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
-                        i.ta_write_bigint(&info, idx, n);
-                    }
-                } else {
-                    let n = ab(i.to_number(&value))?;
-                    if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
-                        i.ta_write(&info, idx, n);
-                    }
-                }
-                return Ok(true);
-            }
-            // A different receiver: a canonical-invalid index is an inert success; a valid index is
-            // a writable data property on the target, so OrdinarySet creates it on the receiver
-            // (never touching the target's element or the prototype chain).
-            match i.ta_index_kind(&info, key) {
-                TaIndex::Exotic => return Ok(true),
-                TaIndex::Element(_) => return reflect_define_on_receiver(i, receiver, key, value),
-                TaIndex::Ordinary => {}
-            }
-        }
-    }
     let mut current = target.clone();
     loop {
         if proxy_pair(i, &current).is_some() {
             // A proxy's [[Set]] returns its own success boolean (via the trap or a forwarded [[Set]]).
             return ab(i.set_member_recv(&current, key, value, receiver.clone()));
+        }
+        // Integer-indexed exotic [[Set]] — applies to the target or any TypedArray reached along
+        // the prototype chain. With the TypedArray itself as receiver, TypedArraySetElement
+        // coerces unconditionally and writes only in-range; with a foreign receiver, a valid
+        // index acts as a writable data property (created on the receiver) and a canonical
+        // non-index is an inert success.
+        if let Some(info) = map_ptr(&current).and_then(|p| i.typed_arrays.get(&p).copied()) {
+            if i.canonical_numeric_index(key).is_some() {
+                let same = matches!((&current, receiver), (Value::Obj(a), Value::Obj(b)) if Rc::ptr_eq(a, b));
+                if same {
+                    if info.kind.is_bigint() {
+                        let n = ab(i.to_bigint(&value))?;
+                        if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
+                            i.ta_write_bigint(&info, idx, n);
+                        }
+                    } else {
+                        let n = ab(i.to_number(&value))?;
+                        if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
+                            i.ta_write(&info, idx, n);
+                        }
+                    }
+                    return Ok(true);
+                }
+                match i.ta_index_kind(&info, key) {
+                    TaIndex::Exotic => return Ok(true),
+                    TaIndex::Element(_) => {
+                        return reflect_define_on_receiver(i, receiver, key, value)
+                    }
+                    TaIndex::Ordinary => {}
+                }
+            }
         }
         let obj = match &current {
             Value::Obj(o) => o.clone(),
@@ -8461,7 +8484,7 @@ fn reflect_ordinary_set(
 
 /// Apply a writable data assignment to `receiver`: update an existing writable data property, or
 /// CreateDataProperty when absent (respecting extensibility); accessor/non-writable existing → false.
-fn reflect_define_on_receiver(
+pub(crate) fn reflect_define_on_receiver(
     i: &mut Interp,
     receiver: &Value,
     key: &str,
@@ -8469,11 +8492,32 @@ fn reflect_define_on_receiver(
 ) -> Result<bool, Value> {
     if proxy_pair(i, receiver).is_some() {
         let (target, handler) = proxy_pair(i, receiver).unwrap();
+        // OrdinarySetWithOwnDescriptor: the receiver's [[GetOwnProperty]] runs first (its trap is
+        // observable); an existing accessor or non-writable property rejects, an existing data
+        // property is redefined with just {value}, and an absent one gets CreateDataProperty.
+        let existing = proxy_gopd_value(i, &target, &handler, key)?;
         let desc = i.new_object();
-        set_data(&desc, "value", value);
-        set_data(&desc, "writable", Value::Bool(true));
-        set_data(&desc, "enumerable", Value::Bool(true));
-        set_data(&desc, "configurable", Value::Bool(true));
+        if let Value::Obj(d) = &existing {
+            let (is_accessor, writable) = {
+                let db = d.borrow();
+                (
+                    db.props.contains("get") || db.props.contains("set"),
+                    matches!(
+                        db.props.get("writable").map(|p| &p.value),
+                        Some(Value::Bool(true))
+                    ),
+                )
+            };
+            if is_accessor || !writable {
+                return Ok(false);
+            }
+            set_data(&desc, "value", value);
+        } else {
+            set_data(&desc, "value", value);
+            set_data(&desc, "writable", Value::Bool(true));
+            set_data(&desc, "enumerable", Value::Bool(true));
+            set_data(&desc, "configurable", Value::Bool(true));
+        }
         return ab(proxy_define_property(
             i,
             &target,
@@ -9786,6 +9830,15 @@ fn proxy_gopd_value(
         ));
     }
     let pd = ab(build_partial(i, &res))?;
+    // A descriptor may be reported for a property the target lacks only on an extensible target.
+    if let Value::Obj(t) = target {
+        if !t.borrow().props.contains(key) && !t.borrow().extensible {
+            return Err(i.make_error(
+                "TypeError",
+                "gOPD trap reported a property missing from a non-extensible target",
+            ));
+        }
+    }
     // A reported non-configurable descriptor must be backed by the target.
     if matches!(pd.configurable, Some(false)) {
         if let Value::Obj(t) = target {
@@ -11834,16 +11887,32 @@ fn install_array(it: &mut Interp) {
     }
 
     let ctor = it.make_native("Array", 1, |i, _this, args| {
-        if args.len() == 1 {
-            if let Value::Num(n) = args[0] {
-                // `new Array(len)` sets length without materializing elements; the length setter
-                // validates that it is a valid uint32 (else RangeError: Invalid array length).
-                let a = i.make_array(Vec::new());
-                ab(i.set_member(&a, "length", Value::Num(n)))?;
-                return Ok(a);
+        let a = if args.len() == 1 && matches!(args[0], Value::Num(_)) {
+            // `new Array(len)` sets length without materializing elements; the length setter
+            // validates that it is a valid uint32 (else RangeError: Invalid array length).
+            let a = i.make_array(Vec::new());
+            ab(i.set_member(&a, "length", args[0].clone()))?;
+            a
+        } else {
+            i.make_array(args.to_vec())
+        };
+        // GetPrototypeFromConstructor: a subclass / cross-realm new.target redirects the
+        // instance prototype (falling back to new.target's realm's %Array.prototype%).
+        if i.constructing {
+            let nt = i.new_target.clone();
+            if let Value::Obj(_) = &nt {
+                let proto = match ab(i.get_member(&nt, "prototype"))? {
+                    Value::Obj(p) => Some(p),
+                    _ => ctor_realm_proto(i, &nt, "Array"),
+                };
+                if let (Value::Obj(o), Some(p)) = (&a, proto) {
+                    if !Rc::ptr_eq(&p, &i.array_proto) {
+                        o.borrow_mut().proto = Some(p);
+                    }
+                }
             }
         }
-        Ok(i.make_array(args.to_vec()))
+        Ok(a)
     });
     ctor.borrow_mut().props.insert(
         "prototype",
@@ -11861,6 +11930,9 @@ fn install_array(it: &mut Interp) {
                     return Ok(Value::Bool(true))
                 }
                 Value::Obj(_) => match proxy_pair(i, &v) {
+                    Some((_, Value::Null)) => {
+                        return Err(i.make_error("TypeError", "proxy is revoked"))
+                    }
                     Some((target, _)) => v = target,
                     None => return Ok(Value::Bool(false)),
                 },
@@ -13785,7 +13857,16 @@ fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value
         }
     } else {
         match &target {
-            Value::Obj(o) => i.array_length(o),
+            // LengthOfArrayLike through [[Get]], so a proxy target's traps are honored.
+            Value::Obj(_) => {
+                let lv = ab(i.get_member(&target, "length"))?;
+                let n = ab(i.to_number(&lv))?;
+                if n.is_nan() || n <= 0.0 {
+                    0
+                } else {
+                    n.min(9007199254740991.0) as usize
+                }
+            }
             Value::Str(s) => s.chars().count(),
             _ => 0,
         }
