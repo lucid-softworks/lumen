@@ -1333,18 +1333,6 @@ impl Interp {
         Ok(out)
     }
 
-    /// Whether `v` is iterable (has a callable `@@iterator`). Used by `Array.from` to choose between
-    /// the iterator protocol and the array-like fallback.
-    pub(crate) fn has_iterator(&mut self, v: &Value) -> bool {
-        if let Some(sym) = self.iterator_sym.clone() {
-            let key = Interp::sym_key(&sym);
-            if let Ok(f) = self.get_member(v, &key) {
-                return f.is_callable();
-            }
-        }
-        false
-    }
-
     fn enum_keys(&mut self, v: &Value) -> Result<Vec<String>, Abrupt> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -2165,26 +2153,35 @@ impl Interp {
 
     fn eval_array(&mut self, elems: &[ArrayElem], env: &Env) -> Result<Value, Abrupt> {
         // Holes leave the index absent (a real elision), not `undefined`.
+        // Elements are created as own data properties (CreateDataProperty), so accessors on
+        // Array.prototype are never consulted.
         let arr = self.make_array(Vec::new());
+        let Value::Obj(ao) = &arr else { unreachable!() };
         let mut idx: usize = 0;
         for e in elems {
             match e {
                 ArrayElem::Item(e) => {
                     let v = self.eval(e, env)?;
-                    self.set_member(&arr, &idx.to_string(), v)?;
+                    ao.borrow_mut()
+                        .props
+                        .insert(idx.to_string(), crate::value::Property::plain(v));
                     idx += 1;
                 }
                 ArrayElem::Hole => idx += 1,
                 ArrayElem::Spread(e) => {
                     let v = self.eval(e, env)?;
                     for item in self.iterate(&v)? {
-                        self.set_member(&arr, &idx.to_string(), item)?;
+                        ao.borrow_mut()
+                            .props
+                            .insert(idx.to_string(), crate::value::Property::plain(item));
                         idx += 1;
                     }
                 }
             }
         }
-        self.set_member(&arr, "length", Value::Num(idx as f64))?;
+        if let Some(pr) = ao.borrow_mut().props.get_mut("length") {
+            pr.value = Value::Num(idx as f64);
+        }
         Ok(arr)
     }
 
@@ -2574,6 +2571,21 @@ impl Interp {
             Value::Obj(o) if self.promises.contains_key(&(Rc::as_ptr(o) as usize)) => {
                 Rc::as_ptr(o) as usize
             }
+            Value::Obj(_) => {
+                // Await of a plain object goes through the promise resolution procedure: a
+                // thenable is adopted (its `then` called once), anything else settles as-is.
+                let then = self.get_member(&v, "then")?;
+                if then.is_callable() {
+                    let p = self.new_promise();
+                    let res = self.make_resolver(&p, true);
+                    let rej = self.make_resolver(&p, false);
+                    if let Err(Abrupt::Throw(e)) = self.call(then, v.clone(), &[res, rej]) {
+                        self.reject_promise(&p, e);
+                    }
+                    return self.await_value(p);
+                }
+                return Ok(v);
+            }
             _ => return Ok(v),
         };
         // Await → PromiseResolve(%Promise%, v): the `constructor` read on a native promise is
@@ -2633,10 +2645,10 @@ impl Interp {
         if self.promises.get(&ptr).map(|s| s.status).unwrap_or(1) != 0 {
             return;
         }
-        // Adopt a thenable's eventual state.
+        // Adopt a thenable's eventual state; a throwing `then` getter rejects.
         if matches!(value, Value::Obj(_)) {
-            if let Ok(then) = self.get_member(&value, "then") {
-                if then.is_callable() {
+            match self.get_member(&value, "then") {
+                Ok(then) if then.is_callable() => {
                     let res = self.make_resolver(promise, true);
                     let rej = self.make_resolver(promise, false);
                     if let Err(Abrupt::Throw(e)) = self.call(then, value.clone(), &[res, rej]) {
@@ -2644,6 +2656,12 @@ impl Interp {
                     }
                     return;
                 }
+                Ok(_) => {}
+                Err(Abrupt::Throw(e)) => {
+                    self.reject_promise(promise, e);
+                    return;
+                }
+                Err(_) => {}
             }
         }
         self.settle(promise, value, true);

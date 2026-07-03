@@ -8233,3 +8233,82 @@ fn proxy_forwarding_and_newtarget() {
         "true:true:true"
     );
 }
+#[test]
+fn array_literal_elements_are_own_props() {
+    assert_eq!(
+        run(
+            "Object.defineProperty(Array.prototype, '0', { get(){return 9}, configurable:true });
+             const r = [11][0] + ':' + [11].every(v => v === 11) + ':' + [11].indexOf(11);
+             delete Array.prototype[0];
+             r"
+        ),
+        "11:true:0"
+    );
+}
+#[test]
+fn array_length_set_coercion_order() {
+    assert_eq!(
+        run("var array = [1, 2, 3];
+             var hints = [];
+             var length = {};
+             length[Symbol.toPrimitive] = function(hint) {
+               hints.push(hint);
+               Object.defineProperty(array, 'length', {writable: false});
+               return 0;
+             };
+             var r = '' + Reflect.set(array, 'length', length);
+             r + ':' + hints.join(',') + ':' + array.length"),
+        "false:number,number:3"
+    );
+}
+
+#[test]
+fn array_spec_semantics_batch() {
+    // concat: spreadable holes advance the index; result length is set; boxed receiver.
+    assert_eq!(
+        run("const sp = { length: 3, 0: 'a', 2: 'c' };
+             sp[Symbol.isConcatSpreadable] = true;
+             const r = [].concat(sp);
+             r.length + ':' + (1 in r) + ':' + r.join(',')"),
+        "3:false:a,,c"
+    );
+    assert_eq!(
+        run("(Array.prototype.concat.call(true)[0] instanceof Boolean) + ''"),
+        "true"
+    );
+    // duplicate parameter names: only the last occurrence is mapped.
+    assert_eq!(
+        run(
+            "const a = (function (x, x, x) { return arguments; })(1, 2, 3);
+             a[Symbol.isConcatSpreadable] = true;
+             [].concat(a).join(',') + ':' + a[0] + a[1] + a[2]"
+        ),
+        "1,2,3:123"
+    );
+    // toSpliced with no arguments copies everything.
+    assert_eq!(run("['a','b','c'].toSpliced().join(',')"), "a,b,c");
+    // with() truncates a fractional index and never reads the replaced element.
+    assert_eq!(run("[1, 2, 3].with(-0.5, 9).join(',')"), "9,2,3");
+    // ArraySetLength: negative or fractional lengths RangeError even via defineProperty.
+    assert_eq!(
+        run("let r = '';
+             try { Object.defineProperty([], 'length', { value: -1, configurable: true }); }
+             catch (e) { r = e.constructor.name; }
+             r"),
+        "RangeError"
+    );
+    // Array.from constructs the custom receiver before iterating.
+    assert_eq!(
+        run("let log = [];
+             function C() { log.push('ctor'); }
+             const obj = { [Symbol.iterator]() { log.push('iter'); return [][Symbol.iterator](); } };
+             Array.from.call(C, obj);
+             log.join(',')"),
+        "ctor,iter"
+    );
+    // Array.of falls back to a plain array for a non-constructor receiver.
+    assert_eq!(
+        run("(Array.of.call(Math.cos.bind(Math)) instanceof Array) + ''"),
+        "true"
+    );
+}

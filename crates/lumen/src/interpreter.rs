@@ -1331,7 +1331,12 @@ impl Interp {
                         TaIndex::Exotic => return Ok(Value::Undefined),
                         TaIndex::Ordinary => {}
                     }
+                    // The meta keys live on %TypedArray.prototype% as accessors; an own property
+                    // (defineProperty on the instance) shadows them.
                     let cur = self.ta_len(&info);
+                    if o.borrow().props.contains(key) {
+                        return self.get_from_chain(&o, key, &receiver);
+                    }
                     match key {
                         "length" => return Ok(Value::Num(cur.unwrap_or(0) as f64)),
                         "byteLength" => {
@@ -1750,7 +1755,7 @@ impl Interp {
         };
         let is_array = matches!(obj.borrow().exotic, Exotic::Array);
         if is_array {
-            self.array_set(&obj, key, value)?;
+            return self.array_set(&obj, key, value);
         } else {
             let existed = obj.borrow().props.contains(key);
             if existed {
@@ -1771,14 +1776,27 @@ impl Interp {
         Ok(true)
     }
 
-    fn array_set(&mut self, obj: &Gc, key: &str, value: Value) -> Result<(), Abrupt> {
+    fn array_set(&mut self, obj: &Gc, key: &str, value: Value) -> Result<bool, Abrupt> {
         if key == "length" {
+            // ArraySetLength coerces twice (ToUint32 then ToNumber, both observable) and
+            // RangeErrors on a mismatch before any writability check.
+            let n1 = self.to_number(&value)?;
+            let new_u: u32 = if n1.is_nan() || n1.is_infinite() || n1 == 0.0 {
+                0
+            } else {
+                (n1.trunc() as i64 as u64 & 0xFFFF_FFFF) as u32
+            };
             let n = self.to_number(&value)?;
-            // Array lengths are uint32 (ToUint32 round-trips exactly, else "Invalid array length").
-            if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
+            let same = if n == 0.0 {
+                new_u == 0
+            } else {
+                (new_u as f64) == n
+            };
+            if !same {
                 return Err(self.throw("RangeError", "Invalid array length"));
             }
-            // A non-writable `length` (frozen/sealed array) rejects the change.
+            // A non-writable `length` (frozen/sealed array) rejects the change — re-read after
+            // the coercions, which may have frozen it.
             let len_writable = obj
                 .borrow()
                 .props
@@ -1791,7 +1809,7 @@ impl Interp {
                         self.throw("TypeError", "cannot assign to read-only property 'length'")
                     );
                 }
-                return Ok(());
+                return Ok(false);
             }
             let new_len = n as usize;
             let old_len = self.array_length(obj);
@@ -1828,7 +1846,7 @@ impl Interp {
                                 "cannot delete non-configurable array element via length",
                             ));
                         }
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
             }
@@ -1836,7 +1854,7 @@ impl Interp {
                 "length",
                 Property::data(Value::Num(new_len as f64), true, false, false),
             );
-            return Ok(());
+            return Ok(true);
         }
         // Adding a new index to a non-extensible (sealed/frozen) array is rejected.
         if !obj.borrow().props.contains(key) && !obj.borrow().extensible {
@@ -1845,7 +1863,26 @@ impl Interp {
                     self.throw("TypeError", "cannot add property, object is not extensible")
                 );
             }
-            return Ok(());
+            return Ok(false);
+        }
+        // Appending past a non-writable `length` is rejected.
+        if let Some(idx) = key.parse::<u64>().ok().filter(|&i| i < 4294967295) {
+            let len = self.array_length(obj);
+            let len_writable = obj
+                .borrow()
+                .props
+                .get("length")
+                .map(|p| p.writable)
+                .unwrap_or(true);
+            if idx as usize >= len && !len_writable {
+                if self.strict {
+                    return Err(self.throw(
+                        "TypeError",
+                        "cannot add an element past a read-only array length",
+                    ));
+                }
+                return Ok(false);
+            }
         }
         obj.borrow_mut().props.insert(key, Property::plain(value));
         // Only a canonical array index (< 2^32 - 1) updates `length`; larger numeric keys are
@@ -1860,7 +1897,7 @@ impl Interp {
                 );
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// A TypedArray's *current* element length, or `None` if it's out of bounds (a fixed-length view
@@ -2450,8 +2487,10 @@ impl Interp {
                     "callee",
                     crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
                 );
-                // Mapped: indices alias the parameter bindings (which live in `scope`).
-                let names: Vec<Option<String>> = func
+                // Mapped: indices alias the parameter bindings (which live in `scope`). With
+                // duplicate parameter names only the LAST occurrence is mapped — earlier indices
+                // stay plain data properties holding the original argument values.
+                let mut names: Vec<Option<String>> = func
                     .params
                     .iter()
                     .take(args.len())
@@ -2460,6 +2499,16 @@ impl Interp {
                         _ => None,
                     })
                     .collect();
+                let mut seen: Vec<String> = Vec::new();
+                for slot in names.iter_mut().rev() {
+                    if let Some(n) = slot {
+                        if seen.contains(n) {
+                            *slot = None;
+                        } else {
+                            seen.push(n.clone());
+                        }
+                    }
+                }
                 if names.iter().any(Option::is_some) {
                     self.mapped_arguments
                         .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
