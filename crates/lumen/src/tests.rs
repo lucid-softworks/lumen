@@ -1501,11 +1501,11 @@ fn regex_validation() {
 }
 #[test]
 fn poison_pill() {
-    // A non-strict function's legacy caller/arguments yield null (the call stack isn't reflected).
-    assert_eq!(run("function f(){}; String(f.caller)"), "null");
-    assert_eq!(run("function f(){}; String(f.arguments)"), "null");
-    assert_eq!(run("String((function(){}).caller)"), "null");
-    // A strict-mode function poisons access with a TypeError.
+    // Function.prototype.caller/arguments are %ThrowTypeError% accessors: any access throws,
+    // strict or sloppy (per sec-function.prototype restricted properties).
+    assert_eq!(throws("function f(){}; f.caller"), "TypeError");
+    assert_eq!(throws("function f(){}; f.arguments"), "TypeError");
+    assert_eq!(throws("(function(){}).caller"), "TypeError");
     assert_eq!(
         throws("'use strict'; function f(){ return f.caller; }; f()"),
         "TypeError"
@@ -6774,4 +6774,146 @@ fn array_mutators_on_primitive_this_are_generic() {
     // And they still mutate real arrays.
     assert_eq!(run("var a=[1,2];a.push(3);a.join(',')"), "1,2,3");
     assert_eq!(run("var a=[1,2,3];a.splice(1,1);a.join(',')"), "1,3");
+}
+
+#[test]
+fn iterator_prototypes_own_next() {
+    // `next` lives on the per-kind iterator prototype (an own property there), not on each
+    // iterator instance, and getPrototypeOf² lands on %IteratorPrototype%.
+    assert_eq!(
+        run("const p = Object.getPrototypeOf([][Symbol.iterator]());
+             String(Object.getOwnPropertyDescriptor(p, 'next').value.length)"),
+        "0"
+    );
+    assert_eq!(
+        run("const p = Object.getPrototypeOf(''[Symbol.iterator]());
+             String(Object.getOwnPropertyDescriptor(p, 'next').value.name)"),
+        "next"
+    );
+    assert_eq!(
+        run("const p = Object.getPrototypeOf(''[Symbol.iterator]()); p[Symbol.toStringTag]"),
+        "String Iterator"
+    );
+    // Array and String iterators have distinct prototypes under a shared %IteratorPrototype%.
+    assert_eq!(
+        run("const ap = Object.getPrototypeOf([][Symbol.iterator]());
+             const sp = Object.getPrototypeOf(''[Symbol.iterator]());
+             String(ap !== sp && Object.getPrototypeOf(ap) === Object.getPrototypeOf(sp))"),
+        "true"
+    );
+}
+
+#[test]
+fn iterator_next_brand_checks() {
+    // Calling a prototype `next` with a receiver lacking the matching internal slots throws.
+    assert_eq!(
+        throws("Object.getPrototypeOf([][Symbol.iterator]()).next.call({})"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("Object.getPrototypeOf(''[Symbol.iterator]()).next.call({})"),
+        "TypeError"
+    );
+    // Cross-kind receivers are also rejected.
+    assert_eq!(
+        throws("Object.getPrototypeOf([][Symbol.iterator]()).next.call(''[Symbol.iterator]())"),
+        "TypeError"
+    );
+}
+
+#[test]
+fn string_iterator_is_lazy_by_code_point() {
+    // An astral code point comes out as one iteration step, not two.
+    assert_eq!(
+        run("const it = 'a\u{1D306}b'[Symbol.iterator](); const o = [];
+             for (let r = it.next(); !r.done; r = it.next()) o.push(r.value.codePointAt(0));
+             o.join(',')"),
+        "97,119558,98"
+    );
+    // Exhausted iterators stay done.
+    assert_eq!(
+        run("const it = 'x'[Symbol.iterator](); it.next(); it.next();
+             String(it.next().done)"),
+        "true"
+    );
+}
+
+#[test]
+fn throw_type_error_single_per_realm() {
+    // The same %ThrowTypeError% function object backs strict/unmapped arguments `callee` and the
+    // Function.prototype caller/arguments restricted accessors.
+    assert_eq!(
+        run("const tte = Object.getOwnPropertyDescriptor(function(){'use strict';return arguments}(), 'callee').get;
+             const ad = Object.getOwnPropertyDescriptor(Function.prototype, 'arguments');
+             const cd = Object.getOwnPropertyDescriptor(Function.prototype, 'caller');
+             String(tte === ad.get && tte === ad.set && tte === cd.get && tte === cd.set)"),
+        "true"
+    );
+    // A non-simple parameter list makes the arguments object unmapped: callee is poisoned too.
+    assert_eq!(
+        run("function f(a = 0){ return arguments; }
+             const d = Object.getOwnPropertyDescriptor(f(), 'callee');
+             const tte = Object.getOwnPropertyDescriptor(function(){'use strict';return arguments}(), 'callee').get;
+             String(d.get === tte && d.set === tte)"),
+        "true"
+    );
+    // Mapped (sloppy, simple params): callee is a data property naming the function itself.
+    assert_eq!(
+        run("function g(a){ return arguments; }
+             String(Object.getOwnPropertyDescriptor(g(), 'callee').value === g)"),
+        "true"
+    );
+}
+
+#[test]
+fn async_dispose_settles_via_return_result() {
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    // The async-iterator prototype carrying [@@asyncDispose].
+    let proto = "Object.getPrototypeOf(Object.getPrototypeOf((async function*(){})()))";
+    // A rejected promise from return() rejects the @@asyncDispose promise.
+    assert_eq!(
+        after(
+            &format!(
+                "var out = 'pending';
+                 const it = Object.create({proto});
+                 it.return = () => Promise.reject('boom');
+                 it[Symbol.asyncDispose]().then(v => out = 'ok:' + v, e => out = 'rej:' + e);"
+            ),
+            "out"
+        ),
+        "rej:boom"
+    );
+    // A throwing `return` getter rejects (not throws synchronously).
+    assert_eq!(
+        after(
+            &format!(
+                "var out = 'pending';
+                 const it = Object.create({proto});
+                 Object.defineProperty(it, 'return', {{ get() {{ throw 'boom'; }} }});
+                 it[Symbol.asyncDispose]().then(v => out = 'ok:' + v, e => out = 'rej:' + e);"
+            ),
+            "out"
+        ),
+        "rej:boom"
+    );
+    // A fulfilled result is dropped: the dispose promise fulfills with undefined.
+    assert_eq!(
+        after(
+            &format!(
+                "var out = 'pending';
+                 const it = Object.create({proto});
+                 it.return = () => Promise.resolve('dropped');
+                 it[Symbol.asyncDispose]().then(v => out = 'ok:' + v, e => out = 'rej:' + e);"
+            ),
+            "out"
+        ),
+        "ok:undefined"
+    );
 }

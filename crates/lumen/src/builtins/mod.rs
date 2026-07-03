@@ -8707,29 +8707,14 @@ fn install_function_proto(it: &mut Interp) {
     }
     it.extra_protos
         .insert("%ThrowTypeError%", throw_type_error.clone());
-    // Legacy Function.prototype.caller / .arguments accessors: a strict-mode function (or a bound /
-    // native / non-function receiver) poisons access with a TypeError; a non-strict function yields
-    // `null` (the live call stack is not reflected). This matches web reality, not the pure poison.
-    let legacy_caller = it.make_native("get", 0, |i, this, _a| {
-        let non_strict = matches!(
-            this.as_obj().map(|o| o.borrow().call.clone()),
-            Some(crate::value::Callable::User(ref f, _)) if !f.is_strict
-        );
-        if non_strict {
-            Ok(Value::Null)
-        } else {
-            Err(i.make_error(
-                "TypeError",
-                "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
-            ))
-        }
-    });
+    // Function.prototype.caller / .arguments: accessor properties whose [[Get]] and [[Set]] are
+    // both the %ThrowTypeError% intrinsic (the same single function object per realm).
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
             Property {
                 value: Value::Undefined,
-                get: Some(Value::Obj(legacy_caller.clone())),
+                get: Some(Value::Obj(throw_type_error.clone())),
                 set: Some(Value::Obj(throw_type_error.clone())),
                 accessor: true,
                 writable: false,
@@ -12075,8 +12060,17 @@ fn install_iterator(it: &mut Interp) {
     // is %IteratorPrototype%), so getPrototypeOf(getPrototypeOf(arrIter)) lands on %IteratorPrototype%.
     let arr_iter_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
     set_to_string_tag(it, &arr_iter_proto, "Array Iterator");
+    it.def_method(&arr_iter_proto, "next", 0, array_iter_next);
     it.extra_protos
         .insert("%ArrayIteratorPrototype%", arr_iter_proto);
+
+    // %StringIteratorPrototype%: the prototype of `String.prototype[@@iterator]()` iterators, which
+    // walk the string lazily by code point.
+    let str_iter_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
+    set_to_string_tag(it, &str_iter_proto, "String Iterator");
+    it.def_method(&str_iter_proto, "next", 0, string_iter_next);
+    it.extra_protos
+        .insert("%StringIteratorPrototype%", str_iter_proto);
 
     // %RegExpStringIteratorPrototype%: the prototype of the iterator returned by
     // `RegExp.prototype[@@matchAll]` and `String.prototype.matchAll`.
@@ -12147,20 +12141,49 @@ fn link_generator_proto(it: &mut Interp, gen_ctor_key: &str, inst_proto: &Gc) {
 /// %AsyncIteratorPrototype%[@@asyncDispose]: return a promise that runs the iterator's `return()`
 /// (if any) and resolves to undefined.
 fn async_dispose_via_return(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // %AsyncIteratorPrototype%[@@asyncDispose]: every failure — a throwing `return` getter, a
+    // throwing call, or a rejected result — surfaces as a rejection of the returned promise, and a
+    // fulfilled result is discarded (the promise fulfills with undefined).
     let promise = i.new_promise();
-    let ret = ab(i.get_member(&this, "return"))?;
-    if ret.is_callable() {
-        match i.call(ret, this, &[]) {
-            Ok(_) => {}
-            Err(e) => {
-                let reason = crate::interpreter::abrupt_value(e);
-                i.reject_promise(&promise, reason);
-                return Ok(promise);
-            }
+    let ret = match i.get_member(&this, "return") {
+        Ok(v) => v,
+        Err(e) => {
+            let reason = crate::interpreter::abrupt_value(e);
+            i.reject_promise(&promise, reason);
+            return Ok(promise);
+        }
+    };
+    if !ret.is_callable() {
+        i.resolve_promise(&promise, Value::Undefined);
+        return Ok(promise);
+    }
+    match i.call(ret, this, &[Value::Undefined]) {
+        Ok(v) => {
+            let inner = promise_resolve_value(i, v);
+            let on_f = make_bound_len(i, dispose_settle_fulfil, vec![promise.clone()], 1.0);
+            let on_r = make_bound_len(i, dispose_settle_reject, vec![promise.clone()], 1.0);
+            i.promise_then(&inner, on_f, on_r);
+        }
+        Err(e) => {
+            let reason = crate::interpreter::abrupt_value(e);
+            i.reject_promise(&promise, reason);
         }
     }
-    i.resolve_promise(&promise, Value::Undefined);
     Ok(promise)
+}
+
+/// Reaction for [@@asyncDispose]: the awaited `return()` result fulfilled — fulfil the dispose
+/// promise (`args[0]`) with undefined, dropping the value.
+fn dispose_settle_fulfil(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    i.resolve_promise(&arg(args, 0), Value::Undefined);
+    Ok(Value::Undefined)
+}
+
+/// Reaction for [@@asyncDispose]: the awaited `return()` result rejected — reject the dispose
+/// promise (`args[0]`) with the same reason (`args[1]`).
+fn dispose_settle_reject(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    i.reject_promise(&arg(args, 0), arg(args, 1));
+    Ok(Value::Undefined)
 }
 
 /// CreateRegExpStringIterator: a lazy iterator over a regex's matches in a string. Its state lives in
@@ -13021,17 +13044,39 @@ fn make_array_iterator(i: &mut Interp, target: Value, kind: u8) -> Value {
         .cloned()
         .or_else(|| i.extra_protos.get("%IteratorPrototype%").cloned());
     let obj = Object::new(proto);
-    set_builtin(&obj, "__ai_target", target);
-    set_builtin(&obj, "__ai_index", Value::Num(0.0));
-    set_builtin(&obj, "__ai_kind", Value::Num(kind as f64));
-    i.def_method(&obj, "next", 0, array_iter_next);
-    if let Some(sym) = i.iterator_sym.clone() {
-        let f = i.make_native("[Symbol.iterator]", 0, return_this);
-        obj.borrow_mut()
-            .props
-            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
-    }
+    set_internal(&obj, "__ai_target", target);
+    set_internal(&obj, "__ai_index", Value::Num(0.0));
+    set_internal(&obj, "__ai_kind", Value::Num(kind as f64));
     Value::Obj(obj)
+}
+
+/// `next()` for a String Iterator: advance one code point through the iterated string. The
+/// `__si_str` slot doubles as the brand check.
+fn string_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    let o = match &this {
+        Value::Obj(o) if o.borrow().props.contains("__si_str") => o.clone(),
+        _ => {
+            return Err(i.make_error(
+                "TypeError",
+                "String Iterator next called on an incompatible receiver",
+            ))
+        }
+    };
+    let s = match o.borrow().props.get("__si_str").map(|p| p.value.clone()) {
+        Some(Value::Str(s)) => s,
+        _ => return Ok(i.iter_result_obj(Value::Undefined, true)),
+    };
+    let idx = match o.borrow().props.get("__si_index").map(|p| p.value.clone()) {
+        Some(Value::Num(n)) => n as usize,
+        _ => 0,
+    };
+    let Some(ch) = s[idx.min(s.len())..].chars().next() else {
+        // Exhausted: clear the string so the iterator stays done.
+        set_internal(&o, "__si_str", Value::Undefined);
+        return Ok(i.iter_result_obj(Value::Undefined, true));
+    };
+    set_internal(&o, "__si_index", Value::Num((idx + ch.len_utf8()) as f64));
+    Ok(i.iter_result_obj(Value::from_string(ch.to_string()), false))
 }
 
 /// `next()` for a generator object built by `make_generator`: walk the buffered values, then throw
@@ -13186,6 +13231,13 @@ pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
 }
 
 fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
+    // Brand check: the receiver must carry the Array Iterator internal slots.
+    if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__ai_kind")) {
+        return Err(i.make_error(
+            "TypeError",
+            "Array Iterator next called on an incompatible receiver",
+        ));
+    }
     let target = ab(i.get_member(&this, "__ai_target"))?;
     // An exhausted iterator clears its target so it stays done even if the source later grows.
     if matches!(target, Value::Undefined) {
@@ -13386,18 +13438,14 @@ fn create_html(
 
 fn install_string(it: &mut Interp) {
     let sp = it.string_proto.clone();
-    // String.prototype[@@iterator]: iterate by code point (via an array iterator over the chars).
+    // String.prototype[@@iterator]: a lazy String Iterator over the receiver, by code point.
     if let Some(sym) = it.iterator_sym.clone() {
         let f = it.make_native("[Symbol.iterator]", 0, |i, this, _| {
             let s = this_string(i, &this)?;
-            let chars: Vec<Value> = s
-                .chars()
-                .map(|c| Value::from_string(c.to_string()))
-                .collect();
-            let arr = i.make_array(chars);
-            let key = Interp::sym_key(i.iterator_sym.as_ref().unwrap());
-            let itfn = ab(i.get_member(&arr, &key))?;
-            ab(i.call(itfn, arr, &[]))
+            let obj = Object::new(i.extra_protos.get("%StringIteratorPrototype%").cloned());
+            set_internal(&obj, "__si_str", Value::Str(s));
+            set_internal(&obj, "__si_index", Value::Num(0.0));
+            Ok(Value::Obj(obj))
         });
         sp.borrow_mut()
             .props

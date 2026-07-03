@@ -2099,25 +2099,35 @@ impl Interp {
                     deletable: false,
                 },
             );
-            // A minimal `arguments` array (not the live mapped object). A strict function's
-            // `arguments` exposes `callee` as the %ThrowTypeError% poison accessor.
+            // A minimal `arguments` array (not the live mapped object). An unmapped arguments
+            // object (strict function OR non-simple parameter list) exposes `callee` as the
+            // %ThrowTypeError% poison accessor; a mapped one carries the function itself as a
+            // plain data property.
             let args_arr = self.make_array(args.to_vec());
-            if func.is_strict {
-                if let (Value::Obj(ao), Some(tte)) = (
-                    &args_arr,
-                    self.extra_protos.get("%ThrowTypeError%").cloned(),
-                ) {
+            let simple_params = func
+                .params
+                .iter()
+                .all(|p| !p.rest && p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
+            if let Value::Obj(ao) = &args_arr {
+                if func.is_strict || !simple_params {
+                    if let Some(tte) = self.extra_protos.get("%ThrowTypeError%").cloned() {
+                        ao.borrow_mut().props.insert(
+                            "callee",
+                            crate::value::Property {
+                                value: Value::Undefined,
+                                get: Some(Value::Obj(tte.clone())),
+                                set: Some(Value::Obj(tte)),
+                                accessor: true,
+                                writable: false,
+                                enumerable: false,
+                                configurable: false,
+                            },
+                        );
+                    }
+                } else {
                     ao.borrow_mut().props.insert(
                         "callee",
-                        crate::value::Property {
-                            value: Value::Undefined,
-                            get: Some(Value::Obj(tte.clone())),
-                            set: Some(Value::Obj(tte)),
-                            accessor: true,
-                            writable: false,
-                            enumerable: false,
-                            configurable: false,
-                        },
+                        crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
                     );
                 }
             }
