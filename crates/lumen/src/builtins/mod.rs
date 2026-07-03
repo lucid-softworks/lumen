@@ -14945,7 +14945,20 @@ fn install_math(it: &mut Interp) {
         } else if finite.is_empty() {
             -0.0
         } else {
-            fsum_exact(&finite)
+            let s = fsum_exact(&finite);
+            if s.is_finite() {
+                s
+            } else {
+                // The exact-summation partials transiently overflowed. Retry on values scaled by a
+                // power of two (exact, so the correctly-rounded result is unchanged) centred near
+                // 2^500, then scale back — a genuine overflow re-materialises as ±Infinity.
+                let max_abs = finite.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+                let scale_exp = max_abs.log2().floor() as i32 - 500;
+                let down = 2f64.powi(-scale_exp);
+                let up = 2f64.powi(scale_exp);
+                let scaled: Vec<f64> = finite.iter().map(|&x| x * down).collect();
+                fsum_exact(&scaled) * up
+            }
         };
         Ok(Value::Num(result))
     });
