@@ -12085,10 +12085,50 @@ fn install_iterator(it: &mut Interp) {
         "prototype",
         Property::data(Value::Obj(proto.clone()), false, false, false),
     );
-    proto
-        .borrow_mut()
-        .props
-        .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
+    // Iterator.prototype.constructor and [@@toStringTag] are accessor pairs: the getter yields
+    // the value; the setter throws for the prototype itself as receiver but defines an own data
+    // property on any other receiver (SetterThatIgnoresPrototypeProperties).
+    {
+        it.extra_protos
+            .insert("%IteratorProtoMarker%", proto.clone());
+        let getter_ctor = it.make_native("get constructor", 0, |i, _t, _a| {
+            Ok(i.global
+                .borrow()
+                .props
+                .get("Iterator")
+                .map(|p| p.value.clone())
+                .unwrap_or(Value::Undefined))
+        });
+        let getter_tag = it.make_native("get [Symbol.toStringTag]", 0, |_i, _t, _a| {
+            Ok(Value::str("Iterator"))
+        });
+        let set_ctor = it.make_native("set constructor", 1, |i, this, a| {
+            iterator_proto_weird_set(i, this, arg(a, 0), "constructor")
+        });
+        let set_tag = it.make_native("set [Symbol.toStringTag]", 1, |i, this, a| {
+            let key = to_string_tag_key(i).unwrap_or_default();
+            iterator_proto_weird_set(i, this, arg(a, 0), &key)
+        });
+        let acc = |get: Gc, set: Gc| Property {
+            value: Value::Undefined,
+            get: Some(Value::Obj(get)),
+            set: Some(Value::Obj(set)),
+            accessor: true,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        proto
+            .borrow_mut()
+            .props
+            .insert("constructor", acc(getter_ctor, set_ctor));
+        if let Some(tag) = to_string_tag_key(it) {
+            proto
+                .borrow_mut()
+                .props
+                .insert(tag, acc(getter_tag, set_tag));
+        }
+    }
     set_builtin(&it.global, "Iterator", Value::Obj(ctor));
 
     // %ArrayIteratorPrototype%: the intermediate prototype of Array iterators (its own [[Prototype]]
@@ -12536,6 +12576,33 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
             .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
     }
     Ok(Value::Obj(obj))
+}
+
+/// SetterThatIgnoresPrototypeProperties: assigning through Iterator.prototype's accessor throws
+/// when the receiver IS the prototype, else creates an own data property on the receiver.
+fn iterator_proto_weird_set(
+    i: &mut Interp,
+    this: Value,
+    v: Value,
+    key: &str,
+) -> Result<Value, Value> {
+    if let (Some(h), Value::Obj(t)) = (i.extra_protos.get("%IteratorProtoMarker%"), &this) {
+        if Rc::ptr_eq(h, t) {
+            return Err(i.make_error(
+                "TypeError",
+                "cannot assign to a property of Iterator.prototype",
+            ));
+        }
+    }
+    match &this {
+        Value::Obj(o) => {
+            o.borrow_mut()
+                .props
+                .insert(key, Property::data(v, true, true, true));
+            Ok(Value::Undefined)
+        }
+        _ => Err(i.make_error("TypeError", "cannot create property on a primitive")),
+    }
 }
 
 fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
