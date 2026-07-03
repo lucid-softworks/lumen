@@ -13488,9 +13488,16 @@ fn async_gen_drive(
 ) -> Result<Value, Value> {
     let r = i.new_promise();
     match this {
-        Value::Obj(o) => i.drive_async_gen(Rc::as_ptr(o) as usize, r.clone(), signal),
+        // Brand check: the receiver must be an actual async generator instance; a mismatch
+        // rejects the returned promise rather than throwing.
+        Value::Obj(o) if i.async_gens.contains(&(Rc::as_ptr(o) as usize)) => {
+            i.drive_async_gen(Rc::as_ptr(o) as usize, r.clone(), signal)
+        }
         _ => {
-            let e = i.make_error("TypeError", "AsyncGenerator method called on a non-object");
+            let e = i.make_error(
+                "TypeError",
+                "AsyncGenerator method called on an incompatible receiver",
+            );
             i.reject_promise(&r, e);
         }
     }
@@ -13541,6 +13548,49 @@ pub(crate) fn async_gen_react_reject(
         _ => return Ok(Value::Undefined),
     };
     i.drive_async_gen_inner(key, arg(a, 1), crate::coroutine::Resume::Throw(arg(a, 2)));
+    Ok(Value::Undefined)
+}
+/// AsyncGeneratorAwaitReturn settled: complete the generator and settle the request promise.
+/// `args` is `[keyMarker, resultPromise, settledValue]`.
+pub(crate) fn async_gen_return_fulfil(
+    i: &mut Interp,
+    _t: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
+    let key = match arg(a, 0) {
+        Value::Num(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+    let (r, x) = (arg(a, 1), arg(a, 2));
+    if let Some(mut coro) = i.generators.remove(&key) {
+        if !coro.done {
+            let _ = coro.resume(i, crate::coroutine::Resume::Return(x.clone()));
+        }
+        i.generators.insert(key, coro);
+    }
+    let res = i.iter_result_obj(x, true);
+    i.resolve_promise(&r, res);
+    i.finish_async_gen_step(key);
+    Ok(Value::Undefined)
+}
+pub(crate) fn async_gen_return_reject(
+    i: &mut Interp,
+    _t: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
+    let key = match arg(a, 0) {
+        Value::Num(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+    let (r, e) = (arg(a, 1), arg(a, 2));
+    if let Some(mut coro) = i.generators.remove(&key) {
+        if !coro.done {
+            let _ = coro.resume(i, crate::coroutine::Resume::Throw(e.clone()));
+        }
+        i.generators.insert(key, coro);
+    }
+    i.reject_promise(&r, e);
+    i.finish_async_gen_step(key);
     Ok(Value::Undefined)
 }
 pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
@@ -14655,6 +14705,66 @@ fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
     }
 }
 
+/// Number.prototype.toExponential's digit selection: the exact decimal expansion of the binary
+/// value, rounded to `f` fraction digits with ties away from zero (the spec's "larger n").
+/// `shortest` (fractionDigits undefined) picks the minimal digits that round-trip.
+fn to_exponential(x: f64, f: usize, shortest: bool) -> String {
+    let (sign, x) = if x < 0.0 { ("-", -x) } else { ("", x) };
+    let fmt_exp = |exp: i32| format!("e{}{}", if exp < 0 { '-' } else { '+' }, exp.abs());
+    if shortest {
+        let s = format!("{x:e}");
+        let (m, e) = s.split_once('e').unwrap();
+        let exp: i32 = e.parse().unwrap();
+        return format!("{sign}{m}{}", fmt_exp(exp));
+    }
+    if x == 0.0 {
+        let m = if f == 0 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(f))
+        };
+        return format!("{sign}{m}e+0");
+    }
+    // 780 fraction digits is past the longest exact decimal expansion of any f64 mantissa, so the
+    // digits (including everything after the rounding point) are exact.
+    let s = format!("{x:.780e}");
+    let (m, e) = s.split_once('e').unwrap();
+    let mut exp: i32 = e.parse().unwrap();
+    let mut digits: Vec<u8> = m
+        .bytes()
+        .filter(|b| b.is_ascii_digit())
+        .map(|b| b - b'0')
+        .collect();
+    if digits.len() > f + 1 && digits[f + 1] >= 5 {
+        let mut k = f + 1;
+        loop {
+            if k == 0 {
+                digits.insert(0, 1);
+                exp += 1;
+                break;
+            }
+            k -= 1;
+            if digits[k] == 9 {
+                digits[k] = 0;
+            } else {
+                digits[k] += 1;
+                break;
+            }
+        }
+    }
+    digits.truncate(f + 1);
+    while digits.len() < f + 1 {
+        digits.push(0);
+    }
+    let ds: String = digits.iter().map(|d| (d + b'0') as char).collect();
+    let m = if f == 0 {
+        ds
+    } else {
+        format!("{}.{}", &ds[..1], &ds[1..])
+    };
+    format!("{sign}{m}{}", fmt_exp(exp))
+}
+
 fn install_number(it: &mut Interp) {
     let np = it.number_proto.clone();
     it.def_method(&np, "toLocaleString", 0, |i, this, args| {
@@ -14694,18 +14804,28 @@ fn install_number(it: &mut Interp) {
         Ok(Value::Num(this_number(i, &this)?))
     });
     it.def_method(&np, "toExponential", 1, |i, this, args| {
-        let n = this_number(i, &this)?;
-        let s = match arg(args, 0) {
-            Value::Undefined => format!("{n:e}"),
-            v => {
-                let d = ab(i.to_number(&v))? as usize;
-                format!("{n:.d$e}")
-            }
-        };
-        // Rust prints `1e2`; JS wants `1e+2`.
-        Ok(Value::from_string(
-            s.replace('e', "e+").replace("e+-", "e-"),
-        ))
+        let x = this_number(i, &this)?;
+        let fd = arg(args, 0);
+        let f = ab(i.to_number(&fd))?;
+        let f = if f.is_nan() { 0.0 } else { f.trunc() };
+        if x.is_nan() {
+            return Ok(Value::str("NaN"));
+        }
+        if x.is_infinite() {
+            return Ok(Value::str(if x > 0.0 { "Infinity" } else { "-Infinity" }));
+        }
+        if !(0.0..=100.0).contains(&f) {
+            return Err(i.make_error(
+                "RangeError",
+                "toExponential() argument must be between 0 and 100",
+            ));
+        }
+        let f = f as usize;
+        Ok(Value::from_string(to_exponential(
+            x,
+            f,
+            matches!(fd, Value::Undefined),
+        )))
     });
     it.def_method(&np, "toPrecision", 1, |i, this, args| {
         let n = this_number(i, &this)?;
@@ -14777,7 +14897,7 @@ fn install_number(it: &mut Interp) {
         ("MAX_SAFE_INTEGER", 9007199254740991.0),
         ("MIN_SAFE_INTEGER", -9007199254740991.0),
         ("MAX_VALUE", f64::MAX),
-        ("MIN_VALUE", f64::MIN_POSITIVE),
+        ("MIN_VALUE", f64::from_bits(1)), // 5e-324, the smallest subnormal
         ("POSITIVE_INFINITY", f64::INFINITY),
         ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
         ("NaN", f64::NAN),

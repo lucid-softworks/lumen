@@ -875,32 +875,67 @@ impl Interp {
             _ => None,
         };
         if of && is_await {
-            // `for await (x of asyncIterable)`: drive the @@asyncIterator (or a sync iterator over
-            // promises), awaiting each `next()` result and value.
+            // `for await (x of asyncIterable)`: drive the @@asyncIterator (or a sync iterator
+            // wrapped async-from-sync), awaiting each `next()` result — and, for a sync source,
+            // each value, closing the sync iterator when that await rejects.
             let akey = crate::builtins::async_iterator_key(self);
             let method = match &akey {
                 Some(k) => self.get_member(&rhs, k)?,
                 None => Value::Undefined,
             };
-            let iter = if method.is_callable() {
-                self.call(method, rhs.clone(), &[])?
+            let (iter, from_sync) = if method.is_callable() {
+                (self.call(method, rhs.clone(), &[])?, false)
             } else {
-                self.get_iterator(&rhs)?.0
+                (self.get_iterator(&rhs)?.0, true)
             };
             let next = self.get_member(&iter, "next")?;
-            return self.run_loop(label, env, |me, env| {
+            let iter_close = iter.clone();
+            // A failure in the iteration step itself marks the iterator done — only abrupt
+            // completions from the loop body (or an early break/return) close it afterwards.
+            let (mut exhausted, mut step_failed) = (false, false);
+            let result = self.run_loop(label, env, |me, env| {
+                step_failed = true;
                 let res = me.call(next.clone(), iter.clone(), &[])?;
-                let res = me.await_value(res)?;
+                let res = if from_sync { res } else { me.await_value(res)? };
+                if !matches!(res, Value::Obj(_)) {
+                    return Err(me.throw("TypeError", "iterator result is not an object"));
+                }
                 let done = me.get_member(&res, "done")?;
-                if me.to_boolean(&done) {
+                let done = me.to_boolean(&done);
+                let v = if from_sync {
+                    let raw = me.get_member(&res, "value")?;
+                    match me.await_value(raw) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if !done {
+                                me.iterator_close(&iter);
+                            }
+                            return Err(e);
+                        }
+                    }
+                } else if done {
+                    Value::Undefined
+                } else {
+                    me.get_member(&res, "value")?
+                };
+                if done {
+                    exhausted = true;
                     return Ok(LoopStep::Done(Value::Empty));
                 }
-                let raw = me.get_member(&res, "value")?;
-                let v = me.await_value(raw)?;
+                step_failed = false;
                 let iter_env = new_scope(Some(env.clone()));
                 let bv = me.for_of_iteration(left, v, mode, body, &iter_env, dispose)?;
                 Ok(LoopStep::Continue(bv))
             });
+            if !(exhausted || step_failed && result.is_err()) {
+                // AsyncIteratorClose: a throw completion keeps its error (close failures are
+                // swallowed); close failures surface for a normal or return completion.
+                let close = self.async_for_await_close(&iter_close, from_sync);
+                if !matches!(result, Err(Abrupt::Throw(_))) {
+                    close?;
+                }
+            }
+            return result;
         }
         if of {
             // Step the iterator lazily; close it if the loop exits early (break/return/throw).
@@ -971,7 +1006,20 @@ impl Interp {
         };
         match crate::coroutine::coroutine_yield(self, value) {
             crate::coroutine::Resume::Next(v) => Ok(v),
-            crate::coroutine::Resume::Return(v) => Err(Abrupt::Return(v)),
+            crate::coroutine::Resume::Return(v) => {
+                // AsyncGeneratorUnwrapYieldResumption: a return() value is awaited before the
+                // yield completes; its rejection becomes a (catchable) throw at the yield.
+                if crate::coroutine::in_async_gen() {
+                    match crate::coroutine::coroutine_await(self, v) {
+                        crate::coroutine::Resume::Next(x) | crate::coroutine::Resume::Return(x) => {
+                            Err(Abrupt::Return(x))
+                        }
+                        crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
+                    }
+                } else {
+                    Err(Abrupt::Return(v))
+                }
+            }
             crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
         }
     }
@@ -1026,6 +1074,28 @@ impl Interp {
         }
     }
 
+    /// AsyncIteratorClose for the inlined `for await` loop: fetch `return`, call it with no
+    /// argument, and (per the async-from-sync wrapper) validate/unwrap its result.
+    fn async_for_await_close(&mut self, iter: &Value, from_sync: bool) -> Result<(), Abrupt> {
+        let ret = self.get_member(iter, "return")?;
+        if matches!(ret, Value::Undefined | Value::Null) {
+            return Ok(());
+        }
+        if !ret.is_callable() {
+            return Err(self.throw("TypeError", "iterator 'return' is not callable"));
+        }
+        let r = self.call(ret, iter.clone(), &[])?;
+        let r = if from_sync { r } else { self.await_value(r)? };
+        if !matches!(r, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "iterator result is not an object"));
+        }
+        if from_sync {
+            let raw = self.get_member(&r, "value")?;
+            self.await_value(raw)?;
+        }
+        Ok(())
+    }
+
     /// Await `v` from inside a coroutine (parks until it settles), surfacing the resume signal.
     fn coro_await(&mut self, v: Value) -> Completion {
         match crate::coroutine::coroutine_await(self, v) {
@@ -1038,8 +1108,17 @@ impl Interp {
     /// AsyncGeneratorYield for `yield*` delegation: await `value`, suspend producing it, and return
     /// the driver's resume signal to continue the delegation loop.
     fn async_gen_yield_resume(&mut self, value: Value) -> Result<crate::coroutine::Resume, Abrupt> {
+        use crate::coroutine::Resume;
         let value = self.coro_await(value)?;
-        Ok(crate::coroutine::coroutine_yield(self, value))
+        Ok(match crate::coroutine::coroutine_yield(self, value) {
+            // AsyncGeneratorUnwrapYieldResumption: await a return() value before the delegation
+            // loop sees it; a rejection turns into a throw resumption.
+            Resume::Return(v) => match crate::coroutine::coroutine_await(self, v) {
+                Resume::Next(x) | Resume::Return(x) => Resume::Return(x),
+                Resume::Throw(e) => Resume::Throw(e),
+            },
+            other => other,
+        })
     }
 
     /// `yield* iterable` inside an *async* generator (14.4.14, async path): drive the inner async
@@ -1071,11 +1150,22 @@ impl Interp {
                     return Err(self.throw("TypeError", "iterator result is not an object"));
                 }
                 let done = self.get_member(&r, "done")?;
+                let done = self.to_boolean(&done);
                 let mut v = self.get_member(&r, "value")?;
                 if from_sync {
-                    v = self.coro_await(v)?;
+                    // AsyncFromSyncIteratorContinuation with closeOnRejection: an abrupt unwrap of
+                    // a live (not-done) step closes the sync iterator before rethrowing.
+                    v = match self.coro_await(v) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            if !done {
+                                self.iterator_close(&iterator);
+                            }
+                            return Err(e);
+                        }
+                    };
                 }
-                (self.to_boolean(&done), v)
+                (done, v)
             }};
         }
         let mut received = Resume::Next(Value::Undefined);
@@ -2493,6 +2583,9 @@ impl Interp {
             }
             _ => return Ok(v),
         };
+        // Await → PromiseResolve(%Promise%, v): the `constructor` read on a native promise is
+        // observable, and its abrupt completion is the await's.
+        self.get_member(&v, "constructor")?;
         self.drain_microtasks();
         match self.promises.get(&ptr) {
             Some(s) if s.status == 1 => Ok(s.value.clone()),
@@ -5311,26 +5404,76 @@ fn parse_number(s: &str) -> f64 {
         "-Infinity" => return f64::NEG_INFINITY,
         _ => {}
     }
-    let (sign, body) = match t.strip_prefix('-') {
-        Some(rest) => (-1.0, rest),
-        None => (1.0, t.strip_prefix('+').unwrap_or(t)),
+    // Radix literals take no sign and may exceed i64, so fold digit-by-digit into an f64.
+    let radix = |digits: &str, r: u32| -> f64 {
+        if digits.is_empty() {
+            return f64::NAN;
+        }
+        let mut acc = 0f64;
+        for c in digits.chars() {
+            match c.to_digit(r) {
+                Some(d) => acc = acc * r as f64 + d as f64,
+                None => return f64::NAN,
+            }
+        }
+        acc
     };
-    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        return i64::from_str_radix(hex, 16)
-            .map(|n| sign * n as f64)
-            .unwrap_or(f64::NAN);
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return radix(hex, 16);
     }
-    if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-        return i64::from_str_radix(oct, 8)
-            .map(|n| sign * n as f64)
-            .unwrap_or(f64::NAN);
+    if let Some(oct) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return radix(oct, 8);
     }
-    if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        return i64::from_str_radix(bin, 2)
-            .map(|n| sign * n as f64)
-            .unwrap_or(f64::NAN);
+    if let Some(bin) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return radix(bin, 2);
     }
-    t.parse::<f64>().unwrap_or(f64::NAN)
+    // Rust's f64 parser accepts "inf"/"nan" spellings the StrDecimalLiteral grammar doesn't,
+    // so validate the shape first.
+    if is_decimal_literal(t) {
+        t.parse::<f64>().unwrap_or(f64::NAN)
+    } else {
+        f64::NAN
+    }
+}
+
+/// StrDecimalLiteral (sans Infinity): `[+-]? (Digits ('.' Digits?)? | '.' Digits) ([eE][+-]?Digits)?`.
+fn is_decimal_literal(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let int_digits = i - start;
+    let mut frac_digits = 0;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        let fs = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        frac_digits = i - fs;
+    }
+    if int_digits == 0 && frac_digits == 0 {
+        return false;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let es = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == es {
+            return false;
+        }
+    }
+    i == b.len()
 }
 
 /// Where an identifier `Reference`'s binding lives, resolved exactly once.

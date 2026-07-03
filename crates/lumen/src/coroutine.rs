@@ -94,6 +94,8 @@ pub struct Coroutine {
     suspend_rx: Receiver<Suspend>,
     /// Set once the body has finished (Done/Throw); further resumes are no-ops.
     pub done: bool,
+    /// Set on the first resume — distinguishes "suspendedStart" from a suspended yield.
+    pub started: bool,
     _handle: JoinHandle<()>,
 }
 
@@ -105,6 +107,7 @@ impl Coroutine {
         if self.done {
             return Suspend::Done(Value::Undefined);
         }
+        self.started = true;
         let (saved_strict, saved_depth) = (i.strict, i.depth);
         let _ = self.resume_tx.send(signal);
         let s = self.suspend_rx.recv();
@@ -207,6 +210,7 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> Coroutine {
         resume_tx,
         suspend_rx,
         done: false,
+        started: false,
         _handle: handle,
     }
 }

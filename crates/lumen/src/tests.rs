@@ -8046,3 +8046,79 @@ fn listformat_to_parts_and_temporal_removed_methods() {
         "false,false,false"
     );
 }
+
+#[test]
+fn async_generator_return_awaits_value() {
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    // return() while suspendedStart awaits its argument; the result value is the unwrapped one.
+    assert_eq!(
+        after(
+            "var out = '';
+             async function* g() { yield 1; }
+             const it = g();
+             it.return(Promise.resolve('unwrapped')).then(r => { out = r.value + ':' + r.done; });",
+            "out"
+        ),
+        "unwrapped:true"
+    );
+    // next/return/throw on a non-async-generator receiver reject rather than throw.
+    assert_eq!(
+        after(
+            "var name = '';
+             async function* g() {}
+             g.prototype.next.call({}).catch(e => { name = e.constructor.name; });",
+            "name"
+        ),
+        "TypeError"
+    );
+}
+
+#[test]
+fn async_from_sync_close_on_rejection() {
+    fn after(setup: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        e.eval(setup, false).expect("setup");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    // A rejected value-promise from a sync iterator closes it (return() runs once).
+    assert_eq!(
+        after(
+            "var returns = 0, caught = '';
+             const sync = {
+               [Symbol.iterator]() {
+                 return {
+                   next() { return { value: Promise.reject('nope'), done: false }; },
+                   return() { returns += 1; return { done: true }; }
+                 };
+               }
+             };
+             (async () => { for await (const _ of sync); })().catch(e => { caught = e; });",
+            "returns + ':' + caught"
+        ),
+        "1:nope"
+    );
+    // Breaking a for-await over a sync source calls return() with no arguments.
+    assert_eq!(
+        after(
+            "var len = -1;
+             const sync = {
+               [Symbol.iterator]() { return this; },
+               next() { return { done: false }; },
+               return() { len = arguments.length; return { done: true }; }
+             };
+             (async () => { for await (const _ of sync) break; })();",
+            "len"
+        ),
+        "0"
+    );
+}

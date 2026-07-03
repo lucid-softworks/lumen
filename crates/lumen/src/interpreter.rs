@@ -470,6 +470,8 @@ pub struct Interp {
     pub agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
     pub typed_arrays: HashMap<usize, TaInfo>,
+    /// Object pointers of async generator instances (the AsyncGenerator brand).
+    pub async_gens: std::collections::HashSet<usize>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
     pub ta_buffer: HashMap<usize, Value>,
@@ -852,6 +854,7 @@ impl Interp {
             pending_async_waits: Vec::new(),
             agent: None,
             typed_arrays: HashMap::new(),
+            async_gens: std::collections::HashSet::new(),
             ta_buffer: HashMap::new(),
             shadow_realms: HashMap::new(),
             data_views: HashMap::new(),
@@ -2609,6 +2612,9 @@ impl Interp {
         let obj = self.make_generator(is_async, gen_proto);
         if let Value::Obj(o) = &obj {
             self.generators.insert(Rc::as_ptr(o) as usize, coro);
+            if is_async {
+                self.async_gens.insert(Rc::as_ptr(o) as usize);
+            }
         }
         Ok(obj)
     }
@@ -2685,7 +2691,14 @@ impl Interp {
         match suspend {
             Suspend::Await(awaited) => {
                 self.generators.insert(key, coro); // still running
-                let px = self.promise_resolve_value(awaited);
+                                                   // Await → PromiseResolve(%Promise%, value); its abrupt (a poisoned `constructor`
+                                                   // getter) throws at the `await` itself.
+                let px = match self.promise_resolve_checked(awaited) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return self.drive_async(key, promise, crate::coroutine::Resume::Throw(e))
+                    }
+                };
                 let on_f = self.make_async_reaction(&promise, true);
                 let on_r = self.make_async_reaction(&promise, false);
                 self.promise_then(&px, on_f, on_r);
@@ -2719,7 +2732,7 @@ impl Interp {
 
     /// The step just completed (resolved or rejected its promise): pump the next queued request,
     /// or clear the busy flag.
-    fn finish_async_gen_step(&mut self, key: usize) {
+    pub(crate) fn finish_async_gen_step(&mut self, key: usize) {
         match self
             .async_gen_queue
             .get_mut(&key)
@@ -2750,18 +2763,28 @@ impl Interp {
         if coro.done {
             self.generators.insert(key, coro);
             match signal {
-                Resume::Throw(e) => self.reject_promise(&r, e),
-                Resume::Return(v) => {
-                    let res = self.iter_result_obj(v, true);
-                    self.resolve_promise(&r, res);
+                Resume::Throw(e) => {
+                    self.reject_promise(&r, e);
+                    self.finish_async_gen_step(key);
                 }
+                // AsyncGeneratorAwaitReturn: the returned value is awaited before the request
+                // promise settles with { value, done: true }.
+                Resume::Return(v) => self.async_gen_await_return(key, r, v),
                 Resume::Next(_) => {
                     let res = self.iter_result_obj(Value::Undefined, true);
                     self.resolve_promise(&r, res);
+                    self.finish_async_gen_step(key);
                 }
             }
-            self.finish_async_gen_step(key);
             return;
+        }
+        // suspendedStart: a return() before the first next() awaits its value without ever
+        // running the body.
+        if !coro.started {
+            if let Resume::Return(v) = signal {
+                self.generators.insert(key, coro);
+                return self.async_gen_await_return(key, r, v);
+            }
         }
         let suspend = coro.resume(self, signal);
         self.generators.insert(key, coro);
@@ -2774,7 +2797,10 @@ impl Interp {
             Suspend::Await(x) => {
                 // Still mid-step: the reaction resumes via drive_async_gen_inner, keeping the
                 // request queue intact.
-                let px = self.promise_resolve_value(x);
+                let px = match self.promise_resolve_checked(x) {
+                    Ok(p) => p,
+                    Err(e) => return self.drive_async_gen_inner(key, r, Resume::Throw(e)),
+                };
                 let on_f = self.make_async_gen_reaction(key, &r, true);
                 let on_r = self.make_async_gen_reaction(key, &r, false);
                 self.promise_then(&px, on_f, on_r);
@@ -2789,6 +2815,41 @@ impl Interp {
                 self.finish_async_gen_step(key);
             }
         }
+    }
+
+    /// AsyncGeneratorAwaitReturn: await the `return()` value; fulfilment completes the generator
+    /// and settles the request with `{ value: awaited, done: true }`, rejection rejects it.
+    fn async_gen_await_return(&mut self, key: usize, r: Value, v: Value) {
+        let px = match self.promise_resolve_checked(v) {
+            Ok(p) => p,
+            Err(e) => {
+                self.reject_promise(&r, e);
+                self.finish_async_gen_step(key);
+                return;
+            }
+        };
+        let on_f = self.make_async_gen_return_reaction(key, &r, true);
+        let on_r = self.make_async_gen_return_reaction(key, &r, false);
+        self.promise_then(&px, on_f, on_r);
+    }
+
+    fn make_async_gen_return_reaction(&mut self, key: usize, r: &Value, fulfil: bool) -> Value {
+        let target = self.make_native(
+            "",
+            1,
+            if fulfil {
+                crate::builtins::async_gen_return_fulfil
+            } else {
+                crate::builtins::async_gen_return_reject
+            },
+        );
+        let bound = Object::new(Some(self.function_proto.clone()));
+        bound.borrow_mut().call = Callable::Bound {
+            target,
+            this: r.clone(),
+            args: vec![Value::Num(key as f64), r.clone()],
+        };
+        Value::Obj(bound)
     }
 
     /// A `{ value, done }` iterator-result object.
@@ -2824,16 +2885,21 @@ impl Interp {
         Value::Obj(bound)
     }
 
-    /// PromiseResolve: a promise stays itself; any other value is wrapped in a resolved promise.
-    fn promise_resolve_value(&mut self, v: Value) -> Value {
+    /// PromiseResolve with the observable `Get(x, "constructor")` on a native promise — a
+    /// poisoned getter surfaces as the returned error.
+    pub(crate) fn promise_resolve_checked(&mut self, v: Value) -> Result<Value, Value> {
         if let Value::Obj(o) = &v {
             if self.promises.contains_key(&(Rc::as_ptr(o) as usize)) {
-                return v;
+                return match self.get_member(&v, "constructor") {
+                    Ok(_) => Ok(v),
+                    Err(Abrupt::Throw(e)) => Err(e),
+                    Err(_) => Err(Value::Undefined),
+                };
             }
         }
         let p = self.new_promise();
         self.resolve_promise(&p, v);
-        p
+        Ok(p)
     }
 
     /// A bound reaction that re-drives the async coroutine when the awaited promise settles.
