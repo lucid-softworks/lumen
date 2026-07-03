@@ -51,6 +51,8 @@ pub fn parse_script_eval(
         allow_new_target,
         top_level: false,
         super_prop_ok: allow_super,
+        proto_dups: Vec::new(),
+        last_paren: false,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -88,6 +90,8 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         allow_new_target: false,
         top_level: false,
         super_prop_ok: false,
+        proto_dups: Vec::new(),
+        last_paren: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -279,6 +283,14 @@ struct Parser {
     /// method body, class field initializer, or class static block. An ordinary function clears it;
     /// an arrow inherits it. `super` outside any such context is a SyntaxError.
     super_prop_ok: bool,
+    /// Deferred duplicate-`__proto__` errors from object literals. The Annex B early error does not
+    /// apply when the literal turns out to be a destructuring assignment pattern, so `parse_assign`
+    /// forgives entries recorded inside a reinterpreted pattern; leftovers surface at the end of the
+    /// enclosing top-level statement.
+    proto_dups: Vec<ParseError>,
+    /// True when the expression just produced was a parenthesized primary (`(...)` with nothing
+    /// consumed after it). Only used to let parens satisfy the `??` / `&&`,`||` no-mixing rule.
+    last_paren: bool,
 }
 
 #[derive(Default)]
@@ -459,6 +471,11 @@ impl Parser {
         while !self.at_eof() {
             self.top_level = true;
             out.push(self.parse_stmt()?);
+            // Any duplicate-__proto__ record not forgiven by a destructuring reinterpretation
+            // inside this statement is a genuine object-literal early error.
+            if let Some(e) = self.proto_dups.pop() {
+                return Err(e);
+            }
         }
         Ok(out)
     }
@@ -493,7 +510,7 @@ impl Parser {
                 self.parse_var_decl(DeclKind::AwaitUsing)
             }
             Tok::Keyword("function") => {
-                let f = self.parse_function(false)?;
+                let f = self.parse_function(false, false)?;
                 if let Some(n) = &f.name {
                     self.declare_fn_decl(n, f.is_async, f.is_generator)?;
                 }
@@ -506,7 +523,7 @@ impl Parser {
                     && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
-                let f = self.parse_function(true)?;
+                let f = self.parse_function(true, false)?;
                 if let Some(n) = &f.name {
                     self.declare_fn_decl(n, f.is_async, f.is_generator)?;
                 }
@@ -1209,7 +1226,7 @@ impl Parser {
                     && matches!(self.peek_kind(1), Tok::Keyword("function")))
             {
                 let is_async = self.eat_ident_word("async");
-                Stmt::FuncDecl(Rc::new(self.parse_function(is_async)?))
+                Stmt::FuncDecl(Rc::new(self.parse_function(is_async, false)?))
             } else if self.is_kw("class") {
                 Stmt::ClassDecl(Rc::new(self.parse_class()?))
             } else {
@@ -1453,6 +1470,7 @@ impl Parser {
         if let Some(arrow) = self.try_parse_arrow()? {
             return Ok(arrow);
         }
+        let proto_mark = self.proto_dups.len();
         let left = self.parse_cond()?;
         if let Tok::Punct(op) = self.cur() {
             let op = *op;
@@ -1466,6 +1484,8 @@ impl Parser {
                     if !is_valid_assign_pattern(&left) {
                         return self.err("invalid destructuring assignment target");
                     }
+                    // A pattern may repeat `__proto__:` — forgive dups recorded inside it.
+                    self.proto_dups.truncate(proto_mark);
                 } else if !is_valid_assign_target(&left) {
                     return self.err("invalid assignment target");
                 }
@@ -1493,7 +1513,8 @@ impl Parser {
             return self.err("yield expression is not allowed in formal parameters");
         }
         self.advance(); // yield
-        let delegate = self.eat_punct("*");
+                        // No LineTerminator is allowed between `yield` and `*` (ASI would split them).
+        let delegate = !self.nl_before() && self.eat_punct("*");
         // A bare `yield` has no argument (before a line terminator or a token that can't start one).
         let no_arg = (!delegate && self.nl_before())
             || matches!(
@@ -1528,13 +1549,41 @@ impl Parser {
 
     fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_unary()?;
+        let mut left_paren = self.last_paren;
         while let Some((op, prec, right_assoc, logical)) = self.binary_op() {
             if prec < min_prec {
                 break;
             }
+            // ShortCircuitExpression: `??` cannot mix with `&&`/`||` without parentheses.
+            if op == "??"
+                && !left_paren
+                && matches!(
+                    &left,
+                    Expr::Logical {
+                        op: "&&" | "||",
+                        ..
+                    }
+                )
+            {
+                return self.err("cannot mix '??' with '&&' or '||' without parentheses");
+            }
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_binary(next_min)?;
+            if op == "??"
+                && !self.last_paren
+                && matches!(
+                    &right,
+                    Expr::Logical {
+                        op: "&&" | "||",
+                        ..
+                    }
+                )
+            {
+                return self.err("cannot mix '??' with '&&' or '||' without parentheses");
+            }
+            left_paren = false;
+            self.last_paren = false;
             left = if logical {
                 Expr::Logical {
                     op,
@@ -1622,6 +1671,11 @@ impl Parser {
             }
             self.advance();
             let arg = self.parse_unary()?;
+            // An await expression is a UnaryExpression: it cannot be an exponentiation base.
+            if self.is_punct("**") {
+                return self
+                    .err("an await expression cannot be the base of '**' (use parentheses)");
+            }
             return Ok(Expr::Await(Box::new(arg)));
         }
         let op = match self.cur() {
@@ -1639,6 +1693,10 @@ impl Parser {
             // Deleting a private member (`delete obj.#x`) is always a SyntaxError.
             if op == "delete" && deletes_private_member(&arg) {
                 return self.err("private fields cannot be deleted");
+            }
+            // A UnaryExpression cannot be an exponentiation base: `-x ** 2` is a SyntaxError.
+            if self.is_punct("**") {
+                return self.err("a unary expression cannot be the base of '**' (use parentheses)");
             }
             return Ok(Expr::Unary {
                 op,
@@ -1857,6 +1915,7 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        self.last_paren = false;
         // Legacy octal numbers and octal/`\8`/`\9` string escapes are SyntaxErrors in strict mode.
         if self.strict && self.toks[self.pos].legacy_octal {
             return self.err("legacy octal literals are not allowed in strict mode");
@@ -1907,7 +1966,7 @@ impl Parser {
                 Ok(Expr::This)
             }
             Tok::Keyword("function") => {
-                let f = self.parse_function(false)?;
+                let f = self.parse_function(false, true)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
             Tok::Keyword("class") | Tok::Punct("@") => {
@@ -1969,7 +2028,7 @@ impl Parser {
                     && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
             {
                 self.advance();
-                let f = self.parse_function(true)?;
+                let f = self.parse_function(true, true)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
             Tok::Ident(name) => {
@@ -1980,6 +2039,14 @@ impl Parser {
                 if self.strict && is_strict_reserved_word(&name) {
                     return self.err(format!("'{name}' is a reserved word in strict mode"));
                 }
+                // `yield` / `await` are reserved as identifier references inside a generator /
+                // async context (even spelled with `\u` escapes).
+                if name == "yield" && self.in_generator {
+                    return self.err("'yield' is not a valid identifier in a generator");
+                }
+                if name == "await" && self.in_async {
+                    return self.err("'await' is not a valid identifier here");
+                }
                 match name.as_str() {
                     "undefined" => Ok(Expr::Undefined),
                     _ => Ok(Expr::Ident(name)),
@@ -1989,6 +2056,7 @@ impl Parser {
                 self.advance();
                 let e = self.parse_expr_allow_in()?;
                 self.expect_punct(")")?;
+                self.last_paren = true;
                 Ok(e)
             }
             Tok::Punct("[") => self.parse_array(),
@@ -2032,9 +2100,13 @@ impl Parser {
                         allow_new_target: self.allow_new_target,
                         top_level: false,
                         super_prop_ok: self.super_prop_ok,
+                        proto_dups: Vec::new(),
+                        last_paren: false,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
-                    Expr::ToStr(Box::new(sub.parse_expr()?))
+                    let e = sub.parse_expr()?;
+                    self.proto_dups.append(&mut sub.proto_dups);
+                    Expr::ToStr(Box::new(e))
                 }
             };
             expr = Some(match expr {
@@ -2086,8 +2158,12 @@ impl Parser {
                         allow_new_target: self.allow_new_target,
                         top_level: false,
                         super_prop_ok: self.super_prop_ok,
+                        proto_dups: Vec::new(),
+                        last_paren: false,
                     };
-                    subs.push(sub.parse_expr()?);
+                    let e = sub.parse_expr()?;
+                    self.proto_dups.append(&mut sub.proto_dups);
+                    subs.push(e);
                 }
             }
         }
@@ -2197,12 +2273,17 @@ impl Parser {
                     func: Rc::new(func),
                 });
             } else if self.eat_punct(":") {
-                // Two `__proto__: value` data properties in one literal are a SyntaxError.
+                // Two `__proto__: value` data properties in one literal are a SyntaxError — but
+                // only if this stays a literal, so the error is deferred (see `proto_dups`): a
+                // destructuring assignment pattern may repeat the key.
                 let is_proto = matches!(&key, PropKey::Ident(n) if n == "__proto__")
                     || matches!(&key, PropKey::Str(s) if &**s == "__proto__");
                 if is_proto {
                     if proto_seen {
-                        return self.err("duplicate __proto__ property in object literal");
+                        self.proto_dups.push(ParseError {
+                            message: "duplicate __proto__ property in object literal".into(),
+                            line: self.line(),
+                        });
                     }
                     proto_seen = true;
                 }
@@ -2282,7 +2363,7 @@ impl Parser {
 
     // ----- functions --------------------------------------------------------------------------
 
-    fn parse_function(&mut self, is_async: bool) -> Result<Function, ParseError> {
+    fn parse_function(&mut self, is_async: bool, is_expr: bool) -> Result<Function, ParseError> {
         self.eat_kw("function");
         let is_generator = self.eat_punct("*");
         let name = if let Tok::Ident(n) = self.cur().clone() {
@@ -2291,6 +2372,16 @@ impl Parser {
         } else {
             None
         };
+        // A function *expression*'s own name binds inside the function, so a generator expression
+        // cannot be named `yield` and an async one cannot be named `await`. (A declaration's name
+        // binds in the enclosing scope and follows the enclosing context's rules instead.)
+        if is_expr {
+            if let Some(n) = &name {
+                if (is_generator && n == "yield") || (is_async && n == "await") {
+                    return self.err(format!("'{n}' cannot name this function expression"));
+                }
+            }
+        }
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;

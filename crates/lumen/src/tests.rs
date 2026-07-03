@@ -6984,3 +6984,89 @@ fn from_char_code_combines_surrogate_pairs() {
     // ToUint16 wrapping still applies.
     assert_eq!(run("String.fromCharCode(65 + 65536)"), "A");
 }
+
+#[test]
+fn parser_early_errors_operators() {
+    // A UnaryExpression (or await expression) cannot be the base of `**`.
+    for src in [
+        "-1 ** 2",
+        "+x ** 2",
+        "!x ** 2",
+        "~x ** 2",
+        "void x ** 2",
+        "typeof x ** 2",
+        "delete x.y ** 2",
+        "async function f(){ await x ** 2 }",
+    ] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // Parenthesized bases and update-expression bases stay valid.
+    assert_eq!(run("(-2) ** 2"), "4");
+    assert_eq!(run("var x=2; String(x++ ** 2)"), "4");
+    assert_eq!(run("2 ** -1"), "0.5");
+}
+
+#[test]
+fn parser_early_errors_coalesce_mixing() {
+    for src in ["a ?? b || c", "a ?? b && c", "a || b ?? c", "a && b ?? c"] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // Parentheses resolve the ambiguity.
+    assert_eq!(run("String((null ?? 'x') || 'y')"), "x");
+    assert_eq!(run("String(null ?? ('a' && 'b'))"), "b");
+    assert_eq!(run("String((null && 1) ?? 'z')"), "z");
+    assert_eq!(run("String(1 ?? 2 ?? 3)"), "1");
+}
+
+#[test]
+fn parser_early_errors_yield_await_identifiers() {
+    for src in [
+        "function *g(){ void yield; }",
+        "function *g(){ void yi\\u0065ld; }",
+        "(function *yield(){})",
+        "async function f(){ void aw\\u0061it; }",
+    ] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // `yield`/`await` stay usable as identifiers outside those contexts (sloppy mode).
+    assert_eq!(run("var yield = 3; yield"), "3");
+    assert_eq!(run("var await = 4; await"), "4");
+    // A generator *declaration*'s name binds in the enclosing (non-generator) scope.
+    assert_eq!(
+        run("function *yield(){ return 1; } typeof yield"),
+        "function"
+    );
+    // `yield <newline> *` cannot form yield* (ASI splits it).
+    assert!(Engine::new()
+        .eval("function *g(){ yield\n* 2; }", false)
+        .is_err());
+}
+
+#[test]
+fn proto_dup_literal_vs_pattern() {
+    // Two `__proto__:` data properties in an object *literal* are a SyntaxError...
+    assert!(Engine::new()
+        .eval("({__proto__: 1, __proto__: 2})", false)
+        .is_err());
+    assert!(Engine::new()
+        .eval("var o = { __proto__: null, '__proto__': null };", false)
+        .is_err());
+    // ...but a destructuring assignment pattern may repeat the key.
+    assert_eq!(
+        run("var x, y; ({ __proto__: x, __proto__: y } = { a: 1 }); String(x === y)"),
+        "true"
+    );
+    assert_eq!(
+        run("var x; ({ __proto__: x } = {}); String(x === Object.prototype)"),
+        "true"
+    );
+}
