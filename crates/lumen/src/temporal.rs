@@ -5283,6 +5283,68 @@ fn read_relative_to(i: &mut Interp, opts: &Value) -> Result<Option<IsoDate>, Val
             }
             Ok(Some(to_date(i, &v, &Value::Undefined)?))
         }
+        Value::Str(sv) => {
+            // ToRelativeTemporalObject on a string: a bracket annotation makes it zoned — the
+            // zone must be valid (minute-precision if an offset), a present offset must agree
+            // with the zone, and the resulting instant must be representable.
+            let p = parse_iso(&sv)
+                .ok_or_else(|| i.make_error("RangeError", "invalid relativeTo string"))?;
+            let d = p
+                .date
+                .ok_or_else(|| i.make_error("RangeError", "relativeTo needs a date"))?;
+            let t = p.time.unwrap_or(IsoTime {
+                hour: 0,
+                minute: 0,
+                second: 0,
+                ms: 0,
+                us: 0,
+                ns: 0,
+            });
+            if let Some(tzname) = &p.tz {
+                let zone: Rc<str> = if let Some(name) = crate::tz::registry_name(tzname) {
+                    Rc::from(name)
+                } else if is_pure_offset(tzname) {
+                    Rc::from(offset_string(tz_offset_ns(tzname)).as_str())
+                } else {
+                    return Err(
+                        i.make_error("RangeError", "invalid time zone in relativeTo string")
+                    );
+                };
+                let local = dt_ns(d, t);
+                if let Off::Num(off, _) = p.offset {
+                    // The string's own offset must agree exactly with the zone's.
+                    let zoff = offset_for_local(&zone, local);
+                    if off != zoff {
+                        return Err(i.make_error(
+                            "RangeError",
+                            "offset does not match time zone in relativeTo",
+                        ));
+                    }
+                    let epoch = local - off as i128;
+                    if epoch.abs() > 8_640_000_000_000_000_000_000 {
+                        return Err(i.make_error(
+                            "RangeError",
+                            "relativeTo is outside the representable range",
+                        ));
+                    }
+                } else {
+                    let zoff = offset_for_local(&zone, local);
+                    let epoch = local - zoff as i128;
+                    if epoch.abs() > 8_640_000_000_000_000_000_000 {
+                        return Err(i.make_error(
+                            "RangeError",
+                            "relativeTo is outside the representable range",
+                        ));
+                    }
+                }
+            } else if !iso_datetime_within_limits(d, t) {
+                return Err(i.make_error(
+                    "RangeError",
+                    "relativeTo is outside the representable range",
+                ));
+            }
+            Ok(Some(d))
+        }
         _ => Ok(Some(to_date(i, &v, &Value::Undefined)?)),
     }
 }
