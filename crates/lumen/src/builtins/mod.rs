@@ -801,6 +801,9 @@ fn install_atomics(it: &mut Interp) {
     let atomics = Object::new(Some(it.object_proto.clone()));
 
     fn target(i: &mut Interp, args: &[Value]) -> Result<(TaInfo, usize), Value> {
+        target_rw(i, args, false)
+    }
+    fn target_rw(i: &mut Interp, args: &[Value], write: bool) -> Result<(TaInfo, usize), Value> {
         let ptr = map_ptr(&arg(args, 0))
             .ok_or_else(|| i.make_error("TypeError", "Atomics: not an integer TypedArray"))?;
         let info = *i
@@ -812,6 +815,12 @@ fn install_atomics(it: &mut Interp) {
             TaKind::F16 | TaKind::F32 | TaKind::F64 | TaKind::U8Clamped
         ) {
             return Err(i.make_error("TypeError", "Atomics requires an integer TypedArray"));
+        }
+        if write && i.immutable_buffers.contains(&info.buffer) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics: cannot write into a view over an immutable ArrayBuffer",
+            ));
         }
         // ValidateAtomicAccess: ToIndex truncates toward zero (NaN→0); a negative or out-of-bounds
         // result is a RangeError, but a fractional request index is simply truncated.
@@ -844,8 +853,13 @@ fn install_atomics(it: &mut Interp) {
             i.ta_write(info, idx, n as f64);
         }
     }
+    /// Truncate `v` to the element type's bit width (unsigned domain) for raw comparison.
+    fn wrap_bits(kind: TaKind, v: i128) -> u128 {
+        let bits = kind.elsize() * 8;
+        (v as u128) & (u128::MAX >> (128 - bits))
+    }
     fn rmw(i: &mut Interp, args: &[Value], f: fn(i128, i128) -> i128) -> Result<Value, Value> {
-        let (info, idx) = target(i, args)?;
+        let (info, idx) = target_rw(i, args, true)?;
         let val = operand(i, &info, &arg(args, 2))?;
         let old = read_i128(i, &info, idx);
         let old_val = i.ta_read(&info, idx);
@@ -864,7 +878,7 @@ fn install_atomics(it: &mut Interp) {
         Ok(i.ta_read(&info, idx))
     });
     it.def_method(&atomics, "store", 3, |i, _t, a| {
-        let (info, idx) = target(i, a)?;
+        let (info, idx) = target_rw(i, a, true)?;
         let val = operand(i, &info, &arg(a, 2))?;
         write_i128(i, &info, idx, val);
         // store returns the coerced value itself, not the (possibly wrapped) stored representation.
@@ -875,12 +889,14 @@ fn install_atomics(it: &mut Interp) {
         })
     });
     it.def_method(&atomics, "compareExchange", 4, |i, _t, a| {
-        let (info, idx) = target(i, a)?;
+        let (info, idx) = target_rw(i, a, true)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         let replacement = operand(i, &info, &arg(a, 3))?;
         let old = read_i128(i, &info, idx);
+        // The comparison is on the element's raw byte representation, so the expected value
+        // wraps to the element type first (e.g. 68547 matches an Int16 2979).
         let old_val = i.ta_read(&info, idx);
-        if old == expected {
+        if wrap_bits(info.kind, old) == wrap_bits(info.kind, expected) {
             write_i128(i, &info, idx, replacement);
         }
         Ok(old_val)
@@ -976,14 +992,9 @@ fn install_atomics(it: &mut Interp) {
         }
     });
     it.def_method(&atomics, "waitAsync", 4, |i, _t, a| {
-        let (info, idx) = target(i, a)?;
-        if !matches!(info.kind, TaKind::I32 | TaKind::I64) {
-            return Err(i.make_error(
-                "TypeError",
-                "Atomics.waitAsync requires an Int32 or BigInt64 array",
-            ));
-        }
-        let id = match i.shared_buffers.get(&info.buffer) {
+        // ValidateIntegerTypedArray(waitable) runs before any index/value coercion.
+        let winfo = require_waitable(i, &arg(a, 0))?;
+        let id = match i.shared_buffers.get(&winfo.buffer) {
             Some(&id) => id,
             None => {
                 return Err(i.make_error(
@@ -992,6 +1003,7 @@ fn install_atomics(it: &mut Interp) {
                 ))
             }
         };
+        let (info, idx) = target(i, a)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         // timeout: ToNumber (NaN → +Infinity); None means "no timeout".
         let q = ab(i.to_number(&arg(a, 3)))?;
@@ -1244,6 +1256,16 @@ fn install_agent(it: &mut Interp, host: &Gc) {
         if ms.is_finite() && ms > 0.0 {
             std::thread::sleep(std::time::Duration::from_millis(ms as u64));
         }
+        Ok(Value::Undefined)
+    });
+    it.def_method(&agent, "setTimeout", 2, |i, _t, a| {
+        let f = arg(a, 0);
+        if !f.is_callable() {
+            return Err(i.make_error("TypeError", "setTimeout requires a callable"));
+        }
+        let ms = ab(i.to_number(&arg(a, 1)))?.max(0.0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms as u64);
+        i.pending_timers.push((f, deadline));
         Ok(Value::Undefined)
     });
     it.def_method(&agent, "monotonicNow", 0, |_i, _t, _a| {

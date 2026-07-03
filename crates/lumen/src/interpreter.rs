@@ -466,6 +466,8 @@ pub struct Interp {
     /// Pending `Atomics.waitAsync` operations: each carries the result promise and a channel that a
     /// waiter thread sends "ok"/"timed-out" on. The event loop resolves them as they complete.
     pub pending_async_waits: Vec<(Value, std::sync::mpsc::Receiver<&'static str>)>,
+    /// Host timers from `$262.agent.setTimeout`: (callback, deadline).
+    pub pending_timers: Vec<(Value, std::time::Instant)>,
     /// Agent-harness wiring (present only in spawned agents / a main with agents).
     pub agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
@@ -863,6 +865,7 @@ impl Interp {
             immutable_buffers: std::collections::HashSet::new(),
             can_block: true,
             pending_async_waits: Vec::new(),
+            pending_timers: Vec::new(),
             agent: None,
             typed_arrays: HashMap::new(),
             async_gens: std::collections::HashSet::new(),

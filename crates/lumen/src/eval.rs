@@ -2750,7 +2750,7 @@ impl Interp {
     pub(crate) fn run_agent_event_loop(&mut self) {
         self.drain_microtasks();
         let mut spins = 0u32;
-        while !self.pending_async_waits.is_empty() {
+        while !self.pending_async_waits.is_empty() || !self.pending_timers.is_empty() {
             let mut resolved_any = false;
             let mut i = 0;
             while i < self.pending_async_waits.len() {
@@ -2761,6 +2761,21 @@ impl Interp {
                 } else {
                     i += 1;
                 }
+            }
+            // Fire due host timers ($262.agent.setTimeout), earliest first.
+            let now = std::time::Instant::now();
+            let mut due: Vec<Value> = Vec::new();
+            self.pending_timers.retain(|(f, deadline)| {
+                if *deadline <= now {
+                    due.push(f.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            for f in due {
+                let _ = self.call(f, Value::Undefined, &[]);
+                resolved_any = true;
             }
             if resolved_any {
                 self.drain_microtasks();

@@ -92,6 +92,11 @@ impl Engine {
 
     /// Run `src` as a spawned `$262.agent`: the agent may block in `Atomics.wait`, receives
     /// SharedArrayBuffer broadcasts on `broadcast_rx`, and reports back via `report_tx`.
+    /// Whether this agent may block in `Atomics.wait` (test262's CanBlockIsTrue flag).
+    pub fn set_can_block(&mut self, b: bool) {
+        self.interp.can_block = b;
+    }
+
     pub fn run_as_agent(
         &mut self,
         src: &str,

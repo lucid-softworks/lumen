@@ -633,8 +633,9 @@ fn engine_for(path: &Path) -> Engine {
 }
 
 /// Run an `async`-flagged test, judging by the `$DONE` completion message printed to the console.
-fn check_async(program: &str, strict: bool, _fm: &Frontmatter, path: &Path) -> Outcome {
+fn check_async(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
     let mut engine = engine_for(path);
+    engine.set_can_block(!fm.has_flag("CanBlockIsFalse"));
     match engine.eval(program, strict) {
         Err(e) => return Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
         Ok(Completion::Throw { name, message }) => {
@@ -736,7 +737,9 @@ fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter)
 
 /// Run one assembled program and judge it against the negative expectation.
 fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
-    let result = engine_for(path).eval(program, strict);
+    let mut engine = engine_for(path);
+    engine.set_can_block(!fm.has_flag("CanBlockIsFalse"));
+    let result = engine.eval(program, strict);
     match (&fm.negative, result) {
         (None, Ok(Completion::Value(_))) => Outcome::Pass,
         (None, Ok(Completion::Throw { name, message })) => {
