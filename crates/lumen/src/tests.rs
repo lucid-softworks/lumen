@@ -6917,3 +6917,70 @@ fn async_dispose_settles_via_return_result() {
         "ok:undefined"
     );
 }
+
+#[test]
+fn parse_float_infinity_and_prefix() {
+    assert_eq!(run("String(parseFloat('Infinity'))"), "Infinity");
+    assert_eq!(run("String(parseFloat('-Infinity'))"), "-Infinity");
+    assert_eq!(run("String(parseFloat('+Infinity1'))"), "Infinity");
+    // The longest valid literal prefix wins; a dangling exponent marker is not part of it.
+    assert_eq!(run("String(parseFloat('1ex'))"), "1");
+    assert_eq!(run("String(parseFloat('1e2x'))"), "100");
+    assert_eq!(run("String(parseFloat('.5e'))"), "0.5");
+    assert_eq!(run("String(parseFloat('e10'))"), "NaN");
+    assert_eq!(run("String(parseFloat('-.'))"), "NaN");
+}
+
+#[test]
+fn parse_int_radix_to_uint32() {
+    // The radix goes through ToUint32: Infinity wraps to 0 (-> default 10), 2^32+2 wraps to 2.
+    assert_eq!(run("String(parseInt('11', Infinity))"), "11");
+    assert_eq!(run("String(parseInt('11', 4294967298))"), "3");
+    assert_eq!(run("String(parseInt('11', -4294967294))"), "3");
+    assert_eq!(run("String(parseInt('11', 1))"), "NaN");
+}
+
+#[test]
+fn uri_decode_spec() {
+    // decodeURI preserves escapes of the reserved set; decodeURIComponent decodes them.
+    assert_eq!(
+        run("decodeURI('%3B%2F%3F%3A%40%26%3D%2B%24%2C%23')"),
+        "%3B%2F%3F%3A%40%26%3D%2B%24%2C%23"
+    );
+    assert_eq!(run("decodeURIComponent('%3B%2F')"), ";/");
+    assert_eq!(run("decodeURI('%41%62')"), "Ab");
+    // Multi-byte sequences decode across escapes; astral code points survive.
+    assert_eq!(
+        run("decodeURIComponent('%F0%9D%8C%86').codePointAt(0).toString(16)"),
+        "1d306"
+    );
+    assert_eq!(run("decodeURIComponent('%D0%AE')"), "Ю");
+    // Malformed input throws URIError: bad hex, truncated, stray continuation, overlong,
+    // encoded surrogate, out of range.
+    for bad in [
+        "'%G1'",
+        "'%1'",
+        "'%'",
+        "'%80'",
+        "'%C0%80'",
+        "'%ED%A0%80'",
+        "'%F5%80%80%80'",
+        "'%F0%9D%8C'",
+    ] {
+        assert_eq!(throws(&format!("decodeURIComponent({bad})")), "URIError");
+        assert_eq!(throws(&format!("decodeURI({bad})")), "URIError");
+    }
+    // A '+' is not a hex digit ("%+1" must not parse as 0x1).
+    assert_eq!(throws("decodeURIComponent('%+1')"), "URIError");
+}
+
+#[test]
+fn from_char_code_combines_surrogate_pairs() {
+    assert_eq!(
+        run("String.fromCharCode(0xD834, 0xDF06).codePointAt(0).toString(16)"),
+        "1d306"
+    );
+    assert_eq!(run("String.fromCharCode(72, 105)"), "Hi");
+    // ToUint16 wrapping still applies.
+    assert_eq!(run("String.fromCharCode(65 + 65536)"), "A");
+}

@@ -2404,24 +2404,59 @@ fn uri_encode(s: &str, keep: &str) -> String {
     out
 }
 
-fn uri_decode(s: &str) -> Option<String> {
+/// Decode (sec-decodeuri-decode): percent-escapes become bytes, validated as strict UTF-8 per
+/// sequence (a bad hex digit, truncated escape, stray continuation byte, overlong form, encoded
+/// surrogate, or > U+10FFFF is a URIError -> None). An escape whose decoded octet is an ASCII
+/// character in `preserve` (decodeURI's reservedSet) keeps its original `%XX` text instead.
+fn uri_decode(s: &str, preserve: &str) -> Option<String> {
+    fn hex_at(bytes: &[u8], i: usize) -> Option<u8> {
+        if i + 2 >= bytes.len() || bytes[i] != b'%' {
+            return None;
+        }
+        let h = (bytes[i + 1] as char).to_digit(16)?;
+        let l = (bytes[i + 2] as char).to_digit(16)?;
+        Some((h * 16 + l) as u8)
+    }
     let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::new();
+    let mut out = String::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
+        if bytes[i] != b'%' {
+            let c = s[i..].chars().next()?;
+            out.push(c);
+            i += c.len_utf8();
+            continue;
+        }
+        let start = i;
+        let b0 = hex_at(bytes, i)?;
+        i += 3;
+        if b0 < 0x80 {
+            let c = b0 as char;
+            if preserve.contains(c) {
+                out.push_str(&s[start..i]);
+            } else {
+                out.push(c);
+            }
+            continue;
+        }
+        let cont = match b0 {
+            0xC2..=0xDF => 1,
+            0xE0..=0xEF => 2,
+            0xF0..=0xF4 => 3,
+            _ => return None,
+        };
+        let mut buf = [b0, 0, 0, 0];
+        for k in 0..cont {
+            let bc = hex_at(bytes, i)?;
+            if bc & 0xC0 != 0x80 {
                 return None;
             }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            buf[k + 1] = bc;
             i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
         }
+        out.push_str(std::str::from_utf8(&buf[..cont + 1]).ok()?);
     }
-    String::from_utf8(out).ok()
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -14100,18 +14135,19 @@ fn install_string(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "fromCharCode", 1, |i, _this, args| {
-        let mut s = String::new();
+        let mut units: Vec<u16> = Vec::with_capacity(args.len());
         for a in args {
             // Each argument is ToUint16'd (so -1 -> 0xFFFF, 0x10000 -> 0), not truncated.
             let num = ab(i.to_number(a))?;
-            let n = if num.is_finite() {
-                num.trunc().rem_euclid(65536.0) as u32
+            units.push(if num.is_finite() {
+                num.trunc().rem_euclid(65536.0) as u16
             } else {
                 0
-            };
-            s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+            });
         }
-        Ok(Value::from_string(s))
+        // UTF-16 decode: a surrogate pair combines into one code point (a lone half degrades to
+        // U+FFFD — this engine's strings are UTF-8 and cannot carry lone surrogates).
+        Ok(Value::from_string(String::from_utf16_lossy(&units)))
     });
     it.def_method(&ctor, "raw", 1, |i, _this, args| {
         let template = arg(args, 0);
@@ -15509,9 +15545,10 @@ fn install_globals(it: &mut Interp) {
     });
     global_fn(it, "parseInt", 2, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
+        // The radix is ToUint32'd (wrapping), so e.g. 2^32+2 means radix 2 and Infinity means 0.
         let radix = match arg(a, 1) {
             Value::Undefined => 0,
-            v => ab(i.to_number(&v))? as u32,
+            v => ab(i.to_uint32(&v))?,
         };
         Ok(Value::Num(parse_int(&s, radix)))
     });
@@ -15618,13 +15655,14 @@ fn install_globals(it: &mut Interp) {
     });
     global_fn(it, "decodeURIComponent", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
-        uri_decode(&s)
+        uri_decode(&s, "")
             .map(Value::from_string)
             .ok_or_else(|| i.make_error("URIError", "URI malformed"))
     });
+    // decodeURI leaves escapes of the reservedSet (and '#') untouched.
     global_fn(it, "decodeURI", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
-        uri_decode(&s)
+        uri_decode(&s, ";/?:@&=+$,#")
             .map(Value::from_string)
             .ok_or_else(|| i.make_error("URIError", "URI malformed"))
     });
@@ -15702,26 +15740,57 @@ fn parse_int(s: &str, mut radix: u32) -> f64 {
 }
 
 fn parse_float(s: &str) -> f64 {
-    let t = s.trim_matches(is_js_ws);
-    // Take the longest leading prefix that parses as a float.
-    let mut end = 0;
+    // StrDecimalLiteral: optional sign, then "Infinity" or digits [. digits] [exponent]. Scan the
+    // longest prefix that is itself a valid literal (so "1ex" -> 1, not NaN from "1e").
+    let t = s.trim_start_matches(is_js_ws);
     let bytes = t.as_bytes();
-    let mut seen_dot = false;
-    let mut seen_e = false;
-    while end < bytes.len() {
-        let c = bytes[end] as char;
-        if c.is_ascii_digit() {
-        } else if c == '.' && !seen_dot && !seen_e {
-            seen_dot = true;
-        } else if (c == 'e' || c == 'E') && !seen_e && end > 0 {
-            seen_e = true;
-        } else if (c == '+' || c == '-')
-            && (end == 0 || matches!(bytes[end - 1] as char, 'e' | 'E'))
-        {
-        } else {
-            break;
+    let mut pos = 0;
+    let neg = match bytes.first() {
+        Some(b'-') => {
+            pos += 1;
+            true
         }
-        end += 1;
+        Some(b'+') => {
+            pos += 1;
+            false
+        }
+        _ => false,
+    };
+    if t[pos..].starts_with("Infinity") {
+        return if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
     }
-    t[..end].parse::<f64>().unwrap_or(f64::NAN)
+    let mut digits = 0;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        pos += 1;
+        digits += 1;
+    }
+    if pos < bytes.len() && bytes[pos] == b'.' {
+        pos += 1;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return f64::NAN;
+    }
+    // An exponent part only counts if at least one digit follows the marker (and optional sign).
+    if pos < bytes.len() && matches!(bytes[pos], b'e' | b'E') {
+        let mut ep = pos + 1;
+        if ep < bytes.len() && matches!(bytes[ep], b'+' | b'-') {
+            ep += 1;
+        }
+        let exp_start = ep;
+        while ep < bytes.len() && bytes[ep].is_ascii_digit() {
+            ep += 1;
+        }
+        if ep > exp_start {
+            pos = ep;
+        }
+    }
+    t[..pos].parse::<f64>().unwrap_or(f64::NAN)
 }
