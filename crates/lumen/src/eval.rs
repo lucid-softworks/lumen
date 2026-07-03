@@ -528,16 +528,20 @@ impl Interp {
                 Err(Abrupt::Throw(v))
             }
             Stmt::If { test, cons, alt } => {
-                // IfStatement completion: UpdateEmpty(branch, undefined) — never EMPTY.
+                // IfStatement completion: UpdateEmpty(branch, undefined) — never EMPTY, and an
+                // abrupt break/continue leaving the branch has its empty value filled too.
                 let t = self.eval(test, env)?;
                 let r = if self.to_boolean(&t) {
-                    self.exec_stmt(cons, env)?
+                    self.exec_stmt(cons, env)
                 } else if let Some(a) = alt {
-                    self.exec_stmt(a, env)?
+                    self.exec_stmt(a, env)
                 } else {
-                    Value::Empty
+                    Ok(Value::Empty)
                 };
-                Ok(crate::interpreter::update_empty(r))
+                match r {
+                    Ok(v) => Ok(crate::interpreter::update_empty(v)),
+                    Err(e) => Err(crate::interpreter::update_abrupt_empty(e, Value::Undefined)),
+                }
             }
             Stmt::While { test, body } => self.run_loop(None, env, |me, env| {
                 let t = me.eval(test, env)?;
@@ -597,8 +601,10 @@ impl Interp {
                     );
                 }
                 let with_env = crate::interpreter::new_with_scope(env.clone(), o);
-                let r = self.exec_stmt(body, &with_env)?;
-                Ok(crate::interpreter::update_empty(r))
+                match self.exec_stmt(body, &with_env) {
+                    Ok(v) => Ok(crate::interpreter::update_empty(v)),
+                    Err(e) => Err(crate::interpreter::update_abrupt_empty(e, Value::Undefined)),
+                }
             }
             Stmt::ClassDecl(class) => {
                 let value = self.eval_class(class, env)?;

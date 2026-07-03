@@ -889,7 +889,15 @@ impl Parser {
     fn parse_substatement(&mut self, annexb_fn: bool) -> Result<Stmt, ParseError> {
         self.single_stmt = true;
         let s = self.parse_stmt()?;
-        match &s {
+        // A label chain is transparent for these checks, and the Annex B allowance only covers a
+        // *direct* FunctionDeclaration: `if (0) l: function f(){}` is illegal even in sloppy mode.
+        let mut labelled = false;
+        let mut inner = &s;
+        while let Stmt::Labeled { body, .. } = inner {
+            labelled = true;
+            inner = body;
+        }
+        match inner {
             Stmt::VarDecl {
                 kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                 ..
@@ -897,7 +905,9 @@ impl Parser {
             | Stmt::ClassDecl(_) => {
                 return self.err("lexical declaration cannot appear in a single-statement context");
             }
-            Stmt::FuncDecl(f) if f.is_async || f.is_generator || !annexb_fn || self.strict => {
+            Stmt::FuncDecl(f)
+                if labelled || f.is_async || f.is_generator || !annexb_fn || self.strict =>
+            {
                 return self
                     .err("function declaration cannot appear in a single-statement context");
             }

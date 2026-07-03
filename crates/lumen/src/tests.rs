@@ -7110,7 +7110,13 @@ fn break_carries_completion_value() {
     );
     assert_eq!(run("String(eval('outer: { 3; break outer; }'))"), "3");
     assert_eq!(run("String(eval('4; outer: { break outer; }'))"), "4");
-    assert_eq!(run("String(eval('for (;;) { 5; if (true) break; }'))"), "5");
+    assert_eq!(run("String(eval('for (;;) { 5; break; }'))"), "5");
+    // An `if` around the break fills the break's empty value with undefined (UpdateEmpty),
+    // so the loop completes with undefined, not the earlier 5.
+    assert_eq!(
+        run("String(eval('for (;;) { 5; if (true) break; }'))"),
+        "undefined"
+    );
     // continue threads its value into the loop's V as well.
     assert_eq!(
         run("String(eval('var i = 0; while (i < 2) { i++; 6; continue; }'))"),
