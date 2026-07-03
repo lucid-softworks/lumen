@@ -529,6 +529,10 @@ pub struct Interp {
     /// `import defer` namespaces awaiting first access: namespace object ptr → module key.
     /// Accessing a property of one evaluates the module (then the entry is removed).
     pub(crate) deferred_ns: HashMap<usize, String>,
+    /// Mapped `arguments` objects: object ptr → (function scope, per-index parameter name — None
+    /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
+    /// parameter bindings.
+    pub(crate) mapped_arguments: HashMap<usize, (Env, Vec<Option<String>>)>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -860,6 +864,7 @@ impl Interp {
             decorator_initializers: Vec::new(),
             annexb_fn_sync: HashMap::new(),
             deferred_ns: HashMap::new(),
+            mapped_arguments: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1229,6 +1234,17 @@ impl Interp {
             Value::Obj(o) => {
                 let o = o.clone();
                 let ptr = Rc::as_ptr(&o) as usize;
+                // A mapped `arguments` index aliases its parameter binding.
+                if !self.mapped_arguments.is_empty() {
+                    if let Some(name) = self.mapped_arg_name(ptr, key) {
+                        if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
+                            let v = env.borrow().vars.get(&name).map(|b| b.value.clone());
+                            if let Some(v) = v {
+                                return Ok(v);
+                            }
+                        }
+                    }
+                }
                 // String wrapper (`new String(...)`/`Object("...")`): own indexed chars + `length`.
                 if let Exotic::StrWrap(s) = o.borrow().exotic.clone() {
                     if key == "length" {
@@ -1361,6 +1377,24 @@ impl Interp {
 
     /// Set `base[key] = value`, honouring setters, accessor-only properties, read-only data
     /// properties, and array `length`/index bookkeeping. The receiver defaults to `base`.
+    /// The parameter name a still-mapped `arguments[key]` aliases, if any.
+    fn mapped_arg_name(&self, ptr: usize, key: &str) -> Option<String> {
+        let (_, names) = self.mapped_arguments.get(&ptr)?;
+        let idx: usize = key.parse().ok()?;
+        names.get(idx)?.clone()
+    }
+
+    /// Unmap an `arguments` index (delete / defineProperty severs the parameter alias).
+    pub(crate) fn unmap_argument(&mut self, ptr: usize, key: &str) {
+        if let Some((_, names)) = self.mapped_arguments.get_mut(&ptr) {
+            if let Ok(idx) = key.parse::<usize>() {
+                if let Some(slot) = names.get_mut(idx) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     pub fn set_member(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Abrupt> {
         self.set_member_recv(base, key, value, base.clone())
             .map(|_| ())
@@ -1376,6 +1410,25 @@ impl Interp {
         value: Value,
         receiver: Value,
     ) -> Result<bool, Abrupt> {
+        // A mapped `arguments` index aliases its parameter binding: writes update the parameter
+        // (and the own property, so unmapped reads and enumeration stay consistent).
+        if !self.mapped_arguments.is_empty() {
+            if let Value::Obj(o) = base {
+                let ptr = Rc::as_ptr(o) as usize;
+                if let Some(name) = self.mapped_arg_name(ptr, key) {
+                    if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
+                        let env = env.clone();
+                        if let Some(b) = env.borrow_mut().vars.get_mut(&name) {
+                            b.value = value.clone();
+                        }
+                        o.borrow_mut()
+                            .props
+                            .insert(key, crate::value::Property::data(value, true, true, true));
+                        return Ok(true);
+                    }
+                }
+            }
+        }
         let obj = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null => {
@@ -2149,42 +2202,79 @@ impl Interp {
                     deletable: false,
                 },
             );
-            // A minimal `arguments` array (not the live mapped object). An unmapped arguments
-            // object (strict function OR non-simple parameter list) exposes `callee` as the
-            // %ThrowTypeError% poison accessor; a mapped one carries the function itself as a
-            // plain data property.
-            let args_arr = self.make_array(args.to_vec());
+            // The `arguments` exotic object: indexed own props + configurable `length`, with
+            // `@@iterator` = Array.prototype.values. An unmapped one (strict function OR
+            // non-simple parameter list) exposes `callee` as the %ThrowTypeError% poison
+            // accessor; a mapped one aliases still-mapped indices to the parameter bindings
+            // (see `mapped_arguments`) and carries the function as `callee`.
+            let ao = Object::new(Some(self.object_proto.clone()));
+            ao.borrow_mut().exotic = crate::value::Exotic::Arguments;
+            for (idx, v) in args.iter().enumerate() {
+                ao.borrow_mut().props.insert(
+                    idx.to_string().as_str(),
+                    Property::data(v.clone(), true, true, true),
+                );
+            }
+            ao.borrow_mut().props.insert(
+                "length",
+                Property::data(Value::Num(args.len() as f64), true, false, true),
+            );
+            if let Some(sym) = self.iterator_sym.clone() {
+                let values = self
+                    .array_proto
+                    .borrow()
+                    .props
+                    .get("values")
+                    .map(|p| p.value.clone());
+                if let Some(v) = values {
+                    ao.borrow_mut()
+                        .props
+                        .insert(Self::sym_key(&sym), Property::builtin(v));
+                }
+            }
             let simple_params = func
                 .params
                 .iter()
                 .all(|p| !p.rest && p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
-            if let Value::Obj(ao) = &args_arr {
-                if func.is_strict || !simple_params {
-                    if let Some(tte) = self.extra_protos.get("%ThrowTypeError%").cloned() {
-                        ao.borrow_mut().props.insert(
-                            "callee",
-                            crate::value::Property {
-                                value: Value::Undefined,
-                                get: Some(Value::Obj(tte.clone())),
-                                set: Some(Value::Obj(tte)),
-                                accessor: true,
-                                writable: false,
-                                enumerable: false,
-                                configurable: false,
-                            },
-                        );
-                    }
-                } else {
+            if func.is_strict || !simple_params {
+                if let Some(tte) = self.extra_protos.get("%ThrowTypeError%").cloned() {
                     ao.borrow_mut().props.insert(
                         "callee",
-                        crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
+                        crate::value::Property {
+                            value: Value::Undefined,
+                            get: Some(Value::Obj(tte.clone())),
+                            set: Some(Value::Obj(tte)),
+                            accessor: true,
+                            writable: false,
+                            enumerable: false,
+                            configurable: false,
+                        },
                     );
+                }
+            } else {
+                ao.borrow_mut().props.insert(
+                    "callee",
+                    crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
+                );
+                // Mapped: indices alias the parameter bindings (which live in `scope`).
+                let names: Vec<Option<String>> = func
+                    .params
+                    .iter()
+                    .take(args.len())
+                    .map(|p| match &p.pattern {
+                        Pattern::Ident(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if names.iter().any(Option::is_some) {
+                    self.mapped_arguments
+                        .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
                 }
             }
             scope.borrow_mut().vars.insert(
                 "arguments".to_string(),
                 Binding {
-                    value: args_arr,
+                    value: Value::Obj(ao),
                     mutable: true,
                     strict_immutable: false,
                     initialized: true,

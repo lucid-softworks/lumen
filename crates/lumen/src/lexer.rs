@@ -820,6 +820,10 @@ impl<'a> Lexer<'a> {
         }
         // A BigInt literal is an integer immediately followed by `n` (no fraction/exponent).
         if self.peek() == Some('n') {
+            // A leading-zero integer (legacy octal / non-octal decimal) admits no BigInt suffix.
+            if self.chars[start] == '0' && self.pos - start > 1 {
+                return Err(self.err("invalid BigInt literal (leading zero)"));
+            }
             self.validate_seps(start, self.pos, 10)?;
             let text: String = self.chars[start..self.pos]
                 .iter()

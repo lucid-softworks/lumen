@@ -122,6 +122,9 @@ pub enum Exotic {
     /// An error object — carries no extra data (name/message live as ordinary properties) but the
     /// tag lets `Error.prototype.toString` and the test262 runner recognise it cheaply.
     Error,
+    /// An `arguments` exotic object (mapped index/parameter aliasing lives in
+    /// `Interp::mapped_arguments`).
+    Arguments,
 }
 
 pub struct Object {

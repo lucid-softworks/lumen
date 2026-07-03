@@ -3751,6 +3751,7 @@ impl Interp {
                         .map(|p| p.configurable)
                         .unwrap_or(true);
                     if configurable {
+                        self.unmap_argument(Rc::as_ptr(o) as usize, prop);
                         o.borrow_mut().props.remove(prop);
                         return Ok(Value::Bool(true));
                     }
@@ -3803,6 +3804,7 @@ impl Interp {
                         .map(|p| p.configurable)
                         .unwrap_or(true);
                     if configurable {
+                        self.unmap_argument(Rc::as_ptr(o) as usize, &key);
                         o.borrow_mut().props.remove(&key);
                         return Ok(Value::Bool(true));
                     }

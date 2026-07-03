@@ -7403,3 +7403,46 @@ fn typed_and_deferred_modules() {
         "undefined,7,true"
     );
 }
+
+#[test]
+fn mapped_arguments_object() {
+    // Sloppy simple-parameter functions get a mapped arguments object: index writes alias
+    // the parameters (and vice versa).
+    assert_eq!(
+        run(
+            "function f(a, b) { arguments[0] = 10; b = 'x'; return [a, arguments[1]].join(','); }
+             f(1, 2)"
+        ),
+        "10,x"
+    );
+    // delete severs the alias.
+    assert_eq!(
+        run("function f(a) { delete arguments[0]; arguments[0] = 9; return String(a); } f(1)"),
+        "1"
+    );
+    // Strict / non-simple parameter lists are unmapped.
+    assert_eq!(
+        run("function f(a) { 'use strict'; arguments[0] = 5; return String(a); } f(1)"),
+        "1"
+    );
+    assert_eq!(
+        run("function f(a = 0) { arguments[0] = 5; return String(a); } f(1)"),
+        "1"
+    );
+    // Arguments is a real exotic object: [object Arguments], configurable length, iterable.
+    assert_eq!(
+        run("function f() { return Object.prototype.toString.call(arguments); } f()"),
+        "[object Arguments]"
+    );
+    assert_eq!(
+        run(
+            "function f() { const d = Object.getOwnPropertyDescriptor(arguments, 'length');
+             return [d.value, d.writable, d.enumerable, d.configurable].join(','); } f(1, 2)"
+        ),
+        "2,true,false,true"
+    );
+    assert_eq!(
+        run("function f() { return [...arguments].join('-'); } f(1, 2, 3)"),
+        "1-2-3"
+    );
+}

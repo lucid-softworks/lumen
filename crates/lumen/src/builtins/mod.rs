@@ -5289,6 +5289,8 @@ fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
             let b = o.borrow();
             if matches!(b.exotic, Exotic::Array) {
                 "Array"
+            } else if matches!(b.exotic, Exotic::Arguments) {
+                "Arguments"
             } else if !matches!(b.call, Callable::None) {
                 "Function"
             } else if matches!(b.exotic, Exotic::Error) {
@@ -10412,6 +10414,9 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
+    // Redefining a mapped `arguments` index severs its parameter alias (after syncing a plain
+    // value write through, per ArgumentsExoticObject [[DefineOwnProperty]]).
+    i.unmap_argument(Rc::as_ptr(o) as usize, key);
     let d = build_partial(i, desc)?;
     // Module namespace [[DefineOwnProperty]]: a String key is only redefinable to a descriptor that
     // matches the export's fixed shape (writable, enumerable, non-configurable, same value); adding
