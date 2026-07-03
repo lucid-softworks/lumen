@@ -958,7 +958,10 @@ fn make_abstract_module_source(it: &mut Interp) -> Value {
         "constructor",
         Property::data(Value::Obj(ctor.clone()), true, false, true),
     );
-    // `.prototype` is non-writable, non-enumerable, non-configurable.
+    // `.prototype` is non-writable, non-enumerable, non-configurable — and the prototype of every
+    // source-phase ModuleSource object (see Interp::module_source_of).
+    it.extra_protos
+        .insert("%AbstractModuleSourceProto%", proto.clone());
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(proto), false, false, false),
@@ -6620,7 +6623,12 @@ fn make_bound(i: &Interp, target: NativeFn, bound_args: Vec<Value>) -> Value {
 /// Like [`make_bound`] but with an explicit observable `length`. These internal closures are
 /// anonymous built-in functions, so they carry own `name` (the empty string) and `length` data
 /// properties (both non-writable, non-enumerable, configurable), which test262's verifyProperty checks.
-fn make_bound_len(i: &Interp, target: NativeFn, bound_args: Vec<Value>, length: f64) -> Value {
+pub(crate) fn make_bound_len(
+    i: &Interp,
+    target: NativeFn,
+    bound_args: Vec<Value>,
+    length: f64,
+) -> Value {
     let t = i.make_native("", 1, target);
     let obj = Object::new(Some(i.function_proto.clone()));
     {

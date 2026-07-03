@@ -7558,3 +7558,158 @@ fn regexp_u_surrogates_and_case_mapping() {
     assert_eq!(run("String(/k/iu.test('\u{212A}'))"), "true");
     assert_eq!(run("String(/K/i.test('k'))"), "true");
 }
+
+#[test]
+fn module_bindings_and_source_phase() {
+    fn run_mod(files: &[(&str, &str)], entry: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let entry_src = files
+            .iter()
+            .find(|(k, _)| k == entry)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        e.eval_module(&entry_src, entry, move |spec, _| {
+            files
+                .iter()
+                .find(|(k, _)| k == spec)
+                .map(|(k, v)| (k.clone(), v.clone()))
+        })
+        .expect("parse");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    // Import bindings are immutable: reads are live, assignment is a TypeError.
+    assert_eq!(
+        run_mod(
+            &[(
+                "m",
+                "import { f as f2 } from 'm'; export function f() { return 23; }
+                 try { f2 = null; globalThis.out = 'no-throw'; }
+                 catch (e) { globalThis.out = 'threw:' + (e instanceof TypeError); }"
+            )],
+            "m",
+            "out"
+        ),
+        "threw:true"
+    );
+    // `import source x` binds a ModuleSource object; `import source from 'm'` is a default
+    // import named `source`; both parse alongside `import from from`-style bindings.
+    assert_eq!(
+        run_mod(
+            &[(
+                "m",
+                "import source x from '<module source>';
+                 globalThis.out = typeof x + ':' + (x === Object($262.AbstractModuleSource ? x : x));"
+            )],
+            "m",
+            "out"
+        ),
+        "object:true"
+    );
+    assert_eq!(
+        run_mod(
+            &[
+                ("m", "import source from 'dep'; globalThis.out = source;"),
+                ("dep", "export default 'dflt';"),
+            ],
+            "m",
+            "out"
+        ),
+        "dflt"
+    );
+    // Two star-exported source bindings of the same specifier are unambiguous.
+    assert_eq!(
+        run_mod(
+            &[
+                (
+                    "m",
+                    "import * as ns from 'both'; globalThis.out = typeof ns.mod;"
+                ),
+                ("both", "export * from 'a'; export * from 'b';"),
+                (
+                    "a",
+                    "import source mod from '<module source>'; export { mod };"
+                ),
+                (
+                    "b",
+                    "import source mod from '<module source>'; export { mod };"
+                ),
+            ],
+            "m",
+            "out"
+        ),
+        "object"
+    );
+}
+
+#[test]
+fn super_set_and_constructor_return_override() {
+    // A base constructor returning an object overrides `this`; super.x = v walks the super
+    // base's chain (a setter there wins) and otherwise defines on the receiver.
+    assert_eq!(
+        run("var got;
+             class A { constructor() { return { marker: 1 }; } set foo(v) { got = v; } }
+             class B extends A { constructor() { super(); super.foo = 14; } }
+             new B(); String(got)"),
+        "14"
+    );
+    assert_eq!(
+        run("class A { constructor() { return { }; } }
+             class B extends A { constructor() { super(); this.x = 5; } }
+             String(new B().x)"),
+        "5"
+    );
+    assert_eq!(
+        run("class C { constructor() { return { y: 9 }; } } String(new C().y)"),
+        "9"
+    );
+}
+
+#[test]
+fn dynamic_import_top_level_await() {
+    let mut e = Engine::new();
+    let files: Vec<(String, String)> = vec![(
+        "tla".to_string(),
+        "globalThis.started = true; await globalThis.gate; globalThis.finished = true;".to_string(),
+    )];
+    e.set_module_loader(move |spec: &str, _referrer: &str| {
+        files
+            .iter()
+            .find(|(k, _)| k == spec)
+            .map(|(k, v)| (k.clone(), v.clone()))
+    });
+    e.eval(
+        "var resolveGate; globalThis.gate = new Promise(r => resolveGate = r);
+         globalThis.order = [];
+         import('tla').then(() => order.push('ns'));
+         globalThis.kick = () => resolveGate();",
+        false,
+    )
+    .expect("setup");
+    // The module starts synchronously but suspends at the top-level await.
+    match e
+        .eval("String(started) + ':' + String(globalThis.finished)", false)
+        .expect("read")
+    {
+        Completion::Value(v) => assert_eq!(v, "true:undefined"),
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+    // Releasing the gate finishes evaluation and settles the import promise.
+    match e.eval("kick(); undefined", false).expect("kick") {
+        Completion::Value(_) => {}
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+    match e
+        .eval("String(finished) + ':' + order.join(',')", false)
+        .expect("read2")
+    {
+        Completion::Value(v) => assert_eq!(v, "true:ns"),
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+}

@@ -13,6 +13,7 @@
 //! so the engine stays filesystem-agnostic.
 
 use crate::ast::*;
+use crate::builtins::make_bound_len;
 use crate::interpreter::{new_scope, Abrupt, Binding, Env, Interp};
 use crate::value::{Object, Property, Value};
 use std::collections::HashMap;
@@ -56,6 +57,9 @@ pub(crate) struct ModuleRec {
     /// Dependency keys imported *only* via `import defer` — skipped during this module's
     /// evaluation phase (they evaluate on first namespace access instead).
     deferred_deps: Vec<String>,
+    /// For a dynamically-imported module evaluating in a coroutine (top-level await): the promise
+    /// that settles when the body finishes.
+    top_promise: Option<Value>,
 }
 
 /// The origin of a local name that is an import binding (so re-exports resolve to the source).
@@ -138,6 +142,12 @@ impl Interp {
             if resolved.contains_key(&spec) {
                 continue;
             }
+            // The host-defined '<module source>' specifier resolves only in the source phase: it
+            // gets a ModuleSource object but no module record.
+            if spec == "<module source>" {
+                resolved.insert(spec.clone(), spec);
+                continue;
+            }
             let (canon, dsrc) = self.fetch_module(&spec, key)?;
             // A `with { type: ... }` dependency synthesizes a wrapper module (JSON/text/bytes) —
             // keyed separately from any ordinary module of the same file.
@@ -193,6 +203,7 @@ impl Interp {
                 evaluating: false,
                 eval_error: None,
                 deferred_deps,
+                top_promise: None,
             },
         );
 
@@ -327,6 +338,10 @@ impl Interp {
                         let dns = self.make_deferred_ns(&dep);
                         self.bind_local(env, local, dns);
                     }
+                    ImportSpec::Source(local) => {
+                        let src_obj = self.module_source_of(&dep);
+                        self.bind_local(env, local, src_obj);
+                    }
                     ImportSpec::Default(local) => {
                         self.link_named(env, local, &dep, "default")?;
                     }
@@ -372,6 +387,22 @@ impl Interp {
         }
     }
 
+    /// The (cached, per canonical key) ModuleSource object a source-phase import binds: an
+    /// ordinary object whose prototype is %AbstractModuleSource%.prototype.
+    pub(crate) fn module_source_of(&mut self, dep: &str) -> Value {
+        if let Some(v) = self.module_source_objs.get(dep) {
+            return v.clone();
+        }
+        let proto = self
+            .extra_protos
+            .get("%AbstractModuleSourceProto%")
+            .cloned();
+        let obj = Object::new(proto);
+        let v = Value::Obj(obj);
+        self.module_source_objs.insert(dep.to_string(), v.clone());
+        v
+    }
+
     fn bind_local(&self, env: &Env, local: &str, value: Value) {
         env.borrow_mut()
             .vars
@@ -401,6 +432,13 @@ impl Interp {
             return Resolution::NotFound;
         }
         seen.push(pair);
+        // A source-phase re-export resolves to the requested module's ModuleSource object.
+        if name == "~source~" {
+            return match self.module_source_objs.get(key) {
+                Some(v) => Resolution::Ns(v.clone()),
+                None => Resolution::NotFound,
+            };
+        }
         let rec = match self.module_recs.get(key) {
             Some(r) => r,
             None => return Resolution::NotFound,
@@ -676,16 +714,123 @@ impl Interp {
                 _ => canon,
             };
             let src = typed_module_source(src, attr_type);
-            self.load_module(&canon, &src)
+            self.parse_and_register(&canon, Some(src))?;
+            self.link_module(&canon)?;
+            Ok(canon)
         })();
         match result {
-            Ok(ns) => self.resolve_promise(&promise, ns),
+            Ok(canon) => {
+                // Evaluation may suspend at a top-level await: chain the import promise onto the
+                // module's evaluation promise, resolving with the namespace.
+                let top = self.evaluate_module_dynamic(&canon);
+                let ns = self.module_recs[&canon].ns.clone();
+                let on_f =
+                    make_bound_len(self, dynamic_import_fulfil, vec![promise.clone(), ns], 1.0);
+                let on_r = make_bound_len(self, dynamic_import_reject, vec![promise.clone()], 1.0);
+                self.promise_then(&top, on_f, on_r);
+            }
             Err(e) => {
                 let reason = crate::interpreter::abrupt_value(e);
                 self.reject_promise(&promise, reason);
             }
         }
         promise
+    }
+
+    /// Evaluate a dynamically-imported module, returning a promise that settles when its body
+    /// (which may use top-level await) completes. Dependencies evaluate synchronously first; the
+    /// module's own body runs in a coroutine so a top-level await parks it.
+    fn evaluate_module_dynamic(&mut self, key: &str) -> Value {
+        let (top, err, settled) = {
+            let rec = &self.module_recs[key];
+            (
+                rec.top_promise.clone(),
+                rec.eval_error.clone(),
+                rec.evaluated || rec.evaluating,
+            )
+        };
+        if let Some(top) = top {
+            return top;
+        }
+        if let Some(err) = err {
+            let p = self.new_promise();
+            self.reject_promise(&p, err);
+            return p;
+        }
+        if settled {
+            let p = self.new_promise();
+            self.resolve_promise(&p, Value::Undefined);
+            return p;
+        }
+        let dep_keys = self.module_recs[key].dep_keys.clone();
+        let deferred = self.module_recs[key].deferred_deps.clone();
+        for dep in &dep_keys {
+            if deferred.contains(dep) {
+                continue;
+            }
+            if let Err(e) = self.evaluate_module(dep) {
+                let p = self.new_promise();
+                let reason = crate::interpreter::abrupt_value(e);
+                self.reject_promise(&p, reason);
+                return p;
+            }
+        }
+        let top = self.new_promise();
+        {
+            let rec = self.module_recs.get_mut(key).unwrap();
+            rec.evaluating = true;
+            rec.top_promise = Some(top.clone());
+        }
+        let (body, env, meta) = {
+            let rec = &self.module_recs[key];
+            (rec.body.clone(), rec.env.clone(), rec.meta.clone())
+        };
+        let module_key = key.to_string();
+        let closure: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> =
+            Box::new(move |i| {
+                let saved_meta = i.import_meta.take();
+                let saved_strict = i.strict;
+                i.import_meta = Some(meta);
+                i.strict = true;
+                let result = i.run_stmt_list(&body, &env);
+                i.import_meta = saved_meta;
+                i.strict = saved_strict;
+                match result {
+                    Ok(_) => {
+                        i.finish_dynamic_module(&module_key, None);
+                        crate::coroutine::Suspend::Done(Value::Undefined)
+                    }
+                    Err(a) => {
+                        let v = crate::interpreter::abrupt_value(a);
+                        i.finish_dynamic_module(&module_key, Some(v.clone()));
+                        crate::coroutine::Suspend::Throw(v)
+                    }
+                }
+            });
+        let ptr = self as *mut Interp;
+        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(closure));
+        if let Value::Obj(o) = &top {
+            self.generators.insert(Rc::as_ptr(o) as usize, coro);
+        }
+        let top_key = match &top {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => unreachable!(),
+        };
+        self.drive_async(
+            top_key,
+            top.clone(),
+            crate::coroutine::Resume::Next(Value::Undefined),
+        );
+        top
+    }
+
+    /// Record a dynamically-evaluated module's completion (run from inside its coroutine).
+    fn finish_dynamic_module(&mut self, key: &str, error: Option<Value>) {
+        if let Some(rec) = self.module_recs.get_mut(key) {
+            rec.evaluated = true;
+            rec.evaluating = false;
+            rec.eval_error = error;
+        }
     }
 }
 
@@ -713,6 +858,24 @@ fn module_dependency_specifiers(body: &[Stmt]) -> Vec<(String, Option<String>)> 
         }
     }
     out
+}
+
+/// Reaction for a dynamic import: the module evaluated — resolve the import promise (`args[0]`)
+/// with the namespace (`args[1]`).
+fn dynamic_import_fulfil(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let p = args.first().cloned().unwrap_or(Value::Undefined);
+    let ns = args.get(1).cloned().unwrap_or(Value::Undefined);
+    i.resolve_promise(&p, ns);
+    Ok(Value::Undefined)
+}
+
+/// Reaction for a dynamic import: evaluation failed — reject the import promise (`args[0]`) with
+/// the reason (`args[1]`).
+fn dynamic_import_reject(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let p = args.first().cloned().unwrap_or(Value::Undefined);
+    let reason = args.get(1).cloned().unwrap_or(Value::Undefined);
+    i.reject_promise(&p, reason);
+    Ok(Value::Undefined)
 }
 
 /// The source text as a JS string literal (escaped).
@@ -786,6 +949,12 @@ fn build_export_tables(body: &[Stmt], resolved: &HashMap<String, String>) -> Exp
                     match spec {
                         ImportSpec::Namespace(local) | ImportSpec::DeferNamespace(local) => {
                             imports.insert(local.clone(), ImportOrigin::Namespace(dep.clone()));
+                        }
+                        ImportSpec::Source(local) => {
+                            imports.insert(
+                                local.clone(),
+                                ImportOrigin::Named(dep.clone(), "~source~".to_string()),
+                            );
                         }
                         ImportSpec::Default(local) => {
                             imports.insert(

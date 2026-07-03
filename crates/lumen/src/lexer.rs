@@ -16,6 +16,8 @@ struct Lexer<'a> {
     line: u32,
     out: Vec<Token>,
     nl_pending: bool,
+    /// Script goal: Annex B HTML-like comments are recognised. Off for modules.
+    html_comments: bool,
     /// Set while reading a string that contained a legacy octal / `\8` / `\9` escape.
     pending_legacy: bool,
     /// Set while reading a string that contained a lone (unpaired) surrogate `\u` escape.
@@ -34,6 +36,12 @@ struct Lexer<'a> {
 
 /// Tokenize `src`. A lex error is reported as a SyntaxError by the caller.
 pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
+    tokenize_goal(src, true)
+}
+
+/// Tokenize with an explicit goal: `html_comments` is true for Scripts (Annex B `<!--`/`-->`
+/// comments apply) and false for Modules (where they are ordinary punctuation, i.e. errors).
+pub fn tokenize_goal(src: &str, html_comments: bool) -> Result<Vec<Token>, LexError> {
     let mut lx = Lexer {
         src: src.as_bytes(),
         chars: src.chars().collect(),
@@ -41,6 +49,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
         line: 1,
         out: Vec::new(),
         nl_pending: false,
+        html_comments,
         pending_legacy: false,
         pending_lone_surrogate: false,
         brace_stack: Vec::new(),
@@ -208,6 +217,7 @@ impl<'a> Lexer<'a> {
             } else if c == '/' && self.peek2() == Some('*') {
                 self.skip_block_comment()?;
             } else if c == '<'
+                && self.html_comments
                 && self.peek_at(1) == Some('!')
                 && self.peek_at(2) == Some('-')
                 && self.peek_at(3) == Some('-')
@@ -215,6 +225,7 @@ impl<'a> Lexer<'a> {
                 // Annex B HTML-like comment: `<!--` opens a single-line comment.
                 self.skip_line_comment();
             } else if c == '-'
+                && self.html_comments
                 && self.peek_at(1) == Some('-')
                 && self.peek_at(2) == Some('>')
                 && (self.nl_pending || self.out.is_empty())

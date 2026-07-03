@@ -2354,7 +2354,33 @@ impl Interp {
             }
             let this = self.get_var("this", env)?;
             let argv = self.eval_args(args, env)?;
-            self.run_constructor_on(&parent, &this, &argv)?;
+            let returned = self.run_constructor_on(&parent, &this, &argv)?;
+            // A base constructor that returns an object overrides `this` for the derived
+            // constructor (and everything downstream: field initializers, super.x accesses,
+            // the implicit return).
+            let this = match (&returned, &this) {
+                (Value::Obj(r), Value::Obj(t)) if !Rc::ptr_eq(r, t) => {
+                    let mut cur = Some(env.clone());
+                    while let Some(scope) = cur {
+                        let done = {
+                            let mut b = scope.borrow_mut();
+                            if let Some(bd) = b.vars.get_mut("this") {
+                                bd.value = returned.clone();
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if done {
+                            break;
+                        }
+                        let parent_scope = scope.borrow().parent.clone();
+                        cur = parent_scope;
+                    }
+                    returned.clone()
+                }
+                _ => this,
+            };
             let this_ctor = self.get_var("%thisctor%", env)?;
             self.init_instance_fields(&this_ctor, &this)?;
             return Ok(Value::Undefined);
@@ -3554,7 +3580,7 @@ impl Interp {
         ctor: &Value,
         this: &Value,
         args: &[Value],
-    ) -> Result<(), Abrupt> {
+    ) -> Result<Value, Abrupt> {
         let obj = match ctor {
             Value::Obj(o) => o.clone(),
             _ => return Err(self.throw("TypeError", "super target is not a constructor")),
@@ -3579,8 +3605,7 @@ impl Interp {
                 self.super_call_ok = is_class && derived;
                 let r = self.call_user(&func, cenv, this.clone(), args, true, &obj);
                 self.super_call_ok = saved_super;
-                r?;
-                Ok(())
+                r
             }
             Callable::Native(f) => {
                 // Native parent (e.g. Error/Map): a super() call is a construct, so set the flag for
@@ -3633,7 +3658,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(())
+                Ok(Value::Undefined)
             }
             _ => Err(self.throw("TypeError", "super target is not a constructor")),
         }
@@ -5468,45 +5493,50 @@ impl Interp {
         match r {
             Reference::Var(base, name) => match base {
                 RefBase::Scope(s) => {
-                    let redirect = {
+                    let found = {
                         let mut b = s.borrow_mut();
                         match b.vars.get_mut(name) {
                             Some(bd) => {
-                                if let Some((src_env, local)) = &bd.import_ref {
-                                    Some((src_env.clone(), local.clone()))
-                                } else {
-                                    // A let/const still in its temporal dead zone: assigning to it
-                                    // is a ReferenceError (this path is assignment, never the
-                                    // declaration's own initialization).
-                                    if !bd.initialized {
+                                if bd.import_ref.is_some() {
+                                    // An import binding is immutable: reads are live through the
+                                    // exporting module, but assignment is always a TypeError.
+                                    return Err(self.throw(
+                                        "TypeError",
+                                        format!("assignment to import binding '{name}'"),
+                                    ));
+                                }
+                                // A let/const still in its temporal dead zone: assigning to it
+                                // is a ReferenceError (this path is assignment, never the
+                                // declaration's own initialization).
+                                if !bd.initialized {
+                                    return Err(self.throw(
+                                        "ReferenceError",
+                                        format!("cannot access '{name}' before initialization"),
+                                    ));
+                                }
+                                if !bd.mutable {
+                                    // A const (strict immutable) always throws; a named
+                                    // function-expression's own name (non-strict immutable)
+                                    // is a silent no-op in sloppy code, a throw under strict.
+                                    if bd.strict_immutable || self.strict {
                                         return Err(self.throw(
-                                            "ReferenceError",
-                                            format!("cannot access '{name}' before initialization"),
+                                            "TypeError",
+                                            format!("assignment to constant '{name}'"),
                                         ));
                                     }
-                                    if !bd.mutable {
-                                        // A const (strict immutable) always throws; a named
-                                        // function-expression's own name (non-strict immutable)
-                                        // is a silent no-op in sloppy code, a throw under strict.
-                                        if bd.strict_immutable || self.strict {
-                                            return Err(self.throw(
-                                                "TypeError",
-                                                format!("assignment to constant '{name}'"),
-                                            ));
-                                        }
-                                        return Ok(());
-                                    }
-                                    bd.value = value;
-                                    bd.initialized = true;
                                     return Ok(());
                                 }
+                                bd.value = value.clone();
+                                bd.initialized = true;
+                                true
                             }
-                            None => None,
+                            None => false,
                         }
                     };
-                    match redirect {
-                        Some((src_env, local)) => self.assign_var(&local, value, &src_env),
-                        None => self.assign_var(name, value, s),
+                    if found {
+                        Ok(())
+                    } else {
+                        self.assign_var(name, value, s)
                     }
                 }
                 RefBase::With(obj) => {
@@ -5547,8 +5577,12 @@ impl Interp {
                     return Err(self.throw("TypeError", "cannot set property on null super base"));
                 }
                 let k = self.coerce_ref_key(key)?;
+                // OrdinarySet from the super base: accessors on the base's chain win, and the
+                // final write lands on the receiver.
+                let proto = proto.clone();
                 let receiver = receiver.clone();
-                self.set_member(&receiver, &k, value)
+                self.set_member_recv(&proto, &k, value, receiver)
+                    .map(|_| ())
             }
         }
     }

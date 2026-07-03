@@ -102,6 +102,8 @@ pub enum ImportSpec {
     Namespace(String),
     /// `import defer * as ns from "…"` — evaluation deferred until the namespace is accessed.
     DeferNamespace(String),
+    /// `import source x from "…"` — a source-phase import binding the module's ModuleSource.
+    Source(String),
     /// `import { imported as local } from "…"`
     Named { imported: String, local: String },
 }

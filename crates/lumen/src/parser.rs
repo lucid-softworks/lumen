@@ -65,7 +65,7 @@ pub fn parse_script_eval(
 /// Parse a module (always strict; `import`/`export` are allowed only here). Modules permit top-level
 /// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
-    let tokens = tokenize(src).map_err(|e| ParseError {
+    let tokens = crate::lexer::tokenize_goal(src, false).map_err(|e| ParseError {
         message: e.message,
         line: e.line,
     })?;
@@ -116,7 +116,8 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
                     let name = match spec {
                         ImportSpec::Default(n)
                         | ImportSpec::Namespace(n)
-                        | ImportSpec::DeferNamespace(n) => n,
+                        | ImportSpec::DeferNamespace(n)
+                        | ImportSpec::Source(n) => n,
                         ImportSpec::Named { local, .. } => local,
                     };
                     lexical.push(name.clone());
@@ -1254,6 +1255,25 @@ impl Parser {
         }
         let mut specs = Vec::new();
         let mut need_from = true;
+        // `import source x from "spec"` — a source-phase import. `import source from "spec"` is
+        // instead a *default* import named `source` (lookahead: `from` + a specifier string).
+        if self.is_ident_word("source")
+            && !self.cur_escaped()
+            && matches!(self.peek_kind(1), Tok::Ident(_))
+            && !(matches!(self.peek_kind(1), Tok::Ident(w) if w == "from")
+                && matches!(self.peek_kind(2), Tok::Str(_)))
+        {
+            self.advance(); // source
+            let local = self.parse_binding_ident_name()?;
+            self.expect_keyword_word("from")?;
+            let (source, attr_type) = self.parse_module_specifier()?;
+            self.consume_semicolon()?;
+            return Ok(Stmt::Import(ImportDecl {
+                source,
+                specs: vec![ImportSpec::Source(local)],
+                attr_type,
+            }));
+        }
         // `import defer * as ns from "spec"` — a deferred namespace import.
         if self.is_ident_word("defer")
             && !self.cur_escaped()
@@ -2199,9 +2219,11 @@ impl Parser {
             let piece = match part {
                 TplPart::Str { cooked, .. } => Expr::Str(Rc::from(cooked.as_str())),
                 TplPart::Sub(src) => {
-                    let tokens = tokenize(&src).map_err(|e| ParseError {
-                        message: e.message,
-                        line: e.line,
+                    let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
+                        ParseError {
+                            message: e.message,
+                            line: e.line,
+                        }
                     })?;
                     let mut sub = Parser {
                         toks: tokens,
@@ -2258,9 +2280,11 @@ impl Parser {
             match part {
                 TplPart::Str { cooked, raw } => quasis.push((Some(cooked), raw)),
                 TplPart::Sub(src) => {
-                    let tokens = tokenize(&src).map_err(|e| ParseError {
-                        message: e.message,
-                        line: e.line,
+                    let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
+                        ParseError {
+                            message: e.message,
+                            line: e.line,
+                        }
                     })?;
                     let mut sub = Parser {
                         toks: tokens,

@@ -533,6 +533,8 @@ pub struct Interp {
     /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
     /// parameter bindings.
     pub(crate) mapped_arguments: HashMap<usize, (Env, Vec<Option<String>>)>,
+    /// Source-phase imports: canonical module key → its (cached) ModuleSource object.
+    pub(crate) module_source_objs: HashMap<String, Value>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -865,6 +867,7 @@ impl Interp {
             annexb_fn_sync: HashMap::new(),
             deferred_ns: HashMap::new(),
             mapped_arguments: HashMap::new(),
+            module_source_objs: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1395,6 +1398,23 @@ impl Interp {
         }
     }
 
+    /// Resolve a module-namespace property before rejecting a write: an exported binding still in
+    /// its temporal dead zone throws ReferenceError (per the namespace [[GetOwnProperty]] step).
+    fn ns_probe_tdz(&mut self, ptr: usize, key: &str) -> Result<(), Abrupt> {
+        let live = self
+            .module_ns
+            .get(&ptr)
+            .and_then(|map| map.get(key))
+            .and_then(|b| match b {
+                crate::modules::NsBinding::Live(env, local) => Some((env.clone(), local.clone())),
+                _ => None,
+            });
+        if let Some((env, local)) = live {
+            self.get_var(&local, &env)?;
+        }
+        Ok(())
+    }
+
     pub fn set_member(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Abrupt> {
         self.set_member_recv(base, key, value, base.clone())
             .map(|_| ())
@@ -1455,8 +1475,10 @@ impl Interp {
 
         let ptr = Rc::as_ptr(&obj) as usize;
         // A module namespace exotic object's [[Set]] always fails: in strict code (all module code
-        // is strict) the assignment throws a TypeError; a sloppy caller sees an inert no-op.
+        // is strict) the assignment throws a TypeError; a sloppy caller sees an inert no-op. The
+        // property is resolved first, so a binding still in its TDZ throws ReferenceError instead.
         if self.is_namespace(ptr) {
+            self.ns_probe_tdz(ptr, key)?;
             if self.strict {
                 return Err(self.throw(
                     "TypeError",
@@ -1607,6 +1629,28 @@ impl Interp {
             cur = o.borrow().proto.clone();
         }
 
+        // OrdinarySet: the write lands on the *receiver* (they differ for `super.x = v` and
+        // Reflect.set with an explicit receiver). A namespace receiver rejects the define,
+        // probing the binding first so a TDZ export surfaces ReferenceError.
+        let obj = match &receiver {
+            Value::Obj(r) if !Rc::ptr_eq(r, &obj) => {
+                let rptr = Rc::as_ptr(r) as usize;
+                if self.is_namespace(rptr) {
+                    self.ns_probe_tdz(rptr, key)?;
+                    if self.strict {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!(
+                                "Cannot assign to read only property '{key}' of module namespace object"
+                            ),
+                        ));
+                    }
+                    return Ok(false);
+                }
+                r.clone()
+            }
+            _ => obj,
+        };
         let is_array = matches!(obj.borrow().exotic, Exotic::Array);
         if is_array {
             self.array_set(&obj, key, value)?;
@@ -2391,6 +2435,24 @@ impl Interp {
             let frame = self.using_stack.pop().unwrap_or_default();
             result = self.dispose_frame(frame, result);
         }
+        // [[Construct]]: a non-object return yields the *current* `this` binding — which a
+        // derived constructor's super() may have rebound to a base constructor's returned object.
+        if is_construct && !func.is_arrow {
+            if let Ok(v) = &result {
+                if !matches!(v, Value::Obj(_)) {
+                    let mut cur = Some(body.clone());
+                    while let Some(scope) = cur {
+                        let found = scope.borrow().vars.get("this").map(|b| b.value.clone());
+                        if let Some(t) = found {
+                            result = Ok(t);
+                            break;
+                        }
+                        let parent = scope.borrow().parent.clone();
+                        cur = parent;
+                    }
+                }
+            }
+        }
         self.strict = saved_strict;
         self.new_target = saved_new_target;
         result
@@ -2813,8 +2875,12 @@ impl Interp {
                 // Class constructors run field initializers (and, when derived, defer `this` setup
                 // to `super()`); plain function constructors just run their body.
                 if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
-                    self.run_constructor_on(&callee, &this_val, args)?;
-                    Ok(this_val)
+                    let ret = self.run_constructor_on(&callee, &this_val, args)?;
+                    // A constructor that explicitly returns an object overrides the instance.
+                    Ok(match ret {
+                        Value::Obj(_) => ret,
+                        _ => this_val,
+                    })
                 } else {
                     let ret = self.call_user(&func, env, this_val.clone(), args, true, &obj)?;
                     Ok(match ret {
