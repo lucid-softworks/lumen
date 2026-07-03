@@ -8902,13 +8902,29 @@ fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Resu
         Some(crate::ast::Stmt::FuncDecl(f)) => {
             let env = i.global_env.clone();
             let func = i.make_function(f, env);
-            // GetPrototypeFromConstructor(new.target, ...): a cross-realm `new other.Function()` gets
-            // other realm's prototype as its [[Prototype]].
+            // GetPrototypeFromConstructor(new.target, ...): a cross-realm `new other.Function()`
+            // gets the other realm's prototype as its [[Prototype]] — including the *fallback*
+            // when newTarget.prototype isn't an object (resolved in newTarget's realm).
             let nt = i.new_target.clone();
             if matches!(nt, Value::Obj(_)) {
-                if let Value::Obj(p) = ab(i.get_member(&nt, "prototype"))? {
-                    if let Value::Obj(fo) = &func {
-                        fo.borrow_mut().proto = Some(p);
+                let kind_key = match prefix {
+                    "function*" => "%GeneratorFunction.prototype%",
+                    "async function" => "%AsyncFunction.prototype%",
+                    "async function*" => "%AsyncGeneratorFunction.prototype%",
+                    _ => "Function",
+                };
+                match ab(i.get_member(&nt, "prototype"))? {
+                    Value::Obj(p) => {
+                        if let Value::Obj(fo) = &func {
+                            fo.borrow_mut().proto = Some(p);
+                        }
+                    }
+                    _ => {
+                        if let Some(p) = ctor_realm_proto(i, &nt, kind_key) {
+                            if let Value::Obj(fo) = &func {
+                                fo.borrow_mut().proto = Some(p);
+                            }
+                        }
                     }
                 }
             }
@@ -14341,13 +14357,34 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
 }
 
 /// Box only when a wrapper constructor is invoked via `new` (`new Number(x)` boxes, `Number(x)` does
-/// not).
+/// not). The instance prototype honors newTarget (OrdinaryCreateFromConstructor), falling back to
+/// newTarget's *realm's* intrinsic when its `prototype` isn't an object.
 fn maybe_box(i: &mut Interp, v: Value) -> Value {
-    if i.constructing {
-        box_primitive(i, v)
-    } else {
-        v
+    if !i.constructing {
+        return v;
     }
+    let boxed = box_primitive(i, v);
+    let nt = i.new_target.clone();
+    if let (Value::Obj(o), Value::Obj(_)) = (&boxed, &nt) {
+        let key = match o.borrow().exotic {
+            Exotic::NumWrap(_) => "Number",
+            Exotic::BoolWrap(_) => "Boolean",
+            Exotic::StrWrap(_) => "String",
+            _ => "",
+        };
+        if !key.is_empty() {
+            match i.get_member(&nt, "prototype") {
+                Ok(Value::Obj(p)) => o.borrow_mut().proto = Some(p),
+                Ok(_) => {
+                    if let Some(p) = ctor_realm_proto(i, &nt, key) {
+                        o.borrow_mut().proto = Some(p);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    boxed
 }
 
 fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Result<Value, Value> {

@@ -893,6 +893,12 @@ impl Interp {
                 deletable: false,
             },
         );
+        // Register the main realm so a call back into main-realm code from inside another realm
+        // swaps the main intrinsics back in (see `callee_realm_global`).
+        let main = interp.snapshot_realm();
+        interp
+            .realms
+            .insert(Rc::as_ptr(&interp.global) as usize, main);
         interp
     }
 
@@ -2042,6 +2048,55 @@ impl Interp {
     }
 
     fn call_inner(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
+        // A cross-realm callee runs with its own realm's intrinsics active (so a thrown TypeError,
+        // a fresh object's prototype, or a global lookup lands in the right realm).
+        if !self.realms.is_empty() {
+            if let Value::Obj(o) = &callee {
+                if let Some(gptr) = self.callee_realm_global(o) {
+                    let saved = self.snapshot_realm();
+                    let target = self.realms[&gptr].snapshot_clone();
+                    self.restore_realm(&target);
+                    let r = self.call_dispatch(callee, this, args);
+                    self.restore_realm(&saved);
+                    return r;
+                }
+            }
+        }
+        self.call_dispatch(callee, this, args)
+    }
+
+    /// The realm (keyed by its global's pointer) a function belongs to, when it is NOT the active
+    /// realm: resolved by finding which realm's %Function.prototype% sits on its prototype chain.
+    fn callee_realm_global(&self, obj: &Gc) -> Option<usize> {
+        let mut cur = obj.borrow().proto.clone();
+        let mut hops = 0;
+        while let Some(p) = cur {
+            if Rc::ptr_eq(&p, &self.function_proto) {
+                return None;
+            }
+            for (g, rs) in &self.realms {
+                if Rc::ptr_eq(&p, &rs.function_proto) {
+                    if Rc::ptr_eq(&rs.function_proto, &self.function_proto) {
+                        return None;
+                    }
+                    return Some(*g);
+                }
+            }
+            hops += 1;
+            if hops > 8 {
+                break;
+            }
+            cur = p.borrow().proto.clone();
+        }
+        None
+    }
+
+    fn call_dispatch(
+        &mut self,
+        callee: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<Value, Abrupt> {
         let obj = match &callee {
             Value::Obj(o) => o.clone(),
             _ => {
@@ -2894,6 +2949,28 @@ impl Interp {
     }
 
     fn construct_inner(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        new_target: Value,
+    ) -> Result<Value, Abrupt> {
+        // A cross-realm constructor runs with its own realm's intrinsics active.
+        if !self.realms.is_empty() {
+            if let Value::Obj(o) = &callee {
+                if let Some(gptr) = self.callee_realm_global(o) {
+                    let saved = self.snapshot_realm();
+                    let target = self.realms[&gptr].snapshot_clone();
+                    self.restore_realm(&target);
+                    let r = self.construct_dispatch(callee, args, new_target);
+                    self.restore_realm(&saved);
+                    return r;
+                }
+            }
+        }
+        self.construct_dispatch(callee, args, new_target)
+    }
+
+    fn construct_dispatch(
         &mut self,
         callee: Value,
         args: &[Value],

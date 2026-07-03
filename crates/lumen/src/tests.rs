@@ -7838,3 +7838,37 @@ fn sub_ten_area_fixes() {
         "th:decimal"
     );
 }
+
+#[test]
+fn cross_realm_calls_and_constructs() {
+    // A function from another realm runs with its own realm's intrinsics: its thrown
+    // TypeError is that realm's, distinct from ours.
+    assert_eq!(
+        run("const other = $262.createRealm().global;
+             const otherTte = Object.getOwnPropertyDescriptor(
+                 new other.Function('\"use strict\"; return arguments;')(), 'callee').get;
+             let cross = false, distinct = false;
+             try { otherTte(); } catch (e) {
+               cross = e instanceof other.TypeError && !(e instanceof TypeError);
+             }
+             distinct = otherTte !== Object.getOwnPropertyDescriptor(
+                 (function() { 'use strict'; return arguments; })(), 'callee').get;
+             String(cross && distinct)"),
+        "true"
+    );
+    // GetPrototypeFromConstructor falls back to the *newTarget's realm's* intrinsic.
+    assert_eq!(
+        run("const other = $262.createRealm().global;
+             const C = new other.Function(); C.prototype = null;
+             const o = Reflect.construct(Boolean, [], C);
+             String(Object.getPrototypeOf(o) === other.Boolean.prototype)"),
+        "true"
+    );
+    // Cross-realm eval sees its own globals while closures keep resolving in theirs.
+    assert_eq!(
+        run("const other = $262.createRealm().global;
+             other.eval('globalThis.marker = 7;');
+             String(other.marker) + ':' + String(typeof globalThis.marker)"),
+        "7:undefined"
+    );
+}
