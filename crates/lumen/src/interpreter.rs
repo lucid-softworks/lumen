@@ -1578,15 +1578,17 @@ impl Interp {
         // that isn't a valid index is inert (the value coercion still runs, then is discarded).
         if let Some(info) = self.typed_arrays.get(&ptr).copied() {
             match self.ta_index_kind(&info, key) {
-                TaIndex::Element(idx) => {
-                    self.ta_store(&info, idx, &value)?;
-                    return Ok(true);
-                }
-                TaIndex::Exotic => {
-                    if info.kind.is_bigint() {
-                        self.to_bigint(&value)?;
+                TaIndex::Element(_) | TaIndex::Exotic => {
+                    // IntegerIndexedElementSet coerces the value first — the coercion can resize
+                    // the underlying buffer, changing which indices are valid — then re-checks the
+                    // index and silently discards an out-of-bounds write.
+                    let num = if info.kind.is_bigint() {
+                        Value::BigInt(self.to_bigint(&value)?)
                     } else {
-                        self.to_number(&value)?;
+                        Value::Num(self.to_number(&value)?)
+                    };
+                    if let TaIndex::Element(idx) = self.ta_index_kind(&info, key) {
+                        self.ta_store(&info, idx, &num)?;
                     }
                     return Ok(true);
                 }

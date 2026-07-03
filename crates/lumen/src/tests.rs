@@ -7937,3 +7937,112 @@ fn temporal_duration_arithmetic_and_parsing() {
         "RangeError"
     );
 }
+#[test]
+fn resizable_typed_array_integrity() {
+    assert_eq!(
+        run("const gsab = new SharedArrayBuffer(8, {maxByteLength: 16});
+             let r = [];
+             try { Object.preventExtensions(new Uint8Array(gsab)); r.push('no-throw'); } catch(e) { r.push(e.name); }
+             try { Object.preventExtensions(new Uint8Array(gsab, 0, 4)); r.push('ok'); } catch(e) { r.push(e.name); }
+             class MyU8 extends Uint8Array {}
+             const rab = new ArrayBuffer(8, {maxByteLength: 16});
+             try { Object.preventExtensions(new MyU8(rab, 0, 4)); r.push('no-throw'); } catch(e) { r.push(e.name); }
+             try { Object.seal(new Uint8Array(gsab, 0, 4)); r.push('no-throw'); } catch(e) { r.push(e.name); }
+             Object.seal(new Uint8Array(gsab, 0, 0)); r.push('sealed-empty');
+             r.join(',')"),
+        "TypeError,ok,TypeError,TypeError,sealed-empty"
+    );
+    assert_eq!(
+        run("const rab = new ArrayBuffer(8, {maxByteLength: 16});
+             const ta = new Uint8Array(rab);
+             let r = [];
+             try { Object.preventExtensions(ta); r.push('no-throw'); } catch(e) { r.push(e.name); }
+             r.push(Reflect.preventExtensions(ta));
+             r.push(Reflect.preventExtensions({}) );
+             r.join(',')"),
+        "TypeError,false,true"
+    );
+    // The value coercion in a TypedArray write runs before the bounds check, so a coercion that
+    // grows the buffer makes the write land.
+    assert_eq!(
+        run("const rab = new ArrayBuffer(0, {maxByteLength: 4});
+             const ta = new Int8Array(rab);
+             ta[1] = { valueOf() { rab.resize(4); return 7; } };
+             ta[1]"),
+        "7"
+    );
+}
+
+#[test]
+fn regexp_duplicate_named_groups_matching() {
+    assert_eq!(
+        run(r#"JSON.stringify(/(?:(?:(?<a>x)|(?<a>y))\k<a>){2}/.exec('xxyy'))"#),
+        r#"["xxyy",null,"y"]"#
+    );
+    assert_eq!(
+        run(r#"'abXcdX'.replace(/(?<d>ab)|(?<d>cd)/g, '[$<d>]')"#),
+        "[ab]X[cd]X"
+    );
+    // Quantifier iterations reset the captures inside the repeated atom.
+    assert_eq!(
+        run(r#"JSON.stringify(/(?:(a)|(b)){2}/.exec('ab'))"#),
+        r#"["ab",null,"b"]"#
+    );
+}
+
+#[test]
+fn uint8array_base64_hex_spec() {
+    assert_eq!(
+        throws("Uint8Array.fromBase64('SGVsbG8=', {lastChunkHandling: 'stric'})"),
+        "TypeError"
+    );
+    assert_eq!(
+        throws("Uint8Array.fromBase64('SGVsbA', {lastChunkHandling: 'strict'})"),
+        "SyntaxError"
+    );
+    assert_eq!(
+        run("Uint8Array.fromBase64('SGVsbA', {lastChunkHandling: 'stop-before-partial'}).length"),
+        "3"
+    );
+    assert_eq!(
+        run("Uint8Array.fromBase64('SGVsbA').join(',')"),
+        "72,101,108,108"
+    ); // loose
+    assert_eq!(
+        throws("Uint8Array.fromBase64('SGVsbG8=extra')"),
+        "SyntaxError"
+    );
+    assert_eq!(
+        run("const ta = new Uint8Array(3);
+             const r = ta.setFromBase64('SGVsbG8gV29ybGQ=', {lastChunkHandling: 'loose'});
+             r.read + ':' + r.written + ':' + ta.join(',')"),
+        "4:3:72,101,108"
+    );
+    assert_eq!(
+        run("const ta = new Uint8Array(2);
+             const r = ta.setFromHex('aabbcc');
+             r.read + ':' + r.written + ':' + ta.join(',')"),
+        "4:2:170,187"
+    );
+    assert_eq!(
+        throws("new Uint8Array(2).setFromHex('aabbc')"),
+        "SyntaxError"
+    );
+}
+
+#[test]
+fn listformat_to_parts_and_temporal_removed_methods() {
+    assert_eq!(
+        run(
+            "const lf = new Intl.ListFormat('en-US', {type: 'disjunction'});
+             lf.formatToParts(['f','o','o']).map(p => p.type[0] + p.value).join('|')"
+        ),
+        "ef|l, |eo|l, or |eo"
+    );
+    assert_eq!(
+        run("['withPlainDate' in Temporal.PlainDateTime.prototype,
+             'epochSeconds' in Temporal.ZonedDateTime.prototype,
+             'toPlainMonthDay' in Temporal.ZonedDateTime.prototype].join(',')"),
+        "false,false,false"
+    );
+}

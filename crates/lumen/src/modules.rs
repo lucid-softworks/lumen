@@ -339,6 +339,14 @@ impl Interp {
                         self.bind_local(env, local, dns);
                     }
                     ImportSpec::Source(local) => {
+                        // GetModuleSource of a Source Text Module Record throws a SyntaxError:
+                        // only the host-defined '<module source>' module has a ModuleSource.
+                        if dep != "<module source>" {
+                            return Err(self.throw(
+                                "SyntaxError",
+                                "source-text modules have no module source",
+                            ));
+                        }
                         let src_obj = self.module_source_of(&dep);
                         self.bind_local(env, local, src_obj);
                     }

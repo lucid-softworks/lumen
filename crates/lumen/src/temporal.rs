@@ -5799,16 +5799,6 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
             Temporal::DateTime(d, nt),
         ))
     });
-    it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
-        let (_, tm) = as_datetime(i, &t)?;
-        let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        Ok(make_like(
-            i,
-            &t,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, tm),
-        ))
-    });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let cal = check_calendar(i, &arg(a, 0))?;
@@ -8196,14 +8186,6 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let tomorrow = tomorrow_local - offset_for_local(&tz, tomorrow_local) as i128;
         Ok(Value::Num((tomorrow - today) as f64 / 3_600_000_000_000.0))
     });
-    def_getter(it, &proto, "epochSeconds", |i, t, _| {
-        Ok(Value::Num(
-            as_zoned(i, &t)?.0.div_euclid(1_000_000_000) as f64
-        ))
-    });
-    def_getter(it, &proto, "epochMicroseconds", |i, t, _| {
-        Ok(Value::BigInt(as_zoned(i, &t)?.0.div_euclid(1000)))
-    });
     time_get!("hour", |t: IsoTime| Value::Num(t.hour as f64));
     time_get!("minute", |t: IsoTime| Value::Num(t.minute as f64));
     time_get!("second", |t: IsoTime| Value::Num(t.second as f64));
@@ -8260,22 +8242,6 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             &t,
             "Temporal.PlainDateTime",
             Temporal::DateTime(d, tm),
-        ))
-    });
-    it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
-        let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(
-            i,
-            "Temporal.PlainYearMonth",
-            Temporal::YearMonth(zoned_local(e, o).0),
-        ))
-    });
-    it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
-        let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(
-            i,
-            "Temporal.PlainMonthDay",
-            Temporal::MonthDay(zoned_local(e, o).0),
         ))
     });
     it.def_method(&proto, "startOfDay", 0, |i, t, _| {
@@ -8526,23 +8492,6 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
             v => to_time(i, &v, &Value::Undefined)?,
         };
         let local = dt_ns(d, nt);
-        let off = offset_for_local(&tz, local);
-        Ok(make_like(
-            i,
-            &t,
-            "Temporal.ZonedDateTime",
-            Temporal::Zoned {
-                epoch_ns: local - off as i128,
-                offset_ns: off,
-                tz,
-            },
-        ))
-    });
-    it.def_method(&proto, "withPlainDate", 1, |i, t, a| {
-        let (e, o, tz) = as_zoned(i, &t)?;
-        let (_, tm) = zoned_local(e, o);
-        let nd = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let local = dt_ns(nd, tm);
         let off = offset_for_local(&tz, local);
         Ok(make_like(
             i,

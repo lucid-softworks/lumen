@@ -85,21 +85,30 @@ fn string_list(i: &mut Interp, list: &Value) -> Result<Vec<String>, Value> {
     Ok(out)
 }
 
-fn assemble(parts: &[String], pats: [&'static str; 4]) -> String {
-    let apply = |pat: &str, a: &str, b: &str| pat.replace("{0}", a).replace("{1}", b);
-    match parts.len() {
-        0 => String::new(),
-        1 => parts[0].clone(),
-        2 => apply(pats[0], &parts[0], &parts[1]),
-        n => {
-            let mut result = parts[n - 1].clone();
-            result = apply(pats[3], &parts[n - 2], &result); // end
-            for idx in (1..n - 2).rev() {
-                result = apply(pats[2], &parts[idx], &result); // middle
+/// The literal between `{0}` and `{1}` in a two-placeholder list pattern.
+fn pat_sep(pat: &str) -> &str {
+    pat.trim_start_matches("{0}").trim_end_matches("{1}")
+}
+
+/// CreatePartsFromList: alternating element/literal segments (`true` = element).
+fn assemble_segments(parts: &[String], pats: [&'static str; 4]) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    let n = parts.len();
+    for (idx, p) in parts.iter().enumerate() {
+        if idx > 0 {
+            let sep = match (n, idx) {
+                (2, _) => pat_sep(pats[0]),               // pair
+                (_, 1) => pat_sep(pats[1]),               // start
+                (_, i) if i == n - 1 => pat_sep(pats[3]), // end
+                _ => pat_sep(pats[2]),                    // middle
+            };
+            if !sep.is_empty() {
+                out.push((false, sep.to_string()));
             }
-            apply(pats[1], &parts[0], &result) // start
         }
+        out.push((true, p.clone()));
     }
+    out
 }
 
 fn format(i: &mut Interp, this: &Value, list: &Value, to_parts: bool) -> Result<Value, Value> {
@@ -112,32 +121,18 @@ fn format(i: &mut Interp, this: &Value, list: &Value, to_parts: bool) -> Result<
     let lang = locale.split('-').next().unwrap_or("en");
     let parts = string_list(i, list)?;
     let pats = data::list_patterns(lang, &kind, &style);
+    let segments = assemble_segments(&parts, pats);
     if !to_parts {
-        return Ok(Value::from_string(assemble(&parts, pats)));
-    }
-    // formatToParts: emit "element"/"literal" segments. We reconstruct by diffing the assembled
-    // string against the elements (sufficient for the common patterns).
-    let whole = assemble(&parts, pats);
-    let mut segments: Vec<(String, String)> = Vec::new();
-    let mut rest = whole.as_str();
-    for (idx, p) in parts.iter().enumerate() {
-        if let Some(pos) = rest.find(p.as_str()) {
-            if pos > 0 {
-                segments.push(("literal".to_string(), rest[..pos].to_string()));
-            }
-            segments.push(("element".to_string(), p.clone()));
-            rest = &rest[pos + p.len()..];
-        }
-        let _ = idx;
-    }
-    if !rest.is_empty() {
-        segments.push(("literal".to_string(), rest.to_string()));
+        return Ok(Value::from_string(
+            segments.iter().map(|(_, s)| s.as_str()).collect::<String>(),
+        ));
     }
     let arr: Vec<Value> = segments
         .into_iter()
-        .map(|(t, v)| {
+        .map(|(is_elem, v)| {
             let ob = i.new_object();
-            set_data(&ob, "type", Value::from_string(t));
+            let t = if is_elem { "element" } else { "literal" };
+            set_data(&ob, "type", Value::from_string(t.to_string()));
             set_data(&ob, "value", Value::from_string(v));
             Value::Obj(ob)
         })

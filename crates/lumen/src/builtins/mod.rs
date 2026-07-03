@@ -3669,6 +3669,15 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
     if !js_prevent_extensions(i, obj)? {
         return Ok(false);
     }
+    // TypedArray elements can never be made non-configurable (or non-writable), so sealing or
+    // freezing any view that currently has elements fails at the first DefinePropertyOrThrow.
+    if let Value::Obj(o) = obj {
+        if let Some(info) = ta_info(i, o) {
+            if i.ta_len(&info).unwrap_or(0) > 0 {
+                return Ok(false);
+            }
+        }
+    }
     let proxy = proxy_pair(i, obj);
     let keys: Vec<String> = if let Some((t, h)) = &proxy {
         let mut ks = Vec::new();
@@ -3817,8 +3826,12 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
             }
             let buflen = i.array_buffers[&bp].len();
-            let rv = ab(i.get_member(&bv, "resizable"))?;
-            let resizable = i.to_boolean(&rv);
+            // A resizable ArrayBuffer or a growable SharedArrayBuffer makes an auto-length view
+            // length-tracking.
+            let resizable = matches!(
+                o.borrow().props.get("__abResizable").map(|p| &p.value),
+                Some(Value::Bool(true))
+            );
             let len = match len_arg {
                 Some(l) => {
                     if offset + l * es > buflen {
@@ -4257,50 +4270,136 @@ fn b64_encode(bytes: &[u8], url: bool, pad: bool) -> String {
     }
     out
 }
-fn b64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
-    let alpha = if url { B64_URL } else { B64_STD };
-    let mut vals: Vec<u32> = Vec::new();
-    for c in s.chars() {
-        if c == '=' {
-            break;
-        }
-        if c.is_whitespace() {
-            continue;
-        }
-        let pos = alpha.iter().position(|&a| a as char == c)?;
-        vals.push(pos as u32);
-    }
-    let mut out = Vec::new();
-    for grp in vals.chunks(4) {
-        if grp.len() == 1 {
-            return None; // a lone 6-bit group is not decodable
-        }
-        let mut n = 0u32;
-        for (idx, &v) in grp.iter().enumerate() {
-            n |= v << (18 - 6 * idx);
-        }
-        out.push((n >> 16) as u8);
-        if grp.len() >= 3 {
-            out.push((n >> 8) as u8);
-        }
-        if grp.len() >= 4 {
-            out.push(n as u8);
-        }
-    }
-    Some(out)
-}
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
+/// FromBase64: decode at most `max_len` bytes honoring `handling` (loose / strict /
+/// stop-before-partial). Returns `(read, bytes)` where `read` is the code units consumed through
+/// the last fully decoded chunk; `Err(())` is a syntax error.
+fn b64_decode_spec(
+    s: &str,
+    url: bool,
+    handling: &str,
+    max_len: usize,
+) -> Result<(usize, Vec<u8>), ()> {
     let chars: Vec<char> = s.chars().collect();
-    let mut out = Vec::new();
-    for pair in chars.chunks(2) {
-        let hi = pair[0].to_digit(16)?;
-        let lo = pair[1].to_digit(16)?;
-        out.push((hi * 16 + lo) as u8);
+    let len = chars.len();
+    let is_ws = |c: char| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' ');
+    let decode_chunk = |chunk: &[u8], throw_extra: bool, bytes: &mut Vec<u8>| -> Result<(), ()> {
+        let mut n = 0u32;
+        for (idx, &v) in chunk.iter().enumerate() {
+            n |= (v as u32) << (18 - 6 * idx);
+        }
+        match chunk.len() {
+            2 => {
+                if throw_extra && n & 0xFFFF != 0 {
+                    return Err(());
+                }
+                bytes.push((n >> 16) as u8);
+            }
+            3 => {
+                if throw_extra && n & 0xFF != 0 {
+                    return Err(());
+                }
+                bytes.extend([(n >> 16) as u8, (n >> 8) as u8]);
+            }
+            _ => bytes.extend([(n >> 16) as u8, (n >> 8) as u8, n as u8]),
+        }
+        Ok(())
+    };
+    let mut bytes = Vec::new();
+    if max_len == 0 {
+        return Ok((0, bytes));
     }
-    Some(out)
+    let (mut read, mut index) = (0usize, 0usize);
+    let mut chunk: Vec<u8> = Vec::new();
+    loop {
+        while index < len && is_ws(chars[index]) {
+            index += 1;
+        }
+        if index == len {
+            if !chunk.is_empty() {
+                match handling {
+                    "stop-before-partial" => return Ok((read, bytes)),
+                    "loose" => {
+                        if chunk.len() == 1 {
+                            return Err(());
+                        }
+                        decode_chunk(&chunk, false, &mut bytes)?;
+                    }
+                    _ => return Err(()), // strict: a partial chunk must be padded
+                }
+            }
+            return Ok((len, bytes));
+        }
+        let mut c = chars[index];
+        index += 1;
+        if c == '=' {
+            if chunk.len() < 2 {
+                return Err(());
+            }
+            while index < len && is_ws(chars[index]) {
+                index += 1;
+            }
+            if chunk.len() == 2 {
+                if index == len {
+                    if handling == "stop-before-partial" {
+                        return Ok((read, bytes));
+                    }
+                    return Err(());
+                }
+                if chars[index] != '=' {
+                    return Err(());
+                }
+                index += 1;
+                while index < len && is_ws(chars[index]) {
+                    index += 1;
+                }
+            }
+            if index < len {
+                return Err(()); // trailing characters after padding
+            }
+            decode_chunk(&chunk, handling == "strict", &mut bytes)?;
+            return Ok((len, bytes));
+        }
+        if url {
+            c = match c {
+                '+' | '/' => return Err(()),
+                '-' => '+',
+                '_' => '/',
+                other => other,
+            };
+        }
+        let Some(v) = B64_STD.iter().position(|&a| a as char == c) else {
+            return Err(());
+        };
+        let remaining = max_len - bytes.len();
+        if (remaining == 1 && chunk.len() == 2) || (remaining == 2 && chunk.len() == 3) {
+            return Ok((read, bytes)); // the next chunk wouldn't fit: stop before it
+        }
+        chunk.push(v as u8);
+        if chunk.len() == 4 {
+            decode_chunk(&chunk, false, &mut bytes)?;
+            chunk.clear();
+            read = index;
+            if bytes.len() == max_len {
+                return Ok((read, bytes));
+            }
+        }
+    }
+}
+/// FromHex: decode at most `max_len` bytes; `read` is the number of code units consumed.
+fn hex_decode_spec(s: &str, max_len: usize) -> Result<(usize, Vec<u8>), ()> {
+    let chars: Vec<char> = s.chars().collect();
+    if !chars.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < chars.len() && out.len() < max_len {
+        let hi = chars[index].to_digit(16).ok_or(())?;
+        let lo = chars[index + 1].to_digit(16).ok_or(())?;
+        out.push((hi * 16 + lo) as u8);
+        index += 2;
+    }
+    Ok((index, out))
 }
 
 /// Read a Uint8Array receiver's bytes; errors if `this` isn't a (non-detached) Uint8Array.
@@ -4347,6 +4446,26 @@ fn b64_option_url(i: &mut Interp, opts: &Value) -> Result<bool, Value> {
     }
 }
 
+/// Read `{alphabet, lastChunkHandling}` for the base64 decode methods.
+fn b64_decode_options(i: &mut Interp, opts: &Value) -> Result<(bool, Rc<str>), Value> {
+    let url = b64_option_url(i, opts)?;
+    let handling = if let Value::Obj(_) = opts {
+        match ab(i.get_member(opts, "lastChunkHandling"))? {
+            Value::Undefined => Rc::from("loose"),
+            Value::Str(s) if matches!(&*s, "loose" | "strict" | "stop-before-partial") => s,
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "lastChunkHandling must be 'loose', 'strict', or 'stop-before-partial'",
+                ))
+            }
+        }
+    } else {
+        Rc::from("loose")
+    };
+    Ok((url, handling))
+}
+
 fn install_uint8_base64(it: &mut Interp) {
     let proto = it.extra_protos.get("Uint8Array").cloned().unwrap();
     let ctor = match it
@@ -4383,8 +4502,8 @@ fn install_uint8_base64(it: &mut Interp) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "fromHex requires a string")),
         };
-        let bytes =
-            hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
+        let (_, bytes) = hex_decode_spec(&s, usize::MAX)
+            .map_err(|_| i.make_error("SyntaxError", "invalid hex string"))?;
         make_u8array(i, bytes)
     });
     it.def_method(&ctor, "fromBase64", 1, |i, _t, a| {
@@ -4392,40 +4511,42 @@ fn install_uint8_base64(it: &mut Interp) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "fromBase64 requires a string")),
         };
-        let url = b64_option_url(i, &arg(a, 1))?;
-        let bytes = b64_decode(&s, url)
-            .ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
+        let (url, handling) = b64_decode_options(i, &arg(a, 1))?;
+        let (_, bytes) = b64_decode_spec(&s, url, &handling, usize::MAX)
+            .map_err(|_| i.make_error("SyntaxError", "invalid base64 string"))?;
         make_u8array(i, bytes)
     });
     it.def_method(&proto, "setFromHex", 1, |i, this, a| {
+        let info = u8_validate(i, &this)?;
         let s = match arg(a, 0) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "setFromHex requires a string")),
         };
-        let bytes =
-            hex_decode(&s).ok_or_else(|| i.make_error("SyntaxError", "invalid hex string"))?;
-        u8_set_bytes(i, &this, &bytes, s.len())
+        let max = i
+            .ta_len(&info)
+            .ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
+        let (read, bytes) = hex_decode_spec(&s, max)
+            .map_err(|_| i.make_error("SyntaxError", "invalid hex string"))?;
+        u8_set_bytes(i, &info, read, &bytes)
     });
     it.def_method(&proto, "setFromBase64", 1, |i, this, a| {
+        let info = u8_validate(i, &this)?;
         let s = match arg(a, 0) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "setFromBase64 requires a string")),
         };
-        let url = b64_option_url(i, &arg(a, 1))?;
-        let bytes = b64_decode(&s, url)
-            .ok_or_else(|| i.make_error("SyntaxError", "invalid base64 string"))?;
-        u8_set_bytes(i, &this, &bytes, s.len())
+        let (url, handling) = b64_decode_options(i, &arg(a, 1))?;
+        let max = i
+            .ta_len(&info)
+            .ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
+        let (read, bytes) = b64_decode_spec(&s, url, &handling, max)
+            .map_err(|_| i.make_error("SyntaxError", "invalid base64 string"))?;
+        u8_set_bytes(i, &info, read, &bytes)
     });
 }
 
-/// Write decoded `bytes` into the Uint8Array receiver (truncating to its length); returns
-/// `{read, written}`.
-fn u8_set_bytes(
-    i: &mut Interp,
-    this: &Value,
-    bytes: &[u8],
-    src_len: usize,
-) -> Result<Value, Value> {
+/// ValidateUint8Array: the receiver must be a Uint8Array (detachment is checked separately).
+fn u8_validate(i: &mut Interp, this: &Value) -> Result<TaInfo, Value> {
     let ptr = map_ptr(this).ok_or_else(|| i.make_error("TypeError", "not a Uint8Array"))?;
     let info = *i
         .typed_arrays
@@ -4434,13 +4555,17 @@ fn u8_set_bytes(
     if !matches!(info.kind, TaKind::U8) {
         return Err(i.make_error("TypeError", "requires a Uint8Array"));
     }
-    let written = bytes.len().min(info.len);
+    Ok(info)
+}
+
+/// SetUint8ArrayBytes + result object: write decoded `bytes` into the view, report `{read, written}`.
+fn u8_set_bytes(i: &mut Interp, info: &TaInfo, read: usize, bytes: &[u8]) -> Result<Value, Value> {
     if let Some(buf) = i.array_buffers.get_mut(&info.buffer) {
-        buf[info.offset..info.offset + written].copy_from_slice(&bytes[..written]);
+        buf[info.offset..info.offset + bytes.len()].copy_from_slice(bytes);
     }
     let result = i.new_object();
-    set_data(&result, "read", Value::Num(src_len as f64));
-    set_data(&result, "written", Value::Num(written as f64));
+    set_data(&result, "read", Value::Num(read as f64));
+    set_data(&result, "written", Value::Num(bytes.len() as f64));
     Ok(Value::Obj(result))
 }
 
@@ -9243,6 +9368,25 @@ fn js_prevent_extensions(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
         return Ok(ok);
     }
     if let Value::Obj(o) = obj {
+        // TypedArray [[PreventExtensions]] refuses unless IsTypedArrayFixedLength: length-tracking
+        // views, and any view over a resizable (non-shared) buffer, can change length.
+        if let Some(info) = ta_info(i, o) {
+            let resizable = Rc::as_ptr(o) as usize;
+            let resizable = i
+                .ta_buffer
+                .get(&resizable)
+                .and_then(|b| b.as_obj())
+                .is_some_and(|b| {
+                    matches!(
+                        b.borrow().props.get("__abResizable").map(|p| &p.value),
+                        Some(Value::Bool(true))
+                    )
+                });
+            let shared = i.shared_buffers.contains_key(&info.buffer);
+            if info.track || (resizable && !shared) {
+                return Ok(false);
+            }
+        }
         o.borrow_mut().extensible = false;
     }
     Ok(true)

@@ -40,6 +40,10 @@ enum Inst {
     AssertEnd,
     WordBoundary(bool),
     Backref(usize),
+    /// `\k<name>` where the name is shared by several groups: matches via whichever captured.
+    BackrefAlt(Rc<Vec<usize>>),
+    /// Reset capture slots for groups `lo..=hi` at the start of a quantifier iteration.
+    ClearCaps(usize, usize),
     Look {
         negate: bool,
         prog: Rc<Vec<Inst>>,
@@ -236,6 +240,8 @@ enum Node {
     Backref(usize),
     /// `\k<name>` — resolved to a group index after the whole pattern is parsed.
     NamedBackref(String),
+    /// `\k<name>` naming several duplicate groups — matches via whichever of them captured.
+    BackrefAlt(Vec<usize>),
     Look(bool, Box<Node>),
     /// `(?<=…)` / `(?<!…)` lookbehind: assert the body matches text *ending* at the current position.
     LookBehind(bool, Box<Node>),
@@ -1347,6 +1353,7 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
         Node::End => prog.push(Inst::AssertEnd),
         Node::WordB(b) => prog.push(Inst::WordBoundary(*b)),
         Node::Backref(n) => prog.push(Inst::Backref(*n)),
+        Node::BackrefAlt(v) => prog.push(Inst::BackrefAlt(Rc::new(v.clone()))),
         // Resolved to `Backref` before compile; treat any stray one as group 0 (never matches).
         Node::NamedBackref(_) => prog.push(Inst::Backref(0)),
         Node::Modifier { add, remove, inner } => {
@@ -1445,8 +1452,16 @@ fn compile_repeat(
         });
         return Ok(());
     }
+    // RepeatMatcher clears the captures inside the atom at the start of every iteration.
+    let span = cap_span(inner);
+    let body_with_clear = |prog: &mut Vec<Inst>| -> Result<(), String> {
+        if let Some((lo, hi)) = span {
+            prog.push(Inst::ClearCaps(lo, hi));
+        }
+        compile(inner, prog)
+    };
     for _ in 0..min {
-        compile(inner, prog)?;
+        body_with_clear(prog)?;
     }
     match max {
         None => {
@@ -1455,7 +1470,7 @@ fn compile_repeat(
             let sp = prog.len();
             prog.push(Inst::Split(0, 0));
             let body = prog.len();
-            compile(inner, prog)?;
+            body_with_clear(prog)?;
             prog.push(Inst::Jmp(l1));
             let end = prog.len();
             prog[sp] = if greedy {
@@ -1472,7 +1487,7 @@ fn compile_repeat(
                 prog.push(Inst::Split(0, 0));
                 let body = prog.len();
                 splits.push((sp, body));
-                compile(inner, prog)?;
+                body_with_clear(prog)?;
             }
             let end = prog.len();
             for (sp, body) in splits {
@@ -1485,6 +1500,23 @@ fn compile_repeat(
         }
     }
     Ok(())
+}
+
+/// The min/max capture-group indices inside `node`, if any (for per-iteration capture resets).
+fn cap_span(node: &Node) -> Option<(usize, usize)> {
+    let merge = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| match (a, b) {
+        (Some((l1, h1)), Some((l2, h2))) => Some((l1.min(l2), h1.max(h2))),
+        (x, None) | (None, x) => x,
+    };
+    match node {
+        Node::Group(idx, inner) => merge(idx.map(|i| (i, i)), cap_span(inner)),
+        Node::Concat(v) | Node::Alt(v) => v.iter().fold(None, |acc, n| merge(acc, cap_span(n))),
+        Node::Repeat(inner, ..)
+        | Node::Look(_, inner)
+        | Node::LookBehind(_, inner)
+        | Node::Modifier { inner, .. } => cap_span(inner),
+        _ => None,
+    }
 }
 
 /// The largest numeric back reference in the pattern (0 when there are none).
@@ -1560,12 +1592,16 @@ fn collect_group_names(
 fn resolve_named_backrefs(node: &mut Node, names: &[(String, usize)]) {
     match node {
         Node::NamedBackref(name) => {
-            let idx = names
+            let idxs: Vec<usize> = names
                 .iter()
-                .find(|(n, _)| n == name)
+                .filter(|(n, _)| n == name)
                 .map(|(_, i)| *i)
-                .unwrap_or(0);
-            *node = Node::Backref(idx);
+                .collect();
+            *node = match idxs.len() {
+                0 => Node::Backref(0),
+                1 => Node::Backref(idxs[0]),
+                _ => Node::BackrefAlt(idxs),
+            };
         }
         Node::Concat(v) | Node::Alt(v) => {
             v.iter_mut().for_each(|n| resolve_named_backrefs(n, names))
@@ -1805,6 +1841,41 @@ impl Matcher<'_> {
                         }
                     }
                     _ => self.run(prog, pc + 1, pos), // unset group matches empty
+                }
+            }
+            Inst::BackrefAlt(idxs) => {
+                // At most one same-named group can have captured; match through that one.
+                let g = idxs.iter().copied().find(|&g| {
+                    2 * g + 1 < self.caps.len()
+                        && self.caps[2 * g].is_some()
+                        && self.caps[2 * g + 1].is_some()
+                });
+                match g {
+                    None => self.run(prog, pc + 1, pos), // no group captured: matches empty
+                    Some(g) => {
+                        let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
+                        let text: Vec<char> = self.input[a..b].to_vec();
+                        if pos + text.len() <= self.input.len()
+                            && (0..text.len()).all(|i| self.eqc(self.input[pos + i], text[i]))
+                        {
+                            self.run(prog, pc + 1, pos + text.len())
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            Inst::ClearCaps(lo, hi) => {
+                let (lo, hi) = (*lo, *hi);
+                let saved: Vec<Option<usize>> = self.caps[2 * lo..2 * hi + 2].to_vec();
+                for s in &mut self.caps[2 * lo..2 * hi + 2] {
+                    *s = None;
+                }
+                if self.run(prog, pc + 1, pos) {
+                    true
+                } else {
+                    self.caps[2 * lo..2 * hi + 2].copy_from_slice(&saved);
+                    false
                 }
             }
             Inst::Look { negate, prog: sub } => {
