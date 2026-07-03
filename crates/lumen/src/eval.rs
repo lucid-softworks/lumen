@@ -4558,11 +4558,11 @@ impl Interp {
                 let bn = self.to_number(b)?;
                 self.loose_equals(a, &Value::Num(bn))?
             }
-            (Value::Obj(_), Value::Num(_) | Value::Str(_)) => {
+            (Value::Obj(_), Value::Num(_) | Value::Str(_) | Value::Sym(_)) => {
                 let ap = self.to_primitive(a, Hint::Default)?;
                 self.loose_equals(&ap, b)?
             }
-            (Value::Num(_) | Value::Str(_), Value::Obj(_)) => {
+            (Value::Num(_) | Value::Str(_) | Value::Sym(_), Value::Obj(_)) => {
                 let bp = self.to_primitive(b, Hint::Default)?;
                 self.loose_equals(a, &bp)?
             }
