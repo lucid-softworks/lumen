@@ -256,6 +256,8 @@ struct Parser {
     unicode: bool,
     /// Whether `\k` is a named back-reference here: true in Unicode mode, or when the pattern
     /// contains a named group (`(?<name>…)`). Otherwise `\k` is the literal character `k` (Annex B).
+    /// The `v` flag: classes are ClassSetExpressions (nested classes, `&&`, `--`, `\q{}`).
+    unicode_sets: bool,
     named_mode: bool,
     /// `\k<name>` references collected during parsing, validated against `names` afterwards.
     name_refs: Vec<String>,
@@ -293,6 +295,7 @@ impl Regex {
             return Err("the u and v regular expression flags are mutually exclusive".into());
         }
         let unicode = flags.contains('u') || flags.contains('v');
+        let unicode_sets = flags.contains('v');
         let named_mode = unicode || has_named_group(pattern);
         let mut p = Parser {
             chars: pattern.chars().collect(),
@@ -300,6 +303,7 @@ impl Regex {
             ngroups: 0,
             names: Vec::new(),
             unicode,
+            unicode_sets,
             named_mode,
             name_refs: Vec::new(),
         };
@@ -656,7 +660,248 @@ impl Parser {
         })
     }
 
+    /// `v`-mode `[...]`: parse a ClassSetExpression, computing the concrete set, and compile it
+    /// to a match node (an alternation of its strings — longest first — plus a range class).
+    fn parse_class_set(&mut self) -> Result<Node, String> {
+        let negate = if self.peek() == Some('^') {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let mut set = self.parse_class_set_expression()?;
+        self.expect(']')?;
+        if negate {
+            set = set.complement()?;
+        }
+        Ok(class_set_to_node(set))
+    }
+
+    fn parse_class_set_expression(&mut self) -> Result<ClassSet, String> {
+        // Empty class.
+        if self.peek() == Some(']') {
+            return Ok(ClassSet::default());
+        }
+        let first = self.parse_class_set_operand()?;
+        // Decide the expression kind from the following operator.
+        if self.peek() == Some('&') && self.chars.get(self.pos + 1) == Some(&'&') {
+            let mut acc = first;
+            while self.peek() == Some('&') && self.chars.get(self.pos + 1) == Some(&'&') {
+                self.bump();
+                self.bump();
+                if self.peek() == Some('&') {
+                    return Err("unexpected '&&&' in class set".into());
+                }
+                let rhs = self.parse_class_set_operand()?;
+                acc = acc.intersect(rhs);
+            }
+            return Ok(acc);
+        }
+        if self.peek() == Some('-') && self.chars.get(self.pos + 1) == Some(&'-') {
+            let mut acc = first;
+            while self.peek() == Some('-') && self.chars.get(self.pos + 1) == Some(&'-') {
+                self.bump();
+                self.bump();
+                let rhs = self.parse_class_set_operand()?;
+                acc = acc.subtract(rhs);
+            }
+            return Ok(acc);
+        }
+        // Union (with a-z ranges).
+        let mut acc = self.maybe_class_set_range(first)?;
+        while self.peek() != Some(']') && self.peek().is_some() {
+            if self.peek() == Some('&') && self.chars.get(self.pos + 1) == Some(&'&') {
+                return Err("cannot mix '&&' with a union in a class set".into());
+            }
+            if self.peek() == Some('-') && self.chars.get(self.pos + 1) == Some(&'-') {
+                return Err("cannot mix '--' with a union in a class set".into());
+            }
+            let next = self.parse_class_set_operand()?;
+            let next = self.maybe_class_set_range(next)?;
+            acc = acc.union(next);
+        }
+        Ok(acc)
+    }
+
+    /// After a single-character operand, `-x` extends it to a range.
+    fn maybe_class_set_range(&mut self, operand: ClassSet) -> Result<ClassSet, String> {
+        let single = operand.strings.is_empty()
+            && operand.ranges.len() == 1
+            && operand.ranges[0].0 == operand.ranges[0].1;
+        if single
+            && self.peek() == Some('-')
+            && self.chars.get(self.pos + 1) != Some(&'-')
+            && self.chars.get(self.pos + 1) != Some(&']')
+        {
+            self.bump(); // '-'
+            let hi = self.parse_class_set_operand()?;
+            let hi_single =
+                hi.strings.is_empty() && hi.ranges.len() == 1 && hi.ranges[0].0 == hi.ranges[0].1;
+            if !hi_single {
+                return Err("invalid character class range".into());
+            }
+            let (a, b) = (operand.ranges[0].0, hi.ranges[0].0);
+            if a > b {
+                return Err("range out of order in character class".into());
+            }
+            return Ok(ClassSet {
+                ranges: vec![(a, b)],
+                strings: Vec::new(),
+            });
+        }
+        Ok(operand)
+    }
+
+    fn parse_class_set_operand(&mut self) -> Result<ClassSet, String> {
+        match self.peek() {
+            None => Err("unterminated character class".into()),
+            Some('[') => {
+                self.bump();
+                let negate = if self.peek() == Some('^') {
+                    self.bump();
+                    true
+                } else {
+                    false
+                };
+                let mut set = self.parse_class_set_expression()?;
+                self.expect(']')?;
+                if negate {
+                    set = set.complement()?;
+                }
+                Ok(set)
+            }
+            Some('\\') => {
+                self.bump();
+                match self.peek() {
+                    Some('q') => {
+                        self.bump();
+                        if self.bump() != Some('{') {
+                            return Err("expected '{' after \\q".into());
+                        }
+                        let mut set = ClassSet::default();
+                        let mut cur: Vec<char> = Vec::new();
+                        loop {
+                            match self.peek() {
+                                None => return Err("unterminated \\q{...}".into()),
+                                Some('}') => {
+                                    self.bump();
+                                    push_q_alternative(&mut set, std::mem::take(&mut cur));
+                                    break;
+                                }
+                                Some('|') => {
+                                    self.bump();
+                                    push_q_alternative(&mut set, std::mem::take(&mut cur));
+                                }
+                                Some('\\') => {
+                                    self.bump();
+                                    cur.push(self.class_set_escape_char()?);
+                                }
+                                Some(c) => {
+                                    self.bump();
+                                    cur.push(c);
+                                }
+                            }
+                        }
+                        set.normalize();
+                        Ok(set)
+                    }
+                    Some(b @ ('d' | 'D' | 'w' | 'W' | 's' | 'S')) => {
+                        self.bump();
+                        Ok(builtin_class_set(b))
+                    }
+                    Some(pc @ ('p' | 'P')) => {
+                        self.bump();
+                        self.parse_class_set_property(pc == 'P')
+                    }
+                    _ => Ok(ClassSet::from_char(self.class_set_escape_char()?)),
+                }
+            }
+            // ClassSetSyntaxCharacters may not appear literally.
+            Some(c @ ('(' | ')' | '{' | '}' | '/' | '|' | '-')) => {
+                Err(format!("'{c}' must be escaped in a v-mode class"))
+            }
+            Some(c) => {
+                // Doubled punctuators are reserved.
+                if "&!#$%*+,.:;<=>?@^`~\"'".contains(c) && self.chars.get(self.pos + 1) == Some(&c)
+                {
+                    return Err(format!("reserved doubled punctuator '{c}{c}' in class set"));
+                }
+                self.bump();
+                Ok(ClassSet::from_char(c))
+            }
+        }
+    }
+
+    /// A single-character escape inside a v-mode class (`\n`, `\u{...}`, `\-`, identity escapes).
+    fn class_set_escape_char(&mut self) -> Result<char, String> {
+        match self.bump() {
+            None => Err("trailing backslash in class".into()),
+            Some('n') => Ok('\n'),
+            Some('t') => Ok('\t'),
+            Some('r') => Ok('\r'),
+            Some('f') => Ok('\u{000C}'),
+            Some('v') => Ok('\u{000B}'),
+            Some('b') => Ok('\u{0008}'),
+            Some('0') => Ok('\0'),
+            Some('x') => self.hex_strict(2),
+            Some('u') => self.unicode_escape_strict(),
+            Some('c') => match self.peek() {
+                Some(l) if l.is_ascii_alphabetic() => {
+                    self.bump();
+                    Ok((l as u8 % 32) as char)
+                }
+                _ => Err("invalid \\c escape in class set".into()),
+            },
+            Some(c) if is_regex_syntax_char(c) || "/-&!#%,:;<=>@`~\"'".contains(c) => Ok(c),
+            Some(c) => Err(format!("invalid identity escape \\{c} in v-mode class")),
+        }
+    }
+
+    fn parse_class_set_property(&mut self, negate: bool) -> Result<ClassSet, String> {
+        if self.bump() != Some('{') {
+            return Err("invalid property escape: expected '{'".into());
+        }
+        let mut body = String::new();
+        loop {
+            match self.bump() {
+                Some('}') => break,
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '=' => body.push(c),
+                Some(_) => return Err("invalid character in property escape".into()),
+                None => return Err("unterminated property escape".into()),
+            }
+        }
+        let (name, value) = match body.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (body.as_str(), None),
+        };
+        if value.is_none() {
+            if let Some(set) = property_of_strings(name) {
+                if negate {
+                    return Err("\\P of a property of strings is invalid".into());
+                }
+                return Ok(set);
+            }
+        }
+        match crate::unicode_props::lookup_strict(name, value) {
+            Some((complement, ranges)) => {
+                let set = ClassSet {
+                    ranges: ranges.to_vec(),
+                    strings: Vec::new(),
+                };
+                if negate != complement {
+                    set.complement()
+                } else {
+                    Ok(set)
+                }
+            }
+            None => Err(format!("invalid unicode property {body}")),
+        }
+    }
+
     fn parse_class(&mut self) -> Result<Node, String> {
+        if self.unicode_sets {
+            return self.parse_class_set();
+        }
         let mut cc = CharClass::default();
         if self.peek() == Some('^') {
             self.bump();
@@ -762,6 +1007,11 @@ impl Parser {
                 ..Default::default()
             })),
             Some(c @ ('p' | 'P')) if self.unicode => {
+                // In v-mode a property escape may be a property of *strings* (a computed set).
+                if self.unicode_sets {
+                    let set = self.parse_class_set_property(c == 'P')?;
+                    return Ok(class_set_to_node(set));
+                }
                 let prop = self.parse_prop_escape(c == 'P')?;
                 Ok(Node::Class(CharClass {
                     props: vec![prop],
@@ -1613,4 +1863,279 @@ impl Matcher<'_> {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// `v`-flag (unicodeSets) character classes: ClassSetExpressions are evaluated at parse time into
+// a concrete set of code-point ranges plus a set of multi-code-point strings.
+// ---------------------------------------------------------------------------------------------
+
+/// A `v`-mode class set: sorted, disjoint code-point ranges plus multi-code-point strings.
+#[derive(Default, Clone)]
+struct ClassSet {
+    ranges: Vec<(u32, u32)>,
+    strings: Vec<Vec<char>>,
+}
+
+impl ClassSet {
+    fn normalize(&mut self) {
+        self.ranges.sort_unstable();
+        let mut out: Vec<(u32, u32)> = Vec::with_capacity(self.ranges.len());
+        for &(lo, hi) in &self.ranges {
+            if let Some(last) = out.last_mut() {
+                if lo <= last.1.saturating_add(1) {
+                    last.1 = last.1.max(hi);
+                    continue;
+                }
+            }
+            out.push((lo, hi));
+        }
+        self.ranges = out;
+        self.strings.sort();
+        self.strings.dedup();
+    }
+
+    fn union(mut self, other: ClassSet) -> ClassSet {
+        self.ranges.extend(other.ranges);
+        self.strings.extend(other.strings);
+        self.normalize();
+        self
+    }
+
+    fn intersect(mut self, other: ClassSet) -> ClassSet {
+        let mut ranges = Vec::new();
+        for &(a, b) in &self.ranges {
+            for &(c, d) in &other.ranges {
+                let lo = a.max(c);
+                let hi = b.min(d);
+                if lo <= hi {
+                    ranges.push((lo, hi));
+                }
+            }
+        }
+        self.strings.retain(|s| other.strings.contains(s));
+        self.ranges = ranges;
+        self.normalize();
+        self
+    }
+
+    fn subtract(mut self, other: ClassSet) -> ClassSet {
+        let mut ranges = self.ranges.clone();
+        for &(c, d) in &other.ranges {
+            let mut next = Vec::with_capacity(ranges.len() + 1);
+            for &(a, b) in &ranges {
+                if d < a || c > b {
+                    next.push((a, b));
+                    continue;
+                }
+                if a < c {
+                    next.push((a, c - 1));
+                }
+                if b > d {
+                    next.push((d + 1, b));
+                }
+            }
+            ranges = next;
+        }
+        self.strings.retain(|s| !other.strings.contains(s));
+        self.ranges = ranges;
+        self.normalize();
+        self
+    }
+
+    /// Complement over the full code-point space. A set containing strings may not be negated.
+    fn complement(mut self) -> Result<ClassSet, String> {
+        if !self.strings.is_empty() {
+            return Err("cannot negate a class set containing strings".into());
+        }
+        self.normalize();
+        let mut out = Vec::new();
+        let mut next = 0u32;
+        for &(lo, hi) in &self.ranges {
+            if lo > next {
+                out.push((next, lo - 1));
+            }
+            next = hi.saturating_add(1);
+        }
+        if next <= 0x10FFFF {
+            out.push((next, 0x10FFFF));
+        }
+        self.ranges = out;
+        Ok(self)
+    }
+
+    fn from_char(c: char) -> ClassSet {
+        ClassSet {
+            ranges: vec![(c as u32, c as u32)],
+            strings: Vec::new(),
+        }
+    }
+}
+
+/// The concrete ranges of a `\d`/`\w`/`\s` class escape (for `v`-mode set arithmetic).
+fn builtin_class_set(b: char) -> ClassSet {
+    let base = match b.to_ascii_lowercase() {
+        'd' => vec![(0x30, 0x39)],
+        'w' => vec![(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)],
+        's' => {
+            let mut r = vec![
+                (0x09, 0x0D),
+                (0x20, 0x20),
+                (0x85, 0x85),
+                (0xA0, 0xA0),
+                (0x1680, 0x1680),
+                (0x2000, 0x200A),
+                (0x2028, 0x2029),
+                (0x202F, 0x202F),
+                (0x205F, 0x205F),
+                (0x3000, 0x3000),
+                (0xFEFF, 0xFEFF),
+            ];
+            r.sort_unstable();
+            r
+        }
+        _ => Vec::new(),
+    };
+    let mut set = ClassSet {
+        ranges: base,
+        strings: Vec::new(),
+    };
+    if b.is_ascii_uppercase() {
+        set = set.complement().unwrap();
+    }
+    set
+}
+
+/// The derivable Unicode "properties of strings" (UTS #51 definitions built from the bundled
+/// emoji binary-property tables). The RGI_* curated lists are not derivable and stay unsupported.
+fn property_of_strings(name: &str) -> Option<ClassSet> {
+    let ranges_of = |prop: &str| -> Vec<(u32, u32)> {
+        crate::unicode_props::lookup(prop, None)
+            .map(|r| r.to_vec())
+            .unwrap_or_default()
+    };
+    match name {
+        "Basic_Emoji" => {
+            // Emoji_Presentation singletons, plus (Emoji minus Emoji_Presentation) + FE0F.
+            let ep = ClassSet {
+                ranges: ranges_of("Emoji_Presentation"),
+                strings: Vec::new(),
+            };
+            let emoji = ClassSet {
+                ranges: ranges_of("Emoji"),
+                strings: Vec::new(),
+            };
+            let text_only = emoji.subtract(ep.clone());
+            let mut strings = Vec::new();
+            for &(lo, hi) in &text_only.ranges {
+                for u in lo..=hi {
+                    if let Some(c) = char::from_u32(u) {
+                        strings.push(vec![c, '\u{FE0F}']);
+                    }
+                }
+            }
+            let mut set = ep;
+            set.strings = strings;
+            set.normalize();
+            Some(set)
+        }
+        "Emoji_Keycap_Sequence" => {
+            let mut strings = Vec::new();
+            for c in "#*0123456789".chars() {
+                strings.push(vec![c, '\u{FE0F}', '\u{20E3}']);
+            }
+            Some(ClassSet {
+                ranges: Vec::new(),
+                strings,
+            })
+        }
+        "RGI_Emoji_Modifier_Sequence" => {
+            let bases = ranges_of("Emoji_Modifier_Base");
+            let mut strings = Vec::new();
+            for &(lo, hi) in &bases {
+                for u in lo..=hi {
+                    if let Some(c) = char::from_u32(u) {
+                        for m in 0x1F3FB..=0x1F3FF {
+                            strings.push(vec![c, char::from_u32(m).unwrap()]);
+                        }
+                    }
+                }
+            }
+            Some(ClassSet {
+                ranges: Vec::new(),
+                strings,
+            })
+        }
+        "RGI_Emoji_Tag_Sequence" => {
+            // The three RGI tag sequences: england, scotland, wales.
+            let mk = |tags: &str| {
+                let mut v = vec!['\u{1F3F4}'];
+                for c in tags.chars() {
+                    v.push(char::from_u32(0xE0000 + c as u32).unwrap());
+                }
+                v.push('\u{E007F}');
+                v
+            };
+            Some(ClassSet {
+                ranges: Vec::new(),
+                strings: vec![mk("gbeng"), mk("gbsct"), mk("gbwls")],
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A `\q{...}` alternative: a single char joins the ranges; longer sequences join the strings.
+fn push_q_alternative(set: &mut ClassSet, alt: Vec<char>) {
+    match alt.len() {
+        0 => set.strings.push(Vec::new()),
+        1 => set.ranges.push((alt[0] as u32, alt[0] as u32)),
+        _ => set.strings.push(alt),
+    }
+}
+
+/// Compile a computed class set: an alternation of its strings (longest first, so the greedy
+/// match prefers the longest sequence) plus a plain range class. Lone-surrogate ranges are
+/// dropped (input is scalar values).
+fn class_set_to_node(mut set: ClassSet) -> Node {
+    set.normalize();
+    let mut ranges: Vec<(char, char)> = Vec::new();
+    for &(lo, hi) in &set.ranges {
+        let mut push = |a: u32, b: u32| {
+            if a <= b {
+                if let (Some(x), Some(y)) = (char::from_u32(a), char::from_u32(b)) {
+                    ranges.push((x, y));
+                }
+            }
+        };
+        if lo <= 0xD7FF && hi >= 0xE000 {
+            push(lo, 0xD7FF);
+            push(0xE000, hi);
+        } else if !(0xD800..=0xDFFF).contains(&lo) || !(0xD800..=0xDFFF).contains(&hi) {
+            push(lo.clamp(0, 0x10FFFF), hi.min(0x10FFFF));
+        }
+    }
+    let class = Node::Class(CharClass {
+        negate: false,
+        ranges,
+        builtins: Vec::new(),
+        props: Vec::new(),
+    });
+    if set.strings.is_empty() {
+        return class;
+    }
+    let mut strings = set.strings;
+    strings.sort_by_key(|b| std::cmp::Reverse(b.len()));
+    let mut alts: Vec<Node> = strings
+        .into_iter()
+        .map(|cs| {
+            if cs.is_empty() {
+                Node::Empty
+            } else {
+                Node::Concat(cs.into_iter().map(Node::Char).collect())
+            }
+        })
+        .collect();
+    alts.push(class);
+    Node::Group(None, Box::new(Node::Alt(alts)))
 }

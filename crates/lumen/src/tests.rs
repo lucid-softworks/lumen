@@ -7872,3 +7872,33 @@ fn cross_realm_calls_and_constructs() {
         "7:undefined"
     );
 }
+
+#[test]
+fn regexp_v_flag_class_sets() {
+    // Set operations: difference, intersection, nested classes.
+    assert_eq!(run("String(/[\\d--[0-5]]/v.test('7'))"), "true");
+    assert_eq!(run("String(/[\\d--[0-5]]/v.test('3'))"), "false");
+    assert_eq!(run("String(/[\\w&&\\d]/v.test('5'))"), "true");
+    assert_eq!(run("String(/[\\w&&\\d]/v.test('a'))"), "false");
+    assert_eq!(run("String(/[[a-z]--[aeiou]]/v.test('b'))"), "true");
+    assert_eq!(run("String(/[[a-z]--[aeiou]]/v.test('e'))"), "false");
+    // String disjunctions match longest-first.
+    assert_eq!(run("/[\\q{a|bc|abc}]/v.exec('abcd')[0]"), "abc");
+    assert_eq!(run("String(/[\\q{ab|cd}x]/v.test('x'))"), "true");
+    // Negation of a plain set works; negating a set with strings is a SyntaxError.
+    assert_eq!(run("String(/[^\\q{a}b]/v.test('c'))"), "true");
+    assert_eq!(throws("new RegExp('[^\\\\q{ab}]', 'v')"), "SyntaxError");
+    // Properties of strings (derived sets) match whole sequences.
+    assert_eq!(
+        run("String(/^\\p{Emoji_Keycap_Sequence}$/v.test('1\\uFE0F\\u20E3'))"),
+        "true"
+    );
+    assert_eq!(
+        run("String(/^\\p{Basic_Emoji}$/v.test('\\u{1F600}'))"),
+        "true"
+    );
+    // Reserved syntax in v-classes.
+    assert_eq!(throws("new RegExp('[&&]', 'v')"), "SyntaxError");
+    assert_eq!(throws("new RegExp('[a--]', 'v')"), "SyntaxError");
+    assert_eq!(run("String(/[&]/v.test('&'))"), "true");
+}
