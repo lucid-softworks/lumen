@@ -130,6 +130,7 @@ fn get(i: &Interp, this: &Value) -> Option<Temporal> {
 fn make(i: &mut Interp, proto: &str, data: Temporal) -> Value {
     let obj = Object::new(i.extra_protos.get(proto).cloned());
     let p = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.temporal.insert(p, data);
     Value::Obj(obj)
 }

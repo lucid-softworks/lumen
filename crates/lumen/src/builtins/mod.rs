@@ -1166,6 +1166,7 @@ fn make_abstract_module_source(it: &mut Interp) -> Value {
 fn agent_make_shared(i: &mut Interp, id: u64, len: usize) -> Value {
     let obj = Object::new(i.extra_protos.get("SharedArrayBuffer").cloned());
     let p = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.array_buffers.insert(p, vec![0u8; len]); // length placeholder; bytes live in the registry
     set_internal(&obj, "__abMaxByteLength", Value::Num(len as f64));
     set_internal(&obj, "__abResizable", Value::Bool(false));
@@ -1587,6 +1588,7 @@ fn install_dataview(it: &mut Interp) {
         // buffer's current length; its stored `len` is only the initial snapshot.
         let track = !has_len && resizable;
         let p = Rc::as_ptr(&obj) as usize;
+        i.gc_pin(&obj);
         i.data_views.insert(p, (bp, offset, len, track));
         // buffer/byteOffset/byteLength are accessor getters on the prototype, not own properties;
         // only the buffer object itself is kept (hidden) for the `buffer` getter.
@@ -1742,6 +1744,9 @@ fn install_regexp(it: &mut Interp) {
         };
         let re = crate::regex::Regex::new(&source, &flags)
             .map_err(|e| i.make_error("SyntaxError", &e))?;
+        if let Value::Obj(o) = &this {
+            i.gc_pin(o);
+        }
         i.regexps.insert(ptr, Rc::new(re));
         ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
         Ok(this)
@@ -2569,6 +2574,7 @@ fn install_shared_array_buffer(it: &mut Interp) {
             return Err(i.make_error("RangeError", "SharedArrayBuffer allocation too large"));
         }
         let bp = Rc::as_ptr(&obj) as usize;
+        i.gc_pin(&obj);
         i.array_buffers.insert(bp, vec![0u8; len]);
         set_internal(&obj, "__abMaxByteLength", Value::Num(max.unwrap_or(n)));
         set_internal(&obj, "__abResizable", Value::Bool(max.is_some()));
@@ -2684,19 +2690,25 @@ fn ab_transfer_impl(i: &mut Interp, this: Value, a: &[Value], fixed: bool) -> Re
     if i.shared_buffers.contains_key(&ptr) {
         return Err(i.make_error("TypeError", "transfer requires a non-shared ArrayBuffer"));
     }
+    // The newLength argument is read (observably) before detachability is verified.
+    let new_len = match arg(a, 0) {
+        Value::Undefined => None,
+        v => {
+            let n = ab(i.to_number(&v))?;
+            let n = if n.is_nan() { 0.0 } else { n.trunc() };
+            if n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
+                return Err(i.make_error("RangeError", "invalid transfer length"));
+            }
+            Some(n as usize)
+        }
+    };
+    if i.immutable_buffers.contains(&ptr) {
+        return Err(i.make_error("TypeError", "an immutable ArrayBuffer is not detachable"));
+    }
     if !i.array_buffers.contains_key(&ptr) {
         return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
     }
-    let new_len = match arg(a, 0) {
-        Value::Undefined => i.array_buffers[&ptr].len(),
-        v => {
-            let n = ab(i.to_number(&v))?;
-            if n.is_nan() || n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
-                return Err(i.make_error("RangeError", "invalid transfer length"));
-            }
-            n as usize
-        }
-    };
+    let new_len = new_len.unwrap_or_else(|| i.array_buffers[&ptr].len());
     // transfer() preserves the source's resizability; transferToFixedLength() is always fixed.
     let src_resizable = matches!(i.get_member(&this, "resizable"), Ok(Value::Bool(true)));
     let src_max = match i.get_member(&this, "maxByteLength") {
@@ -2723,6 +2735,7 @@ fn ab_transfer_impl(i: &mut Interp, this: Value, a: &[Value], fixed: bool) -> Re
 fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
     let obj = Object::new(i.extra_protos.get("ArrayBuffer").cloned());
     let p = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.array_buffers.insert(p, vec![0u8; byte_len]);
     // byteLength/detached derive from the side table; only max/resizable need stored slots, hidden
     // behind the `__ab*` prefix and surfaced through prototype accessor getters.
@@ -2734,6 +2747,7 @@ fn make_array_buffer(i: &mut Interp, byte_len: usize) -> (Value, usize) {
 fn install_array_buffer(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("ArrayBuffer", proto.clone());
+    set_to_string_tag(it, &proto, "ArrayBuffer");
     // byteLength/maxByteLength/resizable/detached are accessor getters on the prototype.
     // ArrayBuffer.prototype accessors/methods require a non-shared buffer: reject a SharedArrayBuffer
     // `this` with a TypeError (both buffer kinds carry `__abMaxByteLength`, so brand alone isn't enough).
@@ -2873,14 +2887,18 @@ fn install_array_buffer(it: &mut Interp) {
         if nptr == ptr {
             return Err(i.make_error("TypeError", "slice species returned the same ArrayBuffer"));
         }
+        if i.immutable_buffers.contains(&nptr) {
+            return Err(i.make_error("TypeError", "slice species returned an immutable buffer"));
+        }
         if i.array_buffers[&nptr].len() < new_len {
             return Err(i.make_error("TypeError", "slice species buffer is too small"));
         }
-        // The species constructor may have detached the source.
+        // The species constructor may have detached or shrunk the source.
         if !i.array_buffers.contains_key(&ptr) {
             return Err(i.make_error("TypeError", "source ArrayBuffer was detached during slice"));
         }
         let src = i.array_buffers[&ptr].clone();
+        let (begin, end) = (begin.min(src.len() as i64), end.min(src.len() as i64));
         if begin < end {
             let slice = src[begin as usize..end as usize].to_vec();
             if let Some(buf) = i.array_buffers.get_mut(&nptr) {
@@ -2901,28 +2919,45 @@ fn install_array_buffer(it: &mut Interp) {
         let mv = ab(i.get_member(&this, "maxByteLength"))?;
         let max = ab(i.to_number(&mv))? as usize;
         let new_len = ab(i.to_number(&arg(a, 0)))?;
-        if !new_len.is_finite() || new_len < 0.0 || new_len as usize > max {
+        let new_len = if new_len.is_nan() {
+            0.0
+        } else {
+            new_len.trunc()
+        };
+        if !new_len.is_finite() || new_len < 0.0 {
+            return Err(i.make_error("RangeError", "ArrayBuffer resize out of range"));
+        }
+        // The coercion may have detached the buffer — that is a TypeError, checked before the
+        // max-length RangeError.
+        if !i.array_buffers.contains_key(&(Rc::as_ptr(&o) as usize)) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
+        }
+        if new_len as usize > max {
             return Err(i.make_error("RangeError", "ArrayBuffer resize out of range"));
         }
         let n = new_len as usize;
+        if i.immutable_buffers.contains(&(Rc::as_ptr(&o) as usize)) {
+            return Err(i.make_error("TypeError", "ArrayBuffer is immutable"));
+        }
         if let Some(buf) = i.array_buffers.get_mut(&(Rc::as_ptr(&o) as usize)) {
             buf.resize(n, 0);
         }
         // byteLength derives from the backing store length, which the resize above updated.
         Ok(Value::Undefined)
     });
-    it.def_method(&proto, "transfer", 1, ab_transfer);
-    it.def_method(&proto, "transferToFixedLength", 1, ab_transfer_fixed);
-    // Immutable-ArrayBuffer proposal: move the bytes into a fresh immutable buffer (detaching the
-    // source), or copy a range into an immutable buffer (leaving the source intact).
-    it.def_method(&proto, "transferToImmutable", 1, |i, this, a| {
-        let bv = ab_transfer(i, this, a)?;
+    it.def_method(&proto, "transfer", 0, ab_transfer);
+    it.def_method(&proto, "transferToFixedLength", 0, ab_transfer_fixed);
+    // Immutable-ArrayBuffer proposal: move the bytes into a fresh immutable (always fixed-length)
+    // buffer, detaching the source; or copy a range into an immutable buffer (source intact).
+    it.def_method(&proto, "transferToImmutable", 0, |i, this, a| {
+        let bv = ab_transfer_fixed(i, this, a)?;
         if let Value::Obj(o) = &bv {
             i.immutable_buffers.insert(Rc::as_ptr(o) as usize);
         }
         Ok(bv)
     });
     it.def_method(&proto, "sliceToImmutable", 2, |i, this, a| {
+        reject_shared_buffer(i, &this)?;
         let ptr = this
             .as_obj()
             .filter(|o| o.borrow().props.contains("__abMaxByteLength"))
@@ -2937,11 +2972,19 @@ fn install_array_buffer(it: &mut Interp) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len),
         };
-        // Coercing start/end may have detached the source buffer.
+        // Coercing start/end may have detached or shrunk the source buffer: detachment is a
+        // TypeError, and a resolved range past the current length is a RangeError.
         let bytes = i
             .array_buffers
             .get(&ptr)
             .ok_or_else(|| i.make_error("TypeError", "ArrayBuffer is detached"))?;
+        let cur = bytes.len() as i64;
+        if begin < end && end > cur {
+            return Err(i.make_error(
+                "RangeError",
+                "source ArrayBuffer shrank below the resolved range",
+            ));
+        }
         let slice = if begin < end {
             bytes[begin as usize..end as usize].to_vec()
         } else {
@@ -2958,29 +3001,46 @@ fn install_array_buffer(it: &mut Interp) {
         if !i.constructing {
             return Err(i.make_error("TypeError", "ArrayBuffer constructor requires 'new'"));
         }
-        // ToIndex: NaN → 0, truncate, and a negative or too-large length is a RangeError.
+        // ToIndex(length): NaN → 0, truncate; negative or non-finite is a RangeError.
         let n = ab(i.to_number(&arg(a, 0)))?;
         let n = if n.is_nan() { 0.0 } else { n.trunc() };
-        if n < 0.0 || !n.is_finite() || n as usize > MAX_ARRAY_OP_LEN {
+        if n < 0.0 || !n.is_finite() {
             return Err(i.make_error("RangeError", "Invalid ArrayBuffer length"));
         }
-        let len = n as usize;
-        let (bv, _) = make_array_buffer(i, len);
-        // The options bag's maxByteLength makes the buffer resizable.
-        if let Value::Obj(_) = arg(a, 1) {
+        // GetArrayBufferMaxByteLengthOption: coerced before the object is created.
+        let max: Option<f64> = if let Value::Obj(_) = arg(a, 1) {
             let mbl = ab(i.get_member(&arg(a, 1), "maxByteLength"))?;
-            if !matches!(mbl, Value::Undefined) {
+            if matches!(mbl, Value::Undefined) {
+                None
+            } else {
                 let m = ab(i.to_number(&mbl))?;
-                if !m.is_finite() || (m as usize) < len || m as usize > MAX_ARRAY_OP_LEN {
+                let m = if m.is_nan() { 0.0 } else { m.trunc() };
+                if m < 0.0 || !m.is_finite() {
                     return Err(i.make_error("RangeError", "Invalid maxByteLength"));
                 }
-                if let Value::Obj(o) = &bv {
-                    set_internal(o, "__abMaxByteLength", Value::Num(m));
-                    set_internal(o, "__abResizable", Value::Bool(true));
-                }
+                Some(m)
+            }
+        } else {
+            None
+        };
+        if let Some(m) = max {
+            if m < n {
+                return Err(i.make_error("RangeError", "maxByteLength is below the length"));
             }
         }
-        Ok(bv)
+        // OrdinaryCreateFromConstructor: new.target's prototype is read (observably) before the
+        // data block is allocated, so a poisoned getter beats an allocation RangeError.
+        let obj = new_from_ctor(i, "ArrayBuffer")?;
+        if n as usize > MAX_ARRAY_OP_LEN || max.is_some_and(|m| m as usize > MAX_ARRAY_OP_LEN) {
+            return Err(i.make_error("RangeError", "ArrayBuffer allocation too large"));
+        }
+        let len = n as usize;
+        let p = Rc::as_ptr(&obj) as usize;
+        i.gc_pin(&obj);
+        i.array_buffers.insert(p, vec![0u8; len]);
+        set_internal(&obj, "__abMaxByteLength", Value::Num(max.unwrap_or(n)));
+        set_internal(&obj, "__abResizable", Value::Bool(max.is_some()));
+        Ok(Value::Obj(obj))
     });
     ctor.borrow_mut().props.insert(
         "prototype",
@@ -4086,6 +4146,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     };
     let obj = Object::new(proto);
     let p = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.typed_arrays.insert(
         p,
         TaInfo {
@@ -4451,12 +4512,7 @@ fn b64_encode(bytes: &[u8], url: bool, pad: bool) -> String {
 /// FromBase64: decode at most `max_len` bytes honoring `handling` (loose / strict /
 /// stop-before-partial). Returns `(read, bytes)` where `read` is the code units consumed through
 /// the last fully decoded chunk; `Err(())` is a syntax error.
-fn b64_decode_spec(
-    s: &str,
-    url: bool,
-    handling: &str,
-    max_len: usize,
-) -> Result<(usize, Vec<u8>), ()> {
+fn b64_decode_spec(s: &str, url: bool, handling: &str, max_len: usize) -> (usize, Vec<u8>, bool) {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     let is_ws = |c: char| matches!(c, '\t' | '\n' | '\x0c' | '\r' | ' ');
@@ -4484,7 +4540,7 @@ fn b64_decode_spec(
     };
     let mut bytes = Vec::new();
     if max_len == 0 {
-        return Ok((0, bytes));
+        return (0, bytes, false);
     }
     let (mut read, mut index) = (0usize, 0usize);
     let mut chunk: Vec<u8> = Vec::new();
@@ -4495,23 +4551,25 @@ fn b64_decode_spec(
         if index == len {
             if !chunk.is_empty() {
                 match handling {
-                    "stop-before-partial" => return Ok((read, bytes)),
+                    "stop-before-partial" => return (read, bytes, false),
                     "loose" => {
                         if chunk.len() == 1 {
-                            return Err(());
+                            return (read, bytes, true);
                         }
-                        decode_chunk(&chunk, false, &mut bytes)?;
+                        if decode_chunk(&chunk, false, &mut bytes).is_err() {
+                            return (read, bytes, true);
+                        }
                     }
-                    _ => return Err(()), // strict: a partial chunk must be padded
+                    _ => return (read, bytes, true), // strict: a partial chunk must be padded
                 }
             }
-            return Ok((len, bytes));
+            return (len, bytes, false);
         }
         let mut c = chars[index];
         index += 1;
         if c == '=' {
             if chunk.len() < 2 {
-                return Err(());
+                return (read, bytes, true);
             }
             while index < len && is_ws(chars[index]) {
                 index += 1;
@@ -4519,12 +4577,12 @@ fn b64_decode_spec(
             if chunk.len() == 2 {
                 if index == len {
                     if handling == "stop-before-partial" {
-                        return Ok((read, bytes));
+                        return (read, bytes, false);
                     }
-                    return Err(());
+                    return (read, bytes, true);
                 }
                 if chars[index] != '=' {
-                    return Err(());
+                    return (read, bytes, true);
                 }
                 index += 1;
                 while index < len && is_ws(chars[index]) {
@@ -4532,52 +4590,58 @@ fn b64_decode_spec(
                 }
             }
             if index < len {
-                return Err(()); // trailing characters after padding
+                return (read, bytes, true); // trailing characters after padding
             }
-            decode_chunk(&chunk, handling == "strict", &mut bytes)?;
-            return Ok((len, bytes));
+            if decode_chunk(&chunk, handling == "strict", &mut bytes).is_err() {
+                return (read, bytes, true);
+            }
+            return (len, bytes, false);
         }
         if url {
             c = match c {
-                '+' | '/' => return Err(()),
+                '+' | '/' => return (read, bytes, true),
                 '-' => '+',
                 '_' => '/',
                 other => other,
             };
         }
         let Some(v) = B64_STD.iter().position(|&a| a as char == c) else {
-            return Err(());
+            return (read, bytes, true);
         };
         let remaining = max_len - bytes.len();
         if (remaining == 1 && chunk.len() == 2) || (remaining == 2 && chunk.len() == 3) {
-            return Ok((read, bytes)); // the next chunk wouldn't fit: stop before it
+            return (read, bytes, false); // the next chunk wouldn't fit: stop before it
         }
         chunk.push(v as u8);
         if chunk.len() == 4 {
-            decode_chunk(&chunk, false, &mut bytes)?;
+            if decode_chunk(&chunk, false, &mut bytes).is_err() {
+                return (read, bytes, true);
+            }
             chunk.clear();
             read = index;
             if bytes.len() == max_len {
-                return Ok((read, bytes));
+                return (read, bytes, false);
             }
         }
     }
 }
 /// FromHex: decode at most `max_len` bytes; `read` is the number of code units consumed.
-fn hex_decode_spec(s: &str, max_len: usize) -> Result<(usize, Vec<u8>), ()> {
+fn hex_decode_spec(s: &str, max_len: usize) -> (usize, Vec<u8>, bool) {
     let chars: Vec<char> = s.chars().collect();
-    if !chars.len().is_multiple_of(2) {
-        return Err(());
-    }
     let mut out = Vec::new();
+    if !chars.len().is_multiple_of(2) {
+        return (0, out, true);
+    }
     let mut index = 0;
     while index < chars.len() && out.len() < max_len {
-        let hi = chars[index].to_digit(16).ok_or(())?;
-        let lo = chars[index + 1].to_digit(16).ok_or(())?;
+        let (Some(hi), Some(lo)) = (chars[index].to_digit(16), chars[index + 1].to_digit(16))
+        else {
+            return (index, out, true);
+        };
         out.push((hi * 16 + lo) as u8);
         index += 2;
     }
-    Ok((index, out))
+    (index, out, false)
 }
 
 /// Read a Uint8Array receiver's bytes; errors if `this` isn't a (non-detached) Uint8Array.
@@ -4665,7 +4729,8 @@ fn install_uint8_base64(it: &mut Interp) {
         Ok(Value::from_string(s))
     });
     it.def_method(&proto, "toBase64", 0, |i, this, a| {
-        let bytes = u8_bytes(i, &this)?;
+        // Receiver validation, then options, then the (detachment-sensitive) byte read.
+        u8_validate(i, &this)?;
         let url = b64_option_url(i, &arg(a, 0))?;
         let omit_padding = if let Value::Obj(_) = arg(a, 0) {
             let op = ab(i.get_member(&arg(a, 0), "omitPadding"))?;
@@ -4673,6 +4738,7 @@ fn install_uint8_base64(it: &mut Interp) {
         } else {
             false
         };
+        let bytes = u8_bytes(i, &this)?;
         Ok(Value::from_string(b64_encode(&bytes, url, !omit_padding)))
     });
     it.def_method(&ctor, "fromHex", 1, |i, _t, a| {
@@ -4680,8 +4746,10 @@ fn install_uint8_base64(it: &mut Interp) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "fromHex requires a string")),
         };
-        let (_, bytes) = hex_decode_spec(&s, usize::MAX)
-            .map_err(|_| i.make_error("SyntaxError", "invalid hex string"))?;
+        let (_, bytes, err) = hex_decode_spec(&s, usize::MAX);
+        if err {
+            return Err(i.make_error("SyntaxError", "invalid hex string"));
+        }
         make_u8array(i, bytes)
     });
     it.def_method(&ctor, "fromBase64", 1, |i, _t, a| {
@@ -4690,12 +4758,14 @@ fn install_uint8_base64(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "fromBase64 requires a string")),
         };
         let (url, handling) = b64_decode_options(i, &arg(a, 1))?;
-        let (_, bytes) = b64_decode_spec(&s, url, &handling, usize::MAX)
-            .map_err(|_| i.make_error("SyntaxError", "invalid base64 string"))?;
+        let (_, bytes, err) = b64_decode_spec(&s, url, &handling, usize::MAX);
+        if err {
+            return Err(i.make_error("SyntaxError", "invalid base64 string"));
+        }
         make_u8array(i, bytes)
     });
     it.def_method(&proto, "setFromHex", 1, |i, this, a| {
-        let info = u8_validate(i, &this)?;
+        let info = u8_validate_writable(i, &this)?;
         let s = match arg(a, 0) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "setFromHex requires a string")),
@@ -4703,12 +4773,16 @@ fn install_uint8_base64(it: &mut Interp) {
         let max = i
             .ta_len(&info)
             .ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
-        let (read, bytes) = hex_decode_spec(&s, max)
-            .map_err(|_| i.make_error("SyntaxError", "invalid hex string"))?;
-        u8_set_bytes(i, &info, read, &bytes)
+        // Valid chunks decoded before an error are still written, then the SyntaxError surfaces.
+        let (read, bytes, err) = hex_decode_spec(&s, max);
+        let result = u8_set_bytes(i, &info, read, &bytes)?;
+        if err {
+            return Err(i.make_error("SyntaxError", "invalid hex string"));
+        }
+        Ok(result)
     });
     it.def_method(&proto, "setFromBase64", 1, |i, this, a| {
-        let info = u8_validate(i, &this)?;
+        let info = u8_validate_writable(i, &this)?;
         let s = match arg(a, 0) {
             Value::Str(s) => s,
             _ => return Err(i.make_error("TypeError", "setFromBase64 requires a string")),
@@ -4717,10 +4791,27 @@ fn install_uint8_base64(it: &mut Interp) {
         let max = i
             .ta_len(&info)
             .ok_or_else(|| i.make_error("TypeError", "detached buffer"))?;
-        let (read, bytes) = b64_decode_spec(&s, url, &handling, max)
-            .map_err(|_| i.make_error("SyntaxError", "invalid base64 string"))?;
-        u8_set_bytes(i, &info, read, &bytes)
+        // Valid chunks decoded before an error are still written, then the SyntaxError surfaces.
+        let (read, bytes, err) = b64_decode_spec(&s, url, &handling, max);
+        let result = u8_set_bytes(i, &info, read, &bytes)?;
+        if err {
+            return Err(i.make_error("SyntaxError", "invalid base64 string"));
+        }
+        Ok(result)
     });
+}
+
+/// ValidateUint8Array for the mutating methods: also rejects an immutable backing buffer
+/// (before any argument is read).
+fn u8_validate_writable(i: &mut Interp, this: &Value) -> Result<TaInfo, Value> {
+    let info = u8_validate(i, this)?;
+    if i.immutable_buffers.contains(&info.buffer) {
+        return Err(i.make_error(
+            "TypeError",
+            "cannot write into a view over an immutable ArrayBuffer",
+        ));
+    }
+    Ok(info)
 }
 
 /// ValidateUint8Array: the receiver must be a Uint8Array (detachment is checked separately).
@@ -4738,6 +4829,12 @@ fn u8_validate(i: &mut Interp, this: &Value) -> Result<TaInfo, Value> {
 
 /// SetUint8ArrayBytes + result object: write decoded `bytes` into the view, report `{read, written}`.
 fn u8_set_bytes(i: &mut Interp, info: &TaInfo, read: usize, bytes: &[u8]) -> Result<Value, Value> {
+    if !bytes.is_empty() && i.immutable_buffers.contains(&info.buffer) {
+        return Err(i.make_error(
+            "TypeError",
+            "cannot write into a view over an immutable ArrayBuffer",
+        ));
+    }
     if let Some(buf) = i.array_buffers.get_mut(&info.buffer) {
         buf[info.offset..info.offset + bytes.len()].copy_from_slice(bytes);
     }
@@ -5918,6 +6015,7 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
             entries.push((v.clone(), v));
         }
     }
+    i.gc_pin(&obj);
     i.map_data.insert(ptr, entries);
     set_internal(&obj, "__ck", Value::str("Set"));
     Value::Obj(obj)
@@ -6213,6 +6311,7 @@ fn collection_ctor(
     }
     let obj = new_from_ctor(i, name)?;
     let ptr = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.map_data.insert(ptr, Vec::new());
     // Brand the instance so prototype methods can reject cross-collection receivers.
     set_internal(&obj, "__ck", Value::str(name));
@@ -6526,6 +6625,7 @@ fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: 
                 .into_iter()
                 .map(|(k, v)| (k, i.make_array(v)))
                 .collect();
+            i.gc_pin(&m);
             i.map_data.insert(ptr, entries);
             set_internal(&m, "__ck", Value::str("Map"));
             Ok(Value::Obj(m))
@@ -6794,6 +6894,12 @@ fn install_reflect(it: &mut Interp) {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
+        }
+        // A mapped arguments index reports the live parameter value.
+        if let Some(v) = i.mapped_arg_value(Rc::as_ptr(&o) as usize, &key) {
+            if let Some(p) = o.borrow_mut().props.get_mut(&key) {
+                p.value = v;
+            }
         }
         // A TypedArray canonical numeric index reads from the buffer (out-of-range → undefined).
         if let Some(info) = ta_info(i, &o) {
@@ -7943,6 +8049,7 @@ fn make_proxy(i: &mut Interp, target: Value, handler: Value) -> Result<Value, Va
         obj.borrow_mut().is_constructor = is_constructor_value(&target);
     }
     let p = Rc::as_ptr(&obj) as usize;
+    i.gc_pin(&obj);
     i.proxies.insert(p, (target, handler));
     Ok(Value::Obj(obj))
 }
@@ -9154,14 +9261,30 @@ fn install_function_proto(it: &mut Interp) {
     }
     it.extra_protos
         .insert("%ThrowTypeError%", throw_type_error.clone());
-    // Function.prototype.caller / .arguments: accessor properties whose [[Get]] and [[Set]] are
-    // both the %ThrowTypeError% intrinsic (the same single function object per realm).
+    // Function.prototype.caller / .arguments: accessor properties. The getter yields undefined
+    // for an ordinary sloppy function (legacy web compatibility) and throws for strict/built-in
+    // functions; the setter is the %ThrowTypeError% poison.
+    let restricted_getter = it.make_native("get", 0, |i, this, _| {
+        if let Value::Obj(o) = &this {
+            if let Callable::User(f, _) = &o.borrow().call {
+                // Only ordinary sloppy functions get the legacy non-throwing behavior; arrows,
+                // generators, async functions, and strict functions all hit the poison.
+                if !f.is_strict && !f.is_arrow && !f.is_generator && !f.is_async {
+                    return Ok(Value::Undefined);
+                }
+            }
+        }
+        Err(i.make_error(
+            "TypeError",
+            "'caller', 'callee', and 'arguments' may not be accessed on strict mode functions",
+        ))
+    });
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
             Property {
                 value: Value::Undefined,
-                get: Some(Value::Obj(throw_type_error.clone())),
+                get: Some(Value::Obj(restricted_getter.clone())),
                 set: Some(Value::Obj(throw_type_error.clone())),
                 accessor: true,
                 writable: false,
@@ -10495,6 +10618,12 @@ fn install_object(it: &mut Interp) {
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
+        // A mapped arguments index reports the live parameter value.
+        if let Some(v) = i.mapped_arg_value(Rc::as_ptr(&o) as usize, &key) {
+            if let Some(p) = o.borrow_mut().props.get_mut(&key) {
+                p.value = v;
+            }
+        }
         // A TypedArray canonical numeric index is an own data property reading from the buffer; a
         // canonical-but-out-of-range index has no own property (a non-canonical key like "1.0" or
         // "+1" is an ordinary property, handled below).
@@ -10726,7 +10855,7 @@ fn descriptor_from_prop(i: &mut Interp, p: Property) -> Value {
 }
 
 /// A property descriptor with only the explicitly-present fields populated.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct PartialDesc {
     value: Option<Value>,
     get: Option<Value>,
@@ -10873,10 +11002,44 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
-    // Redefining a mapped `arguments` index severs its parameter alias (after syncing a plain
-    // value write through, per ArgumentsExoticObject [[DefineOwnProperty]]).
-    i.unmap_argument(Rc::as_ptr(o) as usize, key);
     let d = build_partial(i, desc)?;
+    // ArgumentsExoticObject [[DefineOwnProperty]]: sync the live parameter value into the
+    // ordinary property first; after a successful ordinary define, a plain value write goes
+    // through the map, and only an accessor or writable:false severs the alias.
+    let args_ptr = Rc::as_ptr(o) as usize;
+    let mapped = i.mapped_arg_name(args_ptr, key).is_some();
+    if mapped {
+        if let Some(cur) = i.mapped_arg_value(args_ptr, key) {
+            if let Some(p) = o.borrow_mut().props.get_mut(key) {
+                p.value = cur;
+            }
+        }
+        let allowed = define_own_property_ordinary(i, o, key, &d)?;
+        if !allowed {
+            return Ok(false);
+        }
+        if d.is_accessor() {
+            i.unmap_argument(args_ptr, key);
+        } else {
+            if let Some(v) = d.value.clone() {
+                i.mapped_arg_write(args_ptr, key, v);
+            }
+            if d.writable == Some(false) {
+                i.unmap_argument(args_ptr, key);
+            }
+        }
+        return Ok(true);
+    }
+    define_own_property_ordinary(i, o, key, &d)
+}
+
+fn define_own_property_ordinary(
+    i: &mut Interp,
+    o: &Gc,
+    key: &str,
+    d: &PartialDesc,
+) -> Result<bool, Abrupt> {
+    let d = d.clone();
     // Module namespace [[DefineOwnProperty]]: a String key is only redefinable to a descriptor that
     // matches the export's fixed shape (writable, enumerable, non-configurable, same value); adding
     // a new String key fails. Symbol keys fall through to the ordinary algorithm.

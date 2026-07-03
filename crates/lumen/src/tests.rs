@@ -1501,11 +1501,14 @@ fn regex_validation() {
 }
 #[test]
 fn poison_pill() {
-    // Function.prototype.caller/arguments are %ThrowTypeError% accessors: any access throws,
-    // strict or sloppy (per sec-function.prototype restricted properties).
-    assert_eq!(throws("function f(){}; f.caller"), "TypeError");
-    assert_eq!(throws("function f(){}; f.arguments"), "TypeError");
-    assert_eq!(throws("(function(){}).caller"), "TypeError");
+    // Function.prototype.caller/arguments: the getter yields undefined for an ordinary sloppy
+    // function (legacy web compat) and throws for strict ones; the setter always throws.
+    assert_eq!(run("function f(){}; String(f.caller)"), "undefined");
+    assert_eq!(run("function f(){}; String(f.arguments)"), "undefined");
+    assert_eq!(
+        throws("function f(){}; 'use strict'; f.caller = 1"),
+        "TypeError"
+    );
     assert_eq!(
         throws("'use strict'; function f(){ return f.caller; }; f()"),
         "TypeError"
@@ -6847,7 +6850,7 @@ fn throw_type_error_single_per_realm() {
         run("const tte = Object.getOwnPropertyDescriptor(function(){'use strict';return arguments}(), 'callee').get;
              const ad = Object.getOwnPropertyDescriptor(Function.prototype, 'arguments');
              const cd = Object.getOwnPropertyDescriptor(Function.prototype, 'caller');
-             String(tte === ad.get && tte === ad.set && tte === cd.get && tte === cd.set)"),
+             String(tte === ad.set && tte === cd.set && ad.get === cd.get)"),
         "true"
     );
     // A non-simple parameter list makes the arguments object unmapped: callee is poisoned too.
@@ -8310,5 +8313,128 @@ fn array_spec_semantics_batch() {
     assert_eq!(
         run("(Array.of.call(Math.cos.bind(Math)) instanceof Array) + ''"),
         "true"
+    );
+}
+#[test]
+fn mapped_arguments_define_semantics() {
+    assert_eq!(
+        run(
+            "(function(a){ Object.defineProperty(arguments,'0',{configurable:false});
+             let r = [];
+             try { delete arguments[0]; r.push('del-ok'); } catch(e){ r.push(e.constructor.name); }
+             r.push(Object.prototype.hasOwnProperty.call(arguments,'0'));
+             r.push(Object.getOwnPropertyDescriptor(arguments,'0').configurable);
+             for (var x in arguments) r.push('in:'+x);
+             arguments[0] = 99; r.push(a);
+             return r.join(',');
+             })(1)"
+        ),
+        "del-ok,true,false,in:0,99"
+    );
+    // isWritable-style mutation before the configurable probe (harness order).
+    assert_eq!(
+        run(
+            "(function(a){ Object.defineProperty(arguments,'0',{configurable:false});
+             var d0 = Object.getOwnPropertyDescriptor(arguments,'0');
+             var unlikely = '__val';
+             arguments[0] = unlikely;            // isWritable write
+             var w = arguments[0] === unlikely;
+             arguments[0] = 1;                   // isWritable restore
+             try { delete arguments[0]; } catch(e){}
+             var own = Object.prototype.hasOwnProperty.call(arguments,'0');
+             return d0.configurable + ',' + w + ',' + own;
+             })(1)"
+        ),
+        "false,true,true"
+    );
+    assert_eq!(
+        run("(function(a) {
+             Object.defineProperty(arguments, '0', { configurable: false });
+             const d = Object.getOwnPropertyDescriptor(arguments, '0');
+             a = 2;
+             const d2 = Object.getOwnPropertyDescriptor(arguments, '0');
+             return d.configurable + ':' + d2.value + ':' + arguments[0];
+             })(1)"),
+        "false:2:2"
+    );
+}
+#[test]
+fn dbg_slice_to_immutable() {
+    assert_eq!(
+        run("const ab = new ArrayBuffer(8);
+             const calls = [];
+             const st = { valueOf() { calls.push('s'); return -1; } };
+             const en = { valueOf() { calls.push('e'); return '33'; } };
+             const d = ab.sliceToImmutable(st, en);
+             calls.join(',') + ':' + d.byteLength"),
+        "s,e:1"
+    );
+    assert_eq!(
+        run("const ab2 = new ArrayBuffer(32);
+             const d2 = ab2.sliceToImmutable({ [Symbol.toPrimitive]: () => -1 }, { [Symbol.toPrimitive]: () => '-Infinity' });
+             '' + d2.byteLength"),
+        "0"
+    );
+    // Assigned (not literal) @@toPrimitive, with poisoned valueOf/toString fallbacks present.
+    assert_eq!(
+        run("const calls = [];
+             const objStart = { valueOf() { calls.push('sv'); return {}; }, toString() { calls.push('st'); return {}; } };
+             const objEnd = { valueOf() { calls.push('ev'); return {}; }, toString() { calls.push('et'); return {}; } };
+             objStart[Symbol.toPrimitive] = function (h) { calls.push('sp:' + h); return -1; };
+             objEnd[Symbol.toPrimitive] = function (h) { calls.push('ep:' + h); return '-Infinity'; };
+             const src = new ArrayBuffer(32);
+             const d = src.sliceToImmutable(objStart, objEnd);
+             calls.join(',') + ':' + d.byteLength"),
+        "sp:number,ep:number:0"
+    );
+    // Full harness-like sequence with closures capturing a reassigned `calls` variable.
+    assert_eq!(
+        run("var calls = [];
+             var rawStart = true, rawEnd = 1;
+             var badStartValueOf = false, badStartToString = false;
+             var objStart = {
+               valueOf() { calls.push('start.valueOf'); return badStartValueOf ? {} : rawStart; },
+               toString() { calls.push('start.toString'); return badStartToString ? {} : rawStart; }
+             };
+             var objEnd = {
+               valueOf() { calls.push('end.valueOf'); return rawEnd; },
+               toString() { calls.push('end.toString'); return rawEnd; }
+             };
+             var src = new ArrayBuffer(32);
+             src.sliceToImmutable(objStart, objEnd);
+             var first = calls.join('|');
+             calls = [];
+             objEnd[Symbol.toPrimitive] = function(h) { calls.push('end[tp](' + h + ')'); return rawEnd; };
+             src.sliceToImmutable(objStart, objEnd);
+             var second = calls.join('|');
+             badStartToString = true;
+             calls = [];
+             objStart[Symbol.toPrimitive] = function(h) { calls.push('start[tp](' + h + ')'); return rawStart; };
+             src.sliceToImmutable(objStart, objEnd);
+             first + ' / ' + second + ' / ' + calls.join('|')"),
+        "start.valueOf|end.valueOf / start.valueOf|end[tp](number) / start[tp](number)|end[tp](number)"
+    );
+}
+
+#[test]
+fn gc_side_table_pinning() {
+    // Churn enough objects with side-table entries (buffers, views, symbol-keyed coercion
+    // closures) to cross the GC trigger; recycled addresses must not inherit stale metadata.
+    assert_eq!(
+        run("var bad = 0;
+             for (var i = 0; i < 40000; i++) {
+               var calls = [];
+               var src = new ArrayBuffer(8);
+               var view = new Uint8Array(src);
+               view[0] = 1; view[1] = 2; view[2] = 3;
+               var s = { valueOf: function () { calls.push('s'); return 1; } };
+               var e = {};
+               e[Symbol.toPrimitive] = function (h) { calls.push('e'); return 3; };
+               var dest = src.sliceToImmutable(s, e);
+               var got = Array.from(new Uint8Array(dest)).join(',');
+               if (dest.byteLength !== 2 || got !== '2,3' || calls.join('') !== 'se') { bad++; if (bad > 3) break; }
+             }
+             '' + bad"),
+        "0"
     );
 }

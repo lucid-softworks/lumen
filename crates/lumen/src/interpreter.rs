@@ -475,6 +475,12 @@ pub struct Interp {
     /// The global environment's [[VarNames]]: names declared by `var`/function in global code, for
     /// GlobalDeclarationInstantiation's cross-script clash checks.
     pub global_var_names: std::collections::HashSet<String>,
+    /// GC pins: one `Gc` clone per object that has an entry in a pointer-keyed side table
+    /// (typed_arrays, promises, array_buffers, …). The pin keeps the object from being freed by
+    /// plain refcounting — which would let a later allocation reuse its address and inherit the
+    /// stale side-table entry — so such objects die only in `gc_collect`'s sweep, which evicts
+    /// their table entries first. The collector discounts pins when finding roots.
+    pub gc_pins: HashMap<usize, Gc>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
     pub ta_buffer: HashMap<usize, Value>,
@@ -861,6 +867,7 @@ impl Interp {
             typed_arrays: HashMap::new(),
             async_gens: std::collections::HashSet::new(),
             global_var_names: std::collections::HashSet::new(),
+            gc_pins: HashMap::new(),
             ta_buffer: HashMap::new(),
             shadow_realms: HashMap::new(),
             data_views: HashMap::new(),
@@ -1411,10 +1418,32 @@ impl Interp {
     /// Set `base[key] = value`, honouring setters, accessor-only properties, read-only data
     /// properties, and array `length`/index bookkeeping. The receiver defaults to `base`.
     /// The parameter name a still-mapped `arguments[key]` aliases, if any.
-    fn mapped_arg_name(&self, ptr: usize, key: &str) -> Option<String> {
+    pub(crate) fn mapped_arg_name(&self, ptr: usize, key: &str) -> Option<String> {
         let (_, names) = self.mapped_arguments.get(&ptr)?;
         let idx: usize = key.parse().ok()?;
         names.get(idx)?.clone()
+    }
+
+    /// The current parameter value a mapped `arguments[key]` aliases, if the map is live.
+    pub(crate) fn mapped_arg_value(&self, ptr: usize, key: &str) -> Option<Value> {
+        let name = self.mapped_arg_name(ptr, key)?;
+        let (env, _) = self.mapped_arguments.get(&ptr)?;
+        env.borrow().vars.get(&name).map(|b| b.value.clone())
+    }
+
+    /// Write through a mapped `arguments[key]` alias into its parameter binding.
+    pub(crate) fn mapped_arg_write(&mut self, ptr: usize, key: &str, v: Value) -> bool {
+        let Some(name) = self.mapped_arg_name(ptr, key) else {
+            return false;
+        };
+        let Some((env, _)) = self.mapped_arguments.get(&ptr) else {
+            return false;
+        };
+        if let Some(b) = env.borrow_mut().vars.get_mut(&name) {
+            b.value = v;
+            return true;
+        }
+        false
     }
 
     /// Unmap an `arguments` index (delete / defineProperty severs the parameter alias).
@@ -1471,9 +1500,15 @@ impl Interp {
                         if let Some(b) = env.borrow_mut().vars.get_mut(&name) {
                             b.value = value.clone();
                         }
-                        o.borrow_mut()
-                            .props
-                            .insert(key, crate::value::Property::data(value, true, true, true));
+                        // Update the own property's value in place — its attributes (e.g. a
+                        // configurable:false from defineProperty) must survive.
+                        let mut b = o.borrow_mut();
+                        if let Some(p) = b.props.get_mut(key) {
+                            p.value = value;
+                        } else {
+                            b.props
+                                .insert(key, crate::value::Property::data(value, true, true, true));
+                        }
                         return Ok(true);
                     }
                 }
@@ -2009,6 +2044,11 @@ impl Interp {
         Ok(())
     }
 
+    /// Pin `o` for the lifetime of its side-table entries (see `gc_pins`).
+    pub(crate) fn gc_pin(&mut self, o: &Gc) {
+        self.gc_pins.insert(Rc::as_ptr(o) as usize, o.clone());
+    }
+
     /// The object references *to other heap objects* held directly by `o` (proto, property
     /// values/getters/setters, and bound-function target/this/args). Collected into a Vec so `o`'s
     /// borrow is released before callers re-borrow — important for self-referential objects.
@@ -2064,6 +2104,12 @@ impl Interp {
             }
         }
 
+        // A pin is bookkeeping, not a real holder: count it like an internal reference so a
+        // pinned-but-unreachable object is still collectable (the sweep evicts its entries).
+        for o in self.gc_pins.values() {
+            let b = o.borrow();
+            b.gc_internal.set(b.gc_internal.get() + 1);
+        }
         // Roots: objects with a reference from outside the heap-object graph. `strong_count` here
         // includes exactly one clone held by `live`, so external refs == strong - internal - 1.
         let mut stack: Vec<Gc> = Vec::new();
@@ -2099,6 +2145,16 @@ impl Interp {
                 self.promises.remove(&ptr);
                 self.temporal.remove(&ptr);
                 self.array_buffers.remove(&ptr);
+                self.ta_buffer.remove(&ptr);
+                self.shared_buffers.remove(&ptr);
+                self.immutable_buffers.remove(&ptr);
+                self.generators.remove(&ptr);
+                self.async_gens.remove(&ptr);
+                self.async_gen_busy.remove(&ptr);
+                self.async_gen_queue.remove(&ptr);
+                self.mapped_arguments.remove(&ptr);
+                self.deferred_ns.remove(&ptr);
+                self.gc_pins.remove(&ptr);
                 let mut b = o.borrow_mut();
                 b.props.clear();
                 b.proto = None;
@@ -2510,6 +2566,7 @@ impl Interp {
                     }
                 }
                 if names.iter().any(Option::is_some) {
+                    self.gc_pin(&ao);
                     self.mapped_arguments
                         .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
                 }
@@ -2709,6 +2766,7 @@ impl Interp {
         let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
         let obj = self.make_generator(is_async, gen_proto);
         if let Value::Obj(o) = &obj {
+            self.gc_pin(o);
             self.generators.insert(Rc::as_ptr(o) as usize, coro);
             if is_async {
                 self.async_gens.insert(Rc::as_ptr(o) as usize);
@@ -2767,6 +2825,7 @@ impl Interp {
         let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
         let promise = self.new_promise();
         if let Value::Obj(o) = &promise {
+            self.gc_pin(o);
             self.generators.insert(Rc::as_ptr(o) as usize, coro);
         }
         let key = match &promise {

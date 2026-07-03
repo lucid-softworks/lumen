@@ -2604,6 +2604,7 @@ impl Interp {
     pub(crate) fn new_promise(&mut self) -> Value {
         let obj = Object::new(self.extra_protos.get("Promise").cloned());
         let p = Rc::as_ptr(&obj) as usize;
+        self.gc_pin(&obj);
         self.promises.insert(p, PromiseState::default());
         Value::Obj(obj)
     }
@@ -2814,6 +2815,7 @@ impl Interp {
             "lastIndex",
             Property::data(Value::Num(0.0), true, false, false),
         );
+        self.gc_pin(&obj);
         self.regexps.insert(ptr, Rc::new(re));
         Ok(Value::Obj(obj))
     }
@@ -3429,6 +3431,7 @@ impl Interp {
             }
         }
 
+        self.gc_pin(&ctor_obj);
         self.class_info.insert(
             Rc::as_ptr(&ctor_obj) as usize,
             ClassInfo {
@@ -3774,6 +3777,7 @@ impl Interp {
                         // Move the native object's internal slots (Map/Set/TypedArray/buffer/etc.)
                         // onto `this`, so a subclass instance carries the built-in's state.
                         let (sp, dp) = (Rc::as_ptr(src) as usize, Rc::as_ptr(dst) as usize);
+                        self.gc_pin(dst);
                         if let Some(v) = self.map_data.remove(&sp) {
                             self.map_data.insert(dp, v);
                         }
