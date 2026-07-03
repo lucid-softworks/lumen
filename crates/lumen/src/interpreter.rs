@@ -553,6 +553,8 @@ pub struct Interp {
 pub struct Disposable {
     pub value: Value,
     pub method: Value,
+    /// The method came from `@@asyncDispose` — its result is awaited during disposal.
+    pub method_is_async: bool,
 }
 
 /// A queued microtask: running one promise reaction.
@@ -2593,21 +2595,30 @@ impl Interp {
             }
             i.declare_block_lexicals(&func.body, &scope, false);
             crate::coroutine::set_async_gen(is_async);
-            let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
+            let has_using = func.body.iter().any(crate::eval::stmt_declares_using);
+            if has_using {
+                i.using_stack.push(Vec::new());
+            }
+            let mut result: Result<Value, Abrupt> = Ok(Value::Undefined);
             for stmt in &func.body {
                 match i.exec_stmt(stmt, &scope) {
                     Ok(_) => {}
-                    Err(Abrupt::Return(v)) => {
-                        outcome = crate::coroutine::Suspend::Done(v);
+                    Err(e) => {
+                        result = Err(e);
                         break;
                     }
-                    Err(Abrupt::Throw(e)) => {
-                        outcome = crate::coroutine::Suspend::Throw(e);
-                        break;
-                    }
-                    Err(_) => break,
                 }
             }
+            if has_using {
+                let frame = i.using_stack.pop().unwrap_or_default();
+                result = i.dispose_frame(frame, result);
+            }
+            let outcome = match result {
+                Ok(_) => crate::coroutine::Suspend::Done(Value::Undefined),
+                Err(Abrupt::Return(v)) => crate::coroutine::Suspend::Done(v),
+                Err(Abrupt::Throw(e)) => crate::coroutine::Suspend::Throw(e),
+                Err(_) => crate::coroutine::Suspend::Done(Value::Undefined),
+            };
             i.strict = saved_strict;
             outcome
         });
@@ -2642,21 +2653,30 @@ impl Interp {
                 i.seed_param_vars(ps, &scope);
             }
             i.declare_block_lexicals(&func.body, &scope, false);
-            let mut outcome = crate::coroutine::Suspend::Done(Value::Undefined);
+            let has_using = func.body.iter().any(crate::eval::stmt_declares_using);
+            if has_using {
+                i.using_stack.push(Vec::new());
+            }
+            let mut result: Result<Value, Abrupt> = Ok(Value::Undefined);
             for stmt in &func.body {
                 match i.exec_stmt(stmt, &scope) {
                     Ok(_) => {}
-                    Err(Abrupt::Return(v)) => {
-                        outcome = crate::coroutine::Suspend::Done(v);
+                    Err(e) => {
+                        result = Err(e);
                         break;
                     }
-                    Err(Abrupt::Throw(e)) => {
-                        outcome = crate::coroutine::Suspend::Throw(e);
-                        break;
-                    }
-                    Err(_) => break,
                 }
             }
+            if has_using {
+                let frame = i.using_stack.pop().unwrap_or_default();
+                result = i.dispose_frame(frame, result);
+            }
+            let outcome = match result {
+                Ok(_) => crate::coroutine::Suspend::Done(Value::Undefined),
+                Err(Abrupt::Return(v)) => crate::coroutine::Suspend::Done(v),
+                Err(Abrupt::Throw(e)) => crate::coroutine::Suspend::Throw(e),
+                Err(_) => crate::coroutine::Suspend::Done(Value::Undefined),
+            };
             i.strict = saved_strict;
             outcome
         });

@@ -267,24 +267,27 @@ impl Interp {
         if matches!(value, Value::Undefined | Value::Null) {
             return Ok(());
         }
-        let method = self.dispose_method(value, is_async)?;
+        let (method, method_is_async) = self.dispose_method(value, is_async)?;
         if self.using_stack.is_empty() {
             self.using_stack.push(Vec::new());
         }
         self.using_stack.last_mut().unwrap().push(Disposable {
             value: value.clone(),
             method,
+            method_is_async,
         });
         Ok(())
     }
 
     /// GetDisposeMethod: `@@asyncDispose` (falling back to `@@dispose`) for `await using`, else
     /// `@@dispose`. Throws if the resolved method isn't callable.
-    fn dispose_method(&mut self, value: &Value, is_async: bool) -> Result<Value, Abrupt> {
+    fn dispose_method(&mut self, value: &Value, is_async: bool) -> Result<(Value, bool), Abrupt> {
         let mut m = Value::Undefined;
+        let mut from_async = false;
         if is_async {
             if let Some(k) = crate::builtins::well_known_key(self, "asyncDispose") {
                 m = self.get_member(value, &k)?;
+                from_async = m.is_callable();
             }
         }
         if matches!(m, Value::Undefined | Value::Null) {
@@ -295,7 +298,7 @@ impl Interp {
         if !m.is_callable() {
             return Err(self.throw("TypeError", "value is not disposable"));
         }
-        Ok(m)
+        Ok((m, from_async))
     }
 
     /// Dispose a frame's resources in reverse order. An error thrown while disposing either becomes
@@ -307,7 +310,27 @@ impl Interp {
     ) -> Completion {
         let mut completion = result;
         while let Some(r) = frame.pop() {
-            match self.call(r.method.clone(), r.value.clone(), &[]) {
+            // Only an `@@asyncDispose` method's result is awaited; a sync `@@dispose` (even the
+            // fallback inside `await using`) has any returned promise ignored. Inside a
+            // coroutine the await genuinely parks, so job interleaving matches Await.
+            let disposed = self
+                .call(r.method.clone(), r.value.clone(), &[])
+                .and_then(|p| {
+                    if r.method_is_async {
+                        if crate::coroutine::in_coroutine() {
+                            match crate::coroutine::coroutine_await(self, p) {
+                                crate::coroutine::Resume::Next(x) => Ok(x),
+                                crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
+                                crate::coroutine::Resume::Return(rv) => Err(Abrupt::Return(rv)),
+                            }
+                        } else {
+                            self.await_value(p)
+                        }
+                    } else {
+                        Ok(p)
+                    }
+                });
+            match disposed {
                 Ok(_) => {}
                 Err(Abrupt::Throw(new_err)) => {
                     completion = match completion {
@@ -359,33 +382,11 @@ impl Interp {
     /// boundary). For a sync boundary this is exactly `dispose_frame`.
     pub(crate) fn dispose_frame_maybe_async(
         &mut self,
-        mut frame: Vec<Disposable>,
+        frame: Vec<Disposable>,
         result: Completion,
-        is_async: bool,
+        _is_async: bool,
     ) -> Completion {
-        if !is_async {
-            return self.dispose_frame(frame, result);
-        }
-        let mut completion = result;
-        while let Some(r) = frame.pop() {
-            let disposed = self
-                .call(r.method.clone(), r.value.clone(), &[])
-                .and_then(|p| self.await_value(p));
-            match disposed {
-                Ok(_) => {}
-                Err(Abrupt::Throw(new_err)) => {
-                    completion = match completion {
-                        Err(Abrupt::Throw(prev)) => {
-                            Err(Abrupt::Throw(self.make_suppressed(new_err, prev)))
-                        }
-                        Ok(_) => Err(Abrupt::Throw(new_err)),
-                        Err(other) => Err(other),
-                    };
-                }
-                Err(other) => return Err(other),
-            }
-        }
-        completion
+        self.dispose_frame(frame, result)
     }
 
     /// Build a `SuppressedError(error, suppressed)`.
@@ -3384,12 +3385,26 @@ impl Interp {
                     let scope = new_scope(Some(static_env.clone()));
                     bind(&scope, "this", ctor_val.clone());
                     if let Some(func) = &m.func {
-                        // A static block instantiates its declarations like a function body.
+                        // A static block instantiates its declarations like a function body,
+                        // including a `using` disposal frame.
                         self.hoist(&func.body, &scope, &[]);
                         self.declare_block_lexicals(&func.body, &scope, false);
-                        for stmt in &func.body {
-                            self.exec_stmt(stmt, &scope)?;
+                        let has_using = func.body.iter().any(stmt_declares_using);
+                        if has_using {
+                            self.using_stack.push(Vec::new());
                         }
+                        let mut result: Completion = Ok(Value::Undefined);
+                        for stmt in &func.body {
+                            if let Err(e) = self.exec_stmt(stmt, &scope) {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                        if has_using {
+                            let frame = self.using_stack.pop().unwrap_or_default();
+                            result = self.dispose_frame(frame, result);
+                        }
+                        result?;
                     }
                 }
                 MemberKind::Constructor => {}

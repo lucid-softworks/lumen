@@ -8172,3 +8172,36 @@ fn block_scope_redeclaration_early_errors() {
     assert!(parse_err("() => { new.target; };"));
     assert!(!parse_err("function g() { () => new.target; }"));
 }
+
+#[test]
+fn disposable_stack_semantics() {
+    // Distinct brands: a DisposableStack method rejects an AsyncDisposableStack receiver.
+    assert_eq!(
+        run("let r = '';
+             try { DisposableStack.prototype.dispose.call(new AsyncDisposableStack()); r = 'no'; }
+             catch (e) { r = e.constructor.name; }
+             r"),
+        "TypeError"
+    );
+    // Multiple disposal errors fold into a SuppressedError chain (later error on top).
+    assert_eq!(
+        run("const s = new DisposableStack();
+             s.defer(() => { throw 'first'; });
+             s.defer(() => { throw 'second'; });
+             let r = '';
+             try { s.dispose(); } catch (e) {
+               r = e.constructor.name + ':' + e.error + ':' + e.suppressed;
+             }
+             r"),
+        "SuppressedError:first:second"
+    );
+    // using in a sync function body and a class static block dispose at exit.
+    assert_eq!(
+        run("let out = [];
+             function f() { using x = { [Symbol.dispose]() { out.push('d'); } }; out.push('b'); }
+             f();
+             class C { static { using y = { [Symbol.dispose]() { out.push('s'); } }; } }
+             out.join(',')"),
+        "b,d,s"
+    );
+}
