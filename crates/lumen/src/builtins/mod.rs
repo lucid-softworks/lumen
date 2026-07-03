@@ -8279,7 +8279,7 @@ fn json_str(
         }
     }
     match &value {
-        Value::Undefined | Value::Sym(_) => Ok(None),
+        Value::Undefined | Value::Empty | Value::Sym(_) => Ok(None),
         Value::Null => Ok(Some("null".to_string())),
         Value::Bool(b) => Ok(Some(if *b { "true" } else { "false" }.to_string())),
         Value::Num(n) => Ok(Some(if n.is_finite() {
@@ -9948,7 +9948,7 @@ fn install_object(it: &mut Interp) {
                     .unwrap_or(Value::Null))
             }
             // ToObject coerces a primitive (Object.getPrototypeOf('') → String.prototype).
-            Value::Undefined | Value::Null => {
+            Value::Undefined | Value::Empty | Value::Null => {
                 Err(i.make_error("TypeError", "called on null or undefined"))
             }
             Value::Str(_) => Ok(Value::Obj(i.string_proto.clone())),

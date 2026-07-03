@@ -203,7 +203,7 @@ impl Interp {
         for stmt in body {
             match self.exec_stmt(stmt, env) {
                 Ok(v) => {
-                    if !matches!(v, Value::Undefined) {
+                    if !matches!(v, Value::Empty) {
                         last = v;
                     }
                 }
@@ -229,12 +229,20 @@ impl Interp {
         if has_using {
             self.using_stack.push(Vec::new());
         }
-        let mut result = Ok(Value::Undefined);
+        // StatementList completion: the last non-EMPTY statement value (V); an abrupt
+        // break/continue escaping the block carries V per UpdateEmpty.
+        let mut v = Value::Empty;
+        let mut result = Ok(Value::Empty);
         for s in stmts {
             match self.exec_stmt(s, &scope) {
-                Ok(v) => result = Ok(v),
+                Ok(sv) => {
+                    if !matches!(sv, Value::Empty) {
+                        v = sv;
+                    }
+                    result = Ok(v.clone());
+                }
                 Err(e) => {
-                    result = Err(e);
+                    result = Err(crate::interpreter::update_abrupt_empty(e, v.clone()));
                     break;
                 }
             }
@@ -454,7 +462,7 @@ impl Interp {
 
     pub fn exec_stmt(&mut self, stmt: &Stmt, env: &Env) -> Completion {
         match stmt {
-            Stmt::Empty | Stmt::Debugger | Stmt::FuncDecl(_) => Ok(Value::Undefined),
+            Stmt::Empty | Stmt::Debugger | Stmt::FuncDecl(_) => Ok(Value::Empty),
             Stmt::Expr(e) => self.eval(e, env),
             Stmt::Block(body) => self.exec_block(body, env),
             Stmt::VarDecl { kind, decls } => {
@@ -506,7 +514,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(Value::Undefined)
+                Ok(Value::Empty)
             }
             Stmt::Return(arg) => {
                 let v = match arg {
@@ -520,19 +528,21 @@ impl Interp {
                 Err(Abrupt::Throw(v))
             }
             Stmt::If { test, cons, alt } => {
+                // IfStatement completion: UpdateEmpty(branch, undefined) — never EMPTY.
                 let t = self.eval(test, env)?;
-                if self.to_boolean(&t) {
-                    self.exec_stmt(cons, env)
+                let r = if self.to_boolean(&t) {
+                    self.exec_stmt(cons, env)?
                 } else if let Some(a) = alt {
-                    self.exec_stmt(a, env)
+                    self.exec_stmt(a, env)?
                 } else {
-                    Ok(Value::Undefined)
-                }
+                    Value::Empty
+                };
+                Ok(crate::interpreter::update_empty(r))
             }
             Stmt::While { test, body } => self.run_loop(None, env, |me, env| {
                 let t = me.eval(test, env)?;
                 if !me.to_boolean(&t) {
-                    return Ok(LoopStep::Done(Value::Undefined));
+                    return Ok(LoopStep::Done(Value::Empty));
                 }
                 let bv = me.exec_stmt(body, env)?;
                 Ok(LoopStep::Continue(bv))
@@ -543,7 +553,7 @@ impl Interp {
                     if !first {
                         let t = me.eval(test, env)?;
                         if !me.to_boolean(&t) {
-                            return Ok(LoopStep::Done(Value::Undefined));
+                            return Ok(LoopStep::Done(Value::Empty));
                         }
                     }
                     first = false;
@@ -570,8 +580,8 @@ impl Interp {
                 is_await,
                 body,
             } => self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, None),
-            Stmt::Break(label) => Err(Abrupt::Break(label.clone())),
-            Stmt::Continue(label) => Err(Abrupt::Continue(label.clone())),
+            Stmt::Break(label) => Err(Abrupt::Break(label.clone(), Value::Empty)),
+            Stmt::Continue(label) => Err(Abrupt::Continue(label.clone(), Value::Empty)),
             Stmt::Try {
                 block,
                 handler,
@@ -587,20 +597,19 @@ impl Interp {
                     );
                 }
                 let with_env = crate::interpreter::new_with_scope(env.clone(), o);
-                self.exec_stmt(body, &with_env)
+                let r = self.exec_stmt(body, &with_env)?;
+                Ok(crate::interpreter::update_empty(r))
             }
             Stmt::ClassDecl(class) => {
                 let value = self.eval_class(class, env)?;
                 if let Some(name) = &class.name {
                     self.init_lexical(name, value, false, env);
                 }
-                Ok(Value::Undefined)
+                Ok(Value::Empty)
             }
             // Module declarations: imports are resolved at link time (runtime no-op); exports run
             // their inner declaration (the export itself is link-time metadata).
-            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => {
-                Ok(Value::Undefined)
-            }
+            Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => Ok(Value::Empty),
             Stmt::ExportDecl(inner) => self.exec_stmt(inner, env),
             Stmt::ExportDefault(inner) => match &**inner {
                 Stmt::Expr(e) => {
@@ -610,7 +619,7 @@ impl Interp {
                         self.set_fn_name(&v, "default");
                     }
                     self.init_lexical("*default*", v, false, env);
-                    Ok(Value::Undefined)
+                    Ok(Value::Empty)
                 }
                 // `export default function(){}` / `class{}` with no name: the value is bound to the
                 // synthetic `*default*` local (which the "default" export resolves to).
@@ -618,13 +627,13 @@ impl Interp {
                     let v = self.make_function(f.clone(), env.clone());
                     self.set_fn_name(&v, "default");
                     self.init_lexical("*default*", v, false, env);
-                    Ok(Value::Undefined)
+                    Ok(Value::Empty)
                 }
                 Stmt::ClassDecl(c) if c.name.is_none() => {
                     let v = self.eval_class(c, env)?;
                     self.set_fn_name(&v, "default");
                     self.init_lexical("*default*", v, false, env);
-                    Ok(Value::Undefined)
+                    Ok(Value::Empty)
                 }
                 other => self.exec_stmt(other, env),
             },
@@ -652,7 +661,7 @@ impl Interp {
             other => self.exec_stmt(other, env),
         };
         match result {
-            Err(Abrupt::Break(Some(l))) if l == label => Ok(Value::Undefined),
+            Err(Abrupt::Break(Some(l), bv)) if l == label => Ok(bv),
             other => other,
         }
     }
@@ -663,10 +672,11 @@ impl Interp {
         env: &Env,
         mut step: impl FnMut(&mut Interp, &Env) -> Result<LoopStep, Abrupt>,
     ) -> Completion {
-        // The loop's completion value: the most recent non-empty body completion (UpdateEmpty).
+        // The loop's completion value: the most recent non-EMPTY body completion (UpdateEmpty);
+        // V starts at undefined per ForBodyEvaluation, so a value-less loop completes undefined.
         let mut v = Value::Undefined;
         let keep = |bv: Value, v: &mut Value| {
-            if !matches!(bv, Value::Undefined) {
+            if !matches!(bv, Value::Empty) {
                 *v = bv;
             }
         };
@@ -680,11 +690,18 @@ impl Interp {
                     keep(bv, &mut v);
                     return Ok(v);
                 }
-                Err(Abrupt::Break(None)) => return Ok(v),
-                Err(Abrupt::Break(Some(l))) if Some(l.as_str()) == label => return Ok(v),
-                Err(Abrupt::Continue(None)) => {}
-                Err(Abrupt::Continue(Some(l))) if Some(l.as_str()) == label => {}
-                Err(e) => return Err(e),
+                Err(Abrupt::Break(None, bv)) => {
+                    keep(bv, &mut v);
+                    return Ok(v);
+                }
+                Err(Abrupt::Break(Some(l), bv)) if Some(l.as_str()) == label => {
+                    keep(bv, &mut v);
+                    return Ok(v);
+                }
+                Err(Abrupt::Continue(None, bv)) => keep(bv, &mut v),
+                Err(Abrupt::Continue(Some(l), bv)) if Some(l.as_str()) == label => keep(bv, &mut v),
+                // A break/continue targeting an outer label: thread this loop's V outward.
+                Err(e) => return Err(crate::interpreter::update_abrupt_empty(e, v)),
             }
         }
     }
@@ -789,7 +806,7 @@ impl Interp {
             if let Some(t) = test {
                 let tv = me.eval(t, env)?;
                 if !me.to_boolean(&tv) {
-                    return Ok(LoopStep::Done(Value::Undefined));
+                    return Ok(LoopStep::Done(Value::Empty));
                 }
             }
             let bv = me.exec_stmt(body, env)?;
@@ -841,7 +858,7 @@ impl Interp {
                 let res = me.await_value(res)?;
                 let done = me.get_member(&res, "done")?;
                 if me.to_boolean(&done) {
-                    return Ok(LoopStep::Done(Value::Undefined));
+                    return Ok(LoopStep::Done(Value::Empty));
                 }
                 let raw = me.get_member(&res, "value")?;
                 let v = me.await_value(raw)?;
@@ -860,7 +877,7 @@ impl Interp {
                     Some(x) => x,
                     None => {
                         exhausted = true;
-                        return Ok(LoopStep::Done(Value::Undefined));
+                        return Ok(LoopStep::Done(Value::Empty));
                     }
                 };
                 let iter_env = new_scope(Some(env.clone()));
@@ -893,7 +910,7 @@ impl Interp {
         let mut idx = 0;
         self.run_loop(label, env, |me, env| {
             if idx >= items.len() {
-                return Ok(LoopStep::Done(Value::Undefined));
+                return Ok(LoopStep::Done(Value::Empty));
             }
             let v = items[idx].clone();
             idx += 1;
@@ -1285,13 +1302,19 @@ impl Interp {
                     } else {
                         new_scope(Some(env.clone()))
                     };
-                    let mut last = Ok(Value::Undefined);
+                    let mut v = Value::Empty;
+                    let mut last = Ok(Value::Empty);
                     self.declare_block_lexicals(body, &body_env, true);
                     for s in body {
                         match self.exec_stmt(s, &body_env) {
-                            Ok(v) => last = Ok(v),
+                            Ok(sv) => {
+                                if !matches!(sv, Value::Empty) {
+                                    v = sv;
+                                }
+                                last = Ok(v.clone());
+                            }
                             Err(e) => {
-                                last = Err(e);
+                                last = Err(crate::interpreter::update_abrupt_empty(e, v.clone()));
                                 break;
                             }
                         }
@@ -1308,7 +1331,12 @@ impl Interp {
             // value is discarded (the try/catch completion stands).
             self.exec_block(fin, env)?;
         }
-        after_catch
+        // TryStatement completion: UpdateEmpty(result, undefined) — an EMPTY value (normal or in
+        // an escaping break/continue) becomes undefined.
+        match after_catch {
+            Ok(v) => Ok(crate::interpreter::update_empty(v)),
+            Err(e) => Err(crate::interpreter::update_abrupt_empty(e, Value::Undefined)),
+        }
     }
 
     fn exec_switch(&mut self, disc: &Expr, cases: &[SwitchCase], env: &Env) -> Completion {
@@ -1333,17 +1361,28 @@ impl Interp {
             Some(i) => i,
             None => return Ok(Value::Undefined),
         };
-        let mut last = Value::Undefined;
+        let mut v = Value::Empty;
         for case in &cases[start..] {
             for s in &case.body {
                 match self.exec_stmt(s, &scope) {
-                    Ok(v) => last = v,
-                    Err(Abrupt::Break(None)) => return Ok(last),
-                    Err(e) => return Err(e),
+                    Ok(sv) => {
+                        if !matches!(sv, Value::Empty) {
+                            v = sv;
+                        }
+                    }
+                    Err(Abrupt::Break(None, bv)) => {
+                        if !matches!(bv, Value::Empty) {
+                            v = bv;
+                        }
+                        return Ok(crate::interpreter::update_empty(v));
+                    }
+                    // Abrupt exits thread the accumulated V per UpdateEmpty.
+                    Err(e) => return Err(crate::interpreter::update_abrupt_empty(e, v)),
                 }
             }
         }
-        Ok(last)
+        // SwitchStatement completion is UpdateEmpty(V, undefined).
+        Ok(crate::interpreter::update_empty(v))
     }
 
     // ----- variable binding -------------------------------------------------------------------
@@ -2723,7 +2762,7 @@ impl Interp {
         for stmt in body {
             match self.exec_stmt(stmt, lex_env) {
                 Ok(v) => {
-                    if !matches!(v, Value::Undefined) {
+                    if !matches!(v, Value::Empty) {
                         last = v;
                     }
                 }
@@ -4308,7 +4347,7 @@ impl Interp {
 
     pub fn to_boolean(&self, v: &Value) -> bool {
         match v {
-            Value::Undefined | Value::Null => false,
+            Value::Undefined | Value::Empty | Value::Null => false,
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::BigInt(n) => *n != 0,
@@ -4319,7 +4358,7 @@ impl Interp {
 
     pub fn to_number(&mut self, v: &Value) -> Result<f64, Abrupt> {
         Ok(match v {
-            Value::Undefined => f64::NAN,
+            Value::Undefined | Value::Empty => f64::NAN,
             Value::Null => 0.0,
             Value::Bool(b) => {
                 if *b {
@@ -4354,7 +4393,7 @@ impl Interp {
 
     pub fn to_string(&mut self, v: &Value) -> Result<Rc<str>, Abrupt> {
         Ok(match v {
-            Value::Undefined => Rc::from("undefined"),
+            Value::Undefined | Value::Empty => Rc::from("undefined"),
             Value::Null => Rc::from("null"),
             Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
             Value::Num(n) => Rc::from(self.num_to_str(*n).as_str()),

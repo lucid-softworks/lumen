@@ -244,11 +244,30 @@ pub fn nearest_var_env(env: &Env) -> Env {
 pub enum Abrupt {
     Throw(Value),
     Return(Value),
-    Break(Option<String>),
-    Continue(Option<String>),
+    /// Break/Continue carry the completion value threaded so far by the enclosing statement list
+    /// (`Value::Empty` when none), per the spec's UpdateEmpty bookkeeping.
+    Break(Option<String>, Value),
+    Continue(Option<String>, Value),
 }
 
 pub type Completion = Result<Value, Abrupt>;
+
+/// UpdateEmpty: replace an EMPTY statement-completion value with `undefined`.
+pub(crate) fn update_empty(v: Value) -> Value {
+    match v {
+        Value::Empty => Value::Undefined,
+        other => other,
+    }
+}
+
+/// UpdateEmpty for an abrupt completion: fill an empty break/continue value with `v`.
+pub(crate) fn update_abrupt_empty(a: Abrupt, v: Value) -> Abrupt {
+    match a {
+        Abrupt::Break(l, Value::Empty) => Abrupt::Break(l, v),
+        Abrupt::Continue(l, Value::Empty) => Abrupt::Continue(l, v),
+        other => other,
+    }
+}
 
 /// Extract the thrown value from an abrupt completion (non-throw completions surface as undefined).
 pub fn abrupt_value(a: Abrupt) -> Value {
@@ -1126,7 +1145,7 @@ impl Interp {
         receiver: Value,
     ) -> Result<Value, Abrupt> {
         match base {
-            Value::Undefined | Value::Null => Err(self.throw(
+            Value::Undefined | Value::Empty | Value::Null => Err(self.throw(
                 "TypeError",
                 format!("cannot read property '{key}' of {}", type_name(base)),
             )),
@@ -2822,7 +2841,7 @@ impl Interp {
         for stmt in body {
             match self.exec_stmt(stmt, &env) {
                 Ok(v) => {
-                    if !matches!(v, Value::Undefined) {
+                    if !matches!(v, Value::Empty) {
                         last = v;
                     }
                 }
@@ -3086,7 +3105,7 @@ impl Interp {
 
 fn type_name(v: &Value) -> &'static str {
     match v {
-        Value::Undefined => "undefined",
+        Value::Undefined | Value::Empty => "undefined",
         Value::Null => "null",
         Value::Bool(_) => "boolean",
         Value::Num(_) => "number",

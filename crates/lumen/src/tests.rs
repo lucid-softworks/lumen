@@ -3585,7 +3585,8 @@ fn dataview_offset_validation() {
 #[test]
 fn loop_completion_values() {
     assert_eq!(run("for(var i=0;i<3;i++){ i }"), "2");
-    assert_eq!(run("2; for(var i=0;i<0;i++){ 3 }"), "2"); // no iteration → empty → keeps 2
+    // No iteration still completes with undefined (ForBodyEvaluation's V starts at undefined).
+    assert_eq!(run("2; for(var i=0;i<0;i++){ 3 }"), "undefined");
     assert_eq!(run("for(var i=0;i<3;i++){ }"), "undefined");
     assert_eq!(run("var i=0; while(i<3){ i++; i }"), "3");
     assert_eq!(run("var i=0; do { i++; i } while(i<3)"), "3");
@@ -7068,5 +7069,51 @@ fn proto_dup_literal_vs_pattern() {
     assert_eq!(
         run("var x; ({ __proto__: x } = {}); String(x === Object.prototype)"),
         "true"
+    );
+}
+
+#[test]
+fn statement_completion_values() {
+    // eval's completion follows the spec's EMPTY/UpdateEmpty bookkeeping: declarations and
+    // value-less statements don't update V, but statements that *complete* with undefined do.
+    assert_eq!(run("String(eval('1; var x;'))"), "1");
+    assert_eq!(run("String(eval('1; void 0;'))"), "undefined");
+    assert_eq!(run("String(eval('var x'))"), "undefined");
+    // Loops and ifs complete with undefined when their body produced no value.
+    assert_eq!(run("String(eval('1; for (;false;) {}'))"), "undefined");
+    assert_eq!(run("String(eval('1; if (true) {}'))"), "undefined");
+    assert_eq!(run("String(eval('1; if (false) 2;'))"), "undefined");
+    assert_eq!(run("String(eval('1; while (false) {}'))"), "undefined");
+    // ...and with the last body value otherwise.
+    assert_eq!(
+        run("String(eval('for (var r = true; r; r = false) { 3; }'))"),
+        "3"
+    );
+    assert_eq!(run("String(eval('if (true) 2;'))"), "2");
+    assert_eq!(run("String(eval('switch (1) { case 1: 4; }'))"), "4");
+    assert_eq!(
+        run("String(eval('5; switch (1) { case 1: break; }'))"),
+        "undefined"
+    );
+    assert_eq!(run("String(eval('try { 6; } finally {}'))"), "6");
+    assert_eq!(run("String(eval('7; try { } catch (e) {}'))"), "undefined");
+}
+
+#[test]
+fn break_carries_completion_value() {
+    // A break threads the statement list's V outward (UpdateEmpty), so the loop/labelled
+    // statement completes with the last value produced before the break.
+    assert_eq!(run("String(eval('while (true) { 1; break; }'))"), "1");
+    assert_eq!(
+        run("String(eval('2; while (true) { break; }'))"),
+        "undefined"
+    );
+    assert_eq!(run("String(eval('outer: { 3; break outer; }'))"), "3");
+    assert_eq!(run("String(eval('4; outer: { break outer; }'))"), "4");
+    assert_eq!(run("String(eval('for (;;) { 5; if (true) break; }'))"), "5");
+    // continue threads its value into the loop's V as well.
+    assert_eq!(
+        run("String(eval('var i = 0; while (i < 2) { i++; 6; continue; }'))"),
+        "6"
     );
 }

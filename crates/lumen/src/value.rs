@@ -18,6 +18,10 @@ pub type NativeFn = fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 pub enum Value {
     #[default]
     Undefined,
+    /// The spec's EMPTY completion marker: produced only by *statement* evaluation (declarations
+    /// and other value-less statements) so completion values thread per UpdateEmpty. Never a JS
+    /// value — every engine boundary converts it to `Undefined` before a value escapes.
+    Empty,
     Null,
     Bool(bool),
     Num(f64),
@@ -54,7 +58,7 @@ impl Value {
     }
     pub fn type_of(&self) -> &'static str {
         match self {
-            Value::Undefined => "undefined",
+            Value::Undefined | Value::Empty => "undefined",
             Value::Null => "object",
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",

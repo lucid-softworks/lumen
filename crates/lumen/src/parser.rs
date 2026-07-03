@@ -53,6 +53,7 @@ pub fn parse_script_eval(
         super_prop_ok: allow_super,
         proto_dups: Vec::new(),
         last_paren: false,
+        single_stmt: false,
     };
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
@@ -92,6 +93,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         super_prop_ok: false,
         proto_dups: Vec::new(),
         last_paren: false,
+        single_stmt: false,
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
@@ -291,6 +293,9 @@ struct Parser {
     /// True when the expression just produced was a parenthesized primary (`(...)` with nothing
     /// consumed after it). Only used to let parens satisfy the `??` / `&&`,`||` no-mixing rule.
     last_paren: bool,
+    /// Set for the immediately following `parse_stmt` when it parses a single-statement body
+    /// (`if`/loop/`with`/label): there, `let` only commits to a declaration before `[`.
+    single_stmt: bool,
 }
 
 #[derive(Default)]
@@ -488,6 +493,7 @@ impl Parser {
         // nested context where an import/export declaration is a SyntaxError.
         let at_top = self.top_level;
         self.top_level = false;
+        let single_stmt = std::mem::take(&mut self.single_stmt);
         match self.cur().clone() {
             Tok::Punct("{") => {
                 self.advance();
@@ -500,7 +506,14 @@ impl Parser {
             }
             Tok::Keyword("var") => self.parse_var_decl(DeclKind::Var),
             Tok::Keyword("const") => self.parse_var_decl(DeclKind::Const),
-            Tok::Ident(w) if w == "let" && self.starts_let_decl() => {
+            // In a single-statement (substatement) body only `let [` commits to a declaration —
+            // ExpressionStatement's lookahead restriction is `let [` alone, so a bare `let` there
+            // is an identifier reference (with ASI before a newline-separated binding name).
+            Tok::Ident(w)
+                if w == "let"
+                    && self.starts_let_decl()
+                    && (!single_stmt || matches!(self.peek_kind(1), Tok::Punct("["))) =>
+            {
                 self.parse_var_decl(DeclKind::Let)
             }
             Tok::Ident(w) if w == "using" && self.starts_using_decl() => {
@@ -874,6 +887,7 @@ impl Parser {
     /// `class` declaration is not allowed there. A plain `FunctionDeclaration` is allowed only in the
     /// `if`/`else`/label positions in sloppy mode (Annex B); async/generator functions never are.
     fn parse_substatement(&mut self, annexb_fn: bool) -> Result<Stmt, ParseError> {
+        self.single_stmt = true;
         let s = self.parse_stmt()?;
         match &s {
             Stmt::VarDecl {
@@ -2102,6 +2116,7 @@ impl Parser {
                         super_prop_ok: self.super_prop_ok,
                         proto_dups: Vec::new(),
                         last_paren: false,
+                        single_stmt: false,
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     let e = sub.parse_expr()?;
@@ -2160,6 +2175,7 @@ impl Parser {
                         super_prop_ok: self.super_prop_ok,
                         proto_dups: Vec::new(),
                         last_paren: false,
+                        single_stmt: false,
                     };
                     let e = sub.parse_expr()?;
                     self.proto_dups.append(&mut sub.proto_dups);
