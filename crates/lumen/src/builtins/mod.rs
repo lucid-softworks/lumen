@@ -25,6 +25,19 @@ fn this_obj(this: &Value) -> Option<Gc> {
     this.as_obj().cloned()
 }
 
+/// Set(O, P, V, true): perform [[Set]] and throw a TypeError if it returns false, matching the
+/// spec's `Set(..., Throw=true)` used by Array mutators regardless of the surrounding strict mode.
+fn set_throw(i: &mut Interp, base: &Value, key: &str, value: Value) -> Result<(), Value> {
+    let ok = ab(i.set_member_recv(base, key, value, base.clone()))?;
+    if !ok {
+        return Err(i.make_error(
+            "TypeError",
+            format!("Cannot assign to read only property '{key}'"),
+        ));
+    }
+    Ok(())
+}
+
 /// ToDateTimeOptions default for toLocaleDateString/toLocaleTimeString: when `options` is undefined,
 /// supply the date-only or time-only component defaults; otherwise pass the options through.
 fn date_style_default(i: &mut Interp, options: &Value, date: bool) -> Result<Value, Value> {
@@ -7749,6 +7762,35 @@ fn json_delete_prop(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Val
     Ok(())
 }
 
+/// DeletePropertyOrThrow(O, P): [[Delete]] and throw a TypeError if it returns false. An absent
+/// property deletes successfully (returns true), matching the spec used by Array mutators.
+fn delete_or_throw(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Value> {
+    if let Some((target, handler)) = proxy_pair(i, holder) {
+        let ok = ab(i.proxy_delete(target, handler, key))?;
+        if !ok {
+            return Err(i.make_error("TypeError", format!("Cannot delete property '{key}'")));
+        }
+        return Ok(());
+    }
+    if let Value::Obj(o) = holder {
+        let present = o.borrow().props.contains(key);
+        if !present {
+            return Ok(());
+        }
+        let configurable = o
+            .borrow()
+            .props
+            .get(key)
+            .map(|p| p.configurable)
+            .unwrap_or(true);
+        if !configurable {
+            return Err(i.make_error("TypeError", format!("Cannot delete property '{key}'")));
+        }
+        o.borrow_mut().props.remove(key);
+    }
+    Ok(())
+}
+
 /// CreateDataProperty for the JSON reviver: a { value, writable, enumerable, configurable: true }
 /// data property, trap-aware for proxy holders.
 fn json_create_data_prop(i: &mut Interp, holder: &Value, key: &str, v: Value) -> Result<(), Value> {
@@ -10682,11 +10724,11 @@ fn install_array(it: &mut Interp) {
             return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
         }
         for a in args {
-            ab(i.set_member(&ov, &len.to_string(), a.clone()))?;
+            set_throw(i, &ov, &len.to_string(), a.clone())?;
             len += 1;
         }
         // Generic objects don't auto-track length the way arrays do, so set it explicitly.
-        ab(i.set_member(&ov, "length", Value::Num(len as f64)))?;
+        set_throw(i, &ov, "length", Value::Num(len as f64))?;
         Ok(Value::Num(len as f64))
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
@@ -10695,12 +10737,12 @@ fn install_array(it: &mut Interp) {
         // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
         let len = ab(i.to_length(&o))?;
         if len == 0 {
-            ab(i.set_member(&ov, "length", Value::Num(0.0)))?;
+            set_throw(i, &ov, "length", Value::Num(0.0))?;
             return Ok(Value::Undefined);
         }
         let last = ab(i.get_member(&ov, &(len - 1).to_string()))?;
-        o.borrow_mut().props.remove(&(len - 1).to_string());
-        ab(i.set_member(&ov, "length", Value::Num((len - 1) as f64)))?;
+        delete_or_throw(i, &ov, &(len - 1).to_string())?;
+        set_throw(i, &ov, "length", Value::Num((len - 1) as f64))?;
         Ok(last)
     });
     it.def_method(&ap, "shift", 0, |i, this, _args| {
@@ -10708,15 +10750,22 @@ fn install_array(it: &mut Interp) {
         let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         if len == 0 {
+            set_throw(i, &ov, "length", Value::Num(0.0))?;
             return Ok(Value::Undefined);
         }
         let first = ab(i.get_member(&ov, "0"))?;
         for k in 1..len {
-            let v = ab(i.get_member(&ov, &k.to_string()))?;
-            ab(i.set_member(&ov, &(k - 1).to_string(), v))?;
+            let from = k.to_string();
+            let to = (k - 1).to_string();
+            if i.has_property(&o, &from) {
+                let v = ab(i.get_member(&ov, &from))?;
+                set_throw(i, &ov, &to, v)?;
+            } else {
+                delete_or_throw(i, &ov, &to)?;
+            }
         }
-        o.borrow_mut().props.remove(&(len - 1).to_string());
-        ab(i.set_member(&ov, "length", Value::Num((len - 1) as f64)))?;
+        delete_or_throw(i, &ov, &(len - 1).to_string())?;
+        set_throw(i, &ov, "length", Value::Num((len - 1) as f64))?;
         Ok(first)
     });
     it.def_method(&ap, "unshift", 1, |i, this, args| {
@@ -10724,14 +10773,22 @@ fn install_array(it: &mut Interp) {
         let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         let n = args.len();
-        for k in (0..len).rev() {
-            let v = ab(i.get_member(&ov, &k.to_string()))?;
-            ab(i.set_member(&ov, &(k + n).to_string(), v))?;
+        if n > 0 {
+            for k in (0..len).rev() {
+                let from = k.to_string();
+                let to = (k + n).to_string();
+                if i.has_property(&o, &from) {
+                    let v = ab(i.get_member(&ov, &from))?;
+                    set_throw(i, &ov, &to, v)?;
+                } else {
+                    delete_or_throw(i, &ov, &to)?;
+                }
+            }
+            for (idx, a) in args.iter().enumerate() {
+                set_throw(i, &ov, &idx.to_string(), a.clone())?;
+            }
         }
-        for (idx, a) in args.iter().enumerate() {
-            ab(i.set_member(&ov, &idx.to_string(), a.clone()))?;
-        }
-        ab(i.set_member(&ov, "length", Value::Num((len + n) as f64)))?;
+        set_throw(i, &ov, "length", Value::Num((len + n) as f64))?;
         Ok(Value::Num((len + n) as f64))
     });
     it.def_method(&ap, "slice", 2, |i, this, args| {
@@ -11676,13 +11733,13 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
             let to = (k + item_count).to_string();
             if i.has_property(&o, &from) {
                 let v = ab(i.get_member(&ov, &from))?;
-                ab(i.set_member(&ov, &to, v))?;
+                set_throw(i, &ov, &to, v)?;
             } else {
-                json_delete_prop(i, &ov, &to)?;
+                delete_or_throw(i, &ov, &to)?;
             }
         }
         for k in ((len - delete_count + item_count)..len).rev() {
-            json_delete_prop(i, &ov, &k.to_string())?;
+            delete_or_throw(i, &ov, &k.to_string())?;
         }
     } else if item_count > delete_count {
         for k in ((start + 1)..=(len - delete_count)).rev() {
@@ -11690,20 +11747,21 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
             let to = (k + item_count - 1).to_string();
             if i.has_property(&o, &from) {
                 let v = ab(i.get_member(&ov, &from))?;
-                ab(i.set_member(&ov, &to, v))?;
+                set_throw(i, &ov, &to, v)?;
             } else {
-                json_delete_prop(i, &ov, &to)?;
+                delete_or_throw(i, &ov, &to)?;
             }
         }
     }
     for (off, v) in items.iter().enumerate() {
-        ab(i.set_member(&ov, &(start + off as i64).to_string(), v.clone()))?;
+        set_throw(i, &ov, &(start + off as i64).to_string(), v.clone())?;
     }
-    ab(i.set_member(
+    set_throw(
+        i,
         &ov,
         "length",
         Value::Num((len - delete_count + item_count) as f64),
-    ))?;
+    )?;
     Ok(removed)
 }
 
