@@ -82,14 +82,32 @@ struct CharClass {
 }
 
 impl CharClass {
-    fn matches(&self, c: char, icase: bool) -> bool {
+    fn matches(&self, c: char, icase: bool, unicode: bool) -> bool {
         let mut hit = self.matches_raw(c);
         if !hit && icase {
-            // Try the opposite case for case-insensitive matching.
-            for alt in c.to_lowercase().chain(c.to_uppercase()) {
-                if alt != c && self.matches_raw(alt) {
+            if unicode {
+                // Try the opposite case for case-insensitive matching (full folding).
+                for alt in c.to_lowercase().chain(c.to_uppercase()) {
+                    if alt != c && self.matches_raw(alt) {
+                        hit = true;
+                        break;
+                    }
+                }
+            } else {
+                // Legacy Canonicalize: compare via simple uppercase, never folding a non-ASCII
+                // character onto an ASCII one.
+                let cu = canonicalize_legacy(c);
+                if cu != c && self.matches_raw(cu) {
                     hit = true;
-                    break;
+                }
+                // A class member whose canonical form equals cu also matches (e.g. /[k]/i vs 'K').
+                if !hit {
+                    for alt in c.to_lowercase().chain(c.to_uppercase()) {
+                        if alt != c && canonicalize_legacy(alt) == cu && self.matches_raw(alt) {
+                            hit = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -160,6 +178,31 @@ fn uprop_has(name: &str, c: char) -> bool {
     })
 }
 /// IdentifierStart for a RegExp capture-group name (ID_Start ∪ {$, _}).
+/// The legacy (non-Unicode) Canonicalize: the simple uppercase mapping, except that a non-ASCII
+/// character never canonicalizes onto an ASCII one (so /\u212a/i does not match 'K' without /u).
+fn canonicalize_legacy(c: char) -> char {
+    let mut up = c.to_uppercase();
+    let (first, rest) = (up.next(), up.next());
+    match (first, rest) {
+        (Some(u), None) => {
+            if (c as u32) >= 128 && (u as u32) < 128 {
+                c
+            } else {
+                u
+            }
+        }
+        _ => c,
+    }
+}
+
+/// A regular-expression SyntaxCharacter (the only chars an identity escape may name in /u mode).
+fn is_regex_syntax_char(c: char) -> bool {
+    matches!(
+        c,
+        '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
+    )
+}
+
 fn regex_ident_start(c: char) -> bool {
     if c.is_ascii() {
         return c == '$' || c == '_' || c.is_ascii_alphabetic();
@@ -272,6 +315,16 @@ impl Regex {
         }
         // Duplicate group names are allowed only across distinct alternation branches.
         validate_group_names(&ast, &p.names)?;
+        // In Unicode mode a decimal escape must name an existing capture group.
+        if unicode {
+            let mut max_ref = 0usize;
+            max_backref(&ast, &mut max_ref);
+            if max_ref > p.ngroups {
+                return Err(format!(
+                    "back reference \\{max_ref} exceeds the number of capture groups"
+                ));
+            }
+        }
         resolve_named_backrefs(&mut ast, &p.names);
         // Wrap the whole match in group-0 saves.
         let mut prog = vec![Inst::Save(0)];
@@ -313,6 +366,7 @@ impl Regex {
                 depth: 0,
                 lb_end: None,
                 flags: vec![(self.ignore_case, self.multiline, self.dotall)],
+                unicode: self.flags.contains('u') || self.flags.contains('v'),
             };
             if m.run(&self.prog, 0, from) {
                 let mut out = Vec::with_capacity(self.ngroups + 1);
@@ -381,6 +435,11 @@ impl Parser {
         if matches!(self.peek(), Some('*' | '+' | '?')) {
             return Err("nothing to repeat".into());
         }
+        // A *braced* quantifier at term start too (`/{2}/`); a non-quantifier `{` stays a
+        // literal (Annex B) and is handled by parse_atom.
+        if self.peek() == Some('{') && self.try_parse_brace()?.is_some() {
+            return Err("nothing to repeat".into());
+        }
         let atom = self.parse_atom()?;
         let (min, max) = match self.peek() {
             Some('*') => {
@@ -401,6 +460,12 @@ impl Parser {
             },
             _ => return Ok(atom),
         };
+        // A lookbehind can never be quantified; a lookahead only outside Unicode mode
+        // (the Annex B QuantifiableAssertion carve-out).
+        if matches!(atom, Node::LookBehind(..)) || (self.unicode && matches!(atom, Node::Look(..)))
+        {
+            return Err("quantifier on an assertion".into());
+        }
         let greedy = if self.peek() == Some('?') {
             self.bump();
             false
@@ -474,6 +539,10 @@ impl Parser {
             Some('(') => self.parse_group(),
             Some('[') => self.parse_class(),
             Some('\\') => self.parse_escape(),
+            // In Unicode mode a PatternCharacter excludes the remaining SyntaxCharacters.
+            Some(c @ ('{' | '}' | ']')) if self.unicode => {
+                Err(format!("lone '{c}' is not valid in a unicode pattern"))
+            }
             Some(c) => Ok(Node::Char(c)),
         }
     }
@@ -647,10 +716,38 @@ impl Parser {
                 Some('r') => Ok(ClassAtom::Char('\r')),
                 Some('f') => Ok(ClassAtom::Char('\u{000C}')),
                 Some('v') => Ok(ClassAtom::Char('\u{000B}')),
-                Some('0') => Ok(ClassAtom::Char('\0')),
+                Some('0') => {
+                    if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
+                        return Err("legacy octal escape in unicode pattern".into());
+                    }
+                    Ok(ClassAtom::Char('\0'))
+                }
                 Some('b') => Ok(ClassAtom::Char('\u{0008}')),
-                Some('x') => Ok(ClassAtom::Char(self.hex(2))),
-                Some('u') => Ok(ClassAtom::Char(self.unicode_escape())),
+                Some('c') => match self.peek() {
+                    Some(l) if l.is_ascii_alphabetic() => {
+                        self.bump();
+                        Ok(ClassAtom::Char((l as u8 % 32) as char))
+                    }
+                    _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
+                    _ => Ok(ClassAtom::Char('c')),
+                },
+                Some('x') => {
+                    if self.unicode {
+                        Ok(ClassAtom::Char(self.hex_strict(2)?))
+                    } else {
+                        Ok(ClassAtom::Char(self.hex(2)))
+                    }
+                }
+                Some('u') => {
+                    if self.unicode {
+                        Ok(ClassAtom::Char(self.unicode_escape_strict()?))
+                    } else {
+                        Ok(ClassAtom::Char(self.unicode_escape()))
+                    }
+                }
+                Some(c) if self.unicode && !is_regex_syntax_char(c) && c != '/' && c != '-' => {
+                    Err(format!("invalid identity escape \\{c} in unicode class"))
+                }
                 Some(c) => Ok(ClassAtom::Char(c)),
             },
             Some(c) => Ok(ClassAtom::Char(c)),
@@ -695,9 +792,39 @@ impl Parser {
             Some('r') => Ok(Node::Char('\r')),
             Some('f') => Ok(Node::Char('\u{000C}')),
             Some('v') => Ok(Node::Char('\u{000B}')),
-            Some('0') => Ok(Node::Char('\0')),
-            Some('x') => Ok(Node::Char(self.hex(2))),
-            Some('u') => Ok(Node::Char(self.unicode_escape())),
+            Some('0') => {
+                // `\0` may not be followed by a digit in Unicode mode (a legacy octal escape).
+                if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    return Err("legacy octal escape in unicode pattern".into());
+                }
+                Ok(Node::Char('\0'))
+            }
+            Some('c') => {
+                // `\cX` (a letter) is a control escape; anything else is only tolerated outside
+                // Unicode mode.
+                match self.peek() {
+                    Some(l) if l.is_ascii_alphabetic() => {
+                        self.bump();
+                        Ok(Node::Char((l as u8 % 32) as char))
+                    }
+                    _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
+                    _ => Ok(Node::Char('c')),
+                }
+            }
+            Some('x') => {
+                if self.unicode {
+                    Ok(Node::Char(self.hex_strict(2)?))
+                } else {
+                    Ok(Node::Char(self.hex(2)))
+                }
+            }
+            Some('u') => {
+                if self.unicode {
+                    Ok(Node::Char(self.unicode_escape_strict()?))
+                } else {
+                    Ok(Node::Char(self.unicode_escape()))
+                }
+            }
             Some(c) if c.is_ascii_digit() => {
                 let mut num = c.to_digit(10).unwrap() as usize;
                 while let Some(d) = self.peek() {
@@ -709,6 +836,10 @@ impl Parser {
                     }
                 }
                 Ok(Node::Backref(num))
+            }
+            // IdentityEscape in Unicode mode is a SyntaxCharacter or '/' only.
+            Some(c) if self.unicode && !is_regex_syntax_char(c) && c != '/' => {
+                Err(format!("invalid identity escape \\{c} in unicode pattern"))
             }
             Some(c) => Ok(Node::Char(c)),
         }
@@ -825,6 +956,89 @@ impl Parser {
 
     fn unicode_escape(&mut self) -> char {
         char::from_u32(self.unicode_escape_u32()).unwrap_or('\u{FFFD}')
+    }
+
+    /// Exactly `n` hex digits, or a SyntaxError (Unicode mode).
+    fn hex_strict(&mut self, n: usize) -> Result<char, String> {
+        let mut v: u32 = 0;
+        for _ in 0..n {
+            match self.peek().and_then(|c| c.to_digit(16)) {
+                Some(d) => {
+                    v = v * 16 + d;
+                    self.bump();
+                }
+                None => return Err("invalid hexadecimal escape".into()),
+            }
+        }
+        Ok(char::from_u32(v).unwrap_or('\u{FFFD}'))
+    }
+
+    /// A Unicode-mode `\u` escape: `{…}` bodies are strictly hex and capped at U+10FFFF, plain
+    /// escapes are exactly four hex digits, and a lead/trail surrogate escape pair combines into
+    /// one code point.
+    fn unicode_escape_strict(&mut self) -> Result<char, String> {
+        if self.peek() == Some('{') {
+            self.bump();
+            let mut v: u32 = 0;
+            let mut any = false;
+            loop {
+                match self.peek() {
+                    Some('}') => {
+                        self.bump();
+                        break;
+                    }
+                    Some(c) if c.is_ascii_hexdigit() => {
+                        any = true;
+                        v = v.saturating_mul(16).saturating_add(c.to_digit(16).unwrap());
+                        self.bump();
+                    }
+                    _ => return Err("invalid code point escape".into()),
+                }
+            }
+            if !any || v > 0x10FFFF {
+                return Err("invalid code point escape".into());
+            }
+            return Ok(char::from_u32(v).unwrap_or('\u{FFFD}'));
+        }
+        let mut lead: u32 = 0;
+        for _ in 0..4 {
+            match self.peek().and_then(|c| c.to_digit(16)) {
+                Some(d) => {
+                    lead = lead * 16 + d;
+                    self.bump();
+                }
+                None => return Err("invalid unicode escape".into()),
+            }
+        }
+        // Combine a surrogate escape pair into a single code point.
+        if (0xD800..=0xDBFF).contains(&lead)
+            && self.peek() == Some('\\')
+            && self.chars.get(self.pos + 1) == Some(&'u')
+        {
+            let save = self.pos;
+            self.bump();
+            self.bump();
+            let mut trail: u32 = 0;
+            let mut ok = true;
+            for _ in 0..4 {
+                match self.peek().and_then(|c| c.to_digit(16)) {
+                    Some(d) => {
+                        trail = trail * 16 + d;
+                        self.bump();
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && (0xDC00..=0xDFFF).contains(&trail) {
+                let cp = 0x10000 + ((lead - 0xD800) << 10) + (trail - 0xDC00);
+                return Ok(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            }
+            self.pos = save;
+        }
+        Ok(char::from_u32(lead).unwrap_or('\u{FFFD}'))
     }
 
     /// The raw code-point value of a `\u` escape body (surrogate values pass through).
@@ -1023,6 +1237,24 @@ fn compile_repeat(
     Ok(())
 }
 
+/// The largest numeric back reference in the pattern (0 when there are none).
+fn max_backref(node: &Node, out: &mut usize) {
+    match node {
+        Node::Backref(n) => *out = (*out).max(*n),
+        Node::Concat(items) | Node::Alt(items) => {
+            for n in items {
+                max_backref(n, out);
+            }
+        }
+        Node::Group(_, inner)
+        | Node::Repeat(inner, _, _, _)
+        | Node::Look(_, inner)
+        | Node::LookBehind(_, inner)
+        | Node::Modifier { inner, .. } => max_backref(inner, out),
+        _ => {}
+    }
+}
+
 /// Replace each `\k<name>` (`Node::NamedBackref`) with the numeric `Backref` of its group. Names are
 /// validated before this runs, so an unknown name resolves to group 0 (never matches), harmlessly.
 /// Reject same-name capture groups that could both match (i.e. live in the same concatenation);
@@ -1136,6 +1368,9 @@ struct Matcher<'a> {
     /// `(icase, multiline, dotall)` stack — the base flags, plus an entry per active `(?ims-ims:…)`
     /// inline-modifier group. Reads use the top; the group's Push/Pop instructions undo on backtrack.
     flags: Vec<(bool, bool, bool)>,
+    /// Unicode mode (`u`/`v`): case-insensitive matching uses full case folding instead of the
+    /// legacy Canonicalize (simple uppercase, never folding non-ASCII to ASCII).
+    unicode: bool,
 }
 
 impl Matcher<'_> {
@@ -1153,7 +1388,11 @@ impl Matcher<'_> {
             return true;
         }
         if self.icase() {
-            return a.to_lowercase().eq(b.to_lowercase());
+            if self.unicode {
+                // Full (simple-approximated) case folding: Kelvin sign folds to 'k', etc.
+                return a.to_lowercase().eq(b.to_lowercase());
+            }
+            return canonicalize_legacy(a) == canonicalize_legacy(b);
         }
         false
     }
@@ -1162,7 +1401,7 @@ impl Matcher<'_> {
         match rep {
             Rep::Char(ch) => self.eqc(c, *ch),
             Rep::Any => self.dotall() || c != '\n',
-            Rep::Class(cc) => cc.matches(c, self.icase()),
+            Rep::Class(cc) => cc.matches(c, self.icase(), self.unicode),
         }
     }
 
@@ -1197,7 +1436,8 @@ impl Matcher<'_> {
                 }
             }
             Inst::Class(cc) => {
-                if pos < self.input.len() && cc.matches(self.input[pos], self.icase()) {
+                if pos < self.input.len() && cc.matches(self.input[pos], self.icase(), self.unicode)
+                {
                     self.run(prog, pc + 1, pos + 1)
                 } else {
                     false

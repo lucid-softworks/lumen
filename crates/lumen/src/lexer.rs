@@ -367,6 +367,8 @@ impl<'a> Lexer<'a> {
                 None => return Err(self.err("unterminated string literal")),
                 Some(c) if c == quote => break,
                 Some('\\') => self.read_escape(&mut s)?,
+                // U+2028/U+2029 may appear literally in a string (json-superset); only CR/LF end it.
+                Some(c @ ('\u{2028}' | '\u{2029}')) => s.push(c),
                 Some(c) if is_line_terminator(c) => {
                     return Err(self.err("unterminated string literal"))
                 }
@@ -647,6 +649,13 @@ impl<'a> Lexer<'a> {
                 Ok(())
             }
             Some('u') => self.read_unicode_escape(out),
+            Some('\r') => {
+                // A CRLF pair is a single LineTerminatorSequence for a line continuation.
+                if self.peek() == Some('\n') {
+                    self.bump();
+                }
+                Ok(())
+            }
             Some(c) if is_line_terminator(c) => Ok(()), // line continuation
             Some(c) => {
                 out.push(c);
@@ -751,6 +760,18 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self) -> Result<(), LexError> {
+        self.read_number_inner()?;
+        // The SourceCharacter following a NumericLiteral must not be an IdentifierStart or digit.
+        if self
+            .peek()
+            .is_some_and(|c| is_ident_start(c) || c.is_ascii_digit() || c == '\\')
+        {
+            return Err(self.err("identifier starts immediately after numeric literal"));
+        }
+        Ok(())
+    }
+
+    fn read_number_inner(&mut self) -> Result<(), LexError> {
         let start = self.pos;
         let mut radix = 10u32;
         if self.peek() == Some('0') {

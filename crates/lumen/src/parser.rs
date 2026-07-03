@@ -470,9 +470,33 @@ impl Parser {
     }
 
     fn has_use_strict_prologue(&self) -> bool {
-        // Only a leading run of string-literal expression statements counts as the directive
-        // prologue. The first one being exactly "use strict" enables strict mode.
-        matches!(self.toks.first().map(|t| &t.kind), Some(Tok::Str(s)) if s == "use strict")
+        self.prologue_has_use_strict(0)
+    }
+
+    /// Whether the directive prologue starting at token `from` contains a "use strict" directive.
+    /// The prologue is the leading run of string-literal expression statements (terminated by `;`
+    /// or ASI) — a later directive still makes the earlier prologue strings strict.
+    fn prologue_has_use_strict(&self, from: usize) -> bool {
+        let mut i = from;
+        loop {
+            let Some(tok) = self.toks.get(i) else {
+                return false;
+            };
+            let Tok::Str(str_val) = &tok.kind else {
+                return false;
+            };
+            let next = self.toks.get(i + 1);
+            let semi = matches!(next.map(|t| &t.kind), Some(Tok::Punct(";")));
+            let asi =
+                next.is_none_or(|t| t.nl_before || matches!(t.kind, Tok::Punct("}") | Tok::Eof));
+            if !semi && !asi {
+                return false;
+            }
+            if str_val == "use strict" {
+                return true;
+            }
+            i += if semi { 2 } else { 1 };
+        }
     }
 
     fn parse_stmts_until_eof(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -2047,17 +2071,18 @@ impl Parser {
                     flags: Rc::from(flags.as_str()),
                 })
             }
-            Tok::Keyword("true") => {
+            Tok::Keyword(k @ ("true" | "false" | "null")) => {
+                // A keyword spelled with `\u` escapes is never the keyword (nor a usable
+                // identifier, since the name is reserved).
+                if self.cur_escaped() {
+                    return self.err(format!("'{k}' must not contain escape sequences"));
+                }
                 self.advance();
-                Ok(Expr::Bool(true))
-            }
-            Tok::Keyword("false") => {
-                self.advance();
-                Ok(Expr::Bool(false))
-            }
-            Tok::Keyword("null") => {
-                self.advance();
-                Ok(Expr::Null)
+                Ok(match k {
+                    "true" => Expr::Bool(true),
+                    "false" => Expr::Bool(false),
+                    _ => Expr::Null,
+                })
             }
             Tok::Keyword("this") => {
                 self.advance();
@@ -2871,7 +2896,7 @@ impl Parser {
     ) -> Result<(Vec<Stmt>, bool), ParseError> {
         self.expect_punct("{")?;
         let saved_strict = self.strict;
-        let inner_strict = matches!(self.cur(), Tok::Str(s) if s == "use strict");
+        let inner_strict = self.prologue_has_use_strict(self.pos);
         // A function with a non-simple parameter list (defaults / rest / destructuring) can't apply a
         // `"use strict"` directive to its own body.
         if inner_strict && !params_simple {

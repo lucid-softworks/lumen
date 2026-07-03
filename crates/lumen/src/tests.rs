@@ -7474,3 +7474,87 @@ fn destructuring_and_for_head_early_errors() {
     // Sloppy mode still allows eval/arguments as destructuring targets.
     assert_eq!(run("var eval2; [eval2] = [3]; String(eval2)"), "3");
 }
+
+#[test]
+fn literal_early_errors() {
+    // Escaped keyword spellings are never the keyword.
+    for src in ["tru\\u0065", "fals\\u0065", "n\\u0075ll"] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // A numeric literal can't be immediately followed by an identifier start or digit.
+    assert!(Engine::new().eval("3in [1]", false).is_err());
+    assert!(Engine::new().eval("var x = 1if", false).is_err());
+    // Raw U+2028/U+2029 are legal in strings (json-superset); CR/LF are not.
+    assert_eq!(run("'\u{2028}' === '\\u2028' ? 'y' : 'n'"), "y");
+    assert!(Engine::new().eval("'a\nb'", false).is_err());
+    // Line continuations accept every LineTerminatorSequence, including CRLF.
+    assert_eq!(run("'a\\\r\nb'"), "ab");
+    assert_eq!(run("'a\\\u{2029}b'"), "ab");
+}
+
+#[test]
+fn directive_prologue_scans_all_directives() {
+    // "use strict" anywhere in the prologue makes the whole prologue strict — a legacy
+    // octal escape in an *earlier* directive is a SyntaxError.
+    for src in [
+        "function f() { '\\1'; 'use strict'; }",
+        "function f() { '\\8'; 'use strict'; }",
+        "'\\1'; 'use strict';",
+    ] {
+        assert!(
+            Engine::new().eval(src, false).is_err(),
+            "should reject: {src}"
+        );
+    }
+    // A string after the prologue (or a non-directive continuation) stays sloppy.
+    assert_eq!(
+        run("function f() { var x; '\\1'; return 1; } String(f())"),
+        "1"
+    );
+    assert_eq!(
+        run("var s = '\\1' + 'use strict'; s.length.toString()"),
+        "11"
+    );
+}
+
+#[test]
+fn regexp_u_mode_early_errors() {
+    for bad in [
+        "'{2}'",
+        "'.(?<=.)?'",
+        "'.(?=.)?', 'u'",
+        "'\\\\q', 'u'",
+        "'\\\\00', 'u'",
+        "'\\\\2', 'u'",
+        "'\\\\u{110000}', 'u'",
+        "'\\\\u{1F_639}', 'u'",
+        "'\\\\uZZ', 'u'",
+        "'{', 'u'",
+        "'x{2,1}'",
+    ] {
+        assert_eq!(
+            throws(&format!("new RegExp({bad})")),
+            "SyntaxError",
+            "should reject {bad}"
+        );
+    }
+    // Annex B keeps these legal without the u flag.
+    assert_eq!(run("String(/.(?=.)?/.test('ab'))"), "true");
+    assert_eq!(run("String(/{/.test('{'))"), "true");
+    assert_eq!(run("String(/\\q/.test('q'))"), "true");
+}
+
+#[test]
+fn regexp_u_surrogates_and_case_mapping() {
+    // A surrogate escape pair in /u combines into one code point.
+    assert_eq!(run("String(/\\uD834\\uDF06/u.test('\u{1D306}'))"), "true");
+    assert_eq!(run("String(/[\\uD834\\uDF06]/u.test('\u{1D306}'))"), "true");
+    // Legacy /i never folds a non-ASCII character onto ASCII; /iu does.
+    assert_eq!(run("String(/\\u212a/i.test('K'))"), "false");
+    assert_eq!(run("String(/\\u212a/iu.test('K'))"), "true");
+    assert_eq!(run("String(/k/iu.test('\u{212A}'))"), "true");
+    assert_eq!(run("String(/K/i.test('k'))"), "true");
+}
