@@ -114,7 +114,9 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
             Stmt::Import(decl) => {
                 for spec in &decl.specs {
                     let name = match spec {
-                        ImportSpec::Default(n) | ImportSpec::Namespace(n) => n,
+                        ImportSpec::Default(n)
+                        | ImportSpec::Namespace(n)
+                        | ImportSpec::DeferNamespace(n) => n,
                         ImportSpec::Named { local, .. } => local,
                     };
                     lexical.push(name.clone());
@@ -1124,13 +1126,17 @@ impl Parser {
     }
     fn expect_keyword_word(&mut self, w: &str) -> Result<(), ParseError> {
         if self.is_ident_word(w) {
+            // A contextual keyword in a syntactic position cannot use `\u` escapes.
+            if self.cur_escaped() {
+                return self.err(format!("'{w}' must not contain escape sequences"));
+            }
             self.advance();
             Ok(())
         } else {
             self.err(format!("expected '{w}'"))
         }
     }
-    fn parse_module_specifier(&mut self) -> Result<Rc<str>, ParseError> {
+    fn parse_module_specifier(&mut self) -> Result<(Rc<str>, Option<String>), ParseError> {
         let spec = match self.cur().clone() {
             Tok::Str(s) => {
                 self.advance();
@@ -1138,19 +1144,20 @@ impl Parser {
             }
             _ => return self.err("expected a module specifier string"),
         };
-        self.parse_import_attributes()?;
-        Ok(spec)
+        let attr_type = self.parse_import_attributes()?;
+        Ok((spec, attr_type))
     }
     /// Parse (and validate) an optional import-attributes clause: `with { key: "value", … }` (or the
     /// legacy `assert { … }`). The attribute values must be string literals and the keys must be
     /// unique — a duplicate key is an early SyntaxError.
-    fn parse_import_attributes(&mut self) -> Result<(), ParseError> {
+    fn parse_import_attributes(&mut self) -> Result<Option<String>, ParseError> {
         if !self.is_kw("with") && !self.is_ident_word("assert") {
-            return Ok(());
+            return Ok(None);
         }
         self.advance(); // 'with' / 'assert'
         self.expect_punct("{")?;
         let mut keys: Vec<String> = Vec::new();
+        let mut attr_type = None;
         while !self.is_punct("}") {
             let key = match self.cur().clone() {
                 Tok::Str(s) => {
@@ -1162,31 +1169,37 @@ impl Parser {
             if keys.contains(&key) {
                 return self.err(format!("duplicate import attribute key '{key}'"));
             }
-            keys.push(key);
+            keys.push(key.clone());
             self.expect_punct(":")?;
-            if !matches!(self.cur(), Tok::Str(_)) {
-                return self.err("import attribute value must be a string literal");
+            match self.cur().clone() {
+                Tok::Str(v) => {
+                    if key == "type" {
+                        attr_type = Some(v.clone());
+                    }
+                    self.advance();
+                }
+                _ => return self.err("import attribute value must be a string literal"),
             }
-            self.advance();
             if !self.eat_punct(",") {
                 break;
             }
         }
         self.expect_punct("}")?;
-        Ok(())
+        Ok(attr_type)
     }
 
     /// Parse the `( specifier [, options] )` of a dynamic-import call (any phase). The optional
     /// second options argument is accepted and ignored.
-    fn parse_import_call_args(&mut self) -> Result<Expr, ParseError> {
+    fn parse_import_call_args(&mut self) -> Result<(Expr, Option<Expr>), ParseError> {
         self.expect_punct("(")?;
         let spec = self.parse_assign_allow_in()?;
+        let mut options = None;
         if self.eat_punct(",") && !self.is_punct(")") {
-            let _ = self.parse_assign_allow_in()?;
+            options = Some(self.parse_assign_allow_in()?);
             self.eat_punct(",");
         }
         self.expect_punct(")")?;
-        Ok(spec)
+        Ok((spec, options))
     }
 
     fn parse_import(&mut self) -> Result<Stmt, ParseError> {
@@ -1195,15 +1208,34 @@ impl Parser {
         if let Tok::Str(s) = self.cur().clone() {
             self.advance();
             let source = Rc::from(s.as_str());
-            self.parse_import_attributes()?;
+            let attr_type = self.parse_import_attributes()?;
             self.consume_semicolon()?;
             return Ok(Stmt::Import(ImportDecl {
                 source,
                 specs: Vec::new(),
+                attr_type,
             }));
         }
         let mut specs = Vec::new();
         let mut need_from = true;
+        // `import defer * as ns from "spec"` — a deferred namespace import.
+        if self.is_ident_word("defer")
+            && !self.cur_escaped()
+            && matches!(self.peek_kind(1), Tok::Punct("*"))
+        {
+            self.advance(); // defer
+            self.expect_punct("*")?;
+            self.expect_keyword_word("as")?;
+            specs.push(ImportSpec::DeferNamespace(self.parse_binding_ident_name()?));
+            self.expect_keyword_word("from")?;
+            let (source, attr_type) = self.parse_module_specifier()?;
+            self.consume_semicolon()?;
+            return Ok(Stmt::Import(ImportDecl {
+                source,
+                specs,
+                attr_type,
+            }));
+        }
         // Default binding.
         if matches!(self.cur(), Tok::Ident(_)) {
             specs.push(ImportSpec::Default(self.parse_binding_ident_name()?));
@@ -1220,6 +1252,9 @@ impl Parser {
                 let imported_is_string = matches!(self.cur(), Tok::Str(_));
                 let imported = self.parse_module_export_name()?;
                 let local = if self.is_ident_word("as") {
+                    if self.cur_escaped() {
+                        return self.err("'as' must not contain escape sequences");
+                    }
                     self.advance();
                     self.parse_binding_ident_name()?
                 } else {
@@ -1244,14 +1279,21 @@ impl Parser {
         }
         let _ = need_from;
         self.expect_keyword_word("from")?;
-        let source = self.parse_module_specifier()?;
+        let (source, attr_type) = self.parse_module_specifier()?;
         self.consume_semicolon()?;
-        Ok(Stmt::Import(ImportDecl { source, specs }))
+        Ok(Stmt::Import(ImportDecl {
+            source,
+            specs,
+            attr_type,
+        }))
     }
 
     fn parse_export(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // 'export'
                         // export default …
+        if self.is_kw("default") && self.cur_escaped() {
+            return self.err("'default' must not contain escape sequences");
+        }
         if self.eat_kw("default") {
             let stmt = if self.is_kw("function")
                 || (self.is_ident_word("async")
@@ -1271,13 +1313,16 @@ impl Parser {
         // export * [as ns] from "spec"
         if self.eat_punct("*") {
             let exported = if self.is_ident_word("as") {
+                if self.cur_escaped() {
+                    return self.err("'as' must not contain escape sequences");
+                }
                 self.advance();
                 Some(self.parse_module_export_name()?)
             } else {
                 None
             };
             self.expect_keyword_word("from")?;
-            let source = self.parse_module_specifier()?;
+            let (source, _attr) = self.parse_module_specifier()?;
             self.consume_semicolon()?;
             return Ok(Stmt::ExportAll { source, exported });
         }
@@ -1296,6 +1341,9 @@ impl Parser {
                     string_locals.push(local.clone());
                 }
                 let exported = if self.is_ident_word("as") {
+                    if self.cur_escaped() {
+                        return self.err("'as' must not contain escape sequences");
+                    }
                     self.advance();
                     self.parse_module_export_name()?
                 } else {
@@ -1308,8 +1356,11 @@ impl Parser {
             }
             self.expect_punct("}")?;
             let source = if self.is_ident_word("from") {
+                if self.cur_escaped() {
+                    return self.err("'from' must not contain escape sequences");
+                }
                 self.advance();
-                Some(self.parse_module_specifier()?)
+                Some(self.parse_module_specifier()?.0)
             } else {
                 None
             };
@@ -2041,16 +2092,18 @@ impl Parser {
                         }
                     };
                     self.advance(); // 'source' / 'defer'
-                    let spec = self.parse_import_call_args()?;
+                    let (spec, options) = self.parse_import_call_args()?;
                     Ok(Expr::ImportCall {
                         spec: Box::new(spec),
                         phase,
+                        options: options.map(Box::new),
                     })
                 } else {
-                    let spec = self.parse_import_call_args()?;
+                    let (spec, options) = self.parse_import_call_args()?;
                     Ok(Expr::ImportCall {
                         spec: Box::new(spec),
                         phase: ImportPhase::Evaluation,
+                        options: options.map(Box::new),
                     })
                 }
             }

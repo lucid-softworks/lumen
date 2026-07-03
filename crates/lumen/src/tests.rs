@@ -7330,3 +7330,76 @@ fn regexp_group_name_surrogate_escapes() {
     assert_eq!(run("String(/(?<\\u0041>.)/u.exec('x').groups.A)"), "x");
     assert_eq!(run("String(/(?<a\\u{104A4}>.)/u.test('a'))"), "true");
 }
+
+#[test]
+fn typed_and_deferred_modules() {
+    fn run_mod(files: &[(&str, &str)], entry: &str, read: &str) -> String {
+        let mut e = Engine::new();
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let entry_src = files
+            .iter()
+            .find(|(k, _)| k == entry)
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        e.eval_module(&entry_src, entry, move |spec, _referrer| {
+            files
+                .iter()
+                .find(|(k, _)| k == spec)
+                .map(|(k, v)| (k.clone(), v.clone()))
+        })
+        .expect("parse");
+        match e.eval(read, false).expect("read") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    // JSON modules: default export is the parsed value.
+    assert_eq!(
+        run_mod(
+            &[
+                (
+                    "main",
+                    "import v from 'data' with { type: 'json' }; globalThis.out = v.a;"
+                ),
+                ("data", "{\"a\": 42}"),
+            ],
+            "main",
+            "String(out)"
+        ),
+        "42"
+    );
+    // Text modules: default export is the verbatim source text.
+    assert_eq!(
+        run_mod(
+            &[
+                (
+                    "main",
+                    "import t from 'data' with { type: 'text' }; globalThis.out = t;"
+                ),
+                ("data", "hello \"world\"\n"),
+            ],
+            "main",
+            "out"
+        ),
+        "hello \"world\"\n"
+    );
+    // import defer: evaluation happens on first namespace property access, not at link.
+    assert_eq!(
+        run_mod(
+            &[
+                (
+                    "main",
+                    "import defer * as ns from 'dep'; globalThis.before = globalThis.ran;
+                     globalThis.val = ns.x; globalThis.after = globalThis.ran;"
+                ),
+                ("dep", "globalThis.ran = true; export const x = 7;"),
+            ],
+            "main",
+            "[String(before), String(val), String(after)].join(',')"
+        ),
+        "undefined,7,true"
+    );
+}

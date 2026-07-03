@@ -91,6 +91,8 @@ pub enum Stmt {
 pub struct ImportDecl {
     pub source: Rc<str>,
     pub specs: Vec<ImportSpec>,
+    /// The `with { type: "..." }` import attribute (json/text/bytes), if present.
+    pub attr_type: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub enum ImportSpec {
@@ -98,6 +100,8 @@ pub enum ImportSpec {
     Default(String),
     /// `import * as ns from "…"`
     Namespace(String),
+    /// `import defer * as ns from "…"` — evaluation deferred until the namespace is accessed.
+    DeferNamespace(String),
     /// `import { imported as local } from "…"`
     Named { imported: String, local: String },
 }
@@ -304,6 +308,8 @@ pub enum Expr {
     ImportCall {
         spec: P<Expr>,
         phase: ImportPhase,
+        /// The optional second argument (`import(spec, { with: { type: "json" } })`).
+        options: Option<P<Expr>>,
     },
     /// `import.meta`.
     ImportMeta,

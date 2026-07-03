@@ -526,6 +526,9 @@ pub struct Interp {
     /// declaration is *evaluated*, the block binding's value is copied into the var binding. The
     /// `Rc` value keeps the AST alive so a pointer is never reused by a different function.
     pub annexb_fn_sync: HashMap<usize, Rc<Function>>,
+    /// `import defer` namespaces awaiting first access: namespace object ptr → module key.
+    /// Accessing a property of one evaluates the module (then the entry is removed).
+    pub(crate) deferred_ns: HashMap<usize, String>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -856,6 +859,7 @@ impl Interp {
             accessor_seq: 0,
             decorator_initializers: Vec::new(),
             annexb_fn_sync: HashMap::new(),
+            deferred_ns: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1172,6 +1176,15 @@ impl Interp {
         key: &str,
         receiver: Value,
     ) -> Result<Value, Abrupt> {
+        // An `import defer` namespace evaluates its module on first *string-keyed* access
+        // (symbol reads like @@toStringTag never trigger evaluation).
+        if !self.deferred_ns.is_empty() && !Interp::is_sym_key(key) {
+            if let Value::Obj(o) = base {
+                if let Some(module_key) = self.deferred_ns.remove(&(Rc::as_ptr(o) as usize)) {
+                    self.evaluate_deferred(&module_key)?;
+                }
+            }
+        }
         match base {
             Value::Undefined | Value::Empty | Value::Null => Err(self.throw(
                 "TypeError",

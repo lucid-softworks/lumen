@@ -1537,6 +1537,30 @@ impl Interp {
         name.to_string()
     }
 
+    /// Evaluate a dynamic import's options argument: the `options.with.type` string, if present.
+    fn eval_import_type_option(
+        &mut self,
+        opts: &Expr,
+        env: &Env,
+    ) -> Result<Option<String>, Abrupt> {
+        let o = self.eval(opts, env)?;
+        if matches!(o, Value::Undefined) {
+            return Ok(None);
+        }
+        if !matches!(o, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "import options must be an object"));
+        }
+        let with = self.get_member(&o, "with")?;
+        if matches!(with, Value::Undefined | Value::Null) {
+            return Ok(None);
+        }
+        let ty = self.get_member(&with, "type")?;
+        Ok(match ty {
+            Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        })
+    }
+
     /// Annex B.3.3 sync step: copy the block-scope binding of `name` (or a freshly-made function
     /// for a bare `if (x) function f(){}` position) into the nearest variable environment's
     /// binding — or the global object's property for global code.
@@ -1907,7 +1931,11 @@ impl Interp {
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
             Expr::ImportMeta => Ok(self.import_meta.clone().unwrap_or(Value::Undefined)),
             Expr::NewTarget => Ok(self.new_target.clone()),
-            Expr::ImportCall { spec, phase } => {
+            Expr::ImportCall {
+                spec,
+                phase,
+                options,
+            } => {
                 let specifier = self.eval(spec, env)?;
                 // ToString abruptness rejects the promise (IfAbruptRejectPromise), not a sync throw.
                 let s = match self.to_string(&specifier) {
@@ -1932,7 +1960,23 @@ impl Interp {
                     }
                     // `import.defer(x)` defers evaluation of the module; for specifier handling it
                     // behaves like a plain dynamic import.
-                    ImportPhase::Evaluation | ImportPhase::Defer => Ok(self.dynamic_import(&s)),
+                    ImportPhase::Evaluation | ImportPhase::Defer => {
+                        // `{ with: { type: ... } }` selects a JSON/text/bytes module. An abrupt
+                        // options read rejects the promise like the specifier coercion above.
+                        let mut attr_type = None;
+                        if let Some(opts) = options {
+                            match self.eval_import_type_option(opts, env) {
+                                Ok(t) => attr_type = t,
+                                Err(e) => {
+                                    let p = self.new_promise();
+                                    let reason = crate::interpreter::abrupt_value(e);
+                                    self.reject_promise(&p, reason);
+                                    return Ok(p);
+                                }
+                            }
+                        }
+                        Ok(self.dynamic_import(&s, attr_type.as_deref()))
+                    }
                 }
             }
             Expr::PrivateIn { name, obj } => {

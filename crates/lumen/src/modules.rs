@@ -53,6 +53,9 @@ pub(crate) struct ModuleRec {
     evaluated: bool,
     evaluating: bool,
     eval_error: Option<Value>,
+    /// Dependency keys imported *only* via `import defer` — skipped during this module's
+    /// evaluation phase (they evaluate on first namespace access instead).
+    deferred_deps: Vec<String>,
 }
 
 /// The origin of a local name that is an import binding (so re-exports resolve to the source).
@@ -110,11 +113,39 @@ impl Interp {
         let mut resolved: HashMap<String, String> = HashMap::new();
         let mut dep_keys: Vec<String> = Vec::new();
         let mut dep_srcs: Vec<(String, String)> = Vec::new();
-        for spec in module_dependency_specifiers(&body) {
+        // A dependency evaluates lazily only if *every* clause naming it is an `import defer`.
+        let mut defer_specs: HashMap<String, bool> = HashMap::new();
+        for stmt in body.iter() {
+            let (spec, defers) = match stmt {
+                Stmt::Import(decl) => (
+                    decl.source.to_string(),
+                    !decl.specs.is_empty()
+                        && decl
+                            .specs
+                            .iter()
+                            .all(|s| matches!(s, ImportSpec::DeferNamespace(_))),
+                ),
+                Stmt::ExportNamed {
+                    source: Some(src), ..
+                }
+                | Stmt::ExportAll { source: src, .. } => (src.to_string(), false),
+                _ => continue,
+            };
+            let e = defer_specs.entry(spec).or_insert(true);
+            *e = *e && defers;
+        }
+        for (spec, attr_type) in module_dependency_specifiers(&body) {
             if resolved.contains_key(&spec) {
                 continue;
             }
             let (canon, dsrc) = self.fetch_module(&spec, key)?;
+            // A `with { type: ... }` dependency synthesizes a wrapper module (JSON/text/bytes) —
+            // keyed separately from any ordinary module of the same file.
+            let canon = match attr_type.as_deref() {
+                Some(t @ ("json" | "text" | "bytes")) => format!("{canon}#{t}"),
+                _ => canon,
+            };
+            let dsrc = typed_module_source(dsrc, attr_type.as_deref());
             resolved.insert(spec.clone(), canon.clone());
             if !dep_keys.contains(&canon) {
                 dep_keys.push(canon.clone());
@@ -138,6 +169,11 @@ impl Interp {
         let meta = self.build_import_meta(key);
 
         let tables = build_export_tables(&body, &resolved);
+        let deferred_deps: Vec<String> = resolved
+            .iter()
+            .filter(|(spec, _)| defer_specs.get(*spec).copied().unwrap_or(false))
+            .map(|(_, canon)| canon.clone())
+            .collect();
         self.module_recs.insert(
             key.to_string(),
             ModuleRec {
@@ -156,6 +192,7 @@ impl Interp {
                 evaluated: false,
                 evaluating: false,
                 eval_error: None,
+                deferred_deps,
             },
         );
 
@@ -285,6 +322,10 @@ impl Interp {
                     ImportSpec::Namespace(local) => {
                         let ns = self.module_recs[&dep].ns.clone();
                         self.bind_local(env, local, ns);
+                    }
+                    ImportSpec::DeferNamespace(local) => {
+                        let dns = self.make_deferred_ns(&dep);
+                        self.bind_local(env, local, dns);
                     }
                     ImportSpec::Default(local) => {
                         self.link_named(env, local, &dep, "default")?;
@@ -494,10 +535,51 @@ impl Interp {
         Ok(())
     }
 
+    /// Build the distinct deferred-namespace object for `import defer * as ns`: same exports and
+    /// live bindings as the module's ordinary namespace, but a separate identity, a
+    /// "Deferred Module" @@toStringTag, and evaluation-on-first-string-keyed-access.
+    fn make_deferred_ns(&mut self, dep: &str) -> Value {
+        let base = self.module_recs[dep].ns.clone();
+        let Value::Obj(base_o) = &base else {
+            return base;
+        };
+        let dns = Object::new(None);
+        {
+            let src = base_o.borrow();
+            let mut dst = dns.borrow_mut();
+            for (k, p) in src.props.iter() {
+                let mut p = p.clone();
+                if Interp::is_sym_key(k) {
+                    if let Value::Str(tag) = &p.value {
+                        if &**tag == "Module" {
+                            p.value = Value::from_string("Deferred Module".to_string());
+                        }
+                    }
+                }
+                dst.props.insert(k.clone(), p);
+            }
+            dst.extensible = false;
+        }
+        if let Some(live) = self.module_ns.get(&(Rc::as_ptr(base_o) as usize)).cloned() {
+            self.module_ns.insert(Rc::as_ptr(&dns) as usize, live);
+        }
+        self.deferred_ns
+            .insert(Rc::as_ptr(&dns) as usize, dep.to_string());
+        Value::Obj(dns)
+    }
+
     // --- Evaluate phase -----------------------------------------------------------------------
 
     /// Evaluate module `key` and its dependencies depth-first (each body runs at most once). A body
     /// that throws poisons the module so later imports observe the same error.
+    /// Deferred-namespace trigger: evaluate a module on first access of its namespace.
+    pub(crate) fn evaluate_deferred(&mut self, key: &str) -> Result<(), Abrupt> {
+        if self.module_recs.contains_key(key) {
+            self.evaluate_module(key)?;
+        }
+        Ok(())
+    }
+
     fn evaluate_module(&mut self, key: &str) -> Result<(), Abrupt> {
         {
             let rec = &self.module_recs[key];
@@ -511,7 +593,13 @@ impl Interp {
         self.module_recs.get_mut(key).unwrap().evaluating = true;
 
         let dep_keys = self.module_recs[key].dep_keys.clone();
+        let deferred = self.module_recs[key].deferred_deps.clone();
         for dep in &dep_keys {
+            // A dependency imported only via `import defer` evaluates lazily, on first
+            // namespace access.
+            if deferred.contains(dep) {
+                continue;
+            }
             self.evaluate_module(dep)?;
         }
 
@@ -572,7 +660,7 @@ impl Interp {
 
     /// `import(specifier)`: synchronously load the module and return an already-resolved promise of
     /// its namespace (or a rejected promise if loading throws).
-    pub(crate) fn dynamic_import(&mut self, specifier: &str) -> Value {
+    pub(crate) fn dynamic_import(&mut self, specifier: &str, attr_type: Option<&str>) -> Value {
         let promise = self.new_promise();
         let referrer = match &self.import_meta {
             Some(m) => match self.get_member(&m.clone(), "url") {
@@ -583,6 +671,11 @@ impl Interp {
         };
         let result = (|| {
             let (canon, src) = self.fetch_module(specifier, &referrer)?;
+            let canon = match attr_type {
+                Some(t @ ("json" | "text" | "bytes")) => format!("{canon}#{t}"),
+                _ => canon,
+            };
+            let src = typed_module_source(src, attr_type);
             self.load_module(&canon, &src)
         })();
         match result {
@@ -607,19 +700,59 @@ fn same_binding(a: &Resolution, b: &Resolution) -> bool {
 }
 
 /// Every module specifier this body imports/re-exports from (with duplicates).
-fn module_dependency_specifiers(body: &[Stmt]) -> Vec<String> {
+fn module_dependency_specifiers(body: &[Stmt]) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     for stmt in body {
         match stmt {
-            Stmt::Import(decl) => out.push(decl.source.to_string()),
+            Stmt::Import(decl) => out.push((decl.source.to_string(), decl.attr_type.clone())),
             Stmt::ExportNamed {
                 source: Some(src), ..
             }
-            | Stmt::ExportAll { source: src, .. } => out.push(src.to_string()),
+            | Stmt::ExportAll { source: src, .. } => out.push((src.to_string(), None)),
             _ => {}
         }
     }
     out
+}
+
+/// The source text as a JS string literal (escaped).
+fn js_string_literal(text: &str) -> String {
+    let mut lit = String::with_capacity(text.len() + 2);
+    lit.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => lit.push_str("\\\""),
+            '\\' => lit.push_str("\\\\"),
+            '\n' => lit.push_str("\\n"),
+            '\r' => lit.push_str("\\r"),
+            '\u{2028}' => lit.push_str("\\u2028"),
+            '\u{2029}' => lit.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => {
+                lit.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => lit.push(c),
+        }
+    }
+    lit.push('"');
+    lit
+}
+
+/// Synthesize the module source for a `with { type: ... }` dependency: json parses the text, text
+/// exports it verbatim, bytes exports it as a Uint8Array of its UTF-8 bytes. An unknown type keeps
+/// the source as-is (an ordinary module).
+pub(crate) fn typed_module_source(text: String, attr_type: Option<&str>) -> String {
+    match attr_type {
+        Some("json") => format!("export default JSON.parse({});", js_string_literal(&text)),
+        Some("text") => format!("export default {};", js_string_literal(&text)),
+        Some("bytes") => {
+            let bytes: Vec<String> = text.bytes().map(|b| b.to_string()).collect();
+            format!(
+                "export default (() => {{ const a = new Uint8Array([{}]); Object.freeze(a.buffer); return a; }})();",
+                bytes.join(",")
+            )
+        }
+        _ => text,
+    }
 }
 
 /// A module's parsed export/import tables.
@@ -651,7 +784,7 @@ fn build_export_tables(body: &[Stmt], resolved: &HashMap<String, String>) -> Exp
                 let dep = key_of(&decl.source);
                 for spec in &decl.specs {
                     match spec {
-                        ImportSpec::Namespace(local) => {
+                        ImportSpec::Namespace(local) | ImportSpec::DeferNamespace(local) => {
                             imports.insert(local.clone(), ImportOrigin::Namespace(dep.clone()));
                         }
                         ImportSpec::Default(local) => {
