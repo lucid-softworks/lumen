@@ -10673,6 +10673,7 @@ fn install_array(it: &mut Interp) {
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
         // engine's materialization cap).
         let mut len = ab(i.to_length(&o))? as u64;
@@ -10681,53 +10682,56 @@ fn install_array(it: &mut Interp) {
             return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
         }
         for a in args {
-            ab(i.set_member(&this, &len.to_string(), a.clone()))?;
+            ab(i.set_member(&ov, &len.to_string(), a.clone()))?;
             len += 1;
         }
         // Generic objects don't auto-track length the way arrays do, so set it explicitly.
-        ab(i.set_member(&this, "length", Value::Num(len as f64)))?;
+        ab(i.set_member(&ov, "length", Value::Num(len as f64)))?;
         Ok(Value::Num(len as f64))
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
         let len = ab(i.to_length(&o))?;
         if len == 0 {
-            ab(i.set_member(&this, "length", Value::Num(0.0)))?;
+            ab(i.set_member(&ov, "length", Value::Num(0.0)))?;
             return Ok(Value::Undefined);
         }
-        let last = ab(i.get_member(&this, &(len - 1).to_string()))?;
+        let last = ab(i.get_member(&ov, &(len - 1).to_string()))?;
         o.borrow_mut().props.remove(&(len - 1).to_string());
-        ab(i.set_member(&this, "length", Value::Num((len - 1) as f64)))?;
+        ab(i.set_member(&ov, "length", Value::Num((len - 1) as f64)))?;
         Ok(last)
     });
     it.def_method(&ap, "shift", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         if len == 0 {
             return Ok(Value::Undefined);
         }
-        let first = ab(i.get_member(&this, "0"))?;
+        let first = ab(i.get_member(&ov, "0"))?;
         for k in 1..len {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            ab(i.set_member(&this, &(k - 1).to_string(), v))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
+            ab(i.set_member(&ov, &(k - 1).to_string(), v))?;
         }
         o.borrow_mut().props.remove(&(len - 1).to_string());
-        ab(i.set_member(&this, "length", Value::Num((len - 1) as f64)))?;
+        ab(i.set_member(&ov, "length", Value::Num((len - 1) as f64)))?;
         Ok(first)
     });
     it.def_method(&ap, "unshift", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
+        let ov = Value::Obj(o.clone());
         let len = ab(i.checked_array_len(&o))?;
         let n = args.len();
         for k in (0..len).rev() {
-            let v = ab(i.get_member(&this, &k.to_string()))?;
-            ab(i.set_member(&this, &(k + n).to_string(), v))?;
+            let v = ab(i.get_member(&ov, &k.to_string()))?;
+            ab(i.set_member(&ov, &(k + n).to_string(), v))?;
         }
         for (idx, a) in args.iter().enumerate() {
-            ab(i.set_member(&this, &idx.to_string(), a.clone()))?;
+            ab(i.set_member(&ov, &idx.to_string(), a.clone()))?;
         }
-        ab(i.set_member(&this, "length", Value::Num((len + n) as f64)))?;
+        ab(i.set_member(&ov, "length", Value::Num((len + n) as f64)))?;
         Ok(Value::Num((len + n) as f64))
     });
     it.def_method(&ap, "slice", 2, |i, this, args| {
@@ -11628,6 +11632,7 @@ fn flatten_into(
 
 fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
+    let ov = Value::Obj(o.clone());
     // The total length may be near 2^53 for an array-like; only the elements actually moved are
     // bounded by the engine's materialization cap.
     let len = ab(i.to_length(&o))? as i64;
@@ -11658,7 +11663,7 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
     for k in 0..delete_count {
         let from = (start + k).to_string();
         if i.has_property(&o, &from) {
-            let v = ab(i.get_member(&this, &from))?;
+            let v = ab(i.get_member(&ov, &from))?;
             json_create_data_prop_or_throw(i, &removed, &k.to_string(), v)?;
         }
     }
@@ -11670,32 +11675,32 @@ fn array_splice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Va
             let from = (k + delete_count).to_string();
             let to = (k + item_count).to_string();
             if i.has_property(&o, &from) {
-                let v = ab(i.get_member(&this, &from))?;
-                ab(i.set_member(&this, &to, v))?;
+                let v = ab(i.get_member(&ov, &from))?;
+                ab(i.set_member(&ov, &to, v))?;
             } else {
-                json_delete_prop(i, &this, &to)?;
+                json_delete_prop(i, &ov, &to)?;
             }
         }
         for k in ((len - delete_count + item_count)..len).rev() {
-            json_delete_prop(i, &this, &k.to_string())?;
+            json_delete_prop(i, &ov, &k.to_string())?;
         }
     } else if item_count > delete_count {
         for k in ((start + 1)..=(len - delete_count)).rev() {
             let from = (k + delete_count - 1).to_string();
             let to = (k + item_count - 1).to_string();
             if i.has_property(&o, &from) {
-                let v = ab(i.get_member(&this, &from))?;
-                ab(i.set_member(&this, &to, v))?;
+                let v = ab(i.get_member(&ov, &from))?;
+                ab(i.set_member(&ov, &to, v))?;
             } else {
-                json_delete_prop(i, &this, &to)?;
+                json_delete_prop(i, &ov, &to)?;
             }
         }
     }
     for (off, v) in items.iter().enumerate() {
-        ab(i.set_member(&this, &(start + off as i64).to_string(), v.clone()))?;
+        ab(i.set_member(&ov, &(start + off as i64).to_string(), v.clone()))?;
     }
     ab(i.set_member(
-        &this,
+        &ov,
         "length",
         Value::Num((len - delete_count + item_count) as f64),
     ))?;

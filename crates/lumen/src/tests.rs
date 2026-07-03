@@ -6758,3 +6758,20 @@ fn private_member_brand_check() {
         "2"
     );
 }
+
+#[test]
+fn array_mutators_on_primitive_this_are_generic() {
+    // Array mutators applied to a primitive `this` operate on the wrapper object
+    // (ToObject), not the primitive; in strict mode they'd otherwise throw on [[Set]].
+    assert_eq!(run("String(Array.prototype.push.call(true, 1))"), "1");
+    assert_eq!(run("String(Array.prototype.pop.call(true))"), "undefined");
+    assert_eq!(run("String(Array.prototype.shift.call(true))"), "undefined");
+    assert_eq!(run("String(Array.prototype.unshift.call(true, 1))"), "1");
+    assert_eq!(
+        run("Array.prototype.splice.call(true, 0, 0).length.toString()"),
+        "0"
+    );
+    // And they still mutate real arrays.
+    assert_eq!(run("var a=[1,2];a.push(3);a.join(',')"), "1,2,3");
+    assert_eq!(run("var a=[1,2,3];a.splice(1,1);a.join(',')"), "1,3");
+}
