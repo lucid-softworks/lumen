@@ -14868,12 +14868,14 @@ fn install_math(it: &mut Interp) {
     unary!("abs", f64::abs);
     unary!("floor", f64::floor);
     unary!("ceil", f64::ceil);
-    // Math.round ties toward +Inf, but preserves a negative sign: a value in [-0.5, 0) rounds to -0.
+    // Math.round ties toward +Inf and keeps a negative sign for [-0.5, 0). Computed from floor(x)
+    // (not floor(x + 0.5), which wrongly rounds up e.g. 0.5 - ε/4 and some large odd integers).
     unary!("round", |x: f64| {
         if x.is_nan() || x.is_infinite() || x == 0.0 {
             x
         } else {
-            let r = (x + 0.5).floor();
+            let f = x.floor();
+            let r = if x - f >= 0.5 { f + 1.0 } else { f };
             if r == 0.0 && x < 0.0 {
                 -0.0
             } else {
@@ -14994,9 +14996,7 @@ fn install_math(it: &mut Interp) {
         let exp = ab(i.to_number(&arg(a, 1)))?;
         // Number::exponentiate special cases Rust's powf doesn't share: a NaN exponent is NaN even
         // for base 1, and a base of ±1 with an infinite exponent is NaN.
-        let r = if exp.is_nan() {
-            f64::NAN
-        } else if base.abs() == 1.0 && exp.is_infinite() {
+        let r = if exp.is_nan() || (base.abs() == 1.0 && exp.is_infinite()) {
             f64::NAN
         } else {
             base.powf(exp)
