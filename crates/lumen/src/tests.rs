@@ -8438,3 +8438,37 @@ fn gc_side_table_pinning() {
         "0"
     );
 }
+#[test]
+fn utf16_semantics() {
+    assert_eq!(
+        run("const s = String.fromCharCode(0xD800, 0xDC00);
+             s.length + ':' + encodeURI(s) + ':' + (s === '\\u{10000}')"),
+        "2:%F0%90%80%80:true"
+    );
+    assert_eq!(
+        run("let bad = '';
+             const chars = [0xDC00, 0xDDFF, 0xDFFF];
+             for (let hi = 0xD800; hi <= 0xDBFF; hi++) {
+               for (const lo of chars) {
+                 const s = String.fromCharCode(hi, lo);
+                 try { encodeURI(s); } catch (e) { bad += hi.toString(16) + '/' + lo.toString(16) + ' '; }
+               }
+             }
+             bad.slice(0, 40)"),
+        ""
+    );
+    // Lone surrogates survive round trips, and pairs canonicalize across concatenation.
+    assert_eq!(
+        run("const lone = String.fromCharCode(0xD83D);
+             lone.length + ':' + lone.charCodeAt(0).toString(16) + ':' + (lone === '\\uD83D')
+             + ':' + JSON.stringify(lone) + ':' + ('\\uD834' + '\\uDF06' === '\\uD834\\uDF06')
+             + ':' + '\u{1D306}'.length + ':' + [...'\u{1D306}'].length"),
+        "1:d83d:true:\"\\ud83d\":true:2:1"
+    );
+    assert_eq!(run("'x'.codePointAt(-1) + ''"), "undefined");
+    assert_eq!(run("('\\uD834\\uDF06').split('').length + ''"), "2");
+    assert_eq!(
+        run("String.prototype.isWellFormed.call(String.fromCharCode(0xD800)) + ''"),
+        "false"
+    );
+}

@@ -1231,12 +1231,13 @@ impl Interp {
                 format!("cannot read property '{key}' of {}", type_name(base)),
             )),
             Value::Str(s) => {
+                // `length` and indices are in UTF-16 code units.
                 if key == "length" {
-                    return Ok(Value::Num(s.chars().count() as f64));
+                    return Ok(Value::Num(crate::jstr::unit_len(s) as f64));
                 }
                 if let Ok(i) = key.parse::<usize>() {
-                    return Ok(match s.chars().nth(i) {
-                        Some(c) => Value::from_string(c.to_string()),
+                    return Ok(match crate::jstr::UnitIter::new(s).nth(i) {
+                        Some(u) => Value::from_string(crate::jstr::unit_str(u)),
                         None => Value::Undefined,
                     });
                 }
@@ -1283,11 +1284,11 @@ impl Interp {
                 // String wrapper (`new String(...)`/`Object("...")`): own indexed chars + `length`.
                 if let Exotic::StrWrap(s) = o.borrow().exotic.clone() {
                     if key == "length" {
-                        return Ok(Value::Num(s.chars().count() as f64));
+                        return Ok(Value::Num(crate::jstr::unit_len(&s) as f64));
                     }
                     if let Ok(i) = key.parse::<usize>() {
-                        if let Some(c) = s.chars().nth(i) {
-                            return Ok(Value::from_string(c.to_string()));
+                        if let Some(u) = crate::jstr::UnitIter::new(&s).nth(i) {
+                            return Ok(Value::from_string(crate::jstr::unit_str(u)));
                         }
                     }
                 }

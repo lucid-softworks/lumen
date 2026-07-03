@@ -28,6 +28,7 @@ mod coroutine;
 mod eval;
 mod interpreter;
 mod intl;
+mod jstr;
 mod lexer;
 mod modules;
 mod numbering;

@@ -1878,7 +1878,7 @@ impl Interp {
                 return Ok(true);
             }
             if let Ok(idx) = key.parse::<usize>() {
-                if idx < s.chars().count() {
+                if idx < crate::jstr::unit_len(&s) {
                     return Ok(true);
                 }
             }
@@ -4495,7 +4495,7 @@ impl Interp {
                 if ls.len() + rs.len() > MAX_STR_LEN {
                     return Err(self.throw("RangeError", "Invalid string length"));
                 }
-                return Ok(Value::from_string(format!("{ls}{rs}")));
+                return Ok(Value::from_string(crate::jstr::concat(&ls, &rs)));
             }
             if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&lp, &rp) {
@@ -4640,11 +4640,14 @@ impl Interp {
         let lp = self.to_primitive(&l, Hint::Number)?;
         let rp = self.to_primitive(&r, Hint::Number)?;
         if let (Value::Str(a), Value::Str(b)) = (&lp, &rp) {
+            // String relational comparison is per UTF-16 code unit (which differs from `str`
+            // byte order once supplementary-plane characters are involved).
+            let ord = crate::jstr::cmp_units(a, b);
             let res = match op {
-                "<" => a < b,
-                ">" => a > b,
-                "<=" => a <= b,
-                ">=" => a >= b,
+                "<" => ord.is_lt(),
+                ">" => ord.is_gt(),
+                "<=" => ord.is_le(),
+                ">=" => ord.is_ge(),
                 _ => unreachable!(),
             };
             return Ok(Value::Bool(res));

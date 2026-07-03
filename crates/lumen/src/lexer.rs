@@ -780,14 +780,20 @@ impl<'a> Lexer<'a> {
             };
             if let Some(low) = low.filter(|l| (0xDC00..=0xDFFF).contains(l)) {
                 let cp = 0x10000 + ((n - 0xD800) << 10) + (low - 0xDC00);
-                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                if cp < crate::jstr::SMUGGLE_BASE {
+                    out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                } else {
+                    // A smuggle-range character is canonically its smuggled pair.
+                    out.push(crate::jstr::smuggle(n as u16));
+                    out.push(crate::jstr::smuggle(low as u16));
+                }
                 return Ok(());
             }
             // Not a valid low surrogate: rewind and treat the high surrogate as lone.
             self.pos = save;
         }
         self.pending_lone_surrogate = true;
-        out.push('\u{FFFD}');
+        out.push(crate::jstr::smuggle(n as u16));
         Ok(())
     }
 

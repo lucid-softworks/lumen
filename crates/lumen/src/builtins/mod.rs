@@ -2595,17 +2595,34 @@ fn install_shared_array_buffer(it: &mut Interp) {
     set_builtin(&it.global, "SharedArrayBuffer", Value::Obj(ctor));
 }
 
-fn uri_encode(s: &str, keep: &str) -> String {
+/// Encode (sec-encodeuri-encode): per character; a lone (smuggled) surrogate is a URIError
+/// (`None`).
+fn uri_encode(s: &str, keep: &str) -> Option<String> {
     let mut out = String::new();
-    for b in s.bytes() {
-        let c = b as char;
-        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || keep.contains(c) {
+    let mut chars = s.chars().peekable();
+    while let Some(mut c) = chars.next() {
+        if crate::jstr::smuggled(c).is_some() {
+            // A smuggled pair encodes a real smuggle-range character; a lone one is malformed.
+            match chars.peek().and_then(|&n| crate::jstr::paired_char(c, n)) {
+                Some(real) => {
+                    chars.next();
+                    c = real;
+                }
+                None => return None,
+            }
+        }
+        if c.is_ascii()
+            && (c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || keep.contains(c))
+        {
             out.push(c);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
         }
     }
-    out
+    Some(out)
 }
 
 /// Decode (sec-decodeuri-decode): percent-escapes become bytes, validated as strict UTF-8 per
@@ -8232,7 +8249,13 @@ fn install_json(it: &mut Interp) {
 
 fn json_quote(s: &str) -> String {
     let mut out = String::from("\"");
-    for c in s.chars() {
+    let mut chars = s.chars().peekable();
+    while let Some(mut c) = chars.next() {
+        // A smuggled pair round-trips as its real character.
+        if let Some(real) = chars.peek().and_then(|&n| crate::jstr::paired_char(c, n)) {
+            chars.next();
+            c = real;
+        }
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -8242,7 +8265,11 @@ fn json_quote(s: &str) -> String {
             '\u{0008}' => out.push_str("\\b"),
             '\u{000C}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+            c => match crate::jstr::smuggled(c) {
+                // Well-formed JSON.stringify: a lone surrogate is written as its \u escape.
+                Some(u) => out.push_str(&format!("\\u{u:04x}")),
+                None => out.push(c),
+            },
         }
     }
     out.push('"');
@@ -9123,7 +9150,29 @@ fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<
                         *pos += 4;
                         let n = u32::from_str_radix(&hex, 16)
                             .map_err(|_| i.make_error("SyntaxError", "Bad \\u escape in JSON"))?;
-                        s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+                        if (0xD800..0xDC00).contains(&n)
+                            && chars.get(*pos) == Some(&'\\')
+                            && chars.get(*pos + 1) == Some(&'u')
+                        {
+                            // A high surrogate followed by \uDCxx forms a pair.
+                            let hex2: String = chars
+                                [(*pos + 2).min(chars.len())..(*pos + 6).min(chars.len())]
+                                .iter()
+                                .collect();
+                            if let Ok(n2) = u32::from_str_radix(&hex2, 16) {
+                                if (0xDC00..0xE000).contains(&n2) {
+                                    *pos += 6;
+                                    let c = 0x10000 + ((n - 0xD800) << 10) + (n2 - 0xDC00);
+                                    s.push(char::from_u32(c).unwrap());
+                                    continue;
+                                }
+                            }
+                        }
+                        if (0xD800..0xE000).contains(&n) {
+                            s.push(crate::jstr::smuggle(n as u16));
+                        } else {
+                            s.push(char::from_u32(n).unwrap_or('\u{FFFD}'));
+                        }
                     }
                     _ => return Err(i.make_error("SyntaxError", "Bad escape in JSON")),
                 }
@@ -11602,7 +11651,10 @@ fn install_array(it: &mut Interp) {
                 other => ab(i.to_string(&other))?.to_string(),
             });
         }
-        Ok(Value::from_string(parts.join(&sep)))
+        let out = parts.join(&sep);
+        Ok(Value::from_string(
+            crate::jstr::canonicalize(&out).unwrap_or(out),
+        ))
     });
     it.def_method(&ap, "concat", 1, |i, this, args| {
         // ToObject(this): a primitive receiver is boxed (and spread/appended as its wrapper).
@@ -14068,11 +14120,26 @@ fn string_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         Some(Value::Num(n)) => n as usize,
         _ => 0,
     };
-    let Some(ch) = s[idx.min(s.len())..].chars().next() else {
+    let mut rest = s[idx.min(s.len())..].chars();
+    let Some(ch) = rest.next() else {
         // Exhausted: clear the string so the iterator stays done.
         set_internal(&o, "__si_str", Value::Undefined);
         return Ok(i.iter_result_obj(Value::Undefined, true));
     };
+    // A smuggled surrogate pair is one code point: yield both scalars together.
+    if let Some(next) = rest.next() {
+        if crate::jstr::paired_char(ch, next).is_some() {
+            set_internal(
+                &o,
+                "__si_index",
+                Value::Num((idx + ch.len_utf8() + next.len_utf8()) as f64),
+            );
+            let mut both = String::new();
+            both.push(ch);
+            both.push(next);
+            return Ok(i.iter_result_obj(Value::from_string(both), false));
+        }
+    }
     set_internal(&o, "__si_index", Value::Num((idx + ch.len_utf8()) as f64));
     Ok(i.iter_result_obj(Value::from_string(ch.to_string()), false))
 }
@@ -14317,7 +14384,7 @@ fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value
                     n.min(9007199254740991.0) as usize
                 }
             }
-            Value::Str(s) => s.chars().count(),
+            Value::Str(s) => crate::jstr::unit_len(s),
             _ => 0,
         }
     };
@@ -14516,25 +14583,33 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "charAt", 1, |i, this, args| {
         let s = this_string(i, &this)?;
-        let idx = ab(i.to_number(&arg(args, 0)))? as i64;
-        Ok(match s.chars().nth(idx.max(0) as usize) {
-            Some(c) => Value::from_string(c.to_string()),
+        let n = ab(i.to_number(&arg(args, 0)))?;
+        let idx = if n.is_nan() { 0.0 } else { n.trunc() };
+        if idx < 0.0 || !idx.is_finite() {
+            return Ok(Value::str(""));
+        }
+        Ok(match crate::jstr::UnitIter::new(&s).nth(idx as usize) {
+            Some(u) => Value::from_string(crate::jstr::unit_str(u)),
             None => Value::str(""),
         })
     });
     it.def_method(&sp, "charCodeAt", 1, |i, this, args| {
         let s = this_string(i, &this)?;
-        let idx = ab(i.to_number(&arg(args, 0)))? as i64;
-        Ok(match s.chars().nth(idx.max(0) as usize) {
-            Some(c) => Value::Num(c as u32 as f64),
+        let n = ab(i.to_number(&arg(args, 0)))?;
+        let idx = if n.is_nan() { 0.0 } else { n.trunc() };
+        if idx < 0.0 || !idx.is_finite() {
+            return Ok(Value::Num(f64::NAN));
+        }
+        Ok(match crate::jstr::UnitIter::new(&s).nth(idx as usize) {
+            Some(u) => Value::Num(u as f64),
             None => Value::Num(f64::NAN),
         })
     });
     it.def_method(&sp, "indexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars: Vec<char> = s.chars().collect();
-        let nchars: Vec<char> = needle.chars().collect();
+        let chars = crate::jstr::units(&s);
+        let nchars = crate::jstr::units(&needle);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
         let nlen = nchars.len();
@@ -14546,8 +14621,8 @@ fn install_string(it: &mut Interp) {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;
         // Optional `position`: search for the last occurrence starting at or before it.
-        let chars: Vec<char> = s.chars().collect();
-        let nchars: Vec<char> = needle.chars().collect();
+        let chars = crate::jstr::units(&s);
+        let nchars = crate::jstr::units(&needle);
         let limit = match arg(args, 1) {
             Value::Undefined => chars.len(),
             v => {
@@ -14585,11 +14660,13 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
-        let hay: String = chars[pos..].iter().collect();
-        Ok(Value::Bool(hay.contains(needle.as_ref())))
+        let nchars = crate::jstr::units(&needle);
+        let found = (pos..=chars.len())
+            .any(|k| k + nchars.len() <= chars.len() && chars[k..k + nchars.len()] == nchars[..]);
+        Ok(Value::Bool(found))
     });
     it.def_method(&sp, "startsWith", 1, |i, this, args| {
         let s = this_string(i, &this)?;
@@ -14597,11 +14674,13 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
-        let hay: String = chars[pos..].iter().collect();
-        Ok(Value::Bool(hay.starts_with(needle.as_ref())))
+        let nchars = crate::jstr::units(&needle);
+        Ok(Value::Bool(
+            pos + nchars.len() <= chars.len() && chars[pos..pos + nchars.len()] == nchars[..],
+        ))
     });
     it.def_method(&sp, "endsWith", 1, |i, this, args| {
         let s = this_string(i, &this)?;
@@ -14609,27 +14688,29 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         // endsWith's optional argument is the END position (default = length).
         let end = match args.get(1) {
             Some(v) if !matches!(v, Value::Undefined) => str_clamp_pos(i, Some(v), len)?,
             _ => len as usize,
         };
-        let hay: String = chars[..end].iter().collect();
-        Ok(Value::Bool(hay.ends_with(needle.as_ref())))
+        let nchars = crate::jstr::units(&needle);
+        Ok(Value::Bool(
+            end >= nchars.len() && chars[end - nchars.len()..end] == nchars[..],
+        ))
     });
     it.def_method(&sp, "slice", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
         let end = match arg(args, 1) {
             Value::Undefined => len,
             v => norm_index(ab(i.to_number(&v))?, len),
         };
-        let out: String = if start < end {
-            chars[start as usize..end as usize].iter().collect()
+        let out = if start < end {
+            crate::jstr::from_units(&chars[start as usize..end as usize])
         } else {
             String::new()
         };
@@ -14637,7 +14718,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "substring", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         let mut a = (ab(i.to_number(&arg(args, 0)))? as i64).clamp(0, len);
         let mut b = match arg(args, 1) {
@@ -14647,14 +14728,14 @@ fn install_string(it: &mut Interp) {
         if a > b {
             std::mem::swap(&mut a, &mut b);
         }
-        Ok(Value::from_string(
-            chars[a as usize..b as usize].iter().collect::<String>(),
-        ))
+        Ok(Value::from_string(crate::jstr::from_units(
+            &chars[a as usize..b as usize],
+        )))
     });
     // Annex B B.2.3.1 String.prototype.substr(start, length).
     it.def_method(&sp, "substr", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let size = chars.len() as i64;
         let n = ab(i.to_number(&arg(args, 0)))?;
         let mut start = if n.is_nan() {
@@ -14682,11 +14763,9 @@ fn install_string(it: &mut Interp) {
         if start < 0 {
             start = 0;
         }
-        Ok(Value::from_string(
-            chars[start as usize..(start + count) as usize]
-                .iter()
-                .collect::<String>(),
-        ))
+        Ok(Value::from_string(crate::jstr::from_units(
+            &chars[start as usize..(start + count) as usize],
+        )))
     });
     // Annex B B.2.3 HTML-wrapper methods (CreateHTML): each wraps the string in a tag.
     it.def_method(&sp, "anchor", 1, |i, t, a| {
@@ -14736,11 +14815,25 @@ fn install_string(it: &mut Interp) {
     });
     // lumen strings are valid UTF-8, so they're always well-formed.
     it.def_method(&sp, "isWellFormed", 0, |i, this, _| {
-        this_string(i, &this)?;
-        Ok(Value::Bool(true))
+        let s = this_string(i, &this)?;
+        Ok(Value::Bool(!crate::jstr::has_lone_surrogate(&s)))
     });
     it.def_method(&sp, "toWellFormed", 0, |i, this, _| {
-        Ok(Value::Str(this_string(i, &this)?))
+        let s = this_string(i, &this)?;
+        if !crate::jstr::has_lone_surrogate(&s) {
+            return Ok(Value::Str(s));
+        }
+        let fixed: String = s
+            .chars()
+            .map(|c| {
+                if crate::jstr::smuggled(c).is_some() {
+                    '\u{FFFD}'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        Ok(Value::from_string(fixed))
     });
     it.def_method(&sp, "trim", 0, |i, this, _| {
         Ok(Value::from_string(
@@ -14766,7 +14859,7 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "concat", 1, |i, this, args| {
         let mut s = this_string(i, &this)?.to_string();
         for a in args {
-            s.push_str(&ab(i.to_string(a))?);
+            s = crate::jstr::concat(&s, &ab(i.to_string(a))?);
             if s.len() > MAX_STR_LEN {
                 return Err(i.make_error("RangeError", "Invalid string length"));
             }
@@ -14783,7 +14876,10 @@ fn install_string(it: &mut Interp) {
         if s.len().saturating_mul(count) > MAX_STR_LEN {
             return Err(i.make_error("RangeError", "Invalid string length"));
         }
-        Ok(Value::from_string(s.repeat(count)))
+        let out = s.repeat(count);
+        Ok(Value::from_string(
+            crate::jstr::canonicalize(&out).unwrap_or(out),
+        ))
     });
     it.def_method(&sp, "split", 2, |i, this, args| {
         // RequireObjectCoercible(this), then dispatch to an Object separator's @@split.
@@ -14863,9 +14959,12 @@ fn install_string(it: &mut Interp) {
             Value::Undefined => Ok(i.make_array(vec![Value::Str(s)])),
             sep => {
                 let sep = ab(i.to_string(&sep))?;
+                // Splitting on "" yields one piece per UTF-16 code unit (a surrogate pair
+                // becomes its two lone halves).
                 let mut parts: Vec<Value> = if sep.is_empty() {
-                    s.chars()
-                        .map(|c| Value::from_string(c.to_string()))
+                    crate::jstr::units(&s)
+                        .into_iter()
+                        .map(|u| Value::from_string(crate::jstr::unit_str(u)))
                         .collect()
                 } else {
                     s.split(sep.as_ref())
@@ -14879,7 +14978,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "at", 1, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars: Vec<char> = s.chars().collect();
+        let chars = crate::jstr::units(&s);
         let len = chars.len() as i64;
         let mut idx = ab(i.to_number(&arg(args, 0)))? as i64;
         if idx < 0 {
@@ -14888,14 +14987,28 @@ fn install_string(it: &mut Interp) {
         Ok(if idx < 0 || idx >= len {
             Value::Undefined
         } else {
-            Value::from_string(chars[idx as usize].to_string())
+            Value::from_string(crate::jstr::unit_str(chars[idx as usize]))
         })
     });
     it.def_method(&sp, "codePointAt", 1, |i, this, args| {
         let s = this_string(i, &this)?;
-        let idx = ab(i.to_number(&arg(args, 0)))? as usize;
-        Ok(match s.chars().nth(idx) {
-            Some(c) => Value::Num(c as u32 as f64),
+        let n = ab(i.to_number(&arg(args, 0)))?;
+        let n = if n.is_nan() { 0.0 } else { n.trunc() };
+        if n < 0.0 || !n.is_finite() {
+            return Ok(Value::Undefined);
+        }
+        let idx = n as usize;
+        let chars = crate::jstr::units(&s);
+        Ok(match chars.get(idx) {
+            Some(&u)
+                if (0xD800..0xDC00).contains(&u)
+                    && idx + 1 < chars.len()
+                    && (0xDC00..0xE000).contains(&chars[idx + 1]) =>
+            {
+                let c = 0x10000 + ((u as u32 - 0xD800) << 10) + (chars[idx + 1] as u32 - 0xDC00);
+                Value::Num(c as f64)
+            }
+            Some(&u) => Value::Num(u as f64),
             None => Value::Undefined,
         })
     });
@@ -15167,9 +15280,9 @@ fn install_string(it: &mut Interp) {
                 0
             });
         }
-        // UTF-16 decode: a surrogate pair combines into one code point (a lone half degrades to
-        // U+FFFD — this engine's strings are UTF-8 and cannot carry lone surrogates).
-        Ok(Value::from_string(String::from_utf16_lossy(&units)))
+        // UTF-16 decode: a surrogate pair combines into one code point; a lone half is smuggled
+        // (see `jstr`), so the resulting string round-trips its exact unit sequence.
+        Ok(Value::from_string(crate::jstr::from_units(&units)))
     });
     it.def_method(&ctor, "raw", 1, |i, _this, args| {
         let template = arg(args, 0);
@@ -15197,8 +15310,19 @@ fn install_string(it: &mut Interp) {
             if !n.is_finite() || n.fract() != 0.0 || n < 0.0 || n > 0x10FFFF as f64 {
                 return Err(i.make_error("RangeError", "Invalid code point"));
             }
-            // Lone surrogates are valid arguments but can't be a Rust char; substitute U+FFFD.
-            s.push(char::from_u32(n as u32).unwrap_or('\u{FFFD}'));
+            let cp = n as u32;
+            if (0xD800..0xE000).contains(&cp) {
+                // A lone surrogate is a valid argument: smuggle it (see `jstr`).
+                s.push(crate::jstr::smuggle(cp as u16));
+            } else if cp >= crate::jstr::SMUGGLE_BASE {
+                // A smuggle-range character is canonically its smuggled pair.
+                let hi = 0xD800 + ((cp - 0x10000) >> 10);
+                let lo = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+                s.push(crate::jstr::smuggle(hi as u16));
+                s.push(crate::jstr::smuggle(lo as u16));
+            } else {
+                s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            }
         }
         Ok(Value::from_string(s))
     });
@@ -15223,17 +15347,22 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
     // A String exotic object exposes each character as an own, enumerable, non-writable,
     // non-configurable index property, plus a non-enumerable `length`.
     if let Exotic::StrWrap(s) = &exotic {
-        let chars: Vec<char> = s.chars().collect();
+        let units = crate::jstr::units(s);
         let mut b = obj.borrow_mut();
-        for (idx, ch) in chars.iter().enumerate() {
+        for (idx, u) in units.iter().enumerate() {
             b.props.insert(
                 idx.to_string().as_str(),
-                Property::data(Value::from_string(ch.to_string()), false, true, false),
+                Property::data(
+                    Value::from_string(crate::jstr::unit_str(*u)),
+                    false,
+                    true,
+                    false,
+                ),
             );
         }
         b.props.insert(
             "length",
-            Property::data(Value::Num(chars.len() as f64), false, false, false),
+            Property::data(Value::Num(units.len() as f64), false, false, false),
         );
     }
     obj.borrow_mut().exotic = exotic;
@@ -15274,7 +15403,7 @@ fn maybe_box(i: &mut Interp, v: Value) -> Value {
 fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Result<Value, Value> {
     let s = this_string(i, &this)?.to_string();
     let target = ab(i.to_number(&arg(args, 0)))? as usize;
-    let cur = s.chars().count();
+    let cur = crate::jstr::unit_len(&s);
     if cur >= target {
         return Ok(Value::from_string(s));
     }
@@ -15286,14 +15415,9 @@ fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Re
         return Ok(Value::from_string(s));
     }
     let need = target - cur;
-    let mut fill = String::new();
-    for c in pad.chars().cycle() {
-        if fill.chars().count() >= need {
-            break;
-        }
-        fill.push(c);
-    }
-    let fill: String = fill.chars().take(need).collect();
+    let pad_units = crate::jstr::units(&pad);
+    let fill_units: Vec<u16> = pad_units.iter().copied().cycle().take(need).collect();
+    let fill = crate::jstr::from_units(&fill_units);
     Ok(Value::from_string(if at_start {
         format!("{fill}{s}")
     } else {
@@ -16723,7 +16847,7 @@ fn install_globals(it: &mut Interp) {
     global_fn(it, "escape", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
         let mut out = String::new();
-        for c in s.encode_utf16() {
+        for c in crate::jstr::units(&s) {
             let ch = c as u32;
             let keep = c < 128 && {
                 let a = ch as u8 as char;
@@ -16767,19 +16891,19 @@ fn install_globals(it: &mut Interp) {
             units.push(chars[k] as u16);
             k += 1;
         }
-        Ok(Value::from_string(String::from_utf16_lossy(&units)))
+        Ok(Value::from_string(crate::jstr::from_units(&units)))
     });
     global_fn(it, "encodeURIComponent", 1, |i, _t, a| {
-        Ok(Value::from_string(uri_encode(
-            &ab(i.to_string(&arg(a, 0)))?,
-            "",
-        )))
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        uri_encode(&s, "")
+            .map(Value::from_string)
+            .ok_or_else(|| i.make_error("URIError", "URI malformed"))
     });
     global_fn(it, "encodeURI", 1, |i, _t, a| {
-        Ok(Value::from_string(uri_encode(
-            &ab(i.to_string(&arg(a, 0)))?,
-            ";,/?:@&=+$#",
-        )))
+        let s = ab(i.to_string(&arg(a, 0)))?;
+        uri_encode(&s, ";,/?:@&=+$#")
+            .map(Value::from_string)
+            .ok_or_else(|| i.make_error("URIError", "URI malformed"))
     });
     global_fn(it, "decodeURIComponent", 1, |i, _t, a| {
         let s = ab(i.to_string(&arg(a, 0)))?;
