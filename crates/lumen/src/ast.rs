@@ -381,6 +381,9 @@ pub struct Function {
     /// A concise method / getter / setter: has no own `prototype` and is not a constructor (the
     /// class `constructor` member is re-flagged false once identified).
     pub is_method: bool,
+    /// A function *expression* (`(function f(){})`): its own name binds immutably inside the
+    /// function. A declaration's name binds (mutably) in the enclosing scope instead.
+    pub is_fn_expr: bool,
 }
 
 #[derive(Debug, Clone)]

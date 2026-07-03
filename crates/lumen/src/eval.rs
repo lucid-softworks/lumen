@@ -185,7 +185,7 @@ impl Interp {
     /// Run a parsed script body in `env` (used by `eval`): hoist, declare lexicals, execute, and
     /// return the completion value (the value of the last value-producing statement).
     pub(crate) fn eval_in_scope(&mut self, body: &[Stmt], env: &Env) -> Result<Value, Abrupt> {
-        self.hoist(body, env, true);
+        self.hoist(body, env, &[]);
         self.declare_block_lexicals(body, env, false);
         self.run_stmt_list(body, env)
     }
@@ -462,7 +462,21 @@ impl Interp {
 
     pub fn exec_stmt(&mut self, stmt: &Stmt, env: &Env) -> Completion {
         match stmt {
-            Stmt::Empty | Stmt::Debugger | Stmt::FuncDecl(_) => Ok(Value::Empty),
+            Stmt::Empty | Stmt::Debugger => Ok(Value::Empty),
+            Stmt::FuncDecl(func) => {
+                // Annex B.3.3 web-compat: evaluating a sloppy block/if-position function
+                // declaration copies the block binding's function into the function-scope var
+                // binding created at instantiation (see `hoist_block_funcs`).
+                if let Some(name) = &func.name {
+                    if self
+                        .annexb_fn_sync
+                        .contains_key(&(Rc::as_ptr(func) as usize))
+                    {
+                        self.annexb_fn_sync_eval(name, func, env);
+                    }
+                }
+                Ok(Value::Empty)
+            }
             Stmt::Expr(e) => self.eval(e, env),
             Stmt::Block(body) => self.exec_block(body, env),
             Stmt::VarDecl { kind, decls } => {
@@ -1521,6 +1535,51 @@ impl Interp {
             cur = b.parent.clone();
         }
         name.to_string()
+    }
+
+    /// Annex B.3.3 sync step: copy the block-scope binding of `name` (or a freshly-made function
+    /// for a bare `if (x) function f(){}` position) into the nearest variable environment's
+    /// binding — or the global object's property for global code.
+    fn annexb_fn_sync_eval(&mut self, name: &str, func: &Rc<Function>, env: &Env) {
+        // The value: the block's own binding of the name (instantiated at block entry). A bare
+        // `if (x) function f(){}` position has no block scope — per B.3.4 it acts as an implicit
+        // block, so a fresh function is made here. Only the *immediate* scope counts: an ancestor
+        // binding (a catch parameter, an outer var) is not the block binding.
+        let own = {
+            let b = env.borrow();
+            if b.var_boundary {
+                None
+            } else {
+                b.vars.get(name).map(|x| x.value.clone())
+            }
+        };
+        let val = own.unwrap_or_else(|| {
+            // B.3.4: the bare if-position declaration acts as `{ function f(){} }` — the function
+            // closes over an implicit block scope binding its own name, so `f = ...` inside the
+            // body rebinds the block binding, not the promoted var.
+            let block = crate::interpreter::new_scope(Some(env.clone()));
+            let f = self.make_function(func.clone(), block.clone());
+            bind(&block, name, f.clone());
+            f
+        });
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            if s.borrow().var_boundary {
+                if let Some(b) = s.borrow_mut().vars.get_mut(name) {
+                    b.value = val;
+                    return;
+                }
+                break;
+            }
+            let parent = s.borrow().parent.clone();
+            cur = parent;
+        }
+        // Global code: the var binding lives as a global-object property.
+        if let Some(p) = self.global.borrow_mut().props.get_mut(name) {
+            if p.writable && !p.accessor {
+                p.value = val;
+            }
+        }
     }
 
     /// PrivateGet: read a private field/method after a brand check. An object that was not
@@ -2665,7 +2724,7 @@ impl Interp {
         let probe = new_scope(Some(lex_env.clone()));
         let saved_strict = self.strict;
         self.strict = strict;
-        self.hoist(body, &probe, true);
+        self.hoist(body, &probe, &[]);
         self.strict = saved_strict;
         let var_names: Vec<String> = probe.borrow().vars.keys().cloned().collect();
         // A callable hoisted value is a function declaration (which becomes a global *function*
@@ -4790,6 +4849,7 @@ fn default_constructor(derived: bool) -> Function {
         is_generator: false,
         is_async: false,
         is_method: false,
+        is_fn_expr: false,
     }
 }
 

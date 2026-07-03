@@ -58,6 +58,9 @@ impl<'a> Lexer<'a> {
     fn peek2(&self) -> Option<char> {
         self.chars.get(self.pos + 1).copied()
     }
+    fn peek_at(&self, ahead: usize) -> Option<char> {
+        self.chars.get(self.pos + ahead).copied()
+    }
     fn bump(&mut self) -> Option<char> {
         let c = self.chars.get(self.pos).copied();
         if let Some(c) = c {
@@ -204,6 +207,20 @@ impl<'a> Lexer<'a> {
                 self.skip_line_comment();
             } else if c == '/' && self.peek2() == Some('*') {
                 self.skip_block_comment()?;
+            } else if c == '<'
+                && self.peek_at(1) == Some('!')
+                && self.peek_at(2) == Some('-')
+                && self.peek_at(3) == Some('-')
+            {
+                // Annex B HTML-like comment: `<!--` opens a single-line comment.
+                self.skip_line_comment();
+            } else if c == '-'
+                && self.peek_at(1) == Some('-')
+                && self.peek_at(2) == Some('>')
+                && (self.nl_pending || self.out.is_empty())
+            {
+                // Annex B: `-->` at the start of a line (or of the source) is a comment to EOL.
+                self.skip_line_comment();
             } else if c == '/' && self.regex_allowed() {
                 self.read_regex()?;
             } else if c == '"' || c == '\'' {

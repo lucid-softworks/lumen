@@ -7225,3 +7225,70 @@ fn private_set_method_and_getter_only() {
         "3"
     );
 }
+
+#[test]
+fn annexb_function_in_block_hoisting() {
+    // B.3.3: a sloppy block function gets a function-scope var binding, initialized to
+    // undefined, synced with the block binding when the declaration evaluates.
+    assert_eq!(
+        run("var r; (function() { eval('r = [typeof f]; { function f() {} } r.push(typeof f);'); }()); r.join(',')"),
+        "undefined,function"
+    );
+    // The block binding is independent: assigning inside the function rebinds the block
+    // binding, and the promoted var keeps the function across repeated calls.
+    assert_eq!(
+        run("var r; (function() { eval('{ function f() { r = [typeof f]; f = 123; r.push(f); return 1; } }f(); f();'); }()); r.join(',')"),
+        "number,123"
+    );
+    // A bare if-position declaration acts as an implicit block (B.3.4).
+    assert_eq!(
+        run("String((function(){ if (true) function f() { return 1; } return typeof f; })())"),
+        "function"
+    );
+    // An intervening lexical (for-head let, destructured catch param) skips the promotion...
+    assert_eq!(
+        run("(function() { return eval('for (let f; false; ) {{ function f() {} }} typeof f;'); }())"),
+        "undefined"
+    );
+    assert_eq!(
+        run("(function() { return eval('try { throw {}; } catch ({ f }) {{ function f() {} }} typeof f;'); }())"),
+        "undefined"
+    );
+    // ...but a simple catch parameter does not (the B.3.5 legacy exemption).
+    assert_eq!(
+        run("(function() { return eval('try { throw null; } catch (f) {{ function f() { return 1; } }} typeof f;'); }())"),
+        "function"
+    );
+    // In *function code* (unlike eval code) a same-named parameter blocks the promotion.
+    assert_eq!(
+        run("(function(f) { { function f() {} } return f; }(123)).toString()"),
+        "123"
+    );
+    // `if (x) function f(){} else function f(){}` after a lexical: legal, promotion skipped.
+    assert_eq!(
+        run("(function() { return eval('let f = 1; if (true) function f() {} else function _f() {} f;'); }()).toString()"),
+        "1"
+    );
+}
+
+#[test]
+fn annexb_html_comments() {
+    assert_eq!(
+        run("var x = 1; <!-- this is a comment
+ x"),
+        "1"
+    );
+    assert_eq!(
+        run("var x = 2;
+--> a comment
+x"),
+        "2"
+    );
+    assert_eq!(
+        run("--> comment on the very first line
+'ok'"),
+        "ok"
+    );
+    // `a --> b` mid-line is still the two operators.
+    assert_eq!(run("var a = 5; var b = 1; String(a-- > b)"), "true");
+}

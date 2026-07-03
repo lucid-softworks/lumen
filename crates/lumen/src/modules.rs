@@ -186,7 +186,7 @@ impl Interp {
             self.link_module(dep)?;
         }
 
-        self.hoist(&body, &env, true);
+        self.hoist(&body, &env, &[]);
         self.declare_block_lexicals(&body, &env, false);
         self.declare_default_placeholder(&body, &env);
         self.validate_indirect_exports(key)?;

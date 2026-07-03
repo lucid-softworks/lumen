@@ -390,7 +390,9 @@ impl Parser {
         is_generator: bool,
     ) -> Result<(), ParseError> {
         let in_block = !self.decl_scopes.last().unwrap().fn_boundary;
-        if in_block && (is_async || is_generator) {
+        if in_block && (self.strict || is_async || is_generator) {
+            // Block-level functions are lexical; only sloppy plain functions get the Annex B
+            // var-like treatment (which permits duplicates and shadowing).
             self.declare_lexical(name)
         } else {
             self.declare_var(name, false)
@@ -524,8 +526,12 @@ impl Parser {
             }
             Tok::Keyword("function") => {
                 let f = self.parse_function(false, false)?;
-                if let Some(n) = &f.name {
-                    self.declare_fn_decl(n, f.is_async, f.is_generator)?;
+                // An Annex B substatement-position function (`if (x) function f(){}`) binds in
+                // its own implicit block: its name never conflicts with enclosing declarations.
+                if !single_stmt {
+                    if let Some(n) = &f.name {
+                        self.declare_fn_decl(n, f.is_async, f.is_generator)?;
+                    }
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
@@ -537,8 +543,10 @@ impl Parser {
             {
                 self.advance();
                 let f = self.parse_function(true, false)?;
-                if let Some(n) = &f.name {
-                    self.declare_fn_decl(n, f.is_async, f.is_generator)?;
+                if !single_stmt {
+                    if let Some(n) = &f.name {
+                        self.declare_fn_decl(n, f.is_async, f.is_generator)?;
+                    }
                 }
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
@@ -2454,6 +2462,7 @@ impl Parser {
             is_generator,
             is_async,
             is_method: false,
+            is_fn_expr: is_expr,
         };
         // A function declaration/expression is never a derived constructor, so a `super(...)` call
         // in its body or parameters is an early SyntaxError.
@@ -2595,6 +2604,7 @@ impl Parser {
                 is_generator: false,
                 is_async: false,
                 is_method: false,
+                is_fn_expr: false,
             };
             return Ok(vec![ClassMember {
                 key: PropKey::Ident(String::new()),
@@ -2734,6 +2744,7 @@ impl Parser {
             is_generator,
             is_async,
             is_method: true,
+            is_fn_expr: false,
         })
     }
 
@@ -2885,6 +2896,7 @@ impl Parser {
                 is_generator: false,
                 is_async,
                 is_method: false,
+                is_fn_expr: false,
             }
         } else {
             let expr = self.parse_assign()?;
@@ -2898,6 +2910,7 @@ impl Parser {
                 is_generator: false,
                 is_async,
                 is_method: false,
+                is_fn_expr: false,
             }
         };
         self.in_async = sa;

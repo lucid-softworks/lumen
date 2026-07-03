@@ -311,6 +311,28 @@ fn block_lexical_names(stmts: &[Stmt]) -> Vec<String> {
     out
 }
 
+/// BoundNames of a formal parameter list.
+pub(crate) fn param_bound_names(params: &[Param]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in params {
+        pattern_idents(&p.pattern, &mut out);
+    }
+    out
+}
+
+/// Push `added` names onto the Annex B blocked list (dedup'd); returns how many were pushed so
+/// the caller can truncate back when leaving the scope.
+fn push_blocked(blocked: &mut Vec<String>, added: Vec<String>) -> usize {
+    let mut pushed = 0;
+    for x in added {
+        if !blocked.iter().any(|b| b == &x) {
+            blocked.push(x);
+            pushed += 1;
+        }
+    }
+    pushed
+}
+
 /// Unwrap an `export <decl>` / `export default <decl>` to the declaration it wraps (so the hoisting
 /// and lexical-declaration passes treat them like ordinary declarations).
 pub fn unwrap_export(stmt: &Stmt) -> &Stmt {
@@ -499,6 +521,11 @@ pub struct Interp {
     /// Scratch collector for `context.addInitializer(fn)` calls during decorator application; drained
     /// after each decorator runs.
     pub decorator_initializers: Vec<Value>,
+    /// Annex B.3.3 web-compat function hoisting: block/if-position function declarations (in sloppy
+    /// code) whose names got a function-scope `var` binding, keyed by AST pointer. When such a
+    /// declaration is *evaluated*, the block binding's value is copied into the var binding. The
+    /// `Rc` value keeps the AST alive so a pointer is never reused by a different function.
+    pub annexb_fn_sync: HashMap<usize, Rc<Function>>,
 }
 
 /// A `using x = v` resource: the value plus its captured dispose method.
@@ -828,6 +855,7 @@ impl Interp {
             using_stack: Vec::new(),
             accessor_seq: 0,
             decorator_initializers: Vec::new(),
+            annexb_fn_sync: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -2058,21 +2086,11 @@ impl Interp {
         // a separate parameter Environment Record — not a variable environment — so its body's `var`
         // hoisting sits in a distinct scope below it (and a direct `eval` in a parameter default
         // cannot leak declarations into the body). Otherwise a single variable environment suffices.
-        // A named function *declaration* already has a (mutable) binding of its own name in the
-        // enclosing scope, so it must NOT get the immutable self-reference below (that would make
-        // `function f(){ f = 1 }` throw). A function *expression*'s name is not otherwise in scope,
-        // so it does. Detect the declaration case: the name already resolves to this same function.
-        let self_ref_needed = func.name.as_ref().is_some_and(|name| {
-            let mut cur = Some(closure.clone());
-            while let Some(s) = cur {
-                let b = s.borrow();
-                if let Some(binding) = b.vars.get(name) {
-                    return !matches!(&binding.value, Value::Obj(o) if Rc::ptr_eq(o, fn_obj));
-                }
-                cur = b.parent.clone();
-            }
-            true
-        });
+        // A named function *expression*'s name binds immutably inside the function; a
+        // *declaration*'s name already has a (mutable) binding in the enclosing scope, so it must
+        // NOT get the self-reference (that would make `function f(){ f = 1 }` a silent no-op —
+        // and an Annex B block function's binding may have been reassigned between calls).
+        let self_ref_needed = func.is_fn_expr && func.name.is_some();
         let has_param_exprs = params_have_expr(&func.params);
         let scope = if has_param_exprs {
             // Chain: callee base (variable env) → parameter env → body variable env. A direct `eval`
@@ -2239,7 +2257,8 @@ impl Interp {
         }
 
         // Hoist `var`/function declarations into the function scope before executing the body.
-        self.hoist(&func.body, &body, true);
+        let param_names = param_bound_names(&func.params);
+        self.hoist(&func.body, &body, &param_names);
         if let Some(ps) = &param_seed {
             self.seed_param_vars(ps, &body);
         }
@@ -2289,7 +2308,7 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
-            i.hoist(&func.body, &scope, true);
+            i.hoist(&func.body, &scope, &param_bound_names(&func.params));
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -2336,7 +2355,7 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
-            i.hoist(&func.body, &scope, true);
+            i.hoist(&func.body, &scope, &param_bound_names(&func.params));
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -2804,7 +2823,7 @@ impl Interp {
     }
 
     pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
-        self.hoist(body, &self.global_env.clone(), true);
+        self.hoist(body, &self.global_env.clone(), &[]);
         // The global Environment Record is object-backed: top-level `var`/`function` bindings (which
         // `hoist` just placed in `global_env`) become properties of the global object, so they are
         // visible as `globalThis.<name>` and writes stay in sync.
@@ -2853,8 +2872,10 @@ impl Interp {
     }
 
     /// Hoist `var` and function declarations into `scope`. `let`/`const` get TDZ bindings created
-    /// at block entry instead (see [`Self::exec_block`]).
-    pub(crate) fn hoist(&mut self, stmts: &[Stmt], scope: &Env, _fn_level: bool) {
+    /// at block entry instead (see [`Self::exec_block`]). `param_blocked` carries the formal
+    /// parameter names for *function code* — per B.3.3.1 they block the Annex B var-promotion of
+    /// same-named block functions (eval and global code pass none; B.3.3.2/3 have no such clause).
+    pub(crate) fn hoist(&mut self, stmts: &[Stmt], scope: &Env, param_blocked: &[String]) {
         for stmt in stmts {
             self.hoist_stmt(stmt, scope);
         }
@@ -2884,10 +2905,14 @@ impl Interp {
                 );
             }
         }
-        // Annex B.3.3: in sloppy mode, a function declared inside a block is also bound in the
-        // enclosing function/global scope.
+        // Annex B.3.3: in sloppy mode, a function declared inside a block (or an if/label
+        // substatement position) also gets a `var`-style binding in the enclosing function/global
+        // scope — initialized to undefined, synced with the block binding when the declaration is
+        // evaluated — unless a lexical declaration between here and the block makes the equivalent
+        // `var` an early error.
         if !self.strict {
-            let mut blocked: Vec<String> = Vec::new();
+            let mut blocked: Vec<String> = block_lexical_names(stmts);
+            blocked.extend(param_blocked.iter().cloned());
             for stmt in stmts {
                 self.hoist_block_funcs(stmt, scope, false, &mut blocked);
             }
@@ -2904,34 +2929,34 @@ impl Interp {
         match stmt {
             Stmt::FuncDecl(func) if in_block => {
                 if let Some(name) = &func.name {
-                    // Annex B.3.3: skip the synthesized var binding if an intervening lexical
-                    // declaration with the same name would make it an early error.
+                    // Skip entirely if an intervening lexical declaration with the same name
+                    // would make the equivalent `var` an early error.
                     if blocked.iter().any(|b| b == name) {
                         return;
                     }
-                    let f = self.make_function(func.clone(), scope.clone());
-                    scope.borrow_mut().vars.insert(
-                        name.clone(),
-                        Binding {
-                            value: f,
-                            mutable: true,
-                            strict_immutable: false,
-                            initialized: true,
-                            import_ref: None,
-                            deletable: false,
-                        },
-                    );
+                    // The var binding starts undefined; a pre-existing binding (parameter, an
+                    // outer function declaration, a var) is left untouched. Either way the
+                    // declaration's evaluation syncs the block value into it.
+                    if !scope.borrow().vars.contains_key(name.as_str()) {
+                        scope.borrow_mut().vars.insert(
+                            name.clone(),
+                            Binding {
+                                value: Value::Undefined,
+                                mutable: true,
+                                strict_immutable: false,
+                                initialized: true,
+                                import_ref: None,
+                                deletable: false,
+                            },
+                        );
+                    }
+                    self.annexb_fn_sync
+                        .insert(Rc::as_ptr(func) as usize, func.clone());
                 }
             }
             Stmt::Block(body) => {
                 let added = block_lexical_names(body);
-                let mut pushed = 0;
-                for x in &added {
-                    if !blocked.iter().any(|b| b == x) {
-                        blocked.push(x.clone());
-                        pushed += 1;
-                    }
-                }
+                let pushed = push_blocked(blocked, added);
                 for s in body {
                     self.hoist_block_funcs(s, scope, true, blocked);
                 }
@@ -2943,36 +2968,91 @@ impl Interp {
                     self.hoist_block_funcs(a, scope, true, blocked);
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::ForInOf { body, .. }
-            | Stmt::Labeled { body, .. }
-            | Stmt::With { body, .. } => self.hoist_block_funcs(body, scope, true, blocked),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                self.hoist_block_funcs(body, scope, true, blocked)
+            }
+            // A `for` head's lexical bindings shadow the body: an equivalent `var` inside would
+            // be an early error, so same-named block functions there are skipped.
+            Stmt::For { init, body, .. } => {
+                let mut added = Vec::new();
+                if let Some(init) = init {
+                    if let ForInit::VarDecl {
+                        kind: DeclKind::Let | DeclKind::Const,
+                        decls,
+                    } = init.as_ref()
+                    {
+                        for (pat, _) in decls {
+                            pattern_idents(pat, &mut added);
+                        }
+                    }
+                }
+                let pushed = push_blocked(blocked, added);
+                self.hoist_block_funcs(body, scope, true, blocked);
+                blocked.truncate(blocked.len() - pushed);
+            }
+            Stmt::ForInOf {
+                decl, left, body, ..
+            } => {
+                let mut added = Vec::new();
+                if matches!(decl, Some(DeclKind::Let | DeclKind::Const)) {
+                    pattern_idents(left, &mut added);
+                }
+                let pushed = push_blocked(blocked, added);
+                self.hoist_block_funcs(body, scope, true, blocked);
+                blocked.truncate(blocked.len() - pushed);
+            }
+            Stmt::Labeled { body, .. } | Stmt::With { body, .. } => {
+                self.hoist_block_funcs(body, scope, true, blocked)
+            }
             Stmt::Switch { cases, .. } => {
+                // The switch block's lexicals are shared across all cases.
+                let mut added = Vec::new();
+                for c in cases {
+                    added.extend(block_lexical_names(&c.body));
+                }
+                let pushed = push_blocked(blocked, added);
                 for c in cases {
                     for s in &c.body {
                         self.hoist_block_funcs(s, scope, true, blocked);
                     }
                 }
+                blocked.truncate(blocked.len() - pushed);
             }
             Stmt::Try {
                 block,
                 handler,
                 finalizer,
             } => {
-                for s in block {
-                    self.hoist_block_funcs(s, scope, true, blocked);
+                {
+                    let added = block_lexical_names(block);
+                    let pushed = push_blocked(blocked, added);
+                    for s in block {
+                        self.hoist_block_funcs(s, scope, true, blocked);
+                    }
+                    blocked.truncate(blocked.len() - pushed);
                 }
-                if let Some((_, h)) = handler {
+                if let Some((param, h)) = handler {
+                    // A destructuring catch parameter blocks same-named function hoisting out of
+                    // the handler; a simple `catch (f)` does not (the B.3.5 legacy var exemption).
+                    let mut added = block_lexical_names(h);
+                    if let Some(pat) = param {
+                        if !matches!(pat, Pattern::Ident(_)) {
+                            pattern_idents(pat, &mut added);
+                        }
+                    }
+                    let pushed = push_blocked(blocked, added);
                     for s in h {
                         self.hoist_block_funcs(s, scope, true, blocked);
                     }
+                    blocked.truncate(blocked.len() - pushed);
                 }
                 if let Some(f) = finalizer {
+                    let added = block_lexical_names(f);
+                    let pushed = push_blocked(blocked, added);
                     for s in f {
                         self.hoist_block_funcs(s, scope, true, blocked);
                     }
+                    blocked.truncate(blocked.len() - pushed);
                 }
             }
             _ => {}
