@@ -1879,13 +1879,27 @@ fn read_frac_digits(i: &mut Interp, opts: &Value) -> Result<Option<usize>, Value
     let v = getm(i, opts, "fractionalSecondDigits")?;
     match v {
         Value::Undefined => Ok(None),
-        Value::Str(s) if &*s == "auto" => Ok(None),
-        _ => {
-            let n = to_int(i, &v)?;
-            if !(0..=9).contains(&n) {
+        // A Number floors, then must land in [0, 9]; anything else stringifies and must be "auto".
+        Value::Num(n) => {
+            if n.is_nan() || !n.is_finite() {
                 return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
             }
-            Ok(Some(n as usize))
+            let f = n.floor();
+            if !(0.0..=9.0).contains(&f) {
+                return Err(i.make_error("RangeError", "fractionalSecondDigits out of range"));
+            }
+            Ok(Some(f as usize))
+        }
+        other => {
+            let sv = i.to_string(&other).map_err(unab)?;
+            if &*sv == "auto" {
+                Ok(None)
+            } else {
+                Err(i.make_error(
+                    "RangeError",
+                    "fractionalSecondDigits must be 'auto' or a number",
+                ))
+            }
         }
     }
 }
@@ -7584,6 +7598,13 @@ fn parse_instant(s: &str) -> Option<i128> {
     let p = parse_iso(s)?;
     let date = p.date?; // an instant needs a full date-time...
     let time = p.time?;
+    // A bracketed time-zone annotation that is itself a UTC offset must have minute precision
+    // (sub-minute offsets are only valid as the date-time's own offset).
+    if let Some(tz) = &p.tz {
+        if (tz.starts_with('+') || tz.starts_with('-')) && !is_pure_offset(tz) {
+            return None;
+        }
+    }
     let offset = match p.offset {
         Off::Z => 0,
         Off::Num(n, _) => n,
@@ -7754,8 +7775,12 @@ fn normalize_tz(i: &Interp, s: &str) -> Result<Rc<str>, Value> {
         } else {
             match p.offset {
                 Off::Z => return Ok(Rc::from("UTC")),
-                Off::Num(n, _) => return Ok(Rc::from(offset_string(n).as_str())),
-                Off::None => {}
+                // A date-time's own offset can carry seconds, but used *as a time zone* it must
+                // have minute precision.
+                Off::Num(n, _) if n % 60_000_000_000 == 0 => {
+                    return Ok(Rc::from(offset_string(n).as_str()))
+                }
+                _ => {}
             }
         }
     }
