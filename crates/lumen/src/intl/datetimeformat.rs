@@ -927,9 +927,14 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
     };
     // Read a component slot (gated by `allow`), falling back to the dateStyle/timeStyle expansion.
+    let defaulted = o.borrow().props.contains("__dtf_defaults");
     let get = |k: &str| {
         let field = k.trim_start_matches("__dtf_");
         if !allow(field) {
+            return None;
+        }
+        // A fully-defaulted formatter adapts to the receiver: a PlainTime shows no date fields.
+        if defaulted && kind == 2 && matches!(field, "year" | "month" | "day" | "era") {
             return None;
         }
         let read = |key: &str| match o.borrow().props.get(key).map(|p| p.value.clone()) {
@@ -1130,13 +1135,17 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // A PlainTime (kind 2), or a fully-defaulted formatter over a PlainDateTime (kind 3), shows the
     // natural h:m:s even without explicit time components (the PlainDateTime format defaults to all).
     let dtf_defaulted = o.borrow().props.contains("__dtf_defaults");
+    let has_frac = o.borrow().props.contains("__dtf_fracsec");
+    let day_period = get("__dtf_dayperiod");
     let time_defaulted = (kind == 2 || ((kind == 3 || kind == 6) && dtf_defaulted))
         && get("__dtf_hour").is_none()
         && get("__dtf_minute").is_none()
-        && get("__dtf_second").is_none();
-    let day_period = get("__dtf_dayperiod");
+        && get("__dtf_second").is_none()
+        && day_period.is_none()
+        && !has_frac;
     let have_time = time_defaulted
         || day_period.is_some()
+        || has_frac
         || get("__dtf_hour").is_some()
         || get("__dtf_minute").is_some()
         || get("__dtf_second").is_some();
@@ -1234,6 +1243,19 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             }
             parts.push(("minute", format!("{mi:02}")));
             first = false;
+        }
+        let frac_alone = has_frac && !(time_defaulted || get("__dtf_second").is_some());
+        if frac_alone {
+            if let Some(Value::Num(fd)) = o
+                .borrow()
+                .props
+                .get("__dtf_fracsec")
+                .map(|p| p.value.clone())
+            {
+                let ms_frac = (ms.rem_euclid(1000.0)) as u32;
+                let digits = format!("{ms_frac:03}");
+                parts.push(("fractionalSecond", digits[..fd as usize].to_string()));
+            }
         }
         if time_defaulted || get("__dtf_second").is_some() {
             if !first {
@@ -1382,9 +1404,52 @@ fn tz_display_name(tz: &str, style: &str) -> String {
         }
         .to_string();
     }
-    // The displayed zone name uses the canonical identifier (Asia/Calcutta -> Asia/Kolkata), even
-    // though resolvedOptions preserves the input id.
-    crate::tz::canonicalize(tz).unwrap_or(tz).to_string()
+    // An offset zone renders as a GMT offset (a zero offset is plain "GMT"; minutes only when
+    // nonzero).
+    if tz.starts_with('+') || tz.starts_with('-') {
+        let (sign, rest) = (&tz[..1], &tz[1..]);
+        let mut it = rest.split(':');
+        let h: i64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let m: i64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        return if h == 0 && m == 0 {
+            "GMT".to_string()
+        } else if m == 0 {
+            format!("GMT{sign}{h}")
+        } else {
+            format!("GMT{sign}{h}:{m:02}")
+        };
+    }
+    // Named zones: the short styles render a generic GMT offset; the long styles use the CLDR
+    // standard-time metazone name where known, else the canonical identifier.
+    let canon = crate::tz::canonicalize(tz).unwrap_or(tz).to_string();
+    match style {
+        "short" | "shortOffset" | "shortGeneric" => {
+            let off = crate::tz::offset_at(&canon, 0).unwrap_or(0) as i64;
+            let sign = if off < 0 { "-" } else { "+" };
+            let a = off.abs();
+            let (h, m) = (a / 3600, (a % 3600) / 60);
+            if m == 0 {
+                format!("GMT{sign}{h}")
+            } else {
+                format!("GMT{sign}{h}:{m:02}")
+            }
+        }
+        _ => match canon.as_str() {
+            "Europe/Vienna" | "Europe/Berlin" | "Europe/Paris" | "Europe/Rome"
+            | "Europe/Madrid" | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Prague"
+            | "Europe/Warsaw" | "Europe/Budapest" | "Europe/Stockholm" | "Europe/Oslo"
+            | "Europe/Copenhagen" | "Europe/Zurich" => "Central European Standard Time".to_string(),
+            "Europe/London" => "Greenwich Mean Time".to_string(),
+            "America/New_York" => "Eastern Standard Time".to_string(),
+            "America/Chicago" => "Central Standard Time".to_string(),
+            "America/Denver" => "Mountain Standard Time".to_string(),
+            "America/Los_Angeles" => "Pacific Standard Time".to_string(),
+            "Asia/Tokyo" => "Japan Standard Time".to_string(),
+            "Asia/Shanghai" => "China Standard Time".to_string(),
+            "Asia/Kolkata" => "India Standard Time".to_string(),
+            _ => canon,
+        },
+    }
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {

@@ -825,48 +825,6 @@ fn delta_t_seconds(year: i64) -> f64 {
         -20.0 + 32.0 * u * u
     }
 }
-/// The March-equinox instant of a Gregorian year as a Julian Ephemeris Day (dynamical time).
-fn march_equinox_jde(year: i64) -> f64 {
-    let yy = (year as f64 - 2000.0) / 1000.0;
-    let jde0 = 2451623.80984 + 365242.37404 * yy + 0.05169 * yy.powi(2)
-        - 0.00411 * yy.powi(3)
-        - 0.00057 * yy.powi(4);
-    let t = (jde0 - 2451545.0) / 36525.0;
-    let w = (35999.373 * t - 2.47).to_radians();
-    let dl = 1.0 + 0.0334 * w.cos() + 0.0007 * (2.0 * w).cos();
-    // Meeus Table 27.A periodic terms (A, B, C); S = Σ A·cos(B + C·T) in degrees.
-    const TERMS: [(f64, f64, f64); 24] = [
-        (485.0, 324.96, 1934.136),
-        (203.0, 337.23, 32964.467),
-        (199.0, 342.08, 20.186),
-        (182.0, 27.85, 445267.112),
-        (156.0, 73.14, 45036.886),
-        (136.0, 171.52, 22518.443),
-        (77.0, 222.54, 65928.934),
-        (74.0, 296.72, 3034.906),
-        (70.0, 243.58, 9037.513),
-        (58.0, 119.81, 33718.147),
-        (52.0, 297.17, 150.678),
-        (50.0, 21.02, 2281.226),
-        (45.0, 247.54, 29929.562),
-        (44.0, 325.15, 31555.956),
-        (29.0, 60.93, 4443.417),
-        (18.0, 155.12, 67555.328),
-        (17.0, 288.79, 4562.452),
-        (16.0, 198.04, 62894.029),
-        (14.0, 199.76, 31436.921),
-        (12.0, 95.39, 14577.848),
-        (12.0, 287.11, 31931.756),
-        (12.0, 320.81, 34777.259),
-        (9.0, 227.73, 1222.114),
-        (8.0, 15.45, 16859.074),
-    ];
-    let s: f64 = TERMS
-        .iter()
-        .map(|(a, b, c)| a * (b + c * t).to_radians().cos())
-        .sum();
-    jde0 + (0.00001 * s) / dl
-}
 /// The epoch-day (days from 1970-01-01) of Nowruz for a Persian year.
 fn persian_new_year(py: i64) -> i64 {
     // ICU's arithmetic Persian calendar (exact at any year, matching CLDR):
@@ -2713,7 +2671,6 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
             "minute",
             "second",
             "fractionalSecondDigits",
-            "timeZoneName",
             "dateStyle",
             "timeStyle",
         ] {
@@ -2723,7 +2680,8 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
             }
         }
     }
-    // No components requested: default to a full date+time plus the zone name.
+    // No components requested: default to a full date+time plus the zone name (an explicit
+    // timeZoneName option is preserved).
     if !any_comp {
         for (k, v) in [
             ("year", "numeric"),
@@ -2732,9 +2690,15 @@ fn zoned_to_locale_string(i: &mut Interp, this: Value, a: &[Value]) -> Result<Va
             ("hour", "numeric"),
             ("minute", "numeric"),
             ("second", "numeric"),
-            ("timeZoneName", "short"),
         ] {
             set_data(&opts, k, Value::str(v));
+        }
+        let user_tzname = match &user_obj {
+            Some(_) => i.get_member(&user_opts, "timeZoneName").map_err(unab)?,
+            None => Value::Undefined,
+        };
+        if matches!(user_tzname, Value::Undefined) {
+            set_data(&opts, "timeZoneName", Value::str("short"));
         }
     }
     // Intl.DateTimeFormat canonicalizes the zone (Asia/Calcutta -> Asia/Kolkata); do it here so the
@@ -6176,6 +6140,22 @@ fn cal_month_day_reference(
     has_year: bool,
     ovf: Overflow,
 ) -> Result<IsoDate, Value> {
+    // A wildly out-of-range year can never produce a representable month-day; bail before any
+    // (potentially expensive) calendar computation.
+    {
+        let yv = getm(i, &Value::Obj(snap.clone()), "year")?;
+        if let Value::Num(y) = yv {
+            if !(-300_000.0..=300_000.0).contains(&y) {
+                return Err(i.make_error("RangeError", "date is outside the supported range"));
+            }
+        }
+        let eyv = getm(i, &Value::Obj(snap.clone()), "eraYear")?;
+        if let Value::Num(ey) = eyv {
+            if !(-600_000.0..=600_000.0).contains(&ey) {
+                return Err(i.make_error("RangeError", "date is outside the supported range"));
+            }
+        }
+    }
     // A bare ordinal `month` (no monthCode) can't be interpreted without a year in a non-ISO calendar,
     // so a year is required (a TypeError raised before any month/monthCode-conflict RangeError).
     let has_month = !matches!(
