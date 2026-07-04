@@ -2283,11 +2283,15 @@ impl Parser {
     /// MemberExpression without trailing calls — handles `new` and `.`/`[]` member tails.
     fn parse_member_expr(&mut self) -> Result<Expr, ParseError> {
         let mut base = if self.is_kw("new") {
+            let new_escaped = self.cur_escaped();
             self.advance();
             if self.eat_punct(".") {
-                // `new.target` — only valid inside a function. (lumen models its value as undefined.)
+                // `new.target` — no escape sequences, and only valid inside a function.
                 if !self.is_ident_word("target") {
                     return self.err("expected 'target' after 'new.'");
+                }
+                if new_escaped || self.cur_escaped() {
+                    return self.err("'new.target' must not contain escape sequences");
                 }
                 self.advance();
                 if self.nonarrow_fn_depth == 0 && !self.allow_new_target {
@@ -2461,12 +2465,20 @@ impl Parser {
             // `import(specifier)` (dynamic import), `import.meta`, or the phased forms
             // `import.source(specifier)` / `import.defer(specifier)`.
             Tok::Keyword("import") => {
+                // Neither `import` in an ImportCall/ImportMeta nor the `meta` after it may be
+                // spelled with escape sequences.
+                if self.cur_escaped() {
+                    return self.err("'import' must not contain escape sequences");
+                }
                 self.advance();
                 if self.eat_punct(".") {
                     let phase = match self.cur() {
                         Tok::Ident(w) if w == "source" => ImportPhase::Source,
                         Tok::Ident(w) if w == "defer" => ImportPhase::Defer,
                         Tok::Ident(w) if w == "meta" => {
+                            if self.cur_escaped() {
+                                return self.err("'import.meta' must not contain escape sequences");
+                            }
                             self.advance();
                             if !self.module {
                                 return self.err("'import.meta' is only valid in a module");
