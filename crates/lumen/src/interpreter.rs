@@ -2598,7 +2598,10 @@ impl Interp {
         let saved_ctor = self.constructing;
         let saved_nt = self.new_target.clone();
         self.constructing = false;
-        self.new_target = Value::Undefined;
+        // An arrow inherits the enclosing new.target lexically — don't clear it for one.
+        if !matches!(&call, Callable::User(f, _) if f.is_arrow) {
+            self.new_target = Value::Undefined;
+        }
         let r = match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
             Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),

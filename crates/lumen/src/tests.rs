@@ -8974,3 +8974,15 @@ fn super_call_early_errors() {
 fn parse_err(src: &str) -> bool {
     crate::Engine::new().eval(src, false).is_err()
 }
+
+#[test]
+fn arrow_inherits_lexical_new_target() {
+    assert_eq!(
+        run("var out = [];
+             function F() { out.push(typeof new.target, (_ => typeof new.target)()); }
+             F();
+             new F();
+             out.join(',')"),
+        "undefined,undefined,function,function"
+    );
+}
