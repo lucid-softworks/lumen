@@ -994,13 +994,6 @@ pub(crate) struct ExactDec {
 }
 
 impl ExactDec {
-    fn from_i128(b: i128) -> ExactDec {
-        ExactDec {
-            int: b.unsigned_abs().to_string(),
-            frac: String::new(),
-        }
-    }
-
     /// Parse a simple decimal literal (`[+-]?digits[.digits]`, surrounding whitespace allowed);
     /// anything fancier (exponents, hex, Infinity) falls back to the f64 path.
     fn parse(s: &str) -> Option<ExactDec> {
@@ -1030,7 +1023,10 @@ impl ExactDec {
 /// The exact value a format argument carries, when it has one.
 pub(crate) fn exact_of(x: &Value) -> Option<ExactDec> {
     match x {
-        Value::BigInt(b) => Some(ExactDec::from_i128(*b)),
+        Value::BigInt(b) => Some(ExactDec {
+            int: b.to_string_radix(10).trim_start_matches('-').to_string(),
+            frac: String::new(),
+        }),
         Value::Str(s) => ExactDec::parse(s),
         _ => None,
     }
@@ -1588,7 +1584,7 @@ fn suffix_type_of(o: &Gc) -> String {
 fn to_intl_number(i: &mut Interp, x: &Value) -> Result<f64, Value> {
     // ToIntlMathematicalValue — we approximate with ToNumber (BigInt handled as its value).
     match x {
-        Value::BigInt(b) => Ok(*b as f64),
+        Value::BigInt(b) => Ok(b.to_f64()),
         _ => ab(i.to_number(x)),
     }
 }

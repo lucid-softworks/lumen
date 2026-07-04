@@ -1077,7 +1077,7 @@ impl Interp {
             if start + es <= buf.len() {
                 let bytes = &buf[start..start + es];
                 if info.kind.is_bigint() {
-                    Value::BigInt(info.kind.read_bigint(bytes))
+                    Value::BigInt(info.kind.read_bigint(bytes).into())
                 } else {
                     Value::Num(info.kind.read(bytes))
                 }
@@ -1151,7 +1151,7 @@ impl Interp {
     pub fn ta_store(&mut self, info: &TaInfo, idx: usize, v: &Value) -> Result<(), Abrupt> {
         if info.kind.is_bigint() {
             let n = self.to_bigint(v)?;
-            self.ta_write_bigint(info, idx, n);
+            self.ta_write_bigint(info, idx, n.to_i128_wrapping());
         } else {
             let n = self.to_number(v)?;
             self.ta_write(info, idx, n);
@@ -3373,6 +3373,7 @@ impl Interp {
                 Err(Abrupt::Throw(e)) => crate::coroutine::Suspend::Throw(e),
                 Err(_) => crate::coroutine::Suspend::Done(Value::Undefined),
             };
+            i.in_async_gen_body = saved_agb;
             i.strict = saved_strict;
             outcome
         });

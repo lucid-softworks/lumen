@@ -948,10 +948,8 @@ impl<'a> Lexer<'a> {
                 .collect();
             if self.peek() == Some('n') {
                 self.bump();
-                // BigInt is stored as i128; a literal larger than that wraps (mod 2^128) rather than
-                // erroring, so a file merely *using* such a value (e.g. as a distinct collection key)
-                // still parses. Arbitrary-precision arithmetic is a separate, unimplemented feature.
-                let n = parse_bigint_wrapping(&digits, radix);
+                let n = crate::bigint::JsBigInt::parse_radix(&digits, radix)
+                    .ok_or_else(|| self.err("invalid BigInt literal"))?;
                 self.push(Tok::BigInt(n));
                 return Ok(());
             }
@@ -999,7 +997,8 @@ impl<'a> Lexer<'a> {
                 .filter(|c| **c != '_')
                 .collect();
             self.bump(); // n
-            let n = parse_bigint_wrapping(&text, 10);
+            let n = crate::bigint::JsBigInt::parse_radix(&text, 10)
+                .ok_or_else(|| self.err("invalid BigInt literal"))?;
             self.push(Tok::BigInt(n));
             return Ok(());
         }
@@ -1153,17 +1152,4 @@ fn is_ident_part(c: char) -> bool {
         return c == '_' || c == '$' || c.is_ascii_alphanumeric();
     }
     c == '\u{200C}' || c == '\u{200D}' || prop_has("ID_Continue", c)
-}
-
-/// Parse BigInt `digits` (already separator-free) in `radix` into the engine's i128 representation,
-/// wrapping on overflow (mod 2^128). The same input always yields the same value, so a literal and
-/// `BigInt("<same digits>")` compare equal even when both exceed i128.
-fn parse_bigint_wrapping(digits: &str, radix: u32) -> i128 {
-    let mut acc: i128 = 0;
-    for c in digits.chars() {
-        if let Some(d) = c.to_digit(radix) {
-            acc = acc.wrapping_mul(radix as i128).wrapping_add(d as i128);
-        }
-    }
-    acc
 }

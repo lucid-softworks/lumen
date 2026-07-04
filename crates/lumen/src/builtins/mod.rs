@@ -838,7 +838,7 @@ fn install_atomics(it: &mut Interp) {
     }
     fn operand(i: &mut Interp, info: &TaInfo, v: &Value) -> Result<i128, Value> {
         if info.kind.is_bigint() {
-            ab(i.to_bigint(v))
+            Ok(ab(i.to_bigint(v))?.to_i128_wrapping())
         } else {
             let n = ab(i.to_number(v))?;
             Ok(if n.is_finite() { n.trunc() as i128 } else { 0 })
@@ -847,7 +847,7 @@ fn install_atomics(it: &mut Interp) {
     fn read_i128(i: &Interp, info: &TaInfo, idx: usize) -> i128 {
         match i.ta_read(info, idx) {
             Value::Num(n) => n as i128,
-            Value::BigInt(n) => n,
+            Value::BigInt(n) => n.to_i128_wrapping(),
             _ => 0,
         }
     }
@@ -869,7 +869,7 @@ fn install_atomics(it: &mut Interp) {
         // One atomic read-modify-write (a shared buffer's lock is held across both halves).
         let old = i.ta_modify(&info, idx, |o| Some(f(o, val))).unwrap_or(0);
         Ok(if info.kind.is_bigint() {
-            Value::BigInt(old)
+            Value::BigInt(old.into())
         } else {
             Value::Num(old as f64)
         })
@@ -891,7 +891,7 @@ fn install_atomics(it: &mut Interp) {
         write_i128(i, &info, idx, val);
         // store returns the coerced value itself, not the (possibly wrapped) stored representation.
         Ok(if info.kind.is_bigint() {
-            Value::BigInt(val)
+            Value::BigInt(val.into())
         } else {
             Value::Num(val as f64)
         })
@@ -913,7 +913,7 @@ fn install_atomics(it: &mut Interp) {
             })
             .unwrap_or(0);
         Ok(if info.kind.is_bigint() {
-            Value::BigInt(old)
+            Value::BigInt(old.into())
         } else {
             Value::Num(old as f64)
         })
@@ -1481,9 +1481,9 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
     }
     let raw = u64::from_le_bytes(b.try_into().unwrap());
     Ok(Value::BigInt(if signed {
-        raw as i64 as i128
+        crate::bigint::JsBigInt::from_i128(raw as i64 as i128)
     } else {
-        raw as i128
+        crate::bigint::JsBigInt::from_u64(raw)
     }))
 }
 
@@ -1508,7 +1508,7 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
     if byte_off.checked_add(8).is_none_or(|e| e > vlen) {
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
-    let mut bytes = (value as u64).to_le_bytes().to_vec();
+    let mut bytes = (value.to_i128_wrapping() as u64).to_le_bytes().to_vec();
     if !little {
         bytes.reverse();
     }
@@ -3558,11 +3558,11 @@ fn ta_sort_compare(
         });
     }
     if is_bigint {
-        let (x, y) = match (a, b) {
-            (Value::BigInt(x), Value::BigInt(y)) => (*x, *y),
-            _ => (0, 0),
+        let ord = match (a, b) {
+            (Value::BigInt(x), Value::BigInt(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
         };
-        Ok(x.cmp(&y) as i32)
+        Ok(ord as i32)
     } else {
         let x = if let Value::Num(x) = a { *x } else { f64::NAN };
         let y = if let Value::Num(y) = b { *y } else { f64::NAN };
@@ -9086,7 +9086,7 @@ fn reflect_ordinary_set(
                     if info.kind.is_bigint() {
                         let n = ab(i.to_bigint(&value))?;
                         if let TaIndex::Element(idx) = i.ta_index_kind(&info, key) {
-                            i.ta_write_bigint(&info, idx, n);
+                            i.ta_write_bigint(&info, idx, n.to_i128_wrapping());
                         }
                     } else {
                         let n = ab(i.to_number(&value))?;
@@ -16448,7 +16448,7 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
         Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone())),
         Value::Sym(s) => (i.symbol_proto.clone(), Exotic::SymWrap(s.clone())),
         Value::BigInt(n) => match i.extra_protos.get("BigInt").cloned() {
-            Some(p) => (p, Exotic::BigIntWrap(*n)),
+            Some(p) => (p, Exotic::BigIntWrap(n.clone())),
             None => return v,
         },
         _ => return v,
@@ -16835,7 +16835,7 @@ fn install_number(it: &mut Interp) {
         let n = match args.first() {
             None => 0.0,
             // Number(bigint) explicitly converts (only *implicit* ToNumber of a BigInt throws).
-            Some(Value::BigInt(n)) => *n as f64,
+            Some(Value::BigInt(n)) => n.to_f64(),
             Some(v) => ab(i.to_number(v))?,
         };
         Ok(maybe_box(i, Value::Num(n)))
@@ -17121,95 +17121,17 @@ fn install_symbol(it: &mut Interp) {
     }
 }
 
-fn bigint_to_radix(mut n: i128, radix: u32) -> String {
-    if radix == 10 || !(2..=36).contains(&radix) {
-        return n.to_string();
-    }
-    if n == 0 {
-        return "0".to_string();
-    }
-    let neg = n < 0;
-    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut out = Vec::new();
-    let r = radix as i128;
-    n = n.abs();
-    while n > 0 {
-        out.push(digits[(n % r) as usize]);
-        n /= r;
-    }
-    if neg {
-        out.push(b'-');
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap()
-}
-
-/// StringToBigInt: parse a StringIntegerLiteral (decimal with optional sign, or 0x/0o/0b radix
-/// prefixes), with leading/trailing whitespace trimmed. Returns None when the string is not a valid
-/// literal (the caller raises SyntaxError).
-fn string_to_bigint(s: &str) -> Option<i128> {
-    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
-    if t.is_empty() {
-        return Some(0);
-    }
-    let (radix, body) = if let Some(r) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        (16, r)
-    } else if let Some(r) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
-        (8, r)
-    } else if let Some(r) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
-        (2, r)
-    } else {
-        // Decimal, with an optional single leading sign.
-        let (neg, digits) = match t.strip_prefix('-') {
-            Some(d) => (true, d),
-            None => (false, t.strip_prefix('+').unwrap_or(t)),
-        };
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        // Wrap on overflow (mod 2^128), matching the lexer, so BigInt("<huge>") equals the same
-        // literal even beyond i128. (Full arbitrary precision is unimplemented.)
-        let v = bigint_digits_wrapping(digits, 10);
-        return Some(if neg { v.wrapping_neg() } else { v });
-    };
-    if body.is_empty() || !body.chars().all(|c| c.is_digit(radix)) {
-        return None;
-    }
-    Some(bigint_digits_wrapping(body, radix))
-}
-
-/// Parse validated `digits` in `radix` to i128, wrapping on overflow (mod 2^128). Mirrors the
-/// lexer's BigInt handling so a `BigInt("…")` string and the equivalent literal compare equal.
-fn bigint_digits_wrapping(digits: &str, radix: u32) -> i128 {
-    let mut acc: i128 = 0;
-    for c in digits.chars() {
-        if let Some(d) = c.to_digit(radix) {
-            acc = acc.wrapping_mul(radix as i128).wrapping_add(d as i128);
-        }
-    }
-    acc
-}
-
-/// ToBigInt: coerce a value to a BigInt primitive (i128), following the spec's allowed conversions.
-fn to_bigint(i: &mut Interp, v: &Value) -> Result<i128, Value> {
-    let prim = ab(i.to_primitive(v, crate::eval::Hint::Number))?;
-    match prim {
-        Value::BigInt(n) => Ok(n),
-        Value::Bool(b) => Ok(if b { 1 } else { 0 }),
-        Value::Str(ref s) => string_to_bigint(s)
-            .ok_or_else(|| i.make_error("SyntaxError", "Cannot convert string to a BigInt")),
-        Value::Num(_) => Err(i.make_error("TypeError", "Cannot convert a Number to a BigInt")),
-        Value::Sym(_) => Err(i.make_error("TypeError", "Cannot convert a Symbol to a BigInt")),
-        _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
-    }
+/// ToBigInt: coerce a value to a BigInt primitive, following the spec's allowed conversions.
+fn to_bigint(i: &mut Interp, v: &Value) -> Result<crate::bigint::JsBigInt, Value> {
+    ab(i.to_bigint(v))
 }
 
 /// thisBigIntValue: a BigInt primitive or BigInt wrapper object, else TypeError.
-fn this_bigint(i: &mut Interp, this: &Value) -> Result<i128, Value> {
+fn this_bigint(i: &mut Interp, this: &Value) -> Result<crate::bigint::JsBigInt, Value> {
     match this {
-        Value::BigInt(n) => Ok(*n),
-        Value::Obj(o) => match o.borrow().exotic {
-            Exotic::BigIntWrap(n) => Ok(n),
+        Value::BigInt(n) => Ok(n.clone()),
+        Value::Obj(o) => match &o.borrow().exotic {
+            Exotic::BigIntWrap(n) => Ok(n.clone()),
             _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),
         },
         _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),
@@ -17233,7 +17155,7 @@ fn install_bigint(it: &mut Interp) {
                 r as u32
             }
         };
-        Ok(Value::from_string(bigint_to_radix(n, radix)))
+        Ok(Value::from_string(n.to_string_radix(radix)))
     });
     it.def_method(&proto, "valueOf", 0, |i, this, _| {
         Ok(Value::BigInt(this_bigint(i, &this)?))
@@ -17261,17 +17183,13 @@ fn install_bigint(it: &mut Interp) {
         };
         match prim {
             Value::BigInt(n) => Ok(Value::BigInt(n)),
-            Value::Num(n) => {
-                if n.is_finite() && n.fract() == 0.0 {
-                    Ok(Value::BigInt(n as i128))
-                } else {
-                    Err(i.make_error("RangeError", "The number cannot be converted to a BigInt"))
-                }
-            }
-            Value::Bool(b) => Ok(Value::BigInt(if b { 1 } else { 0 })),
-            Value::Str(s) => string_to_bigint(&s)
+            Value::Num(n) => crate::bigint::JsBigInt::from_f64(n)
                 .map(Value::BigInt)
-                .ok_or_else(|| i.make_error("SyntaxError", "Cannot convert string to a BigInt")),
+                .ok_or_else(|| {
+                    i.make_error("RangeError", "The number cannot be converted to a BigInt")
+                }),
+            Value::Bool(b) => Ok(Value::BigInt(crate::bigint::JsBigInt::from_u64(b as u64))),
+            Value::Str(s) => ab(i.to_bigint(&Value::Str(s))).map(Value::BigInt),
             _ => Err(i.make_error("TypeError", "Cannot convert value to a BigInt")),
         }
     });
@@ -17284,31 +17202,45 @@ fn install_bigint(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     it.def_method(&ctor, "asIntN", 2, |i, _t, a| {
-        let bits = to_index(i, &arg(a, 0))? as u32;
+        use crate::bigint::JsBigInt;
+        let bits = to_index(i, &arg(a, 0))? as u64;
         let n = to_bigint(i, &arg(a, 1))?;
         if bits == 0 {
-            return Ok(Value::BigInt(0));
+            return Ok(Value::BigInt(JsBigInt::zero()));
         }
-        if bits >= 128 {
-            return Ok(Value::BigInt(n));
+        // A width beyond any plausible magnitude: the value is already in range (or the result
+        // would be too large to represent).
+        if bits > (1 << 26) {
+            if (n.bit_len() as u64) < bits {
+                return Ok(Value::BigInt(n));
+            }
+            return Err(i.make_error("RangeError", "BigInt is too large to allocate"));
         }
-        let m = 1i128 << bits;
-        let mut r = n.rem_euclid(m);
-        if r >= m / 2 {
-            r -= m;
-        }
-        Ok(Value::BigInt(r))
+        // n mod 2^bits via two's-complement masking, then subtract 2^bits if the sign bit is set.
+        let m = JsBigInt::from_u64(1).shl(bits);
+        let r = n.bitand(&m.sub(&JsBigInt::from_u64(1)));
+        let half = JsBigInt::from_u64(1).shl(bits - 1);
+        Ok(Value::BigInt(if r.cmp(&half).is_lt() {
+            r
+        } else {
+            r.sub(&m)
+        }))
     });
     it.def_method(&ctor, "asUintN", 2, |i, _t, a| {
-        let bits = to_index(i, &arg(a, 0))? as u32;
+        use crate::bigint::JsBigInt;
+        let bits = to_index(i, &arg(a, 0))? as u64;
         let n = to_bigint(i, &arg(a, 1))?;
         if bits == 0 {
-            return Ok(Value::BigInt(0));
+            return Ok(Value::BigInt(JsBigInt::zero()));
         }
-        if bits >= 127 {
-            return Ok(Value::BigInt(n));
+        if bits > (1 << 26) {
+            if !n.is_negative() && (n.bit_len() as u64) <= bits {
+                return Ok(Value::BigInt(n));
+            }
+            return Err(i.make_error("RangeError", "BigInt is too large to allocate"));
         }
-        Ok(Value::BigInt(n.rem_euclid(1i128 << bits)))
+        let mask = JsBigInt::from_u64(1).shl(bits).sub(&JsBigInt::from_u64(1));
+        Ok(Value::BigInt(n.bitand(&mask)))
     });
     set_builtin(&it.global, "BigInt", Value::Obj(ctor));
 

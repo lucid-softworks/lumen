@@ -215,7 +215,7 @@ pub struct ObjPatProp {
 #[allow(dead_code)] // some node fields (regex body/flags) are parsed before they are interpreted
 pub enum Expr {
     Num(f64),
-    BigInt(i128),
+    BigInt(crate::bigint::JsBigInt),
     Str(Rc<str>),
     /// A template-literal substitution: evaluate the inner expression and apply ToString (which uses
     /// the `string` hint — toString before valueOf — unlike `+` which uses the `default` hint).

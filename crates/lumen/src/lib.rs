@@ -23,6 +23,7 @@
 #![allow(clippy::wrong_self_convention)]
 
 mod ast;
+mod bigint;
 mod builtins;
 mod coroutine;
 mod eval;

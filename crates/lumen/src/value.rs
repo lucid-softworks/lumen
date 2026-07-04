@@ -27,7 +27,7 @@ pub enum Value {
     Num(f64),
     /// BigInt, approximated with `i128` (exact within ±2^127; tests beyond that range fail rather
     /// than implementing arbitrary precision).
-    BigInt(i128),
+    BigInt(crate::bigint::JsBigInt),
     Str(Rc<str>),
     Sym(Rc<SymbolData>),
     Obj(Gc),
@@ -127,7 +127,7 @@ pub enum Exotic {
     NumWrap(f64),
     StrWrap(Rc<str>),
     SymWrap(Rc<SymbolData>),
-    BigIntWrap(i128),
+    BigIntWrap(crate::bigint::JsBigInt),
     /// An error object — carries no extra data (name/message live as ordinary properties) but the
     /// tag lets `Error.prototype.toString` and the test262 runner recognise it cheaply.
     Error,

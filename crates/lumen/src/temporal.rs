@@ -7421,7 +7421,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         ))
     });
     def_getter(it, &proto, "epochNanoseconds", |i, t, _| {
-        Ok(Value::BigInt(as_instant(i, &t)?))
+        Ok(Value::BigInt(as_instant(i, &t)?.into()))
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let ns_utc = as_instant(i, &t)?;
@@ -7633,7 +7633,9 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
     // ToTemporalInstant: a non-Temporal value is coerced to a string (ToPrimitive, string hint) and
     // parsed as an ISO instant.
     match v {
-        Value::BigInt(n) => Ok(*n),
+        Value::BigInt(n) => n
+            .to_i128()
+            .ok_or_else(|| i.make_error("RangeError", "Instant outside of supported range")),
         _ => {
             let s = i.to_string(v).map_err(unab)?;
             parse_instant(&s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
@@ -7644,7 +7646,9 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
 /// undefined, symbol, and object are a TypeError.
 fn to_epoch_bigint(i: &mut Interp, v: &Value) -> Result<i128, Value> {
     match v {
-        Value::BigInt(n) => Ok(*n),
+        Value::BigInt(n) => n
+            .to_i128()
+            .ok_or_else(|| i.make_error("RangeError", "epochNanoseconds out of range")),
         Value::Bool(b) => Ok(*b as i128),
         Value::Str(s) => s
             .trim()
@@ -8220,7 +8224,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         Ok(Value::Num(as_zoned(i, &t)?.0.div_euclid(1_000_000) as f64))
     });
     def_getter(it, &proto, "epochNanoseconds", |i, t, _| {
-        Ok(Value::BigInt(as_zoned(i, &t)?.0))
+        Ok(Value::BigInt(as_zoned(i, &t)?.0.into()))
     });
     def_getter(it, &proto, "offsetNanoseconds", |i, t, _| {
         Ok(Value::Num(as_zoned(i, &t)?.1 as f64))
@@ -8627,7 +8631,9 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
         require_new(i)?;
         let epoch_ns = match arg(a, 0) {
-            Value::BigInt(n) => n,
+            Value::BigInt(n) => n
+                .to_i128()
+                .ok_or_else(|| i.make_error("RangeError", "epochNanoseconds out of range"))?,
             _ => return Err(i.make_error("TypeError", "epochNanoseconds must be a BigInt")),
         };
         let tzv = arg(a, 1);

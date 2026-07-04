@@ -25,8 +25,8 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Num(f64),
-    /// A BigInt literal (`123n`), stored as `i128`.
-    BigInt(i128),
+    /// A BigInt literal (`123n`).
+    BigInt(crate::bigint::JsBigInt),
     Str(String),
     /// A template literal, split into cooked string chunks and raw `${...}` substitution sources.
     /// `` `a${x}b` `` lexes to `[Str("a"), Sub("x"), Str("b")]`. The parser desugars it to a string

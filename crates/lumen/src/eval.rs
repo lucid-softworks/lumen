@@ -337,9 +337,7 @@ impl Interp {
             // Await(undefined) — one real tick.
             let tick = self.new_promise();
             self.resolve_promise(&tick, Value::Undefined);
-            if let Err(e) = self.coro_await(tick) {
-                return Err(e);
-            }
+            self.coro_await(tick)?;
         }
         completion
     }
@@ -382,8 +380,7 @@ impl Interp {
         result: Completion,
         _is_async: bool,
     ) -> Completion {
-        let result = self.dispose_frame(frame, result);
-        result
+        self.dispose_frame(frame, result)
     }
 
     /// Build a `SuppressedError(error, suppressed)`.
@@ -2238,7 +2235,7 @@ impl Interp {
     pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
-            Expr::BigInt(n) => Ok(Value::BigInt(*n)),
+            Expr::BigInt(n) => Ok(Value::BigInt(n.clone())),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::ToStr(inner) => {
                 let v = self.eval(inner, env)?;
@@ -2967,8 +2964,8 @@ impl Interp {
             // inside the constructor keeps its lexical super-call capability even when invoked
             // later (BindThisValue then throws ReferenceError instead).
             if !self.super_call_ok
-                && !(self.peek_binding("%superclass%", env).is_some()
-                    && self.peek_binding("%thisctor%", env).is_some())
+                && (self.peek_binding("%superclass%", env).is_none()
+                    || self.peek_binding("%thisctor%", env).is_none())
             {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             }
@@ -4917,9 +4914,9 @@ impl Interp {
         };
         if let Value::BigInt(n) = v {
             return match op {
-                "!" => Ok(Value::Bool(n == 0)),
-                "-" => Ok(Value::BigInt(n.wrapping_neg())),
-                "~" => Ok(Value::BigInt(!n)),
+                "!" => Ok(Value::Bool(n.is_zero())),
+                "-" => Ok(Value::BigInt(n.neg())),
+                "~" => Ok(Value::BigInt(n.not())),
                 "void" => Ok(Value::Undefined),
                 "+" => Err(self.throw("TypeError", "Cannot convert a BigInt value to a number")),
                 _ => unreachable!("unary {op}"),
@@ -5186,12 +5183,9 @@ impl Interp {
         let mut lref = self.resolve_reference(arg, env)?;
         let old = self.get_reference(&mut lref)?;
         if let Value::BigInt(n) = old {
-            let new = if op == "++" {
-                n.wrapping_add(1)
-            } else {
-                n.wrapping_sub(1)
-            };
-            self.put_reference(&mut lref, Value::BigInt(new))?;
+            let one = crate::bigint::JsBigInt::from_u64(1);
+            let new = if op == "++" { n.add(&one) } else { n.sub(&one) };
+            self.put_reference(&mut lref, Value::BigInt(new.clone()))?;
             return Ok(Value::BigInt(if prefix { new } else { n }));
         }
         let n = self.to_number(&old)?;
@@ -5537,7 +5531,7 @@ impl Interp {
                 };
                 if matches!(ln, Value::BigInt(_)) || matches!(rn, Value::BigInt(_)) {
                     if let (Value::BigInt(x), Value::BigInt(y)) = (&ln, &rn) {
-                        return self.bigint_binop(op, *x, *y);
+                        return self.bigint_binop(op, x, y);
                     }
                     return Err(self.throw(
                         "TypeError",
@@ -5596,7 +5590,7 @@ impl Interp {
             }
             if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&lp, &rp) {
-                    return self.bigint_binop(op, *x, *y);
+                    return self.bigint_binop(op, x, y);
                 }
                 return Err(self.throw(
                     "TypeError",
@@ -5669,46 +5663,51 @@ impl Interp {
         }
     }
 
-    fn bigint_binop(&self, op: &str, x: i128, y: i128) -> Result<Value, Abrupt> {
+    fn bigint_binop(
+        &self,
+        op: &str,
+        x: &crate::bigint::JsBigInt,
+        y: &crate::bigint::JsBigInt,
+    ) -> Result<Value, Abrupt> {
+        use crate::bigint::JsBigInt;
         let v = match op {
-            "+" => x.wrapping_add(y),
-            "-" => x.wrapping_sub(y),
-            "*" => x.wrapping_mul(y),
-            "/" => {
-                if y == 0 {
-                    return Err(self.throw("RangeError", "Division by zero"));
-                }
-                x.wrapping_div(y)
-            }
-            "%" => {
-                if y == 0 {
-                    return Err(self.throw("RangeError", "Division by zero"));
-                }
-                x.wrapping_rem(y)
-            }
-            "**" => {
-                if y < 0 {
-                    return Err(self.throw("RangeError", "Exponent must be non-negative"));
-                }
-                x.wrapping_pow(y.min(u32::MAX as i128) as u32)
-            }
-            "&" => x & y,
-            "|" => x | y,
-            "^" => x ^ y,
-            // A negative BigInt shift count shifts the other way (arbitrary-precision shr
-            // is an arithmetic shift, flooring toward negative infinity).
-            "<<" => {
-                if y < 0 {
-                    x >> (-y).min(127) as u32
+            "+" => x.add(y),
+            "-" => x.sub(y),
+            "*" => x.mul(y),
+            "/" => x
+                .div(y)
+                .ok_or_else(|| self.throw("RangeError", "Division by zero"))?,
+            "%" => x
+                .rem(y)
+                .ok_or_else(|| self.throw("RangeError", "Division by zero"))?,
+            "**" => x
+                .pow(y)
+                .ok_or_else(|| self.throw("RangeError", "Exponent must be non-negative"))?,
+            "&" => x.bitand(y),
+            "|" => x.bitor(y),
+            "^" => x.bitxor(y),
+            // A negative shift count shifts the other way; the rightward shift is arithmetic
+            // (flooring toward negative infinity).
+            "<<" | ">>" => {
+                let leftward = (op == "<<") != y.is_negative();
+                let count = y.to_i128().map(|v| v.unsigned_abs()).unwrap_or(u128::MAX);
+                if leftward {
+                    if x.is_zero() {
+                        JsBigInt::zero()
+                    } else if count > (1 << 30) {
+                        return Err(self.throw("RangeError", "BigInt is too large to allocate"));
+                    } else {
+                        x.shl(count as u64)
+                    }
+                } else if count >= (1 << 30) {
+                    // Every bit shifted out: floor(x / 2^count) is 0 or -1 by sign.
+                    if x.is_negative() {
+                        JsBigInt::from_i128(-1)
+                    } else {
+                        JsBigInt::zero()
+                    }
                 } else {
-                    x.wrapping_shl(y.min(127) as u32)
-                }
-            }
-            ">>" => {
-                if y < 0 {
-                    x.wrapping_shl((-y).min(127) as u32)
-                } else {
-                    x >> y.min(127) as u32
+                    x.shr(count as u64)
                 }
             }
             _ => return Err(self.throw("TypeError", "unsupported BigInt operator")),
@@ -5718,11 +5717,11 @@ impl Interp {
 
     /// ToBigInt: BigInt stays; Boolean → 0n/1n; String parses (SyntaxError if malformed); Number /
     /// undefined / null / Symbol throw TypeError.
-    pub(crate) fn to_bigint(&mut self, v: &Value) -> Result<i128, Abrupt> {
+    pub(crate) fn to_bigint(&mut self, v: &Value) -> Result<crate::bigint::JsBigInt, Abrupt> {
         let p = self.to_primitive(v, Hint::Number)?;
         match p {
             Value::BigInt(n) => Ok(n),
-            Value::Bool(b) => Ok(b as i128),
+            Value::Bool(b) => Ok(crate::bigint::JsBigInt::from_u64(b as u64)),
             Value::Str(s) => string_to_bigint(&s)
                 .ok_or_else(|| self.throw("SyntaxError", "Cannot convert string to a BigInt")),
             Value::Num(_) => Err(self.throw("TypeError", "Cannot convert a Number to a BigInt")),
@@ -5756,11 +5755,11 @@ impl Interp {
             (Value::Str(t), Value::BigInt(b)) => string_to_bigint(t).map(|a| a.cmp(b)),
             (Value::BigInt(a), _) => {
                 let n = self.to_number(&rp)?;
-                cmp_bigint_f64(*a, n)
+                a.cmp_f64(n)
             }
             (_, Value::BigInt(b)) => {
                 let n = self.to_number(&lp)?;
-                cmp_bigint_f64(*b, n).map(std::cmp::Ordering::reverse)
+                b.cmp_f64(n).map(std::cmp::Ordering::reverse)
             }
             _ => {
                 let a = self.to_number(&lp)?;
@@ -5848,7 +5847,7 @@ impl Interp {
             Value::Undefined | Value::Empty | Value::Null => false,
             Value::Bool(b) => *b,
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
-            Value::BigInt(n) => *n != 0,
+            Value::BigInt(n) => !n.is_zero(),
             Value::Str(s) => !s.is_empty(),
             // The [[IsHTMLDDA]] object is the one falsy Object.
             Value::Obj(_) => !self.is_htmldda(v),
@@ -6093,9 +6092,7 @@ impl Interp {
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::BigInt(x), Value::BigInt(y)) => x == y,
-            (Value::BigInt(x), Value::Num(y)) | (Value::Num(y), Value::BigInt(x)) => {
-                y.is_finite() && y.fract() == 0.0 && (*x as f64) == *y
-            }
+            (Value::BigInt(x), Value::Num(y)) | (Value::Num(y), Value::BigInt(x)) => x.eq_f64(*y),
             (Value::BigInt(x), Value::Str(s)) | (Value::Str(s), Value::BigInt(x)) => {
                 // StringToBigInt: an unparsable string compares unequal.
                 string_to_bigint(s).map(|n| n == *x).unwrap_or(false)
@@ -6986,61 +6983,32 @@ pub(crate) fn private_display(key: &str) -> &str {
     key.split('\u{1}').next().unwrap_or(key)
 }
 
-/// Exact BigInt-vs-Number ordering (the mathematical comparison; None when the number is NaN).
 /// StringToBigInt: trimmed decimal / 0x / 0o / 0b text (empty is 0); None when unparsable.
-fn string_to_bigint(s: &str) -> Option<i128> {
-    let t = s.trim();
+fn string_to_bigint(s: &str) -> Option<crate::bigint::JsBigInt> {
+    use crate::bigint::JsBigInt;
+    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
     if t.is_empty() {
-        return Some(0);
+        return Some(JsBigInt::zero());
     }
     if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        return i128::from_str_radix(h, 16).ok();
+        return JsBigInt::parse_radix(h, 16);
     }
     if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
-        return i128::from_str_radix(o, 8).ok();
+        return JsBigInt::parse_radix(o, 8);
     }
     if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
-        return i128::from_str_radix(b, 2).ok();
+        return JsBigInt::parse_radix(b, 2);
     }
-    t.parse::<i128>().ok()
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(d) => (true, d),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let v = JsBigInt::parse_dec(digits)?;
+    Some(if neg { v.neg() } else { v })
 }
 
 /// The outcome of evaluating a `return` operand: a pending proper tail call, or a plain value.
 enum TailEval {
     Tail(Value, Value, Vec<Value>),
     Val(Value),
-}
-
-fn cmp_bigint_f64(b: i128, n: f64) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
-    if n.is_nan() {
-        return None;
-    }
-    if n == f64::INFINITY {
-        return Some(Ordering::Less);
-    }
-    if n == f64::NEG_INFINITY {
-        return Some(Ordering::Greater);
-    }
-    // Beyond i128's range the sign of n decides.
-    if n >= i128::MAX as f64 {
-        return Some(Ordering::Less);
-    }
-    if n <= i128::MIN as f64 {
-        return Some(Ordering::Greater);
-    }
-    let t = n.trunc();
-    match b.cmp(&(t as i128)) {
-        Ordering::Equal => {
-            let f = n - t;
-            if f > 0.0 {
-                Some(Ordering::Less)
-            } else if f < 0.0 {
-                Some(Ordering::Greater)
-            } else {
-                Some(Ordering::Equal)
-            }
-        }
-        o => Some(o),
-    }
 }
