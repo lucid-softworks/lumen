@@ -5366,8 +5366,9 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let suffix = cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?;
-        // When the calendar is shown, a PlainYearMonth includes its reference ISO day (`-DD`).
-        let s = if suffix.is_empty() {
+        // A non-ISO year-month (or an explicit calendar annotation) includes its reference day.
+        let cal = cal_of(i, &t);
+        let s = if suffix.is_empty() && &*cal == "iso8601" {
             format!("{}-{:02}", pad_year(d.year), d.month)
         } else {
             format!("{}-{:02}-{:02}{}", pad_year(d.year), d.month, d.day, suffix)
@@ -5376,7 +5377,23 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_yearmonth(i, &t)?;
-        Ok(Value::str(format!("{}-{:02}", pad_year(d.year), d.month)))
+        let cal = cal_of(i, &t);
+        Ok(Value::str(if &*cal == "iso8601" {
+            format!("{}-{:02}", pad_year(d.year), d.month)
+        } else {
+            format!(
+                "{}-{:02}-{:02}[u-ca={cal}]",
+                pad_year(d.year),
+                d.month,
+                d.day
+            )
+        }))
+    });
+    it.def_method(&proto, "valueOf", 0, |i, _t, _| {
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.PlainYearMonth has no valueOf; use compare",
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
@@ -5384,7 +5401,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
         Ok(Value::Bool(
-            d.year == o.year && d.month == o.month && this_cal == other_cal,
+            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -5521,9 +5538,8 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&ctor, "compare", 2, |i, _t, a| {
         let x = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
         let y = to_yearmonth(i, &arg(a, 1), &Value::Undefined)?;
-        let xk = x.year * 12 + x.month as i64;
-        let yk = y.year * 12 + y.month as i64;
-        Ok(Value::Num(xk.cmp(&yk) as i64 as f64))
+        // CompareISODate on the reference dates — the reference day participates.
+        Ok(Value::Num(cmp_date(x, y) as f64))
     });
 }
 fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
