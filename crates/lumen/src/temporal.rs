@@ -2949,65 +2949,186 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_date(i, &t)?;
-        let f = arg(a, 0);
-        if !matches!(f, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "with() argument must be an object"));
-        }
         let cal = cal_of(i, &t);
-        let ovf = to_overflow(i, &arg(a, 1))?;
-        let nd = if &*cal == "iso8601" {
-            let year = field_int(i, &f, "year", d.year)?;
-            let month = field_int(i, &f, "month", d.month as i64)?;
-            let day = field_int(i, &f, "day", d.day as i64)?;
-            build_date_ovf(i, year, month, day, ovf)?
-        } else {
-            with_cal_date(i, &cal, d, &f, ovf)?
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) || get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
+        }
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        let uses_era = cal_uses_era(&cal);
+        let mut any = false;
+        let day = {
+            let fv = getm(i, &f, "day")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "day must be positive"));
+                    }
+                    Some(n)
+                }
+            }
         };
+        let (era, era_year) = if uses_era {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(i.to_string(&ev).map_err(unab)?.to_lowercase())
+                }
+            };
+            let eyv = getm(i, &f, "eraYear")?;
+            let ey = match eyv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &eyv)?)
+                }
+            };
+            (era, ey)
+        } else {
+            (None, None)
+        };
+        let month = {
+            let fv = getm(i, &f, "month")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let month_code = {
+            let fv = getm(i, &f, "monthCode")?;
+            match &fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    Some(sv)
+                }
+            }
+        };
+        let year = {
+            let fv = getm(i, &f, "year")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &fv)?)
+                }
+            }
+        };
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one field"));
+        }
+        if era.is_some() != era_year.is_some() {
+            return Err(i.make_error("TypeError", "era and eraYear must both be provided"));
+        }
+        if era_year.is_some() && year.is_some() {
+            return Err(i.make_error("TypeError", "eraYear and year are mutually exclusive"));
+        }
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
+        let cf = cal_fields(&cal, d);
+        let bag = Object::new(Some(i.object_proto.clone()));
+        {
+            let mut b = bag.borrow_mut();
+            match year {
+                Some(y) => {
+                    b.props
+                        .insert("year", Property::builtin(Value::Num(y as f64)));
+                }
+                None => {
+                    if era.is_none() || era_year.is_none() {
+                        b.props.insert(
+                            "year",
+                            Property::builtin(Value::Num(cal_year_num(&cal, d) as f64)),
+                        );
+                    }
+                }
+            }
+            if let Some(e2) = &era {
+                b.props
+                    .insert("era", Property::builtin(Value::str(e2.as_str())));
+            }
+            if let Some(ey) = era_year {
+                b.props
+                    .insert("eraYear", Property::builtin(Value::Num(ey as f64)));
+            }
+            match (month, &month_code) {
+                (None, None) => {
+                    b.props.insert(
+                        "monthCode",
+                        Property::builtin(Value::str(cal_month_code(&cal, d))),
+                    );
+                }
+                _ => {
+                    if let Some(m) = month {
+                        b.props
+                            .insert("month", Property::builtin(Value::Num(m as f64)));
+                    }
+                    if let Some(mc) = &month_code {
+                        b.props
+                            .insert("monthCode", Property::builtin(Value::Str(mc.clone())));
+                    }
+                }
+            }
+            b.props.insert(
+                "day",
+                Property::builtin(Value::Num(day.unwrap_or(cf.2) as f64)),
+            );
+        }
+        let bagv = Value::Obj(bag);
+        let draw = read_date_raw_cal(i, &bagv, &cal, ovf)?;
+        let nd = regulate_date(i, draw, ovf)?;
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal_id = cal_of(i, &t);
-        let nd = add_to_date(i, d, dur, 1, ovf, &cal_id)?;
+        let nd = add_to_date(i, d, date_dur_without_time(dur), 1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_date(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal_id = cal_of(i, &t);
-        let nd = add_to_date(i, d, dur, -1, ovf, &cal_id)?;
+        let nd = add_to_date(i, d, date_dur_without_time(dur), -1, ovf, &cal_id)?;
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
-    it.def_method(&proto, "until", 1, |i, t, a| {
-        let d = as_date(i, &t)?;
-        let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(diff_date_rounded(
-                &cal, d, o, &largest, &smallest, incr, &mode,
-            )),
-        ))
-    });
-    it.def_method(&proto, "since", 1, |i, t, a| {
-        let d = as_date(i, &t)?;
-        let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        // `since` mirrors `until` with a negated rounding mode, then negates the result.
-        let (largest, smallest, incr, mode) = read_date_diff(i, &arg(a, 1))?;
-        let dur = diff_date_rounded(&cal, d, o, &largest, &smallest, incr, negate_mode(&mode));
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(neg_duration(dur)),
-        ))
-    });
-    it.def_method(&proto, "toPlainDateTime", 1, |i, t, a| {
+    it.def_method(&proto, "until", 1, |i, t, a| pd_until_since(i, &t, a, 1));
+    it.def_method(&proto, "since", 1, |i, t, a| pd_until_since(i, &t, a, -1));
+    it.def_method(&proto, "toPlainDateTime", 0, |i, t, a| {
         let d = as_date(i, &t)?;
         let time = match arg(a, 0) {
             Value::Undefined => IsoTime {
@@ -3020,6 +3141,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             },
             v => to_time(i, &v, &Value::Undefined)?,
         };
+        if !iso_datetime_within_limits(d, time) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
@@ -3029,25 +3153,59 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainYearMonth", 0, |i, t, _| {
         let d = as_date(i, &t)?;
+        let cal = cal_of(i, &t);
         Ok(make_like(
             i,
             &t,
             "Temporal.PlainYearMonth",
-            Temporal::YearMonth(d),
+            Temporal::YearMonth(ym_ref_of(&cal, d)),
         ))
     });
     it.def_method(&proto, "toPlainMonthDay", 0, |i, t, _| {
         let d = as_date(i, &t)?;
+        let cal = cal_of(i, &t);
+        let md = if &*cal == "iso8601" {
+            IsoDate {
+                year: 1972,
+                month: d.month,
+                day: d.day,
+            }
+        } else {
+            let snap = i.new_object();
+            setm(
+                &snap,
+                "monthCode",
+                Value::str(cal_month_code(&cal, d).as_str()),
+            );
+            setm(&snap, "day", Value::Num(cal_fields(&cal, d).2 as f64));
+            cal_month_day_reference(i, &cal, &snap, false, Overflow::Constrain)?
+        };
         Ok(make_like(
             i,
             &t,
             "Temporal.PlainMonthDay",
-            Temporal::MonthDay(d),
+            Temporal::MonthDay(md),
         ))
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let d = as_date(i, &t)?;
-        let cal = check_calendar(i, &arg(a, 0))?;
+        let cv = arg(a, 0);
+        let cal = match &cv {
+            Value::Undefined => {
+                return Err(i.make_error("TypeError", "calendar argument is required"))
+            }
+            Value::Obj(_) => match get(i, &cv) {
+                Some(
+                    Temporal::Date(_)
+                    | Temporal::DateTime(_, _)
+                    | Temporal::YearMonth(_)
+                    | Temporal::MonthDay(_)
+                    | Temporal::Zoned { .. },
+                ) => cal_of(i, &cv),
+                _ => return Err(i.make_error("TypeError", "calendar must be a string")),
+            },
+            _ => check_calendar(i, &cv)?,
+        };
         let v = make(i, "Temporal.PlainDate", Temporal::Date(d));
         set_cal(i, &v, cal);
         Ok(v)
@@ -3059,42 +3217,26 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
             Value::Obj(_) => (getm(i, &item, "timeZone")?, getm(i, &item, "plainTime")?),
             other => (other.clone(), Value::Undefined),
         };
-        let tz_raw: Rc<str> = match &tzv {
-            Value::Str(s) => s.clone(),
-            Value::Obj(_) => match get(i, &tzv) {
-                Some(Temporal::Zoned { tz, .. }) => tz,
-                _ => {
+        let tz = tz_from_field(i, &tzv)?;
+        let epoch = match timev {
+            Value::Undefined => start_of_day_ns(i, &tz, d)?,
+            v => {
+                let time = to_time(i, &v, &Value::Undefined)?;
+                if !iso_datetime_within_limits(d, time) {
                     return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
+                        i.make_error("RangeError", "date-time is outside the representable range")
+                    );
                 }
-            },
-            _ => {
-                return Err(
-                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                )
+                check_instant(i, local_to_epoch(i, &tz, dt_ns(d, time), "compatible")?)?
             }
         };
-        let tz = normalize_tz(i, &tz_raw)?;
-        let time = match timev {
-            Value::Undefined => IsoTime {
-                hour: 0,
-                minute: 0,
-                second: 0,
-                ms: 0,
-                us: 0,
-                ns: 0,
-            },
-            v => to_time(i, &v, &Value::Undefined)?,
-        };
-        let local = dt_ns(d, time);
-        let offset = offset_for_local(&tz, local);
+        let offset = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
-                epoch_ns: local - offset as i128,
+                epoch_ns: epoch,
                 offset_ns: offset,
                 tz,
             },
@@ -3291,13 +3433,6 @@ fn sing(u: &str) -> &str {
 fn time_unit_rank(u: &str) -> Option<i32> {
     match unit_rank(u) {
         Some(r) if r <= 5 => Some(r),
-        _ => None,
-    }
-}
-/// Rank of a *date* unit (year=9 … day=6), or None if it isn't one.
-fn date_unit_rank(u: &str) -> Option<i32> {
-    match unit_rank(u) {
-        Some(r) if r >= 6 => Some(r),
         _ => None,
     }
 }
@@ -3905,33 +4040,6 @@ fn read_ym_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, String)
     Ok((largest, smallest, mode))
 }
 
-/// Read `until`/`since` options for a PlainDate difference: (largest, smallest, increment, mode).
-/// GetDifferenceSettings reads the options in the order largestUnit, roundingIncrement,
-/// roundingMode, smallestUnit, then validates the unit relationship.
-fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
-    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
-    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "day")?).to_string();
-    check_mode(i, &mode)?;
-    let srank = date_unit_rank(&smallest)
-        .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a date unit"))?;
-    let lrank = if largest_raw == "auto" {
-        srank.max(6)
-    } else {
-        date_unit_rank(&largest_raw)
-            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a date unit"))?
-    };
-    if lrank < srank {
-        return Err(i.make_error(
-            "RangeError",
-            "largestUnit cannot be smaller than smallestUnit",
-        ));
-    }
-    check_increment(i, &smallest, incr)?;
-    Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
-}
-
 /// Add `months` months to a date, clamping the day to the resulting month's length.
 fn constrain_add_ym(d: IsoDate, months: i64) -> IsoDate {
     let total = d.year * 12 + (d.month as i64 - 1) + months;
@@ -4386,64 +4494,6 @@ fn setm(o: &Gc, k: &str, v: Value) {
         .insert(k.to_string(), Property::data(v, true, true, true));
 }
 
-/// `with()` for a non-ISO calendar: merge the receiver's calendar fields with the partial input
-/// (CalendarMergeFields — a provided year/era or month/monthCode replaces the receiver's whole
-/// group), then resolve back to an ISO date.
-fn with_cal_date(
-    i: &mut Interp,
-    cal: &str,
-    d: IsoDate,
-    f: &Value,
-    ovf: Overflow,
-) -> Result<IsoDate, Value> {
-    let (_, cm, cd, ..) = cal_fields(cal, d);
-    // The `year` field is the calendar's reported year number (e.g. ethioaa's amete-alem = amete-mihret
-    // + 5500), which is not always `cal_fields().0`.
-    let cy = cal_year_num(cal, d);
-    let (cera, cery) = cal_era(cal, d);
-    let present = |i: &mut Interp, k: &str| -> Result<bool, Value> {
-        Ok(!matches!(getm(i, f, k)?, Value::Undefined))
-    };
-    let has_year = present(i, "year")? || present(i, "era")? || present(i, "eraYear")?;
-    let has_month = present(i, "month")? || present(i, "monthCode")?;
-    let has_day = present(i, "day")?;
-    let merged = i.new_object();
-    if !has_year {
-        setm(&merged, "year", Value::Num(cy as f64));
-        if let Some(e) = cera {
-            setm(&merged, "era", Value::str(e));
-        }
-        if let Some(ey) = cery {
-            setm(&merged, "eraYear", Value::Num(ey as f64));
-        }
-    }
-    if !has_month {
-        // For leap-month calendars the month's identity is its monthCode (an ordinal shifts between
-        // leap and common years); carrying it over lets a year change reject/constrain correctly.
-        if matches!(cal, "hebrew" | "chinese" | "dangi") {
-            setm(
-                &merged,
-                "monthCode",
-                Value::str(cal_month_code(cal, d).as_str()),
-            );
-        } else {
-            setm(&merged, "month", Value::Num(cm as f64));
-        }
-    }
-    if !has_day {
-        setm(&merged, "day", Value::Num(cd as f64));
-    }
-    // Overlay every field the caller actually supplied.
-    for k in ["year", "era", "eraYear", "month", "monthCode", "day"] {
-        let v = getm(i, f, k)?;
-        if !matches!(v, Value::Undefined) {
-            setm(&merged, k, v);
-        }
-    }
-    let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, ovf)?;
-    regulate_date(i, raw, ovf)
-}
-
 /// Regulate raw year/month/day into a valid ISO date per `overflow`.
 fn regulate_date(
     i: &Interp,
@@ -4580,10 +4630,27 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
             d
         }
         Value::Obj(_) => {
-            read_calendar(i, v)?;
-            let cal = input_cal(i, v)?;
-            let ovf = to_overflow(i, opts)?;
-            let raw = read_date_raw_cal(i, v, &cal, ovf)?;
+            let bag = read_dt_bag(i, v, false, false)?;
+            {
+                let b = match &bag.date_bag {
+                    Value::Obj(o) => o.clone(),
+                    _ => unreachable!(),
+                };
+                let has = |k: &str| b.borrow().props.get(k).is_some();
+                let has_year =
+                    has("year") || (cal_uses_era(&bag.cal) && has("era") && has("eraYear"));
+                if !has_year {
+                    return Err(i.make_error("TypeError", "missing field 'year'"));
+                }
+                if !has("month") && !has("monthCode") {
+                    return Err(i.make_error("TypeError", "missing field 'month'"));
+                }
+                if !has("day") {
+                    return Err(i.make_error("TypeError", "missing field 'day'"));
+                }
+            }
+            let ovf = to_overflow(i, &get_opts_obj(i, opts)?)?;
+            let raw = read_date_raw_cal(i, &bag.date_bag, &bag.cal, ovf)?;
             regulate_date(i, raw, ovf)?
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDate")),
@@ -5580,7 +5647,7 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
         Value::Obj(_) => {
             // All fields read once in alphabetical order (with per-field coercion), requiredness
             // TypeErrors after the reads, options next, then calendar resolution and regulation.
-            let bag = read_dt_bag(i, v, false)?;
+            let bag = read_dt_bag(i, v, false, true)?;
             {
                 let b = match &bag.date_bag {
                     Value::Obj(o) => o.clone(),
@@ -7539,7 +7606,10 @@ fn diff_pdt_rounded(
             time: 0,
         });
     }
-    if !iso_datetime_within_limits(d1, t1) || !iso_datetime_within_limits(d2, t2) {
+    // A date-only diff (both times at midnight) has no datetime-limits requirement — the full
+    // PlainDate range is valid.
+    let date_only = time_to_ns(t1) == 0 && time_to_ns(t2) == 0;
+    if !date_only && (!iso_datetime_within_limits(d1, t1) || !iso_datetime_within_limits(d2, t2)) {
         return Err(i.make_error("RangeError", "date-time is outside the supported range"));
     }
     if unit_rank(sing(largest)).unwrap_or(0) < 6 {
@@ -8178,6 +8248,23 @@ fn install_duration(it: &mut Interp, ns: &Gc) {
         };
         Ok(Value::Num(xn.cmp(&yn) as i64 as f64))
     });
+}
+
+/// ToDateDurationRecordWithoutTime: fold the time part into whole 24-hour days (truncating).
+fn date_dur_without_time(d: IsoDuration) -> IsoDuration {
+    let days = duration_total_ns(d).div_euclid(NS_PER_DAY);
+    let days = if duration_sign(d) < 0 && duration_total_ns(d).rem_euclid(NS_PER_DAY) != 0 {
+        days + 1
+    } else {
+        days
+    };
+    IsoDuration {
+        years: d.years,
+        months: d.months,
+        weeks: d.weeks,
+        days: days as f64,
+        ..Default::default()
+    }
 }
 
 fn neg_duration(d: IsoDuration) -> IsoDuration {
@@ -8900,24 +8987,6 @@ fn interpret_offset(
     let epoch = local_to_epoch(i, tz, local, disamb)?;
     Ok((epoch, (local - epoch) as i64))
 }
-/// The offset (ns) for interpreting a local wall-clock time under the default "compatible"
-/// disambiguation.
-fn offset_for_local(tz: &str, local_ns: i128) -> i64 {
-    let poss = possible_epochs(tz, local_ns);
-    let inst = match poss.len() {
-        0 => {
-            // Spring-forward gap: shift the wall time forward by the gap (compatible), then take the
-            // later instant.
-            let day = 86_400_000_000_000i128;
-            let gap = (zone_offset(tz, local_ns + day) - zone_offset(tz, local_ns - day)) as i128;
-            *possible_epochs(tz, local_ns + gap)
-                .last()
-                .unwrap_or(&(local_ns - zone_offset(tz, local_ns) as i128))
-        }
-        _ => poss[0],
-    };
-    (local_ns - inst) as i64
-}
 
 /// Parse a fixed-offset id (`UTC`/`Z`/`±HH:MM[:SS]`) to ns, or None for a named zone.
 /// Validate and canonicalize a time-zone identifier: a UTC-offset form (`±HH:MM[:SS]`) normalizes to
@@ -9070,7 +9139,12 @@ struct DtBag {
     tz: Option<std::rc::Rc<str>>,
 }
 
-fn read_dt_bag(i: &mut Interp, v: &Value, want_offset_tz: bool) -> Result<DtBag, Value> {
+fn read_dt_bag(
+    i: &mut Interp,
+    v: &Value,
+    want_offset_tz: bool,
+    want_time: bool,
+) -> Result<DtBag, Value> {
     let cal: std::rc::Rc<str> = {
         let c = getm(i, v, "calendar")?;
         match &c {
@@ -9117,10 +9191,12 @@ fn read_dt_bag(i: &mut Interp, v: &Value, want_offset_tz: bool) -> Result<DtBag,
         (None, None)
     };
     let mut time_raw = [0i64; 6];
-    time_raw[0] = read_int(i, "hour")?.unwrap_or(0);
-    time_raw[4] = read_int(i, "microsecond")?.unwrap_or(0);
-    time_raw[3] = read_int(i, "millisecond")?.unwrap_or(0);
-    time_raw[1] = read_int(i, "minute")?.unwrap_or(0);
+    if want_time {
+        time_raw[0] = read_int(i, "hour")?.unwrap_or(0);
+        time_raw[4] = read_int(i, "microsecond")?.unwrap_or(0);
+        time_raw[3] = read_int(i, "millisecond")?.unwrap_or(0);
+        time_raw[1] = read_int(i, "minute")?.unwrap_or(0);
+    }
     let month = {
         let f = getm(i, v, "month")?;
         match f {
@@ -9160,7 +9236,9 @@ fn read_dt_bag(i: &mut Interp, v: &Value, want_offset_tz: bool) -> Result<DtBag,
             }
         }
     };
-    time_raw[5] = read_int(i, "nanosecond")?.unwrap_or(0);
+    if want_time {
+        time_raw[5] = read_int(i, "nanosecond")?.unwrap_or(0);
+    }
     let offset_ns = if want_offset_tz {
         let offset_v = getm(i, v, "offset")?;
         match &offset_v {
@@ -9179,7 +9257,9 @@ fn read_dt_bag(i: &mut Interp, v: &Value, want_offset_tz: bool) -> Result<DtBag,
     } else {
         None
     };
-    time_raw[2] = read_int(i, "second")?.unwrap_or(0);
+    if want_time {
+        time_raw[2] = read_int(i, "second")?.unwrap_or(0);
+    }
     let tz = if want_offset_tz {
         let tzv = getm(i, v, "timeZone")?;
         match &tzv {
@@ -9395,7 +9475,7 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<ZonedParts, Value
             Ok((epoch, (local - epoch) as i64, tz, cal))
         }
         Value::Obj(_) => {
-            let bag = read_dt_bag(i, v, true)?;
+            let bag = read_dt_bag(i, v, true, true)?;
             let tz = bag
                 .tz
                 .ok_or_else(|| i.make_error("TypeError", "missing timeZone"))?;
@@ -9477,6 +9557,70 @@ fn zdt_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i6
     }
     if !matches!(smallest.as_str(), "year" | "month" | "week" | "day") {
         check_increment(i, &smallest, incr)?;
+    }
+    Ok((largest, smallest, incr, mode))
+}
+
+/// The shared body of PlainDate until/since (`dir` = 1 for until, -1 for since).
+fn pd_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
+    let d = as_date(i, t)?;
+    let tcal = cal_of(i, t);
+    let ocal = input_cal(i, &arg(a, 0))?;
+    let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
+    if canon(&tcal) != canon(&ocal) {
+        return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
+    }
+    let (largest, smallest, incr, mode) = pd_diff_settings(i, &arg(a, 1))?;
+    let mode = if dir < 0 {
+        negate_mode(&mode).to_string()
+    } else {
+        mode
+    };
+    let internal = diff_pdt_rounded(
+        i, d, MIDNIGHT, o, MIDNIGHT, &tcal, &largest, incr, &smallest, &mode,
+    )?;
+    let mut out = dur_from_internal(i, &internal, "day")?;
+    if dir < 0 {
+        out = neg_duration(out);
+    }
+    Ok(make(i, "Temporal.Duration", Temporal::Duration(out)))
+}
+/// GetDifferenceSettings for PlainDate until/since: date units only, default day.
+fn pd_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+    let opts = get_opts_obj(i, opts)?;
+    let largest_raw = opt_str(i, &opts, "largestUnit", "")?;
+    if !(largest_raw.is_empty() || largest_raw == "auto" || unit_rank(&largest_raw).is_some()) {
+        return Err(i.make_error("RangeError", "invalid largestUnit"));
+    }
+    let incr = read_rounding_increment(i, &opts)?;
+    let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let smallest_raw = opt_str(i, &opts, "smallestUnit", "")?;
+    if !smallest_raw.is_empty() && unit_rank(&smallest_raw).is_none() {
+        return Err(i.make_error("RangeError", "invalid smallestUnit"));
+    }
+    let smallest: String = if smallest_raw.is_empty() {
+        "day".into()
+    } else {
+        sing(&smallest_raw).into()
+    };
+    if unit_rank(&smallest).unwrap() < 6 {
+        return Err(i.make_error("RangeError", "smallestUnit must be a date unit"));
+    }
+    let largest: String = if largest_raw.is_empty() || largest_raw == "auto" {
+        if unit_rank(&smallest).unwrap() > unit_rank("day").unwrap() {
+            smallest.clone()
+        } else {
+            "day".into()
+        }
+    } else {
+        sing(&largest_raw).into()
+    };
+    if unit_rank(&largest).unwrap() < 6 {
+        return Err(i.make_error("RangeError", "largestUnit must be a date unit"));
+    }
+    if unit_rank(&smallest).unwrap() > unit_rank(&largest).unwrap() {
+        return Err(i.make_error("RangeError", "smallestUnit is larger than largestUnit"));
     }
     Ok((largest, smallest, incr, mode))
 }
