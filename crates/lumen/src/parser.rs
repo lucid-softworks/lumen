@@ -1033,6 +1033,7 @@ impl Parser {
                 break;
             }
             let key = self.parse_prop_key()?;
+            self.reject_private_key(&key)?;
             let (value, default) = if self.eat_punct(":") {
                 let v = self.parse_binding_pattern()?;
                 let d = if self.eat_punct("=") {
@@ -2148,6 +2149,10 @@ impl Parser {
                 };
             } else if self.eat_punct(".") {
                 let name = self.parse_property_name_ident()?;
+                // `super.#x` is an early SyntaxError.
+                if name.starts_with('#') && matches!(expr, Expr::Super) {
+                    return self.err("cannot access a private member through 'super'");
+                }
                 expr = Expr::Member {
                     obj: Box::new(expr),
                     prop: name,
@@ -2946,9 +2951,13 @@ impl Parser {
         self.eat_kw("class");
         let name = if let Tok::Ident(n) = self.cur().clone() {
             self.advance();
-            // A class definition is always strict, so its name can't be a reserved word.
+            // A class definition is always strict, so its name can't be a reserved word;
+            // `await` is additionally reserved in modules, async bodies and static blocks.
             if is_strict_reserved_binding(&n) {
                 return self.err(format!("'{n}' cannot be used as a class name"));
+            }
+            if n == "await" && (self.module || self.in_async || self.in_static_block) {
+                return self.err("'await' cannot be used as a class name here");
             }
             Some(n)
         } else {

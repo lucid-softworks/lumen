@@ -2591,13 +2591,6 @@ impl Interp {
             let Some(this_env) = this_env else {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             };
-            {
-                let b = this_env.borrow();
-                let bd = b.vars.get("this").unwrap();
-                if bd.initialized {
-                    return Err(self.throw("ReferenceError", "super() may only be called once"));
-                }
-            }
             let this = this_env
                 .borrow()
                 .vars
@@ -2606,6 +2599,15 @@ impl Interp {
                 .unwrap();
             let argv = self.eval_args(args, env)?;
             let returned = self.run_constructor_on(&parent, &this, &argv)?;
+            // BindThisValue: an already-initialized `this` (a second super()) is a
+            // ReferenceError — but only after the arguments and parent construct ran.
+            {
+                let b = this_env.borrow();
+                let bd = b.vars.get("this").unwrap();
+                if bd.initialized {
+                    return Err(self.throw("ReferenceError", "super() may only be called once"));
+                }
+            }
             // A base constructor that returns an object overrides `this` for the derived
             // constructor (and everything downstream: field initializers, super.x accesses,
             // the implicit return).
@@ -3409,6 +3411,23 @@ impl Interp {
     // ----- classes ----------------------------------------------------------------------------
 
     fn eval_class(&mut self, class: &Rc<Class>, env: &Env) -> Result<Value, Abrupt> {
+        // The class scope opens before the heritage evaluates: a named class's own name is in
+        // scope there — uninitialized (TDZ) until the constructor exists, and immutable.
+        let outer_class_env = new_scope(Some(env.clone()));
+        if let Some(n) = &class.name {
+            outer_class_env.borrow_mut().vars.insert(
+                n.clone(),
+                Binding {
+                    value: Value::Undefined,
+                    mutable: false,
+                    strict_immutable: true,
+                    initialized: false,
+                    import_ref: None,
+                    deletable: false,
+                },
+            );
+        }
+        let env = &outer_class_env;
         // Superclass and the prototype / static parents it implies.
         let parent = match &class.superclass {
             Some(e) => Some(self.eval(e, env)?),
@@ -3512,7 +3531,10 @@ impl Interp {
         // A named class binds its own name (initialized) in the class scope, so methods, static
         // blocks, field initializers and decorators can reference the class itself.
         if let Some(n) = &class.name {
-            bind(&class_env, n, ctor_val.clone());
+            if let Some(b) = outer_class_env.borrow_mut().vars.get_mut(n) {
+                b.value = ctor_val.clone();
+                b.initialized = true;
+            }
         }
 
         // Methods, accessors and fields.
@@ -3664,6 +3686,19 @@ impl Interp {
                 MemberKind::Get | MemberKind::Set => {
                     let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
                     let is_get = m.kind == MemberKind::Get;
+                    if let Value::Obj(fo) = &f {
+                        let prefix = if is_get { "get " } else { "set " };
+                        let name = self.fn_name_for_key(private_display(&key));
+                        fo.borrow_mut().props.insert(
+                            "name",
+                            Property::data(
+                                Value::from_string(format!("{prefix}{name}")),
+                                false,
+                                false,
+                                true,
+                            ),
+                        );
+                    }
                     if !m.decorators.is_empty() {
                         let sink = if m.is_static {
                             &mut static_inits
@@ -3745,7 +3780,7 @@ impl Interp {
                             Some(e) => {
                                 let v = self.eval(e, &scope);
                                 if let (Ok(v), true) = (&v, is_anonymous_fn(e)) {
-                                    self.set_fn_name(v, &key);
+                                    self.set_fn_name(v, private_display(&key));
                                 }
                                 v
                             }
@@ -4314,7 +4349,7 @@ impl Interp {
                     Some(e) => {
                         let v = me.eval(&e, &scope)?;
                         if is_anonymous_fn(&e) {
-                            me.set_fn_name(&v, &key);
+                            me.set_fn_name(&v, private_display(&key));
                         }
                         v
                     }
