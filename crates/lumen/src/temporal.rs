@@ -289,12 +289,6 @@ fn check_date(i: &Interp, d: IsoDate) -> Result<IsoDate, Value> {
     }
     Ok(d)
 }
-fn check_time(i: &Interp, t: IsoTime) -> Result<IsoTime, Value> {
-    if t.hour > 23 || t.minute > 59 || t.second > 59 || t.ms > 999 || t.us > 999 || t.ns > 999 {
-        return Err(i.make_error("RangeError", "invalid ISO time"));
-    }
-    Ok(t)
-}
 /// Range-check raw (possibly out-of-range) integer date fields *before* narrowing, then validate the
 /// ISO date and its representable range. Avoids the silent wrap of casting e.g. day=257 to `1u8`.
 fn build_date(i: &Interp, year: i64, month: i64, day: i64) -> Result<IsoDate, Value> {
@@ -1880,6 +1874,26 @@ fn to_f64_integral(i: &mut Interp, v: &Value) -> Result<f64, Value> {
 
 fn fmt_date(d: IsoDate) -> String {
     format!("{}-{:02}-{:02}", pad_year(d.year), d.month, d.day)
+}
+/// Format a time with a seconds-string precision: None = auto (trim trailing zeros),
+/// Some(-1) = minute precision (no seconds), Some(k) = exactly k fractional digits.
+fn fmt_time_prec(t: IsoTime, prec: Option<i64>) -> String {
+    match prec {
+        None => fmt_time(t),
+        Some(-1) => format!("{:02}:{:02}", t.hour, t.minute),
+        Some(0) => format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second),
+        Some(k) => {
+            let frac = t.ms as u32 * 1_000_000 + t.us as u32 * 1000 + t.ns as u32;
+            let f = format!("{frac:09}");
+            format!(
+                "{:02}:{:02}:{:02}.{}",
+                t.hour,
+                t.minute,
+                t.second,
+                &f[..k as usize]
+            )
+        }
+    }
 }
 fn fmt_time(t: IsoTime) -> String {
     let mut s = format!("{:02}:{:02}:{:02}", t.hour, t.minute, t.second);
@@ -4020,214 +4034,6 @@ fn diff_datetime_rounded(
     }
 }
 
-/// Read `until`/`since` options for a PlainDateTime difference: (largest, smallest, increment, mode).
-/// DifferenceZonedDateTime: the difference between two instants in `tz`/`cal`. Time-only largest
-/// units use a rounded nanosecond span; date units count whole calendar days in the time zone (a day
-/// may be 23/25 hours across a DST transition) and balance the remaining time of day.
-fn diff_zoned(
-    _i: &Interp,
-    e1: i128,
-    o1: i64,
-    e2: i128,
-    tz: &str,
-    cal: &str,
-    largest: &str,
-    smallest: &str,
-    incr: i64,
-    mode: &str,
-) -> IsoDuration {
-    if e1 == e2 {
-        return IsoDuration::default();
-    }
-    if !matches!(largest, "year" | "month" | "week" | "day") {
-        let un = unit_ns(smallest).unwrap_or(1);
-        let rounded = round_ns(e2 - e1, un * incr as i128, mode);
-        return balance_ns(rounded, largest);
-    }
-    let (d1, t1) = zoned_local(e1, o1);
-    let sign = if e1 <= e2 { 1i64 } else { -1 };
-    let add_days_ns = |days: i64| -> i128 {
-        let (y, mo, da) = civil_from_days(epoch_days(d1) + days);
-        let local = dt_ns(
-            IsoDate {
-                year: y,
-                month: mo,
-                day: da,
-            },
-            t1,
-        );
-        local - offset_for_local(tz, local) as i128
-    };
-    let mut days = ((e2 - e1) / 86_400_000_000_000) as i64;
-    for _ in 0..4 {
-        let ns = add_days_ns(days);
-        if sign > 0 {
-            if ns > e2 {
-                days -= 1;
-            } else if add_days_ns(days + 1) <= e2 {
-                days += 1;
-            } else {
-                break;
-            }
-        } else if ns < e2 {
-            days += 1;
-        } else if add_days_ns(days - 1) >= e2 {
-            days -= 1;
-        } else {
-            break;
-        }
-    }
-    let mid_ns = add_days_ns(days);
-    let (my, mmo, mda) = civil_from_days(epoch_days(d1) + days);
-    let mut out = diff_date_cal(
-        cal,
-        d1,
-        IsoDate {
-            year: my,
-            month: mmo,
-            day: mda,
-        },
-        largest,
-    );
-    let tb = balance_ns(e2 - mid_ns, "hour");
-    out.hours = tb.hours;
-    out.minutes = tb.minutes;
-    out.seconds = tb.seconds;
-    out.ms = tb.ms;
-    out.us = tb.us;
-    out.ns = tb.ns;
-
-    let sm = smallest.strip_suffix('s').unwrap_or(smallest);
-    if sm == "nanosecond" && incr <= 1 {
-        return out;
-    }
-    let positive = e1 <= e2;
-    let mag = if positive { out } else { neg_duration(out) };
-
-    if matches!(sm, "year" | "month" | "week" | "day") {
-        // NudgeToCalendarUnit: truncate at the unit, bracket with one increment above, and
-        // place the target instant between the two boundary instants of the zoned day.
-        let mut low = IsoDuration {
-            years: mag.years,
-            ..Default::default()
-        };
-        if matches!(sm, "month" | "week" | "day") {
-            low.months = mag.months;
-        }
-        if matches!(sm, "week" | "day") {
-            low.weeks = mag.weeks;
-        }
-        if sm == "day" {
-            low.days = mag.days - mag.days.rem_euclid(incr as f64);
-        }
-        let mut high = low;
-        let base_units = match sm {
-            "year" => {
-                low.years -= low.years.rem_euclid(incr as f64);
-                high.years = low.years + incr as f64;
-                low.years / incr as f64
-            }
-            "month" => {
-                low.months -= low.months.rem_euclid(incr as f64);
-                high.months = low.months + incr as f64;
-                low.months / incr as f64
-            }
-            "week" => {
-                low.weeks -= low.weeks.rem_euclid(incr as f64);
-                high.weeks = low.weeks + incr as f64;
-                low.weeks / incr as f64
-            }
-            _ => {
-                high.days = low.days + incr as f64;
-                low.days / incr as f64
-            }
-        };
-        let dir: i64 = if positive { 1 } else { -1 };
-        let boundary_ns = |dur: IsoDuration| -> i128 {
-            let dd = if is_month_structure(cal) {
-                cal_add_c(cal, d1, dur, dir)
-            } else {
-                add_date_dur(d1, mul_duration_sign(dur, dir))
-            };
-            let local = dt_ns(dd, t1);
-            local - offset_for_local(tz, local) as i128
-        };
-        let nl = boundary_ns(low);
-        let nh = boundary_ns(high);
-        let denom = (nh - nl) as f64;
-        let fraction = if denom == 0.0 {
-            0.0
-        } else {
-            ((e2 - nl) as f64 / denom).clamp(0.0, 1.0)
-        };
-        let up = round_up_magnitude(mode, fraction, positive, base_units % 2.0 == 0.0);
-        let chosen = if up {
-            // Re-express the shifted boundary greedily so the rounded duration stays exact.
-            let dd = if is_month_structure(cal) {
-                cal_add_c(cal, d1, high, dir)
-            } else {
-                add_date_dur(d1, mul_duration_sign(high, dir))
-            };
-            // diff_date_greedy already returns a direction-signed duration.
-            diff_date_greedy(cal, d1, dd, largest)
-        } else if positive {
-            low
-        } else {
-            neg_duration(low)
-        };
-        return chosen;
-    }
-
-    // A time smallestUnit with a calendar largestUnit: round the time remainder, bubbling a
-    // full day into the date portion.
-    let un = unit_ns(sm).unwrap_or(1);
-    let time_ns = e2 - mid_ns;
-    let mut rounded = round_ns(time_ns, un * incr as i128, mode);
-    let mut date_days = 0i64;
-    const DAY: i128 = 86_400_000_000_000;
-    if rounded.abs() >= DAY {
-        date_days = (rounded / DAY) as i64;
-        rounded %= DAY;
-    }
-    if date_days != 0 {
-        let (ny, nmo, nda) = civil_from_days(epoch_days(d1) + days + date_days);
-        out = diff_date_cal(
-            cal,
-            d1,
-            IsoDate {
-                year: ny,
-                month: nmo,
-                day: nda,
-            },
-            largest,
-        );
-    } else {
-        out.hours = 0.0;
-        out.minutes = 0.0;
-        out.seconds = 0.0;
-        out.ms = 0.0;
-        out.us = 0.0;
-        out.ns = 0.0;
-    }
-    let tb = balance_ns(rounded, "hour");
-    out.hours = tb.hours;
-    out.minutes = tb.minutes;
-    out.seconds = tb.seconds;
-    out.ms = tb.ms;
-    out.us = tb.us;
-    out.ns = tb.ns;
-    out
-}
-
-/// Multiply every field of a duration by ±1.
-fn mul_duration_sign(d: IsoDuration, sign: i64) -> IsoDuration {
-    if sign >= 0 {
-        d
-    } else {
-        neg_duration(d)
-    }
-}
-
 fn read_datetime_diff(
     i: &mut Interp,
     opts: &Value,
@@ -4946,21 +4752,23 @@ fn regulate_date(
 }
 /// Read the six raw time components from a bag; returns the values and whether any were present.
 fn read_time_raw(i: &mut Interp, v: &Value) -> Result<([i64; 6], bool), Value> {
-    let keys = [
-        "hour",
-        "minute",
-        "second",
-        "millisecond",
-        "microsecond",
-        "nanosecond",
+    // PrepareTemporalFields reads in alphabetical order: hour, microsecond, millisecond,
+    // minute, nanosecond, second. (Slots stay in logical hour..nanosecond order.)
+    let keys: [(&str, usize); 6] = [
+        ("hour", 0),
+        ("microsecond", 4),
+        ("millisecond", 3),
+        ("minute", 1),
+        ("nanosecond", 5),
+        ("second", 2),
     ];
     let mut vals = [0i64; 6];
     let mut any = false;
-    for (k, slot) in keys.iter().zip(vals.iter_mut()) {
+    for (k, slot) in keys {
         let fv = getm(i, v, k)?;
         if !matches!(fv, Value::Undefined) {
             any = true;
-            *slot = to_int(i, &fv)?;
+            vals[slot] = to_int(i, &fv)?;
         }
     }
     Ok((vals, any))
@@ -7086,14 +6894,36 @@ fn add_zoned(
     cal: &str,
     dur: &InternalDur,
 ) -> Result<i128, Value> {
+    add_zoned_ovf(i, epoch_ns, tz, cal, dur, Overflow::Constrain)
+}
+fn add_zoned_ovf(
+    i: &mut Interp,
+    epoch_ns: i128,
+    tz: &str,
+    cal: &str,
+    dur: &InternalDur,
+    ovf: Overflow,
+) -> Result<i128, Value> {
     if dur.years == 0.0 && dur.months == 0.0 && dur.weeks == 0.0 && dur.days == 0.0 {
         return check_instant(i, epoch_ns.saturating_add(dur.time));
     }
     let off = zone_offset(tz, epoch_ns);
     let (d, t) = zoned_local(epoch_ns, off);
-    let added = add_to_date(i, d, date_part(dur), 1, Overflow::Constrain, cal)?;
+    let added = add_to_date(i, d, date_part(dur), 1, ovf, cal)?;
     let inter = epoch_for(i, tz, added, t)?;
     check_instant(i, inter.saturating_add(dur.time))
+}
+
+/// TimeZoneEquals: identifiers are equal after canonicalization; two offset zones compare by
+/// value; an offset zone never equals a named zone.
+fn tz_equals(a: &str, b: &str) -> bool {
+    match (is_pure_offset(a), is_pure_offset(b)) {
+        (true, true) => tz_offset_ns(a) == tz_offset_ns(b),
+        (false, false) => {
+            crate::tz::canonicalize(a).unwrap_or(a) == crate::tz::canonicalize(b).unwrap_or(b)
+        }
+        _ => false,
+    }
 }
 
 /// The result of one nudge step.
@@ -7151,43 +6981,12 @@ fn nudge_calendar_unit(
         let v = x as i64;
         (v / incr) * incr
     };
-    let (r1, r2, start_dur, end_dur) = match unit {
-        "year" => {
-            let r1 = trunc_to(dur.years);
-            let r2 = r1 + incr * sign;
-            (
-                r1,
-                r2,
-                IsoDuration {
-                    years: r1 as f64,
-                    ..Default::default()
-                },
-                IsoDuration {
-                    years: r2 as f64,
-                    ..Default::default()
-                },
-            )
-        }
-        "month" => {
-            let r1 = trunc_to(dur.months);
-            let r2 = r1 + incr * sign;
-            (
-                r1,
-                r2,
-                IsoDuration {
-                    years: dur.years,
-                    months: r1 as f64,
-                    ..Default::default()
-                },
-                IsoDuration {
-                    years: dur.years,
-                    months: r2 as f64,
-                    ..Default::default()
-                },
-            )
-        }
+    // Initial truncated count of `unit` in the duration; the windowing loop below advances it
+    // until the target instant falls within [start, end) (tc39/proposal-temporal #3148).
+    let base = match unit {
+        "year" => trunc_to(dur.years),
+        "month" => trunc_to(dur.months),
         "week" => {
-            // Re-express the days span in whole weeks anchored at the years+months boundary.
             let ym = IsoDuration {
                 years: dur.years,
                 months: dur.months,
@@ -7195,61 +6994,67 @@ fn nudge_calendar_unit(
             };
             let weeks_start = add_to_date(i, date, ym, 1, Overflow::Constrain, cal)?;
             let weeks_end = civil_of(epoch_days(weeks_start) + dur.days as i64);
-            let until = diff_date_greedy(cal, weeks_start, weeks_end, "week");
-            let r1 = trunc_to(dur.weeks + until.weeks);
-            let r2 = r1 + incr * sign;
-            (
-                r1,
-                r2,
-                IsoDuration {
-                    years: dur.years,
-                    months: dur.months,
-                    weeks: r1 as f64,
-                    ..Default::default()
-                },
-                IsoDuration {
-                    years: dur.years,
-                    months: dur.months,
-                    weeks: r2 as f64,
-                    ..Default::default()
-                },
-            )
+            let until = diff_date_cal(cal, weeks_start, weeks_end, "week");
+            trunc_to(dur.weeks + until.weeks)
         }
-        _ => {
-            let r1 = trunc_to(dur.days);
-            let r2 = r1 + incr * sign;
-            (
-                r1,
-                r2,
-                IsoDuration {
-                    years: dur.years,
-                    months: dur.months,
-                    weeks: dur.weeks,
-                    days: r1 as f64,
-                    ..Default::default()
-                },
-                IsoDuration {
-                    years: dur.years,
-                    months: dur.months,
-                    weeks: dur.weeks,
-                    days: r2 as f64,
-                    ..Default::default()
-                },
-            )
-        }
+        _ => trunc_to(dur.days),
     };
-    // Zoned boundaries anchor at the origin *instant* (AddZonedDateTime), so an origin sitting on
-    // the second occurrence of a repeated wall-clock time keeps its actual offset.
-    let (start_ns, end_ns) = match origin {
-        Some((epoch, tz)) => (
-            add_zoned(i, epoch, tz, cal, &to_internal(start_dur))?,
-            add_zoned(i, epoch, tz, cal, &to_internal(end_dur))?,
-        ),
-        None => {
-            let start = add_to_date(i, date, start_dur, 1, Overflow::Constrain, cal)?;
-            let end = add_to_date(i, date, end_dur, 1, Overflow::Constrain, cal)?;
-            (dt_ns(start, time), dt_ns(end, time))
+    let bounds = |r1: i64, r2: i64| -> (IsoDuration, IsoDuration) {
+        let with = |c: i64| match unit {
+            "year" => IsoDuration {
+                years: c as f64,
+                ..Default::default()
+            },
+            "month" => IsoDuration {
+                years: dur.years,
+                months: c as f64,
+                ..Default::default()
+            },
+            "week" => IsoDuration {
+                years: dur.years,
+                months: dur.months,
+                weeks: c as f64,
+                ..Default::default()
+            },
+            _ => IsoDuration {
+                years: dur.years,
+                months: dur.months,
+                weeks: dur.weeks,
+                days: c as f64,
+                ..Default::default()
+            },
+        };
+        (with(r1), with(r2))
+    };
+    let mut r1 = base;
+    let mut guard = 0;
+    let (r2, start_dur, end_dur, start_ns, end_ns) = loop {
+        let r2 = r1 + incr * sign;
+        let (start_dur, end_dur) = bounds(r1, r2);
+        let (start_ns, end_ns) = match origin {
+            Some((epoch, tz)) => (
+                add_zoned(i, epoch, tz, cal, &to_internal(start_dur))?,
+                add_zoned(i, epoch, tz, cal, &to_internal(end_dur))?,
+            ),
+            None => {
+                let start = add_to_date(i, date, start_dur, 1, Overflow::Constrain, cal)?;
+                let end = add_to_date(i, date, end_dur, 1, Overflow::Constrain, cal)?;
+                (dt_ns(start, time), dt_ns(end, time))
+            }
+        };
+        // Advance the window when the target lies at-or-beyond the end boundary.
+        let beyond = dest_ns - end_ns;
+        let beyond_sign = match beyond.cmp(&0) {
+            std::cmp::Ordering::Less => -1i64,
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Equal => 0,
+        };
+        if beyond_sign == sign && guard < 8 {
+            guard += 1;
+            r1 = r2;
+            continue;
         }
+        break (r2, start_dur, end_dur, start_ns, end_ns);
     };
     // Exact rational position of dest between the two boundaries.
     let num = dest_ns - start_ns;
@@ -7264,7 +7069,9 @@ fn nudge_calendar_unit(
         )
     };
     let j1_even = (r1 / incr) % 2 == 0;
-    let up = den_a != 0 && round_up_rational(mode, sign < 0, num_a, den_a, j1_even);
+    // The destination landing exactly on the end boundary IS the end count, whatever the mode.
+    let up =
+        den_a != 0 && (num_a == den_a || round_up_rational(mode, sign < 0, num_a, den_a, j1_even));
     let (chosen_dur, nudged_ns, did_expand) = if up {
         (end_dur, end_ns, true)
     } else {
@@ -7306,6 +7113,14 @@ fn nudge_zoned_time(
     let end_date = civil_of(epoch_days(start) + sign);
     let end_ns = epoch_for(i, tz, end_date, st)?;
     let day_span = end_ns - start_ns;
+    let span_sign = match day_span.cmp(&0) {
+        std::cmp::Ordering::Less => -1i64,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Equal => 0,
+    };
+    if span_sign != sign {
+        return Err(i.make_error("RangeError", "time zone returned inconsistent instants"));
+    }
     let inc_ns = unit_ns(unit).unwrap_or(1) * incr as i128;
     let mut rounded = round_time_dur(i, dur.time, inc_ns, mode)?;
     let beyond = rounded - day_span;
@@ -7565,7 +7380,7 @@ fn diff_pdt(
     } else {
         "day"
     };
-    let dd = diff_date_greedy(cal, d1, adjusted, date_largest);
+    let dd = diff_date_cal(cal, d1, adjusted, date_largest);
     InternalDur {
         years: dd.years,
         months: dd.months,
@@ -7673,42 +7488,46 @@ fn diff_zdt(
             time: 0,
         });
     }
-    let sign: i64 = if ns2 > ns1 { 1 } else { -1 };
-    let (d1, _t1) = zoned_local(ns1, zone_offset(tz, ns1));
-    let (d2, _t2) = zoned_local(ns2, zone_offset(tz, ns2));
-    let base_days = epoch_days(d2) - epoch_days(d1);
-    let max_correction = if sign == 1 { 2 } else { 1 };
-    for dc in 0..=max_correction {
-        // The candidate intermediate anchors at the origin instant (AddZonedDateTime semantics):
-        // a zero-day candidate is the origin itself, keeping its side of any DST fold.
-        let day_count = base_days - dc * sign;
-        let inter_ns = add_zoned(
-            i,
-            ns1,
-            tz,
-            cal,
-            &InternalDur {
-                years: 0.0,
-                months: 0.0,
-                weeks: 0.0,
-                days: day_count as f64,
-                time: 0,
-            },
-        )?;
+    let dir: i64 = if ns2 > ns1 { 1 } else { -1 };
+    let (d1, t1) = zoned_local(ns1, zone_offset(tz, ns1));
+    let (d2, t2) = zoned_local(ns2, zone_offset(tz, ns2));
+    // Same calendar date: a pure time difference (also avoids a day correction backing up too
+    // far on same-day diffs with a reverse-direction wall-clock delta, tc39 #3141).
+    if d1.year == d2.year && d1.month == d2.month && d1.day == d2.day {
+        return Ok(InternalDur {
+            years: 0.0,
+            months: 0.0,
+            weeks: 0.0,
+            days: 0.0,
+            time: ns2 - ns1,
+        });
+    }
+    // The intermediate takes the end's date and the start's wall-clock time, backed up by a day
+    // correction. A wall-clock delta opposite to the travel direction guarantees one correction;
+    // forward travel allows one more for a push-forward `compatible` DST disambiguation.
+    let wall_delta = time_to_ns(t2) - time_to_ns(t1);
+    let mut dc: i64 = if (wall_delta < 0 && dir > 0) || (wall_delta > 0 && dir < 0) {
+        1
+    } else {
+        0
+    };
+    let max_correction: i64 = if dir == 1 { 2 } else { 1 };
+    while dc <= max_correction {
+        let inter_date = civil_of(epoch_days(d2) - dc * dir);
+        let inter_ns = epoch_for(i, tz, inter_date, t1)?;
         let time = ns2 - inter_ns;
         let time_sign = match time.cmp(&0) {
             std::cmp::Ordering::Less => -1i64,
             std::cmp::Ordering::Greater => 1,
             std::cmp::Ordering::Equal => 0,
         };
-        if time_sign != -sign {
-            let inter_date = civil_of(epoch_days(d1) + day_count);
+        if time_sign != -dir {
             let date_largest = if unit_rank(sing(largest)).unwrap_or(0) >= 6 {
                 sing(largest)
             } else {
                 "day"
             };
-            let dd = diff_date_greedy(cal, d1, inter_date, date_largest);
+            let dd = diff_date_cal(cal, d1, inter_date, date_largest);
             return Ok(InternalDur {
                 years: dd.years,
                 months: dd.months,
@@ -7717,6 +7536,7 @@ fn diff_zdt(
                 time,
             });
         }
+        dc += 1;
     }
     Err(i.make_error("RangeError", "inconsistent time zone data"))
 }
@@ -8857,6 +8677,7 @@ fn possible_epochs(tz: &str, local_ns: i128) -> Vec<i128> {
     let mut v: Vec<i128> = Vec::new();
     for off in [
         zone_offset(tz, local_ns - day),
+        zone_offset(tz, local_ns),
         zone_offset(tz, local_ns + day),
     ] {
         let inst = local_ns - off as i128;
@@ -9042,6 +8863,12 @@ fn tz_offset_ns(tz: &str) -> i64 {
         None => (1, t.strip_prefix('+').unwrap_or(t)),
     };
     if t.starts_with('+') || t.starts_with('-') {
+        if !rest.contains(':') {
+            // Colonless "±HH" or "±HHMM".
+            let h: i64 = rest.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(0);
+            let m: i64 = rest.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(0);
+            return sign * ((h * 3600 + m * 60) * 1_000_000_000);
+        }
         let mut p = rest.split(':');
         let h: i64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
         let m: i64 = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -9098,24 +8925,302 @@ fn as_zoned(i: &Interp, this: &Value) -> Result<(i128, i64, Rc<str>), Value> {
 }
 /// ToTemporalZonedDateTime: a ZonedDateTime, an ISO string with `[timeZone]`, or a fields object
 /// carrying `timeZone`.
-fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<str>), Value> {
+/// A property bag's date/time/offset/timeZone fields, read once in alphabetical order with each
+/// field coerced (and syntax-checked) as it is read, per PrepareCalendarFields.
+struct DtBag {
+    cal: std::rc::Rc<str>,
+    /// Synthetic object carrying the already-coerced date fields (plain data properties, so the
+    /// calendar resolution below re-reads them without observable effects).
+    date_bag: Value,
+    time_raw: [i64; 6],
+    offset_ns: Option<i64>,
+    tz: Option<std::rc::Rc<str>>,
+}
+
+fn read_dt_bag(i: &mut Interp, v: &Value, want_offset_tz: bool) -> Result<DtBag, Value> {
+    let cal: std::rc::Rc<str> = {
+        let c = getm(i, v, "calendar")?;
+        match &c {
+            Value::Undefined => std::rc::Rc::from("iso8601"),
+            Value::Str(_) => check_calendar(i, &c)?,
+            Value::Obj(_)
+                if matches!(
+                    get(i, &c),
+                    Some(
+                        Temporal::Date(_)
+                            | Temporal::DateTime(_, _)
+                            | Temporal::YearMonth(_)
+                            | Temporal::MonthDay(_)
+                            | Temporal::Zoned { .. }
+                    )
+                ) =>
+            {
+                cal_of(i, &c)
+            }
+            _ => return Err(i.make_error("TypeError", "calendar is not a string")),
+        }
+    };
+    let uses_era = cal_uses_era(&cal);
+    let read_int = |i: &mut Interp, key: &str| -> Result<Option<i64>, Value> {
+        let f = getm(i, v, key)?;
+        match f {
+            Value::Undefined => Ok(None),
+            _ => Ok(Some(to_int(i, &f)?)),
+        }
+    };
+    let day = match read_int(i, "day")? {
+        Some(d) if d < 1 => return Err(i.make_error("RangeError", "day must be positive")),
+        other => other,
+    };
+    let (era, era_year) = if uses_era {
+        let e = getm(i, v, "era")?;
+        let e = match e {
+            Value::Undefined => None,
+            _ => Some(i.to_string(&e).map_err(unab)?.to_lowercase()),
+        };
+        let ey = read_int(i, "eraYear")?;
+        (e, ey)
+    } else {
+        (None, None)
+    };
+    let mut time_raw = [0i64; 6];
+    time_raw[0] = read_int(i, "hour")?.unwrap_or(0);
+    time_raw[4] = read_int(i, "microsecond")?.unwrap_or(0);
+    time_raw[3] = read_int(i, "millisecond")?.unwrap_or(0);
+    time_raw[1] = read_int(i, "minute")?.unwrap_or(0);
+    let month = {
+        let f = getm(i, v, "month")?;
+        match f {
+            Value::Undefined => None,
+            _ => {
+                let n = to_int(i, &f)?;
+                if n < 1 {
+                    return Err(i.make_error("RangeError", "month must be positive"));
+                }
+                Some(n)
+            }
+        }
+    };
+    let month_code = {
+        let f = getm(i, v, "monthCode")?;
+        match &f {
+            Value::Undefined => None,
+            _ => {
+                // ToPrimitive, then the value must be a string with well-formed `Mnn[L]` syntax
+                // (the value's suitability for the calendar is checked later, after requiredness).
+                let prim = i
+                    .to_primitive(&f, crate::eval::Hint::String)
+                    .map_err(unab)?;
+                let sv = match &prim {
+                    Value::Str(sv) => sv.clone(),
+                    _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                };
+                let b = sv.as_bytes();
+                let well_formed = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                    && b[0] == b'M'
+                    && b[1].is_ascii_digit()
+                    && b[2].is_ascii_digit();
+                if !well_formed {
+                    return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                }
+                Some(sv)
+            }
+        }
+    };
+    time_raw[5] = read_int(i, "nanosecond")?.unwrap_or(0);
+    let offset_ns = if want_offset_tz {
+        let offset_v = getm(i, v, "offset")?;
+        match &offset_v {
+            Value::Undefined => None,
+            Value::Str(sv) => Some(parse_offset_option(i, sv)?),
+            _ => {
+                let prim = i
+                    .to_primitive(&offset_v, crate::eval::Hint::String)
+                    .map_err(unab)?;
+                match &prim {
+                    Value::Str(sv) => Some(parse_offset_option(i, sv)?),
+                    _ => return Err(i.make_error("TypeError", "offset must be a string")),
+                }
+            }
+        }
+    } else {
+        None
+    };
+    time_raw[2] = read_int(i, "second")?.unwrap_or(0);
+    let tz = if want_offset_tz {
+        let tzv = getm(i, v, "timeZone")?;
+        match &tzv {
+            Value::Undefined => None,
+            _ => Some(tz_from_field(i, &tzv)?),
+        }
+    } else {
+        None
+    };
+    let year = read_int(i, "year")?;
+
+    let bag = Object::new(Some(i.object_proto.clone()));
+    {
+        let mut b = bag.borrow_mut();
+        if let Some(y) = year {
+            b.props
+                .insert("year", Property::builtin(Value::Num(y as f64)));
+        }
+        if let Some(m) = month {
+            b.props
+                .insert("month", Property::builtin(Value::Num(m as f64)));
+        }
+        if let Some(mc) = &month_code {
+            b.props
+                .insert("monthCode", Property::builtin(Value::Str(mc.clone())));
+        }
+        if let Some(d) = day {
+            b.props
+                .insert("day", Property::builtin(Value::Num(d as f64)));
+        }
+        if let Some(e) = &era {
+            b.props
+                .insert("era", Property::builtin(Value::str(e.as_str())));
+        }
+        if let Some(ey) = era_year {
+            b.props
+                .insert("eraYear", Property::builtin(Value::Num(ey as f64)));
+        }
+    }
+    Ok(DtBag {
+        cal,
+        date_bag: Value::Obj(bag),
+        time_raw,
+        offset_ns,
+        tz,
+    })
+}
+
+/// Read a ZonedDateTime conversion's options in alphabetical order:
+/// (disambiguation, offset option, overflow).
+fn zdt_options(i: &mut Interp, opts: &Value) -> Result<(String, String, Overflow), Value> {
+    let opts = get_opts_obj(i, opts)?;
+    let disamb = opt_enum(
+        i,
+        &opts,
+        "disambiguation",
+        &["compatible", "earlier", "later", "reject"],
+        "compatible",
+    )?;
+    let off = opt_enum(
+        i,
+        &opts,
+        "offset",
+        &["prefer", "use", "ignore", "reject"],
+        "reject",
+    )?;
+    let ovf = to_overflow(i, &opts)?;
+    Ok((disamb, off, ovf))
+}
+
+/// GetStartOfDay: the earliest instant of a calendar day (handles a midnight skipped by DST).
+fn start_of_day_ns(i: &Interp, tz: &str, date: IsoDate) -> Result<i128, Value> {
+    let local = dt_ns(date, MIDNIGHT);
+    let poss = possible_epochs(tz, local);
+    let epoch = match poss.first() {
+        Some(f) => *f,
+        None => {
+            // Midnight was skipped by a transition: the day starts at the transition instant
+            // itself (which may be mid-hour, e.g. a gap running 23:30 -> 00:30).
+            let off_before = zone_offset(tz, local - NS_PER_DAY);
+            let probe = local - off_before as i128;
+            // `probe` equals the transition instant when the gap starts exactly at midnight, so
+            // search from one second past it (the lookup is strictly-before).
+            match crate::tz::next_transition(tz, probe.div_euclid(1_000_000_000) as i64 + 1, false)
+            {
+                Some(t) => t as i128 * 1_000_000_000,
+                None => local_to_epoch(i, tz, local, "compatible")?,
+            }
+        }
+    };
+    check_instant(i, epoch)
+}
+
+type ZonedParts = (i128, i64, Rc<str>, Rc<str>);
+enum OffBehaviour {
+    /// A UTC designator: the wall time is UTC minus the given offset, exactly.
+    Exact(i64),
+    /// A numeric offset subject to the `offset` option (bool: seconds were present in the syntax).
+    Option(i64, bool),
+    /// No offset: resolve the wall-clock time in the zone.
+    Wall,
+}
+/// CheckISODaysRange: the wall-clock date must be within ±10^8 days of the epoch.
+fn days_range(i: &Interp, d: IsoDate) -> Result<(), Value> {
+    if epoch_days(d).abs() > 100_000_000 {
+        return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+    }
+    Ok(())
+}
+/// InterpretISODateTimeOffset: resolve wall time + offset designator + options to an exact,
+/// validated epoch instant.
+#[allow(clippy::too_many_arguments)]
+fn zdt_interpret(
+    i: &Interp,
+    tz: &str,
+    date: IsoDate,
+    local: i128,
+    behaviour: OffBehaviour,
+    offset_opt: &str,
+    disamb: &str,
+) -> Result<i128, Value> {
+    match behaviour {
+        OffBehaviour::Exact(off) => {
+            let epoch = local - off as i128;
+            days_range(i, civil_of(epoch.div_euclid(NS_PER_DAY) as i64))?;
+            check_instant(i, epoch)
+        }
+        OffBehaviour::Option(off, _) if offset_opt == "use" => {
+            let epoch = local - off as i128;
+            days_range(i, civil_of(epoch.div_euclid(NS_PER_DAY) as i64))?;
+            check_instant(i, epoch)
+        }
+        OffBehaviour::Wall => {
+            if !iso_datetime_within_limits(date, ns_to_time(local.rem_euclid(NS_PER_DAY))) {
+                return Err(
+                    i.make_error("RangeError", "date-time is outside the representable range")
+                );
+            }
+            check_instant(i, local_to_epoch(i, tz, local, disamb)?)
+        }
+        OffBehaviour::Option(off, exact) => {
+            if offset_opt == "ignore" {
+                if !iso_datetime_within_limits(date, ns_to_time(local.rem_euclid(NS_PER_DAY))) {
+                    return Err(
+                        i.make_error("RangeError", "date-time is outside the representable range")
+                    );
+                }
+                return check_instant(i, local_to_epoch(i, tz, local, disamb)?);
+            }
+            // prefer / reject: the wall-clock instant itself is consulted for offset matching.
+            days_range(i, date)?;
+            let (epoch, _) = interpret_offset(i, tz, local, true, off, exact, offset_opt, disamb)?;
+            check_instant(i, epoch)
+        }
+    }
+}
+
+fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<ZonedParts, Value> {
     if let Some(Temporal::Zoned {
         epoch_ns,
         offset_ns,
         tz,
     }) = get(i, v)
     {
-        to_overflow(i, opts)?;
-        return Ok((epoch_ns, offset_ns, tz));
+        zdt_options(i, opts)?;
+        let cal = cal_of(i, v);
+        return Ok((epoch_ns, offset_ns, tz, cal));
     }
     match v {
         Value::Str(s) => {
             let p =
                 parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid ZonedDateTime"))?;
-            // A `[u-ca=...]` annotation must name a calendar Temporal supports (RangeError otherwise;
-            // e.g. a not-yet-adopted "bangla").
-            if let Some(cal) = &p.calendar {
-                canon_calendar(i, cal)?;
+            if !cal_ok(&p.calendar) {
+                return Err(i.make_error("RangeError", "unsupported calendar"));
             }
             let date = p
                 .date
@@ -9124,117 +9229,156 @@ fn to_zoned(i: &mut Interp, v: &Value, opts: &Value) -> Result<(i128, i64, Rc<st
                 Some(t) => normalize_tz(i, &t)?,
                 None => return Err(i.make_error("RangeError", "missing time zone")),
             };
-            let time = p.time.unwrap_or(IsoTime {
-                hour: 0,
-                minute: 0,
-                second: 0,
-                ms: 0,
-                us: 0,
-                ns: 0,
-            });
-            let local = dt_ns(date, time);
-            let disamb = opt_str(i, opts, "disambiguation", "compatible")?;
-            // A string with an offset defaults to `offset: reject`; the fixed-offset zone case ("Z" or
-            // a numeric-offset id) always uses the annotation's own offset.
-            let offset_opt = opt_str(i, opts, "offset", "reject")?;
-            let (has_off, off_ns, off_exact) = match p.offset {
-                Off::Z => (true, 0, true),
-                Off::Num(n, exact) => (true, n, exact),
-                Off::None => (false, 0, false),
+            let cal: Rc<str> = Rc::from(
+                p.calendar
+                    .as_deref()
+                    .and_then(canon_cal)
+                    .unwrap_or("iso8601"),
+            );
+            let (disamb, offset_opt, _ovf) = zdt_options(i, opts)?;
+            let time = match p.time {
+                Some(t) => t,
+                None => {
+                    // A date-only string means start-of-day (never offset-matched).
+                    days_range(i, date)?;
+                    let epoch = start_of_day_ns(i, &tz, date)?;
+                    return Ok((epoch, (dt_ns(date, MIDNIGHT) - epoch) as i64, tz, cal));
+                }
             };
-            if parse_fixed_offset(&tz).is_some() {
-                // A fixed-offset zone: `use` takes the string's offset, `reject` errors on a mismatch
-                // (e.g. a sub-minute -00:44:30 against a minute-precision -00:45 zone), else the zone's.
-                let zone_off = zone_offset(&tz, local);
-                let off = if offset_opt == "use" && has_off {
-                    off_ns
-                } else {
-                    if offset_opt == "reject" && has_off && off_ns != zone_off {
-                        return Err(
-                            i.make_error("RangeError", "offset does not match the time zone")
-                        );
-                    }
-                    zone_off
-                };
-                return Ok((local - off as i128, off, tz));
-            }
-            let (epoch, off) = interpret_offset(
+            let local = dt_ns(date, time);
+            let epoch = zdt_interpret(
                 i,
                 &tz,
+                date,
                 local,
-                has_off,
-                off_ns,
-                off_exact,
+                match p.offset {
+                    Off::Z => OffBehaviour::Exact(0),
+                    Off::Num(off, exact) => OffBehaviour::Option(off, exact),
+                    Off::None => OffBehaviour::Wall,
+                },
                 &offset_opt,
                 &disamb,
             )?;
-            Ok((epoch, off, tz))
+            Ok((epoch, (local - epoch) as i64, tz, cal))
         }
         Value::Obj(_) => {
-            read_calendar(i, v)?;
-            let tzv = getm(i, v, "timeZone")?;
-            if matches!(tzv, Value::Undefined) {
-                return Err(i.make_error("TypeError", "missing timeZone"));
+            let bag = read_dt_bag(i, v, true)?;
+            let tz = bag
+                .tz
+                .ok_or_else(|| i.make_error("TypeError", "missing timeZone"))?;
+            // Required fields (TypeError) are checked after every field has been read but before
+            // any value validation.
+            {
+                let b = match &bag.date_bag {
+                    Value::Obj(o) => o.clone(),
+                    _ => unreachable!(),
+                };
+                let has = |k: &str| b.borrow().props.get(k).is_some();
+                let has_year =
+                    has("year") || (cal_uses_era(&bag.cal) && has("era") && has("eraYear"));
+                if !has_year {
+                    return Err(i.make_error("TypeError", "missing field 'year'"));
+                }
+                if !has("month") && !has("monthCode") {
+                    return Err(i.make_error("TypeError", "missing field 'month'"));
+                }
+                if !has("day") {
+                    return Err(i.make_error("TypeError", "missing field 'day'"));
+                }
             }
-            let tz_raw: Rc<str> = match &tzv {
-                Value::Str(s) => s.clone(),
-                Value::Obj(_) => match get(i, &tzv) {
-                    Some(Temporal::Zoned { tz, .. }) => tz,
-                    _ => {
-                        return Err(i.make_error(
-                            "TypeError",
-                            "time zone must be a string or a ZonedDateTime",
-                        ))
-                    }
-                },
-                _ => {
-                    return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
-                }
-            };
-            let tz = normalize_tz(i, &tz_raw)?;
-            let zcal = input_cal(i, v)?;
-            // The bag's own `offset` field (a "+HH:MM" string), if present.
-            let offv = getm(i, v, "offset")?;
-            let (has_off, off_ns, off_exact) = match &offv {
-                Value::Undefined => (false, 0, false),
-                _ => {
-                    let s = i.to_string(&offv).map_err(unab)?;
-                    if !(s.starts_with('+') || s.starts_with('-')) {
-                        return Err(i.make_error("RangeError", "invalid offset string"));
-                    }
-                    // A property-bag offset is always matched exactly — no minute-rounding fuzz.
-                    (true, tz_offset_ns(&s), true)
-                }
-            };
-            let snap = snapshot_date_fields(i, v)?;
-            let (traw, _) = read_time_raw(i, v)?;
-            let disamb = opt_str(i, opts, "disambiguation", "compatible")?;
-            let offset_opt = opt_str(i, opts, "offset", "reject")?;
-            let ovf = to_overflow(i, opts)?;
-            let draw = read_date_raw_cal(i, &snap, &zcal, ovf)?;
+            let (disamb, offset_opt, ovf) = zdt_options(i, opts)?;
+            let draw = read_date_raw_cal(i, &bag.date_bag, &bag.cal, ovf)?;
             let date = regulate_date(i, draw, ovf)?;
-            let time = regulate_time(i, traw, ovf)?;
+            let time = regulate_time(i, bag.time_raw, ovf)?;
             let local = dt_ns(date, time);
-            if parse_fixed_offset(&tz).is_some() {
-                let off = zone_offset(&tz, local);
-                return Ok((local - off as i128, off, tz));
-            }
-            let (epoch, off) = interpret_offset(
+            let epoch = zdt_interpret(
                 i,
                 &tz,
+                date,
                 local,
-                has_off,
-                off_ns,
-                off_exact,
+                match bag.offset_ns {
+                    Some(off) => OffBehaviour::Option(off, true),
+                    None => OffBehaviour::Wall,
+                },
                 &offset_opt,
                 &disamb,
             )?;
-            Ok((epoch, off, tz))
+            Ok((epoch, (local - epoch) as i64, tz, bag.cal))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.ZonedDateTime")),
     }
+}
+
+/// GetDifferenceSettings for ZonedDateTime until/since: options read alphabetically
+/// (largestUnit, roundingIncrement, roundingMode, smallestUnit), each validated as read.
+/// Returns (largest, smallest, increment, mode).
+fn zdt_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+    let opts = get_opts_obj(i, opts)?;
+    let largest_raw = opt_str(i, &opts, "largestUnit", "")?;
+    if !(largest_raw.is_empty() || largest_raw == "auto" || unit_rank(&largest_raw).is_some()) {
+        return Err(i.make_error("RangeError", "invalid largestUnit"));
+    }
+    let incr = read_rounding_increment(i, &opts)?;
+    let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let smallest_raw = opt_str(i, &opts, "smallestUnit", "")?;
+    if !smallest_raw.is_empty() && unit_rank(&smallest_raw).is_none() {
+        return Err(i.make_error("RangeError", "invalid smallestUnit"));
+    }
+    let smallest: String = if smallest_raw.is_empty() {
+        "nanosecond".into()
+    } else {
+        sing(&smallest_raw).into()
+    };
+    let largest: String = if largest_raw.is_empty() || largest_raw == "auto" {
+        if unit_rank(&smallest).unwrap() > unit_rank("hour").unwrap() {
+            smallest.clone()
+        } else {
+            "hour".into()
+        }
+    } else {
+        sing(&largest_raw).into()
+    };
+    if unit_rank(&smallest).unwrap() > unit_rank(&largest).unwrap() {
+        return Err(i.make_error("RangeError", "smallestUnit is larger than largestUnit"));
+    }
+    if !matches!(smallest.as_str(), "year" | "month" | "week" | "day") {
+        check_increment(i, &smallest, incr)?;
+    }
+    Ok((largest, smallest, incr, mode))
+}
+
+/// The shared body of ZonedDateTime until/since (`dir` = 1 for until, -1 for since).
+fn zdt_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
+    let (e, _, tz) = as_zoned(i, t)?;
+    let tcal = cal_of(i, t);
+    let (oe, _, otz, ocal) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
+    if tcal != ocal {
+        return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
+    }
+    let (largest, smallest, incr, mode) = zdt_diff_settings(i, &arg(a, 1))?;
+    let mode = if dir < 0 {
+        negate_mode(&mode).to_string()
+    } else {
+        mode
+    };
+    if unit_rank(&largest).unwrap_or(0) >= 6 && !tz_equals(&tz, &otz) {
+        return Err(i.make_error(
+            "RangeError",
+            "cannot compute a calendar-unit difference between time zones",
+        ));
+    }
+    let internal = diff_zdt_rounded(i, e, oe, &tz, &tcal, &largest, incr, &smallest, &mode)?;
+    let hour_capped = if unit_rank(&largest).unwrap_or(0) >= 6 {
+        "hour"
+    } else {
+        largest.as_str()
+    };
+    let mut d = dur_from_internal(i, &internal, hour_capped)?;
+    if dir < 0 {
+        d = neg_duration(d);
+    }
+    Ok(make(i, "Temporal.Duration", Temporal::Duration(d)))
 }
 
 fn install_zoned(it: &mut Interp, ns: &Gc) {
@@ -9328,26 +9472,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     def_getter(it, &proto, "hoursInDay", |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
-        let midnight = IsoTime {
-            hour: 0,
-            minute: 0,
-            second: 0,
-            ms: 0,
-            us: 0,
-            ns: 0,
-        };
-        let today_local = dt_ns(d, midnight);
-        let today = today_local - offset_for_local(&tz, today_local) as i128;
-        let (ty, tm, td) = civil_from_days(epoch_days(d) + 1);
-        let tomorrow_local = dt_ns(
-            IsoDate {
-                year: ty,
-                month: tm,
-                day: td,
-            },
-            midnight,
-        );
-        let tomorrow = tomorrow_local - offset_for_local(&tz, tomorrow_local) as i128;
+        let today = start_of_day_ns(i, &tz, d)?;
+        let tomorrow = start_of_day_ns(i, &tz, civil_of(epoch_days(d) + 1))?;
         Ok(Value::Num((tomorrow - today) as f64 / 3_600_000_000_000.0))
     });
     time_get!("hour", |t: IsoTime| Value::Num(t.hour as f64));
@@ -9384,16 +9510,18 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toPlainDate", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(
+        Ok(make_like(
             i,
+            &t,
             "Temporal.PlainDate",
             Temporal::Date(zoned_local(e, o).0),
         ))
     });
     it.def_method(&proto, "toPlainTime", 0, |i, t, _| {
         let (e, o, _) = as_zoned(i, &t)?;
-        Ok(make(
+        Ok(make_like(
             i,
+            &t,
             "Temporal.PlainTime",
             Temporal::Time(zoned_local(e, o).1),
         ))
@@ -9411,19 +9539,11 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "startOfDay", 0, |i, t, _| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
-        let midnight = IsoTime {
-            hour: 0,
-            minute: 0,
-            second: 0,
-            ms: 0,
-            us: 0,
-            ns: 0,
-        };
-        let local = dt_ns(d, midnight);
-        let off = offset_for_local(&tz, local);
-        let epoch = local - off as i128;
-        Ok(make(
+        let epoch = start_of_day_ns(i, &tz, d)?;
+        let off = zone_offset(&tz, epoch);
+        Ok(make_like(
             i,
+            &t,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
                 epoch_ns: epoch,
@@ -9436,10 +9556,8 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         // Two ZonedDateTimes are equal iff same instant, same *canonicalized* time zone, same calendar.
         let (e, _, tz) = as_zoned(i, &t)?;
         let tcal = cal_of(i, &t);
-        let (oe, _, otz) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let ocal = input_cal(i, &arg(a, 0))?;
-        let same_tz = crate::tz::canonicalize(&tz) == crate::tz::canonicalize(&otz);
-        Ok(Value::Bool(e == oe && same_tz && tcal == ocal))
+        let (oe, _, otz, ocal) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
+        Ok(Value::Bool(e == oe && tz_equals(&tz, &otz) && tcal == ocal))
     });
     it.def_method(&proto, "valueOf", 0, |i, _t, _| {
         Err(i.make_error(
@@ -9460,27 +9578,118 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
+        let cal = cal_of(i, &t);
+        let opts = get_opts_obj(i, &arg(a, 0))?;
+        // Options are read alphabetically, each validated as read: calendarName,
+        // fractionalSecondDigits, offset, roundingMode, smallestUnit, timeZoneName.
+        let cal_name = opt_enum(
+            i,
+            &opts,
+            "calendarName",
+            &["auto", "always", "never", "critical"],
+            "auto",
+        )?;
+        let digits = read_frac_digits(i, &opts)?;
+        let show_offset = opt_enum(i, &opts, "offset", &["auto", "never"], "auto")?;
+        let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+        check_mode(i, &mode)?;
+        let smallest = opt_str(i, &opts, "smallestUnit", "")?;
+        let su = sing(&smallest);
+        if !smallest.is_empty() && unit_rank(su).is_none() {
+            return Err(i.make_error("RangeError", "invalid smallestUnit"));
+        }
+        let show_tz = opt_enum(
+            i,
+            &opts,
+            "timeZoneName",
+            &["auto", "never", "critical"],
+            "auto",
+        )?;
+        // The "must be minute or smaller" restriction is algorithmic validation, applied only
+        // after every option has been read.
+        if !smallest.is_empty()
+            && !matches!(
+                su,
+                "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+            )
+        {
+            return Err(i.make_error("RangeError", "invalid smallestUnit for toString"));
+        }
+        // ToSecondsStringPrecisionRecord: precision None=auto, Some(k) fixed digits; unit+incr.
+        let (prec, unit, incr): (Option<i64>, &str, i128) = if !smallest.is_empty() {
+            match su {
+                "minute" => (Some(-1), "minute", 1),
+                "second" => (Some(0), "second", 1),
+                "millisecond" => (Some(3), "millisecond", 1),
+                "microsecond" => (Some(6), "microsecond", 1),
+                _ => (Some(9), "nanosecond", 1),
+            }
+        } else {
+            match digits {
+                None => (None, "nanosecond", 1),
+                Some(0) => (Some(0), "second", 1),
+                Some(n @ 1..=3) => (Some(n as i64), "millisecond", 10i128.pow(3 - n as u32)),
+                Some(n @ 4..=6) => (Some(n as i64), "microsecond", 10i128.pow(6 - n as u32)),
+                Some(n) => (Some(n as i64), "nanosecond", 10i128.pow(9 - n as u32)),
+            }
+        };
+        // Round the wall-clock time, carry into the next day, and re-resolve the instant
+        // preferring the current offset.
+        let (e, o) = if unit != "nanosecond" || incr != 1 {
+            let (d, tm) = zoned_local(e, o);
+            let day_time = time_to_ns(tm) as i128;
+            let rounded = round_ns(day_time, unit_ns(unit).unwrap_or(1) * incr, &mode);
+            let day_delta = rounded.div_euclid(NS_PER_DAY);
+            let new_time = ns_to_time(rounded.rem_euclid(NS_PER_DAY));
+            let new_date = civil_of(epoch_days(d) + day_delta as i64);
+            let local = dt_ns(new_date, new_time);
+            let epoch = zdt_interpret(
+                i,
+                &tz,
+                new_date,
+                local,
+                OffBehaviour::Option(o, true),
+                "prefer",
+                "compatible",
+            )?;
+            (epoch, zone_offset(&tz, epoch))
+        } else {
+            (e, o)
+        };
         let (d, tm) = zoned_local(e, o);
-        let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
-        Ok(Value::str(format!(
-            "{}T{}{}[{}]{}",
-            fmt_date(d),
-            ts,
-            offset_string(o),
-            tz,
-            cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?
-        )))
+        let time_str = fmt_time_prec(tm, prec);
+        let mut out = format!("{}T{}", fmt_date(d), time_str);
+        if show_offset != "never" {
+            // The displayed offset is rounded to minute precision (half-expand).
+            let minute = 60_000_000_000i64;
+            let rounded_off = (o as f64 / minute as f64).round() as i64 * minute;
+            out.push_str(&offset_string(rounded_off));
+        }
+        match show_tz.as_str() {
+            "never" => {}
+            "critical" => out.push_str(&format!("[!{tz}]")),
+            _ => out.push_str(&format!("[{tz}]")),
+        }
+        match cal_name.as_str() {
+            "never" => {}
+            "always" => out.push_str(&format!("[u-ca={cal}]")),
+            "critical" => out.push_str(&format!("[!u-ca={cal}]")),
+            _ => {
+                if &*cal != "iso8601" {
+                    out.push_str(&format!("[u-ca={cal}]"));
+                }
+            }
+        }
+        Ok(Value::str(out))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
-        let (e, o, tz) = as_zoned(i, &t)?;
+        let (e, _, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let (d, tm) = zoned_local(e, o);
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let opts = get_opts_obj(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &opts)?;
         let cal_id = cal_of(i, &t);
-        let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf, &cal_id)?;
-        let local = dt_ns(nd, ntm);
-        let off = offset_for_local(&tz, local);
-        let epoch = local - off as i128;
+        let epoch = add_zoned_ovf(i, e, &tz, &cal_id, &to_internal(dur), ovf)?;
+        let off = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
@@ -9493,15 +9702,13 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         ))
     });
     it.def_method(&proto, "subtract", 1, |i, t, a| {
-        let (e, o, tz) = as_zoned(i, &t)?;
+        let (e, _, tz) = as_zoned(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let (d, tm) = zoned_local(e, o);
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let opts = get_opts_obj(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &opts)?;
         let cal_id = cal_of(i, &t);
-        let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf, &cal_id)?;
-        let local = dt_ns(nd, ntm);
-        let off = offset_for_local(&tz, local);
-        let epoch = local - off as i128;
+        let epoch = add_zoned_ovf(i, e, &tz, &cal_id, &to_internal(neg_duration(dur)), ovf)?;
+        let off = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
@@ -9516,60 +9723,219 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, tm) = zoned_local(e, o);
+        let cal = cal_of(i, &t);
         let f = arg(a, 0);
         if !matches!(f, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "with() argument must be an object"));
         }
-        let hour = field_int(i, &f, "hour", tm.hour as i64)? as u8;
-        let minute = field_int(i, &f, "minute", tm.minute as i64)? as u8;
-        let second = field_int(i, &f, "second", tm.second as i64)? as u8;
-        let ms = field_int(i, &f, "millisecond", tm.ms as i64)? as u16;
-        let us = field_int(i, &f, "microsecond", tm.us as i64)? as u16;
-        let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)? as u16;
-        let ovf = to_overflow(i, &arg(a, 1))?;
-        let cal = cal_of(i, &t);
-        let nd = if &*cal == "iso8601" {
-            let year = field_int(i, &f, "year", d.year)?;
-            let month = field_int(i, &f, "month", d.month as i64)? as u8;
-            let day = field_int(i, &f, "day", d.day as i64)? as u8;
-            check_date(i, IsoDate { year, month, day })?
-        } else {
-            with_cal_date(i, &cal, d, &f, ovf)?
-        };
-        let nt = check_time(
-            i,
-            IsoTime {
-                hour,
-                minute,
-                second,
-                ms,
-                us,
-                ns: nsf,
-            },
-        )?;
-        let local = dt_ns(nd, nt);
-        // The offset field defaults to the instance's current offset; with() matches it exactly (no
-        // minute-rounding fuzz) and defaults the offset option to "prefer".
-        let offv = getm(i, &f, "offset")?;
-        let off_str = match &offv {
-            Value::Undefined => offset_string(o),
-            _ => {
-                let s = i.to_string(&offv).map_err(unab)?;
-                if !(s.starts_with('+') || s.starts_with('-')) {
-                    return Err(i.make_error("RangeError", "invalid offset string"));
+        // RejectObjectWithCalendarOrTimeZone: a Temporal object, or any object carrying a
+        // `calendar` or `timeZone` property, cannot be a partial-fields bag.
+        if get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
+        }
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        // Read the partial fields in alphabetical order, coerced as read.
+        let uses_era = cal_uses_era(&cal);
+        let mut any = false;
+        let read_int = |i: &mut Interp, key: &str, any: &mut bool| -> Result<Option<i64>, Value> {
+            let fv = getm(i, &f, key)?;
+            match fv {
+                Value::Undefined => Ok(None),
+                _ => {
+                    *any = true;
+                    Ok(Some(to_int(i, &fv)?))
                 }
-                s.to_string()
             }
         };
-        let off_ns = tz_offset_ns(&off_str);
-        let offset_opt = opt_str(i, &arg(a, 1), "offset", "prefer")?;
-        let disamb = opt_str(i, &arg(a, 1), "disambiguation", "compatible")?;
-        let (epoch, off) = if parse_fixed_offset(&tz).is_some() {
-            let z = zone_offset(&tz, local);
-            (local - z as i128, z)
-        } else {
-            interpret_offset(i, &tz, local, true, off_ns, true, &offset_opt, &disamb)?
+        let day = match read_int(i, "day", &mut any)? {
+            Some(d2) if d2 < 1 => {
+                return Err(i.make_error("RangeError", "day must be positive"));
+            }
+            other => other,
         };
+        let (era, era_year) = if uses_era {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(i.to_string(&ev).map_err(unab)?.to_lowercase())
+                }
+            };
+            let ey = read_int(i, "eraYear", &mut any)?;
+            (era, ey)
+        } else {
+            (None, None)
+        };
+        let hour = read_int(i, "hour", &mut any)?;
+        let us = read_int(i, "microsecond", &mut any)?;
+        let ms = read_int(i, "millisecond", &mut any)?;
+        let minute = read_int(i, "minute", &mut any)?;
+        let month = {
+            let fv = getm(i, &f, "month")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let month_code = {
+            let fv = getm(i, &f, "monthCode")?;
+            match &fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    Some(sv)
+                }
+            }
+        };
+        let ns_f = read_int(i, "nanosecond", &mut any)?;
+        let offv = getm(i, &f, "offset")?;
+        let off_field = match &offv {
+            Value::Undefined => None,
+            Value::Str(sv) => {
+                any = true;
+                Some(parse_offset_option(i, sv)?)
+            }
+            _ => {
+                any = true;
+                let prim = i
+                    .to_primitive(&offv, crate::eval::Hint::String)
+                    .map_err(unab)?;
+                match &prim {
+                    Value::Str(sv) => Some(parse_offset_option(i, sv)?),
+                    _ => return Err(i.make_error("TypeError", "offset must be a string")),
+                }
+            }
+        };
+        let second = read_int(i, "second", &mut any)?;
+        let year = read_int(i, "year", &mut any)?;
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one field"));
+        }
+        // era and eraYear come as a pair, and never alongside a plain year.
+        if era.is_some() != era_year.is_some() {
+            return Err(i.make_error("TypeError", "era and eraYear must both be provided"));
+        }
+        if era_year.is_some() && year.is_some() {
+            return Err(i.make_error("TypeError", "eraYear and year are mutually exclusive"));
+        }
+        // Options, read after the fields: disambiguation, offset (default prefer), overflow.
+        let opts = get_opts_obj(i, &arg(a, 1))?;
+        let disamb = opt_enum(
+            i,
+            &opts,
+            "disambiguation",
+            &["compatible", "earlier", "later", "reject"],
+            "compatible",
+        )?;
+        let offset_opt = opt_enum(
+            i,
+            &opts,
+            "offset",
+            &["prefer", "use", "ignore", "reject"],
+            "prefer",
+        )?;
+        let ovf = to_overflow(i, &opts)?;
+        // Merge with the receiver's calendar fields: a provided month or monthCode replaces both.
+        let cf = cal_fields(&cal, d);
+        let bag = Object::new(Some(i.object_proto.clone()));
+        {
+            let mut b = bag.borrow_mut();
+            match year {
+                Some(y) => {
+                    b.props
+                        .insert("year", Property::builtin(Value::Num(y as f64)));
+                }
+                None => {
+                    if era.is_none() || era_year.is_none() {
+                        b.props.insert(
+                            "year",
+                            Property::builtin(Value::Num(cal_year_num(&cal, d) as f64)),
+                        );
+                    }
+                }
+            }
+            if let Some(e2) = &era {
+                b.props
+                    .insert("era", Property::builtin(Value::str(e2.as_str())));
+            }
+            if let Some(ey) = era_year {
+                b.props
+                    .insert("eraYear", Property::builtin(Value::Num(ey as f64)));
+            }
+            match (month, &month_code) {
+                (None, None) => {
+                    b.props.insert(
+                        "monthCode",
+                        Property::builtin(Value::str(cal_month_code(&cal, d))),
+                    );
+                }
+                _ => {
+                    if let Some(m) = month {
+                        b.props
+                            .insert("month", Property::builtin(Value::Num(m as f64)));
+                    }
+                    if let Some(mc) = &month_code {
+                        b.props
+                            .insert("monthCode", Property::builtin(Value::Str(mc.clone())));
+                    }
+                }
+            }
+            b.props.insert(
+                "day",
+                Property::builtin(Value::Num(day.unwrap_or(cf.2) as f64)),
+            );
+        }
+        let bagv = Value::Obj(bag);
+        let draw = read_date_raw_cal(i, &bagv, &cal, ovf)?;
+        let nd = regulate_date(i, draw, ovf)?;
+        let traw = [
+            hour.unwrap_or(tm.hour as i64),
+            minute.unwrap_or(tm.minute as i64),
+            second.unwrap_or(tm.second as i64),
+            ms.unwrap_or(tm.ms as i64),
+            us.unwrap_or(tm.us as i64),
+            ns_f.unwrap_or(tm.ns as i64),
+        ];
+        let nt = regulate_time(i, traw, ovf)?;
+        let local = dt_ns(nd, nt);
+        let epoch = zdt_interpret(
+            i,
+            &tz,
+            nd,
+            local,
+            OffBehaviour::Option(off_field.unwrap_or(o), true),
+            &offset_opt,
+            &disamb,
+        )?;
+        let off = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
@@ -9583,8 +9949,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "withTimeZone", 1, |i, t, a| {
         let (e, _, _) = as_zoned(i, &t)?;
-        let s = i.to_string(&arg(a, 0)).map_err(unab)?;
-        let tz = normalize_tz(i, &s)?;
+        let tz = tz_from_field(i, &arg(a, 0))?;
         let off = zone_offset(&tz, e);
         Ok(make_like(
             i,
@@ -9599,7 +9964,23 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
-        let cal = check_calendar(i, &arg(a, 0))?;
+        let cv = arg(a, 0);
+        let cal = match &cv {
+            Value::Undefined => {
+                return Err(i.make_error("TypeError", "calendar argument is required"))
+            }
+            Value::Obj(_) => match get(i, &cv) {
+                Some(
+                    Temporal::Date(_)
+                    | Temporal::DateTime(_, _)
+                    | Temporal::YearMonth(_)
+                    | Temporal::MonthDay(_)
+                    | Temporal::Zoned { .. },
+                ) => cal_of(i, &cv),
+                _ => return Err(i.make_error("TypeError", "calendar must be a string")),
+            },
+            _ => check_calendar(i, &cv)?,
+        };
         let v = make(
             i,
             "Temporal.ZonedDateTime",
@@ -9616,188 +9997,221 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         let (e, _, tz) = as_zoned(i, &t)?;
         let dir = match arg(a, 0) {
             Value::Str(s) => s.to_string(),
-            Value::Obj(_) => opt_str(i, &arg(a, 0), "direction", "")?,
+            Value::Obj(o_) => {
+                let dv = getm(i, &Value::Obj(o_), "direction")?;
+                match dv {
+                    Value::Undefined => {
+                        return Err(i.make_error("RangeError", "direction is required"))
+                    }
+                    _ => i.to_string(&dv).map_err(unab)?.to_string(),
+                }
+            }
             Value::Undefined => return Err(i.make_error("TypeError", "direction is required")),
-            v => i.to_string(&v).map_err(unab)?.to_string(),
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "direction must be a string or an options object",
+                ))
+            }
         };
         if dir != "next" && dir != "previous" {
             return Err(i.make_error("RangeError", "direction must be 'next' or 'previous'"));
         }
-        let epoch_sec = (e.div_euclid(1_000_000_000)) as i64;
-        match crate::tz::next_transition(&tz, epoch_sec, dir == "next") {
-            Some(ts) => {
-                let (off, _) = (zone_offset(&tz, ts as i128 * 1_000_000_000), ());
-                Ok(make_like(
-                    i,
-                    &t,
-                    "Temporal.ZonedDateTime",
-                    Temporal::Zoned {
-                        epoch_ns: ts as i128 * 1_000_000_000,
-                        offset_ns: off,
-                        tz,
-                    },
-                ))
+        let forward = dir == "next";
+        // The transition table is second-resolution; pick the boundary so a nanosecond past a
+        // transition still finds it in the `previous` direction (strict inequality in ns).
+        let mut sec = if forward {
+            e.div_euclid(1_000_000_000) as i64
+        } else {
+            ((e - 1).div_euclid(1_000_000_000) + 1) as i64
+        };
+        // Skip table entries that do not change the actual UTC offset (rule-only changes).
+        loop {
+            match crate::tz::next_transition(&tz, sec, forward) {
+                Some(ts) => {
+                    let ns = ts as i128 * 1_000_000_000;
+                    let off = zone_offset(&tz, ns);
+                    let before = zone_offset(&tz, ns - 1_000_000_000);
+                    if off != before {
+                        return Ok(make_like(
+                            i,
+                            &t,
+                            "Temporal.ZonedDateTime",
+                            Temporal::Zoned {
+                                epoch_ns: ns,
+                                offset_ns: off,
+                                tz,
+                            },
+                        ));
+                    }
+                    sec = ts;
+                }
+                None => return Ok(Value::Null),
             }
-            None => Ok(Value::Null),
         }
     });
-    it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
+    it.def_method(&proto, "withPlainTime", 0, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
         let (d, _) = zoned_local(e, o);
-        let nt = match arg(a, 0) {
-            Value::Undefined => IsoTime {
-                hour: 0,
-                minute: 0,
-                second: 0,
-                ms: 0,
-                us: 0,
-                ns: 0,
-            },
-            v => to_time(i, &v, &Value::Undefined)?,
+        let epoch = match arg(a, 0) {
+            Value::Undefined => start_of_day_ns(i, &tz, d)?,
+            v => {
+                let nt = to_time(i, &v, &Value::Undefined)?;
+                let local = dt_ns(d, nt);
+                if !iso_datetime_within_limits(d, nt) {
+                    return Err(
+                        i.make_error("RangeError", "date-time is outside the representable range")
+                    );
+                }
+                check_instant(i, local_to_epoch(i, &tz, local, "compatible")?)?
+            }
         };
-        let local = dt_ns(d, nt);
-        let off = offset_for_local(&tz, local);
+        let off = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
-                epoch_ns: local - off as i128,
+                epoch_ns: epoch,
                 offset_ns: off,
                 tz,
             },
         ))
     });
-    it.def_method(&proto, "until", 1, |i, t, a| {
-        let (e, o, tz) = as_zoned(i, &t)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let (largest, smallest, incr, mode) = read_datetime_diff_auto(i, &arg(a, 1), 5)?;
-        let dur = diff_zoned(i, e, o, oe, &tz, &cal, &largest, &smallest, incr, &mode);
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
-    });
-    it.def_method(&proto, "since", 1, |i, t, a| {
-        let (e, o, tz) = as_zoned(i, &t)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        let (oe, _, _) = to_zoned(i, &arg(a, 0), &Value::Undefined)?;
-        let (largest, smallest, incr, mode) = read_datetime_diff_auto(i, &arg(a, 1), 5)?;
-        let dur = diff_zoned(
-            i,
-            e,
-            o,
-            oe,
-            &tz,
-            &cal,
-            &largest,
-            &smallest,
-            incr,
-            negate_mode(&mode),
-        );
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(neg_duration(dur)),
-        ))
-    });
+    it.def_method(&proto, "until", 1, |i, t, a| zdt_until_since(i, &t, a, 1));
+    it.def_method(&proto, "since", 1, |i, t, a| zdt_until_since(i, &t, a, -1));
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (e, o, tz) = as_zoned(i, &t)?;
-        let opts = arg(a, 0);
-        let smallest = sing(&opt_str(i, &opts, "smallestUnit", "")?).to_string();
-        let incr_raw = opt_num(i, &opts, "roundingIncrement", 1)?;
-        let mode = opt_str(i, &opts, "roundingMode", "halfExpand")?;
+        let arg0 = arg(a, 0);
+        if matches!(arg0, Value::Undefined) {
+            return Err(i.make_error("TypeError", "round() requires an options argument"));
+        }
+        if !matches!(arg0, Value::Obj(_) | Value::Str(_)) {
+            return Err(i.make_error("TypeError", "options must be an object or a string"));
+        }
+        let (opts, shorthand) = round_opts(&arg0);
+        // Alphabetical option order: roundingIncrement, roundingMode, smallestUnit.
+        let incr = match &shorthand {
+            Some(_) => 1,
+            None => read_rounding_increment(i, &opts)?,
+        };
+        let mode = match &shorthand {
+            Some(_) => "halfExpand".to_string(),
+            None => opt_str(i, &opts, "roundingMode", "halfExpand")?,
+        };
         check_mode(i, &mode)?;
-        check_increment(i, &smallest, incr_raw)?;
-        let incr = incr_raw as i128;
+        let smallest_raw = match shorthand {
+            Some(sh) => sh,
+            None => opt_str(i, &opts, "smallestUnit", "")?,
+        };
+        let smallest = sing(&smallest_raw).to_string();
+        if !matches!(
+            smallest.as_str(),
+            "day" | "hour" | "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+        ) {
+            return Err(i.make_error("RangeError", "invalid smallestUnit"));
+        }
         if smallest == "day" {
-            // Round to the nearest local day boundary; a DST day is 23/25h long, not a fixed 24h.
-            let (d, _) = zoned_local(e, o);
-            let sod = |dd: IsoDate| -> i128 {
-                let mid = dt_ns(
-                    dd,
-                    IsoTime {
-                        hour: 0,
-                        minute: 0,
-                        second: 0,
-                        ms: 0,
-                        us: 0,
-                        ns: 0,
-                    },
-                );
-                mid - offset_for_local(&tz, mid) as i128
-            };
-            let today = sod(d);
-            let (ny, nm, nda) = civil_from_days(epoch_days(d) + 1);
-            let tomorrow = sod(IsoDate {
-                year: ny,
-                month: nm,
-                day: nda,
-            });
-            let denom = (tomorrow - today) as f64;
-            let frac = if denom == 0.0 {
-                0.0
-            } else {
-                (e - today) as f64 / denom
-            };
-            let up = round_up_magnitude(&mode, frac, true, false);
-            let epoch = if up { tomorrow } else { today };
-            let off = zone_offset(&tz, epoch);
+            if incr != 1 {
+                return Err(i.make_error("RangeError", "roundingIncrement out of range"));
+            }
+        } else {
+            check_increment(i, &smallest, incr)?;
+        }
+        if smallest == "nanosecond" && incr == 1 {
             return Ok(make_like(
                 i,
                 &t,
                 "Temporal.ZonedDateTime",
                 Temporal::Zoned {
-                    epoch_ns: epoch,
-                    offset_ns: off,
+                    epoch_ns: e,
+                    offset_ns: o,
                     tz,
                 },
             ));
         }
-        let unit = unit_ns(&smallest)
-            .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?;
-        let local = e + o as i128;
-        let rounded = round_ns(local, unit * incr, &mode);
-        // Re-resolve the offset for the rounded wall-clock time (it may cross a DST transition).
-        let off = offset_for_local(&tz, rounded);
+        let (d, tm) = zoned_local(e, o);
+        let epoch = if smallest == "day" {
+            // Round to the nearest local day boundary; a DST day is not a fixed 24 hours.
+            let today = start_of_day_ns(i, &tz, d)?;
+            let tomorrow = start_of_day_ns(i, &tz, civil_of(epoch_days(d) + 1))?;
+            let span = tomorrow - today;
+            if span <= 0 {
+                return Err(i.make_error("RangeError", "inconsistent time zone data"));
+            }
+            // A backward transition interleaving two calendar days can place this instant at or
+            // past the next day's first start; clamp it into the day's span (tc39 #3312).
+            let e2 = if e >= tomorrow { tomorrow - 1 } else { e };
+            check_instant(i, today + round_ns(e2 - today, span, &mode))?
+        } else {
+            // Round the wall-clock time, carrying into the next day, then re-resolve the instant
+            // preferring the current offset.
+            let day_time = time_to_ns(tm) as i128;
+            let rounded = round_ns(
+                day_time,
+                unit_ns(&smallest).unwrap_or(1) * incr as i128,
+                &mode,
+            );
+            let day_delta = rounded.div_euclid(NS_PER_DAY);
+            let new_time = ns_to_time(rounded.rem_euclid(NS_PER_DAY));
+            let new_date = civil_of(epoch_days(d) + day_delta as i64);
+            let local = dt_ns(new_date, new_time);
+            zdt_interpret(
+                i,
+                &tz,
+                new_date,
+                local,
+                OffBehaviour::Option(o, true),
+                "prefer",
+                "compatible",
+            )?
+        };
+        let off = zone_offset(&tz, epoch);
         Ok(make_like(
             i,
             &t,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
-                epoch_ns: rounded - off as i128,
+                epoch_ns: epoch,
                 offset_ns: off,
                 tz,
             },
         ))
     });
-
     let ctor = add_ctor(it, ns, "ZonedDateTime", 2, proto, |i, _t, a| {
         require_new(i)?;
-        let epoch_ns = match arg(a, 0) {
-            Value::BigInt(n) => n
-                .to_i128()
-                .ok_or_else(|| i.make_error("RangeError", "epochNanoseconds out of range"))?,
-            _ => return Err(i.make_error("TypeError", "epochNanoseconds must be a BigInt")),
-        };
+        // ToBigInt (a numeric string or boolean converts; a Number throws), then the instant
+        // range check.
+        let big = i.to_bigint(&arg(a, 0)).map_err(unab)?;
+        let epoch_ns = big
+            .to_i128()
+            .ok_or_else(|| i.make_error("RangeError", "epochNanoseconds out of range"))?;
+        let epoch_ns = check_instant(i, epoch_ns)?;
         let tzv = arg(a, 1);
-        let tz_raw: Rc<str> = match &tzv {
-            Value::Str(s) => s.clone(),
-            Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
-            Value::Obj(_) => match get(i, &tzv) {
-                Some(Temporal::Zoned { tz, .. }) => tz,
-                _ => {
-                    return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
+        // The constructor takes only a bare time-zone identifier (never an ISO string).
+        let tz: Rc<str> = match &tzv {
+            Value::Str(t) => {
+                let t2 = t.trim();
+                if let Some(name) = crate::tz::registry_name(t2) {
+                    Rc::from(name)
+                } else if is_pure_offset(t2) {
+                    Rc::from(offset_string(tz_offset_ns(t2)).as_str())
+                } else {
+                    return Err(i.make_error("RangeError", "invalid time zone identifier"));
                 }
-            },
-            _ => {
-                return Err(
-                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                )
             }
+            Value::Undefined => return Err(i.make_error("TypeError", "missing timeZone")),
+            _ => return Err(i.make_error("TypeError", "time zone must be a string")),
         };
-        let tz = normalize_tz(i, &tz_raw)?;
-        let cal = check_calendar(i, &arg(a, 2))?;
+        // Likewise the calendar: a bare identifier only.
+        let cal: std::rc::Rc<str> = match &arg(a, 2) {
+            Value::Undefined => std::rc::Rc::from("iso8601"),
+            Value::Str(c) => match canon_cal(c) {
+                Some(canon) => std::rc::Rc::from(canon),
+                None => return Err(i.make_error("RangeError", "invalid calendar identifier")),
+            },
+            _ => return Err(i.make_error("TypeError", "calendar must be a string")),
+        };
         let offset_ns = zone_offset(&tz, epoch_ns);
         let v = make(
             i,
@@ -9813,8 +10227,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
-        let cal = input_cal(i, &arg(a, 0))?;
-        let (epoch_ns, offset_ns, tz) = to_zoned(i, &arg(a, 0), &arg(a, 1))?;
+        let (epoch_ns, offset_ns, tz, cal) = to_zoned(i, &arg(a, 0), &arg(a, 1))?;
         let v = make(
             i,
             "Temporal.ZonedDateTime",

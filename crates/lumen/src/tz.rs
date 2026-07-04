@@ -9,7 +9,24 @@ pub fn canonicalize(name: &str) -> Option<&'static str> {
     let lc = name.to_ascii_lowercase();
     if matches!(
         lc.as_str(),
-        "utc" | "etc/utc" | "etc/uct" | "uct" | "universal" | "etc/universal" | "zulu" | "etc/zulu"
+        "utc"
+            | "etc/utc"
+            | "etc/uct"
+            | "uct"
+            | "universal"
+            | "etc/universal"
+            | "zulu"
+            | "etc/zulu"
+            | "gmt"
+            | "etc/gmt"
+            | "etc/gmt0"
+            | "gmt0"
+            | "gmt+0"
+            | "gmt-0"
+            | "etc/gmt+0"
+            | "etc/gmt-0"
+            | "etc/greenwich"
+            | "greenwich"
     ) {
         return Some("UTC");
     }
