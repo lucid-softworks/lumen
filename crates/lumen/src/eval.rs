@@ -231,6 +231,18 @@ impl Interp {
     /// resources are ignored; a non-callable dispose method is a TypeError.
     fn add_disposable(&mut self, value: &Value, is_async: bool) -> Result<(), Abrupt> {
         if matches!(value, Value::Undefined | Value::Null) {
+            // An evaluated `await using x = null` still records a pending Await for the
+            // block's end (an empty async disposal awaits once).
+            if is_async {
+                if self.using_stack.is_empty() {
+                    self.using_stack.push(Vec::new());
+                }
+                self.using_stack.last_mut().unwrap().push(Disposable {
+                    value: Value::Undefined,
+                    method: Value::Undefined,
+                    method_is_async: true,
+                });
+            }
             return Ok(());
         }
         let (method, method_is_async) = self.dispose_method(value, is_async)?;
@@ -274,6 +286,16 @@ impl Interp {
         mut frame: Vec<Disposable>,
         result: Completion,
     ) -> Completion {
+        // A null/undefined `await using` resource left an await-only marker (no method): the
+        // block's end still performs one Await even with nothing to dispose.
+        let mut await_pending = false;
+        frame.retain(|d| {
+            if d.method_is_async && !d.method.is_callable() {
+                await_pending = true;
+                return false;
+            }
+            true
+        });
         let mut completion = result;
         while let Some(r) = frame.pop() {
             // Only an `@@asyncDispose` method's result is awaited; a sync `@@dispose` (even the
@@ -309,6 +331,14 @@ impl Interp {
                     };
                 }
                 Err(other) => return Err(other),
+            }
+        }
+        if await_pending && crate::coroutine::in_coroutine() {
+            // Await(undefined) — one real tick.
+            let tick = self.new_promise();
+            self.resolve_promise(&tick, Value::Undefined);
+            if let Err(e) = self.coro_await(tick) {
+                return Err(e);
             }
         }
         completion
@@ -352,7 +382,8 @@ impl Interp {
         result: Completion,
         _is_async: bool,
     ) -> Completion {
-        self.dispose_frame(frame, result)
+        let result = self.dispose_frame(frame, result);
+        result
     }
 
     /// Build a `SuppressedError(error, suppressed)`.
