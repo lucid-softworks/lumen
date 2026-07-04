@@ -1805,30 +1805,6 @@ fn cal_of(i: &Interp, this: &Value) -> std::rc::Rc<str> {
         _ => std::rc::Rc::from("iso8601"),
     }
 }
-/// The (canonical) calendar of a value coerced to a Temporal date: a Temporal object carries its own,
-/// a property bag its `calendar` field, an ISO string its `[u-ca=...]` annotation (default iso8601).
-fn arg_calendar(i: &mut Interp, v: &Value) -> Result<String, Value> {
-    let canon = |c: &str| canon_cal(c).unwrap_or("iso8601").to_string();
-    if let Value::Obj(o) = v {
-        let ptr = Rc::as_ptr(o) as usize;
-        if i.temporal.contains_key(&ptr) {
-            return Ok(canon(&cal_of(i, v)));
-        }
-        let c = getm(i, v, "calendar")?;
-        return Ok(match c {
-            Value::Undefined => "iso8601".to_string(),
-            Value::Str(s) => canon(&s),
-            Value::Obj(_) => canon(&cal_of(i, &c)),
-            _ => "iso8601".to_string(),
-        });
-    }
-    if let Value::Str(s) = v {
-        if let Some(p) = parse_iso(s) {
-            return Ok(canon(&p.calendar.unwrap_or_else(|| "iso8601".to_string())));
-        }
-    }
-    Ok("iso8601".to_string())
-}
 /// ToIntegerIfIntegral: ToNumber, then reject non-finite and any fractional part (Duration fields).
 /// Read a Duration property-bag field via ToIntegerIfIntegral, defaulting when absent.
 /// Read a positional Duration constructor argument via ToIntegerIfIntegral, defaulting to 0.
@@ -2584,6 +2560,12 @@ fn parse_month_day(s: &str) -> Option<IsoDate> {
 
 pub fn install(it: &mut Interp) {
     let ns = Object::new(Some(it.object_proto.clone()));
+    if let Some(key) = crate::builtins::to_string_tag_key(it) {
+        ns.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("Temporal"), false, false, true),
+        );
+    }
     install_plain_date(it, &ns);
     install_plain_time(it, &ns);
     install_plain_datetime(it, &ns);
@@ -2958,11 +2940,13 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_date(i, &t)?;
-        let other_cal = arg_calendar(i, &arg(a, 0))?;
-        let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
-        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        let (o, ocal) = to_date_cal(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = cal_of(i, &t);
         Ok(Value::Bool(
-            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
+            d.year == o.year
+                && d.month == o.month
+                && d.day == o.day
+                && canon(&this_cal) == canon(&ocal),
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -4272,31 +4256,6 @@ fn regulate_time(i: &Interp, v: [i64; 6], ovf: Overflow) -> Result<IsoTime, Valu
     })
 }
 
-/// Extract the calendar id from a Temporal-like input (Temporal object, ISO string, or property bag).
-fn input_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
-    if get(i, v).is_some() {
-        return Ok(cal_of(i, v));
-    }
-    Ok(match v {
-        Value::Str(s) => match parse_iso(s).and_then(|p| p.calendar) {
-            Some(c) => std::rc::Rc::from(canon_cal(&c).unwrap_or("iso8601")),
-            None => std::rc::Rc::from("iso8601"),
-        },
-        Value::Obj(_) => {
-            let c = getm(i, v, "calendar")?;
-            match &c {
-                Value::Str(_) => check_calendar(i, &c)?,
-                _ => std::rc::Rc::from("iso8601"),
-            }
-        }
-        _ => std::rc::Rc::from("iso8601"),
-    })
-}
-
-fn datetime_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
-    input_cal(i, v)
-}
-
 fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
     Ok(to_date_cal(i, v, opts)?.0)
 }
@@ -4415,24 +4374,6 @@ fn add_to_date(
             day: nd,
         },
     )
-}
-
-/// Validate a time-zone identifier string per ToTemporalTimeZoneIdentifier: an offset, a named zone,
-/// or an ISO date/time string whose `[...]` annotation is itself a valid zone. RangeError otherwise.
-fn validate_tz_string(i: &Interp, s: &str) -> Result<(), Value> {
-    let t = s.trim();
-    if is_pure_offset(t) {
-        return normalize_tz(i, t).map(|_| ());
-    }
-    if crate::tz::canonicalize(t).is_some() {
-        return Ok(());
-    }
-    if let Some(p) = parse_iso(t) {
-        if let Some(tz) = p.tz {
-            return validate_tz_string(i, &tz);
-        }
-    }
-    Err(i.make_error("RangeError", "invalid time zone identifier"))
 }
 
 /// Add a duration to a date+time, carrying the time overflow into the date.
@@ -4858,19 +4799,15 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let (_, tm) = as_datetime(i, &t)?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(tm)))
     });
-    it.def_method(&proto, "withPlainTime", 1, |i, t, a| {
+    it.def_method(&proto, "withPlainTime", 0, |i, t, a| {
         let (d, _) = as_datetime(i, &t)?;
         let nt = match arg(a, 0) {
-            Value::Undefined => IsoTime {
-                hour: 0,
-                minute: 0,
-                second: 0,
-                ms: 0,
-                us: 0,
-                ns: 0,
-            },
+            Value::Undefined => MIDNIGHT,
             v => to_time(i, &v, &Value::Undefined)?,
         };
+        if !iso_datetime_within_limits(d, nt) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
@@ -4880,7 +4817,23 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "withCalendar", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let cal = check_calendar(i, &arg(a, 0))?;
+        let cv = arg(a, 0);
+        let cal = match &cv {
+            Value::Undefined => {
+                return Err(i.make_error("TypeError", "calendar argument is required"))
+            }
+            Value::Obj(_) => match get(i, &cv) {
+                Some(
+                    Temporal::Date(_)
+                    | Temporal::DateTime(_, _)
+                    | Temporal::YearMonth(_)
+                    | Temporal::MonthDay(_)
+                    | Temporal::Zoned { .. },
+                ) => cal_of(i, &cv),
+                _ => return Err(i.make_error("TypeError", "calendar must be a string")),
+            },
+            _ => check_calendar(i, &cv)?,
+        };
         let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
         set_cal(i, &v, cal);
         Ok(v)
@@ -4914,11 +4867,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let other_cal = arg_calendar(i, &arg(a, 0))?;
-        let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        let (od, otm, ocal) = to_datetime_cal(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = cal_of(i, &t);
         Ok(Value::Bool(
-            cmp_date(d, od) == 0 && time_to_ns(tm) == time_to_ns(otm) && this_cal == other_cal,
+            cmp_date(d, od) == 0
+                && time_to_ns(tm) == time_to_ns(otm)
+                && canon(&this_cal) == canon(&ocal),
         ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -5194,14 +5148,16 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let cal = ctor_calendar(i, &arg(a, 9))?;
         let d = build_date(i, year, month, day)?;
         let tm = build_time(i, hour, minute, second, ms, us, ns)?;
+        if !iso_datetime_within_limits(d, tm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
         sub_proto(i, &v)?;
         set_cal(i, &v, cal);
         Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
-        let (d, tm) = to_datetime(i, &arg(a, 0), &arg(a, 1))?;
-        let cal = datetime_cal(i, &arg(a, 0))?;
+        let (d, tm, cal) = to_datetime_cal(i, &arg(a, 0), &arg(a, 1))?;
         let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
         set_cal(i, &v, cal);
         Ok(v)
@@ -5219,6 +5175,11 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
 }
 
 fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoTime), Value> {
+    let (d, t, _) = to_datetime_cal(i, v, opts)?;
+    Ok((d, t))
+}
+type DtParts = (IsoDate, IsoTime, std::rc::Rc<str>);
+fn to_datetime_cal(i: &mut Interp, v: &Value, opts: &Value) -> Result<DtParts, Value> {
     let midnight = IsoTime {
         hour: 0,
         minute: 0,
@@ -5230,11 +5191,11 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
     match get(i, v) {
         Some(Temporal::DateTime(d, t)) => {
             to_overflow(i, opts)?;
-            return Ok((d, t));
+            return Ok((d, t, cal_of(i, v)));
         }
         Some(Temporal::Date(d)) => {
             to_overflow(i, opts)?;
-            return Ok((d, midnight));
+            return Ok((d, midnight, cal_of(i, v)));
         }
         _ => {}
     }
@@ -5265,7 +5226,13 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             }
             // The overflow option is read and validated even though a string never overflows.
             to_overflow(i, opts)?;
-            Ok((d, t))
+            let cal: std::rc::Rc<str> = std::rc::Rc::from(
+                p.calendar
+                    .as_deref()
+                    .and_then(canon_cal)
+                    .unwrap_or("iso8601"),
+            );
+            Ok((d, t, cal))
         }
         Value::Obj(_) => {
             // All fields read once in alphabetical order (with per-field coercion), requiredness
@@ -5296,7 +5263,7 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             if !iso_datetime_within_limits(d, t) {
                 return Err(i.make_error("RangeError", "date-time outside representable range"));
             }
-            Ok((d, t))
+            Ok((d, t, bag.cal))
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDateTime")),
     }
@@ -5354,7 +5321,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         let day = to_int(i, &dv)?;
         let cal = cal_of(i, &t);
         let d = if &*cal == "iso8601" {
-            build_date(i, ym.year, ym.month as i64, day)?
+            build_date_ovf(i, ym.year, ym.month as i64, day, Overflow::Constrain)?
         } else {
             // Combine the calendar's (year, monthCode) with the day, resolving through the calendar.
             let merged = i.new_object();
@@ -9366,8 +9333,7 @@ fn pym_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<V
 fn pd_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
     let d = as_date(i, t)?;
     let tcal = cal_of(i, t);
-    let ocal = input_cal(i, &arg(a, 0))?;
-    let o = to_date(i, &arg(a, 0), &Value::Undefined)?;
+    let (o, ocal) = to_date_cal(i, &arg(a, 0), &Value::Undefined)?;
     if canon(&tcal) != canon(&ocal) {
         return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
     }
@@ -9430,8 +9396,7 @@ fn pd_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i64
 fn pdt_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
     let (d, tm) = as_datetime(i, t)?;
     let tcal = cal_of(i, t);
-    let ocal = input_cal(i, &arg(a, 0))?;
-    let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
+    let (od, otm, ocal) = to_datetime_cal(i, &arg(a, 0), &Value::Undefined)?;
     if canon(&tcal) != canon(&ocal) {
         return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
     }
@@ -10395,107 +10360,64 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
 
 // ===== Now ====================================================================================
 
-/// Validate a `Now.*ISO` time-zone argument (a string identifier, or undefined for the default).
-fn now_validate_zone(i: &mut Interp, v: &Value) -> Result<(), Value> {
-    match v {
-        Value::Undefined => Ok(()),
-        Value::Str(s) => validate_tz_string(i, s),
-        // A ZonedDateTime carries its own zone; any other object or primitive is a TypeError.
-        Value::Obj(_) => match get(i, v) {
-            Some(Temporal::Zoned { .. }) => Ok(()),
-            _ => Err(i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")),
-        },
-        _ => Err(i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")),
-    }
-}
-
 fn install_now(it: &mut Interp, ns: &Gc) {
     let now = Object::new(Some(it.object_proto.clone()));
-    // lumen has no real clock; the epoch is fixed at 1970-01-01T00:00:00Z. Structure/type tests
-    // pass even though absolute-time tests do not.
+    // The system clock, in epoch nanoseconds (millisecond resolution, like Date.now()).
+    fn now_ns() -> i128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i128 * 1_000_000)
+            .unwrap_or(0)
+    }
+    fn now_zone(i: &mut Interp, v: &Value) -> Result<Rc<str>, Value> {
+        match v {
+            Value::Undefined => Ok(Rc::from("UTC")),
+            _ => tz_from_field(i, v),
+        }
+    }
     it.def_method(&now, "instant", 0, |i, _t, _| {
-        Ok(make(i, "Temporal.Instant", Temporal::Instant(0)))
+        Ok(make(i, "Temporal.Instant", Temporal::Instant(now_ns())))
     });
     it.def_method(&now, "timeZoneId", 0, |_i, _t, _| Ok(Value::str("UTC")));
     it.def_method(&now, "zonedDateTimeISO", 0, |i, _t, a| {
-        // The system zone (default UTC) at the fixed epoch.
-        let tz: Rc<str> = match arg(a, 0) {
-            Value::Undefined => Rc::from("UTC"),
-            Value::Str(s) => normalize_tz(i, &s)?,
-            v @ Value::Obj(_) => match get(i, &v) {
-                Some(Temporal::Zoned { tz, .. }) => tz,
-                _ => {
-                    return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
-                }
-            },
-            _ => {
-                return Err(
-                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                )
-            }
-        };
-        let off = zone_offset(&tz, 0);
+        let tz = now_zone(i, &arg(a, 0))?;
+        let e = now_ns();
+        let off = zone_offset(&tz, e);
         Ok(make(
             i,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
-                epoch_ns: 0,
+                epoch_ns: e,
                 offset_ns: off,
                 tz,
             },
         ))
     });
     it.def_method(&now, "plainDateISO", 0, |i, _t, a| {
-        now_validate_zone(i, &arg(a, 0))?;
-        Ok(make(
-            i,
-            "Temporal.PlainDate",
-            Temporal::Date(IsoDate {
-                year: 1970,
-                month: 1,
-                day: 1,
-            }),
-        ))
+        let tz = now_zone(i, &arg(a, 0))?;
+        let e = now_ns();
+        let (d, _) = zoned_local(e, zone_offset(&tz, e));
+        Ok(make(i, "Temporal.PlainDate", Temporal::Date(d)))
     });
     it.def_method(&now, "plainTimeISO", 0, |i, _t, a| {
-        now_validate_zone(i, &arg(a, 0))?;
-        Ok(make(
-            i,
-            "Temporal.PlainTime",
-            Temporal::Time(IsoTime {
-                hour: 0,
-                minute: 0,
-                second: 0,
-                ms: 0,
-                us: 0,
-                ns: 0,
-            }),
-        ))
+        let tz = now_zone(i, &arg(a, 0))?;
+        let e = now_ns();
+        let (_, tm) = zoned_local(e, zone_offset(&tz, e));
+        Ok(make(i, "Temporal.PlainTime", Temporal::Time(tm)))
     });
     it.def_method(&now, "plainDateTimeISO", 0, |i, _t, a| {
-        now_validate_zone(i, &arg(a, 0))?;
-        Ok(make(
-            i,
-            "Temporal.PlainDateTime",
-            Temporal::DateTime(
-                IsoDate {
-                    year: 1970,
-                    month: 1,
-                    day: 1,
-                },
-                IsoTime {
-                    hour: 0,
-                    minute: 0,
-                    second: 0,
-                    ms: 0,
-                    us: 0,
-                    ns: 0,
-                },
-            ),
-        ))
+        let tz = now_zone(i, &arg(a, 0))?;
+        let e = now_ns();
+        let (d, tm) = zoned_local(e, zone_offset(&tz, e));
+        Ok(make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm)))
     });
+    // Temporal.Now[@@toStringTag]
+    if let Some(key) = crate::builtins::to_string_tag_key(it) {
+        now.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("Temporal.Now"), false, false, true),
+        );
+    }
     ns.borrow_mut()
         .props
         .insert("Now", Property::builtin(Value::Obj(now)));
