@@ -2236,9 +2236,10 @@ impl Parser {
                     return self.err("'await' expression cannot be the operand of 'new'");
                 }
                 let callee = self.parse_member_expr()?;
-                // `new import(...)` is a SyntaxError — an ImportCall (`import()`) is a CallExpression,
-                // so it can't be the MemberExpression base of `new` (even under property access).
-                if callee_has_import_call(&callee) {
+                // `new import(...)` is a SyntaxError — an ImportCall (`import()`) is a
+                // CallExpression, so it can't be the MemberExpression base of `new` — but a
+                // parenthesized `new (import(...))` covers it into a valid PrimaryExpression.
+                if !self.last_paren && callee_has_import_call(&callee) {
                     return self.err("'import(...)' cannot be used with 'new'");
                 }
                 let args = if self.is_punct("(") {

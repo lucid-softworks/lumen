@@ -2246,6 +2246,12 @@ impl Interp {
                     // a getter on the super prototype sees the current `this`.
                     let this = self.get_var("this", env)?;
                     let home = self.super_base(env)?;
+                    if matches!(home, Value::Undefined | Value::Null) {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot read property '{prop}' of a null super base"),
+                        ));
+                    }
                     return crate::builtins::reflect_ordinary_get(self, &home, prop, &this)
                         .map_err(Abrupt::Throw);
                 }
@@ -2269,10 +2275,17 @@ impl Interp {
                 optional,
             } => {
                 if matches!(**obj, Expr::Super) {
+                    // GetThisBinding, the key expression, GetSuperBase, then ToPropertyKey.
                     let this = self.get_var("this", env)?;
                     let idx = self.eval(index, env)?;
-                    let key = self.to_property_key(&idx)?;
                     let home = self.super_base(env)?;
+                    let key = self.to_property_key(&idx)?;
+                    if matches!(home, Value::Undefined | Value::Null) {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot read property '{key}' of a null super base"),
+                        ));
+                    }
                     return crate::builtins::reflect_ordinary_get(self, &home, &key, &this)
                         .map_err(Abrupt::Throw);
                 }
@@ -2664,6 +2677,10 @@ impl Interp {
             let parent = self.get_var("%superclass%", env)?;
             if matches!(parent, Value::Undefined) {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+            }
+            // GetSuperConstructor: a null (extends null) or non-constructor parent is a TypeError.
+            if !self.value_is_constructor(&parent) {
+                return Err(self.throw("TypeError", "super constructor is not a constructor"));
             }
             // Read the `this` binding directly (it is in TDZ until this very call completes);
             // an already-initialized binding means super() ran twice.
@@ -3583,10 +3600,15 @@ impl Interp {
         }
         let inst_env = new_scope(Some(class_env.clone()));
         bind(&inst_env, "%superproto%", opt_obj(&proto_parent));
+        // `extends null` binds Null (a super() call is a TypeError, not a SyntaxError).
         bind(
             &inst_env,
             "%superclass%",
-            ctor_parent.clone().unwrap_or(Value::Undefined),
+            ctor_parent.clone().unwrap_or(if derived {
+                Value::Null
+            } else {
+                Value::Undefined
+            }),
         );
         let static_env = new_scope(Some(class_env.clone()));
         bind(
@@ -4267,6 +4289,17 @@ impl Interp {
                         for k in src.borrow().props.keys() {
                             let p = src.borrow().props.get(&k).cloned().unwrap();
                             dst.borrow_mut().props.insert(k, p);
+                        }
+                        // A Function (or GeneratorFunction/AsyncFunction) subclass instance is
+                        // itself callable: carry the built-in's [[Call]] behavior onto `this`.
+                        let src_call = src.borrow().call.clone();
+                        if !matches!(src_call, Callable::None)
+                            && matches!(dst.borrow().call, Callable::None)
+                        {
+                            let is_ctor = src.borrow().is_constructor;
+                            let mut db = dst.borrow_mut();
+                            db.call = src_call;
+                            db.is_constructor = is_ctor;
                         }
                         // A subclass instance inherits the built-in's exotic behavior (e.g. an Array
                         // subclass is itself an Array exotic).
