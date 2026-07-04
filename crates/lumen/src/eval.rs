@@ -3794,6 +3794,9 @@ impl Interp {
             }
         }
         let inst_env = new_scope(Some(class_env.clone()));
+        // Instance members' [[HomeObject]] is the prototype: `super.x` resolves against its
+        // *live* [[GetPrototypeOf]].
+        bind(&inst_env, "%homeobject%", Value::Obj(proto.clone()));
         bind(&inst_env, "%superproto%", opt_obj(&proto_parent));
         // `extends null` binds Null (a super() call is a TypeError, not a SyntaxError).
         bind(
@@ -3806,15 +3809,22 @@ impl Interp {
             }),
         );
         let static_env = new_scope(Some(class_env.clone()));
+        // Static elements' [[HomeObject]] is the constructor: their super base is the parent
+        // constructor, or %Function.prototype% for a base class.
         bind(
             &static_env,
             "%superproto%",
-            ctor_parent.clone().unwrap_or(Value::Undefined),
+            ctor_parent
+                .clone()
+                .unwrap_or_else(|| Value::Obj(self.function_proto.clone())),
         );
 
         // Build the constructor object on `proto`.
         let ctor_val = self.make_function(ctor_func, inst_env.clone());
         let ctor_obj = ctor_val.as_obj().unwrap().clone();
+        // Static members' [[HomeObject]] is the constructor itself (bound after it exists; the
+        // scope cell is shared with the already-captured static member environments).
+        bind(&static_env, "%homeobject%", ctor_val.clone());
         {
             let mut b = ctor_obj.borrow_mut();
             b.props.insert(
@@ -3852,6 +3862,10 @@ impl Interp {
         // (PrivateMethodOrAccessorAdd), not placed on the prototype — so brand checks, double
         // initialization, and return-override semantics fall out of own-property checks.
         let mut priv_members: Vec<(String, Property)> = Vec::new();
+        // Static elements (field initializers and static blocks) defer until every member's
+        // computed key has been evaluated, then run in declaration order.
+        type StaticEl = (Option<Rc<Function>>, String, Option<Expr>, Vec<Value>);
+        let mut static_els: Vec<StaticEl> = Vec::new();
         let mut instance_inits: Vec<Value> = Vec::new();
         let mut static_inits: Vec<Value> = Vec::new();
         for m in &class.members {
@@ -3928,26 +3942,7 @@ impl Interp {
                         self.define_class_accessor(&target, &key, Some(getter), Some(setter));
                     }
                     if m.is_static {
-                        let scope = new_scope(Some(static_env.clone()));
-                        bind(&scope, "this", ctor_val.clone());
-                        let saved_super = self.super_call_ok;
-                        let saved_field = self.in_field_init_code;
-                        self.super_call_ok = false;
-                        self.in_field_init_code = true;
-                        let v = match &m.value {
-                            Some(e) => self.eval(e, &scope),
-                            None => Ok(Value::Undefined),
-                        };
-                        self.super_call_ok = saved_super;
-                        self.in_field_init_code = saved_field;
-                        let mut v = v?;
-                        for tr in &transforms {
-                            v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
-                        }
-                        ctor_obj
-                            .borrow_mut()
-                            .props
-                            .insert(backing.to_string(), Property::plain(v));
+                        static_els.push((None, backing.to_string(), m.value.clone(), transforms));
                     } else {
                         inst_fields.push(FieldInit {
                             key: backing.to_string(),
@@ -4078,43 +4073,7 @@ impl Interp {
                         )?
                     };
                     if m.is_static {
-                        let scope = new_scope(Some(static_env.clone()));
-                        bind(&scope, "this", ctor_val.clone());
-                        // A static field initializer is field-initializer code: no super() and no
-                        // `arguments` (even through a direct eval); an anonymous function value
-                        // takes the field's name.
-                        let saved_super = self.super_call_ok;
-                        let saved_field = self.in_field_init_code;
-                        self.super_call_ok = false;
-                        self.in_field_init_code = true;
-                        let v = match &m.value {
-                            Some(e) => {
-                                let v = self.eval(e, &scope);
-                                if let (Ok(v), true) = (&v, is_anonymous_fn(e)) {
-                                    self.set_fn_name(v, private_display(&key));
-                                }
-                                v
-                            }
-                            None => Ok(Value::Undefined),
-                        };
-                        self.super_call_ok = saved_super;
-                        self.in_field_init_code = saved_field;
-                        let mut v = v?;
-                        for tr in &transforms {
-                            v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
-                        }
-                        // Static PrivateFieldAdd: a non-extensible constructor (the initializer
-                        // may have sealed it) or a duplicate is a TypeError.
-                        if Interp::is_private_key(&key)
-                            && (ctor_obj.borrow().props.contains(key.as_str())
-                                || !ctor_obj.borrow().extensible)
-                        {
-                            return Err(self.throw(
-                                "TypeError",
-                                "cannot add a private field to a non-extensible object",
-                            ));
-                        }
-                        ctor_obj.borrow_mut().props.insert(key, Property::plain(v));
+                        static_els.push((None, key, m.value.clone(), transforms));
                     } else {
                         inst_fields.push(FieldInit {
                             key,
@@ -4124,33 +4083,74 @@ impl Interp {
                     }
                 }
                 MemberKind::StaticBlock => {
-                    let scope = new_scope(Some(static_env.clone()));
-                    bind(&scope, "this", ctor_val.clone());
                     if let Some(func) = &m.func {
-                        // A static block instantiates its declarations like a function body,
-                        // including a `using` disposal frame.
-                        self.hoist(&func.body, &scope, &[]);
-                        self.declare_block_lexicals(&func.body, &scope, false);
-                        let has_using = func.body.iter().any(stmt_declares_using);
-                        if has_using {
-                            self.using_stack.push(Vec::new());
-                        }
-                        let mut result: Completion = Ok(Value::Undefined);
-                        for stmt in &func.body {
-                            if let Err(e) = self.exec_stmt(stmt, &scope) {
-                                result = Err(e);
-                                break;
-                            }
-                        }
-                        if has_using {
-                            let frame = self.using_stack.pop().unwrap_or_default();
-                            result = self.dispose_frame(frame, result);
-                        }
-                        result?;
+                        static_els.push((Some(func.clone()), String::new(), None, Vec::new()));
                     }
                 }
                 MemberKind::Constructor => {}
             }
+        }
+
+        for (block, key, init, transforms) in static_els {
+            let scope = new_scope(Some(static_env.clone()));
+            bind(&scope, "this", ctor_val.clone());
+            if let Some(func) = block {
+                // A static block instantiates its declarations like a function body,
+                // including a `using` disposal frame.
+                self.hoist(&func.body, &scope, &[]);
+                self.declare_block_lexicals(&func.body, &scope, false);
+                let has_using = func.body.iter().any(stmt_declares_using);
+                if has_using {
+                    self.using_stack.push(Vec::new());
+                }
+                let mut result: Completion = Ok(Value::Undefined);
+                for stmt in &func.body {
+                    if let Err(e) = self.exec_stmt(stmt, &scope) {
+                        result = Err(e);
+                        break;
+                    }
+                }
+                if has_using {
+                    let frame = self.using_stack.pop().unwrap_or_default();
+                    result = self.dispose_frame(frame, result);
+                }
+                result?;
+                continue;
+            }
+            // A static field initializer is field-initializer code: no super() and no
+            // `arguments` (even through a direct eval); an anonymous function value takes
+            // the field's name.
+            let saved_super = self.super_call_ok;
+            let saved_field = self.in_field_init_code;
+            self.super_call_ok = false;
+            self.in_field_init_code = true;
+            let v = match &init {
+                Some(e) => {
+                    let v = self.eval(e, &scope);
+                    if let (Ok(v), true) = (&v, is_anonymous_fn(e)) {
+                        self.set_fn_name(v, private_display(&key));
+                    }
+                    v
+                }
+                None => Ok(Value::Undefined),
+            };
+            self.super_call_ok = saved_super;
+            self.in_field_init_code = saved_field;
+            let mut v = v?;
+            for tr in &transforms {
+                v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
+            }
+            // Static PrivateFieldAdd: a non-extensible constructor (the initializer may have
+            // sealed it) or a duplicate is a TypeError.
+            if Interp::is_private_key(&key)
+                && (ctor_obj.borrow().props.contains(key.as_str()) || !ctor_obj.borrow().extensible)
+            {
+                return Err(self.throw(
+                    "TypeError",
+                    "cannot add a private field to a non-extensible object",
+                ));
+            }
+            ctor_obj.borrow_mut().props.insert(key, Property::plain(v));
         }
 
         self.gc_pin(&ctor_obj);
@@ -4473,7 +4473,7 @@ impl Interp {
             } => {
                 let mut all = bargs.clone();
                 all.extend_from_slice(args);
-                return self.run_constructor_on(&Value::Obj(target), this, &all);
+                self.run_constructor_on(&Value::Obj(target), this, &all)
             }
             Callable::User(func, cenv) => {
                 // A base class initializes its fields before its body runs; a derived class does so

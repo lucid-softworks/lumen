@@ -3177,6 +3177,7 @@ impl Parser {
         }
         // `static { ... }` initialization block — a super-property context and function-like code
         // where `new.target` is valid (evaluates to undefined).
+        // (get/set before a `*` is a *field* named get/set followed by a generator method.)
         if is_static && self.is_punct("{") {
             self.advance();
             let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
@@ -3253,6 +3254,8 @@ impl Parser {
         if (self.is_ident_word("get") || self.is_ident_word("set"))
             && !self.cur_escaped()
             && !self.next_is_member_terminator(1)
+            // `get` followed by `*` is a *field* named get and a generator method (ASI).
+            && !matches!(self.peek_kind(1), Tok::Punct("*"))
         {
             kind = if self.is_ident_word("get") {
                 MemberKind::Get
