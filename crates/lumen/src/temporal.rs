@@ -3112,6 +3112,9 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let bagv = Value::Obj(bag);
         let draw = read_date_raw_cal(i, &bagv, &cal, ovf)?;
         let nd = regulate_date(i, draw, ovf)?;
+        if !iso_date_within_limits(nd) {
+            return Err(i.make_error("RangeError", "date is outside the supported range"));
+        }
         Ok(make_like(i, &t, "Temporal.PlainDate", Temporal::Date(nd)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -3800,6 +3803,10 @@ fn ym_add(
             "RangeError",
             "cannot add units smaller than months to a PlainYearMonth",
         ));
+    }
+    // The arithmetic anchors at the month's first day, which must itself be representable.
+    if !iso_date_within_limits(ym_ref_of(cal, d)) {
+        return Err(i.make_error("RangeError", "date is outside the supported range"));
     }
     // Anchor at day 1: it fits every month, so the synthetic day never triggers a day-overflow reject,
     // while a `reject` overflow still fires for a leap month absent in the target year (an independent
@@ -5638,7 +5645,16 @@ fn to_yearmonth_cal(
                     .unwrap_or("iso8601"),
             );
             to_overflow(i, opts)?;
-            (ym, cal)
+            if &*cal != "iso8601" {
+                // The stored reference is the calendar month's first day of the full date.
+                let full = parse_iso(s).and_then(|p| p.date).unwrap_or(ym);
+                if !date_in_range(full) {
+                    return Err(i.make_error("RangeError", "date outside representable range"));
+                }
+                (ym_ref_of(&cal, full), cal)
+            } else {
+                (ym, cal)
+            }
         }
         Value::Obj(_) => {
             let bag = read_dt_bag(i, v, false, false, false)?;
@@ -5961,7 +5977,6 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
 /// CalendarMonthDayToISOReferenceDate for a non-ISO calendar: the reference ISO date is the latest
 /// date at or before 1972-12-31 (in the calendar) whose monthCode and day match the request, so a
 /// leap monthCode anchors to a year that actually has it. `snap` holds the already-read fields.
-
 /// The largest day the month code reaches in any year of the calendar, or None when the
 /// (code, day-30) combination is not known to occur historically (rare Chinese leap months).
 fn md_max_day(cal: &str, code: &str, day: i64) -> Option<i64> {
@@ -5979,11 +5994,9 @@ fn md_max_day(cal: &str, code: &str, day: i64) -> Option<i64> {
         }
         "chinese" | "dangi" => {
             let refs = chinese_md_ref(cal, code)?;
-            if refs.0.is_none() {
-                return None;
-            }
-            if day >= 30 && refs.1.is_none() {
-                return None;
+            refs.0?;
+            if day >= 30 {
+                refs.1?;
             }
             Some(30)
         }
@@ -6119,13 +6132,7 @@ fn md_ref_iso_year(cal: &str, code: &str, day: i64) -> i64 {
                 1972
             }
         }
-        c if is_13month(c) => {
-            if code == "M13" && day == 6 {
-                1971
-            } else {
-                1972
-            }
-        }
+        c if is_13month(c) && code == "M13" && day == 6 => 1971,
         _ => 1972,
     }
 }
