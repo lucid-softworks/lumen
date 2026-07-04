@@ -5090,6 +5090,10 @@ impl Interp {
                     return self.set_member(&this, prop, value);
                 }
                 let base = self.eval(obj, env)?;
+                if prop.starts_with('#') {
+                    let k = self.resolve_private(prop, env);
+                    return self.set_private_member(&base, &k, value);
+                }
                 self.set_member(&base, prop, value)
             }
             Expr::Index { obj, index, .. } => {

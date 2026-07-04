@@ -58,6 +58,7 @@ pub fn parse_script_eval(
         super_call_ok: allow_super,
         in_derived_class: false,
         in_case_clause: false,
+        no_arguments_refs: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -120,6 +121,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         super_call_ok: false,
         in_derived_class: false,
         in_case_clause: false,
+        no_arguments_refs: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -339,6 +341,9 @@ struct Parser {
     in_derived_class: bool,
     /// True while parsing the statements directly inside a switch case/default clause.
     in_case_clause: bool,
+    /// True while `arguments` may not be referenced (a class static block; unlike the `await`
+    /// reservation this survives arrow bodies — `Contains` descends arrows).
+    no_arguments_refs: bool,
     /// Deferred duplicate-`__proto__` errors from object literals. The Annex B early error does not
     /// apply when the literal turns out to be a destructuring assignment pattern, so `parse_assign`
     /// forgives entries recorded inside a reinterpreted pattern; leftovers surface at the end of the
@@ -625,6 +630,9 @@ impl Parser {
     // ----- statements -------------------------------------------------------------------------
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if self.in_static_block && self.is_kw("return") {
+            return self.err("'return' is not allowed directly in a class static block");
+        }
         // `import`/`export` declarations are valid only as top-level ModuleItems. Capture the flag
         // and clear it: any statement we recurse into (block, if/loop body, label, switch case) is a
         // nested context where an import/export declaration is a SyntaxError.
@@ -2331,6 +2339,10 @@ impl Parser {
         loop {
             if self.eat_punct(".") {
                 let name = self.parse_property_name_ident()?;
+                // `super.#x` is an early SyntaxError.
+                if name.starts_with('#') && matches!(base, Expr::Super) {
+                    return self.err("cannot access a private member through 'super'");
+                }
                 base = Expr::Member {
                     obj: Box::new(base),
                     prop: name,
@@ -2393,6 +2405,9 @@ impl Parser {
             return self.err("legacy octal literals are not allowed in strict mode");
         }
         match self.cur().clone() {
+            Tok::Ident(n) if n == "arguments" && self.no_arguments_refs => {
+                self.err("'arguments' is not allowed in a class static block")
+            }
             Tok::Num(n) => {
                 self.advance();
                 Ok(Expr::Num(n))
@@ -2612,6 +2627,7 @@ impl Parser {
                         super_call_ok: self.super_call_ok,
                         in_derived_class: false,
                         in_case_clause: false,
+                        no_arguments_refs: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2680,6 +2696,7 @@ impl Parser {
                         super_call_ok: self.super_call_ok,
                         in_derived_class: false,
                         in_case_clause: false,
+                        no_arguments_refs: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2964,11 +2981,13 @@ impl Parser {
         let ssuper = std::mem::replace(&mut self.super_prop_ok, false);
         let scall = std::mem::replace(&mut self.super_call_ok, false);
         let ssb = std::mem::replace(&mut self.in_static_block, false);
+        let sargs = std::mem::replace(&mut self.no_arguments_refs, false);
         let params = self.parse_params()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
         self.super_call_ok = scall;
         self.in_static_block = ssb;
+        self.no_arguments_refs = sargs;
         self.in_generator = sg;
         self.in_async = sa;
         let strict = is_strict || self.strict;
@@ -3155,11 +3174,13 @@ impl Parser {
             let scall = std::mem::replace(&mut self.super_call_ok, false);
             let snt = std::mem::replace(&mut self.allow_new_target, true);
             let ssb = std::mem::replace(&mut self.in_static_block, true);
+            let sargs = std::mem::replace(&mut self.no_arguments_refs, true);
             let body = self.parse_block_body();
             self.super_prop_ok = ssuper;
             self.super_call_ok = scall;
             self.allow_new_target = snt;
             self.in_static_block = ssb;
+            self.no_arguments_refs = sargs;
             let body = body?;
             let func = Function {
                 name: None,
@@ -3299,8 +3320,10 @@ impl Parser {
         // A method body (and any parameter default) is a super-property context. Whether it is a
         // SuperCall context was decided by the caller (only a derived class constructor is).
         let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
-        // A method body is a function boundary: it leaves a static block's `await` reservation.
+        // A method body is a function boundary: it leaves a static block's `await` and
+        // `arguments` reservations.
         let ssb = std::mem::replace(&mut self.in_static_block, false);
+        let sargs = std::mem::replace(&mut self.no_arguments_refs, false);
         let params = self.parse_params()?;
         // A method has UniqueFormalParameters: duplicate parameter names are always an error.
         if let Some(dup) = duplicate_name(&param_names(&params)) {
@@ -3308,11 +3331,13 @@ impl Parser {
             self.in_async = sa;
             self.super_prop_ok = ssuper;
             self.in_static_block = ssb;
+            self.no_arguments_refs = sargs;
             return self.err(format!("duplicate parameter name '{dup}'"));
         }
         let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
         self.in_static_block = ssb;
+        self.no_arguments_refs = sargs;
         self.in_generator = sg;
         self.in_async = sa;
         if let Some(dup) = params_body_lexical_clash(&params, &body) {
