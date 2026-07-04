@@ -1224,7 +1224,12 @@ impl Parser {
         } else if self.is_ident_word("let") && !self.cur_escaped() && self.starts_let_decl() {
             self.advance();
             Some(DeclKind::Let)
-        } else if self.is_ident_word("using") && self.starts_using_decl() {
+        } else if self.is_ident_word("using")
+            && self.starts_using_decl()
+            && !matches!(self.peek_kind(1), Tok::Ident(w) if w == "of")
+        {
+            // (`for (using of ...)` keeps `using` as an identifier — a using declaration's
+            // binding can't be named `of` here.)
             self.advance();
             Some(DeclKind::Using)
         } else if self.is_ident_word("await") && self.in_async && self.starts_await_using() {

@@ -1063,11 +1063,20 @@ impl Interp {
             .collect();
         let mut idx = 0;
         self.run_loop(label, env, |me, env| {
-            if idx >= items.len() {
-                return Ok(LoopStep::Done(Value::Empty));
-            }
-            let v = items[idx].clone();
-            idx += 1;
+            // A property deleted while the enumeration is under way is not visited.
+            let v = loop {
+                if idx >= items.len() {
+                    return Ok(LoopStep::Done(Value::Empty));
+                }
+                let v = items[idx].clone();
+                idx += 1;
+                if let Value::Str(k) = &v {
+                    if !me.js_has_property(&rhs, k)? {
+                        continue;
+                    }
+                }
+                break v;
+            };
             let iter_env = new_scope(Some(env.clone()));
             me.bind_pattern(left, v, &iter_env, mode)?;
             let bv = me.exec_stmt(body, &iter_env)?;
@@ -2814,7 +2823,7 @@ impl Interp {
             return Ok(None);
         };
         let (func, this) = match &**tag {
-            Expr::Ident(_) => (self.eval(tag, env)?, Value::Undefined),
+            Expr::Ident(_) | Expr::Call { .. } => (self.eval(tag, env)?, Value::Undefined),
             Expr::Member { obj, prop, .. } if !matches!(**obj, Expr::Super) => {
                 let base = self.eval(obj, env)?;
                 if matches!(base, Value::Undefined | Value::Null) {
@@ -5397,7 +5406,7 @@ impl Interp {
         // mixing check so a wrapped BigInt object coerces correctly.
         if matches!(
             op,
-            "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>"
+            "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" | ">>>"
         ) {
             // `+` primes both operands with ToPrimitive first (string concatenation dispatch);
             // every other operator applies ToNumeric to the left operand *completely* before
@@ -5456,6 +5465,9 @@ impl Interp {
                     )),
                     ">>" => Ok(Value::Num(
                         (self.to_int32(&ln)? >> (self.to_uint32(&rn)? & 31)) as f64,
+                    )),
+                    ">>>" => Ok(Value::Num(
+                        (self.to_uint32(&ln)? >> (self.to_uint32(&rn)? & 31)) as f64,
                     )),
                     _ => unreachable!(),
                 };
@@ -5532,18 +5544,7 @@ impl Interp {
                 let b = (self.to_uint32(&r)?) & 31;
                 Ok(Value::Num((a >> b) as f64))
             }
-            ">>>" => {
-                // ToNumeric both operands first (left completely, then right): a BigInt on
-                // either side is a TypeError — but only after the coercions ran.
-                let lp = self.to_primitive(&l, Hint::Number)?;
-                let rp = self.to_primitive(&r, Hint::Number)?;
-                if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
-                    return Err(self.throw("TypeError", "BigInts have no unsigned right shift"));
-                }
-                let a = self.to_uint32(&lp)?;
-                let b = (self.to_uint32(&rp)?) & 31;
-                Ok(Value::Num((a >> b) as f64))
-            }
+            ">>>" => unreachable!("handled by the numeric block"),
             "instanceof" => self.instanceof(&l, &r),
             "in" => {
                 if matches!(&r, Value::Obj(_)) {
