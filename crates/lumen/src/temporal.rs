@@ -360,28 +360,6 @@ fn build_time(
 /// Build a time honoring `overflow`: `reject` range-checks (as [`build_time`]); `constrain` clamps
 /// each field into its valid range.
 #[allow(clippy::too_many_arguments)]
-fn build_time_ovf(
-    i: &Interp,
-    hour: i64,
-    minute: i64,
-    second: i64,
-    ms: i64,
-    us: i64,
-    ns: i64,
-    ovf: Overflow,
-) -> Result<IsoTime, Value> {
-    match ovf {
-        Overflow::Reject => build_time(i, hour, minute, second, ms, us, ns),
-        Overflow::Constrain => Ok(IsoTime {
-            hour: hour.clamp(0, 23) as u8,
-            minute: minute.clamp(0, 59) as u8,
-            second: second.clamp(0, 59) as u8,
-            ms: ms.clamp(0, 999) as u16,
-            us: us.clamp(0, 999) as u16,
-            ns: ns.clamp(0, 999) as u16,
-        }),
-    }
-}
 /// The recognised BCP-47 calendar identifiers. Date arithmetic uses the proleptic ISO/Gregorian
 /// calendar for all of them (exact for iso8601/gregory; the others are accepted so construction and
 /// `calendarId` round-trip, even though their field output is not yet calendar-specific).
@@ -3862,240 +3840,6 @@ fn diff_date_greedy(cal: &str, a: IsoDate, b: IsoDate, largest: &str) -> IsoDura
     out
 }
 
-/// Add a full duration (date + time parts) to a datetime, carrying time overflow into days.
-fn add_dt_dur(d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
-    let date_only = IsoDuration {
-        years: dur.years,
-        months: dur.months,
-        weeks: dur.weeks,
-        days: dur.days,
-        ..Default::default()
-    };
-    let nd = add_date_dur(d, date_only);
-    let time_ns = dur.hours as i128 * 3_600_000_000_000
-        + dur.minutes as i128 * 60_000_000_000
-        + dur.seconds as i128 * 1_000_000_000
-        + dur.ms as i128 * 1_000_000
-        + dur.us as i128 * 1_000
-        + dur.ns as i128;
-    let total = time_to_ns(t) as i128 + time_ns;
-    let carry = total.div_euclid(86_400_000_000_000);
-    let rem = total.rem_euclid(86_400_000_000_000);
-    let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
-    (
-        IsoDate {
-            year: y,
-            month: m,
-            day: da,
-        },
-        ns_to_time(rem),
-    )
-}
-
-/// Like `add_dt_dur`, but adds the year/month/day part with calendar `cal`'s own arithmetic (for a
-/// non-ISO PlainDateTime), carrying time overflow into the calendar day count.
-fn add_dt_dur_cal(cal: &str, d: IsoDate, t: IsoTime, dur: &IsoDuration) -> (IsoDate, IsoTime) {
-    if !is_month_structure(cal) {
-        return add_dt_dur(d, t, dur);
-    }
-    let date_only = IsoDuration {
-        years: dur.years,
-        months: dur.months,
-        weeks: dur.weeks,
-        days: dur.days,
-        ..Default::default()
-    };
-    let nd = cal_add_c(cal, d, date_only, 1);
-    let time_ns = dur.hours as i128 * 3_600_000_000_000
-        + dur.minutes as i128 * 60_000_000_000
-        + dur.seconds as i128 * 1_000_000_000
-        + dur.ms as i128 * 1_000_000
-        + dur.us as i128 * 1_000
-        + dur.ns as i128;
-    let total = time_to_ns(t) as i128 + time_ns;
-    let carry = total.div_euclid(86_400_000_000_000);
-    let rem = total.rem_euclid(86_400_000_000_000);
-    let (y, m, da) = civil_from_days(epoch_days(nd) + carry as i64);
-    (
-        IsoDate {
-            year: y,
-            month: m,
-            day: da,
-        },
-        ns_to_time(rem),
-    )
-}
-
-/// Zero every duration field strictly smaller than the unit of rank `srank` (year=9 … ns=0).
-fn zero_below(m: &mut IsoDuration, srank: i32) {
-    if srank > 0 {
-        m.ns = 0.0;
-    }
-    if srank > 1 {
-        m.us = 0.0;
-    }
-    if srank > 2 {
-        m.ms = 0.0;
-    }
-    if srank > 3 {
-        m.seconds = 0.0;
-    }
-    if srank > 4 {
-        m.minutes = 0.0;
-    }
-    if srank > 5 {
-        m.hours = 0.0;
-    }
-    if srank > 6 {
-        m.days = 0.0;
-    }
-    if srank > 7 {
-        m.weeks = 0.0;
-    }
-    if srank > 8 {
-        m.months = 0.0;
-    }
-}
-/// The value of the duration field named by `unit`.
-fn dur_field_val(m: &IsoDuration, unit: &str) -> f64 {
-    match unit {
-        "year" => m.years,
-        "month" => m.months,
-        "week" => m.weeks,
-        "day" => m.days,
-        "hour" => m.hours,
-        "minute" => m.minutes,
-        "second" => m.seconds,
-        "millisecond" => m.ms,
-        "microsecond" => m.us,
-        _ => m.ns,
-    }
-}
-/// Add `delta` to the duration field named by `unit`.
-fn dur_field_add(m: &mut IsoDuration, unit: &str, delta: f64) {
-    match unit {
-        "year" => m.years += delta,
-        "month" => m.months += delta,
-        "week" => m.weeks += delta,
-        "day" => m.days += delta,
-        "hour" => m.hours += delta,
-        "minute" => m.minutes += delta,
-        "second" => m.seconds += delta,
-        "millisecond" => m.ms += delta,
-        "microsecond" => m.us += delta,
-        _ => m.ns += delta,
-    }
-}
-
-/// A PlainDateTime difference (`d1t1` → `d2t2`) balanced to `largest`, then rounded to `smallest`
-/// with `increment`/`mode`. The fraction of the smallest unit is measured on the absolute-ns line
-/// between the two candidate boundary datetimes.
-#[allow(clippy::too_many_arguments)]
-fn diff_datetime_rounded(
-    cal: &str,
-    d1: IsoDate,
-    t1: IsoTime,
-    d2: IsoDate,
-    t2: IsoTime,
-    largest: &str,
-    smallest: &str,
-    increment: i64,
-    mode: &str,
-) -> IsoDuration {
-    let smallest = sing(smallest);
-    let is_cal = matches!(largest, "year" | "month" | "week");
-    let base = if is_cal {
-        diff_datetime(cal, d1, t1, d2, t2, largest)
-    } else {
-        balance_ns(dt_ns(d2, t2) - dt_ns(d1, t1), largest)
-    };
-    let srank = unit_rank(smallest).unwrap_or(0);
-    if srank == 0 && increment <= 1 {
-        return base;
-    }
-    let a_ns = dt_ns(d1, t1);
-    let b_ns = dt_ns(d2, t2);
-    if a_ns == b_ns {
-        return base;
-    }
-    let positive = a_ns < b_ns;
-    let (lo_d, lo_t, hi_d, hi_t) = if positive {
-        (d1, t1, d2, t2)
-    } else {
-        (d2, t2, d1, t1)
-    };
-    let mag = if positive { base } else { neg_duration(base) };
-    let mut low = mag;
-    zero_below(&mut low, srank);
-    if increment > 1 {
-        let v = dur_field_val(&low, smallest);
-        dur_field_add(&mut low, smallest, -v.rem_euclid(increment as f64));
-    }
-    let base_units = dur_field_val(&low, smallest) / increment.max(1) as f64;
-    let mut high = low;
-    dur_field_add(&mut high, smallest, increment as f64);
-    let (ld, lt) = add_dt_dur_cal(cal, lo_d, lo_t, &low);
-    let (hd, ht) = add_dt_dur_cal(cal, lo_d, lo_t, &high);
-    let low_ns = dt_ns(ld, lt);
-    let high_ns = dt_ns(hd, ht);
-    let target_ns = dt_ns(hi_d, hi_t);
-    let denom = (high_ns - low_ns) as f64;
-    let fraction = if denom == 0.0 {
-        0.0
-    } else {
-        (target_ns - low_ns) as f64 / denom
-    };
-    let up = round_up_magnitude(mode, fraction, positive, base_units % 2.0 == 0.0);
-    let chosen = if up { high } else { low };
-    let (rd, rt) = add_dt_dur_cal(cal, lo_d, lo_t, &chosen);
-    let result = if is_cal {
-        diff_datetime(cal, lo_d, lo_t, rd, rt, largest)
-    } else {
-        balance_ns(dt_ns(rd, rt) - dt_ns(lo_d, lo_t), largest)
-    };
-    if positive {
-        result
-    } else {
-        neg_duration(result)
-    }
-}
-
-fn read_datetime_diff(
-    i: &mut Interp,
-    opts: &Value,
-) -> Result<(String, String, i64, String), Value> {
-    read_datetime_diff_auto(i, opts, 6)
-}
-
-/// Like `read_datetime_diff` with an explicit `auto` rank for largestUnit (day for
-/// PlainDateTime, hour for ZonedDateTime).
-fn read_datetime_diff_auto(
-    i: &mut Interp,
-    opts: &Value,
-    auto_rank: i32,
-) -> Result<(String, String, i64, String), Value> {
-    let largest_raw = sing(&opt_str(i, opts, "largestUnit", "auto")?).to_string();
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
-    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
-    check_mode(i, &mode)?;
-    let srank =
-        unit_rank(&smallest).ok_or_else(|| i.make_error("RangeError", "invalid smallestUnit"))?;
-    let lrank = if largest_raw == "auto" {
-        srank.max(auto_rank)
-    } else {
-        unit_rank(&largest_raw).ok_or_else(|| i.make_error("RangeError", "invalid largestUnit"))?
-    };
-    if lrank < srank {
-        return Err(i.make_error(
-            "RangeError",
-            "largestUnit cannot be smaller than smallestUnit",
-        ));
-    }
-    check_increment(i, &smallest, incr)?;
-    Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
-}
-
 /// The ISO date of the first day of `iso`'s month in calendar `cal` — the reference date a
 /// PlainYearMonth stores.
 fn ym_ref_of(cal: &str, iso: IsoDate) -> IsoDate {
@@ -4186,55 +3930,6 @@ fn read_date_diff(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, 
     }
     check_increment(i, &smallest, incr)?;
     Ok((rank_unit(lrank).to_string(), smallest, incr, mode))
-}
-
-/// Difference between two datetimes honoring a calendar `largest` unit (year/month/week/day) for the
-/// date part and balancing the remaining time-of-day, with a borrow when the end time is earlier.
-fn diff_datetime(
-    cal: &str,
-    d1: IsoDate,
-    t1: IsoTime,
-    d2: IsoDate,
-    t2: IsoTime,
-    largest: &str,
-) -> IsoDuration {
-    let a = dt_ns(d1, t1);
-    let b = dt_ns(d2, t2);
-    if a == b {
-        return IsoDuration::default();
-    }
-    // Anchor the difference at (d1, t1) and move toward (d2, t2), matching `diff_date`. The time part
-    // carries a whole-day borrow (in the direction of travel) when the end time-of-day would overshoot.
-    let day_ns = 86_400_000_000_000i64;
-    let sign = if a < b { 1 } else { -1 };
-    let mut tdiff = time_to_ns(t2) - time_to_ns(t1);
-    let mut end_date = d2;
-    if sign > 0 && tdiff < 0 {
-        tdiff += day_ns;
-        let (y, m, da) = civil_from_days(epoch_days(d2) - 1);
-        end_date = IsoDate {
-            year: y,
-            month: m,
-            day: da,
-        };
-    } else if sign < 0 && tdiff > 0 {
-        tdiff -= day_ns;
-        let (y, m, da) = civil_from_days(epoch_days(d2) + 1);
-        end_date = IsoDate {
-            year: y,
-            month: m,
-            day: da,
-        };
-    }
-    let mut out = diff_date_cal(cal, d1, end_date, largest); // signed (anchored at d1)
-    let time = balance_ns(tdiff as i128, "hour");
-    out.hours = time.hours;
-    out.minutes = time.minutes;
-    out.seconds = time.seconds;
-    out.ms = time.ms;
-    out.us = time.us;
-    out.ns = time.ns;
-    out
 }
 
 /// Add `months` months to a date, clamping the day to the resulting month's length.
@@ -4346,19 +4041,6 @@ fn check_str_calendar(i: &Interp, s: &str) -> Result<(), Value> {
         }
         _ => Ok(()),
     }
-}
-/// Copy the six date fields out of `v` (reading each once, in `read_date_raw_cal`'s field order) into
-/// a plain object, so the calendar resolution can be deferred past the overflow option without
-/// re-triggering the source's getters.
-fn snapshot_date_fields(i: &mut Interp, v: &Value) -> Result<Value, Value> {
-    let snap = i.new_object();
-    for k in ["day", "era", "eraYear", "month", "monthCode", "year"] {
-        let fv = getm(i, v, k)?;
-        if !matches!(fv, Value::Undefined) {
-            setm(&snap, k, fv);
-        }
-    }
-    Ok(Value::Obj(snap))
 }
 /// Clamp `val` into `[1, hi]`, or (under `overflow: reject`) raise a RangeError if it was out of range.
 fn clamp_or(i: &Interp, val: i64, hi: i64, ovf: Overflow, what: &str) -> Result<i64, Value> {
@@ -5290,48 +4972,6 @@ fn ns_to_time(ns: i128) -> IsoTime {
         ns: (ns % 1000) as u16,
     }
 }
-/// Balance a nanosecond span into a Duration whose largest unit is `largest`.
-fn balance_ns(total: i128, largest: &str) -> IsoDuration {
-    let largest = largest.strip_suffix('s').unwrap_or(largest); // accept plural unit names
-    let neg = total < 0;
-    let mut n = total.abs();
-    let nanos = (n % 1000) as i64;
-    n /= 1000;
-    let micros = (n % 1000) as i64;
-    n /= 1000;
-    let millis = (n % 1000) as i64;
-    n /= 1000;
-    let secs = n as i64; // remaining whole seconds
-    let mut out = IsoDuration {
-        ms: millis as f64,
-        us: micros as f64,
-        ns: nanos as f64,
-        ..Default::default()
-    };
-    match largest {
-        "day" => {
-            out.days = (secs / 86400) as f64;
-            let r = secs % 86400;
-            out.hours = (r / 3600) as f64;
-            out.minutes = ((r / 60) % 60) as f64;
-            out.seconds = (r % 60) as f64;
-        }
-        "hour" | "auto" => {
-            out.hours = (secs / 3600) as f64;
-            out.minutes = ((secs / 60) % 60) as f64;
-            out.seconds = (secs % 60) as f64;
-        }
-        "minute" => {
-            out.minutes = (secs / 60) as f64;
-            out.seconds = (secs % 60) as f64;
-        }
-        _ => out.seconds = secs as f64,
-    }
-    if neg {
-        out = neg_duration(out);
-    }
-    out
-}
 fn to_time(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoTime, Value> {
     match get(i, v) {
         Some(Temporal::Time(t)) | Some(Temporal::DateTime(_, t)) => {
@@ -5549,27 +5189,19 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toZonedDateTime", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let tzv = arg(a, 0);
-        let tz_raw: Rc<str> = match &tzv {
-            Value::Str(s) => s.clone(),
-            Value::Obj(_) => match get(i, &tzv) {
-                Some(Temporal::Zoned { tz, .. }) => tz,
-                _ => {
-                    return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
-                }
-            },
-            _ => {
-                return Err(
-                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                )
-            }
-        };
-        let tz = normalize_tz(i, &tz_raw)?;
-        let disamb = opt_str(i, &arg(a, 1), "disambiguation", "compatible")?;
+        let tz = tz_from_field(i, &arg(a, 0))?;
+        let disamb = opt_enum(
+            i,
+            &get_opts_obj(i, &arg(a, 1))?,
+            "disambiguation",
+            &["compatible", "earlier", "later", "reject"],
+            "compatible",
+        )?;
+        if !iso_datetime_within_limits(d, tm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         let local = dt_ns(d, tm);
-        let epoch = local_to_epoch(i, &tz, local, &disamb)?;
+        let epoch = check_instant(i, local_to_epoch(i, &tz, local, &disamb)?)?;
         let offset = (local - epoch) as i64;
         Ok(make_like(
             i,
@@ -5594,9 +5226,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal_id = cal_of(i, &t);
         let (nd, ntm) = dt_add(i, d, tm, dur, 1, ovf, &cal_id)?;
+        if !iso_datetime_within_limits(nd, ntm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
@@ -5607,9 +5242,12 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal_id = cal_of(i, &t);
         let (nd, ntm) = dt_add(i, d, tm, dur, -1, ovf, &cal_id)?;
+        if !iso_datetime_within_limits(nd, ntm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
@@ -5619,27 +5257,169 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let f = arg(a, 0);
-        if !matches!(f, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "with() argument must be an object"));
-        }
-        let hour = field_int(i, &f, "hour", tm.hour as i64)?;
-        let minute = field_int(i, &f, "minute", tm.minute as i64)?;
-        let second = field_int(i, &f, "second", tm.second as i64)?;
-        let ms = field_int(i, &f, "millisecond", tm.ms as i64)?;
-        let us = field_int(i, &f, "microsecond", tm.us as i64)?;
-        let nsf = field_int(i, &f, "nanosecond", tm.ns as i64)?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
         let cal = cal_of(i, &t);
-        let nd = if &*cal == "iso8601" {
-            let year = field_int(i, &f, "year", d.year)?;
-            let month = field_int(i, &f, "month", d.month as i64)?;
-            let day = field_int(i, &f, "day", d.day as i64)?;
-            build_date_ovf(i, year, month, day, ovf)?
-        } else {
-            with_cal_date(i, &cal, d, &f, ovf)?
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) || get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
+        }
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        let uses_era = cal_uses_era(&cal);
+        let mut any = false;
+        let read_int = |i: &mut Interp, key: &str, any: &mut bool| -> Result<Option<i64>, Value> {
+            let fv = getm(i, &f, key)?;
+            match fv {
+                Value::Undefined => Ok(None),
+                _ => {
+                    *any = true;
+                    Ok(Some(to_int(i, &fv)?))
+                }
+            }
         };
-        let nt = build_time_ovf(i, hour, minute, second, ms, us, nsf, ovf)?;
+        let day = match read_int(i, "day", &mut any)? {
+            Some(d2) if d2 < 1 => {
+                return Err(i.make_error("RangeError", "day must be positive"));
+            }
+            other => other,
+        };
+        let (era, era_year) = if uses_era {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(i.to_string(&ev).map_err(unab)?.to_lowercase())
+                }
+            };
+            let ey = read_int(i, "eraYear", &mut any)?;
+            (era, ey)
+        } else {
+            (None, None)
+        };
+        let hour = read_int(i, "hour", &mut any)?;
+        let us = read_int(i, "microsecond", &mut any)?;
+        let ms = read_int(i, "millisecond", &mut any)?;
+        let minute = read_int(i, "minute", &mut any)?;
+        let month = {
+            let fv = getm(i, &f, "month")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let month_code = {
+            let fv = getm(i, &f, "monthCode")?;
+            match &fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    Some(sv)
+                }
+            }
+        };
+        let ns_f = read_int(i, "nanosecond", &mut any)?;
+        let second = read_int(i, "second", &mut any)?;
+        let year = read_int(i, "year", &mut any)?;
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one field"));
+        }
+        if era.is_some() != era_year.is_some() {
+            return Err(i.make_error("TypeError", "era and eraYear must both be provided"));
+        }
+        if era_year.is_some() && year.is_some() {
+            return Err(i.make_error("TypeError", "eraYear and year are mutually exclusive"));
+        }
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
+        let cf = cal_fields(&cal, d);
+        let bag = Object::new(Some(i.object_proto.clone()));
+        {
+            let mut b = bag.borrow_mut();
+            match year {
+                Some(y) => {
+                    b.props
+                        .insert("year", Property::builtin(Value::Num(y as f64)));
+                }
+                None => {
+                    if era.is_none() || era_year.is_none() {
+                        b.props.insert(
+                            "year",
+                            Property::builtin(Value::Num(cal_year_num(&cal, d) as f64)),
+                        );
+                    }
+                }
+            }
+            if let Some(e2) = &era {
+                b.props
+                    .insert("era", Property::builtin(Value::str(e2.as_str())));
+            }
+            if let Some(ey) = era_year {
+                b.props
+                    .insert("eraYear", Property::builtin(Value::Num(ey as f64)));
+            }
+            match (month, &month_code) {
+                (None, None) => {
+                    b.props.insert(
+                        "monthCode",
+                        Property::builtin(Value::str(cal_month_code(&cal, d))),
+                    );
+                }
+                _ => {
+                    if let Some(m) = month {
+                        b.props
+                            .insert("month", Property::builtin(Value::Num(m as f64)));
+                    }
+                    if let Some(mc) = &month_code {
+                        b.props
+                            .insert("monthCode", Property::builtin(Value::Str(mc.clone())));
+                    }
+                }
+            }
+            b.props.insert(
+                "day",
+                Property::builtin(Value::Num(day.unwrap_or(cf.2) as f64)),
+            );
+        }
+        let bagv = Value::Obj(bag);
+        let draw = read_date_raw_cal(i, &bagv, &cal, ovf)?;
+        let nd = regulate_date(i, draw, ovf)?;
+        let traw = [
+            hour.unwrap_or(tm.hour as i64),
+            minute.unwrap_or(tm.minute as i64),
+            second.unwrap_or(tm.second as i64),
+            ms.unwrap_or(tm.ms as i64),
+            us.unwrap_or(tm.us as i64),
+            ns_f.unwrap_or(tm.ns as i64),
+        ];
+        let nt = regulate_time(i, traw, ovf)?;
+        if !iso_datetime_within_limits(nd, nt) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
@@ -5649,71 +5429,58 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let (o, shorthand) = round_opts(&arg(a, 0));
-        let smallest = match shorthand {
-            Some(s) => s,
+        let arg0 = arg(a, 0);
+        if !matches!(arg0, Value::Obj(_) | Value::Str(_)) {
+            return Err(i.make_error("TypeError", "options must be an object or a string"));
+        }
+        let (o, shorthand) = round_opts(&arg0);
+        // Alphabetical option order: roundingIncrement, roundingMode, smallestUnit.
+        let incr_raw = match &shorthand {
+            Some(_) => 1,
+            None => read_rounding_increment(i, &o)?,
+        };
+        let mode = match &shorthand {
+            Some(_) => "halfExpand".to_string(),
+            None => opt_str(i, &o, "roundingMode", "halfExpand")?,
+        };
+        check_mode(i, &mode)?;
+        let smallest_raw = match shorthand {
+            Some(sh) => sh,
             None => opt_str(i, &o, "smallestUnit", "")?,
         };
-        let unit = if smallest == "day" {
-            86_400_000_000_000
+        let smallest = sing(&smallest_raw).to_string();
+        if !matches!(
+            smallest.as_str(),
+            "day" | "hour" | "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+        ) {
+            return Err(i.make_error("RangeError", "invalid smallestUnit"));
+        }
+        if smallest == "day" {
+            if incr_raw != 1 {
+                return Err(i.make_error("RangeError", "roundingIncrement out of range"));
+            }
         } else {
-            unit_ns(&smallest)
-                .ok_or_else(|| i.make_error("RangeError", "smallestUnit is required"))?
-        };
-        let incr_raw = opt_num(i, &o, "roundingIncrement", 1)?;
-        let mode = opt_str(i, &o, "roundingMode", "halfExpand")?;
-        check_mode(i, &mode)?;
-        check_increment(i, smallest.strip_suffix('s').unwrap_or(&smallest), incr_raw)?;
-        let incr = incr_raw as i128;
-        let rounded = round_ns(dt_ns(d, tm), unit * incr, &mode);
-        let z = rounded.div_euclid(86_400_000_000_000) as i64;
-        let rem = rounded.rem_euclid(86_400_000_000_000);
-        let (y, mo, da) = civil_from_days(z);
-        let nd = check_date(
-            i,
-            IsoDate {
-                year: y,
-                month: mo,
-                day: da,
-            },
-        )?;
+            check_increment(i, &smallest, incr_raw)?;
+        }
+        let unit = unit_len(&smallest).unwrap_or(1);
+        // The date-time rounds in its wall representation, carrying into the date.
+        let day_time = time_to_ns(tm) as i128;
+        let rounded = round_ns(day_time, unit * incr_raw as i128, &mode);
+        let nd = civil_of(epoch_days(d) + rounded.div_euclid(NS_PER_DAY) as i64);
+        let ntm = ns_to_time(rounded.rem_euclid(NS_PER_DAY));
+        let nd = check_date(i, nd)?;
+        if !iso_datetime_within_limits(nd, ntm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(make_like(
             i,
             &t,
             "Temporal.PlainDateTime",
-            Temporal::DateTime(nd, ns_to_time(rem)),
+            Temporal::DateTime(nd, ntm),
         ))
     });
-    it.def_method(&proto, "until", 1, |i, t, a| {
-        let (d, tm) = as_datetime(i, &t)?;
-        let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_datetime_rounded(&cal, d, tm, od, otm, &largest, &smallest, incr, &mode);
-        Ok(make(i, "Temporal.Duration", Temporal::Duration(dur)))
-    });
-    it.def_method(&proto, "since", 1, |i, t, a| {
-        let (d, tm) = as_datetime(i, &t)?;
-        let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
-        let cal = same_calendar(i, &t, &arg(a, 0))?;
-        let (largest, smallest, incr, mode) = read_datetime_diff(i, &arg(a, 1))?;
-        let dur = diff_datetime_rounded(
-            &cal,
-            d,
-            tm,
-            od,
-            otm,
-            &largest,
-            &smallest,
-            incr,
-            negate_mode(&mode),
-        );
-        Ok(make(
-            i,
-            "Temporal.Duration",
-            Temporal::Duration(neg_duration(dur)),
-        ))
-    });
+    it.def_method(&proto, "until", 1, |i, t, a| pdt_until_since(i, &t, a, 1));
+    it.def_method(&proto, "since", 1, |i, t, a| pdt_until_since(i, &t, a, -1));
 
     let ctor = add_ctor(it, ns, "PlainDateTime", 3, proto, |i, _t, a| {
         require_new(i)?;
@@ -5803,17 +5570,31 @@ fn to_datetime(i: &mut Interp, v: &Value, opts: &Value) -> Result<(IsoDate, IsoT
             Ok((d, t))
         }
         Value::Obj(_) => {
-            read_calendar(i, v)?;
-            let cal = input_cal(i, v)?;
-            // Snapshot the date fields (side-effecting reads, in order), then read time fields, then
-            // the overflow option — matching the spec order — and only then resolve the calendar with
-            // the real overflow (so reject rejects an out-of-range calendar day).
-            let snap = snapshot_date_fields(i, v)?;
-            let (traw, _) = read_time_raw(i, v)?;
-            let ovf = to_overflow(i, opts)?;
-            let draw = read_date_raw_cal(i, &snap, &cal, ovf)?;
+            // All fields read once in alphabetical order (with per-field coercion), requiredness
+            // TypeErrors after the reads, options next, then calendar resolution and regulation.
+            let bag = read_dt_bag(i, v, false)?;
+            {
+                let b = match &bag.date_bag {
+                    Value::Obj(o) => o.clone(),
+                    _ => unreachable!(),
+                };
+                let has = |k: &str| b.borrow().props.get(k).is_some();
+                let has_year =
+                    has("year") || (cal_uses_era(&bag.cal) && has("era") && has("eraYear"));
+                if !has_year {
+                    return Err(i.make_error("TypeError", "missing field 'year'"));
+                }
+                if !has("month") && !has("monthCode") {
+                    return Err(i.make_error("TypeError", "missing field 'month'"));
+                }
+                if !has("day") {
+                    return Err(i.make_error("TypeError", "missing field 'day'"));
+                }
+            }
+            let ovf = to_overflow(i, &get_opts_obj(i, opts)?)?;
+            let draw = read_date_raw_cal(i, &bag.date_bag, &bag.cal, ovf)?;
             let d = regulate_date(i, draw, ovf)?;
-            let t = regulate_time(i, traw, ovf)?;
+            let t = regulate_time(i, bag.time_raw, ovf)?;
             if !iso_datetime_within_limits(d, t) {
                 return Err(i.make_error("RangeError", "date-time outside representable range"));
             }
@@ -9679,6 +9460,74 @@ fn zdt_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i6
             smallest.clone()
         } else {
             "hour".into()
+        }
+    } else {
+        sing(&largest_raw).into()
+    };
+    if unit_rank(&smallest).unwrap() > unit_rank(&largest).unwrap() {
+        return Err(i.make_error("RangeError", "smallestUnit is larger than largestUnit"));
+    }
+    if !matches!(smallest.as_str(), "year" | "month" | "week" | "day") {
+        check_increment(i, &smallest, incr)?;
+    }
+    Ok((largest, smallest, incr, mode))
+}
+
+/// The shared body of PlainDateTime until/since (`dir` = 1 for until, -1 for since).
+fn pdt_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
+    let (d, tm) = as_datetime(i, t)?;
+    let tcal = cal_of(i, t);
+    let ocal = input_cal(i, &arg(a, 0))?;
+    let (od, otm) = to_datetime(i, &arg(a, 0), &Value::Undefined)?;
+    if canon(&tcal) != canon(&ocal) {
+        return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
+    }
+    let (largest, smallest, incr, mode) = pdt_diff_settings(i, &arg(a, 1))?;
+    let mode = if dir < 0 {
+        negate_mode(&mode).to_string()
+    } else {
+        mode
+    };
+    let internal = diff_pdt_rounded(i, d, tm, od, otm, &tcal, &largest, incr, &smallest, &mode)?;
+    let hour_capped = if unit_rank(&largest).unwrap_or(0) >= 6 {
+        "hour"
+    } else {
+        largest.as_str()
+    };
+    let mut out = dur_from_internal(i, &internal, hour_capped)?;
+    if dir < 0 {
+        out = neg_duration(out);
+    }
+    Ok(make(i, "Temporal.Duration", Temporal::Duration(out)))
+}
+/// Canonical alias-resolved calendar id.
+fn canon(c: &str) -> &str {
+    canon_cal(c).unwrap_or("iso8601")
+}
+/// GetDifferenceSettings for PlainDateTime until/since (default largest: day).
+fn pdt_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i64, String), Value> {
+    let opts = get_opts_obj(i, opts)?;
+    let largest_raw = opt_str(i, &opts, "largestUnit", "")?;
+    if !(largest_raw.is_empty() || largest_raw == "auto" || unit_rank(&largest_raw).is_some()) {
+        return Err(i.make_error("RangeError", "invalid largestUnit"));
+    }
+    let incr = read_rounding_increment(i, &opts)?;
+    let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let smallest_raw = opt_str(i, &opts, "smallestUnit", "")?;
+    if !smallest_raw.is_empty() && unit_rank(&smallest_raw).is_none() {
+        return Err(i.make_error("RangeError", "invalid smallestUnit"));
+    }
+    let smallest: String = if smallest_raw.is_empty() {
+        "nanosecond".into()
+    } else {
+        sing(&smallest_raw).into()
+    };
+    let largest: String = if largest_raw.is_empty() || largest_raw == "auto" {
+        if unit_rank(&smallest).unwrap() > unit_rank("day").unwrap() {
+            smallest.clone()
+        } else {
+            "day".into()
         }
     } else {
         sing(&largest_raw).into()
