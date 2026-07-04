@@ -685,7 +685,12 @@ impl Parser {
             Tok::Ident(w)
                 if w == "async"
                     && !self.cur_escaped()
-                    && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                    && matches!(self.peek_kind(1), Tok::Keyword("function"))
+                    && !self
+                        .toks
+                        .get(self.pos + 1)
+                        .map(|t| t.nl_before)
+                        .unwrap_or(true) =>
             {
                 let start = self.cur_start();
                 self.advance();
@@ -3175,7 +3180,16 @@ impl Parser {
             let snt = std::mem::replace(&mut self.allow_new_target, true);
             let ssb = std::mem::replace(&mut self.in_static_block, true);
             let sargs = std::mem::replace(&mut self.no_arguments_refs, true);
+            // The block is a break/continue/label boundary.
+            let sid = std::mem::take(&mut self.iter_depth);
+            let ssd = std::mem::take(&mut self.switch_depth);
+            let slabels = std::mem::take(&mut self.labels);
+            let sil = std::mem::take(&mut self.iter_labels);
             let body = self.parse_block_body();
+            self.iter_depth = sid;
+            self.switch_depth = ssd;
+            self.labels = slabels;
+            self.iter_labels = sil;
             self.super_prop_ok = ssuper;
             self.super_call_ok = scall;
             self.allow_new_target = snt;

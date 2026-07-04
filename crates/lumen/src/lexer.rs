@@ -510,6 +510,14 @@ impl<'a> Lexer<'a> {
                         invalid = true;
                     }
                 }
+                Some('\r') => {
+                    // The cooked value normalizes <CR><LF> and lone <CR> to <LF> (like raw).
+                    self.bump();
+                    if self.peek() == Some('\n') {
+                        self.bump();
+                    }
+                    cooked.push('\n');
+                }
                 Some(c) => {
                     self.bump();
                     cooked.push(c);

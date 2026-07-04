@@ -5464,8 +5464,15 @@ impl Interp {
                 Ok(Value::Num((a >> b) as f64))
             }
             ">>>" => {
-                let a = self.to_uint32(&l)?;
-                let b = (self.to_uint32(&r)?) & 31;
+                // ToNumeric both operands first (left completely, then right): a BigInt on
+                // either side is a TypeError — but only after the coercions ran.
+                let lp = self.to_primitive(&l, Hint::Number)?;
+                let rp = self.to_primitive(&r, Hint::Number)?;
+                if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
+                    return Err(self.throw("TypeError", "BigInts have no unsigned right shift"));
+                }
+                let a = self.to_uint32(&lp)?;
+                let b = (self.to_uint32(&rp)?) & 31;
                 Ok(Value::Num((a >> b) as f64))
             }
             "instanceof" => self.instanceof(&l, &r),
