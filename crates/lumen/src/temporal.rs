@@ -2556,7 +2556,7 @@ fn ym_in_range(year: i64, month: u8) -> bool {
 fn parse_month_day(s: &str) -> Option<IsoDate> {
     if let Some(p) = parse_iso(s) {
         if let Some(d) = p.date {
-            if p.offset == Off::Z || !cal_ok(&p.calendar) {
+            if p.offset == Off::Z || !cal_ok(&p.calendar) || !date_in_range(d) {
                 return None;
             }
             return Some(IsoDate {
@@ -2582,6 +2582,12 @@ fn parse_month_day(s: &str) -> Option<IsoDate> {
     let (cal, _tz) = p_annotations(&mut c)?;
     if !c.done() || !cal_ok(&cal) {
         return None;
+    }
+    // A year-less MM-DD form is only meaningful in the ISO calendar.
+    if let Some(c2) = &cal {
+        if canon_cal(c2) != Some("iso8601") {
+            return None;
+        }
     }
     Some(IsoDate {
         year: 1972,
@@ -6156,9 +6162,11 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        let suffix = cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?;
-        // When the calendar is shown, a PlainMonthDay includes its reference ISO year (`YYYY-`).
-        let s = if suffix.is_empty() {
+        let cal = cal_of(i, &t);
+        let opts = get_opts_obj(i, &arg(a, 0))?;
+        let suffix = cal_suffix(i, &opts, &cal)?;
+        // A non-ISO month-day (or an explicit calendar annotation) includes its reference year.
+        let s = if suffix.is_empty() && &*cal == "iso8601" {
             format!("{:02}-{:02}", d.month, d.day)
         } else {
             format!("{}-{:02}-{:02}{}", pad_year(d.year), d.month, d.day, suffix)
@@ -6167,7 +6175,23 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         let d = as_monthday(i, &t)?;
-        Ok(Value::str(format!("{:02}-{:02}", d.month, d.day)))
+        let cal = cal_of(i, &t);
+        Ok(Value::str(if &*cal == "iso8601" {
+            format!("{:02}-{:02}", d.month, d.day)
+        } else {
+            format!(
+                "{}-{:02}-{:02}[u-ca={cal}]",
+                pad_year(d.year),
+                d.month,
+                d.day
+            )
+        }))
+    });
+    it.def_method(&proto, "valueOf", 0, |i, _t, _| {
+        Err(i.make_error(
+            "TypeError",
+            "Temporal.PlainMonthDay has no valueOf; use equals",
+        ))
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_monthday(i, &t)?;
@@ -6175,22 +6199,179 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let o = to_monthday(i, &arg(a, 0), &Value::Undefined)?;
         let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
         Ok(Value::Bool(
-            d.month == o.month && d.day == o.day && this_cal == other_cal,
+            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let md = as_monthday(i, &t)?;
+        let cal = cal_of(i, &t);
         let f = arg(a, 0);
-        if !matches!(f, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "with() argument must be an object"));
+        if !matches!(f, Value::Obj(_)) || get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
         }
-        let month = field_int(i, &f, "month", md.month as i64)?;
-        let day = field_int(i, &f, "day", md.day as i64)?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
-        // Keep the reference ISO year; regulate the merged month/day.
-        let d = build_date_ovf(i, md.year, month, day, ovf)?;
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        // Partial fields, read once in alphabetical order.
+        let uses_era = cal_uses_era(&cal);
+        let mut any = false;
+        let day = {
+            let fv = getm(i, &f, "day")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "day must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let (era, era_year) = if uses_era {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(i.to_string(&ev).map_err(unab)?.to_lowercase())
+                }
+            };
+            let eyv = getm(i, &f, "eraYear")?;
+            let ey = match eyv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &eyv)?)
+                }
+            };
+            (era, ey)
+        } else {
+            (None, None)
+        };
+        let month = {
+            let fv = getm(i, &f, "month")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let month_code = {
+            let fv = getm(i, &f, "monthCode")?;
+            match &fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    Some(sv)
+                }
+            }
+        };
+        let year = {
+            let fv = getm(i, &f, "year")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &fv)?)
+                }
+            }
+        };
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one field"));
+        }
+        if era.is_some() != era_year.is_some() {
+            return Err(i.make_error("TypeError", "era and eraYear must both be provided"));
+        }
+        let has_year = year.is_some() || era_year.is_some();
+        // Merge with the receiver's calendar fields: a provided month or monthCode replaces both.
+        let snap = i.new_object();
+        if let Some(d2) = day {
+            setm(&snap, "day", Value::Num(d2 as f64));
+        } else {
+            setm(&snap, "day", Value::Num(cal_fields(&cal, md).2 as f64));
+        }
+        match (month, &month_code) {
+            (None, None) => setm(
+                &snap,
+                "monthCode",
+                Value::str(cal_month_code(&cal, md).as_str()),
+            ),
+            _ => {
+                if let Some(m) = month {
+                    setm(&snap, "month", Value::Num(m as f64));
+                }
+                if let Some(mc) = &month_code {
+                    setm(&snap, "monthCode", Value::Str(mc.clone()));
+                }
+            }
+        }
+        if let Some(y) = year {
+            setm(&snap, "year", Value::Num(y as f64));
+        }
+        if let Some(e2) = &era {
+            setm(&snap, "era", Value::str(e2.as_str()));
+        }
+        if let Some(ey) = era_year {
+            setm(&snap, "eraYear", Value::Num(ey as f64));
+        }
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
+        let d = if &*cal == "iso8601" {
+            let month2 = match (month, &month_code) {
+                (None, None) => md.month as i64,
+                (Some(m), None) => m,
+                _ => {
+                    if year.is_none() {
+                        setm(&snap, "year", Value::Num(1972.0));
+                    }
+                    let raw = read_date_raw_cal(i, &Value::Obj(snap.clone()), &cal, ovf)?;
+                    raw.1
+                }
+            };
+            let month2 = regulate_high(i, month2, 12, ovf, "month")? as u8;
+            // The reference ISO year applies the day ceiling but is otherwise inert.
+            let dd = regulate_high(
+                i,
+                day.unwrap_or(md.day as i64),
+                days_in_month(md.year, month2) as i64,
+                ovf,
+                "day",
+            )? as u8;
+            IsoDate {
+                year: 1972,
+                month: month2,
+                day: dd,
+            }
+        } else {
+            cal_month_day_reference(i, &cal, &snap, has_year, ovf)?
+        };
         let v = make_like(i, &t, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
-        set_cal(i, &v, cal_of(i, &t));
+        set_cal(i, &v, cal);
         Ok(v)
     });
     it.def_method(&proto, "toPlainDate", 1, |i, t, a| {
@@ -6207,7 +6388,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         let year = to_int(i, &yv)?;
         let cal = cal_of(i, &t);
         let d = if &*cal == "iso8601" {
-            build_date(i, year, md.month as i64, md.day as i64)?
+            build_date_ovf(i, year, md.month as i64, md.day as i64, Overflow::Constrain)?
         } else {
             // Combine the month-day's calendar (monthCode, day) with the supplied year.
             let merged = i.new_object();
@@ -6346,38 +6527,126 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
             Ok(md)
         }
         Value::Obj(_) => {
-            read_calendar(i, v)?;
-            let cal = input_cal(i, v)?;
+            let cal: std::rc::Rc<str> = {
+                let c = getm(i, v, "calendar")?;
+                match &c {
+                    Value::Undefined => std::rc::Rc::from("iso8601"),
+                    Value::Str(_) => check_calendar(i, &c)?,
+                    Value::Obj(_)
+                        if matches!(
+                            get(i, &c),
+                            Some(
+                                Temporal::Date(_)
+                                    | Temporal::DateTime(_, _)
+                                    | Temporal::YearMonth(_)
+                                    | Temporal::MonthDay(_)
+                                    | Temporal::Zoned { .. }
+                            )
+                        ) =>
+                    {
+                        cal_of(i, &c)
+                    }
+                    _ => return Err(i.make_error("TypeError", "calendar is not a string")),
+                }
+            };
+            // Fields read once, in alphabetical order, coerced (and syntax-checked) as read.
+            let uses_era = cal_uses_era(&cal);
+            let snap = i.new_object();
+            let mut has_year = false;
+            let mut has_day = false;
+            let mut has_month = false;
+            let mut has_month_code = false;
+            {
+                let fv = getm(i, v, "day")?;
+                if !matches!(fv, Value::Undefined) {
+                    has_day = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "day must be positive"));
+                    }
+                    setm(&snap, "day", Value::Num(n as f64));
+                }
+            }
+            if uses_era {
+                let ev = getm(i, v, "era")?;
+                if !matches!(ev, Value::Undefined) {
+                    has_year = true;
+                    let e2 = i.to_string(&ev).map_err(unab)?.to_lowercase();
+                    setm(&snap, "era", Value::str(e2.as_str()));
+                }
+                let eyv = getm(i, v, "eraYear")?;
+                if !matches!(eyv, Value::Undefined) {
+                    has_year = true;
+                    let ey = to_int(i, &eyv)?;
+                    setm(&snap, "eraYear", Value::Num(ey as f64));
+                }
+            }
+            {
+                let fv = getm(i, v, "month")?;
+                if !matches!(fv, Value::Undefined) {
+                    has_month = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    setm(&snap, "month", Value::Num(n as f64));
+                }
+            }
+            {
+                let fv = getm(i, v, "monthCode")?;
+                if !matches!(fv, Value::Undefined) {
+                    has_month_code = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    setm(&snap, "monthCode", Value::Str(sv));
+                }
+            }
+            {
+                let fv = getm(i, v, "year")?;
+                if !matches!(fv, Value::Undefined) {
+                    has_year = true;
+                    let n = to_int(i, &fv)?;
+                    setm(&snap, "year", Value::Num(n as f64));
+                }
+            }
+            // Requiredness (TypeError) before any value validation.
+            if !has_day {
+                return Err(i.make_error("TypeError", "missing field 'day'"));
+            }
+            if !has_month && !has_month_code {
+                return Err(i.make_error("TypeError", "missing field 'month'"));
+            }
+            let ovf = to_overflow(i, opts)?;
             if &*cal == "iso8601" {
                 // The day ceiling is computed against the provided year (or the ISO reference year
                 // 1972, also a leap year) but the stored reference year is always 1972.
-                let year = field_int(i, v, "year", 1972)?;
-                let month = field_month(i, v)?;
-                let day = field_req(i, v, "day")?;
-                let ovf = to_overflow(i, opts)?;
-                let month = regulate_high(i, month, 12, ovf, "month")? as u8;
+                if !has_year {
+                    setm(&snap, "year", Value::Num(1972.0));
+                }
+                let raw = read_date_raw_cal(i, &Value::Obj(snap.clone()), &cal, ovf)?;
+                let year = if has_year { raw.0 } else { 1972 };
+                let month = regulate_high(i, raw.1, 12, ovf, "month")? as u8;
                 let day =
-                    regulate_high(i, day, days_in_month(year, month) as i64, ovf, "day")? as u8;
+                    regulate_high(i, raw.2, days_in_month(year, month) as i64, ovf, "day")? as u8;
                 Ok(IsoDate {
                     year: 1972,
                     month,
                     day,
                 })
             } else {
-                // Snapshot the caller's fields once (in the observable order), then resolve the
-                // reference date via the calendar-specific search.
-                let snap = i.new_object();
-                let mut has_year = false;
-                for k in ["day", "era", "eraYear", "month", "monthCode", "year"] {
-                    let fv = getm(i, v, k)?;
-                    if !matches!(fv, Value::Undefined) {
-                        if matches!(k, "year" | "era" | "eraYear") {
-                            has_year = true;
-                        }
-                        setm(&snap, k, fv);
-                    }
-                }
-                let ovf = to_overflow(i, opts)?;
                 cal_month_day_reference(i, &cal, &snap, has_year, ovf)
             }
         }
