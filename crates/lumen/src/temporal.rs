@@ -5404,11 +5404,13 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        let other_cal = arg_calendar(i, &arg(a, 0))?;
-        let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
-        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        let (o, ocal) = to_yearmonth_cal(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = cal_of(i, &t);
         Ok(Value::Bool(
-            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
+            d.year == o.year
+                && d.month == o.month
+                && d.day == o.day
+                && canon(&this_cal) == canon(&ocal),
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -5615,8 +5617,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
-        let cal = input_cal(i, &arg(a, 0))?;
-        let d = to_yearmonth(i, &arg(a, 0), &arg(a, 1))?;
+        let (d, cal) = to_yearmonth_cal(i, &arg(a, 0), &arg(a, 1))?;
         let v = make(i, "Temporal.PlainYearMonth", Temporal::YearMonth(d));
         set_cal(i, &v, cal);
         Ok(v)
@@ -5629,16 +5630,30 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
 }
 fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
+    Ok(to_yearmonth_cal(i, v, opts)?.0)
+}
+fn to_yearmonth_cal(
+    i: &mut Interp,
+    v: &Value,
+    opts: &Value,
+) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
     if let Some(Temporal::YearMonth(d)) = get(i, v) {
         to_overflow(i, opts)?;
-        return Ok(d);
+        return Ok((d, cal_of(i, v)));
     }
-    let d = match v {
+    let (d, cal) = match v {
         Value::Str(s) => {
             let ym = parse_year_month(s)
                 .ok_or_else(|| i.make_error("RangeError", "invalid year-month"))?;
+            let cal: std::rc::Rc<str> = std::rc::Rc::from(
+                parse_iso(s)
+                    .and_then(|p| p.calendar)
+                    .as_deref()
+                    .and_then(canon_cal)
+                    .unwrap_or("iso8601"),
+            );
             to_overflow(i, opts)?;
-            ym
+            (ym, cal)
         }
         Value::Obj(_) => {
             let bag = read_dt_bag(i, v, false, false, false)?;
@@ -5664,14 +5679,14 @@ fn to_yearmonth(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Valu
             let ovf = to_overflow(i, &get_opts_obj(i, opts)?)?;
             let raw = read_date_raw_cal(i, &bag.date_bag, &bag.cal, ovf)?;
             let d0 = regulate_date(i, raw, ovf)?;
-            ym_ref_of(&bag.cal, d0)
+            (ym_ref_of(&bag.cal, d0), bag.cal)
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainYearMonth")),
     };
     if !iso_year_month_within_limits(d.year, d.month as i64) {
         return Err(i.make_error("RangeError", "year-month is outside the supported range"));
     }
-    Ok(d)
+    Ok((d, cal))
 }
 
 fn install_month_day(it: &mut Interp, ns: &Gc) {
@@ -9246,8 +9261,7 @@ fn zdt_diff_settings(i: &mut Interp, opts: &Value) -> Result<(String, String, i6
 fn pym_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<Value, Value> {
     let d = as_yearmonth(i, t)?;
     let tcal = cal_of(i, t);
-    let ocal = input_cal(i, &arg(a, 0))?;
-    let o = to_yearmonth(i, &arg(a, 0), &Value::Undefined)?;
+    let (o, ocal) = to_yearmonth_cal(i, &arg(a, 0), &Value::Undefined)?;
     if canon(&tcal) != canon(&ocal) {
         return Err(i.make_error("RangeError", "cannot compare dates in different calendars"));
     }
