@@ -3796,6 +3796,13 @@ fn ym_add(
     sign: i64,
     ovf: Overflow,
 ) -> Result<IsoDate, Value> {
+    // Units below months never apply to a year-month.
+    if dur.weeks != 0.0 || dur.days != 0.0 || duration_time_ns(dur) != 0 {
+        return Err(i.make_error(
+            "RangeError",
+            "cannot add units smaller than months to a PlainYearMonth",
+        ));
+    }
     // Anchor at day 1: it fits every month, so the synthetic day never triggers a day-overflow reject,
     // while a `reject` overflow still fires for a leap month absent in the target year (an independent
     // check in the calendar add).
@@ -5557,7 +5564,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "add", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal = cal_of(i, &t);
         let r = ym_add(i, &cal, d, dur, 1, ovf)?;
         Ok(make_like(
@@ -5570,7 +5577,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "subtract", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
         let dur = to_duration(i, &arg(a, 0))?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
         let cal = cal_of(i, &t);
         let r = ym_add(i, &cal, d, dur, -1, ovf)?;
         Ok(make_like(
