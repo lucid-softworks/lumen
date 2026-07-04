@@ -1665,6 +1665,23 @@ pub fn cal_fields(cal: &str, iso: IsoDate) -> (i64, i64, i64, i64, i64, i64, i64
     }
 }
 
+/// The (display month-number, is-leap-month) of a lunisolar chinese/dangi date.
+pub fn lunisolar_month_num(cal: &str, iso: IsoDate) -> (i64, bool) {
+    let (_, _, num, leap, _) = china_fields(cal, iso);
+    (num, leap)
+}
+
+/// The CLDR month index (1..13) of a Hebrew date: CLDR reserves index 6 for Adar I, so common
+/// years skip it (Adar is always index 7).
+pub fn hebrew_cldr_month(iso: IsoDate) -> i64 {
+    let (y, m, _) = hebrew_from_iso(iso);
+    if hebrew_leap(y) || m < 6 {
+        m
+    } else {
+        m + 1
+    }
+}
+
 /// The monthCode string for a date. Most calendars derive it from the ordinal month; Hebrew inserts
 /// the leap month code "M05L".
 fn cal_month_code(cal: &str, iso: IsoDate) -> String {

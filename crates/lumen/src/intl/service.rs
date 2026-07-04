@@ -27,6 +27,10 @@ pub fn supported_language(lang: &str) -> bool {
             | "gv"
             | "sl"
             | "pl"
+            | "si"
+            | "ln"
+            | "sv"
+            | "hi"
     )
 }
 

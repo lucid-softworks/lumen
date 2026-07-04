@@ -75,15 +75,24 @@ pub fn install(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "formatRange", 2, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
         let (s, e, kind) = range_dates(i, &o, &arg(a, 0), &arg(a, 1))?;
-        let a1 = do_format_ms(&o, s, kind);
-        let a2 = do_format_ms(&o, e, kind);
+        let pa = build_parts(&o, s, kind);
+        let pb = build_parts(&o, e, kind);
+        let join = |ps: &[(&'static str, String)]| -> String {
+            ps.iter().map(|(_, v)| v.as_str()).collect()
+        };
         // "Practically equal" (the two endpoints render identically) collapses to a single date.
-        if a1 == a2 {
-            return Ok(Value::from_string(a1));
+        if join(&pa) == join(&pb) {
+            return Ok(Value::from_string(join(&pa)));
         }
-        Ok(Value::from_string(format!(
-            "{a1}\u{2009}\u{2013}\u{2009}{a2}"
-        )))
+        let (p, sfx) = range_split(&pa, &pb).unwrap_or((0, 0));
+        let out = format!(
+            "{}{}\u{2009}\u{2013}\u{2009}{}{}",
+            join(&pa[..p]),
+            join(&pa[p..pa.len() - sfx]),
+            join(&pb[p..pb.len() - sfx]),
+            join(&pa[pa.len() - sfx..]),
+        );
+        Ok(Value::from_string(out))
     });
     it.def_method(&proto, "formatRangeToParts", 2, |i, this, a| {
         let o = brand_slot(i, &this, "__dtf")?;
@@ -102,19 +111,29 @@ pub fn install(it: &mut Interp, ns: &Gc) {
             set_data(&ob, "source", Value::str(src));
             arr.push(Value::Obj(ob));
         };
-        // Equal endpoints: one date, every part "shared". Otherwise emit both dates' typed parts
-        // tagged startRange / endRange around a shared separator (no partial field collapsing).
+        // Equal endpoints: one date, every part "shared". Otherwise fields coarser than the
+        // largest differing field collapse into shared prefix/suffix sections around the two
+        // ranges' own parts.
         if equal {
             for (ty, val) in build_parts(&o, s, kind) {
                 emit(i, &mut arr, ty, &val, "shared");
             }
         } else {
-            for (ty, val) in build_parts(&o, s, kind) {
-                emit(i, &mut arr, ty, &val, "startRange");
+            let pa = build_parts(&o, s, kind);
+            let pb = build_parts(&o, e, kind);
+            let (p, sfx) = range_split(&pa, &pb).unwrap_or((0, 0));
+            for (ty, val) in &pa[..p] {
+                emit(i, &mut arr, ty, val, "shared");
+            }
+            for (ty, val) in &pa[p..pa.len() - sfx] {
+                emit(i, &mut arr, ty, val, "startRange");
             }
             emit(i, &mut arr, "literal", "\u{2009}\u{2013}\u{2009}", "shared");
-            for (ty, val) in build_parts(&o, e, kind) {
-                emit(i, &mut arr, ty, &val, "endRange");
+            for (ty, val) in &pb[p..pb.len() - sfx] {
+                emit(i, &mut arr, ty, val, "endRange");
+            }
+            for (ty, val) in &pa[pa.len() - sfx..] {
+                emit(i, &mut arr, ty, val, "shared");
             }
         }
         Ok(i.make_array(arr))
@@ -775,6 +794,70 @@ fn do_format_ms(o: &Gc, ms: f64, kind: u8) -> String {
 
 /// Build the typed (type, value) parts for the given epoch-ms per the stored components (en, UTC).
 /// `kind` gates which components a Temporal receiver may show (see [`dtf_ms_kind`]).
+/// Range collapse decision: (shared-prefix, shared-suffix) part counts, or None to repeat both
+/// endpoints in full. Fields coarser than the largest differing one collapse; a year difference
+/// or a numeric-month date pattern never collapses (CLDR only defines range patterns for named
+/// months); a pure time difference shares the whole date section.
+fn range_split(
+    pa: &[(&'static str, String)],
+    pb: &[(&'static str, String)],
+) -> Option<(usize, usize)> {
+    if pa.len() != pb.len() || pa.iter().zip(pb).any(|(x, y)| x.0 != y.0) {
+        return None;
+    }
+    let time_ty = |t: &str| {
+        matches!(
+            t,
+            "hour" | "minute" | "second" | "dayPeriod" | "fractionalSecond" | "timeZoneName"
+        )
+    };
+    let (mut date_diff, mut time_diff, mut year_diff, mut month_diff) =
+        (false, false, false, false);
+    for (x, y) in pa.iter().zip(pb) {
+        if x.1 != y.1 {
+            match x.0 {
+                t if time_ty(t) => time_diff = true,
+                "era" | "year" | "relatedYear" | "yearName" => {
+                    date_diff = true;
+                    year_diff = true;
+                }
+                "month" => {
+                    date_diff = true;
+                    month_diff = true;
+                }
+                "day" | "weekday" => date_diff = true,
+                _ => return None, // a differing literal: repeat in full
+            }
+        }
+    }
+    if date_diff && time_diff {
+        return None;
+    }
+    if !date_diff && time_diff {
+        let p = pa.iter().position(|(t, _)| time_ty(t)).unwrap_or(0);
+        return Some((p, 0));
+    }
+    let named_month = pa
+        .iter()
+        .any(|(t, v)| *t == "month" && v.chars().any(|c| !c.is_ascii_digit()));
+    if !named_month || year_diff {
+        return None;
+    }
+    let n = pa.len();
+    let mut prefix = 0;
+    while prefix < n && pa[prefix].1 == pb[prefix].1 {
+        prefix += 1;
+    }
+    if month_diff {
+        prefix = 0;
+    }
+    let mut suffix = 0;
+    while suffix < n - prefix - 1 && pa[n - 1 - suffix].1 == pb[n - 1 - suffix].1 {
+        suffix += 1;
+    }
+    Some((prefix, suffix))
+}
+
 fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // An absolute instant (number/Date kind 0, Temporal.Instant kind 6) is shifted into the
     // formatter's time zone; Temporal wall-clock values (kinds 1-5) already carry their local time.
@@ -804,6 +887,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         _ => "iso8601".to_string(),
     };
     let greg_cal = matches!(dcal.as_str(), "" | "gregory" | "iso8601");
+    let mut leap_month = false;
     if !greg_cal {
         let f = crate::temporal::cal_fields(&dcal, iso_date);
         // The year uses cal_year_num (era-year, e.g. ethioaa amete-alem = +5500); month/day come
@@ -811,6 +895,20 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         y = crate::temporal::cal_year_num(&dcal, iso_date);
         mo = f.1 as u32;
         d = f.2 as u32;
+        // Lunisolar months display their month NUMBER (leap months flagged), not the ordinal;
+        // Hebrew months use the fixed CLDR index (Adar I is 6 in leap years only).
+        if dcal == "chinese" || dcal == "dangi" {
+            let (num, leap) = crate::temporal::lunisolar_month_num(&dcal, iso_date);
+            mo = num as u32;
+            leap_month = leap;
+        } else if dcal == "hebrew" {
+            mo = crate::temporal::hebrew_cldr_month(iso_date) as u32;
+        } else if dcal == "japanese" {
+            // The Japanese calendar's year is the era year (Reiwa 32), matching Temporal.
+            if let (_, Some(ey)) = crate::temporal::cal_era("japanese", iso_date) {
+                y = ey;
+            }
+        }
     }
     // A Temporal receiver restricts the displayable fields: YearMonth drops day/weekday/time,
     // MonthDay drops year/weekday/time, Date/YearMonth/MonthDay drop time, Time drops date.
@@ -880,17 +978,28 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     let cal_key = if greg_cal { "gregory" } else { dcal.as_str() };
     // Named months come from CLDR (localized, per-calendar); missing → numeric.
     let mut month_is_named = false;
-    let month_str = get("__dtf_month").map(|m| match m.as_str() {
-        w @ ("long" | "short" | "narrow") => {
-            if let Some(n) = crate::cldr_dates::month_name(&cldr_loc, cal_key, w, mo as u8) {
+    // ICU marks a chinese/dangi leap month with a "bis" suffix in numeric contexts.
+    let bis = if leap_month { "bis" } else { "" };
+    let month_str = get("__dtf_month").map(|m| {
+        // Hebrew months always render by name regardless of the requested width (CLDR-15510).
+        if dcal == "hebrew" {
+            if let Some(n) = crate::cldr_dates::month_name(&cldr_loc, "hebrew", "long", mo as u8) {
                 month_is_named = true;
-                n.to_string()
-            } else {
-                format!("{mo}")
+                return n.to_string();
             }
         }
-        "2-digit" => format!("{mo:02}"),
-        _ => format!("{mo}"),
+        match m.as_str() {
+            w @ ("long" | "short" | "narrow") => {
+                if let Some(n) = crate::cldr_dates::month_name(&cldr_loc, cal_key, w, mo as u8) {
+                    month_is_named = true;
+                    n.to_string()
+                } else {
+                    format!("{mo}{bis}")
+                }
+            }
+            "2-digit" => format!("{mo:02}{bis}"),
+            _ => format!("{mo}{bis}"),
+        }
     });
     let day_str = get("__dtf_day").map(|dd| {
         if dd == "2-digit" {
@@ -912,6 +1021,35 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             format!("{disp_year}")
         }
     });
+    // chinese/dangi years render as related Gregorian year + sexagenary cycle name.
+    let year_cluster: Option<Vec<(&'static str, String)>> =
+        if (dcal == "chinese" || dcal == "dangi") && year_str.is_some() {
+            const STEMS: [&str; 10] = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+            const BRANCHES: [&str; 12] = [
+                "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
+            ];
+            let name = format!(
+                "{}{}",
+                STEMS[(y - 4).rem_euclid(10) as usize],
+                BRANCHES[(y - 4).rem_euclid(12) as usize]
+            );
+            Some(if cldr_loc.starts_with("zh") {
+                vec![
+                    ("relatedYear", y.to_string()),
+                    ("yearName", name),
+                    ("literal", "年".to_string()),
+                ]
+            } else {
+                vec![
+                    ("relatedYear", y.to_string()),
+                    ("literal", "(".to_string()),
+                    ("yearName", name),
+                    ("literal", ")".to_string()),
+                ]
+            })
+        } else {
+            None
+        };
     let named_month = month_is_named;
     let have_date = month_str.is_some() || day_str.is_some() || year_str.is_some();
 
@@ -925,7 +1063,10 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
         if let Some(yy) = &year_str {
             lit(&mut parts, ", ");
-            parts.push(("year", yy.clone()));
+            match &year_cluster {
+                Some(c) => parts.extend(c.iter().cloned()),
+                None => parts.push(("year", yy.clone())),
+            }
         }
     } else if have_date {
         // numeric M/D/Y
@@ -945,7 +1086,10 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             if !first {
                 lit(&mut parts, "/");
             }
-            parts.push(("year", yy.clone()));
+            match &year_cluster {
+                Some(c) => parts.extend(c.iter().cloned()),
+                None => parts.push(("year", yy.clone())),
+            }
         }
     }
     // The era follows the date (CLDR name for the calendar/locale; the code is the fallback).
@@ -953,9 +1097,30 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         let (code, _) =
             crate::temporal::cal_era(if greg_cal { "gregory" } else { &dcal }, iso_date);
         if let Some(code) = code {
+            // Japanese named eras resolve by code; its ce/bce fallback uses the Gregorian names.
+            let jp_name = if dcal == "japanese" {
+                match code {
+                    "reiwa" => Some("Reiwa"),
+                    "heisei" => Some("Heisei"),
+                    "showa" => Some("Shōwa"),
+                    "taisho" => Some("Taishō"),
+                    "meiji" => Some("Meiji"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let idx = era_cldr_index(if greg_cal { "gregory" } else { &dcal }, code);
-            let name = crate::cldr_dates::era_name(&cldr_loc, cal_key, &width, idx)
+            let ekey = if cal_key == "japanese" {
+                "gregory"
+            } else {
+                cal_key
+            };
+            let name = jp_name
                 .map(|s| s.to_string())
+                .or_else(|| {
+                    crate::cldr_dates::era_name(&cldr_loc, ekey, &width, idx).map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| code.to_uppercase());
             lit(&mut parts, " ");
             parts.push(("era", name));

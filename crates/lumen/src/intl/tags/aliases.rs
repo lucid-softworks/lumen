@@ -202,7 +202,7 @@ pub fn unicode_type_alias(key: &str, ty: &str) -> Option<&'static str> {
         ("ms", "imperial") => "uksystem",
         ("tz", "cnckg") => "cnsha",
         ("tz", "eire") => "iedub",
-        ("tz", "est") => "utcw05",
+        ("tz", "est") => "papty",
         ("tz", "gmt0") => "gmt",
         ("tz", "uct") => "utc",
         ("tz", "zulu") => "utc",
@@ -213,10 +213,13 @@ pub fn unicode_type_alias(key: &str, ty: &str) -> Option<&'static str> {
         ("ks", "quaternary") => "level4",
         ("ks", "quarternary") => "level4",
         ("ks", "identical") => "identic",
-        // Region-override / subdivision alias (rg / sd share subdivision codes).
-        ("rg", "no23") => "no50",
-        ("sd", "no23") => "no50",
-        ("rg", "cn11") => "cnbj",
+        // Region-override / subdivision alias (rg / sd share subdivision codes; a multi-value
+        // replacement uses its first entry).
+        ("rg" | "sd", "no23") => "no50",
+        ("rg" | "sd", "cn11") => "cnbj",
+        ("rg" | "sd", "cz10a") => "cz110",
+        ("rg" | "sd", "fra" | "frg") => "frges",
+        ("rg" | "sd", "lud") => "lucl",
         ("kb", "yes") => "true",
         ("kc", "yes") => "true",
         ("kh", "yes") => "true",
@@ -229,6 +232,14 @@ pub fn unicode_type_alias(key: &str, ty: &str) -> Option<&'static str> {
 /// Grammar-valid grandfathered / redundant whole-tag replacements (matched lowercase). The
 /// *irregular* grandfathered tags (`i-*`, `no-bok`, `no-nyn`, `sgn-*`, `zh-min`, `zh-min-nan`) do
 /// not match the Unicode grammar and are simply rejected as structurally invalid.
+/// Transform-extension field-value aliases (tkey, deprecated tvalue → preferred).
+pub fn transform_value_alias(tkey: &str, tvalue: &str) -> Option<&'static str> {
+    Some(match (tkey, tvalue) {
+        ("m0", "names") => "prprname",
+        _ => return None,
+    })
+}
+
 pub fn grandfathered(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "art-lojban" => "jbo",

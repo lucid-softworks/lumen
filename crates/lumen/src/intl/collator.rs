@@ -110,7 +110,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         .next()
         .unwrap_or("en")
         .to_string();
-    let supported = |c: &str| c == "eor" || (c == "phonebk" && res_lang == "de");
+    let supported = |c: &str| supported_collation(&res_lang, c);
     let opt_co = collation_opt
         .filter(|c| COLLATIONS.contains(&c.as_str()) && supported(c))
         .filter(|_| usage == "sort");
@@ -380,4 +380,21 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     set_data(&res, "numeric", get("__co_numeric"));
     set_data(&res, "caseFirst", get("__co_casefirst"));
     Ok(Value::Obj(res))
+}
+
+/// Whether a locale's Collator supports a collation type (mirrors the CLDR availability that
+/// Intl.supportedValuesOf("collation") reflects). "eor"/"emoji" are available everywhere.
+fn supported_collation(lang: &str, c: &str) -> bool {
+    match c {
+        "eor" | "emoji" => true,
+        "phonebk" => lang == "de",
+        "compat" => lang == "ar",
+        "trad" => lang == "es",
+        "dict" => lang == "si",
+        "phonetic" => lang == "ln",
+        "reformed" => lang == "sv",
+        "searchjl" => lang == "ko",
+        "pinyin" | "stroke" | "zhuyin" | "big5han" | "gb2312" | "unihan" => lang == "zh",
+        _ => false,
+    }
 }

@@ -180,12 +180,29 @@ fn supported_values_of(i: &mut Interp, key: &Value) -> Result<Value, Value> {
     // The `timeZone` list is every canonical IANA zone; the others are static. SupportedValuesOf must
     // return a sorted array with no duplicates.
     if &*k == "timeZone" {
+        // Etc/GMT and Etc/UTC canonicalize to "UTC" and must not appear themselves.
         let mut zs: Vec<&str> = crate::tz::canonical_zone_names();
+        zs.retain(|z| *z != "Etc/GMT" && *z != "Etc/UTC");
+        if !zs.contains(&"UTC") {
+            zs.push("UTC");
+        }
         zs.sort_unstable();
         zs.dedup();
         return Ok(i.make_array(zs.iter().map(|s| Value::str(*s)).collect()));
     }
+    if &*k == "numberingSystem" {
+        // Every numeric system with a simple digit mapping, plus latn.
+        let mut ns: Vec<&str> = crate::numbering::NUMBERING
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        ns.push("latn");
+        ns.sort_unstable();
+        return Ok(i.make_array(ns.iter().map(|s| Value::str(*s)).collect()));
+    }
     let vals: &[&str] = match &*k {
+        // "islamic" and "islamic-rgsa" resolve to islamic-civil, so they are not fixed points
+        // of DateTimeFormat and are excluded (the era/monthCode proposal's required set).
         "calendar" => &[
             "buddhist",
             "chinese",
@@ -196,19 +213,18 @@ fn supported_values_of(i: &mut Interp, key: &Value) -> Result<Value, Value> {
             "gregory",
             "hebrew",
             "indian",
-            "islamic",
-            "islamic-umalqura",
-            "islamic-tbla",
             "islamic-civil",
-            "islamic-rgsa",
+            "islamic-tbla",
+            "islamic-umalqura",
             "iso8601",
             "japanese",
             "persian",
             "roc",
         ],
+        // Exactly the collations some locale's Collator resolves (see collator::supported_collation).
         "collation" => &[
-            "compat", "dict", "emoji", "eor", "phonebk", "pinyin", "searchjl", "stroke", "trad",
-            "unihan", "zhuyin",
+            "big5han", "compat", "dict", "emoji", "eor", "gb2312", "phonebk", "phonetic", "pinyin",
+            "reformed", "searchjl", "stroke", "trad", "unihan", "zhuyin",
         ],
         "currency" => &["USD", "EUR", "GBP", "JPY", "CNY"],
         "numberingSystem" => &[
@@ -216,39 +232,7 @@ fn supported_values_of(i: &mut Interp, key: &Value) -> Result<Value, Value> {
             "hanidec", "khmr", "knda", "laoo", "latn", "mlym", "mymr", "orya", "tamldec", "telu",
             "thai", "tibt",
         ],
-        "unit" => &[
-            "acre",
-            "bit",
-            "byte",
-            "celsius",
-            "centimeter",
-            "day",
-            "degree",
-            "fahrenheit",
-            "gigabyte",
-            "gram",
-            "hour",
-            "kilogram",
-            "kilometer",
-            "liter",
-            "megabyte",
-            "meter",
-            "mile",
-            "milliliter",
-            "millimeter",
-            "millisecond",
-            "minute",
-            "month",
-            "ounce",
-            "percent",
-            "petabyte",
-            "pound",
-            "second",
-            "terabyte",
-            "week",
-            "yard",
-            "year",
-        ],
+        "unit" => &crate::units::SANCTIONED_UNITS,
         _ => return Err(i.make_error("RangeError", format!("invalid key: {k}"))),
     };
     let mut v: Vec<&str> = vals.to_vec();

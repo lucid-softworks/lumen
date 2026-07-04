@@ -8752,3 +8752,19 @@ fn numberformat_exact_decimal_inputs() {
         "9007200.256743991"
     );
 }
+#[test]
+fn dtf_chinese_calendar_year_parts() {
+    assert_eq!(
+        run("JSON.stringify(new Intl.DateTimeFormat('zh-u-ca-chinese',{year:'numeric'})
+             .formatToParts(new Date(2019, 5, 1)))"),
+        "[{\"type\":\"relatedYear\",\"value\":\"2019\"},{\"type\":\"yearName\",\"value\":\"己亥\"},{\"type\":\"literal\",\"value\":\"年\"}]"
+    );
+    // A DTF range with only the day differing collapses around shared fields.
+    assert_eq!(
+        run(
+            "new Intl.DateTimeFormat('en-US',{year:'numeric',month:'short',day:'numeric'})
+             .formatRange(new Date('2019-01-03T00:00:00'), new Date('2019-01-05T00:00:00'))"
+        ),
+        "Jan 3\u{2009}\u{2013}\u{2009}5, 2019"
+    );
+}

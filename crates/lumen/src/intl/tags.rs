@@ -317,6 +317,12 @@ fn canonicalize_struct(t: &mut LangTag) {
     if let Some(s) = aliases::script_alias(&t.script) {
         t.script = s.to_string();
     }
+    // The CLDR languageAlias "und-hepburn-heploc" → "und-alalc97": the variant PAIR collapses
+    // (checked before the per-variant aliases, which would rewrite heploc on its own).
+    if t.variants.iter().any(|v| v == "hepburn") && t.variants.iter().any(|v| v == "heploc") {
+        t.variants.retain(|v| v != "hepburn" && v != "heploc");
+        t.variants.push("alalc97".to_string());
+    }
     // Variant aliases.
     for v in &mut t.variants {
         if let Some(rep) = aliases::variant_alias(v) {
@@ -334,9 +340,12 @@ fn canonicalize_struct(t: &mut LangTag) {
         if let Some(l) = tlang {
             canonicalize_struct(l);
         }
-        for (_k, v) in fields.iter_mut() {
+        for (k, v) in fields.iter_mut() {
             for e in v.iter_mut() {
                 *e = e.to_lowercase();
+                if let Some(rep) = aliases::transform_value_alias(k, e) {
+                    *e = rep.to_string();
+                }
             }
         }
         fields.sort_by(|a, b| a.0.cmp(&b.0));
