@@ -437,18 +437,16 @@ impl JsBigInt {
         if bl <= 64 {
             return self.mag[0] as f64 * sign;
         }
+        // Work on the magnitude (`shr`/`shl` are arithmetic and would skew a negative value).
+        let mag = Self {
+            neg: false,
+            mag: self.mag.clone(),
+        };
         // Take the top 54 bits; round to 53 with a sticky bit for the rest.
         let shift = (bl - 54) as u64;
-        let head_big = self.shr(shift);
+        let head_big = mag.shr(shift);
         let head = *head_big.mag.first().unwrap_or(&0); // 54 bits
-        let sticky = {
-            // Any nonzero bit below `shift`?
-            let back = head_big.shl(shift);
-            back.cmp(&Self {
-                neg: false,
-                mag: self.mag.clone(),
-            }) != std::cmp::Ordering::Equal
-        };
+        let sticky = head_big.shl(shift).cmp(&mag) != std::cmp::Ordering::Equal;
         let q = head >> 1;
         let round = head & 1 == 1;
         let up = round && (sticky || q & 1 == 1);

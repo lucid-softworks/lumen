@@ -1690,6 +1690,31 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
             let mut out = String::new();
             let mut escaped = false;
             for c in re.source.chars() {
+                // Line terminators are always escaped (even directly after a backslash) so the
+                // rendered source has no raw line breaks.
+                match c {
+                    '\n' => {
+                        out.push_str("\\n");
+                        escaped = false;
+                        continue;
+                    }
+                    '\r' => {
+                        out.push_str("\\r");
+                        escaped = false;
+                        continue;
+                    }
+                    '\u{2028}' => {
+                        out.push_str("\\u2028");
+                        escaped = false;
+                        continue;
+                    }
+                    '\u{2029}' => {
+                        out.push_str("\\u2029");
+                        escaped = false;
+                        continue;
+                    }
+                    _ => {}
+                }
                 if escaped {
                     out.push(c);
                     escaped = false;
@@ -1701,10 +1726,6 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
                         escaped = true;
                     }
                     '/' => out.push_str("\\/"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\u{2028}' => out.push_str("\\u2028"),
-                    '\u{2029}' => out.push_str("\\u2029"),
                     c => out.push(c),
                 }
             }
@@ -5491,32 +5512,33 @@ fn date_set_multi(
     }
     let mut any_nan = t.is_nan() && !nan_to_zero;
     let base = if t.is_nan() { 0.0 } else { t };
-    let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ml, _) = ms_to_parts(base);
+    let (py, pmo, pd, ph, pmi, ps, pml, _) = ms_to_parts(base);
+    // Fields default to their current value, held as f64 so an out-of-range assignment overflows
+    // to a non-finite MakeDay/MakeTime intermediate (NaN) rather than wrapping an i64.
+    let mut f = [
+        py as f64, pmo as f64, pd as f64, ph as f64, pmi as f64, ps as f64, pml as f64,
+    ];
     for (k, &v) in vals.iter().enumerate() {
         if !v.is_finite() {
             any_nan = true;
         }
-        let n = v as i64;
-        match ORDER[start_idx + k] {
-            0 => y = n,
-            1 => mo = n,
-            2 => d = n,
-            4 => h = n,
-            5 => mi = n,
-            6 => s = n,
-            _ => ml = n,
-        }
+        let slot = match ORDER[start_idx + k] {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            4 => 3,
+            5 => 4,
+            6 => 5,
+            _ => 6,
+        };
+        f[slot] = v.trunc();
     }
+    let day = make_day(f[0], f[1], f[2]);
+    let time = f[3] * 3_600_000.0 + f[4] * 60_000.0 + f[5] * 1000.0 + f[6];
     let ms = if any_nan {
         f64::NAN
     } else {
-        // TimeClip: beyond ±8.64e15 ms the date is invalid (NaN).
-        let v = parts_to_ms(y, mo, d, h, mi, s, ml);
-        if v.abs() > 8.64e15 {
-            f64::NAN
-        } else {
-            v
-        }
+        time_clip(make_date(day, time))
     };
     if let Value::Obj(o) = this {
         set_internal(o, "__date_ms", Value::Num(ms));
@@ -9510,18 +9532,45 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
         'n' => json_parse_lit(i, chars, pos, "null", Value::Null),
         '-' | '0'..='9' => {
             let start = *pos;
-            if chars[*pos] == '-' {
+            // Strict JSON number grammar: -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)? — no leading
+            // zeros, a mandatory integer part, and at least one digit after `.` / exponent.
+            let err = || i.make_error("SyntaxError", "Invalid number in JSON");
+            let at = |p: usize| chars.get(p).copied();
+            if at(*pos) == Some('-') {
                 *pos += 1;
             }
-            while *pos < chars.len()
-                && matches!(chars[*pos], '0'..='9' | '.' | 'e' | 'E' | '+' | '-')
-            {
+            match at(*pos) {
+                Some('0') => *pos += 1,
+                Some('1'..='9') => {
+                    while matches!(at(*pos), Some('0'..='9')) {
+                        *pos += 1;
+                    }
+                }
+                _ => return Err(err()),
+            }
+            if at(*pos) == Some('.') {
                 *pos += 1;
+                if !matches!(at(*pos), Some('0'..='9')) {
+                    return Err(err());
+                }
+                while matches!(at(*pos), Some('0'..='9')) {
+                    *pos += 1;
+                }
+            }
+            if matches!(at(*pos), Some('e' | 'E')) {
+                *pos += 1;
+                if matches!(at(*pos), Some('+' | '-')) {
+                    *pos += 1;
+                }
+                if !matches!(at(*pos), Some('0'..='9')) {
+                    return Err(err());
+                }
+                while matches!(at(*pos), Some('0'..='9')) {
+                    *pos += 1;
+                }
             }
             let s: String = chars[start..*pos].iter().collect();
-            s.parse::<f64>()
-                .map(Value::Num)
-                .map_err(|_| i.make_error("SyntaxError", "Invalid number in JSON"))
+            s.parse::<f64>().map(Value::Num).map_err(|_| err())
         }
         _ => Err(i.make_error("SyntaxError", "Unexpected token in JSON")),
     }
