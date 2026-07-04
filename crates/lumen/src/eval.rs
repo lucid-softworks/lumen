@@ -2880,14 +2880,15 @@ impl Interp {
             if !self.super_call_ok {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             }
-            let parent = self.get_var("%superclass%", env)?;
-            if matches!(parent, Value::Undefined) {
+            if matches!(self.get_var("%superclass%", env)?, Value::Undefined) {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             }
-            // GetSuperConstructor: a null (extends null) or non-constructor parent is a TypeError.
-            if !self.value_is_constructor(&parent) {
-                return Err(self.throw("TypeError", "super constructor is not a constructor"));
-            }
+            // GetSuperConstructor: the *live* [[GetPrototypeOf]] of the running class
+            // constructor (Object.setPrototypeOf(C, ...) between definition and the call is
+            // honored). The IsConstructor check waits until the arguments have evaluated.
+            let this_ctor_for_parent = self.get_var("%thisctor%", env)?;
+            let parent = crate::builtins::js_get_prototype_of(self, &this_ctor_for_parent)
+                .map_err(Abrupt::Throw)?;
             // Read the `this` binding directly (it is in TDZ until this very call completes);
             // an already-initialized binding means super() ran twice.
             let this_env = {
@@ -2913,6 +2914,14 @@ impl Interp {
                 .map(|b| b.value.clone())
                 .unwrap();
             let argv = self.eval_args(args, env)?;
+            // A null (extends null) or non-constructor parent is a TypeError — after
+            // ArgumentListEvaluation.
+            if !self.value_is_constructor(&parent) {
+                return Err(self.throw("TypeError", "super constructor is not a constructor"));
+            }
+            // Construct(parent, args, GetNewTarget()): the parent runs with the derived
+            // constructor's active newTarget.
+            self.pending_new_target = self.new_target.clone();
             let returned = self.run_constructor_on(&parent, &this, &argv)?;
             // BindThisValue: an already-initialized `this` (a second super()) is a
             // ReferenceError — but only after the arguments and parent construct ran.
@@ -4510,13 +4519,6 @@ impl Interp {
                 // A `super(...)` call is legal only directly within a *derived* constructor body.
                 let saved_super = self.super_call_ok;
                 self.super_call_ok = is_class && derived;
-                // Construct(parent, args, newTarget): the parent runs with the derived
-                // constructor's active newTarget, not itself.
-                self.pending_new_target = if matches!(self.new_target, Value::Undefined) {
-                    ctor.clone()
-                } else {
-                    self.new_target.clone()
-                };
                 let r = self.call_user(&func, cenv, this.clone(), args, true, &obj);
                 self.super_call_ok = saved_super;
                 r
