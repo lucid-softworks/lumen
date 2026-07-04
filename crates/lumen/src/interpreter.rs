@@ -587,6 +587,9 @@ pub struct Interp {
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
     pub super_call_ok: bool,
+    /// True while class field initializer code runs: a direct eval from there may not contain an
+    /// `arguments` reference (arrows inherit the context; ordinary functions clear it).
+    pub in_field_init_code: bool,
     /// A stack of disposal scopes — one frame per block/function body that can hold `using`
     /// declarations. Resources are disposed in reverse on scope exit (see `dispose_frame`).
     pub using_stack: Vec<Vec<Disposable>>,
@@ -661,6 +664,9 @@ pub struct ClassInfo {
     /// Instance initializers registered by decorators via `context.addInitializer`, run on each new
     /// instance after its fields are set, with `this` = the instance.
     pub instance_initializers: Vec<Value>,
+    /// Instance private methods and accessors, stamped as own properties on each instance when
+    /// `this` is created (before the fields run). Stamping twice is a TypeError.
+    pub private_members: Vec<(String, crate::value::Property)>,
 }
 
 /// One instance field: its key, optional initializer expression, and any decorator-supplied
@@ -962,6 +968,7 @@ impl Interp {
             gc_next: GC_TRIGGER,
             constructing: false,
             super_call_ok: false,
+            in_field_init_code: false,
             using_stack: Vec::new(),
             accessor_seq: 0,
             decorator_initializers: Vec::new(),
@@ -2922,12 +2929,15 @@ impl Interp {
         // `new.target`: an ordinary call clears it, a construct installs the pending target; an arrow
         // inherits the enclosing value. Saved and restored around the body.
         let saved_new_target = self.new_target.clone();
+        let saved_field_init = self.in_field_init_code;
         if !func.is_arrow {
             self.new_target = if is_construct {
                 std::mem::replace(&mut self.pending_new_target, Value::Undefined)
             } else {
                 Value::Undefined
             };
+            // An ordinary function body is not class-field-initializer code (an arrow inherits it).
+            self.in_field_init_code = false;
         }
 
         if !func.is_arrow {
@@ -3099,6 +3109,7 @@ impl Interp {
             if let Err(e) = bind_result {
                 self.strict = saved_strict;
                 self.new_target = saved_new_target;
+                self.in_field_init_code = saved_field_init;
                 let reason = abrupt_value(e);
                 let promise = self.new_promise();
                 self.reject_promise(&promise, reason);
@@ -3107,12 +3118,14 @@ impl Interp {
             let r = self.run_async(func, &body, param_seed);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
+            self.in_field_init_code = saved_field_init;
             return r;
         }
 
         if let Err(e) = bind_result {
             self.strict = saved_strict;
             self.new_target = saved_new_target;
+            self.in_field_init_code = saved_field_init;
             return Err(e);
         }
 
@@ -3127,6 +3140,7 @@ impl Interp {
             let gen = self.run_generator(func, &body, param_seed, gen_proto);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
+            self.in_field_init_code = saved_field_init;
             return gen;
         }
 
@@ -3213,6 +3227,7 @@ impl Interp {
         }
         self.strict = saved_strict;
         self.new_target = saved_new_target;
+        self.in_field_init_code = saved_field_init;
         result
     }
 

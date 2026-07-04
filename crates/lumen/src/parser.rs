@@ -14,7 +14,7 @@ pub struct ParseError {
 /// Parse a complete script. `strict` seeds strict mode (e.g. for the strict test262 variant); a
 /// `"use strict"` directive prologue also turns it on.
 pub fn parse_script(src: &str, strict: bool) -> Result<Vec<Stmt>, ParseError> {
-    parse_script_eval(src, strict, false, false)
+    parse_script_eval(src, strict, false, false, &[])
 }
 
 /// Parse eval code. Like [`parse_script`], but `allow_new_target` permits a top-level `new.target`
@@ -24,6 +24,7 @@ pub fn parse_script_eval(
     strict: bool,
     allow_new_target: bool,
     allow_super: bool,
+    private_names: &[String],
 ) -> Result<Vec<Stmt>, ParseError> {
     let tokens = tokenize(src).map_err(|e| ParseError {
         message: e.message,
@@ -53,6 +54,8 @@ pub fn parse_script_eval(
         allow_new_target,
         top_level: false,
         super_prop_ok: allow_super,
+        super_call_ok: allow_super,
+        in_derived_class: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -61,7 +64,12 @@ pub fn parse_script_eval(
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
-    validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
+    // A direct eval sees the private names visible where it was called.
+    let mut st: Vec<Vec<String>> = Vec::new();
+    if !private_names.is_empty() {
+        st.push(private_names.to_vec());
+    }
+    pn_stmts(&body, &mut st).map_err(|message| ParseError { message, line: 0 })?;
     // A super call is never valid in script/global code (only a derived constructor, or a direct
     // eval inside one, may contain it).
     if !allow_super {
@@ -106,6 +114,8 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         allow_new_target: false,
         top_level: false,
         super_prop_ok: false,
+        super_call_ok: false,
+        in_derived_class: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -315,6 +325,11 @@ struct Parser {
     /// method body, class field initializer, or class static block. An ordinary function clears it;
     /// an arrow inherits it. `super` outside any such context is a SyntaxError.
     super_prop_ok: bool,
+    /// True where a `SuperCall` (`super(...)`) is syntactically allowed: the constructor body of a
+    /// class with a heritage clause (an arrow inherits it; everything else resets it).
+    super_call_ok: bool,
+    /// True while parsing the members of a class that has an `extends` clause.
+    in_derived_class: bool,
     /// Deferred duplicate-`__proto__` errors from object literals. The Annex B early error does not
     /// apply when the literal turns out to be a destructuring assignment pattern, so `parse_assign`
     /// forgives entries recorded inside a reinterpreted pattern; leftovers surface at the end of the
@@ -2311,7 +2326,12 @@ impl Parser {
                     if !self.super_prop_ok {
                         return self.err("'super' keyword unexpected here");
                     }
-                } else if !self.is_punct("(") {
+                } else if self.is_punct("(") {
+                    // A SuperCall is only valid in a derived class constructor (or an arrow there).
+                    if !self.super_call_ok {
+                        return self.err("'super' call unexpected here");
+                    }
+                } else {
                     return self.err("'super' keyword unexpected here");
                 }
                 Ok(Expr::Super)
@@ -2435,6 +2455,8 @@ impl Parser {
                         allow_new_target: self.allow_new_target,
                         top_level: false,
                         super_prop_ok: self.super_prop_ok,
+                        super_call_ok: self.super_call_ok,
+                        in_derived_class: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2499,6 +2521,8 @@ impl Parser {
                         allow_new_target: self.allow_new_target,
                         top_level: false,
                         super_prop_ok: self.super_prop_ok,
+                        super_call_ok: self.super_call_ok,
+                        in_derived_class: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2746,10 +2770,12 @@ impl Parser {
         // An ordinary function body is not a super-property context (a nested arrow would inherit
         // from here, correctly seeing no super) — and it leaves a static block's await reservation.
         let ssuper = std::mem::replace(&mut self.super_prop_ok, false);
+        let scall = std::mem::replace(&mut self.super_call_ok, false);
         let ssb = std::mem::replace(&mut self.in_static_block, false);
         let params = self.parse_params()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
+        self.super_call_ok = scall;
         self.in_static_block = ssb;
         self.in_generator = sg;
         self.in_async = sa;
@@ -2874,10 +2900,12 @@ impl Parser {
         // Class bodies are always strict mode.
         let saved = self.strict;
         self.strict = true;
+        let sderived = std::mem::replace(&mut self.in_derived_class, superclass.is_some());
         let mut members = Vec::new();
         while !self.is_punct("}") && !self.at_eof() {
             members.extend(self.parse_class_member()?);
         }
+        self.in_derived_class = sderived;
         self.strict = saved;
         self.expect_punct("}")?;
         // The class constructor's `toString` is the whole class's source text.
@@ -2928,10 +2956,12 @@ impl Parser {
         if is_static && self.is_punct("{") {
             self.advance();
             let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+            let scall = std::mem::replace(&mut self.super_call_ok, false);
             let snt = std::mem::replace(&mut self.allow_new_target, true);
             let ssb = std::mem::replace(&mut self.in_static_block, true);
             let body = self.parse_block_body();
             self.super_prop_ok = ssuper;
+            self.super_call_ok = scall;
             self.allow_new_target = snt;
             self.in_static_block = ssb;
             let body = body?;
@@ -3002,7 +3032,13 @@ impl Parser {
         let key = self.parse_prop_key()?;
 
         if self.is_punct("(") {
-            let mut func = self.parse_method_function_kind(is_generator, is_async, member_start)?;
+            // Only a derived class's `constructor` body is a SuperCall context.
+            let is_ctor = kind == MemberKind::Method && !is_static && key_is(&key, "constructor");
+            let scall =
+                std::mem::replace(&mut self.super_call_ok, is_ctor && self.in_derived_class);
+            let func = self.parse_method_function_kind(is_generator, is_async, member_start);
+            self.super_call_ok = scall;
+            let mut func = func?;
             if matches!(kind, MemberKind::Get | MemberKind::Set) {
                 check_accessor_arity(&func, kind == MemberKind::Get).map_err(|m| ParseError {
                     message: m,
@@ -3029,9 +3065,11 @@ impl Parser {
             // code where `new.target` is valid (it evaluates to undefined).
             let value = if self.eat_punct("=") {
                 let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+                let scall = std::mem::replace(&mut self.super_call_ok, false);
                 let snt = std::mem::replace(&mut self.allow_new_target, true);
                 let v = self.parse_assign();
                 self.super_prop_ok = ssuper;
+                self.super_call_ok = scall;
                 self.allow_new_target = snt;
                 Some(v?)
             } else {
@@ -3062,7 +3100,8 @@ impl Parser {
         let (sg, sa) = (self.in_generator, self.in_async);
         self.in_generator = is_generator;
         self.in_async = is_async;
-        // A method body (and any parameter default) is a super-property context.
+        // A method body (and any parameter default) is a super-property context. Whether it is a
+        // SuperCall context was decided by the caller (only a derived class constructor is).
         let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
         let params = self.parse_params()?;
         // A method has UniqueFormalParameters: duplicate parameter names are always an error.

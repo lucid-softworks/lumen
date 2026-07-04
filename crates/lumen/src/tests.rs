@@ -8944,3 +8944,33 @@ fn atomics_waitasync_sees_same_job_notify() {
         crate::Completion::Throw { name, message } => panic!("{name}: {message}"),
     }
 }
+
+#[test]
+fn super_call_early_errors() {
+    // SuperCall outside a derived class constructor is a parse-time SyntaxError.
+    assert_eq!(
+        parse_err("var C = class { constructor() { super(); } };"),
+        true
+    );
+    assert_eq!(parse_err("class C { m() { super(); } }"), true);
+    assert_eq!(parse_err("({ m() { super(); } });"), true);
+    assert_eq!(
+        parse_err("class C extends B { constructor() { super(); } }"),
+        false
+    );
+    assert_eq!(
+        parse_err("class C extends B { constructor() { () => super(); } }"),
+        false
+    );
+    assert_eq!(parse_err("class C extends B { m() { super(); } }"), true);
+    assert_eq!(parse_err("class C extends B { f = super(); }"), true);
+    assert_eq!(parse_err("class C extends B { static { super(); } }"), true);
+    assert_eq!(
+        parse_err("class C extends B { constructor() { function f() { super(); } } }"),
+        true
+    );
+}
+
+fn parse_err(src: &str) -> bool {
+    crate::Engine::new().eval(src, false).is_err()
+}

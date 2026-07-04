@@ -876,8 +876,16 @@ impl Interp {
                 Some(k) => self.get_member(&rhs, k)?,
                 None => Value::Undefined,
             };
+            // GetMethod: a non-callable, non-nullish @@asyncIterator is a TypeError.
+            if !matches!(method, Value::Undefined | Value::Null) && !method.is_callable() {
+                return Err(self.throw("TypeError", "@@asyncIterator is not callable"));
+            }
             let (iter, from_sync) = if method.is_callable() {
-                (self.call(method, rhs.clone(), &[])?, false)
+                let it = self.call(method, rhs.clone(), &[])?;
+                if !matches!(it, Value::Obj(_)) {
+                    return Err(self.throw("TypeError", "@@asyncIterator did not return an object"));
+                }
+                (it, false)
             } else {
                 (self.get_iterator(&rhs)?.0, true)
             };
@@ -1131,8 +1139,15 @@ impl Interp {
             Some(k) => self.get_member(value, k)?,
             None => Value::Undefined,
         };
+        // GetMethod: a non-callable, non-nullish @@asyncIterator is a TypeError (no sync fallback).
+        if !matches!(amethod, Value::Undefined | Value::Null) && !amethod.is_callable() {
+            return Err(self.throw("TypeError", "@@asyncIterator is not callable"));
+        }
         let (iterator, next, from_sync) = if amethod.is_callable() {
             let it = self.call(amethod, value.clone(), &[])?;
+            if !matches!(it, Value::Obj(_)) {
+                return Err(self.throw("TypeError", "@@asyncIterator did not return an object"));
+            }
             let n = self.get_member(&it, "next")?;
             (it, n, false)
         } else {
@@ -1700,9 +1715,23 @@ impl Interp {
     /// PrivateGet: read a private field/method after a brand check. An object that was not
     /// constructed with this private name in scope (`#x` absent) is a TypeError, not `undefined`.
     fn get_private_member(&mut self, base: &Value, name: &str) -> Completion {
-        match base {
-            Value::Obj(o) if self.has_property(o, name) => self.get_member(base, name),
-            _ => {
+        let prop = match base {
+            Value::Obj(o) => o.borrow().props.get(name).cloned(),
+            _ => None,
+        };
+        match prop {
+            Some(p) if p.accessor => match &p.get {
+                Some(g) => self.call(g.clone(), base.clone(), &[]),
+                None => {
+                    let shown = private_display(name);
+                    Err(self.throw(
+                        "TypeError",
+                        format!("private accessor {shown} has no getter"),
+                    ))
+                }
+            },
+            Some(p) => Ok(p.value),
+            None => {
                 let shown = private_display(name);
                 Err(self.throw(
                     "TypeError",
@@ -1717,36 +1746,39 @@ impl Interp {
     /// silent sloppy-mode no-op.
     fn set_private_member(&mut self, base: &Value, name: &str, value: Value) -> Result<(), Abrupt> {
         let shown = private_display(name).to_string();
-        match base {
-            Value::Obj(o) if self.has_property(o, name) => {
-                let mut cur = Some(o.clone());
-                while let Some(c) = cur {
-                    let found = c.borrow().props.get(name).cloned();
-                    if let Some(p) = found {
-                        if p.accessor {
-                            let Some(setter) = p.set.clone() else {
-                                return Err(self.throw(
-                                    "TypeError",
-                                    format!("private accessor {shown} has no setter"),
-                                ));
-                            };
-                            self.call(setter, base.clone(), &[value])?;
-                            return Ok(());
-                        }
-                        if !p.writable {
-                            return Err(self.throw(
-                                "TypeError",
-                                format!("private method {shown} is not writable"),
-                            ));
-                        }
-                        return self.set_member(base, name, value);
-                    }
-                    let parent = c.borrow().proto.clone();
-                    cur = parent;
-                }
-                self.set_member(base, name, value)
+        let (o, prop) = match base {
+            Value::Obj(o) => (o.clone(), o.borrow().props.get(name).cloned()),
+            _ => {
+                return Err(self.throw(
+                    "TypeError",
+                    format!("cannot write private member {shown} to an object whose class did not declare it"),
+                ))
             }
-            _ => Err(self.throw(
+        };
+        match prop {
+            Some(p) if p.accessor => {
+                let Some(setter) = p.set.clone() else {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("private accessor {shown} has no setter"),
+                    ));
+                };
+                self.call(setter, base.clone(), &[value])?;
+                Ok(())
+            }
+            Some(p) => {
+                if !p.writable {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("private method {shown} is not writable"),
+                    ));
+                }
+                if let Some(p) = o.borrow_mut().props.get_mut(name) {
+                    p.value = value;
+                }
+                Ok(())
+            }
+            None => Err(self.throw(
                 "TypeError",
                 format!("cannot write private member {shown} to an object whose class did not declare it"),
             )),
@@ -2092,8 +2124,8 @@ impl Interp {
                 let o = self.eval(obj, env)?;
                 let k = self.resolve_private(name, env);
                 match o {
-                    // Private fields are own props; private methods live on the prototype.
-                    Value::Obj(obj) => Ok(Value::Bool(self.has_property(&obj, &k))),
+                    // Private fields, methods and accessors are all own properties.
+                    Value::Obj(obj) => Ok(Value::Bool(obj.borrow().props.contains(k.as_str()))),
                     _ => {
                         Err(self
                             .throw("TypeError", "the right-hand side of 'in' must be an object"))
@@ -2975,13 +3007,42 @@ impl Interp {
         let allow_new_target = direct && self.in_function_code(caller_env);
         // A direct eval may contain a SuperProperty; the runtime `super_base` lookup enforces that a
         // home object is actually in scope (throwing SyntaxError otherwise), so parse permissively.
-        let body = crate::parser::parse_script_eval(code, base_strict, allow_new_target, direct)
-            .map_err(|e| self.throw("SyntaxError", e.message))?;
+        // A direct eval's code may reference any private name visible at the call site: collect
+        // the `#name` bindings on the caller's scope chain to seed the parser's validation.
+        let mut private_names: Vec<String> = Vec::new();
+        if direct {
+            let mut cur = Some(caller_env.clone());
+            while let Some(s) = cur {
+                let b = s.borrow();
+                for k in b.vars.keys() {
+                    if k.starts_with('#') {
+                        private_names.push(k.clone());
+                    }
+                }
+                cur = b.parent.clone();
+            }
+        }
+        let body = crate::parser::parse_script_eval(
+            code,
+            base_strict,
+            allow_new_target,
+            direct,
+            &private_names,
+        )
+        .map_err(|e| self.throw("SyntaxError", e.message))?;
         // A direct `eval` inherits the caller's super-call context: a `super(...)` in the eval is an
         // early SyntaxError unless the eval sits directly inside a derived constructor body. (Caught
         // here, before any of the eval body runs, so side effects preceding the `super()` don't.)
         if direct && !self.super_call_ok && stmts_have_super_call(&body) {
             return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+        }
+        // A direct eval from class-field-initializer code may not reference `arguments` (also an
+        // early error, checked before the body runs).
+        if direct && self.in_field_init_code && stmts_have_arguments_ref(&body) {
+            return Err(self.throw(
+                "SyntaxError",
+                "'arguments' is not allowed in class field initializer code",
+            ));
         }
         let directive_strict = matches!(
             body.first(),
@@ -3351,6 +3412,10 @@ impl Interp {
 
         // Methods, accessors and fields.
         let mut inst_fields: Vec<FieldInit> = Vec::new();
+        // Instance private methods/accessors: stamped onto each instance when `this` is created
+        // (PrivateMethodOrAccessorAdd), not placed on the prototype — so brand checks, double
+        // initialization, and return-override semantics fall out of own-property checks.
+        let mut priv_members: Vec<(String, Property)> = Vec::new();
         let mut instance_inits: Vec<Value> = Vec::new();
         let mut static_inits: Vec<Value> = Vec::new();
         for m in &class.members {
@@ -3408,14 +3473,36 @@ impl Interp {
                         setter = s;
                         transforms = t;
                     }
-                    self.define_class_accessor(&target, &key, Some(getter), Some(setter));
+                    if is_private && !m.is_static {
+                        priv_members.push((
+                            key.clone(),
+                            Property {
+                                value: Value::Undefined,
+                                get: Some(getter),
+                                set: Some(setter),
+                                accessor: true,
+                                writable: false,
+                                enumerable: false,
+                                configurable: false,
+                            },
+                        ));
+                    } else {
+                        self.define_class_accessor(&target, &key, Some(getter), Some(setter));
+                    }
                     if m.is_static {
                         let scope = new_scope(Some(static_env.clone()));
                         bind(&scope, "this", ctor_val.clone());
-                        let mut v = match &m.value {
-                            Some(e) => self.eval(e, &scope)?,
-                            None => Value::Undefined,
+                        let saved_super = self.super_call_ok;
+                        let saved_field = self.in_field_init_code;
+                        self.super_call_ok = false;
+                        self.in_field_init_code = true;
+                        let v = match &m.value {
+                            Some(e) => self.eval(e, &scope),
+                            None => Ok(Value::Undefined),
                         };
+                        self.super_call_ok = saved_super;
+                        self.in_field_init_code = saved_field;
+                        let mut v = v?;
                         for tr in &transforms {
                             v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
                         }
@@ -3463,7 +3550,11 @@ impl Interp {
                     } else {
                         Property::builtin(f)
                     };
-                    target.borrow_mut().props.insert(key, prop);
+                    if is_private && !m.is_static {
+                        priv_members.push((key, prop));
+                    } else {
+                        target.borrow_mut().props.insert(key, prop);
+                    }
                 }
                 MemberKind::Get | MemberKind::Set => {
                     let mut f = self.make_function(m.func.clone().unwrap(), menv.clone());
@@ -3491,7 +3582,31 @@ impl Interp {
                     } else {
                         (None, Some(f))
                     };
-                    self.define_class_accessor(&target, &key, get, set);
+                    if is_private && !m.is_static {
+                        if let Some((_, p)) = priv_members.iter_mut().find(|(k, _)| *k == key) {
+                            if get.is_some() {
+                                p.get = get;
+                            }
+                            if set.is_some() {
+                                p.set = set;
+                            }
+                        } else {
+                            priv_members.push((
+                                key,
+                                Property {
+                                    value: Value::Undefined,
+                                    get,
+                                    set,
+                                    accessor: true,
+                                    writable: false,
+                                    enumerable: false,
+                                    configurable: false,
+                                },
+                            ));
+                        }
+                    } else {
+                        self.define_class_accessor(&target, &key, get, set);
+                    }
                 }
                 MemberKind::Field => {
                     let transforms = if m.decorators.is_empty() {
@@ -3514,10 +3629,26 @@ impl Interp {
                     if m.is_static {
                         let scope = new_scope(Some(static_env.clone()));
                         bind(&scope, "this", ctor_val.clone());
-                        let mut v = match &m.value {
-                            Some(e) => self.eval(e, &scope)?,
-                            None => Value::Undefined,
+                        // A static field initializer is field-initializer code: no super() and no
+                        // `arguments` (even through a direct eval); an anonymous function value
+                        // takes the field's name.
+                        let saved_super = self.super_call_ok;
+                        let saved_field = self.in_field_init_code;
+                        self.super_call_ok = false;
+                        self.in_field_init_code = true;
+                        let v = match &m.value {
+                            Some(e) => {
+                                let v = self.eval(e, &scope);
+                                if let (Ok(v), true) = (&v, is_anonymous_fn(e)) {
+                                    self.set_fn_name(v, &key);
+                                }
+                                v
+                            }
+                            None => Ok(Value::Undefined),
                         };
+                        self.super_call_ok = saved_super;
+                        self.in_field_init_code = saved_field;
+                        let mut v = v?;
                         for tr in &transforms {
                             v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
                         }
@@ -3568,6 +3699,7 @@ impl Interp {
                 field_env: inst_env,
                 derived,
                 instance_initializers: instance_inits,
+                private_members: priv_members,
             },
         );
 
@@ -3949,7 +4081,7 @@ impl Interp {
             _ => return Ok(()),
         };
         let ptr = Rc::as_ptr(&obj) as usize;
-        let (fields, field_env, initializers) = match self.class_info.get(&ptr) {
+        let (fields, field_env, initializers, priv_members) = match self.class_info.get(&ptr) {
             Some(i) => (
                 i.fields
                     .iter()
@@ -3957,13 +4089,32 @@ impl Interp {
                     .collect::<Vec<_>>(),
                 i.field_env.clone(),
                 i.instance_initializers.clone(),
+                i.private_members.clone(),
             ),
             None => return Ok(()),
         };
+        // PrivateMethodOrAccessorAdd: stamp the class's private methods/accessors on the instance
+        // before any field initializer runs; a second initialization (return-override tricks
+        // constructing over the same object twice) is a TypeError.
+        if let Value::Obj(o) = this {
+            if let Some((k, _)) = priv_members.first() {
+                if o.borrow().props.contains(k.as_str()) {
+                    return Err(self.throw(
+                        "TypeError",
+                        "cannot initialize private methods of a class twice on the same object",
+                    ));
+                }
+            }
+            for (k, p) in &priv_members {
+                o.borrow_mut().props.insert(k.as_str(), p.clone());
+            }
+        }
         // A field initializer is not a constructor: a `super(...)` reached from here (e.g. through a
         // direct `eval`) is illegal, so clear the flag for the duration of the initializers.
         let saved_super = self.super_call_ok;
+        let saved_field = self.in_field_init_code;
         self.super_call_ok = false;
+        self.in_field_init_code = true;
         let result = (|me: &mut Self| -> Result<(), Abrupt> {
             for (key, init, transforms) in fields {
                 let scope = new_scope(Some(field_env.clone()));
@@ -3993,6 +4144,7 @@ impl Interp {
             Ok(())
         })(self);
         self.super_call_ok = saved_super;
+        self.in_field_init_code = saved_field;
         result
     }
 
@@ -5284,25 +5436,28 @@ pub(crate) fn stmt_declares_using(s: &Stmt) -> bool {
     )
 }
 
-fn stmts_have_super_call(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(stmt_has_super_call)
+/// `Contains` over eval code: search for a node matching `pred`, descending into arrow functions
+/// (their parameter defaults and bodies) but not into ordinary functions or class bodies.
+fn stmts_contain(stmts: &[Stmt], pred: fn(&Expr) -> bool) -> bool {
+    stmts.iter().any(|s| stmt_contains(s, pred))
 }
 
-fn stmt_has_super_call(s: &Stmt) -> bool {
+fn stmt_contains(s: &Stmt, pred: fn(&Expr) -> bool) -> bool {
+    let e = |x: &Expr| expr_contains(x, pred);
     match s {
-        Stmt::Expr(e) | Stmt::Throw(e) => expr_has_super_call(e),
-        Stmt::Return(e) => e.as_ref().is_some_and(expr_has_super_call),
+        Stmt::Expr(x) | Stmt::Throw(x) => e(x),
+        Stmt::Return(x) => x.as_ref().is_some_and(&e),
         Stmt::VarDecl { decls, .. } => decls
             .iter()
-            .any(|(_, init)| init.as_ref().is_some_and(expr_has_super_call)),
+            .any(|(_, init)| init.as_ref().is_some_and(&e)),
         Stmt::If { test, cons, alt } => {
-            expr_has_super_call(test)
-                || stmt_has_super_call(cons)
-                || alt.as_deref().is_some_and(stmt_has_super_call)
+            e(test)
+                || stmt_contains(cons, pred)
+                || alt.as_deref().is_some_and(|s| stmt_contains(s, pred))
         }
-        Stmt::Block(b) => stmts_have_super_call(b),
+        Stmt::Block(b) => stmts_contain(b, pred),
         Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
-            expr_has_super_call(test) || stmt_has_super_call(body)
+            e(test) || stmt_contains(body, pred)
         }
         Stmt::For {
             init,
@@ -5311,89 +5466,94 @@ fn stmt_has_super_call(s: &Stmt) -> bool {
             body,
         } => {
             init.as_deref().is_some_and(|i| match i {
-                ForInit::Expr(e) => expr_has_super_call(e),
-                ForInit::VarDecl { decls, .. } => decls
-                    .iter()
-                    .any(|(_, x)| x.as_ref().is_some_and(expr_has_super_call)),
-            }) || test.as_ref().is_some_and(expr_has_super_call)
-                || update.as_ref().is_some_and(expr_has_super_call)
-                || stmt_has_super_call(body)
+                ForInit::Expr(x) => e(x),
+                ForInit::VarDecl { decls, .. } => {
+                    decls.iter().any(|(_, x)| x.as_ref().is_some_and(&e))
+                }
+            }) || test.as_ref().is_some_and(&e)
+                || update.as_ref().is_some_and(&e)
+                || stmt_contains(body, pred)
         }
-        Stmt::ForInOf { right, body, .. } => {
-            expr_has_super_call(right) || stmt_has_super_call(body)
-        }
+        Stmt::ForInOf { right, body, .. } => e(right) || stmt_contains(body, pred),
         Stmt::Try {
             block,
             handler,
             finalizer,
         } => {
-            stmts_have_super_call(block)
+            stmts_contain(block, pred)
                 || handler
                     .as_ref()
-                    .is_some_and(|(_, b)| stmts_have_super_call(b))
-                || finalizer.as_ref().is_some_and(|b| stmts_have_super_call(b))
+                    .is_some_and(|(_, b)| stmts_contain(b, pred))
+                || finalizer.as_ref().is_some_and(|b| stmts_contain(b, pred))
         }
         Stmt::Switch { disc, cases } => {
-            expr_has_super_call(disc)
-                || cases.iter().any(|c| {
-                    c.test.as_ref().is_some_and(expr_has_super_call)
-                        || stmts_have_super_call(&c.body)
-                })
+            e(disc)
+                || cases
+                    .iter()
+                    .any(|c| c.test.as_ref().is_some_and(&e) || stmts_contain(&c.body, pred))
         }
-        Stmt::Labeled { body, .. } | Stmt::With { body, .. } => stmt_has_super_call(body),
-        // A (non-arrow) function or class declaration opens its own super-context.
+        Stmt::Labeled { body, .. } | Stmt::With { body, .. } => stmt_contains(body, pred),
+        // A (non-arrow) function or class declaration opens its own context.
         _ => false,
     }
 }
 
-fn expr_has_super_call(e: &Expr) -> bool {
-    match e {
-        Expr::Call { callee, args, .. } => {
-            matches!(**callee, Expr::Super)
-                || expr_has_super_call(callee)
-                || args_have_super_call(args)
-        }
-        Expr::New { callee, args } => expr_has_super_call(callee) || args_have_super_call(args),
-        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => {
-            expr_has_super_call(arg)
-        }
-        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
-            expr_has_super_call(left) || expr_has_super_call(right)
-        }
-        Expr::Assign { target, value, .. } => {
-            expr_has_super_call(target) || expr_has_super_call(value)
-        }
-        Expr::Cond { test, cons, alt } => {
-            expr_has_super_call(test) || expr_has_super_call(cons) || expr_has_super_call(alt)
-        }
-        Expr::Member { obj, .. } | Expr::OptionalChain(obj) => expr_has_super_call(obj),
-        Expr::Index { obj, index, .. } => expr_has_super_call(obj) || expr_has_super_call(index),
-        Expr::Seq(v) => v.iter().any(expr_has_super_call),
-        Expr::Array(elems) => arr_elems_have_super_call(elems),
-        Expr::Yield { arg, .. } => arg.as_deref().is_some_and(expr_has_super_call),
-        Expr::ImportCall { spec, .. } => expr_has_super_call(spec),
-        Expr::PrivateIn { obj, .. } => expr_has_super_call(obj),
-        Expr::TaggedTemplate { tag, subs, .. } => {
-            expr_has_super_call(tag) || subs.iter().any(expr_has_super_call)
-        }
+fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
+    if pred(x) {
+        return true;
+    }
+    let e = |x: &Expr| expr_contains(x, pred);
+    match x {
+        Expr::Call { callee, args, .. } => e(callee) || call_args_contain(args, pred),
+        Expr::New { callee, args } => e(callee) || call_args_contain(args, pred),
+        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => e(arg),
+        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => e(left) || e(right),
+        Expr::Assign { target, value, .. } => e(target) || e(value),
+        Expr::Cond { test, cons, alt } => e(test) || e(cons) || e(alt),
+        Expr::Member { obj, .. } | Expr::OptionalChain(obj) => e(obj),
+        Expr::Index { obj, index, .. } => e(obj) || e(index),
+        Expr::Seq(v) => v.iter().any(e),
+        Expr::Array(elems) => arr_elems_contain(elems, pred),
+        Expr::Yield { arg, .. } => arg.as_deref().is_some_and(e),
+        Expr::ImportCall { spec, .. } => e(spec),
+        Expr::PrivateIn { obj, .. } => e(obj),
+        Expr::TaggedTemplate { tag, subs, .. } => e(tag) || subs.iter().any(e),
         Expr::Object(props) => props.iter().any(|p| match p {
-            PropDef::KeyValue { value, .. } => expr_has_super_call(value),
-            PropDef::Spread(e) => expr_has_super_call(e),
-            // Methods/getters/setters open their own super-context.
+            PropDef::KeyValue { value, .. } => e(value),
+            PropDef::Spread(x) => e(x),
+            // Methods/getters/setters open their own context.
             _ => false,
         }),
-        // `Func`/`Class` (incl. arrows) open a fresh super-context; literals/identifiers carry none.
+        // `Contains` descends into arrow functions; an ordinary function/class does not.
+        Expr::Func(f) if f.is_arrow => {
+            f.params
+                .iter()
+                .any(|p| p.default.as_ref().is_some_and(&e))
+                || stmts_contain(&f.body, pred)
+        }
         _ => false,
     }
 }
 
-fn args_have_super_call(args: &[ArrayElem]) -> bool {
-    arr_elems_have_super_call(args)
+fn stmts_have_super_call(stmts: &[Stmt]) -> bool {
+    stmts_contain(
+        stmts,
+        |e| matches!(e, Expr::Call { callee, .. } if matches!(**callee, Expr::Super)),
+    )
 }
 
-fn arr_elems_have_super_call(elems: &[ArrayElem]) -> bool {
+/// ContainsArguments: an `arguments` identifier reference (arrow-descending, like `Contains`).
+fn stmts_have_arguments_ref(stmts: &[Stmt]) -> bool {
+    stmts_contain(stmts, |e| matches!(e, Expr::Ident(n) if n == "arguments"))
+}
+
+fn call_args_contain(args: &[ArrayElem], pred: fn(&Expr) -> bool) -> bool {
+    arr_elems_contain(args, pred)
+}
+
+fn arr_elems_contain(elems: &[ArrayElem], pred: fn(&Expr) -> bool) -> bool {
     elems.iter().any(|el| match el {
-        ArrayElem::Item(e) | ArrayElem::Spread(e) => expr_has_super_call(e),
+        ArrayElem::Item(e) | ArrayElem::Spread(e) => expr_contains(e, pred),
         ArrayElem::Hole => false,
     })
 }
