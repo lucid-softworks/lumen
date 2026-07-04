@@ -9288,9 +9288,26 @@ fn pym_until_since(i: &mut Interp, t: &Value, a: &[Value], dir: i64) -> Result<V
     } else {
         mode
     };
-    let internal = diff_pdt_rounded(
-        i, d, MIDNIGHT, o, MIDNIGHT, &tcal, &largest, incr, &smallest, &mode,
-    )?;
+    if cmp_date(d, o) == 0 {
+        return Ok(make(
+            i,
+            "Temporal.Duration",
+            Temporal::Duration(IsoDuration::default()),
+        ));
+    }
+    // The difference anchors at the first day of each month, which must be representable.
+    if !iso_date_within_limits(d) || !iso_date_within_limits(o) {
+        return Err(i.make_error("RangeError", "date is outside the supported range"));
+    }
+    // The month/increment-1 default skips rounding entirely (so extreme year-months never
+    // compute an out-of-range rounding boundary).
+    let internal = if smallest == "month" && incr == 1 {
+        diff_pdt(d, MIDNIGHT, o, MIDNIGHT, &tcal, &largest)
+    } else {
+        diff_pdt_rounded(
+            i, d, MIDNIGHT, o, MIDNIGHT, &tcal, &largest, incr, &smallest, &mode,
+        )?
+    };
     let mut out = dur_from_internal(i, &internal, "day")?;
     out.weeks = 0.0;
     out.days = 0.0;
