@@ -505,6 +505,17 @@ impl Interp {
                 Ok(Value::Empty)
             }
             Stmt::Return(arg) => {
+                // A strict ordinary function's `return f(...)` is a proper tail call: evaluate
+                // the callee and arguments, then hand the dispatch to the trampoline in
+                // Interp::call so the current frame unwinds first.
+                if let Some(e) = arg {
+                    if self.tco_ok && !self.using_stack.iter().any(|f| !f.is_empty()) {
+                        if let Some((f, t, a)) = self.eval_tail_call(e, env)? {
+                            self.pending_tail = Some((f, t, a));
+                            return Err(Abrupt::Return(Value::Undefined));
+                        }
+                    }
+                }
                 let v = match arg {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Undefined,
@@ -1489,8 +1500,21 @@ impl Interp {
         };
         if let Some(fin) = finalizer {
             // An abrupt completion in `finally` overrides the try/catch completion; its normal
-            // value is discarded (the try/catch completion stands).
-            self.exec_block(fin, env)?;
+            // value is discarded (the try/catch completion stands). A pending tail call from the
+            // try/catch is parked during the finalizer (which may schedule its own) and dropped
+            // if the finalizer overrides the completion.
+            let parked = self.pending_tail.take();
+            match self.exec_block(fin, env) {
+                Ok(_) => {
+                    if parked.is_some() {
+                        self.pending_tail = parked;
+                    }
+                }
+                Err(e) => {
+                    self.pending_tail = None;
+                    return Err(e);
+                }
+            }
         }
         // TryStatement completion: UpdateEmpty(result, undefined) — an EMPTY value (normal or in
         // an escaping break/continue) becomes undefined.
@@ -2540,6 +2564,70 @@ impl Interp {
             argv.push(self.eval(s, env)?);
         }
         self.call(func, this, &argv)
+    }
+
+    /// If `e` is a plain call usable as a proper tail call, evaluate its callee, `this` and
+    /// arguments and return them for the trampoline; `None` falls back to a normal evaluation.
+    fn eval_tail_call(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+    ) -> Result<Option<(Value, Value, Vec<Value>)>, Abrupt> {
+        let Expr::Call {
+            callee,
+            args,
+            optional: false,
+        } = e
+        else {
+            return Ok(None);
+        };
+        let (func, this) = match &**callee {
+            // A direct `eval`, `super(...)`, private-name or super-property callee stays on the
+            // normal path.
+            Expr::Ident(name) if name != "eval" => {
+                // A `with`-resolved callee needs its receiver; keep it on the slow path.
+                let mut cur = Some(env.clone());
+                let mut plain = true;
+                while let Some(s) = cur {
+                    let (has, with, parent) = {
+                        let b = s.borrow();
+                        (
+                            b.vars.contains_key(name.as_str()),
+                            b.with_obj.is_some(),
+                            b.parent.clone(),
+                        )
+                    };
+                    if has {
+                        break;
+                    }
+                    if with {
+                        plain = false;
+                        break;
+                    }
+                    cur = parent;
+                }
+                if !plain {
+                    return Ok(None);
+                }
+                (self.get_var(name, env)?, Value::Undefined)
+            }
+            Expr::Member { obj, prop, .. }
+                if !matches!(**obj, Expr::Super) && !prop.starts_with('#') =>
+            {
+                let base = self.eval(obj, env)?;
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Ok(None);
+                }
+                let f = self.get_member(&base, prop)?;
+                (f, base)
+            }
+            _ => return Ok(None),
+        };
+        if !func.is_callable() {
+            return Ok(None);
+        }
+        let argv = self.eval_args(args, env)?;
+        Ok(Some((func, this, argv)))
     }
 
     fn eval_call(

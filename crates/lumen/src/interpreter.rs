@@ -591,6 +591,12 @@ pub struct Interp {
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
     pub yield_raw_result: bool,
+    /// A pending proper tail call: set by `return f(...)` in a strict ordinary function; the
+    /// nearest `Interp::call` frame re-dispatches it (a trampoline), keeping the stack flat.
+    pub pending_tail: Option<(Value, Value, Vec<Value>)>,
+    /// True while executing a body where `return f(...)` is a proper tail call (a strict,
+    /// ordinary, non-constructor function).
+    pub tco_ok: bool,
     /// GetTemplateObject cache: one frozen strings array per tagged-template *site* (AST node),
     /// so the same site always passes the identical object. Keyed by the quasis slice address.
     pub template_cache: std::collections::HashMap<usize, Value>,
@@ -977,6 +983,8 @@ impl Interp {
             super_call_ok: false,
             in_field_init_code: false,
             yield_raw_result: false,
+            pending_tail: None,
+            tco_ok: false,
             template_cache: std::collections::HashMap::new(),
             using_stack: Vec::new(),
             accessor_seq: 0,
@@ -2401,7 +2409,21 @@ impl Interp {
             self.depth -= 1;
             return Err(e);
         }
-        let r = self.call_inner(callee, this, args);
+        let mut r = self.call_inner(callee, this, args);
+        // Trampoline: a proper tail call unwound out of the callee re-dispatches here, in the
+        // same stack frame, so mutual tail recursion runs in constant stack space.
+        while r.is_ok() {
+            match self.pending_tail.take() {
+                Some((f, t, a)) => {
+                    if let Err(e) = self.gc_check() {
+                        r = Err(e);
+                        break;
+                    }
+                    r = self.call_inner(f, t, &a);
+                }
+                None => break,
+            }
+        }
         self.depth -= 1;
         r
     }
@@ -3173,6 +3195,11 @@ impl Interp {
         if has_using {
             self.using_stack.push(Vec::new());
         }
+        // `return f(...)` is a proper tail call only in a strict, ordinary, non-constructor body.
+        let saved_tco = std::mem::replace(
+            &mut self.tco_ok,
+            func.is_strict && !func.is_generator && !func.is_async && !is_construct,
+        );
         let mut result = Ok(Value::Undefined);
         for stmt in &func.body {
             match self.exec_stmt(stmt, &body) {
@@ -3187,6 +3214,7 @@ impl Interp {
                 }
             }
         }
+        self.tco_ok = saved_tco;
         if has_using {
             let frame = self.using_stack.pop().unwrap_or_default();
             result = self.dispose_frame(frame, result);
