@@ -11725,10 +11725,12 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
         Value::Obj(o) => o.clone(),
         _ => return Err(i.throw("TypeError", "Property description must be an object")),
     };
-    // ToPropertyDescriptor reads each field with HasProperty/Get, so inherited fields count.
+    // ToPropertyDescriptor reads each field with HasProperty/Get (both trap-aware — the
+    // descriptor may itself be a proxy), in the spec's field order: enumerable, configurable,
+    // value, writable, get, set.
     let base = Value::Obj(o.clone());
     let bool_field = |i: &mut Interp, k: &str| -> Result<Option<bool>, Abrupt> {
-        if i.has_property(&o, k) {
+        if i.js_has_property(&base, k)? {
             let v = i.get_member(&base, k)?;
             Ok(Some(i.to_boolean(&v)))
         } else {
@@ -11737,18 +11739,18 @@ fn build_partial(i: &mut Interp, desc: &Value) -> Result<PartialDesc, Abrupt> {
     };
     let enumerable = bool_field(i, "enumerable")?;
     let configurable = bool_field(i, "configurable")?;
-    let writable = bool_field(i, "writable")?;
-    let value = if i.has_property(&o, "value") {
+    let value = if i.js_has_property(&base, "value")? {
         Some(i.get_member(&base, "value")?)
     } else {
         None
     };
-    let get = if i.has_property(&o, "get") {
+    let writable = bool_field(i, "writable")?;
+    let get = if i.js_has_property(&base, "get")? {
         Some(i.get_member(&base, "get")?)
     } else {
         None
     };
-    let set = if i.has_property(&o, "set") {
+    let set = if i.js_has_property(&base, "set")? {
         Some(i.get_member(&base, "set")?)
     } else {
         None
@@ -13645,6 +13647,17 @@ fn install_iterator(it: &mut Interp) {
             .insert("%WrapForValidIteratorPrototype%", wrap_proto);
     }
 
+    // %IteratorHelperPrototype%: the shared prototype of every map/filter/take/drop/flatMap
+    // helper (so cross-realm helpers interoperate — the methods live here, not per-object).
+    {
+        let helper_proto = Object::new(Some(proto.clone()));
+        it.def_method(&helper_proto, "next", 0, iter_helper_next);
+        it.def_method(&helper_proto, "return", 0, iter_helper_return);
+        set_to_string_tag(it, &helper_proto, "Iterator Helper");
+        it.extra_protos
+            .insert("%IteratorHelperPrototype%", helper_proto);
+    }
+
     let ctor = it.make_native("Iterator", 0, |i, t, _a| {
         // Abstract: NewTarget must be present and must not be %Iterator% itself.
         let nt = i.new_target.clone();
@@ -13678,22 +13691,34 @@ fn install_iterator(it: &mut Interp) {
         // GetIteratorFlattenable (strings allowed): a string/iterable via @@iterator, or an iterator
         // used directly. If the result already inherits %Iterator.prototype%, return it; else wrap it.
         let iter = get_iterator_flattenable(i, &v, true)?;
+        // GetIteratorDirect's `next` get happens before the OrdinaryHasInstance walk, whose
+        // [[GetPrototypeOf]] a proxy observes.
+        let next = ab(i.get_member(&iter, "next"))?;
         let iter_proto = i.extra_protos.get("%IteratorPrototype%").cloned();
-        let inherits = matches!(&iter, Value::Obj(o) if {
-            let mut p = o.borrow().proto.clone();
-            let mut found = false;
-            while let Some(pp) = p {
-                if iter_proto.as_ref().is_some_and(|ip| Rc::ptr_eq(&pp, ip)) { found = true; break; }
-                p = pp.borrow().proto.clone();
+        let mut inherits = false;
+        let mut cur = iter.clone();
+        loop {
+            let p = js_get_prototype_of(i, &cur)?;
+            match p {
+                Value::Obj(pp) => {
+                    if iter_proto.as_ref().is_some_and(|ip| Rc::ptr_eq(&pp, ip)) {
+                        inherits = true;
+                        break;
+                    }
+                    cur = Value::Obj(pp);
+                }
+                _ => break,
             }
-            found
-        });
+        }
         if inherits {
             return Ok(iter);
         }
         // Wrap: a %WrapForValidIteratorPrototype% object forwarding next/return to `iter`.
-        let next = ab(i.get_member(&iter, "next"))?;
-        let obj = Object::new(i.extra_protos.get("%WrapForValidIteratorPrototype%").cloned());
+        let obj = Object::new(
+            i.extra_protos
+                .get("%WrapForValidIteratorPrototype%")
+                .cloned(),
+        );
         set_builtin(&obj, "__wrap_iter", iter);
         set_builtin(&obj, "__wrap_next", next);
         Ok(Value::Obj(obj))
@@ -14348,7 +14373,11 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     } else {
         None
     };
-    let proto = i.extra_protos.get("%IteratorPrototype%").cloned();
+    let proto = i
+        .extra_protos
+        .get("%IteratorHelperPrototype%")
+        .or_else(|| i.extra_protos.get("%IteratorPrototype%"))
+        .cloned();
     let obj = Object::new(proto);
     // GetIteratorDirect: read the source's `next` method exactly once, now.
     let next = ab(i.get_member(&source, "next"))?;
@@ -14362,51 +14391,48 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     }
     set_builtin(&obj, "__ih_count", Value::Num(0.0));
     set_builtin(&obj, "__ih_done", Value::Bool(false));
-    i.def_method(&obj, "next", 0, iter_helper_next);
-    // The helper's `return` closes the underlying iterator once (IteratorHelperPrototype %return%).
-    i.def_method(&obj, "return", 0, |i, this, _a| {
-        let running = ab(i.get_member(&this, "__ih_running"))?;
-        if i.to_boolean(&running) {
-            return Err(i.make_error("TypeError", "iterator helper is already running"));
-        }
-        let done = ab(i.get_member(&this, "__ih_done"))?;
-        if !i.to_boolean(&done) {
-            let o = this.as_obj().unwrap().clone();
-            let started = ab(i.get_member(&this, "__ih_gstarted"))?;
-            let started = i.to_boolean(&started);
-            if started {
-                // Suspended at a yield: the close runs in the executing state.
-                set_internal(&o, "__ih_running", Value::Bool(true));
-            } else {
-                // Suspended-start: the generator completes before the close.
-                set_internal(&o, "__ih_done", Value::Bool(true));
-            }
-            let res = (|i: &mut Interp| -> Result<(), Value> {
-                // A helper suspended inside a flatMap inner iterator closes it first.
-                let inner = ab(i.get_member(&this, "__ih_inner"))?;
-                if matches!(inner, Value::Obj(_)) {
-                    ab(i.iterator_close_normal(&inner))?;
-                }
-                let src = ab(i.get_member(&this, "__ih_src"))?;
-                // A normal return() propagates an error from the source's return method.
-                ab(i.iterator_close_normal(&src))?;
-                Ok(())
-            })(i);
-            if started {
-                set_internal(&o, "__ih_running", Value::Bool(false));
-                set_internal(&o, "__ih_done", Value::Bool(true));
-            }
-            res?;
-        }
-        Ok(iter_result(i, Value::Undefined, true))
-    });
-    if let Some(sym) = i.iterator_sym.clone() {
-        let itf = i.make_native("[Symbol.iterator]", 0, return_this);
-        obj.borrow_mut()
-            .props
-            .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(itf)));
-    }
     Ok(Value::Obj(obj))
+}
+
+/// %IteratorHelperPrototype%.return: closes the underlying iterator once.
+fn iter_helper_return(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__ih_kind")) {
+        return Err(i.make_error("TypeError", "return called on an incompatible receiver"));
+    }
+    let running = ab(i.get_member(&this, "__ih_running"))?;
+    if i.to_boolean(&running) {
+        return Err(i.make_error("TypeError", "iterator helper is already running"));
+    }
+    let done = ab(i.get_member(&this, "__ih_done"))?;
+    if !i.to_boolean(&done) {
+        let o = this.as_obj().unwrap().clone();
+        let started = ab(i.get_member(&this, "__ih_gstarted"))?;
+        let started = i.to_boolean(&started);
+        if started {
+            // Suspended at a yield: the close runs in the executing state.
+            set_internal(&o, "__ih_running", Value::Bool(true));
+        } else {
+            // Suspended-start: the generator completes before the close.
+            set_internal(&o, "__ih_done", Value::Bool(true));
+        }
+        let res = (|i: &mut Interp| -> Result<(), Value> {
+            // A helper suspended inside a flatMap inner iterator closes it first.
+            let inner = ab(i.get_member(&this, "__ih_inner"))?;
+            if matches!(inner, Value::Obj(_)) {
+                ab(i.iterator_close_normal(&inner))?;
+            }
+            let src = ab(i.get_member(&this, "__ih_src"))?;
+            // A normal return() propagates an error from the source's return method.
+            ab(i.iterator_close_normal(&src))?;
+            Ok(())
+        })(i);
+        if started {
+            set_internal(&o, "__ih_running", Value::Bool(false));
+            set_internal(&o, "__ih_done", Value::Bool(true));
+        }
+        res?;
+    }
+    Ok(iter_result(i, Value::Undefined, true))
 }
 
 /// SetterThatIgnoresPrototypeProperties: assigning through Iterator.prototype's accessor throws
@@ -14621,7 +14647,12 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
         }
     }
 
-    let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
+    let obj = Object::new(
+        i.extra_protos
+            .get("%IteratorHelperPrototype%")
+            .or_else(|| i.extra_protos.get("%IteratorPrototype%"))
+            .cloned(),
+    );
     set_builtin(&obj, "__zip_iters", i.make_array(iters));
     set_builtin(&obj, "__zip_nexts", i.make_array(nexts));
     set_builtin(
@@ -14992,6 +15023,12 @@ fn get_iterator_flattenable(
 }
 
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // Brand check: only real iterator-helper objects carry the [[UnderlyingIterator]] slots (a
+    // generator also inherits from %IteratorPrototype% but must be rejected here).
+    if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__ih_kind") || o.borrow().props.contains("__zip_iters"))
+    {
+        return Err(i.make_error("TypeError", "next called on an incompatible receiver"));
+    }
     // GeneratorValidate: re-entering a running helper throws.
     let running = ab(i.get_member(&this, "__ih_running"))?;
     if i.to_boolean(&running) {
@@ -15102,7 +15139,12 @@ fn iter_helper_step(i: &mut Interp, this: Value) -> Result<Value, Value> {
                 let n = ab(i.to_number(&nv))? as usize;
                 for _ in 0..n {
                     if step_iter_with(i, &src, &inext)?.is_none() {
-                        break;
+                        // Exhausted while skipping: the helper completes here — no further
+                        // step of the underlying iterator.
+                        let o = this.as_obj().unwrap();
+                        set_internal(o, "__ih_started", Value::Bool(true));
+                        set_internal(o, "__ih_done", Value::Bool(true));
+                        return Ok(iter_result(i, Value::Undefined, true));
                     }
                 }
                 set_internal(this.as_obj().unwrap(), "__ih_started", Value::Bool(true));
