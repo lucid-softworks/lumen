@@ -120,6 +120,8 @@ pub struct Class {
     pub members: Vec<ClassMember>,
     /// `@dec` decorators applied to the whole class (outermost last).
     pub decorators: Vec<Expr>,
+    /// The class's source text (what the constructor's `toString` returns).
+    pub source: Option<Rc<str>>,
 }
 
 #[derive(Debug, Clone)]

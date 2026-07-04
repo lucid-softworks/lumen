@@ -3034,7 +3034,7 @@ impl Parser {
         let scall = std::mem::replace(&mut self.super_call_ok, false);
         let ssb = std::mem::replace(&mut self.in_static_block, false);
         let sargs = std::mem::replace(&mut self.no_arguments_refs, false);
-        let params = self.parse_params()?;
+        let params = self.parse_params_fn()?;
         let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
         self.super_call_ok = scall;
@@ -3199,6 +3199,7 @@ impl Parser {
             superclass,
             members,
             decorators,
+            source: self.src_slice(class_start, self.prev_end()),
         })
     }
 
@@ -3397,7 +3398,7 @@ impl Parser {
         // `arguments` reservations.
         let ssb = std::mem::replace(&mut self.in_static_block, false);
         let sargs = std::mem::replace(&mut self.no_arguments_refs, false);
-        let params = self.parse_params()?;
+        let params = self.parse_params_fn()?;
         // A method has UniqueFormalParameters: duplicate parameter names are always an error.
         if let Some(dup) = duplicate_name(&param_names(&params)) {
             self.in_generator = sg;
@@ -3459,6 +3460,17 @@ impl Parser {
         let result = self.parse_params_inner();
         self.in_params = saved_in_params;
         result
+    }
+
+    /// Parameters of a non-arrow function: default expressions are inside the function for
+    /// `new.target` purposes (an arrow's parameters instead see the enclosing context).
+    fn parse_params_fn(&mut self) -> Result<Vec<Param>, ParseError> {
+        self.fn_depth += 1;
+        self.nonarrow_fn_depth += 1;
+        let r = self.parse_params();
+        self.fn_depth -= 1;
+        self.nonarrow_fn_depth -= 1;
+        r
     }
 
     fn parse_params_inner(&mut self) -> Result<Vec<Param>, ParseError> {

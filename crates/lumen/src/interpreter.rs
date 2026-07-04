@@ -2132,6 +2132,23 @@ impl Interp {
         } else {
             let existed = obj.borrow().props.contains(key);
             if existed {
+                // OrdinarySetWithOwnDescriptor 4.d: an existing receiver property must be a
+                // writable data property (super.x = v / Reflect.set can reach here with a
+                // receiver whose own descriptor differs from the base chain's).
+                let (accessor, writable) = {
+                    let b = obj.borrow();
+                    let pr = b.props.get(key).unwrap();
+                    (pr.accessor, pr.writable)
+                };
+                if accessor || !writable {
+                    if self.strict {
+                        return Err(self.throw(
+                            "TypeError",
+                            format!("cannot assign to read only property '{key}'"),
+                        ));
+                    }
+                    return Ok(false);
+                }
                 if let Some(p) = obj.borrow_mut().props.get_mut(key) {
                     p.value = value;
                 }
@@ -3172,6 +3189,18 @@ impl Interp {
         is_construct: bool,
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
+        self.call_user_inner(func, closure, this, args, is_construct, fn_obj)
+    }
+
+    fn call_user_inner(
+        &mut self,
+        func: &Rc<Function>,
+        closure: Env,
+        this: Value,
+        args: &[Value],
+        is_construct: bool,
+        fn_obj: &Gc,
+    ) -> Result<Value, Abrupt> {
         // A function with parameter expressions (default values or destructuring with defaults) gets
         // a separate parameter Environment Record — not a variable environment — so its body's `var`
         // hoisting sits in a distinct scope below it (and a direct `eval` in a parameter default
@@ -3368,6 +3397,14 @@ impl Interp {
                     deletable: false,
                 },
             );
+            // Methods and class constructors may reference `super.x` — including from a direct
+            // eval in a nested arrow, which resolves this marker lexically long after the call.
+            if func.is_method || self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize)) {
+                scope.borrow_mut().vars.insert(
+                    "%superpropok%".to_string(),
+                    Binding::data(Value::Bool(true), false, true),
+                );
+            }
             // (A named function expression's self-name binds in its own environment, created
             // before the variable environment above.)
         }

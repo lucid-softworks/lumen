@@ -3564,6 +3564,28 @@ impl Interp {
         if direct && !self.super_call_ok && stmts_have_super_call(&body) {
             return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
         }
+        // Likewise a `super.x` reference requires the eval to sit (lexically) in method or class
+        // code — an ordinary nested function inside a method shields it, an arrow is transparent.
+        if direct && stmts_have_super_prop(&body) {
+            let mut ok = false;
+            let mut cur = Some(caller_env.clone());
+            while let Some(sc) = cur {
+                let b = sc.borrow();
+                if b.vars.contains_key("%superpropok%") || b.vars.contains_key("%homeobject%") {
+                    ok = true;
+                    break;
+                }
+                // An ordinary function boundary (binds `arguments`) without the marker shields
+                // the capability.
+                if b.vars.contains_key("arguments") {
+                    break;
+                }
+                cur = b.parent.clone();
+            }
+            if !ok {
+                return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
+            }
+        }
         // A direct eval from class-field-initializer code may not reference `arguments` (also an
         // early error, checked before the body runs). The context is *lexical*: an arrow created
         // in an initializer keeps it, while an ordinary function (whose scope binds `arguments`)
@@ -3864,6 +3886,16 @@ impl Interp {
     // ----- classes ----------------------------------------------------------------------------
 
     fn eval_class(&mut self, class: &Rc<Class>, env: &Env) -> Result<Value, Abrupt> {
+        // ClassDefinitionEvaluation is strict code throughout — the heritage expression and
+        // computed member keys included, whatever the surrounding mode.
+        let saved_strict = self.strict;
+        self.strict = true;
+        let r = self.eval_class_strict(class, env);
+        self.strict = saved_strict;
+        r
+    }
+
+    fn eval_class_strict(&mut self, class: &Rc<Class>, env: &Env) -> Result<Value, Abrupt> {
         // The class scope opens before the heritage evaluates: a named class's own name is in
         // scope there — uninitialized (TDZ) until the constructor exists, and immutable.
         let outer_class_env = new_scope(Some(env.clone()));
@@ -3916,13 +3948,21 @@ impl Interp {
 
         let proto = Object::new(proto_parent.clone());
 
-        // The constructor: explicit member, or a synthesized default.
+        // The constructor: explicit member, or a synthesized default. Either way its rendered
+        // source (Function.prototype.toString) is the whole class's source text.
         let ctor_func = class
             .members
             .iter()
             .find(|m| m.kind == MemberKind::Constructor)
             .and_then(|m| m.func.clone())
             .unwrap_or_else(|| Rc::new(default_constructor(derived)));
+        let ctor_func = if class.source.is_some() {
+            let mut f = (*ctor_func).clone();
+            f.source = class.source.clone();
+            Rc::new(f)
+        } else {
+            ctor_func
+        };
 
         // Environments that carry the `super` bindings into methods/fields.
         let class_env = new_scope(Some(env.clone()));
@@ -4003,12 +4043,13 @@ impl Interp {
                 self.set_fn_name(&ctor_val, &n);
             }
         }
-        // A named class binds its own name (initialized) in the class scope, so methods, static
-        // blocks, field initializers and decorators can reference the class itself.
+        // A named class binds its own name in the class scope, so methods, static blocks and
+        // field initializers can reference the class itself. The binding stays in its TDZ until
+        // every member's computed key has evaluated (spec: InitializeBinding runs after
+        // ClassElementEvaluation), so `[Name]` as a computed key is a ReferenceError.
         if let Some(n) = &class.name {
             if let Some(b) = outer_class_env.borrow_mut().vars.get_mut(n) {
                 b.value = ctor_val.clone();
-                b.initialized = true;
             }
         }
 
@@ -4244,6 +4285,14 @@ impl Interp {
                     }
                 }
                 MemberKind::Constructor => {}
+            }
+        }
+
+        // Every member key has evaluated: the class name binding leaves its TDZ before static
+        // field initializers and static blocks run.
+        if let Some(n) = &class.name {
+            if let Some(b) = outer_class_env.borrow_mut().vars.get_mut(n) {
+                b.initialized = true;
             }
         }
 
@@ -4615,6 +4664,12 @@ impl Interp {
             _ => return Err(self.throw("TypeError", "super target is not a constructor")),
         };
         let ptr = Rc::as_ptr(&obj) as usize;
+        // A proxy parent constructs through its [[Construct]] trap machinery; the returned object
+        // is what super() binds as `this` (the object-override path in the super-call code).
+        if self.proxies.contains_key(&ptr) {
+            let nt = self.new_target.clone();
+            return self.construct_nt(ctor.clone(), args, nt);
+        }
         let is_class = self.class_info.contains_key(&ptr);
         let derived = self
             .class_info
@@ -6388,6 +6443,14 @@ fn stmts_have_super_call(stmts: &[Stmt]) -> bool {
         stmts,
         |e| matches!(e, Expr::Call { callee, .. } if matches!(**callee, Expr::Super)),
     )
+}
+
+/// Contains a `super.x` / `super[x]` reference (arrow-descending, like `Contains`).
+fn stmts_have_super_prop(stmts: &[Stmt]) -> bool {
+    stmts_contain(stmts, |e| {
+        matches!(e, Expr::Member { obj, .. } | Expr::Index { obj, .. }
+            if matches!(&**obj, Expr::Super))
+    })
 }
 
 /// ContainsArguments: an `arguments` identifier reference (arrow-descending, like `Contains`).
