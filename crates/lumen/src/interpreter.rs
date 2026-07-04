@@ -2969,6 +2969,29 @@ impl Interp {
         // NOT get the self-reference (that would make `function f(){ f = 1 }` a silent no-op —
         // and an Annex B block function's binding may have been reassigned between calls).
         let self_ref_needed = func.is_fn_expr && func.name.is_some();
+        // A named function expression's self-name binds in its own environment *outside* the
+        // variable environment, so a body-level `var` of the same name creates a fresh binding
+        // instead of aliasing the callee.
+        let closure = if self_ref_needed {
+            let selfref_env = new_scope(Some(closure));
+            if let Some(name) = &func.name {
+                selfref_env.borrow_mut().vars.insert(
+                    name.clone(),
+                    Binding {
+                        value: Value::Obj(fn_obj.clone()),
+                        mutable: false,
+                        initialized: true,
+                        import_ref: None,
+                        deletable: false,
+                        // Non-strict immutable: reassignment is a silent no-op in sloppy code.
+                        strict_immutable: false,
+                    },
+                );
+            }
+            selfref_env
+        } else {
+            closure
+        };
         let has_param_exprs = params_have_expr(&func.params);
         let scope = if has_param_exprs {
             // Chain: callee base (variable env) → parameter env → body variable env. A direct `eval`
@@ -3117,24 +3140,8 @@ impl Interp {
                     deletable: false,
                 },
             );
-            // Expose the callee for named function expressions / recursion via `name`.
-            if let (true, Some(name)) = (self_ref_needed, &func.name) {
-                if !scope.borrow().vars.contains_key(name) {
-                    scope.borrow_mut().vars.insert(
-                        name.clone(),
-                        Binding {
-                            value: Value::Obj(fn_obj.clone()),
-                            mutable: false,
-                            initialized: true,
-                            import_ref: None,
-                            deletable: false,
-                            // A function-expression self-name is a non-strict immutable binding:
-                            // reassigning it is a silent no-op in sloppy code.
-                            strict_immutable: false,
-                        },
-                    );
-                }
-            }
+            // (A named function expression's self-name binds in its own environment, created
+            // before the variable environment above.)
         }
 
         // Parameter binding may throw (a default initializer, a destructuring mismatch, or an

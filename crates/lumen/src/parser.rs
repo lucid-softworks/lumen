@@ -1352,6 +1352,10 @@ impl Parser {
             return self.finish_c_for(None);
         }
         let proto_mark = self.proto_dups.len();
+        // A head starting with the unescaped, unparenthesized token `async` can't be a plain
+        // for-of LHS (ambiguity with an async arrow head); note it before parsing.
+        let bare_async_head =
+            matches!(self.cur(), Tok::Ident(w) if *w == "async") && !self.cur_escaped();
         let init_expr = self.parse_expr_no_in()?;
         if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
             let of = self.is_ident_word("of") && !self.cur_escaped();
@@ -1363,9 +1367,14 @@ impl Parser {
             };
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
-            // `for (async of ...)` is ambiguous with an async arrow head: a bare `async`
-            // LHS in a for-of is a SyntaxError (parenthesize it).
-            if of && !self.last_paren && matches!(&init_expr, Expr::Ident(n) if n == "async") {
+            // `for (async of ...)` is ambiguous with an async arrow head: a bare, unescaped
+            // `async` LHS in a plain for-of is a SyntaxError (parenthesize or escape it;
+            // for-await has no ambiguity).
+            if of
+                && !is_await
+                && bare_async_head
+                && matches!(&init_expr, Expr::Ident(n) if n == "async")
+            {
                 return Err(ParseError {
                     message: "'async' as a for-of left side must be parenthesized".into(),
                     line: self.line(),

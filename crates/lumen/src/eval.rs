@@ -1681,6 +1681,16 @@ impl Interp {
     }
 
     pub fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
+        self.get_var_with(name, env).map(|(v, _)| v)
+    }
+
+    /// Resolve like [`Interp::get_var`], also yielding the `with` object the binding came from —
+    /// the implicit call receiver for `f()` resolved through a with scope.
+    pub(crate) fn get_var_with(
+        &mut self,
+        name: &str,
+        env: &Env,
+    ) -> Result<(Value, Option<Value>), Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
             let (with_obj, parent) = {
@@ -1696,9 +1706,9 @@ impl Interp {
                     if let Some((src_env, local)) = &binding.import_ref {
                         let (src_env, local) = (src_env.clone(), local.clone());
                         drop(b);
-                        return self.get_var(&local, &src_env);
+                        return Ok((self.get_var(&local, &src_env)?, None));
                     }
-                    return Ok(binding.value.clone());
+                    return Ok((binding.value.clone(), None));
                 }
                 (b.with_obj.clone(), b.parent.clone())
             };
@@ -1714,9 +1724,9 @@ impl Interp {
                                 self.throw("ReferenceError", format!("{name} is not defined"))
                             );
                         }
-                        return Ok(Value::Undefined);
+                        return Ok((Value::Undefined, Some(obj.clone())));
                     }
-                    return self.get_member(obj, name);
+                    return Ok((self.get_member(obj, name)?, Some(obj.clone())));
                 }
             }
             cur = parent;
@@ -1724,7 +1734,7 @@ impl Interp {
         // Fall back to a property of the global object (where builtins live).
         let g = Value::Obj(self.global.clone());
         if self.has_property(&self.global.clone(), name) {
-            return self.get_member(&g, name);
+            return Ok((self.get_member(&g, name)?, None));
         }
         Err(self.throw("ReferenceError", format!("{name} is not defined")))
     }
@@ -2746,44 +2756,18 @@ impl Interp {
             // A direct `eval`, `super(...)`, private-name or super-property callee stays on the
             // normal path.
             Expr::Ident(name) => {
-                // A callee resolved *through* a `with` object needs its receiver; a with scope
-                // that doesn't bind the name is transparent for the walk.
-                let mut cur = Some(env.clone());
-                let mut plain = true;
-                while let Some(s) = cur {
-                    let (has, with_obj, parent) = {
-                        let b = s.borrow();
-                        (
-                            b.vars.contains_key(name.as_str()),
-                            b.with_obj.clone(),
-                            b.parent.clone(),
-                        )
-                    };
-                    if has {
-                        break;
-                    }
-                    if let Some(obj @ Value::Obj(_)) = &with_obj {
-                        if self.with_has_binding(obj, name)? {
-                            plain = false;
-                            break;
-                        }
-                    }
-                    cur = parent;
-                }
-                if !plain {
-                    return Ok(None);
-                }
-                let f = self.get_var(name, env)?;
+                // A callee resolved through a `with (obj)` environment gets `obj` as `this`.
+                let (f, recv) = self.get_var_with(name, env)?;
                 // A callee *named* eval only disqualifies when it is the real eval function
                 // (a direct eval isn't a call at all).
-                if name == "eval" {
+                if name == "eval" && recv.is_none() {
                     if let (Value::Obj(fo), Some(ef)) = (&f, &self.eval_fn) {
                         if Rc::ptr_eq(fo, ef) {
                             return Ok(None);
                         }
                     }
                 }
-                (f, Value::Undefined)
+                (f, recv.unwrap_or(Value::Undefined))
             }
             Expr::Member { obj, prop, .. }
                 if !matches!(**obj, Expr::Super) && !prop.starts_with('#') =>
@@ -2975,41 +2959,13 @@ impl Interp {
                 return self.call(f, this, &argv);
             }
         }
-        // A callee resolved through a `with (obj)` environment is called with `this` = obj.
-        if let Expr::Ident(name) = callee {
-            let mut cur = Some(env.clone());
-            let mut with_hit: Option<(Value, Value)> = None;
-            while let Some(s) = cur {
-                let (has, with_obj, parent) = {
-                    let b = s.borrow();
-                    (
-                        b.vars.contains_key(name),
-                        b.with_obj.clone(),
-                        b.parent.clone(),
-                    )
-                };
-                if has {
-                    break;
-                }
-                if let Some(obj @ Value::Obj(_)) = &with_obj {
-                    if self.with_has_binding(obj, name)? {
-                        let f = self.get_member(obj, name)?;
-                        with_hit = Some((f, obj.clone()));
-                        break;
-                    }
-                }
-                cur = parent;
-            }
-            if let Some((func, this)) = with_hit {
-                let argv = self.eval_args(args, env)?;
-                if !func.is_callable() {
-                    return Err(self.throw("TypeError", format!("{name} is not a function")));
-                }
-                return self.call(func, this, &argv);
-            }
-        }
-        // Determine `this` for method calls (`obj.m()` → this = obj).
+        // Determine `this` for method calls (`obj.m()` → this = obj); a callee resolved
+        // through a `with (obj)` environment is called with `this` = obj.
         let (func, this) = match callee {
+            Expr::Ident(name) => {
+                let (f, recv) = self.get_var_with(name, env)?;
+                (f, recv.unwrap_or(Value::Undefined))
+            }
             Expr::Member {
                 obj,
                 prop,
