@@ -514,6 +514,10 @@ impl Interp {
                             self.pending_tail = Some((f, t, a));
                             return Err(Abrupt::Return(Value::Undefined));
                         }
+                        if let Some((f, t, a)) = self.eval_tail_tagged(e, env)? {
+                            self.pending_tail = Some((f, t, a));
+                            return Err(Abrupt::Return(Value::Undefined));
+                        }
                     }
                 }
                 let v = match arg {
@@ -2554,8 +2558,36 @@ impl Interp {
         subs: &[Expr],
         env: &Env,
     ) -> Result<Value, Abrupt> {
-        // GetTemplateObject: one frozen strings array (with a frozen `.raw`) per template *site* —
-        // re-evaluating the same site passes the identical object.
+        let strings = self.template_object(quasis)?;
+        // Evaluate the tag callee, capturing `this` for method tags (`obj.tag\`...\``).
+        let (func, this) = match tag {
+            Expr::Member { obj, prop, .. } => {
+                let base = self.eval(obj, env)?;
+                let f = self.get_member(&base, prop)?;
+                (f, base)
+            }
+            Expr::Index { obj, index, .. } => {
+                let base = self.eval(obj, env)?;
+                let idx = self.eval(index, env)?;
+                let key = self.to_property_key(&idx)?;
+                let f = self.get_member(&base, &key)?;
+                (f, base)
+            }
+            _ => (self.eval(tag, env)?, Value::Undefined),
+        };
+        if !func.is_callable() {
+            return Err(self.throw("TypeError", "tag is not a function"));
+        }
+        let mut argv = vec![strings];
+        for s in subs {
+            argv.push(self.eval(s, env)?);
+        }
+        self.call(func, this, &argv)
+    }
+
+    /// GetTemplateObject: one frozen strings array (with a frozen `.raw`) per template *site* —
+    /// re-evaluating the same site passes the identical object.
+    fn template_object(&mut self, quasis: &[(Option<String>, String)]) -> Result<Value, Abrupt> {
         let site = quasis.as_ptr() as usize;
         let strings = match self.template_cache.get(&site) {
             Some(v) => v.clone(),
@@ -2590,30 +2622,7 @@ impl Interp {
                 strings
             }
         };
-        // Evaluate the tag callee, capturing `this` for method tags (`obj.tag\`...\``).
-        let (func, this) = match tag {
-            Expr::Member { obj, prop, .. } => {
-                let base = self.eval(obj, env)?;
-                let f = self.get_member(&base, prop)?;
-                (f, base)
-            }
-            Expr::Index { obj, index, .. } => {
-                let base = self.eval(obj, env)?;
-                let idx = self.eval(index, env)?;
-                let key = self.to_property_key(&idx)?;
-                let f = self.get_member(&base, &key)?;
-                (f, base)
-            }
-            _ => (self.eval(tag, env)?, Value::Undefined),
-        };
-        if !func.is_callable() {
-            return Err(self.throw("TypeError", "tag is not a function"));
-        }
-        let mut argv = vec![strings];
-        for s in subs {
-            argv.push(self.eval(s, env)?);
-        }
-        self.call(func, this, &argv)
+        Ok(strings)
     }
 
     /// If `e` is a plain call usable as a proper tail call, evaluate its callee, `this` and
@@ -2635,24 +2644,27 @@ impl Interp {
             // A direct `eval`, `super(...)`, private-name or super-property callee stays on the
             // normal path.
             Expr::Ident(name) => {
-                // A `with`-resolved callee needs its receiver; keep it on the slow path.
+                // A callee resolved *through* a `with` object needs its receiver; a with scope
+                // that doesn't bind the name is transparent for the walk.
                 let mut cur = Some(env.clone());
                 let mut plain = true;
                 while let Some(s) = cur {
-                    let (has, with, parent) = {
+                    let (has, with_obj, parent) = {
                         let b = s.borrow();
                         (
                             b.vars.contains_key(name.as_str()),
-                            b.with_obj.is_some(),
+                            b.with_obj.clone(),
                             b.parent.clone(),
                         )
                     };
                     if has {
                         break;
                     }
-                    if with {
-                        plain = false;
-                        break;
+                    if let Some(obj @ Value::Obj(_)) = &with_obj {
+                        if self.with_has_binding(obj, name)? {
+                            plain = false;
+                            break;
+                        }
                     }
                     cur = parent;
                 }
@@ -2681,12 +2693,53 @@ impl Interp {
                 let f = self.get_member(&base, prop)?;
                 (f, base)
             }
+            // A call-expression callee (`return getF()(n)`) evaluates generically.
+            c @ Expr::Call { .. } => {
+                let f = self.eval(c, env)?;
+                if self.short_circuit {
+                    return Ok(None);
+                }
+                (f, Value::Undefined)
+            }
             _ => return Ok(None),
         };
         if !func.is_callable() {
             return Ok(None);
         }
         let argv = self.eval_args(args, env)?;
+        Ok(Some((func, this, argv)))
+    }
+
+    /// A tagged template in tail position: evaluate the tag and assemble the argument list for
+    /// the trampoline.
+    fn eval_tail_tagged(
+        &mut self,
+        e: &Expr,
+        env: &Env,
+    ) -> Result<Option<(Value, Value, Vec<Value>)>, Abrupt> {
+        let Expr::TaggedTemplate { tag, quasis, subs } = e else {
+            return Ok(None);
+        };
+        let (func, this) = match &**tag {
+            Expr::Ident(_) => (self.eval(tag, env)?, Value::Undefined),
+            Expr::Member { obj, prop, .. } if !matches!(**obj, Expr::Super) => {
+                let base = self.eval(obj, env)?;
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Ok(None);
+                }
+                let f = self.get_member(&base, prop)?;
+                (f, base)
+            }
+            _ => return Ok(None),
+        };
+        if !func.is_callable() {
+            return Ok(None);
+        }
+        let strings = self.template_object(quasis)?;
+        let mut argv = vec![strings];
+        for s in subs {
+            argv.push(self.eval(s, env)?);
+        }
         Ok(Some((func, this, argv)))
     }
 

@@ -1313,6 +1313,23 @@ impl Parser {
                 decls.push((pat, init));
             }
             self.expect_punct(";")?;
+            // The head's bound names live in the for statement's own scope: a lexical head name
+            // redeclared by a `var` in the body is a SyntaxError.
+            {
+                let mut names = Vec::new();
+                for (pat, _) in &decls {
+                    pattern_names(pat, &mut names);
+                }
+                if kind != DeclKind::Var && names.iter().any(|n| n == "let") {
+                    return self.err("'let' is disallowed as a lexically bound name");
+                }
+                for n in &names {
+                    match kind {
+                        DeclKind::Var => self.declare_var(n, true)?,
+                        _ => self.declare_lexical(n)?,
+                    }
+                }
+            }
             return self.finish_c_for(Some(Box::new(ForInit::VarDecl { kind, decls })));
         }
 
