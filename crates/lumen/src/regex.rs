@@ -15,6 +15,7 @@ const STEP_LIMIT: u64 = 2_000_000;
 /// A compiled regular expression.
 pub struct Regex {
     prog: Vec<Inst>,
+    pub unicode: bool,
     pub ngroups: usize,
     pub source: String,
     pub flags: String,
@@ -269,6 +270,95 @@ struct Parser {
     name_refs: Vec<String>,
 }
 
+/// The element sequence regular expressions operate over. In unicode (`u`/`v`) mode an element
+/// is a code point; otherwise it is a UTF-16 code unit. Surrogate units/code points are carried
+/// as their jstr-smuggled plane-16 scalars so every element is a valid `char` — an astral
+/// character in a non-unicode pattern or subject is therefore TWO elements (its two halves).
+pub fn pattern_elements(unicode: bool, s: &str) -> Vec<char> {
+    if unicode {
+        crate::jstr::code_points(s)
+            .into_iter()
+            .map(elem_of_cp)
+            .collect()
+    } else {
+        crate::jstr::units(s)
+            .into_iter()
+            .map(elem_of_unit)
+            .collect()
+    }
+}
+
+fn elem_of_unit(u: u16) -> char {
+    if (0xD800..0xE000).contains(&(u as u32)) {
+        crate::jstr::smuggle(u)
+    } else {
+        char::from_u32(u as u32).unwrap()
+    }
+}
+
+fn elem_of_cp(cp: u32) -> char {
+    if (0xD800..0xE000).contains(&cp) {
+        crate::jstr::smuggle(cp as u16)
+    } else {
+        char::from_u32(cp).unwrap()
+    }
+}
+
+/// A subject string prepared for matching: its elements plus each element's unit offset
+/// (`unit_of.len() == elems.len() + 1`; the last entry is the total unit length). JS-visible
+/// indices (lastIndex, match.index) are always unit offsets.
+pub struct ReText {
+    pub elems: Vec<char>,
+    pub unit_of: Vec<usize>,
+}
+
+impl ReText {
+    pub fn new(unicode: bool, s: &str) -> ReText {
+        if unicode {
+            let cps = crate::jstr::code_points(s);
+            let mut unit_of = Vec::with_capacity(cps.len() + 1);
+            let mut u = 0usize;
+            let mut elems = Vec::with_capacity(cps.len());
+            for cp in cps {
+                unit_of.push(u);
+                u += if cp >= 0x10000 { 2 } else { 1 };
+                elems.push(elem_of_cp(cp));
+            }
+            unit_of.push(u);
+            ReText { elems, unit_of }
+        } else {
+            let units = crate::jstr::units(s);
+            let elems: Vec<char> = units.iter().map(|&u| elem_of_unit(u)).collect();
+            let unit_of = (0..=elems.len()).collect();
+            ReText { elems, unit_of }
+        }
+    }
+
+    /// The element index containing unit offset `u` (== len when `u` is at/past the end).
+    pub fn elem_at_unit(&self, u: usize) -> usize {
+        match self.unit_of.binary_search(&u) {
+            Ok(k) => k.min(self.elems.len()),
+            Err(k) => k - 1,
+        }
+    }
+
+    /// The unit offset of element `e`.
+    pub fn unit_index(&self, e: usize) -> usize {
+        self.unit_of[e.min(self.elems.len())]
+    }
+
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.elems.len()
+    }
+
+    /// The canonical string for elements `a..b` (surrogate halves recombine).
+    pub fn slice(&self, a: usize, b: usize) -> String {
+        let s: String = self.elems[a..b].iter().collect();
+        crate::jstr::canonicalize(&s).unwrap_or(s)
+    }
+}
+
 /// Whether `pattern` contains a named capture group `(?<name>…)` (not a lookbehind `(?<=`/`(?<!`).
 fn has_named_group(pattern: &str) -> bool {
     let b: Vec<char> = pattern.chars().collect();
@@ -304,7 +394,7 @@ impl Regex {
         let unicode_sets = flags.contains('v');
         let named_mode = unicode || has_named_group(pattern);
         let mut p = Parser {
-            chars: pattern.chars().collect(),
+            chars: pattern_elements(unicode, pattern),
             pos: 0,
             ngroups: 0,
             names: Vec::new(),
@@ -344,6 +434,7 @@ impl Regex {
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
         Ok(Regex {
+            unicode,
             prog,
             ngroups: p.ngroups,
             source: if pattern.is_empty() {
@@ -986,7 +1077,7 @@ impl Parser {
                     if self.unicode {
                         Ok(ClassAtom::Char(self.hex_strict(2)?))
                     } else {
-                        Ok(ClassAtom::Char(self.hex(2)))
+                        Ok(ClassAtom::Char(self.hex(2, 'x')))
                     }
                 }
                 Some('u') => {
@@ -1071,7 +1162,7 @@ impl Parser {
                 if self.unicode {
                     Ok(Node::Char(self.hex_strict(2)?))
                 } else {
-                    Ok(Node::Char(self.hex(2)))
+                    Ok(Node::Char(self.hex(2, 'x')))
                 }
             }
             Some('u') => {
@@ -1180,13 +1271,20 @@ impl Parser {
         Ok(name)
     }
 
-    fn hex(&mut self, n: usize) -> char {
+    /// Annex B ExtendedHexEscapeSequence: `\x` needs exactly `n` hex digits, otherwise the whole
+    /// escape is an IdentityEscape for `esc` (consuming nothing past it).
+    fn hex(&mut self, n: usize, esc: char) -> char {
+        let save = self.pos;
         let mut s = String::new();
         for _ in 0..n {
-            if let Some(c) = self.peek() {
-                if c.is_ascii_hexdigit() {
+            match self.peek() {
+                Some(c) if c.is_ascii_hexdigit() => {
                     s.push(c);
                     self.bump();
+                }
+                _ => {
+                    self.pos = save;
+                    return esc;
                 }
             }
         }

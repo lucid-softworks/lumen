@@ -1915,10 +1915,20 @@ fn regexp_exec_abstract(i: &mut Interp, r: &Value, s: Rc<str>) -> Result<Value, 
     regexp_exec(i, r.clone(), &[Value::Str(s)])
 }
 
-/// AdvanceStringIndex. lumen strings are sequences of code points (not UTF-16 units), so a step is
-/// always one code point — the `fullUnicode` distinction (surrogate pairs) doesn't apply here.
-fn advance_string_index(index: usize, _s: &str, _unicode: bool) -> usize {
-    index + 1
+/// AdvanceStringIndex over UNIT offsets: one code unit, or a whole surrogate pair in unicode mode.
+fn advance_string_index(index: usize, s: &str, unicode: bool) -> usize {
+    if !unicode {
+        return index + 1;
+    }
+    let units = crate::jstr::units(s);
+    if index + 1 < units.len()
+        && (0xD800..0xDC00).contains(&(units[index] as u32))
+        && (0xDC00..0xE000).contains(&(units[index + 1] as u32))
+    {
+        index + 2
+    } else {
+        index + 1
+    }
 }
 
 fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
@@ -1973,8 +1983,9 @@ fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Valu
 fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     require_regexp_this(i, &this, "[Symbol.replace]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
-    let schars: Vec<char> = s.chars().collect();
-    let size = schars.len();
+    // All positions are UTF-16 unit offsets.
+    let sunits: Vec<u16> = crate::jstr::units(&s);
+    let size = sunits.len();
     let repl = arg(a, 1);
     let functional = repl.is_callable();
     let repl_str = if functional {
@@ -2020,7 +2031,7 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
         let ncaptures = length.saturating_sub(1);
         let matched_v = ab(i.get_member(result, "0"))?;
         let matched = ab(i.to_string(&matched_v))?;
-        let match_len = matched.chars().count();
+        let match_len = crate::jstr::unit_len(&matched);
         let index_v = ab(i.get_member(result, "index"))?;
         let pos_raw = ab(i.to_number(&index_v))?;
         let position = if pos_raw.is_nan() || pos_raw < 0.0 {
@@ -2049,18 +2060,20 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
             let r = ab(i.call(repl.clone(), Value::Undefined, &cbargs))?;
             ab(i.to_string(&r))?.to_string()
         } else {
-            get_substitution(i, &matched, &schars, position, &captures, &named, &repl_str)?
+            get_substitution(i, &matched, &sunits, position, &captures, &named, &repl_str)?
         };
         if position >= next_pos {
-            accumulated.extend(schars[next_pos..position].iter());
+            accumulated.push_str(&crate::jstr::from_units(&sunits[next_pos..position]));
             accumulated.push_str(&replacement);
             next_pos = position + match_len;
         }
     }
     if next_pos < size {
-        accumulated.extend(schars[next_pos..].iter());
+        accumulated.push_str(&crate::jstr::from_units(&sunits[next_pos..]));
     }
-    Ok(Value::from_string(accumulated))
+    Ok(Value::from_string(
+        crate::jstr::canonicalize(&accumulated).unwrap_or(accumulated),
+    ))
 }
 
 /// ToLength of a value (clamped to a non-negative integer).
@@ -2078,13 +2091,13 @@ fn to_length_val(i: &mut Interp, v: &Value) -> Result<usize, Value> {
 fn get_substitution(
     i: &mut Interp,
     matched: &str,
-    schars: &[char],
+    sunits: &[u16],
     position: usize,
     captures: &[Value],
     named: &Value,
     template: &str,
 ) -> Result<String, Value> {
-    let tail = (position + matched.chars().count()).min(schars.len());
+    let tail = (position + crate::jstr::unit_len(matched)).min(sunits.len());
     let push_cap = |out: &mut String, cap: &Value| {
         if let Value::Str(s) = cap {
             out.push_str(s);
@@ -2109,11 +2122,13 @@ fn get_substitution(
                 k += 2;
             }
             '`' => {
-                out.extend(schars[..position].iter());
+                out.push_str(&crate::jstr::from_units(
+                    &sunits[..position.min(sunits.len())],
+                ));
                 k += 2;
             }
             '\'' => {
-                out.extend(schars[tail..].iter());
+                out.push_str(&crate::jstr::from_units(&sunits[tail..]));
                 k += 2;
             }
             '<' if !matches!(named, Value::Undefined) => {
@@ -2180,8 +2195,9 @@ fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
 fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     require_regexp_this(i, &this, "[Symbol.split]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
-    let schars: Vec<char> = s.chars().collect();
-    let size = schars.len();
+    // All positions are UTF-16 unit offsets.
+    let sunits: Vec<u16> = crate::jstr::units(&s);
+    let size = sunits.len();
     // SpeciesConstructor(rx, %RegExp%), then a sticky-flagged splitter constructed from it.
     let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "RegExp"))?;
     let c = species_constructor(i, &this, &default_ctor)?;
@@ -2232,7 +2248,7 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
             q = advance_string_index(q, &s, unicode);
             continue;
         }
-        out.push(Value::from_string(schars[p..q].iter().collect::<String>()));
+        out.push(Value::from_string(crate::jstr::from_units(&sunits[p..q])));
         if out.len() == limit {
             return Ok(i.make_array(out));
         }
@@ -2248,9 +2264,9 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
         }
         q = p;
     }
-    out.push(Value::from_string(
-        schars[p..size].iter().collect::<String>(),
-    ));
+    out.push(Value::from_string(crate::jstr::from_units(
+        &sunits[p..size],
+    )));
     Ok(i.make_array(out))
 }
 
@@ -2264,21 +2280,23 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         .cloned()
         .ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
     let input = ab(i.to_string(&arg(args, 0)))?;
-    let chars: Vec<char> = input.chars().collect();
+    // Elements are code units (non-unicode) or code points (u/v); JS-visible indices are units.
+    let text = crate::regex::ReText::new(re.unicode, &input);
     let use_last = re.global || re.sticky;
-    let last = if use_last {
+    let last_units = if use_last {
         let li = ab(i.get_member(&this, "lastIndex"))?;
         ab(i.to_number(&li))?.max(0.0) as usize
     } else {
         0
     };
-    if last > chars.len() {
+    if last_units > text.unit_index(text.len()) {
         if use_last {
             ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
         }
         return Ok(Value::Null);
     }
-    match re.exec_at(&chars, last) {
+    let last = text.elem_at_unit(last_units);
+    match re.exec_at(&text.elems, last) {
         None => {
             if use_last {
                 ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
@@ -2288,14 +2306,12 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         Some(caps) => {
             let (start, end) = caps[0].unwrap();
             if use_last {
-                ab(i.set_member(&this, "lastIndex", Value::Num(end as f64)))?;
+                ab(i.set_member(&this, "lastIndex", Value::Num(text.unit_index(end) as f64)))?;
             }
-            let mut items = vec![Value::from_string(
-                chars[start..end].iter().collect::<String>(),
-            )];
+            let mut items = vec![Value::from_string(text.slice(start, end))];
             for g in 1..=re.ngroups {
                 items.push(match caps[g] {
-                    Some((a, b)) => Value::from_string(chars[a..b].iter().collect::<String>()),
+                    Some((a, b)) => Value::from_string(text.slice(a, b)),
                     None => Value::Undefined,
                 });
             }
@@ -2319,7 +2335,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                         .iter()
                         .filter(|(n, _)| n == name)
                         .find_map(|(_, idx)| caps.get(*idx).copied().flatten())
-                        .map(|(a, b)| Value::from_string(chars[a..b].iter().collect::<String>()))
+                        .map(|(a, b)| Value::from_string(text.slice(a, b)))
                         .unwrap_or(Value::Undefined);
                     set_data(&g, name, v);
                 }
@@ -2329,7 +2345,10 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
             // plus a null-prototype `groups` of the same for named captures.
             let indices = if re.flags.contains('d') {
                 let pair = |i: &mut Interp, span: Option<(usize, usize)>| match span {
-                    Some((a, b)) => i.make_array(vec![Value::Num(a as f64), Value::Num(b as f64)]),
+                    Some((a, b)) => i.make_array(vec![
+                        Value::Num(text.unit_index(a) as f64),
+                        Value::Num(text.unit_index(b) as f64),
+                    ]),
                     None => Value::Undefined,
                 };
                 let mut idx_items = Vec::with_capacity(re.ngroups + 1);
@@ -2367,7 +2386,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                 None
             };
             if let Value::Obj(o) = &result {
-                set_data(o, "index", Value::Num(start as f64));
+                set_data(o, "index", Value::Num(text.unit_index(start) as f64));
                 set_data(o, "input", Value::Str(input));
                 set_data(o, "groups", groups);
                 if let Some(ind) = indices {
@@ -2380,8 +2399,12 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
 }
 
 /// Coerce `v` to a RegExp object (returning it unchanged if already one).
-/// All non-overlapping matches of `re` in `chars`, each as capture spans.
-fn regex_find_all(re: &crate::regex::Regex, chars: &[char]) -> Vec<Vec<Option<(usize, usize)>>> {
+/// All non-overlapping matches of `re` in `text`, each as capture spans (element indices).
+fn regex_find_all(
+    re: &crate::regex::Regex,
+    text: &crate::regex::ReText,
+) -> Vec<Vec<Option<(usize, usize)>>> {
+    let chars = &text.elems;
     let mut out = Vec::new();
     let mut pos = 0;
     while pos <= chars.len() {
@@ -14834,12 +14857,8 @@ fn install_string(it: &mut Interp) {
             .props
             .insert(Interp::sym_key(&sym), Property::builtin(Value::Obj(f)));
     }
-    it.def_method(&sp, "toString", 0, |i, this, _| {
-        Ok(Value::Str(this_string(i, &this)?))
-    });
-    it.def_method(&sp, "valueOf", 0, |i, this, _| {
-        Ok(Value::Str(this_string(i, &this)?))
-    });
+    it.def_method(&sp, "toString", 0, |i, this, _| string_this_value(i, &this));
+    it.def_method(&sp, "valueOf", 0, |i, this, _| string_this_value(i, &this));
     it.def_method(&sp, "charAt", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let n = ab(i.to_number(&arg(args, 0)))?;
@@ -15180,13 +15199,20 @@ fn install_string(it: &mut Interp) {
         if s.len() > MAX_ARRAY_OP_LEN {
             return Err(i.make_error("RangeError", "string too large to split in this engine"));
         }
-        // `limit` (ToUint32) caps the number of pieces; 0 → empty result.
+        // `limit` (ToUint32) caps the number of pieces; 0 → empty result — but ToString of the
+        // separator is observable BEFORE the zero-limit shortcut.
         let limit = match arg(args, 1) {
             Value::Undefined => u32::MAX as usize,
             v => {
                 let n = ab(i.to_number(&v))?;
                 (if n.is_finite() { n as i64 as u32 } else { 0 }) as usize
             }
+        };
+        let is_live_regexp = matches!(&arg(args, 0), Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)));
+        let sep_str: Option<Rc<str>> = match &arg(args, 0) {
+            Value::Undefined => None,
+            _ if is_live_regexp => None,
+            v => Some(ab(i.to_string(v))?),
         };
         if limit == 0 {
             return Ok(i.make_array(Vec::new()));
@@ -15195,26 +15221,22 @@ fn install_string(it: &mut Interp) {
         if let Value::Obj(o) = &arg(args, 0) {
             if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
                 let re = i.regexps[&(Rc::as_ptr(o) as usize)].clone();
-                let chars: Vec<char> = s.chars().collect();
+                let text = crate::regex::ReText::new(re.unicode, &s);
                 let mut parts = Vec::new();
                 let mut last = 0;
-                'outer: for caps in regex_find_all(&re, &chars) {
+                'outer: for caps in regex_find_all(&re, &text) {
                     let (a, b) = caps[0].unwrap();
                     // Skip a zero-width match at the very start or end of the string.
-                    if a == b && (b == 0 || a >= chars.len()) {
+                    if a == b && (b == 0 || a >= text.len()) {
                         continue;
                     }
-                    parts.push(Value::from_string(
-                        chars[last..a].iter().collect::<String>(),
-                    ));
+                    parts.push(Value::from_string(text.slice(last, a)));
                     if parts.len() >= limit {
                         break;
                     }
                     for g in 1..=re.ngroups {
                         parts.push(match caps[g] {
-                            Some((x, y)) => {
-                                Value::from_string(chars[x..y].iter().collect::<String>())
-                            }
+                            Some((x, y)) => Value::from_string(text.slice(x, y)),
                             None => Value::Undefined,
                         });
                         if parts.len() >= limit {
@@ -15224,16 +15246,15 @@ fn install_string(it: &mut Interp) {
                     last = b;
                 }
                 if parts.len() < limit {
-                    parts.push(Value::from_string(chars[last..].iter().collect::<String>()));
+                    parts.push(Value::from_string(text.slice(last, text.len())));
                 }
                 parts.truncate(limit);
                 return Ok(i.make_array(parts));
             }
         }
-        match arg(args, 0) {
-            Value::Undefined => Ok(i.make_array(vec![Value::Str(s)])),
-            sep => {
-                let sep = ab(i.to_string(&sep))?;
+        match sep_str {
+            None => Ok(i.make_array(vec![Value::Str(s)])),
+            Some(sep) => {
                 // Splitting on "" yields one piece per UTF-16 code unit (a surrogate pair
                 // becomes its two lone halves).
                 let mut parts: Vec<Value> = if sep.is_empty() {
@@ -15395,13 +15416,16 @@ fn install_string(it: &mut Interp) {
                     ));
                 }
             }
-            if let Some(key) = well_known_key(i, "matchAll") {
-                let matcher = ab(i.get_member(&regexp, &key))?;
-                if !matches!(matcher, Value::Undefined | Value::Null) {
-                    if !matcher.is_callable() {
-                        return Err(i.make_error("TypeError", "@@matchAll is not callable"));
+            // Only an Object's @@matchAll is consulted; a primitive goes to the string path.
+            if matches!(regexp, Value::Obj(_)) {
+                if let Some(key) = well_known_key(i, "matchAll") {
+                    let matcher = ab(i.get_member(&regexp, &key))?;
+                    if !matches!(matcher, Value::Undefined | Value::Null) {
+                        if !matcher.is_callable() {
+                            return Err(i.make_error("TypeError", "@@matchAll is not callable"));
+                        }
+                        return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
                     }
-                    return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
                 }
             }
         }
@@ -15441,7 +15465,8 @@ fn install_string(it: &mut Interp) {
         }
         let s = this_string(i, &this)?.to_string();
         let pat = ab(i.to_string(&arg(args, 0)))?;
-        let repl = arg(args, 1);
+        // A non-callable replaceValue is ToString'd BEFORE the search (even when nothing matches).
+        let repl = prep_repl(i, &arg(args, 1))?;
         match s.find(pat.as_ref()) {
             None => Ok(Value::from_string(s)),
             Some(pos) => {
@@ -15497,7 +15522,8 @@ fn install_string(it: &mut Interp) {
         }
         let s = this_string(i, &this)?.to_string();
         let pat = ab(i.to_string(&arg(args, 0)))?;
-        let repl = arg(args, 1);
+        // ToString(replaceValue) happens exactly once, before any matching.
+        let repl = prep_repl(i, &arg(args, 1))?;
         if pat.is_empty() {
             // An empty search matches at every position: insert the replacement between each char.
             let mut out = String::new();
@@ -15702,16 +15728,43 @@ fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Re
 
 /// Compute the replacement text for String.prototype.replace/replaceAll. A function replacer is
 /// called with (match, position, whole-string); otherwise `$&` etc. patterns are honored minimally.
+/// thisStringValue: a String primitive or wrapper; anything else is a TypeError (the
+/// String.prototype toString/valueOf methods are not generic).
+fn string_this_value(i: &mut Interp, this: &Value) -> Result<Value, Value> {
+    match this {
+        Value::Str(s) => Ok(Value::Str(s.clone())),
+        Value::Obj(o) => match &o.borrow().exotic {
+            Exotic::StrWrap(s) => Ok(Value::Str(s.clone())),
+            _ => Err(i.make_error("TypeError", "not a String object")),
+        },
+        _ => Err(i.make_error("TypeError", "not a String object")),
+    }
+}
+
+/// A prepared replacement: the non-callable form is ToString'd exactly once, up front.
+enum Repl {
+    Fn(Value),
+    Text(Rc<str>),
+}
+
+fn prep_repl(i: &mut Interp, v: &Value) -> Result<Repl, Value> {
+    if v.is_callable() {
+        Ok(Repl::Fn(v.clone()))
+    } else {
+        Ok(Repl::Text(ab(i.to_string(v))?))
+    }
+}
+
 fn string_replacement(
     i: &mut Interp,
-    repl: &Value,
+    repl: &Repl,
     matched: &str,
     whole: &str,
     pos: usize,
 ) -> Result<String, Value> {
-    if repl.is_callable() {
+    if let Repl::Fn(f) = repl {
         let r = ab(i.call(
-            repl.clone(),
+            f.clone(),
             Value::Undefined,
             &[
                 Value::from_string(matched.to_string()),
@@ -15719,9 +15772,13 @@ fn string_replacement(
                 Value::from_string(whole.to_string()),
             ],
         ))?;
-        Ok(ab(i.to_string(&r))?.to_string())
-    } else {
-        let template = ab(i.to_string(repl))?;
+        return Ok(ab(i.to_string(&r))?.to_string());
+    }
+    {
+        let template = match repl {
+            Repl::Text(t) => t.clone(),
+            Repl::Fn(_) => unreachable!(),
+        };
         // GetSubstitution for a string match: $$ → $, $& → match, $` → preceding, $' → following.
         // (No captures, so $n and $<name> stay literal.)
         let before = &whole[..pos.min(whole.len())];

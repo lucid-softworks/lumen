@@ -449,10 +449,27 @@ impl<'a> Lexer<'a> {
         let mut cooked = String::new();
         let mut raw_start = self.pos; // raw source of the current chunk starts here
         loop {
+            // The template's raw value normalizes line terminators: <CR><LF> and <CR> → <LF>.
+            let raw_of = |chars: &[char]| -> String {
+                let mut out = String::with_capacity(chars.len());
+                let mut k = 0;
+                while k < chars.len() {
+                    if chars[k] == '\r' {
+                        out.push('\n');
+                        if chars.get(k + 1) == Some(&'\n') {
+                            k += 1;
+                        }
+                    } else {
+                        out.push(chars[k]);
+                    }
+                    k += 1;
+                }
+                out
+            };
             match self.peek() {
                 None => return Err(self.err("unterminated template literal")),
                 Some('`') => {
-                    let raw: String = self.chars[raw_start..self.pos].iter().collect();
+                    let raw = raw_of(&self.chars[raw_start..self.pos]);
                     self.bump();
                     parts.push(TplPart::Str {
                         cooked: std::mem::take(&mut cooked),
@@ -461,7 +478,7 @@ impl<'a> Lexer<'a> {
                     break;
                 }
                 Some('$') if self.chars.get(self.pos + 1) == Some(&'{') => {
-                    let raw: String = self.chars[raw_start..self.pos].iter().collect();
+                    let raw = raw_of(&self.chars[raw_start..self.pos]);
                     parts.push(TplPart::Str {
                         cooked: std::mem::take(&mut cooked),
                         raw,
