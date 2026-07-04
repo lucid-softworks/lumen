@@ -1787,6 +1787,22 @@ fn install_regexp(it: &mut Interp) {
     it.def_method(&proto, "compile", 2, |i, this, a| {
         let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
         let ptr = ptr.ok_or_else(|| i.make_error("TypeError", "compile called on non-RegExp"))?;
+        // The legacy-regexp proposal: compile requires a DIRECT same-realm RegExp instance (a
+        // subclass or cross-realm instance is a TypeError).
+        if let (Value::Obj(o), Some(rp)) = (&this, i.extra_protos.get("RegExp")) {
+            let direct = o
+                .borrow()
+                .proto
+                .as_ref()
+                .map(|p| Rc::ptr_eq(p, rp))
+                .unwrap_or(false);
+            if !direct {
+                return Err(i.make_error(
+                    "TypeError",
+                    "RegExp.prototype.compile requires a direct RegExp instance",
+                ));
+            }
+        }
         let (source, flags) = match arg(a, 0) {
             Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(&o) as usize)) => {
                 // A RegExp pattern copies its source/flags; a second flags argument is then an error.
@@ -1810,6 +1826,7 @@ fn install_regexp(it: &mut Interp) {
             i.gc_pin(o);
         }
         i.regexps.insert(ptr, Rc::new(re));
+        set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
         ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
         Ok(this)
     });
@@ -1896,6 +1913,7 @@ fn install_regexp(it: &mut Interp) {
         ab(i.make_regexp(&source, &flags))
     });
     it.extra_protos.insert("%RegExpCtor%", ctor.clone());
+    install_regexp_legacy_statics(it, &ctor);
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(proto.clone()), false, false, false),
@@ -1972,6 +1990,153 @@ fn regexp_escape_cp(cp: u32, first: bool) -> String {
             }
         }
         _ => c.to_string(),
+    }
+}
+
+/// Refresh the %RegExp% constructor's legacy static state after a successful RegExpBuiltinExec.
+fn update_regexp_legacy_statics(
+    i: &mut Interp,
+    re: &crate::regex::Regex,
+    caps: &[Option<(usize, usize)>],
+    text: &crate::regex::ReText,
+    input: &Rc<str>,
+) {
+    let ctor = match i.extra_protos.get("%RegExpCtor%") {
+        Some(c) => c.clone(),
+        None => return,
+    };
+    let put = |k: &'static str, v: String| {
+        ctor.borrow_mut()
+            .props
+            .insert(k, Property::data(Value::from_string(v), true, false, false));
+    };
+    let (start, end) = caps[0].unwrap();
+    put("__legacy_input", input.to_string());
+    put("__legacy_lastMatch", text.slice(start, end));
+    put("__legacy_leftContext", text.slice(0, start));
+    put("__legacy_rightContext", text.slice(end, text.len()));
+    let cap_str = |k: usize| {
+        caps.get(k)
+            .copied()
+            .flatten()
+            .map(|(a, b)| text.slice(a, b))
+            .unwrap_or_default()
+    };
+    put(
+        "__legacy_lastParen",
+        if re.ngroups >= 1 {
+            cap_str(re.ngroups)
+        } else {
+            String::new()
+        },
+    );
+    const DOLLARS: [&str; 9] = [
+        "__legacy_$1",
+        "__legacy_$2",
+        "__legacy_$3",
+        "__legacy_$4",
+        "__legacy_$5",
+        "__legacy_$6",
+        "__legacy_$7",
+        "__legacy_$8",
+        "__legacy_$9",
+    ];
+    for (k, slot) in DOLLARS.iter().enumerate() {
+        put(slot, cap_str(k + 1));
+    }
+}
+
+/// The legacy RegExp static accessors (`RegExp.input`/`$_`, `lastMatch`/`$&`, `lastParen`/`$+`,
+/// `leftContext`/`` $` ``, `rightContext`/`$'`, `$1`..`$9`): getters (and the input setter)
+/// brand-check that the receiver IS this realm's %RegExp% constructor.
+fn regexp_legacy_brand(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
+    let ctor = i.extra_protos.get("%RegExpCtor%").cloned();
+    match (this, ctor) {
+        (Value::Obj(o), Some(c)) if Rc::ptr_eq(o, &c) => Ok(c),
+        _ => Err(i.make_error(
+            "TypeError",
+            "RegExp legacy static accessor called on an incompatible receiver",
+        )),
+    }
+}
+
+fn regexp_legacy_get(i: &mut Interp, this: &Value, slot: &str) -> Result<Value, Value> {
+    let c = regexp_legacy_brand(i, this)?;
+    let v = c.borrow().props.get(slot).map(|p| p.value.clone());
+    Ok(v.unwrap_or_else(|| Value::str("")))
+}
+
+macro_rules! legacy_getter {
+    ($fname:ident, $slot:literal) => {
+        fn $fname(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+            regexp_legacy_get(i, &this, $slot)
+        }
+    };
+}
+legacy_getter!(lg_input, "__legacy_input");
+legacy_getter!(lg_last_match, "__legacy_lastMatch");
+legacy_getter!(lg_last_paren, "__legacy_lastParen");
+legacy_getter!(lg_left, "__legacy_leftContext");
+legacy_getter!(lg_right, "__legacy_rightContext");
+legacy_getter!(lg_d1, "__legacy_$1");
+legacy_getter!(lg_d2, "__legacy_$2");
+legacy_getter!(lg_d3, "__legacy_$3");
+legacy_getter!(lg_d4, "__legacy_$4");
+legacy_getter!(lg_d5, "__legacy_$5");
+legacy_getter!(lg_d6, "__legacy_$6");
+legacy_getter!(lg_d7, "__legacy_$7");
+legacy_getter!(lg_d8, "__legacy_$8");
+legacy_getter!(lg_d9, "__legacy_$9");
+
+fn lg_set_input(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    regexp_legacy_brand(i, &this)?;
+    let v = ab(i.to_string(&arg(a, 0)))?;
+    let c = regexp_legacy_brand(i, &this)?;
+    c.borrow_mut().props.insert(
+        "__legacy_input",
+        Property::data(Value::Str(v), true, false, false),
+    );
+    Ok(Value::Undefined)
+}
+
+fn install_regexp_legacy_statics(it: &mut Interp, ctor: &Gc) {
+    let entries: [(&[&str], NativeFn, bool); 14] = [
+        (&["input", "$_"], lg_input, true),
+        (&["lastMatch", "$&"], lg_last_match, false),
+        (&["lastParen", "$+"], lg_last_paren, false),
+        (&["leftContext", "$`"], lg_left, false),
+        (&["rightContext", "$'"], lg_right, false),
+        (&["$1"], lg_d1, false),
+        (&["$2"], lg_d2, false),
+        (&["$3"], lg_d3, false),
+        (&["$4"], lg_d4, false),
+        (&["$5"], lg_d5, false),
+        (&["$6"], lg_d6, false),
+        (&["$7"], lg_d7, false),
+        (&["$8"], lg_d8, false),
+        (&["$9"], lg_d9, false),
+    ];
+    for (names, get, with_set) in entries {
+        for name in names {
+            let g = it.make_native("get", 0, get);
+            let set = if with_set {
+                Some(Value::Obj(it.make_native("set", 1, lg_set_input)))
+            } else {
+                None
+            };
+            ctor.borrow_mut().props.insert(
+                *name,
+                Property {
+                    value: Value::Undefined,
+                    get: Some(Value::Obj(g)),
+                    set,
+                    accessor: true,
+                    writable: false,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+        }
     }
 }
 
@@ -2409,6 +2574,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                     Value::Num(text.unit_index(end) as f64),
                 )?;
             }
+            update_regexp_legacy_statics(i, &re, &caps, &text, &input);
             let mut items = vec![Value::from_string(text.slice(start, end))];
             for g in 1..=re.ngroups {
                 items.push(match caps[g] {
@@ -5264,7 +5430,13 @@ fn date_set_multi(
     let ms = if any_nan {
         f64::NAN
     } else {
-        parts_to_ms(y, mo, d, h, mi, s, ml)
+        // TimeClip: beyond ±8.64e15 ms the date is invalid (NaN).
+        let v = parts_to_ms(y, mo, d, h, mi, s, ml);
+        if v.abs() > 8.64e15 {
+            f64::NAN
+        } else {
+            v
+        }
     };
     if let Value::Obj(o) = this {
         set_internal(o, "__date_ms", Value::Num(ms));
@@ -5527,7 +5699,9 @@ fn install_date(it: &mut Interp) {
                 y
             }
         };
-        date_set_multi(i, &this, 0, &[Value::Num(full)], 1)
+        date_set_multi(i, &this, 0, &[Value::Num(full)], 1)?;
+        // TimeClip: setYear reports the stored (possibly NaN) time value.
+        date_ms(i, &this).map(Value::Num)
     });
     it.def_method(&proto, "setMonth", 2, |i, this, a| {
         date_set_multi(i, &this, 1, a, 2)
@@ -5614,12 +5788,11 @@ fn install_date(it: &mut Interp) {
             utc_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
         ))
     });
-    it.def_method(&proto, "toGMTString", 0, |i, this, _| {
-        let t = date_ms(i, &this)?;
-        Ok(Value::from_string(
-            utc_string(t).unwrap_or_else(|| "Invalid Date".to_string()),
-        ))
-    });
+    // toGMTString IS toUTCString (the very same function object).
+    let utc = proto.borrow().props.get("toUTCString").cloned();
+    if let Some(p) = utc {
+        proto.borrow_mut().props.insert("toGMTString", p);
+    }
     // toLocale* route through Intl.DateTimeFormat (which exists now).
     it.def_method(&proto, "toLocaleString", 0, |i, this, args| {
         let t = date_ms(i, &this)?;
@@ -15133,6 +15306,8 @@ fn install_string(it: &mut Interp) {
         let chars = crate::jstr::units(&s);
         let size = chars.len() as i64;
         let n = ab(i.to_number(&arg(args, 0)))?;
+        // ToIntegerOrInfinity truncates first, so -0.5 is +0, not a from-the-end index.
+        let n = n.trunc();
         let mut start = if n.is_nan() {
             0
         } else if n < 0.0 {
@@ -15423,6 +15598,13 @@ fn install_string(it: &mut Interp) {
                 .to_string(),
         ))
     });
+    // Annex B aliases: trimLeft/trimRight ARE trimStart/trimEnd (same function objects).
+    for (alias, target) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
+        let p = sp.borrow().props.get(target).cloned();
+        if let Some(p) = p {
+            sp.borrow_mut().props.insert(alias, p);
+        }
+    }
     it.def_method(&sp, "padStart", 1, |i, this, args| {
         string_pad(i, this, args, true)
     });

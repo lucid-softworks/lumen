@@ -1187,7 +1187,38 @@ impl Parser {
                     if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
                         return Err("legacy octal escape in unicode pattern".into());
                     }
-                    Ok(ClassAtom::Char(0))
+                    // Annex B: `\0` continues as a LegacyOctalEscapeSequence in a class.
+                    let mut v = 0u32;
+                    if !self.unicode {
+                        for _ in 0..2 {
+                            match self.peek() {
+                                Some(d @ '0'..='7') => {
+                                    v = v * 8 + d.to_digit(8).unwrap();
+                                    self.bump();
+                                }
+                                _ => break,
+                            }
+                        }
+                    }
+                    Ok(ClassAtom::Char(v))
+                }
+                Some(c) if !self.unicode && c.is_ascii_digit() => {
+                    // Annex B class octal escape; \8 and \9 are identity digits.
+                    if c >= '8' {
+                        return Ok(ClassAtom::Char(c as u32));
+                    }
+                    let mut v = c.to_digit(8).unwrap();
+                    let max_more = if c <= '3' { 2 } else { 1 };
+                    for _ in 0..max_more {
+                        match self.peek() {
+                            Some(d @ '0'..='7') => {
+                                v = v * 8 + d.to_digit(8).unwrap();
+                                self.bump();
+                            }
+                            _ => break,
+                        }
+                    }
+                    Ok(ClassAtom::Char(v))
                 }
                 Some('b') => Ok(ClassAtom::Char(0x08)),
                 Some('c') => match self.peek() {
@@ -1201,7 +1232,10 @@ impl Parser {
                         Ok(ClassAtom::Char((l as u8 % 32) as u32))
                     }
                     _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
-                    _ => Ok(ClassAtom::Char('c' as u32)),
+                    _ => {
+                        self.pos -= 1; // un-consume the 'c': `\` is a literal backslash member
+                        Ok(ClassAtom::Char('\\' as u32))
+                    }
                 },
                 Some('x') => {
                     if self.unicode {
@@ -1283,15 +1317,18 @@ impl Parser {
                 Ok(Node::Char(v))
             }
             Some('c') => {
-                // `\cX` (a letter) is a control escape; anything else is only tolerated outside
-                // Unicode mode.
+                // `\cX` (a letter) is a control escape; otherwise Annex B treats the `\` as a
+                // literal backslash and reparses the `c` as a plain character.
                 match self.peek() {
                     Some(l) if l.is_ascii_alphabetic() => {
                         self.bump();
                         Ok(Node::Char((l as u8 % 32) as u32))
                     }
                     _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
-                    _ => Ok(Node::Char('c' as u32)),
+                    _ => {
+                        self.pos -= 1; // un-consume the 'c'
+                        Ok(Node::Char('\\' as u32))
+                    }
                 }
             }
             Some('x') => {
@@ -1475,8 +1512,27 @@ impl Parser {
         u32::from_str_radix(&s, 16).unwrap_or(0xFFFD)
     }
 
+    /// A non-strict (Annex B) `\u` escape: exactly four hex digits or `{…}`, otherwise the
+    /// whole escape is an IdentityEscape for `u` (consuming nothing).
     fn unicode_escape(&mut self) -> u32 {
-        self.unicode_escape_u32()
+        if self.peek() == Some('{') {
+            return self.unicode_escape_u32();
+        }
+        let save = self.pos;
+        let mut v: u32 = 0;
+        for _ in 0..4 {
+            match self.peek().and_then(|c| c.to_digit(16)) {
+                Some(d) => {
+                    v = v * 16 + d;
+                    self.bump();
+                }
+                None => {
+                    self.pos = save;
+                    return 'u' as u32;
+                }
+            }
+        }
+        v
     }
 
     /// Exactly `n` hex digits, or a SyntaxError (Unicode mode).
