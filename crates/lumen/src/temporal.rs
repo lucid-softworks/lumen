@@ -869,17 +869,10 @@ fn march_equinox_jde(year: i64) -> f64 {
 }
 /// The epoch-day (days from 1970-01-01) of Nowruz for a Persian year.
 fn persian_new_year(py: i64) -> i64 {
-    let greg_year = py + 621;
-    let jde = march_equinox_jde(greg_year);
-    let ut = jde - delta_t_seconds(greg_year) / 86400.0; // JD in universal time
-    let tehran = ut + 3.5 / 24.0; // Tehran standard time (UTC+3:30)
-    let ed = tehran - 2440587.5; // epoch-days as a real moment
-    let day = ed.floor() as i64;
-    if ed - day as f64 <= 0.5 {
-        day // equinox before local noon → Nowruz today
-    } else {
-        day + 1
-    }
+    // ICU's arithmetic Persian calendar (exact at any year, matching CLDR):
+    // julianDay(1 Farvardin y) = 1948320 + 365(y-1) + floor((8y + 21)/33).
+    const PERSIAN_EPOCH_ED: i64 = 1_948_320 - 2_440_588;
+    PERSIAN_EPOCH_ED + 365 * (py - 1) + (8 * py + 21).div_euclid(33)
 }
 fn persian_leap(py: i64) -> bool {
     persian_new_year(py + 1) - persian_new_year(py) == 366
@@ -6225,7 +6218,11 @@ fn cal_month_day_reference(
             }
         }
         let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, ovf)?;
-        regulate_date(i, raw, ovf)?
+        let anchor = regulate_date(i, raw, ovf)?;
+        if !iso_date_within_limits(anchor) {
+            return Err(i.make_error("RangeError", "date is outside the supported range"));
+        }
+        anchor
     } else {
         resolve(i, start_cy)?
     };
@@ -6297,7 +6294,8 @@ fn cal_month_day_reference(
     };
     let cf = cal_fields(cal, start_iso);
     let start_code = cal_month_code(cal, start_iso);
-    let mut cal_year = cf.0;
+    // The `year` field follows the year-getter numbering (e.g. amete-alem for ethioaa).
+    let mut cal_year = cal_year_num(cal, start_iso);
     // Lexicographic month-code ordering decides whether Dec 31 has already passed the target.
     let passed = start_code.as_str() > code.as_str() || (start_code == code && cf.2 >= day);
     if !passed {
