@@ -181,6 +181,9 @@ impl Interp {
         let ns = Value::Obj(ns_obj.clone());
         self.modules.insert(key.to_string(), ns.clone());
         let meta = self.build_import_meta(key);
+        // `import.meta` resolves lexically: a function exported from this module keeps seeing
+        // this module's object no matter who calls it.
+        crate::eval::bind(&env, "%importmeta%", meta.clone());
 
         let tables = build_export_tables(&body, &resolved);
         let deferred_deps: Vec<String> = resolved

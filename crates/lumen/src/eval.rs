@@ -2261,7 +2261,10 @@ impl Interp {
                 self.binary(op, l, r)
             }
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
-            Expr::ImportMeta => Ok(self.import_meta.clone().unwrap_or(Value::Undefined)),
+            Expr::ImportMeta => Ok(self
+                .peek_binding("%importmeta%", env)
+                .or_else(|| self.import_meta.clone())
+                .unwrap_or(Value::Undefined)),
             Expr::NewTarget => Ok(self.new_target.clone()),
             Expr::ImportCall {
                 spec,
@@ -6047,7 +6050,7 @@ enum LoopStep {
 }
 
 /// Insert an initialized, mutable binding into `env` (used for the hidden `%super*%`/`this` slots).
-fn bind(env: &Env, name: &str, value: Value) {
+pub(crate) fn bind(env: &Env, name: &str, value: Value) {
     env.borrow_mut().vars.insert(
         name.to_string(),
         Binding {

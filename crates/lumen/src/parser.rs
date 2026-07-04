@@ -2556,7 +2556,13 @@ impl Parser {
             Tok::Ident(name)
                 if name == "async"
                     && !self.cur_escaped()
-                    && matches!(self.peek_kind(1), Tok::Keyword("function")) =>
+                    && matches!(self.peek_kind(1), Tok::Keyword("function"))
+                    // No line terminator is allowed between `async` and `function`.
+                    && !self
+                        .toks
+                        .get(self.pos + 1)
+                        .map(|t| t.nl_before)
+                        .unwrap_or(true) =>
             {
                 let start = self.cur_start();
                 self.advance();
