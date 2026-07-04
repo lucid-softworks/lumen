@@ -505,19 +505,19 @@ impl Interp {
                 Ok(Value::Empty)
             }
             Stmt::Return(arg) => {
-                // A strict ordinary function's `return f(...)` is a proper tail call: evaluate
-                // the callee and arguments, then hand the dispatch to the trampoline in
+                // A strict ordinary function's `return <expr>` walks the expression's tail
+                // positions (conditional branches, logical right sides, the last of a comma
+                // sequence): a call there is a proper tail call, handed to the trampoline in
                 // Interp::call so the current frame unwinds first.
                 if let Some(e) = arg {
                     if self.tco_ok && !self.using_stack.iter().any(|f| !f.is_empty()) {
-                        if let Some((f, t, a)) = self.eval_tail_call(e, env)? {
-                            self.pending_tail = Some((f, t, a));
-                            return Err(Abrupt::Return(Value::Undefined));
-                        }
-                        if let Some((f, t, a)) = self.eval_tail_tagged(e, env)? {
-                            self.pending_tail = Some((f, t, a));
-                            return Err(Abrupt::Return(Value::Undefined));
-                        }
+                        return match self.eval_return_expr(e, env)? {
+                            TailEval::Tail(f, t, a) => {
+                                self.pending_tail = Some((f, t, a));
+                                Err(Abrupt::Return(Value::Undefined))
+                            }
+                            TailEval::Val(v) => Err(Abrupt::Return(v)),
+                        };
                     }
                 }
                 let v = match arg {
@@ -2633,6 +2633,54 @@ impl Interp {
             }
         };
         Ok(strings)
+    }
+
+    /// Evaluate a `return` operand, treating the expression's tail positions as proper tail
+    /// calls. Anything else evaluates normally to a value.
+    fn eval_return_expr(&mut self, e: &Expr, env: &Env) -> Result<TailEval, Abrupt> {
+        match e {
+            Expr::Call { .. } => {
+                if let Some((f, t, a)) = self.eval_tail_call(e, env)? {
+                    return Ok(TailEval::Tail(f, t, a));
+                }
+                Ok(TailEval::Val(self.eval(e, env)?))
+            }
+            Expr::TaggedTemplate { .. } => {
+                if let Some((f, t, a)) = self.eval_tail_tagged(e, env)? {
+                    return Ok(TailEval::Tail(f, t, a));
+                }
+                Ok(TailEval::Val(self.eval(e, env)?))
+            }
+            Expr::Cond { test, cons, alt } => {
+                let tv = self.eval(test, env)?;
+                if self.to_boolean(&tv) {
+                    self.eval_return_expr(cons, env)
+                } else {
+                    self.eval_return_expr(alt, env)
+                }
+            }
+            Expr::Seq(v) if !v.is_empty() => {
+                for x in &v[..v.len() - 1] {
+                    self.eval(x, env)?;
+                }
+                self.eval_return_expr(&v[v.len() - 1], env)
+            }
+            Expr::Logical { op, left, right } => {
+                let lv = self.eval(left, env)?;
+                let take_right = match *op {
+                    "&&" => self.to_boolean(&lv),
+                    "||" => !self.to_boolean(&lv),
+                    "??" => matches!(lv, Value::Undefined | Value::Null),
+                    _ => false,
+                };
+                if take_right {
+                    self.eval_return_expr(right, env)
+                } else {
+                    Ok(TailEval::Val(lv))
+                }
+            }
+            _ => Ok(TailEval::Val(self.eval(e, env)?)),
+        }
     }
 
     /// If `e` is a plain call usable as a proper tail call, evaluate its callee, `this` and
@@ -5457,21 +5505,8 @@ impl Interp {
         match p {
             Value::BigInt(n) => Ok(n),
             Value::Bool(b) => Ok(b as i128),
-            Value::Str(s) => {
-                let t = s.trim();
-                let parsed = if t.is_empty() {
-                    Some(0)
-                } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                    i128::from_str_radix(h, 16).ok()
-                } else if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
-                    i128::from_str_radix(o, 8).ok()
-                } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
-                    i128::from_str_radix(b, 2).ok()
-                } else {
-                    t.parse::<i128>().ok()
-                };
-                parsed.ok_or_else(|| self.throw("SyntaxError", "Cannot convert string to a BigInt"))
-            }
+            Value::Str(s) => string_to_bigint(&s)
+                .ok_or_else(|| self.throw("SyntaxError", "Cannot convert string to a BigInt")),
             Value::Num(_) => Err(self.throw("TypeError", "Cannot convert a Number to a BigInt")),
             _ => Err(self.throw("TypeError", "Cannot convert value to a BigInt")),
         }
@@ -5498,17 +5533,9 @@ impl Interp {
             (Value::BigInt(a), Value::BigInt(b)) => Some(a.cmp(b)),
             (Value::BigInt(a), Value::Str(t)) => {
                 // StringToBigInt: an unparsable string makes the comparison undefined (false).
-                match t.trim().parse::<i128>() {
-                    Ok(b) => Some(a.cmp(&b)),
-                    Err(_) if t.trim().is_empty() => Some(a.cmp(&0)),
-                    Err(_) => None,
-                }
+                string_to_bigint(t).map(|b| a.cmp(&b))
             }
-            (Value::Str(t), Value::BigInt(b)) => match t.trim().parse::<i128>() {
-                Ok(a) => Some(a.cmp(b)),
-                Err(_) if t.trim().is_empty() => Some(0.cmp(b)),
-                Err(_) => None,
-            },
+            (Value::Str(t), Value::BigInt(b)) => string_to_bigint(t).map(|a| a.cmp(b)),
             (Value::BigInt(a), _) => {
                 let n = self.to_number(&rp)?;
                 cmp_bigint_f64(*a, n)
@@ -5849,7 +5876,8 @@ impl Interp {
                 y.is_finite() && y.fract() == 0.0 && (*x as f64) == *y
             }
             (Value::BigInt(x), Value::Str(s)) | (Value::Str(s), Value::BigInt(x)) => {
-                s.trim().parse::<i128>().map(|n| n == *x).unwrap_or(false)
+                // StringToBigInt: an unparsable string compares unequal.
+                string_to_bigint(s).map(|n| n == *x).unwrap_or(false)
             }
             (Value::BigInt(_), Value::Obj(_)) => {
                 let bp = self.to_primitive(b, Hint::Default)?;
@@ -6738,6 +6766,30 @@ pub(crate) fn private_display(key: &str) -> &str {
 }
 
 /// Exact BigInt-vs-Number ordering (the mathematical comparison; None when the number is NaN).
+/// StringToBigInt: trimmed decimal / 0x / 0o / 0b text (empty is 0); None when unparsable.
+fn string_to_bigint(s: &str) -> Option<i128> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Some(0);
+    }
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return i128::from_str_radix(h, 16).ok();
+    }
+    if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return i128::from_str_radix(o, 8).ok();
+    }
+    if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return i128::from_str_radix(b, 2).ok();
+    }
+    t.parse::<i128>().ok()
+}
+
+/// The outcome of evaluating a `return` operand: a pending proper tail call, or a plain value.
+enum TailEval {
+    Tail(Value, Value, Vec<Value>),
+    Val(Value),
+}
+
 fn cmp_bigint_f64(b: i128, n: f64) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     if n.is_nan() {
