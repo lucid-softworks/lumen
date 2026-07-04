@@ -2265,7 +2265,9 @@ impl Interp {
                 .peek_binding("%importmeta%", env)
                 .or_else(|| self.import_meta.clone())
                 .unwrap_or(Value::Undefined)),
-            Expr::NewTarget => Ok(self.new_target.clone()),
+            Expr::NewTarget => Ok(self
+                .peek_binding("%newtarget%", env)
+                .unwrap_or(Value::Undefined)),
             Expr::ImportCall {
                 spec,
                 phase,
@@ -2986,6 +2988,20 @@ impl Interp {
                 let argv = self.eval_args(args, env)?;
                 return self.call(f, this, &argv);
             }
+        }
+        // A parenthesized optional chain as the callee still resolves like the chain (the
+        // method receiver is preserved), but a short-circuited chain yields undefined and
+        // calling it throws.
+        if let Expr::OptionalChain(inner) = callee {
+            let saved = self.short_circuit;
+            self.short_circuit = false;
+            let r = self.eval_call(inner, args, optional, env);
+            let short = std::mem::replace(&mut self.short_circuit, saved);
+            if short && r.is_ok() {
+                self.eval_args(args, env)?;
+                return Err(self.throw("TypeError", "callee is not a function"));
+            }
+            return r;
         }
         // Determine `this` for method calls (`obj.m()` → this = obj); a callee resolved
         // through a `with (obj)` environment is called with `this` = obj.

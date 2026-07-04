@@ -1226,10 +1226,11 @@ impl Parser {
             Some(DeclKind::Let)
         } else if self.is_ident_word("using")
             && self.starts_using_decl()
-            && !matches!(self.peek_kind(1), Tok::Ident(w) if w == "of")
+            && (!matches!(self.peek_kind(1), Tok::Ident(w) if w == "of")
+                || matches!(self.peek_kind(2), Tok::Punct("=")))
         {
-            // (`for (using of ...)` keeps `using` as an identifier — a using declaration's
-            // binding can't be named `of` here.)
+            // `for (using of = ...)` declares a resource named `of`; any other `for (using of`
+            // keeps `using` as a plain for-of left side.
             self.advance();
             Some(DeclKind::Using)
         } else if self.is_ident_word("await") && self.in_async && self.starts_await_using() {
@@ -1948,7 +1949,19 @@ impl Parser {
                     left = Expr::Ident("undefined".to_string());
                 }
                 self.advance();
-                let value = self.parse_assign()?;
+                let mut value = self.parse_assign()?;
+                // NamedEvaluation applies only to an IdentifierReference target: `(x) = fn` does
+                // not name the function. A transparent one-element Seq hides the anonymity.
+                if op == "="
+                    && left_paren
+                    && matches!(left, Expr::Ident(_))
+                    && matches!(
+                        &value,
+                        Expr::Func(f) if f.name.is_none()
+                    )
+                {
+                    value = Expr::Seq(vec![value]);
+                }
                 // Plain `=` also accepts an array/object literal reinterpreted as a destructuring
                 // assignment target — but only an unparenthesized, *valid* pattern (`({}) = x`
                 // stays a PrimaryExpression, which is not a target).

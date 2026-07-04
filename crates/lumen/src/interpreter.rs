@@ -3029,6 +3029,19 @@ impl Interp {
                     prim => crate::builtins::box_primitive_pub(self, prim),
                 }
             };
+            // `new.target` resolves lexically (arrows and closures created here keep seeing this
+            // function's value, even after it returns).
+            scope.borrow_mut().vars.insert(
+                "%newtarget%".to_string(),
+                Binding {
+                    value: self.new_target.clone(),
+                    mutable: false,
+                    strict_immutable: false,
+                    initialized: true,
+                    import_ref: None,
+                    deletable: false,
+                },
+            );
             // A derived class constructor's `this` stays in TDZ until `super()` runs.
             let derived_tdz = is_construct
                 && self
@@ -3780,6 +3793,14 @@ impl Interp {
         args: &[Value],
         new_target: Value,
     ) -> Result<Value, Abrupt> {
+        // IsConstructor is checked in the *caller's* realm, before any realm swap — the
+        // TypeError for `new nonCtor` belongs to the code doing the `new`.
+        if !matches!(&callee, Value::Obj(_)) || !self.value_is_constructor(&callee) {
+            return Err(self.throw(
+                "TypeError",
+                format!("{} is not a constructor", type_name(&callee)),
+            ));
+        }
         // A cross-realm constructor runs with its own realm's intrinsics active. The caller's
         // realm is remembered for the [[Construct]] errors thrown after the callee context pops.
         if !self.realms.is_empty() {
