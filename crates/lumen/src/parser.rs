@@ -503,7 +503,9 @@ impl Parser {
                 "'{name}' cannot be used as a shorthand property in strict mode"
             ));
         }
-        if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+        if ((self.in_async || self.in_static_block || self.module) && name == "await")
+            || (self.in_generator && name == "yield")
+        {
             return self.err(format!(
                 "'{name}' cannot be used as a shorthand property here"
             ));
@@ -1295,6 +1297,7 @@ impl Parser {
         if self.eat_punct(";") {
             return self.finish_c_for(None);
         }
+        let proto_mark = self.proto_dups.len();
         let init_expr = self.parse_expr_no_in()?;
         if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
             let of = self.is_ident_word("of") && !self.cur_escaped();
@@ -1317,6 +1320,9 @@ impl Parser {
                             line: self.line(),
                         });
                     }
+                    // Reinterpreted as a pattern: forgive deferred literal-only errors
+                    // (duplicate __proto__, CoverInitializedName).
+                    self.proto_dups.truncate(proto_mark);
                     Pattern::Member(Box::new(init_expr.clone()))
                 }
                 _ => match expr_to_pattern(&init_expr) {
@@ -1844,6 +1850,7 @@ impl Parser {
         }
         let proto_mark = self.proto_dups.len();
         let mut left = self.parse_cond()?;
+        let left_paren = self.last_paren;
         if let Tok::Punct(op) = self.cur() {
             let op = *op;
             if is_assign_op(op) {
@@ -1855,8 +1862,10 @@ impl Parser {
                 self.advance();
                 let value = self.parse_assign()?;
                 // Plain `=` also accepts an array/object literal reinterpreted as a destructuring
-                // assignment target — but only if it is a *valid* destructuring pattern.
-                let destructuring = op == "=" && matches!(left, Expr::Array(_) | Expr::Object(_));
+                // assignment target — but only an unparenthesized, *valid* pattern (`({}) = x`
+                // stays a PrimaryExpression, which is not a target).
+                let destructuring =
+                    op == "=" && !left_paren && matches!(left, Expr::Array(_) | Expr::Object(_));
                 if destructuring {
                     if !is_valid_assign_pattern(&left) {
                         return self.err("invalid destructuring assignment target");
@@ -1869,7 +1878,11 @@ impl Parser {
                 } else if !is_valid_assign_target(&left) {
                     // Annex B web compat: a CallExpression is a grammatically valid target in
                     // sloppy mode; the assignment throws a ReferenceError at runtime instead.
-                    if self.strict || !matches!(left, Expr::Call { .. }) {
+                    // Logical assignment (&&=, ||=, ??=) has no such legacy carve-out.
+                    if self.strict
+                        || matches!(op, "&&=" | "||=" | "??=")
+                        || !matches!(left, Expr::Call { .. })
+                    {
                         return self.err("invalid assignment target");
                     }
                 }
@@ -2467,8 +2480,17 @@ impl Parser {
                 self.last_paren = true;
                 Ok(e)
             }
-            Tok::Punct("[") => self.parse_array(),
-            Tok::Punct("{") => self.parse_object(),
+            Tok::Punct("[") => {
+                let e = self.parse_array();
+                // An inner parenthesized element must not mark the literal itself as covered.
+                self.last_paren = false;
+                e
+            }
+            Tok::Punct("{") => {
+                let e = self.parse_object();
+                self.last_paren = false;
+                e
+            }
             other => self.err(format!("unexpected token {other:?}")),
         }
     }
@@ -2709,6 +2731,9 @@ impl Parser {
             let is_generator = self.eat_punct("*");
             let key = self.parse_prop_key()?;
             self.reject_private_key(&key)?;
+            if (is_async || is_generator) && !self.is_punct("(") {
+                return self.err("expected a method after 'async'/'*' in an object literal");
+            }
             if self.is_punct("(") {
                 // Method shorthand.
                 let func = if is_async || is_generator {
@@ -2755,6 +2780,13 @@ impl Parser {
                         self.check_shorthand_ident(name)?;
                         let ident = Expr::Ident(name.clone());
                         let value = if self.eat_punct("=") {
+                            // CoverInitializedName: only valid when the literal is reinterpreted
+                            // as a destructuring pattern; as a plain literal it is a SyntaxError
+                            // (deferred exactly like duplicate `__proto__`).
+                            self.proto_dups.push(ParseError {
+                                message: "invalid shorthand property initializer".into(),
+                                line: self.line(),
+                            });
                             let default = self.parse_assign()?;
                             Expr::Assign {
                                 op: "=",
@@ -3226,6 +3258,14 @@ impl Parser {
             message: m,
             line: self.line(),
         })?;
+        // A "use strict" body subjects the parameter names to the strict binding rules.
+        if f.is_strict && !self.strict {
+            for n in param_names(&f.params) {
+                if is_strict_reserved_binding(&n) {
+                    return self.err(format!("'{n}' cannot be used as a binding in strict mode"));
+                }
+            }
+        }
         Ok(f)
     }
 

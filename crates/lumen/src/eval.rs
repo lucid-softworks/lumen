@@ -1730,28 +1730,53 @@ impl Interp {
         name.to_string()
     }
 
-    /// Evaluate a dynamic import's options argument: the `options.with.type` string, if present.
-    fn eval_import_type_option(
-        &mut self,
-        opts: &Expr,
-        env: &Env,
-    ) -> Result<Option<String>, Abrupt> {
-        let o = self.eval(opts, env)?;
+    /// Validate a dynamic import's already-evaluated options value, returning the `with.type`
+    /// attribute. Non-object options/attributes and non-string attribute values are TypeErrors
+    /// (which the caller turns into a rejected promise).
+    fn import_attributes(&mut self, o: &Value) -> Result<Option<String>, Abrupt> {
         if matches!(o, Value::Undefined) {
             return Ok(None);
         }
         if !matches!(o, Value::Obj(_)) {
             return Err(self.throw("TypeError", "import options must be an object"));
         }
-        let with = self.get_member(&o, "with")?;
-        if matches!(with, Value::Undefined | Value::Null) {
+        let with = self.get_member(o, "with")?;
+        if matches!(with, Value::Undefined) {
             return Ok(None);
         }
-        let ty = self.get_member(&with, "type")?;
-        Ok(match ty {
-            Value::Str(s) => Some(s.to_string()),
-            _ => None,
-        })
+        if !matches!(with, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "import attributes must be an object"));
+        }
+        // EnumerableOwnProperties(with, key+value): own string keys in order, re-checking each
+        // descriptor before its Get; every attribute value must be a string.
+        let keys: Vec<std::rc::Rc<str>> = with
+            .as_obj()
+            .map(|obj| {
+                obj.borrow()
+                    .props
+                    .ordered_keys()
+                    .into_iter()
+                    .filter(|k| !Interp::is_sym_key(k))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut ty = None;
+        for k in keys {
+            let live = with
+                .as_obj()
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+            if live != Some(true) {
+                continue;
+            }
+            let v = self.get_member(&with, &k)?;
+            let Value::Str(sv) = v else {
+                return Err(self.throw("TypeError", "import attribute values must be strings"));
+            };
+            if &*k == "type" {
+                ty = Some(sv.to_string());
+            }
+        }
+        Ok(ty)
     }
 
     /// Annex B.3.3 sync step: copy the block-scope binding of `name` (or a freshly-made function
@@ -2166,6 +2191,12 @@ impl Interp {
                 options,
             } => {
                 let specifier = self.eval(spec, env)?;
+                // The options argument evaluates synchronously (abrupt completions propagate,
+                // before any promise exists); its validation happens inside the promise.
+                let opts_val = match options {
+                    Some(o) => Some(self.eval(o, env)?),
+                    None => None,
+                };
                 // ToString abruptness rejects the promise (IfAbruptRejectPromise), not a sync throw.
                 let s = match self.to_string(&specifier) {
                     Ok(s) => s,
@@ -2191,10 +2222,10 @@ impl Interp {
                     // behaves like a plain dynamic import.
                     ImportPhase::Evaluation | ImportPhase::Defer => {
                         // `{ with: { type: ... } }` selects a JSON/text/bytes module. An abrupt
-                        // options read rejects the promise like the specifier coercion above.
+                        // attributes validation rejects the promise like the specifier coercion.
                         let mut attr_type = None;
-                        if let Some(opts) = options {
-                            match self.eval_import_type_option(opts, env) {
+                        if let Some(o) = &opts_val {
+                            match self.import_attributes(o) {
                                 Ok(t) => attr_type = t,
                                 Err(e) => {
                                     let p = self.new_promise();
