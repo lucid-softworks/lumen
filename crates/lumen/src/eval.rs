@@ -2151,8 +2151,12 @@ impl Interp {
                 optional,
             } => {
                 if matches!(**obj, Expr::Super) {
+                    // GetThisBinding first (TDZ ReferenceError), then Get(base, key, actualThis):
+                    // a getter on the super prototype sees the current `this`.
+                    let this = self.get_var("this", env)?;
                     let home = self.super_base(env)?;
-                    return self.get_member(&home, prop);
+                    return crate::builtins::reflect_ordinary_get(self, &home, prop, &this)
+                        .map_err(Abrupt::Throw);
                 }
                 let base = self.eval(obj, env)?;
                 if self.short_circuit {
@@ -2174,10 +2178,12 @@ impl Interp {
                 optional,
             } => {
                 if matches!(**obj, Expr::Super) {
-                    let home = self.super_base(env)?;
+                    let this = self.get_var("this", env)?;
                     let idx = self.eval(index, env)?;
                     let key = self.to_property_key(&idx)?;
-                    return self.get_member(&home, &key);
+                    let home = self.super_base(env)?;
+                    return crate::builtins::reflect_ordinary_get(self, &home, &key, &this)
+                        .map_err(Abrupt::Throw);
                 }
                 let base = self.eval(obj, env)?;
                 if self.short_circuit {
@@ -2556,7 +2562,8 @@ impl Interp {
             }
             let this_ctor = self.get_var("%thisctor%", env)?;
             self.init_instance_fields(&this_ctor, &this)?;
-            return Ok(Value::Undefined);
+            // The value of a `super(...)` expression is the (possibly overridden) `this`.
+            return Ok(this);
         }
         // `super.m(...)` / `super[k](...)`: method on the super prototype, called with current `this`.
         if let Expr::Member { obj, prop, .. } = callee {
@@ -4001,6 +4008,13 @@ impl Interp {
                 // A `super(...)` call is legal only directly within a *derived* constructor body.
                 let saved_super = self.super_call_ok;
                 self.super_call_ok = is_class && derived;
+                // Construct(parent, args, newTarget): the parent runs with the derived
+                // constructor's active newTarget, not itself.
+                self.pending_new_target = if matches!(self.new_target, Value::Undefined) {
+                    ctor.clone()
+                } else {
+                    self.new_target.clone()
+                };
                 let r = self.call_user(&func, cenv, this.clone(), args, true, &obj);
                 self.super_call_ok = saved_super;
                 r
@@ -4263,7 +4277,19 @@ impl Interp {
     fn eval_delete(&mut self, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match arg {
             Expr::Member { obj, prop, .. } => {
+                // `delete super.x` is a runtime ReferenceError (the reference is a super
+                // reference) — after GetThisBinding (TDZ ReferenceError first).
+                if matches!(**obj, Expr::Super) {
+                    self.get_var("this", env)?;
+                    return Err(self.throw("ReferenceError", "cannot delete a super property"));
+                }
                 let base = self.eval(obj, env)?;
+                if !self.short_circuit && matches!(base, Value::Undefined | Value::Null) {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("cannot delete property '{prop}' of null or undefined"),
+                    ));
+                }
                 if let Value::Obj(o) = &base {
                     self.defer_trigger(o, Some(prop))?;
                     let ptr = Rc::as_ptr(o) as usize;
@@ -4299,9 +4325,22 @@ impl Interp {
                 Ok(Value::Bool(true))
             }
             Expr::Index { obj, index, .. } => {
+                if matches!(**obj, Expr::Super) {
+                    // GetThisBinding first (TDZ ReferenceError), then the key expression
+                    // evaluates — without ToPropertyKey — before the ReferenceError.
+                    self.get_var("this", env)?;
+                    self.eval(index, env)?;
+                    return Err(self.throw("ReferenceError", "cannot delete a super property"));
+                }
                 let base = self.eval(obj, env)?;
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
+                if !self.short_circuit && matches!(base, Value::Undefined | Value::Null) {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("cannot delete property '{key}' of null or undefined"),
+                    ));
+                }
                 if let Value::Obj(o) = &base {
                     self.defer_trigger(o, Some(&key))?;
                     let ptr = Rc::as_ptr(o) as usize;
@@ -4403,7 +4442,11 @@ impl Interp {
                     None => Ok(Value::Bool(true)),
                 }
             }
-            _ => Ok(Value::Bool(true)),
+            // Any other operand evaluates (for its side effects) and deletes to `true`.
+            other => {
+                self.eval(other, env)?;
+                Ok(Value::Bool(true))
+            }
         }
     }
 

@@ -8987,7 +8987,7 @@ fn assign_set(i: &mut Interp, to: &Value, key: &str, value: Value) -> Result<(),
 /// OrdinaryGet(target, key, receiver): walk target's chain; a data property returns its value, an
 /// accessor invokes its getter with `receiver` as `this`. Proxies on the chain fall back to the
 /// receiver-less [[Get]].
-fn reflect_ordinary_get(
+pub(crate) fn reflect_ordinary_get(
     i: &mut Interp,
     target: &Value,
     key: &str,
