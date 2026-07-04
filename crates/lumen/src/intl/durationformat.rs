@@ -302,16 +302,7 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
             i.temporal.get(&(std::rc::Rc::as_ptr(o) as usize))
         {
             return Ok([
-                d.years as f64,
-                d.months as f64,
-                d.weeks as f64,
-                d.days as f64,
-                d.hours as f64,
-                d.minutes as f64,
-                d.seconds as f64,
-                d.ms as f64,
-                d.us as f64,
-                d.ns as f64,
+                d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms, d.us, d.ns,
             ]);
         }
     }

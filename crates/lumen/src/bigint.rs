@@ -427,25 +427,33 @@ impl JsBigInt {
             base.shr((-exp) as u64)
         })
     }
-    /// Approximate conversion to f64 (round-to-nearest via the top 64+ bits).
+    /// Correctly-rounded conversion to f64 (round-to-nearest, ties to even).
     pub fn to_f64(&self) -> f64 {
         let bl = self.bit_len();
         if bl == 0 {
             return 0.0;
         }
-        if bl <= 63 {
-            let v = self.mag[0] as f64 * if self.neg { -1.0 } else { 1.0 };
-            return v;
+        let sign = if self.neg { -1.0 } else { 1.0 };
+        if bl <= 64 {
+            return self.mag[0] as f64 * sign;
         }
-        // value ≈ top_bits * 2^(bl - 64)
-        let take = self.shr((bl - 64) as u64);
-        let top = *take.mag.first().unwrap_or(&0);
-        let v = top as f64 * 2f64.powi((bl - 64) as i32);
-        if self.neg {
-            -v
-        } else {
-            v
-        }
+        // Take the top 54 bits; round to 53 with a sticky bit for the rest.
+        let shift = (bl - 54) as u64;
+        let head_big = self.shr(shift);
+        let head = *head_big.mag.first().unwrap_or(&0); // 54 bits
+        let sticky = {
+            // Any nonzero bit below `shift`?
+            let back = head_big.shl(shift);
+            back.cmp(&Self {
+                neg: false,
+                mag: self.mag.clone(),
+            }) != std::cmp::Ordering::Equal
+        };
+        let q = head >> 1;
+        let round = head & 1 == 1;
+        let up = round && (sticky || q & 1 == 1);
+        let m = q + up as u64;
+        m as f64 * 2f64.powi(shift as i32 + 1) * sign
     }
 
     /// Parse from digits (no sign) in the given radix.

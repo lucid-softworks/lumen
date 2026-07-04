@@ -134,7 +134,7 @@ fn date_all_default(i: &mut Interp, options: &Value) -> Result<Value, Value> {
 
 /// Construct `Intl.<service>(locales, options)` and invoke `method(args…)` on it. Used to route the
 /// `toLocale*`/`localeCompare` methods through the Intl services now that they exist.
-fn intl_delegate(
+pub(crate) fn intl_delegate(
     i: &mut Interp,
     service: &str,
     locales: Value,
