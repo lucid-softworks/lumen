@@ -3748,6 +3748,10 @@ impl Interp {
                 });
             }
         }
+        // The probe scope sits in every hoisted function's closure chain; empty it so their
+        // variable references resolve through to the real environments (the probe's stale
+        // `undefined` bindings must not shadow the caller's vars).
+        probe.borrow_mut().vars.clear();
         // Lexical declarations (`let`/`const`/`class`) stay in the eval's private lexical scope.
         self.declare_block_lexicals(body, lex_env, false);
         Ok(())
@@ -4936,6 +4940,18 @@ impl Interp {
         }
     }
 
+    /// Whether `key` names a non-configurable own property of a string primitive ("length" or an
+    /// in-range canonical integer index).
+    fn string_own_key(&self, s: &std::rc::Rc<str>, key: &str) -> bool {
+        if key == "length" {
+            return true;
+        }
+        match key.parse::<usize>() {
+            Ok(i) => (key.len() == 1 || !key.starts_with('0')) && i < crate::jstr::unit_len(s),
+            Err(_) => false,
+        }
+    }
+
     fn eval_delete(&mut self, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match arg {
             Expr::Member { obj, prop, .. } => {
@@ -4983,6 +4999,19 @@ impl Interp {
                         ));
                     }
                     return Ok(Value::Bool(false));
+                }
+                // A string primitive's `length` and in-range indices are non-configurable own
+                // properties of the string exotic wrapper: [[Delete]] is false (TypeError strict).
+                if let Value::Str(sv) = &base {
+                    if self.string_own_key(sv, prop) {
+                        if self.strict {
+                            return Err(self.throw(
+                                "TypeError",
+                                format!("cannot delete non-configurable property '{prop}'"),
+                            ));
+                        }
+                        return Ok(Value::Bool(false));
+                    }
                 }
                 Ok(Value::Bool(true))
             }
@@ -5049,6 +5078,17 @@ impl Interp {
                         ));
                     }
                     return Ok(Value::Bool(false));
+                }
+                if let Value::Str(sv) = &base {
+                    if self.string_own_key(sv, &key) {
+                        if self.strict {
+                            return Err(self.throw(
+                                "TypeError",
+                                format!("cannot delete non-configurable property '{key}'"),
+                            ));
+                        }
+                        return Ok(Value::Bool(false));
+                    }
                 }
                 Ok(Value::Bool(true))
             }

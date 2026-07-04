@@ -598,9 +598,9 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
 
     if fm.has_flag("raw") {
         return if is_async {
-            check_async(&src, false, &fm, path)
+            check_async("", &src, false, &fm, path)
         } else {
-            check(&src, false, &fm, path)
+            check("", &src, false, &fm, path)
         };
     }
 
@@ -614,25 +614,24 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
         preamble.push_str(&harness.include(inc));
         preamble.push('\n');
     }
-    let program = format!("{preamble}\n{src}");
-    let judge = |p: &str, strict: bool| {
+    let judge = |test_src: &str, strict: bool| {
         if is_async {
-            check_async(p, strict, &fm, path)
+            check_async(&preamble, test_src, strict, &fm, path)
         } else {
-            check(p, strict, &fm, path)
+            check(&preamble, test_src, strict, &fm, path)
         }
     };
 
     let mut ran = false;
     if !fm.has_flag("onlyStrict") {
         ran = true;
-        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = judge(&program, false) {
+        if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = judge(&src, false) {
             return r;
         }
     }
     if !fm.has_flag("noStrict") {
         ran = true;
-        let strict = format!("\"use strict\";\n{program}");
+        let strict = format!("\"use strict\";\n{src}");
         if let r @ (Outcome::Fail(_) | Outcome::Skip(_)) = judge(&strict, true) {
             return r;
         }
@@ -665,10 +664,17 @@ fn engine_for(path: &Path) -> Engine {
 }
 
 /// Run an `async`-flagged test, judging by the `$DONE` completion message printed to the console.
-fn check_async(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
+fn check_async(preamble: &str, src: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
     let mut engine = engine_for(path);
     engine.set_can_block(!fm.has_flag("CanBlockIsFalse"));
-    match engine.eval(program, strict) {
+    match engine.eval(preamble, false) {
+        Ok(Completion::Value(_)) => {}
+        Ok(Completion::Throw { name, message }) => {
+            return Outcome::Fail(format!("harness threw {name}: {message}"));
+        }
+        Err(e) => return Outcome::Fail(format!("harness SyntaxError: {}", e.message)),
+    }
+    match engine.eval(src, strict) {
         Err(e) => return Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
         Ok(Completion::Throw { name, message }) => {
             return Outcome::Fail(format!("unexpected throw {name}: {message}"));
@@ -773,10 +779,19 @@ fn judge_module(result: Result<Completion, lumen::ParseError>, fm: &Frontmatter)
 }
 
 /// Run one assembled program and judge it against the negative expectation.
-fn check(program: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
+fn check(preamble: &str, src: &str, strict: bool, fm: &Frontmatter, path: &Path) -> Outcome {
     let mut engine = engine_for(path);
     engine.set_can_block(!fm.has_flag("CanBlockIsFalse"));
-    let result = engine.eval(program, strict);
+    // Per INTERPRETING.md, harness files are separate scripts and never receive the "use strict"
+    // prefix — only the test source does.
+    match engine.eval(preamble, false) {
+        Ok(Completion::Value(_)) => {}
+        Ok(Completion::Throw { name, message }) => {
+            return Outcome::Fail(format!("harness threw {name}: {message}"));
+        }
+        Err(e) => return Outcome::Fail(format!("harness SyntaxError: {}", e.message)),
+    }
+    let result = engine.eval(src, strict);
     match (&fm.negative, result) {
         (None, Ok(Completion::Value(_))) => Outcome::Pass,
         (None, Ok(Completion::Throw { name, message })) => {

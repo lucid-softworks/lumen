@@ -9020,3 +9020,43 @@ fn top_level_for_await_runs_outside_a_coroutine() {
         Completion::Throw { name, message } => panic!("{name}: {message}"),
     }
 }
+
+#[test]
+fn scratch_eval_file() {
+    // Debug helper: LUMEN_SCRATCH=/path/to/file.js cargo test scratch_eval_file -- --nocapture
+    if let Ok(p) = std::env::var("LUMEN_SCRATCH") {
+        let src = std::fs::read_to_string(&p).expect("read scratch file");
+        let mut e = Engine::new();
+        let module = std::env::var("LUMEN_SCRATCH_MODULE").is_ok();
+        if let Ok(pre) = std::env::var("LUMEN_SCRATCH_PRE") {
+            let pre_src = std::fs::read_to_string(&pre).expect("read preamble");
+            match e.eval(&pre_src, false) {
+                Ok(Completion::Value(_)) => {}
+                other => {
+                    println!("PREAMBLE PROBLEM: {:?}", matches!(other, Ok(_)));
+                    return;
+                }
+            }
+        }
+        let strict = std::env::var("LUMEN_SCRATCH_STRICT").is_ok();
+        let r = if module {
+            e.eval_module(&src, "scratch.js", |_, _| None)
+                .expect("parse")
+        } else {
+            match e.eval(&src, strict) {
+                Ok(c) => c,
+                Err(err) => {
+                    println!("PARSE ERROR: {err:?}");
+                    return;
+                }
+            }
+        };
+        for line in e.take_console() {
+            println!("console: {line}");
+        }
+        match r {
+            Completion::Value(v) => println!("value: {v}"),
+            Completion::Throw { name, message } => println!("throw: {name}: {message}"),
+        }
+    }
+}

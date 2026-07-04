@@ -12713,8 +12713,15 @@ fn install_array(it: &mut Interp) {
         let item_count = items.len();
         merge_sort(i, &mut items, &cmp)?;
         let ov = Value::Obj(o.clone());
+        // Set(O, k, v, true): a failed write (non-writable element) always throws.
         for (k, v) in items.into_iter().enumerate() {
-            ab(i.set_member(&ov, &k.to_string(), v))?;
+            let ok = ab(i.set_member_recv(&ov, &k.to_string(), v, ov.clone()))?;
+            if !ok {
+                return Err(i.make_error(
+                    "TypeError",
+                    format!("cannot assign to read-only element {k}"),
+                ));
+            }
         }
         // Vacated trailing indices (originally holes, or beyond the present count) are deleted.
         for k in item_count..len {
