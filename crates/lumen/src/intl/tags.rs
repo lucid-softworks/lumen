@@ -283,8 +283,34 @@ fn canonicalize_struct(t: &mut LangTag) {
 
     // Language alias (may expand to language[-script][-region][-variant…]).
     apply_language_alias(t);
-    // Region alias (simple + territory-split handled minimally).
-    if let Some(r) = aliases::region_alias(&t.region) {
+    // Region alias: multi-candidate territory splits resolve via likely subtags (the region the
+    // rest of the tag maximizes to, else the first candidate), simple aliases directly.
+    if let Some(cands) = aliases::region_alias_multi(&t.region) {
+        let lang = if t.language.is_empty() {
+            "und".to_string()
+        } else {
+            t.language.clone()
+        };
+        let mut keys = Vec::new();
+        if !t.script.is_empty() {
+            keys.push(format!("{lang}-{}", t.script));
+        }
+        keys.push(lang);
+        if !t.script.is_empty() {
+            keys.push(format!("und-{}", t.script));
+        }
+        let mut chosen = cands[0];
+        for k in keys {
+            if let Some(v) = crate::cldr_likely::likely(&k) {
+                let r = v.split('-').nth(2).unwrap_or("");
+                if let Some(c) = cands.iter().find(|c| **c == r) {
+                    chosen = c;
+                }
+                break;
+            }
+        }
+        t.region = chosen.to_string();
+    } else if let Some(r) = aliases::region_alias(&t.region) {
         t.region = r.to_string();
     }
     // Script alias.

@@ -49,6 +49,8 @@ mod cldr_dates;
 mod cldr_units;
 #[rustfmt::skip]
 mod units;
+mod unicode_norm;
+mod unicode_norm_impl;
 mod unicode_props;
 mod value;
 

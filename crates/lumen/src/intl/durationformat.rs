@@ -295,6 +295,26 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
     if !matches!(v, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "duration must be an object"));
     }
+    // A Temporal.Duration carries its fields in internal slots; user-visible prototype getters
+    // are NOT consulted (they may be redefined).
+    if let Value::Obj(o) = v {
+        if let Some(crate::temporal::Temporal::Duration(d)) =
+            i.temporal.get(&(std::rc::Rc::as_ptr(o) as usize))
+        {
+            return Ok([
+                d.years as f64,
+                d.months as f64,
+                d.weeks as f64,
+                d.days as f64,
+                d.hours as f64,
+                d.minutes as f64,
+                d.seconds as f64,
+                d.ms as f64,
+                d.us as f64,
+                d.ns as f64,
+            ]);
+        }
+    }
     let mut vals = [0f64; 10];
     let mut any_present = false;
     for (k, (plural, _s)) in UNITS.iter().enumerate() {
@@ -421,6 +441,7 @@ fn partition(
         // Seconds/ms/us absorb the smaller sub-second units into a single fractional value when the
         // next unit is numeric (formatting then stops — the fold consumes everything smaller).
         let mut done = false;
+        let mut exact_arg: Option<String> = None;
         let mut nf_max_frac: Option<u32> = None;
         let mut nf_min_frac: Option<u32> = None;
         let mut nf_trunc = false;
@@ -433,6 +454,7 @@ fn partition(
                     _ => 3,
                 };
                 value = fractional_value(&vals, exp);
+                exact_arg = Some(fractional_string(&vals, exp));
                 nf_max_frac = Some(frac_digits.unwrap_or(9));
                 nf_min_frac = Some(frac_digits.unwrap_or(0));
                 nf_trunc = true;
@@ -494,7 +516,14 @@ fn partition(
 
             let nf = new_service(i, "NumberFormat", &locale, nf_opts)?;
             let ftp = ab(i.get_member(&nf, "formatToParts"))?;
-            let parts_arr = ab(i.call(ftp, nf.clone(), &[Value::Num(value)]))?;
+            let nf_arg = match &exact_arg {
+                // A negative-zero fold still needs its sign for the display rules.
+                Some(sd) if !(value == 0.0 && value.is_sign_negative()) => {
+                    Value::from_string(sd.clone())
+                }
+                _ => Value::Num(value),
+            };
+            let parts_arr = ab(i.call(ftp, nf.clone(), &[nf_arg]))?;
             // Read the {type,value} objects into (type,value,unit=singular) parts.
             let len = ab(i.get_member(&parts_arr, "length"))?;
             let len = if let Value::Num(n) = len {
@@ -610,6 +639,28 @@ fn format_to_parts(i: &mut Interp, this: &Value, dur: &Value) -> Result<Value, V
 
 /// The fractional seconds/ms/us value combining sub-second fields, truncated as a decimal string
 /// value (returned as an f64 — good enough for the fraction digits we format).
+/// The exact folded sub-second value as a decimal string (i128 nanosecond arithmetic — the f64
+/// sum in `fractional_value` loses precision past 2^53).
+fn fractional_string(vals: &[f64; 10], exp: i32) -> String {
+    let (base, ms, us, ns) = (
+        vals[6] as i128,
+        vals[7] as i128,
+        vals[8] as i128,
+        vals[9] as i128,
+    );
+    let total: i128 = match exp {
+        9 => base * 1_000_000_000 + ms * 1_000_000 + us * 1_000 + ns,
+        6 => ms * 1_000_000 + us * 1_000 + ns,
+        _ => us * 1_000 + ns,
+    };
+    let e = 10i128.pow(exp as u32);
+    let q = total / e;
+    let r = (total % e).abs();
+    let sign = if total < 0 { "-" } else { "" };
+    let q = q.abs();
+    format!("{sign}{q}.{r:0width$}", width = exp as usize)
+}
+
 fn fractional_value(vals: &[f64; 10], exp: i32) -> f64 {
     let (base, ms, us, ns) = (vals[6], vals[7], vals[8], vals[9]);
     match exp {

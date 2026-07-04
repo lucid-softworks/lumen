@@ -8679,3 +8679,76 @@ fn dynamic_function_coerces_params_before_body() {
         "p,b"
     );
 }
+#[test]
+fn locale_canonicalization_and_likely_subtags() {
+    assert_eq!(run("new Intl.Locale('ces').toString()"), "cs");
+    assert_eq!(run("new Intl.Locale('hy-arevmda').toString()"), "hyw");
+    assert_eq!(
+        run("new Intl.Locale('ces').maximize().toString()"),
+        "cs-Latn-CZ"
+    );
+    // A multi-candidate territory alias (SU) resolves via likely subtags, before options apply.
+    assert_eq!(
+        run("new Intl.Locale('und-Armn-SU', {language: 'ru'}).toString()"),
+        "ru-Armn-AM"
+    );
+}
+
+#[test]
+fn string_normalize_forms() {
+    assert_eq!(run(r"'\u0041\u030A'.normalize('NFC')"), "\u{C5}");
+    assert_eq!(run(r"'\u00C5'.normalize('NFD').length.toString()"), "2");
+    assert_eq!(run(r"'\uFB01'.normalize('NFKD')"), "fi");
+    assert_eq!(run("'\u{AC01}'.normalize('NFD').length.toString()"), "3");
+    assert_eq!(run("'\u{1E0B}\u{323}'.normalize('NFC')"), "\u{1E0D}\u{307}");
+    assert_eq!(throws("'a'.normalize('NFX')"), "RangeError");
+}
+
+#[test]
+fn bigint_relational_compare_is_exact() {
+    assert_eq!(
+        run("String(9007199254740992000n <= 9007199254740991999n)"),
+        "false"
+    );
+    assert_eq!(run("String(9007199254740993n > 9007199254740992)"), "true");
+    assert_eq!(run("String(1n < 1.5)"), "true");
+    assert_eq!(
+        run("String('9007199254740992001' < 9007199254740992002n)"),
+        "true"
+    );
+}
+
+#[test]
+fn collator_three_level_compare() {
+    // Case is a tertiary difference: lowercase sorts first in en.
+    assert_eq!(run("String('a'.localeCompare('A'))"), "-1");
+    // Canonically equivalent strings are equal.
+    assert_eq!(
+        run(r"String(new Intl.Collator('en').compare('o\u0308', '\u00F6'))"),
+        "0"
+    );
+    // Accents are secondary: ä sorts between a and b.
+    assert_eq!(
+        run("['b','\u{E4}','a'].sort(new Intl.Collator('en').compare).join('')"),
+        "a\u{E4}b"
+    );
+    // German phonebook expands ä to ae.
+    assert_eq!(
+        run("['Af','\u{C4}','Ab'].sort(new Intl.Collator('de-u-co-phonebk').compare).join(',')"),
+        "Ab,\u{C4},Af"
+    );
+}
+
+#[test]
+fn numberformat_exact_decimal_inputs() {
+    // A BigInt beyond 2^53 keeps its exact digits.
+    assert_eq!(
+        run("(90071992547409910n).toLocaleString('en-US')"),
+        "90,071,992,547,409,910"
+    );
+    // A decimal-string argument does not round through f64.
+    assert_eq!(
+        run("new Intl.NumberFormat('en',{useGrouping:false,maximumFractionDigits:9}).format('9007200.256743991')"),
+        "9007200.256743991"
+    );
+}

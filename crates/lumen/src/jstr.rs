@@ -223,3 +223,40 @@ pub fn canonicalize(s: &str) -> Option<String> {
     }
     None
 }
+
+/// The code points of `s`, with lone surrogates as their surrogate values (paired smuggled
+/// high+low decode to the real character they canonically encode — see module docs).
+pub fn code_points(s: &str) -> Vec<u32> {
+    let units = units(s);
+    let mut out = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        let u = units[i] as u32;
+        if (0xD800..0xDC00).contains(&u)
+            && i + 1 < units.len()
+            && (0xDC00..0xE000).contains(&(units[i + 1] as u32))
+        {
+            out.push(0x10000 + ((u - 0xD800) << 10) + (units[i + 1] as u32 - 0xDC00));
+            i += 2;
+        } else {
+            out.push(u);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Rebuild a string from code points (surrogate values become lone surrogates).
+pub fn from_code_points(cps: &[u32]) -> String {
+    let mut units: Vec<u16> = Vec::with_capacity(cps.len());
+    for &cp in cps {
+        if cp < 0x10000 {
+            units.push(cp as u16);
+        } else {
+            let v = cp - 0x10000;
+            units.push(0xD800 + (v >> 10) as u16);
+            units.push(0xDC00 + (v & 0x3FF) as u16);
+        }
+    }
+    from_units(&units)
+}

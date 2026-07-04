@@ -48,7 +48,7 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let options = coerce_options(i, &arg(a, 1))?;
     let usage = get_option(i, &options, "usage", &["sort", "search"], Some("sort"))?.unwrap();
     read_locale_matcher(i, &options)?;
-    let _ = get_option(i, &options, "collation", &[], None)?;
+    let collation_opt = get_option(i, &options, "collation", &[], None)?;
     let numeric = {
         let v = ab(i.get_member(&options, "numeric"))?;
         if matches!(v, Value::Undefined) {
@@ -102,16 +102,30 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         "compat", "dict", "emoji", "eor", "phonebk", "phonetic", "pinyin", "reformed", "searchjl",
         "stroke", "trad", "unihan", "zhuyin", "big5han", "gb2312",
     ];
-    let collation = kw("co")
-        .filter(|c| COLLATIONS.contains(&c.as_str()))
+    // A collation is *supported* per locale (phonebk for German; eor broadly). The `collation`
+    // option overrides the -u-co extension when supported; an unsupported value is ignored.
+    let res_lang = resolved
+        .locale
+        .split('-')
+        .next()
+        .unwrap_or("en")
+        .to_string();
+    let supported = |c: &str| c == "eor" || (c == "phonebk" && res_lang == "de");
+    let opt_co = collation_opt
+        .filter(|c| COLLATIONS.contains(&c.as_str()) && supported(c))
+        .filter(|_| usage == "sort");
+    let ext_co = kw("co").filter(|c| COLLATIONS.contains(&c.as_str()) && supported(c));
+    let collation = opt_co
+        .clone()
+        .or_else(|| ext_co.clone())
         .unwrap_or_else(|| "default".to_string());
 
     // ResolveLocale: reflect the surviving `-u-` keywords in the resolved locale string. A keyword
     // survives when its value came from the locale extension and no differing option overrode it
     // (keys are emitted in alphabetical order: co, kf, kn).
     let mut additions: Vec<(&str, String)> = Vec::new();
-    if let Some(co) = kw("co") {
-        if COLLATIONS.contains(&co.as_str()) {
+    if let Some(co) = ext_co {
+        if opt_co.as_ref().is_none_or(|o| *o == co) {
             additions.push(("co", co));
         }
     }
@@ -169,29 +183,183 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 
 fn compare(i: &mut Interp, this: &Value, a: &Value, b: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__co")?;
-    let sensitivity = match o
-        .borrow()
-        .props
-        .get("__co_sensitivity")
-        .map(|p| p.value.clone())
-    {
+    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value.clone()) {
         Some(Value::Str(s)) => s.to_string(),
-        _ => "variant".to_string(),
+        _ => String::new(),
+    };
+    let getb = |k: &str| {
+        matches!(
+            o.borrow().props.get(k).map(|p| p.value.clone()),
+            Some(Value::Bool(true))
+        )
     };
     let sa = ab(i.to_string(a))?.to_string();
     let sb = ab(i.to_string(b))?.to_string();
-    // base/accent sensitivity ignores case; a full collator would fold diacritics too.
-    let (ka, kb) = if sensitivity == "base" || sensitivity == "accent" {
-        (sa.to_lowercase(), sb.to_lowercase())
-    } else {
-        (sa.clone(), sb.clone())
+    let opts = CollateOpts {
+        sensitivity: get("__co_sensitivity"),
+        numeric: getb("__co_numeric"),
+        ignore_punct: getb("__co_ignorepunct"),
+        upper_first: get("__co_casefirst") == "upper",
+        // German ä/ö/ü expand to ae/oe/ue under the phonebook collation and in search usage.
+        expand_umlaut: {
+            let lang = get("__co_locale");
+            let lang = lang.split('-').next().unwrap_or("");
+            lang == "de" && (get("__co_collation") == "phonebk" || get("__co_usage") == "search")
+        },
     };
-    let ord = match ka.cmp(&kb) {
+    let ord = match collate(&sa, &sb, &opts) {
         std::cmp::Ordering::Less => -1.0,
         std::cmp::Ordering::Greater => 1.0,
         std::cmp::Ordering::Equal => 0.0,
     };
     Ok(Value::Num(ord))
+}
+
+struct CollateOpts {
+    sensitivity: String,
+    numeric: bool,
+    ignore_punct: bool,
+    upper_first: bool,
+    expand_umlaut: bool,
+}
+
+/// Per-primary-slot collation element: a lowercased base code point, its attached marks
+/// (secondary), and a case weight (tertiary).
+struct El {
+    prim: u32,
+    marks: Vec<u32>,
+    upper: bool,
+}
+
+fn elements(s: &str, opts: &CollateOpts) -> Vec<El> {
+    let cps = crate::jstr::code_points(s);
+    let nfd = crate::unicode_norm_impl::decompose(&cps, false);
+    let mut els: Vec<El> = Vec::with_capacity(nfd.len());
+    let mut k = 0;
+    while k < nfd.len() {
+        let cp = nfd[k];
+        k += 1;
+        if crate::unicode_norm_impl::ccc(cp) != 0 {
+            if let Some(last) = els.last_mut() {
+                last.marks.push(cp);
+                continue;
+            }
+        }
+        if opts.ignore_punct && is_collation_ignorable(cp) {
+            continue;
+        }
+        let ch = char::from_u32(cp);
+        let upper = ch.map(|c| c.is_uppercase()).unwrap_or(false);
+        let prim = ch
+            .and_then(|c| c.to_lowercase().next())
+            .map(|c| c as u32)
+            .unwrap_or(cp);
+        // German phonebook/search expansion: ä → "ae" at the primary level, with the umlaut
+        // kept as a secondary difference (so AE < Ä).
+        if opts.expand_umlaut && matches!(prim, 0x61 | 0x6F | 0x75) && nfd.get(k) == Some(&0x308) {
+            k += 1;
+            els.push(El {
+                prim,
+                marks: vec![0x308],
+                upper,
+            });
+            els.push(El {
+                prim: 'e' as u32,
+                marks: Vec::new(),
+                upper: false,
+            });
+            continue;
+        }
+        els.push(El {
+            prim,
+            marks: Vec::new(),
+            upper,
+        });
+    }
+    els
+}
+
+fn is_collation_ignorable(cp: u32) -> bool {
+    match char::from_u32(cp) {
+        Some(c) => c.is_whitespace() || c.is_ascii_punctuation() || (0x2000..=0x206F).contains(&cp),
+        None => false,
+    }
+}
+
+/// A three-level (primary letters / secondary accents / tertiary case) comparison, with an
+/// optional numeric mode that compares digit runs by value at the primary level.
+fn collate(a: &str, b: &str, opts: &CollateOpts) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let ea = elements(a, opts);
+    let eb = elements(b, opts);
+    // Primary.
+    let prim = if opts.numeric {
+        cmp_primary_numeric(&ea, &eb)
+    } else {
+        ea.iter().map(|e| e.prim).cmp(eb.iter().map(|e| e.prim))
+    };
+    if prim != Ordering::Equal {
+        return prim;
+    }
+    let sens = opts.sensitivity.as_str();
+    // Secondary (accents).
+    if sens == "accent" || sens == "variant" {
+        let sec = ea.iter().map(|e| &e.marks).cmp(eb.iter().map(|e| &e.marks));
+        if sec != Ordering::Equal {
+            return sec;
+        }
+    }
+    // Tertiary (case): lowercase first unless caseFirst is "upper".
+    if sens == "case" || sens == "variant" {
+        let w = |u: bool| u != opts.upper_first;
+        let ter = ea
+            .iter()
+            .map(|e| w(e.upper))
+            .cmp(eb.iter().map(|e| w(e.upper)));
+        if ter != Ordering::Equal {
+            return ter;
+        }
+    }
+    Ordering::Equal
+}
+
+fn cmp_primary_numeric(a: &[El], b: &[El]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let is_digit = |e: &El| (0x30..=0x39).contains(&e.prim);
+    let (mut i, mut j) = (0, 0);
+    loop {
+        match (a.get(i), b.get(j)) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if is_digit(x) && is_digit(y) {
+                    // Compare whole digit runs by numeric value, then by run position.
+                    let (si, sj) = (i, j);
+                    while a.get(i).map(is_digit).unwrap_or(false) {
+                        i += 1;
+                    }
+                    while b.get(j).map(is_digit).unwrap_or(false) {
+                        j += 1;
+                    }
+                    let da: String = a[si..i].iter().map(|e| (e.prim as u8) as char).collect();
+                    let db: String = b[sj..j].iter().map(|e| (e.prim as u8) as char).collect();
+                    let (ta, tb) = (da.trim_start_matches('0'), db.trim_start_matches('0'));
+                    let c = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                } else {
+                    let c = x.prim.cmp(&y.prim);
+                    if c != Ordering::Equal {
+                        return c;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+    }
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {

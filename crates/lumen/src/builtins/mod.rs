@@ -14593,46 +14593,168 @@ fn locale_case_lang(i: &mut Interp, locales: &Value) -> Result<Option<String>, V
 
 /// Language-sensitive lowercasing. Turkish/Azeri map the dotted/dotless I pair specially; all other
 /// languages use the default Unicode mapping.
-fn locale_lower(s: &str, lang: Option<&str>) -> String {
-    if matches!(lang, Some("tr") | Some("az")) {
-        let mut out = String::with_capacity(s.len());
-        let chars: Vec<char> = s.chars().collect();
-        let mut k = 0;
-        while k < chars.len() {
-            match chars[k] {
-                '\u{0130}' => out.push('i'), // İ → i
-                'I' => {
-                    // "I" + combining dot above → "i" (the dot is absorbed); otherwise → dotless ı.
-                    if chars.get(k + 1) == Some(&'\u{0307}') {
-                        out.push('i');
-                        k += 1;
-                    } else {
-                        out.push('\u{0131}');
-                    }
-                }
-                c => out.extend(c.to_lowercase()),
-            }
-            k += 1;
-        }
-        return out;
-    }
-    s.to_lowercase()
+/// The canonical combining class used by the SpecialCasing conditions (0 = base).
+fn ccc(cp: u32) -> u8 {
+    crate::unicode_norm_impl::ccc(cp)
 }
 
-/// Language-sensitive uppercasing (Turkish/Azeri dotted-I handling).
-fn locale_upper(s: &str, lang: Option<&str>) -> String {
-    if matches!(lang, Some("tr") | Some("az")) {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                'i' => out.push('\u{0130}'), // i → İ
-                '\u{0131}' => out.push('I'), // ı → I
-                c => out.extend(c.to_uppercase()),
-            }
+/// From `chars[k+1..]`, the index of a COMBINING DOT ABOVE reachable across marks of combining
+/// class other than 0/230 (the SpecialCasing After_I / After_Soft_Dotted scan), if any.
+fn absorbable_dot_above(chars: &[char], k: usize) -> Option<usize> {
+    let mut j = k + 1;
+    while let Some(&m) = chars.get(j) {
+        if m == '\u{0307}' {
+            return Some(j);
         }
-        return out;
+        match ccc(m as u32) {
+            0 | 230 => return None,
+            _ => j += 1,
+        }
     }
-    s.to_uppercase()
+    None
+}
+
+/// SpecialCasing More_Above: `chars[k]` is followed by a class-230 mark with no intervening
+/// class 0/230 character.
+fn more_above(chars: &[char], k: usize) -> bool {
+    let mut j = k + 1;
+    while let Some(&m) = chars.get(j) {
+        match ccc(m as u32) {
+            230 => return true,
+            0 => return false,
+            _ => j += 1,
+        }
+    }
+    false
+}
+
+/// Unicode Soft_Dotted (the subset with lowercase dots that interact with case mapping).
+fn is_soft_dotted(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x69 | 0x6A
+            | 0x12F
+            | 0x249
+            | 0x268
+            | 0x29D
+            | 0x2B2
+            | 0x3F3
+            | 0x456
+            | 0x458
+            | 0x1D62
+            | 0x1D96
+            | 0x1DA4
+            | 0x1DA8
+            | 0x1E2D
+            | 0x1ECB
+            | 0x2071
+            | 0x2148..=0x2149
+            | 0x2C7C
+            | 0x1D422..=0x1D423
+            | 0x1D456..=0x1D457
+            | 0x1D48A..=0x1D48B
+            | 0x1D4BE..=0x1D4BF
+            | 0x1D4F2..=0x1D4F3
+            | 0x1D526..=0x1D527
+            | 0x1D55A..=0x1D55B
+            | 0x1D58E..=0x1D58F
+            | 0x1D5C2..=0x1D5C3
+            | 0x1D5F6..=0x1D5F7
+            | 0x1D62A..=0x1D62B
+            | 0x1D65E..=0x1D65F
+            | 0x1D692..=0x1D693
+            | 0x1DF1A
+            | 0x1E04C..=0x1E04D
+            | 0x1E068
+    )
+}
+
+fn locale_lower(s: &str, lang: Option<&str>) -> String {
+    match lang {
+        Some("tr") | Some("az") => {
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = String::with_capacity(s.len());
+            let mut k = 0;
+            while k < chars.len() {
+                match chars[k] {
+                    '\u{0130}' => out.push('i'), // İ → i
+                    'I' => {
+                        // After_I: a following combining dot above (reachable across non-0/230
+                        // marks) is absorbed and I lowercases dotted; otherwise → dotless ı.
+                        if let Some(dj) = absorbable_dot_above(&chars, k) {
+                            out.push('i');
+                            for &m in &chars[k + 1..dj] {
+                                out.push(m);
+                            }
+                            k = dj;
+                        } else {
+                            out.push('\u{0131}');
+                        }
+                    }
+                    c => out.extend(c.to_lowercase()),
+                }
+                k += 1;
+            }
+            out
+        }
+        Some("lt") => {
+            // Lithuanian retains the dot above a lowercased I/J/Į when further above-marks
+            // follow, and bakes it into the dotted-accent capitals.
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = String::with_capacity(s.len());
+            for (k, &c) in chars.iter().enumerate() {
+                match c {
+                    'I' if more_above(&chars, k) => out.push_str("i\u{0307}"),
+                    'J' if more_above(&chars, k) => out.push_str("j\u{0307}"),
+                    '\u{012E}' if more_above(&chars, k) => out.push_str("\u{012F}\u{0307}"),
+                    '\u{00CC}' => out.push_str("i\u{0307}\u{0300}"),
+                    '\u{00CD}' => out.push_str("i\u{0307}\u{0301}"),
+                    '\u{0128}' => out.push_str("i\u{0307}\u{0303}"),
+                    c => out.extend(c.to_lowercase()),
+                }
+            }
+            out
+        }
+        _ => s.to_lowercase(),
+    }
+}
+
+/// Language-sensitive uppercasing (Turkish/Azeri dotted-I, Lithuanian dot-above removal).
+fn locale_upper(s: &str, lang: Option<&str>) -> String {
+    match lang {
+        Some("tr") | Some("az") => {
+            let mut out = String::with_capacity(s.len());
+            for c in s.chars() {
+                match c {
+                    'i' => out.push('\u{0130}'), // i → İ
+                    '\u{0131}' => out.push('I'), // ı → I
+                    c => out.extend(c.to_uppercase()),
+                }
+            }
+            out
+        }
+        Some("lt") => {
+            // A combining dot above after a soft-dotted base disappears when uppercasing.
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = String::with_capacity(s.len());
+            let mut k = 0;
+            while k < chars.len() {
+                let c = chars[k];
+                out.extend(c.to_uppercase());
+                if is_soft_dotted(c as u32) {
+                    if let Some(dj) = absorbable_dot_above(&chars, k) {
+                        for &m in &chars[k + 1..dj] {
+                            out.push(m);
+                        }
+                        k = dj;
+                    }
+                }
+                k += 1;
+            }
+            out
+        }
+        _ => s.to_uppercase(),
+    }
 }
 
 fn this_string(i: &mut Interp, this: &Value) -> Result<Rc<str>, Value> {
@@ -14790,6 +14912,22 @@ fn install_string(it: &mut Interp) {
         let s = this_string(i, &this)?;
         let lang = locale_case_lang(i, &arg(args, 0))?;
         Ok(Value::from_string(locale_upper(&s, lang.as_deref())))
+    });
+    it.def_method(&sp, "normalize", 0, |i, this, args| {
+        let s = this_string(i, &this)?;
+        let form = match arg(args, 0) {
+            Value::Undefined => "NFC".to_string(),
+            v => ab(i.to_string(&v))?.to_string(),
+        };
+        if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+            return Err(i.make_error(
+                "RangeError",
+                "The normalization form should be one of NFC, NFD, NFKC, NFKD",
+            ));
+        }
+        let cps = crate::jstr::code_points(&s);
+        let out = crate::unicode_norm_impl::normalize(&cps, &form);
+        Ok(Value::from_string(crate::jstr::from_code_points(&out)))
     });
     it.def_method(&sp, "includes", 1, |i, this, args| {
         let s = this_string(i, &this)?;

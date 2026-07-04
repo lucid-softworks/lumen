@@ -38,6 +38,16 @@ pub fn install(it: &mut Interp) {
             .insert(key, Property::data(Value::str("Intl"), false, false, true));
     }
 
+    // The per-realm %Intl%.[[FallbackSymbol]] backing the legacy constructed-instance behavior
+    // (kept in a holder object so it snapshots with the realm's extra_protos).
+    let fsym = it.new_symbol(Some("IntlLegacyConstructedSymbol".into()));
+    let holder = Object::new(None);
+    holder
+        .borrow_mut()
+        .props
+        .insert("sym", Property::data(fsym, false, false, false));
+    it.extra_protos.insert("%IntlFallbackSymbol%", holder);
+
     // Intl.getCanonicalLocales(locales) — returns a fresh Array of canonicalized tags.
     let f = it.make_native("getCanonicalLocales", 1, |i, _t, a| {
         let list = canonicalize_locale_list(i, &arg(a, 0))?;
@@ -288,6 +298,90 @@ pub(crate) fn make_service(
     );
     set_builtin(ns, name, Value::Obj(ctor.clone()));
     (ctor, proto)
+}
+
+/// UnwrapNumberFormat / UnwrapDateTimeFormat: a receiver without the brand may carry a legacy
+/// chained instance under the realm's %Intl%.[[FallbackSymbol]].
+pub(crate) fn brand_slot_legacy(
+    i: &mut Interp,
+    this: &Value,
+    marker: &str,
+    proto_key: &str,
+) -> Result<Gc, Value> {
+    if let Some(o) = this.as_obj() {
+        if o.borrow().props.contains(marker) {
+            return Ok(o.clone());
+        }
+        let symv = i
+            .extra_protos
+            .get("%IntlFallbackSymbol%")
+            .and_then(|h| h.borrow().props.get("sym").map(|p| p.value.clone()));
+        if let Some(Value::Sym(sd)) = symv {
+            if inherits_service_proto(i, o, proto_key) {
+                let key = crate::interpreter::Interp::sym_key(&sd);
+                let v = ab(i.get_member(this, &key))?;
+                if let Some(inner) = v.as_obj() {
+                    if inner.borrow().props.contains(marker) {
+                        return Ok(inner.clone());
+                    }
+                }
+            }
+        }
+    }
+    Err(i.make_error("TypeError", "method called on an incompatible receiver"))
+}
+
+/// Whether `o` inherits from the service prototype registered under `proto_key`.
+fn inherits_service_proto(i: &Interp, o: &Gc, proto_key: &str) -> bool {
+    let proto = match i.extra_protos.get(proto_key) {
+        Some(p) => p.clone(),
+        None => return false,
+    };
+    let mut cur = o.borrow().proto.clone();
+    for _ in 0..64 {
+        match cur {
+            Some(p) => {
+                if Rc::ptr_eq(&p, &proto) {
+                    return true;
+                }
+                cur = p.borrow().proto.clone();
+            }
+            None => break,
+        }
+    }
+    false
+}
+
+/// The legacy Intl-constructor chain behavior (%Intl%.[[FallbackSymbol]]): when a service
+/// constructor is *called* on an object inheriting from its prototype, the fresh instance is
+/// defined on that object under the realm's fallback symbol and the object itself is returned.
+pub(crate) fn legacy_chain(
+    i: &mut Interp,
+    this: &Value,
+    proto_key: &str,
+    instance: &Gc,
+) -> Option<Value> {
+    let this_o = this.as_obj()?;
+    if !inherits_service_proto(i, this_o, proto_key) {
+        return None;
+    }
+    let symv = i
+        .extra_protos
+        .get("%IntlFallbackSymbol%")?
+        .borrow()
+        .props
+        .get("sym")
+        .map(|p| p.value.clone());
+    match symv {
+        Some(Value::Sym(sd)) => {
+            this_o.borrow_mut().props.insert(
+                crate::interpreter::Interp::sym_key(&sd),
+                Property::data(Value::Obj(instance.clone()), false, false, false),
+            );
+            Some(this.clone())
+        }
+        _ => None,
+    }
 }
 
 // (get_string_option removed; per-service option readers live in each module)

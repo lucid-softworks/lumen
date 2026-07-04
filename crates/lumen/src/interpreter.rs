@@ -3584,8 +3584,7 @@ impl Interp {
                         let saved = self.snapshot_realm();
                         let target = self.realms[&gptr].snapshot_clone();
                         self.restore_realm(&target);
-                        let saved_ccr =
-                            self.ctor_caller_realm.replace(saved.snapshot_clone());
+                        let saved_ccr = self.ctor_caller_realm.replace(saved.snapshot_clone());
                         let r = self.construct_dispatch(callee, args, new_target);
                         self.ctor_caller_realm = saved_ccr;
                         self.restore_realm(&saved);

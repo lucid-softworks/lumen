@@ -4712,30 +4712,49 @@ impl Interp {
             };
             return Ok(Value::Bool(res));
         }
-        // Comparisons accept mixed BigInt/Number operands (compared as real numbers).
-        let bigint_f64 = |v: &Value| -> Option<f64> {
-            match v {
-                Value::BigInt(n) => Some(*n as f64),
-                _ => None,
+        // BigInt operands compare exactly (never through f64, which would lose precision).
+        let ord: Option<std::cmp::Ordering> = match (&lp, &rp) {
+            (Value::BigInt(a), Value::BigInt(b)) => Some(a.cmp(b)),
+            (Value::BigInt(a), Value::Str(t)) => {
+                // StringToBigInt: an unparsable string makes the comparison undefined (false).
+                match t.trim().parse::<i128>() {
+                    Ok(b) => Some(a.cmp(&b)),
+                    Err(_) if t.trim().is_empty() => Some(a.cmp(&0)),
+                    Err(_) => None,
+                }
+            }
+            (Value::Str(t), Value::BigInt(b)) => match t.trim().parse::<i128>() {
+                Ok(a) => Some(a.cmp(b)),
+                Err(_) if t.trim().is_empty() => Some(0.cmp(b)),
+                Err(_) => None,
+            },
+            (Value::BigInt(a), _) => {
+                let n = self.to_number(&rp)?;
+                cmp_bigint_f64(*a, n)
+            }
+            (_, Value::BigInt(b)) => {
+                let n = self.to_number(&lp)?;
+                cmp_bigint_f64(*b, n).map(std::cmp::Ordering::reverse)
+            }
+            _ => {
+                let a = self.to_number(&lp)?;
+                let b = self.to_number(&rp)?;
+                if a.is_nan() || b.is_nan() {
+                    None
+                } else {
+                    a.partial_cmp(&b)
+                }
             }
         };
-        let a = match bigint_f64(&lp) {
-            Some(n) => n,
-            None => self.to_number(&lp)?,
-        };
-        let b = match bigint_f64(&rp) {
-            Some(n) => n,
-            None => self.to_number(&rp)?,
-        };
-        if a.is_nan() || b.is_nan() {
-            return Ok(Value::Bool(false));
-        }
-        let res = match op {
-            "<" => a < b,
-            ">" => a > b,
-            "<=" => a <= b,
-            ">=" => a >= b,
-            _ => unreachable!(),
+        let res = match ord {
+            None => false,
+            Some(ord) => match op {
+                "<" => ord.is_lt(),
+                ">" => ord.is_gt(),
+                "<=" => ord.is_le(),
+                ">=" => ord.is_ge(),
+                _ => unreachable!(),
+            },
         };
         Ok(Value::Bool(res))
     }
@@ -5859,4 +5878,39 @@ impl Interp {
 /// from a runtime key (see `Interp::resolve_private`).
 pub(crate) fn private_display(key: &str) -> &str {
     key.split('\u{1}').next().unwrap_or(key)
+}
+
+/// Exact BigInt-vs-Number ordering (the mathematical comparison; None when the number is NaN).
+fn cmp_bigint_f64(b: i128, n: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if n.is_nan() {
+        return None;
+    }
+    if n == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if n == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    // Beyond i128's range the sign of n decides.
+    if n >= i128::MAX as f64 {
+        return Some(Ordering::Less);
+    }
+    if n <= i128::MIN as f64 {
+        return Some(Ordering::Greater);
+    }
+    let t = n.trunc();
+    match b.cmp(&(t as i128)) {
+        Ordering::Equal => {
+            let f = n - t;
+            if f > 0.0 {
+                Some(Ordering::Less)
+            } else if f < 0.0 {
+                Some(Ordering::Greater)
+            } else {
+                Some(Ordering::Equal)
+            }
+        }
+        o => Some(o),
+    }
 }

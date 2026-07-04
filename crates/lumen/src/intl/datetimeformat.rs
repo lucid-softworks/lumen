@@ -222,14 +222,14 @@ fn range_type_tag(i: &Interp, v: &Value) -> u8 {
 
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
     let g = it.make_native("get format", 0, |i, this, _| {
-        let o = brand_slot(i, &this, "__dtf")?;
+        let o = crate::intl::brand_slot_legacy(i, &this, "__dtf", "Intl.DateTimeFormat")?;
         if let Some(f) = o.borrow().props.get("__dtf_bound").map(|p| p.value.clone()) {
             return Ok(f);
         }
         let f = i.make_native("", 1, |i, that, a| {
             Ok(Value::from_string(do_format(i, &that, &arg(a, 0))?))
         });
-        let bound = crate::intl::numberformat::bind_this(i, Value::Obj(f), this.clone());
+        let bound = crate::intl::numberformat::bind_this(i, Value::Obj(f), Value::Obj(o.clone()));
         set_builtin(&o, "__dtf_bound", bound.clone());
         Ok(bound)
     });
@@ -254,7 +254,7 @@ fn valid_type_id(s: &str) -> bool {
             .all(|p| p.len() >= 3 && p.len() <= 8 && p.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
-fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
+fn construct(i: &mut Interp, t: Value, a: &[Value]) -> Result<Value, Value> {
     // Legacy service: callable without `new` (returns a fresh instance either way).
     let requested = canonicalize_locale_list(i, &arg(a, 0))?;
     let options = coerce_options(i, &arg(a, 1))?;
@@ -594,6 +594,14 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
         set_builtin(&obj, "__dtf_month", Value::str("numeric"));
         set_builtin(&obj, "__dtf_day", Value::str("numeric"));
         set_builtin(&obj, "__dtf_defaults", Value::Bool(true));
+    }
+    // Legacy "ChainDateTimeFormat": called without `new` on an object inheriting from
+    // %DateTimeFormat.prototype%, the fresh instance is stored ON that object under the realm's
+    // [[FallbackSymbol]] and the object itself is returned.
+    if !i.constructing {
+        if let Some(chained) = crate::intl::legacy_chain(i, &t, "Intl.DateTimeFormat", &obj) {
+            return Ok(chained);
+        }
     }
     Ok(Value::Obj(obj))
 }
@@ -1215,7 +1223,7 @@ fn tz_display_name(tz: &str, style: &str) -> String {
 }
 
 fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
-    let o = brand_slot(i, &this, "__dtf")?;
+    let o = crate::intl::brand_slot_legacy(i, &this, "__dtf", "Intl.DateTimeFormat")?;
     let res = i.new_object();
     let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
         if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {

@@ -88,6 +88,8 @@ fn gcb_class(cp: u32) -> Gcb {
         0x0D => return Gcb::Cr,
         0x0A => return Gcb::Lf,
         0x200D => return Gcb::Zwj,
+        // Emoji modifiers (skin tones) have Grapheme_Cluster_Break=Extend (UAX #29, GB9).
+        0x1F3FB..=0x1F3FF => return Gcb::Extend,
         // Hangul Jamo (fixed blocks) + conjoining Hangul syllables.
         0x1100..=0x115F | 0xA960..=0xA97C => return Gcb::L,
         0x1160..=0x11A7 | 0xD7B0..=0xD7C6 => return Gcb::V,
@@ -219,20 +221,43 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
     match granularity {
         "grapheme" => grapheme_boundaries(s),
         "word" => {
+            // Decode to (offset, code point), pairing valid surrogates so an astral character is
+            // one word character; a lone surrogate stays as its own (non-word) unit.
+            let mut cps: Vec<(usize, u32)> = Vec::new();
+            let mut k = 0;
+            while k < n {
+                let u = s[k] as u32;
+                if (0xD800..0xDC00).contains(&u)
+                    && k + 1 < n
+                    && (0xDC00..0xE000).contains(&(s[k + 1] as u32))
+                {
+                    cps.push((
+                        k,
+                        0x10000 + ((u - 0xD800) << 10) + (s[k + 1] as u32 - 0xDC00),
+                    ));
+                    k += 2;
+                } else {
+                    cps.push((k, u));
+                    k += 1;
+                }
+            }
             // Runs of "word" characters (letters/digits) vs. non-word, with UAX #29 infix handling:
             // a MidNum/MidLetter/MidNumLet (e.g. "." or ",") between two word characters does not
             // break, so "1.23" and "3,000" stay whole.
+            let m = cps.len();
             let mut out = Vec::new();
             let mut idx = 0;
-            while idx < n {
+            while idx < m {
                 let start = idx;
-                let word = is_word_cu(s[idx]);
+                let word = is_word_cp(cps[idx].1);
                 if word {
                     idx += 1;
-                    while idx < n {
-                        if is_word_cu(s[idx]) {
+                    while idx < m {
+                        if is_word_cp(cps[idx].1) {
                             idx += 1;
-                        } else if idx + 1 < n && mid_joins(s[idx - 1], s[idx], s[idx + 1]) {
+                        } else if idx + 1 < m
+                            && mid_joins(cps[idx - 1].1, cps[idx].1, cps[idx + 1].1)
+                        {
                             idx += 2;
                         } else {
                             break;
@@ -240,11 +265,15 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
                     }
                 } else {
                     idx += 1;
-                    while idx < n && !is_word_cu(s[idx]) {
-                        idx += 1;
+                    // WB3d: runs of spaces stay together; any other non-word character
+                    // (punctuation, lone surrogate, ...) is its own segment (WB999).
+                    if cps[start].1 == 0x20 {
+                        while idx < m && cps[idx].1 == 0x20 {
+                            idx += 1;
+                        }
                     }
                 }
-                out.push((start, word));
+                out.push((cps[start].0, word));
             }
             out
         }
@@ -273,19 +302,19 @@ fn boundaries(s: &[u16], granularity: &str) -> Vec<(usize, bool)> {
     }
 }
 
-fn is_num_cu(c: u16) -> bool {
+fn is_num_cp(c: u32) -> bool {
     (0x30..=0x39).contains(&c)
 }
-fn is_alpha_cu(c: u16) -> bool {
-    matches!(c, 0x41..=0x5A | 0x61..=0x7A) || c >= 0x80
+fn is_alpha_cp(c: u32) -> bool {
+    matches!(c, 0x41..=0x5A | 0x61..=0x7A) || (c >= 0x80 && !(0xD800..0xE000).contains(&c))
 }
 
 /// Whether a MidNum/MidLetter/MidNumLet character `mid` joins its neighbours (UAX #29 WB6/7/11/12):
 /// MidNumLet (. ' ’ ⁄) joins two numbers or two letters; MidNum (, ;) only two numbers; MidLetter
 /// (: ·) only two letters.
-fn mid_joins(prev: u16, mid: u16, next: u16) -> bool {
-    let both_num = is_num_cu(prev) && is_num_cu(next);
-    let both_alpha = is_alpha_cu(prev) && is_alpha_cu(next);
+fn mid_joins(prev: u32, mid: u32, next: u32) -> bool {
+    let both_num = is_num_cp(prev) && is_num_cp(next);
+    let both_alpha = is_alpha_cp(prev) && is_alpha_cp(next);
     match mid {
         0x2E | 0x27 | 0x2019 | 0x2044 => both_num || both_alpha,
         0x2C | 0x3B => both_num,
@@ -294,13 +323,12 @@ fn mid_joins(prev: u16, mid: u16, next: u16) -> bool {
     }
 }
 
-fn is_word_cu(c: u16) -> bool {
-    let c = c as u32;
+fn is_word_cp(c: u32) -> bool {
     (0x30..=0x39).contains(&c)
         || (0x41..=0x5A).contains(&c)
         || (0x61..=0x7A).contains(&c)
-        || c >= 0x80
-    // treat most non-ASCII as word-like (coarse)
+        || (c >= 0x80 && !(0xD800..0xE000).contains(&c))
+    // treat most non-ASCII as word-like (coarse); unpaired surrogates are not word characters
 }
 
 fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> {
@@ -315,7 +343,8 @@ fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> 
         _ => "grapheme".to_string(),
     };
     let s = ab(i.to_string(input))?.to_string();
-    let units: Vec<u16> = s.encode_utf16().collect();
+    // jstr units: lone surrogates must round-trip (each is its own single-unit segment).
+    let units: Vec<u16> = crate::jstr::units(&s);
     let bnds = boundaries(&units, &granularity);
 
     // Build an array-like "Segments" object that is iterable and has a `containing` method. We
@@ -324,7 +353,7 @@ fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> 
     let mut records: Vec<Value> = Vec::new();
     for (k, &(start, wordlike)) in bnds.iter().enumerate() {
         let end = bnds.get(k + 1).map(|&(e, _)| e).unwrap_or(units.len());
-        let seg: String = String::from_utf16_lossy(&units[start..end]);
+        let seg: String = crate::jstr::from_units(&units[start..end]);
         let rec = i.new_object();
         set_data(&rec, "segment", Value::from_string(seg));
         set_data(&rec, "index", Value::Num(start as f64));
@@ -364,7 +393,7 @@ fn it_containing(i: &mut Interp, segments: &Gc) {
             let start = ab(i.to_number(&idxv))? as i64;
             let seg = ab(i.get_member(&rec, "segment"))?;
             let slen = if let Value::Str(s) = &seg {
-                s.encode_utf16().count() as i64
+                crate::jstr::unit_len(s) as i64
             } else {
                 0
             };

@@ -7,6 +7,7 @@ pub fn language_alias(key: &str) -> Option<&'static str> {
     Some(match key {
         // Simple deprecated two/three-letter codes.
         "in" => "id",
+        "ces" => "cs",
         "iw" => "he",
         "heb" => "he",
         "cnr" => "sr-ME",
@@ -125,7 +126,6 @@ pub fn language_alias(key: &str) -> Option<&'static str> {
 pub fn region_alias(region: &str) -> Option<&'static str> {
     Some(match region {
         "BU" => "MM",
-        "CS" => "RS",
         "CT" => "KI",
         "DD" => "DE",
         "DY" => "BJ",
@@ -142,7 +142,6 @@ pub fn region_alias(region: &str) -> Option<&'static str> {
         "RH" => "ZW",
         "TP" => "TL",
         "UK" => "GB",
-        "SU" => "RU",
         "VD" => "VN",
         "WK" => "UM",
         "YD" => "YE",
@@ -153,15 +152,28 @@ pub fn region_alias(region: &str) -> Option<&'static str> {
         "008" => "AL",
         "554" => "NZ",
         "756" => "CH",
-        "810" => "RU",
         "840" => "US",
-        "890" => "RS",
         "230" => "ET",
         "280" => "DE",
         "532" => "CW",
         "536" => "SA",
         "582" => "FM",
         "886" => "YE",
+        _ => return None,
+    })
+}
+
+/// territoryAlias entries whose replacement is a *list* of candidates: the choice is made with
+/// the likely-subtags data (the region the rest of the tag maximizes to, else the first).
+pub fn region_alias_multi(region: &str) -> Option<&'static [&'static str]> {
+    Some(match region {
+        "SU" | "810" => &[
+            "RU", "AM", "AZ", "BY", "EE", "GE", "KZ", "KG", "LV", "LT", "MD", "TJ", "TM", "UA",
+            "UZ",
+        ],
+        "CS" | "890" => &["RS", "ME"],
+        "NT" => &["SA", "IQ"],
+        "AN" | "530" => &["CW", "SX", "BQ"],
         _ => return None,
     })
 }
@@ -221,6 +233,8 @@ pub fn grandfathered(tag: &str) -> Option<&'static str> {
     Some(match tag {
         "art-lojban" => "jbo",
         "cel-gaulish" => "xtg",
+        "hy-arevela" => "hy",
+        "hy-arevmda" => "hyw",
         // `en-gb-oed` is intentionally absent: its 3-letter `oed` subtag is not a valid variant, so
         // the tag is structurally invalid and must be rejected (RangeError), not canonicalized.
         "zh-guoyu" => "zh",
