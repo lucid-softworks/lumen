@@ -5290,14 +5290,25 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+fn year_str(y: i64) -> String {
+    if y < 0 {
+        format!("-{:04}", -y)
+    } else {
+        format!("{y:04}")
+    }
+}
+
 fn date_str_part(t: f64) -> Option<String> {
     if !t.is_finite() {
         return None;
     }
     let (y, mo, d, _, _, _, _, wd) = ms_to_parts(t);
     Some(format!(
-        "{} {} {:02} {:04}",
-        WDAYS[wd as usize], MONTHS[mo as usize], d, y
+        "{} {} {:02} {}",
+        WDAYS[wd as usize],
+        MONTHS[mo as usize],
+        d,
+        year_str(y)
     ))
 }
 fn time_str_part(t: f64) -> Option<String> {
@@ -5315,8 +5326,14 @@ fn utc_string(t: f64) -> Option<String> {
     }
     let (y, mo, d, h, mi, s, _, wd) = ms_to_parts(t);
     Some(format!(
-        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        WDAYS[wd as usize], d, MONTHS[mo as usize], y, h, mi, s
+        "{}, {:02} {} {} {:02}:{:02}:{:02} GMT",
+        WDAYS[wd as usize],
+        d,
+        MONTHS[mo as usize],
+        year_str(y),
+        h,
+        mi,
+        s
     ))
 }
 
@@ -5337,6 +5354,44 @@ fn ms_to_parts(t: f64) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// MakeTime (spec-ordered f64 arithmetic, so precision matches the standard exactly).
+fn make_time(h: f64, m: f64, s: f64, ms: f64) -> f64 {
+    h.trunc() * 3_600_000.0 + m.trunc() * 60_000.0 + s.trunc() * 1000.0 + ms.trunc()
+}
+
+/// MakeDay: the day number for (year, month, date), with month overflow carried into the year.
+fn make_day(y: f64, m: f64, d: f64) -> f64 {
+    if !y.is_finite() || !m.is_finite() || !d.is_finite() {
+        return f64::NAN;
+    }
+    let (y, m, d) = (y.trunc(), m.trunc(), d.trunc());
+    let ym = y + (m / 12.0).floor();
+    let mn = m.rem_euclid(12.0);
+    // Outside this range no finite time value can exist anyway (the clip is ±8.64e15 ms).
+    if !(-300_000.0..=300_000.0).contains(&ym) {
+        return f64::NAN;
+    }
+    days_from_civil(ym as i64, mn as i64 + 1, 1) as f64 + (d - 1.0)
+}
+
+fn make_date(day: f64, time: f64) -> f64 {
+    let t = day * 86_400_000.0 + time;
+    if t.is_finite() {
+        t
+    } else {
+        f64::NAN
+    }
+}
+
+/// TimeClip: NaN outside ±8.64e15 ms; -0 normalizes to +0.
+fn time_clip(t: f64) -> f64 {
+    if !t.is_finite() || t.abs() > 8.64e15 {
+        f64::NAN
+    } else {
+        t.trunc() + 0.0
+    }
+}
+
 fn parts_to_ms(y: i64, mo0: i64, d: i64, h: i64, mi: i64, s: i64, ml: i64) -> f64 {
     // Normalize the month into 0..11 with a year carry so e.g. month 13 rolls over.
     let y = y + mo0.div_euclid(12);
@@ -5504,9 +5559,29 @@ fn parse_iso(s: &str) -> f64 {
         Some((d, t)) => (d, Some(t)),
         None => (s, None),
     };
+    // Extended years carry an explicit sign and six digits (`+275760-…`, `-271821-…`);
+    // "-000000" is explicitly rejected.
+    let (neg_year, date_part) = match date_part.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, date_part.strip_prefix('+').unwrap_or(date_part)),
+    };
+    if neg_year
+        && date_part
+            .split('-')
+            .next()
+            .is_some_and(|y| y.bytes().all(|b| b == b'0'))
+    {
+        return f64::NAN;
+    }
     let mut dp = date_part.splitn(3, '-');
-    let y: i64 = match dp.next().and_then(|x| x.parse().ok()) {
-        Some(v) => v,
+    let y: i64 = match dp.next().and_then(|x| x.parse::<i64>().ok()) {
+        Some(v) => {
+            if neg_year {
+                -v
+            } else {
+                v
+            }
+        }
         None => return f64::NAN,
     };
     let mo: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
@@ -5532,7 +5607,7 @@ fn parse_iso(s: &str) -> f64 {
             ml = f3.parse().unwrap_or(0);
         }
     }
-    parts_to_ms(y, mo - 1, d, h, mi, s, ml)
+    time_clip(parts_to_ms(y, mo - 1, d, h, mi, s, ml))
 }
 
 fn date_to_string(t: f64) -> String {
@@ -5551,41 +5626,41 @@ fn date_ctor(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> 
     let ms = match args.len() {
         0 => now_ms(),
         1 => match &args[0] {
-            Value::Str(s) => parse_iso(s),
-            v => ab(i.to_number(v))?.trunc(),
+            // A Date argument clones its time value directly (no valueOf call).
+            Value::Obj(o) if o.borrow().props.contains("__date_ms") => {
+                match o.borrow().props.get("__date_ms").map(|p| p.value.clone()) {
+                    Some(Value::Num(n)) => n,
+                    _ => f64::NAN,
+                }
+            }
+            v => {
+                let prim = ab(i.to_primitive(v, crate::eval::Hint::Default))?;
+                match prim {
+                    Value::Str(s) => parse_iso(&s),
+                    p => time_clip(ab(i.to_number(&p))?),
+                }
+            }
         },
         _ => {
-            let mut y = ab(i.to_number(&args[0]))? as i64;
-            if (0..=99).contains(&y) {
-                y += 1900;
+            // All components coerce as f64 (NaN propagates through MakeDay/MakeTime).
+            let mut y = ab(i.to_number(&args[0]))?;
+            if !y.is_nan() && (0.0..=99.0).contains(&y.trunc()) {
+                y = 1900.0 + y.trunc();
             }
-            let mo = ab(i.to_number(&arg(args, 1)))? as i64;
-            let d = if args.len() > 2 {
-                ab(i.to_number(&args[2]))? as i64
-            } else {
-                1
+            let read = |i: &mut Interp, k: usize, dflt: f64| -> Result<f64, Value> {
+                if args.len() > k {
+                    ab(i.to_number(&args[k]))
+                } else {
+                    Ok(dflt)
+                }
             };
-            let h = if args.len() > 3 {
-                ab(i.to_number(&args[3]))? as i64
-            } else {
-                0
-            };
-            let mi = if args.len() > 4 {
-                ab(i.to_number(&args[4]))? as i64
-            } else {
-                0
-            };
-            let s = if args.len() > 5 {
-                ab(i.to_number(&args[5]))? as i64
-            } else {
-                0
-            };
-            let ml = if args.len() > 6 {
-                ab(i.to_number(&args[6]))? as i64
-            } else {
-                0
-            };
-            parts_to_ms(y, mo, d, h, mi, s, ml)
+            let mo = read(i, 1, 0.0)?;
+            let d = read(i, 2, 1.0)?;
+            let h = read(i, 3, 0.0)?;
+            let mi = read(i, 4, 0.0)?;
+            let sec = read(i, 5, 0.0)?;
+            let ml = read(i, 6, 0.0)?;
+            time_clip(make_date(make_day(y, mo, d), make_time(h, mi, sec, ml)))
         }
     };
     let obj = new_from_ctor(i, "Date")?;
@@ -5598,8 +5673,16 @@ fn iso_string(t: f64) -> Option<String> {
         return None;
     }
     let (y, mo, d, h, mi, s, ml, _) = ms_to_parts(t);
+    // Years outside 0..=9999 use the signed six-digit extended form.
+    let ys = if (0..=9999).contains(&y) {
+        format!("{y:04}")
+    } else if y < 0 {
+        format!("-{:06}", -y)
+    } else {
+        format!("+{y:06}")
+    };
     Some(format!(
-        "{y:04}-{:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ml:03}Z",
+        "{ys}-{:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ml:03}Z",
         mo + 1
     ))
 }
@@ -5615,7 +5698,8 @@ fn install_date(it: &mut Interp) {
         Ok(Value::Num(date_ms(i, &this)?))
     });
     it.def_method(&proto, "setTime", 1, |i, this, a| {
-        let v = ab(i.to_number(&arg(a, 0)))?.trunc();
+        date_ms(i, &this)?; // thisTimeValue brand check
+        let v = time_clip(ab(i.to_number(&arg(a, 0)))?);
         if let Value::Obj(o) = &this {
             set_internal(o, "__date_ms", Value::Num(v));
         }
@@ -5861,33 +5945,25 @@ fn install_date(it: &mut Interp) {
         // The year is always read; later components only if supplied. Coerce all reads first; any
         // non-finite component makes the whole result NaN.
         let count = a.len().clamp(1, 7);
-        let defaults = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut vals = defaults;
         let mut nan = false;
         for k in 0..count {
             let v = ab(i.to_number(&arg(a, k)))?;
             if !v.is_finite() {
                 nan = true;
-            } else {
-                vals[k] = v.trunc();
             }
+            vals[k] = v;
         }
-        if nan {
-            return Ok(Value::Num(f64::NAN));
+        let _ = nan;
+        let mut y = vals[0];
+        if !y.is_nan() && (0.0..=99.0).contains(&y.trunc()) {
+            y = 1900.0 + y.trunc();
         }
-        let mut y = vals[0] as i64;
-        if (0..=99).contains(&y) {
-            y += 1900;
-        }
-        Ok(Value::Num(parts_to_ms(
-            y,
-            vals[1] as i64,
-            vals[2] as i64,
-            vals[3] as i64,
-            vals[4] as i64,
-            vals[5] as i64,
-            vals[6] as i64,
-        )))
+        Ok(Value::Num(time_clip(make_date(
+            make_day(y, vals[1], vals[2]),
+            make_time(vals[3], vals[4], vals[5], vals[6]),
+        ))))
     });
     // Date.prototype[@@toPrimitive]: "number" hint uses valueOf, "string"/"default" use toString.
     let prim = it.make_native("[Symbol.toPrimitive]", 1, |i, this, a| {
@@ -5920,10 +5996,11 @@ fn install_date(it: &mut Interp) {
         Err(i.make_error("TypeError", "cannot convert Date to a primitive value"))
     });
     if let Some(key) = well_known_key(it, "toPrimitive") {
+        // @@toPrimitive is non-writable (unlike ordinary builtin methods).
         proto
             .borrow_mut()
             .props
-            .insert(key, Property::builtin(Value::Obj(prim)));
+            .insert(key, Property::data(Value::Obj(prim), false, false, true));
     }
     set_builtin(&it.global, "Date", Value::Obj(ctor));
 }
