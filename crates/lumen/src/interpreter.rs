@@ -599,6 +599,9 @@ pub struct Interp {
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
     pub yield_raw_result: bool,
+    /// True while statements *directly* in an async generator's body run (nested ordinary
+    /// functions clear it; arrows inherit): `return <expr>` awaits its value only there.
+    pub in_async_gen_body: bool,
     /// NamedEvaluation: the binding/property name an anonymous class expression being evaluated
     /// should take — applied *before* its static initializers run.
     pub pending_fn_name: Option<String>,
@@ -994,6 +997,7 @@ impl Interp {
             super_call_ok: false,
             in_field_init_code: false,
             yield_raw_result: false,
+            in_async_gen_body: false,
             pending_fn_name: None,
             pending_tail: None,
             tco_ok: false,
@@ -3007,14 +3011,17 @@ impl Interp {
         // inherits the enclosing value. Saved and restored around the body.
         let saved_new_target = self.new_target.clone();
         let saved_field_init = self.in_field_init_code;
+        let saved_agb = self.in_async_gen_body;
         if !func.is_arrow {
             self.new_target = if is_construct {
                 std::mem::replace(&mut self.pending_new_target, Value::Undefined)
             } else {
                 Value::Undefined
             };
-            // An ordinary function body is not class-field-initializer code (an arrow inherits it).
+            // An ordinary function body is not class-field-initializer code, nor an async
+            // generator's own body (an arrow inherits both).
             self.in_field_init_code = false;
+            self.in_async_gen_body = false;
         }
 
         if !func.is_arrow {
@@ -3184,6 +3191,7 @@ impl Interp {
                 self.strict = saved_strict;
                 self.new_target = saved_new_target;
                 self.in_field_init_code = saved_field_init;
+                self.in_async_gen_body = saved_agb;
                 let reason = abrupt_value(e);
                 let promise = self.new_promise();
                 self.reject_promise(&promise, reason);
@@ -3193,6 +3201,7 @@ impl Interp {
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             self.in_field_init_code = saved_field_init;
+            self.in_async_gen_body = saved_agb;
             return r;
         }
 
@@ -3200,6 +3209,7 @@ impl Interp {
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             self.in_field_init_code = saved_field_init;
+            self.in_async_gen_body = saved_agb;
             return Err(e);
         }
 
@@ -3215,6 +3225,7 @@ impl Interp {
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             self.in_field_init_code = saved_field_init;
+            self.in_async_gen_body = saved_agb;
             return gen;
         }
 
@@ -3308,6 +3319,7 @@ impl Interp {
         self.strict = saved_strict;
         self.new_target = saved_new_target;
         self.in_field_init_code = saved_field_init;
+        self.in_async_gen_body = saved_agb;
         result
     }
 
@@ -3336,6 +3348,7 @@ impl Interp {
             }
             i.declare_block_lexicals(&func.body, &scope, false);
             crate::coroutine::set_async_gen(is_async);
+            let saved_agb = std::mem::replace(&mut i.in_async_gen_body, is_async);
             let has_using = func.body.iter().any(crate::eval::stmt_declares_using);
             if has_using {
                 i.using_stack.push(Vec::new());

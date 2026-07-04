@@ -546,6 +546,16 @@ impl Interp {
                     Some(e) => self.eval(e, env)?,
                     None => Value::Undefined,
                 };
+                // In an async generator's own body, `return <expr>` awaits the expression (a
+                // bare `return`, an implicit completion, or a nested plain function does not).
+                let v = if arg.is_some()
+                    && self.in_async_gen_body
+                    && crate::coroutine::in_async_gen()
+                {
+                    self.coro_await(v)?
+                } else {
+                    v
+                };
                 Err(Abrupt::Return(v))
             }
             Stmt::Throw(e) => {
@@ -970,7 +980,8 @@ impl Interp {
             let result = self.run_loop(label, env, |me, env| {
                 step_failed = true;
                 let res = me.call(next.clone(), iter.clone(), &[])?;
-                let res = if from_sync { res } else { me.await_value(res)? };
+                // Await the step result by parking the coroutine (real microtask ticks).
+                let res = if from_sync { res } else { me.coro_await(res)? };
                 if !matches!(res, Value::Obj(_)) {
                     return Err(me.throw("TypeError", "iterator result is not an object"));
                 }
@@ -978,7 +989,23 @@ impl Interp {
                 let done = me.to_boolean(&done);
                 let v = if from_sync {
                     let raw = me.get_member(&res, "value")?;
-                    match me.await_value(raw) {
+                    // AsyncFromSyncIteratorContinuation: PromiseResolve(%Promise%, value) reads
+                    // the value's constructor observably; an abrupt read rejects the wrapper
+                    // promise, so the throw lands a tick later at the await. A rejection closes
+                    // the sync iterator (closeOnRejection) before rethrowing.
+                    let px = match me.promise_resolve_checked(raw) {
+                        // The wrapper promise settles via its own reaction job (one tick), and
+                        // the outer Await adds another — two ticks per unwrapped value, like the
+                        // spec's PerformPromiseThen into the AsyncFromSyncIterator capability.
+                        Ok(p) => me.promise_then(&p, Value::Undefined, Value::Undefined),
+                        // IfAbruptRejectPromise: the wrapper rejects directly (no extra hop).
+                        Err(e) => {
+                            let p = me.new_promise();
+                            me.reject_promise(&p, e);
+                            p
+                        }
+                    };
+                    match me.coro_await(px) {
                         Ok(v) => v,
                         Err(e) => {
                             if !done {
@@ -1206,7 +1233,8 @@ impl Interp {
     /// the driver's resume signal to continue the delegation loop.
     fn async_gen_yield_resume(&mut self, value: Value) -> Result<crate::coroutine::Resume, Abrupt> {
         use crate::coroutine::Resume;
-        let value = self.coro_await(value)?;
+        // The delegated value passes through unawaited: `yield*` never unwraps a promise
+        // produced by the inner iterator.
         Ok(match crate::coroutine::coroutine_yield(self, value) {
             // AsyncGeneratorUnwrapYieldResumption: await a return() value before the delegation
             // loop sees it; a rejection turns into a throw resumption.
