@@ -460,21 +460,27 @@ impl Interp {
                 for (pat, init) in decls {
                     match kind {
                         DeclKind::Var => {
-                            // `var x;` (no init) keeps the hoisted binding untouched.
+                            // `var x;` (no init) keeps the hoisted binding untouched. For an
+                            // identifier target, the binding Reference resolves BEFORE the
+                            // initializer runs (a `with` base captured then is written even if
+                            // the initializer deletes the property).
                             if let Some(e) = init {
                                 if let Pattern::Ident(n) = pat {
                                     if matches!(e, Expr::Class(c) if c.name.is_none()) {
                                         self.pending_fn_name = Some(n.clone());
                                     }
-                                }
-                                let value = self.eval(e, env)?;
-                                self.pending_fn_name = None;
-                                if let Pattern::Ident(n) = pat {
+                                    let mut lref =
+                                        self.resolve_reference(&Expr::Ident(n.clone()), env)?;
+                                    let value = self.eval(e, env)?;
+                                    self.pending_fn_name = None;
                                     if is_anonymous_fn(e) {
                                         self.set_fn_name(&value, n);
                                     }
+                                    self.put_reference(&mut lref, value)?;
+                                } else {
+                                    let value = self.eval(e, env)?;
+                                    self.bind_pattern(pat, value, env, BindMode::Var)?;
                                 }
-                                self.bind_pattern(pat, value, env, BindMode::Var)?;
                             }
                         }
                         DeclKind::Let | DeclKind::Const => {
@@ -1563,8 +1569,9 @@ impl Interp {
                 }
                 Err(e) => {
                     // The finalizer overrides the try/catch completion: the parked tail call
-                    // is dropped, but one the finalizer itself scheduled stays pending.
-                    return Err(e);
+                    // is dropped, but one the finalizer itself scheduled stays pending. The
+                    // TryStatement's UpdateEmpty(F, undefined) still applies.
+                    return Err(crate::interpreter::update_abrupt_empty(e, Value::Undefined));
                 }
             }
         }
