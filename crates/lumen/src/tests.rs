@@ -9008,3 +9008,15 @@ fn private_elements_on_non_extensible_receivers() {
         "TypeError,TypeError,TypeError"
     );
 }
+
+#[test]
+fn top_level_for_await_runs_outside_a_coroutine() {
+    // `for await` in module top-level code has no enclosing coroutine to park; it must fall back
+    // to the synchronous top-level await drive instead of panicking.
+    let src = "let out = [];\nfor await (const x of [await 1, Promise.resolve(2), 3]) { out.push(x); }\nif (out.join() !== '1,2,3') throw new Error('got ' + out.join());\n";
+    let mut e = Engine::new();
+    match e.eval_module(src, "tla.js", |_, _| None).expect("parse") {
+        Completion::Value(_) => {}
+        Completion::Throw { name, message } => panic!("{name}: {message}"),
+    }
+}

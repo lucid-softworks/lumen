@@ -1248,8 +1248,12 @@ impl Interp {
         Ok(())
     }
 
-    /// Await `v` from inside a coroutine (parks until it settles), surfacing the resume signal.
+    /// Await `v`: park the coroutine until it settles, surfacing the resume signal. Outside a
+    /// coroutine (top-level await in module code) this is the synchronous event-loop drive.
     fn coro_await(&mut self, v: Value) -> Completion {
+        if !crate::coroutine::in_coroutine() {
+            return self.await_value(v);
+        }
         match crate::coroutine::coroutine_await(self, v) {
             crate::coroutine::Resume::Next(x) => Ok(x),
             crate::coroutine::Resume::Throw(e) => Err(Abrupt::Throw(e)),
