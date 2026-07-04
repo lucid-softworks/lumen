@@ -2346,6 +2346,12 @@ impl Interp {
                     return Ok(Value::Undefined);
                 }
                 let idx = self.eval(index, env)?;
+                // GetValue: ToObject(base) throws before ToPropertyKey coerces the key.
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Err(
+                        self.throw("TypeError", "cannot read property of null or undefined")
+                    );
+                }
                 let key = self.to_property_key(&idx)?;
                 self.get_member(&base, &key)
             }
@@ -4720,6 +4726,12 @@ impl Interp {
             return self.eval_delete(arg, env);
         }
         let v = self.eval(arg, env)?;
+        // `-`/`~` apply ToNumeric: a BigInt (or BigInt wrapper object) stays a BigInt.
+        let v = if matches!(op, "-" | "~") && matches!(v, Value::Obj(_)) {
+            self.to_primitive(&v, Hint::Number)?
+        } else {
+            v
+        };
         if let Value::BigInt(n) = v {
             return match op {
                 "!" => Ok(Value::Bool(n == 0)),

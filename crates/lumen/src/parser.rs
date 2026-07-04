@@ -2932,6 +2932,15 @@ impl Parser {
         self.eat_kw("function");
         let is_generator = self.eat_punct("*");
         let name = if let Tok::Ident(n) = self.cur().clone() {
+            // A *declaration*'s name is a BindingIdentifier in the enclosing context: `await`
+            // is reserved in async bodies / static blocks / modules, `yield` in generators.
+            // (An expression's name binds inside the function, past those boundaries.)
+            if !is_expr
+                && ((n == "await" && (self.in_async || self.in_static_block || self.module))
+                    || (n == "yield" && (self.in_generator || self.strict)))
+            {
+                return self.err(format!("'{n}' cannot be used as a function name here"));
+            }
             self.advance();
             Some(n)
         } else {
@@ -3509,6 +3518,12 @@ impl Parser {
         let ssb = std::mem::replace(&mut self.in_static_block, false);
         let result = if self.is_punct("{") {
             let (body, is_strict) = self.parse_function_body(!params_complex(&params), true)?;
+            // A body-level lexical may not redeclare a parameter name.
+            if let Some(dup) = params_body_lexical_clash(&params, &body) {
+                self.in_async = sa;
+                self.in_static_block = ssb;
+                return self.err(format!("Identifier '{dup}' has already been declared"));
+            }
             // A "use strict" body subjects the parameter names to the strict binding rules.
             if is_strict && !self.strict {
                 for n in param_names(&params) {
