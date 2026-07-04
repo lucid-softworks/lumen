@@ -2835,6 +2835,18 @@ fn sub_proto(i: &mut Interp, v: &Value) -> Result<(), Value> {
     Ok(())
 }
 
+/// A constructor's calendar parameter: a bare identifier only (never an ISO string).
+fn ctor_calendar(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
+    match v {
+        Value::Undefined => Ok(std::rc::Rc::from("iso8601")),
+        Value::Str(c) => match canon_cal(c) {
+            Some(canon) => Ok(std::rc::Rc::from(canon)),
+            None => Err(i.make_error("RangeError", "invalid calendar identifier")),
+        },
+        _ => Err(i.make_error("TypeError", "calendar must be a string")),
+    }
+}
+
 fn require_new(i: &Interp) -> Result<(), Value> {
     if !i.constructing {
         return Err(i.make_error("TypeError", "constructor requires 'new'"));
@@ -3254,7 +3266,7 @@ fn install_plain_date(it: &mut Interp, ns: &Gc) {
         let year = to_int(i, &arg(a, 0))?;
         let month = to_int(i, &arg(a, 1))?;
         let day = to_int(i, &arg(a, 2))?;
-        let cal = check_calendar(i, &arg(a, 3))?;
+        let cal = ctor_calendar(i, &arg(a, 3))?;
         let d = build_date(i, year, month, day)?;
         let v = make(i, "Temporal.PlainDate", Temporal::Date(d));
         sub_proto(i, &v)?;
@@ -5175,7 +5187,7 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
         let ms = to_int_default(i, &arg(a, 6), 0)?;
         let us = to_int_default(i, &arg(a, 7), 0)?;
         let ns = to_int_default(i, &arg(a, 8), 0)?;
-        let cal = check_calendar(i, &arg(a, 9))?;
+        let cal = ctor_calendar(i, &arg(a, 9))?;
         let d = build_date(i, year, month, day)?;
         let tm = build_time(i, hour, minute, second, ms, us, ns)?;
         let v = make(i, "Temporal.PlainDateTime", Temporal::DateTime(d, tm));
@@ -5595,7 +5607,7 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
         require_new(i)?;
         let year = to_int(i, &arg(a, 0))?;
         let month = to_int(i, &arg(a, 1))?;
-        let cal = check_calendar(i, &arg(a, 2))?;
+        let cal = ctor_calendar(i, &arg(a, 2))?;
         let day = to_int_default(i, &arg(a, 3), 1)?;
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month as u8) as i64 {
             return Err(i.make_error("RangeError", "invalid year-month"));
@@ -5742,11 +5754,13 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "equals", 1, |i, t, a| {
         let d = as_monthday(i, &t)?;
-        let other_cal = arg_calendar(i, &arg(a, 0))?;
-        let o = to_monthday(i, &arg(a, 0), &Value::Undefined)?;
-        let this_cal = canon_cal(&cal_of(i, &t)).unwrap_or("iso8601").to_string();
+        let (o, ocal) = to_monthday_cal(i, &arg(a, 0), &Value::Undefined)?;
+        let this_cal = cal_of(i, &t);
         Ok(Value::Bool(
-            d.year == o.year && d.month == o.month && d.day == o.day && this_cal == other_cal,
+            d.year == o.year
+                && d.month == o.month
+                && d.day == o.day
+                && canon(&this_cal) == canon(&ocal),
         ))
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
@@ -5955,7 +5969,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         require_new(i)?;
         let month = to_int(i, &arg(a, 0))?;
         let day = to_int(i, &arg(a, 1))?;
-        let cal = check_calendar(i, &arg(a, 2))?;
+        let cal = ctor_calendar(i, &arg(a, 2))?;
         let year = to_int_default(i, &arg(a, 3), 1972)?;
         let d = build_date(i, year, month, day)?;
         let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
@@ -5964,8 +5978,7 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         Ok(v)
     });
     it.def_method(&ctor, "from", 1, |i, _t, a| {
-        let cal = input_cal(i, &arg(a, 0))?;
-        let d = to_monthday(i, &arg(a, 0), &arg(a, 1))?;
+        let (d, cal) = to_monthday_cal(i, &arg(a, 0), &arg(a, 1))?;
         let v = make(i, "Temporal.PlainMonthDay", Temporal::MonthDay(d));
         set_cal(i, &v, cal);
         Ok(v)
@@ -6061,17 +6074,28 @@ fn cal_month_day_reference(
     // Fallback: the anchor itself (should be unreachable for representable month-days).
     Ok(anchor)
 }
-fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
+fn to_monthday_cal(
+    i: &mut Interp,
+    v: &Value,
+    opts: &Value,
+) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
     if let Some(Temporal::MonthDay(d)) = get(i, v) {
         to_overflow(i, opts)?;
-        return Ok(d);
+        return Ok((d, cal_of(i, v)));
     }
     match v {
         Value::Str(s) => {
             let md = parse_month_day(s)
                 .ok_or_else(|| i.make_error("RangeError", "invalid month-day"))?;
+            let cal: std::rc::Rc<str> = std::rc::Rc::from(
+                parse_iso(s)
+                    .and_then(|p| p.calendar)
+                    .as_deref()
+                    .and_then(canon_cal)
+                    .unwrap_or("iso8601"),
+            );
             to_overflow(i, opts)?;
-            Ok(md)
+            Ok((md, cal))
         }
         Value::Obj(_) => {
             let cal: std::rc::Rc<str> = {
@@ -6188,13 +6212,16 @@ fn to_monthday(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value
                 let month = regulate_high(i, raw.1, 12, ovf, "month")? as u8;
                 let day =
                     regulate_high(i, raw.2, days_in_month(year, month) as i64, ovf, "day")? as u8;
-                Ok(IsoDate {
-                    year: 1972,
-                    month,
-                    day,
-                })
+                Ok((
+                    IsoDate {
+                        year: 1972,
+                        month,
+                        day,
+                    },
+                    cal,
+                ))
             } else {
-                cal_month_day_reference(i, &cal, &snap, has_year, ovf)
+                Ok((cal_month_day_reference(i, &cal, &snap, has_year, ovf)?, cal))
             }
         }
         _ => Err(i.make_error("TypeError", "cannot convert to Temporal.PlainMonthDay")),
