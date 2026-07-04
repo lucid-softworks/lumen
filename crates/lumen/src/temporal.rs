@@ -4297,22 +4297,19 @@ fn datetime_cal(i: &mut Interp, v: &Value) -> Result<std::rc::Rc<str>, Value> {
     input_cal(i, v)
 }
 
-/// Like [`to_date`], but also returns the resolved calendar id.
+fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
+    Ok(to_date_cal(i, v, opts)?.0)
+}
+/// Like [`to_date`], but also returns the resolved calendar id (read exactly once).
 fn to_date_cal(
     i: &mut Interp,
     v: &Value,
     opts: &Value,
 ) -> Result<(IsoDate, std::rc::Rc<str>), Value> {
-    let cal = input_cal(i, v)?;
-    let d = to_date(i, v, opts)?;
-    Ok((d, cal))
-}
-
-fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
     match get(i, v) {
         Some(Temporal::Date(d)) | Some(Temporal::DateTime(d, _)) => {
             to_overflow(i, opts)?;
-            return Ok(d);
+            return Ok((d, cal_of(i, v)));
         }
         Some(Temporal::Zoned {
             epoch_ns,
@@ -4320,11 +4317,12 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
             ..
         }) => {
             to_overflow(i, opts)?;
-            return Ok(zoned_local(epoch_ns, offset_ns).0);
+            let cal = cal_of(i, v);
+            return Ok((zoned_local(epoch_ns, offset_ns).0, cal));
         }
         _ => {}
     }
-    let d = match v {
+    let (d, cal) = match v {
         Value::Str(s) => {
             let p =
                 parse_iso(s).ok_or_else(|| i.make_error("RangeError", "invalid date string"))?;
@@ -4341,7 +4339,13 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
                 return Err(i.make_error("RangeError", "date outside representable range"));
             }
             to_overflow(i, opts)?;
-            d
+            let cal: std::rc::Rc<str> = std::rc::Rc::from(
+                p.calendar
+                    .as_deref()
+                    .and_then(canon_cal)
+                    .unwrap_or("iso8601"),
+            );
+            (d, cal)
         }
         Value::Obj(_) => {
             let bag = read_dt_bag(i, v, false, false, true)?;
@@ -4365,14 +4369,14 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
             }
             let ovf = to_overflow(i, &get_opts_obj(i, opts)?)?;
             let raw = read_date_raw_cal(i, &bag.date_bag, &bag.cal, ovf)?;
-            regulate_date(i, raw, ovf)?
+            (regulate_date(i, raw, ovf)?, bag.cal)
         }
         _ => return Err(i.make_error("TypeError", "cannot convert to Temporal.PlainDate")),
     };
     if !iso_date_within_limits(d) {
         return Err(i.make_error("RangeError", "date is outside the supported range"));
     }
-    Ok(d)
+    Ok((d, cal))
 }
 fn field_int(i: &mut Interp, o: &Value, k: &str, default: i64) -> Result<i64, Value> {
     let v = getm(i, o, k)?;
