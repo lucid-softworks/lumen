@@ -5406,73 +5406,152 @@ fn install_year_month(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "with", 1, |i, t, a| {
         let d = as_yearmonth(i, &t)?;
-        let f = arg(a, 0);
-        if !matches!(f, Value::Obj(_)) {
-            return Err(i.make_error("TypeError", "with() argument must be an object"));
-        }
         let cal = cal_of(i, &t);
-        if &*cal != "iso8601" {
-            // Merge the calendar (year, monthCode) with the partial input (day 1), then reduce back to
-            // the resulting year-month.
-            let present = |i: &mut Interp, k: &str| -> Result<bool, Value> {
-                Ok(!matches!(getm(i, &f, k)?, Value::Undefined))
+        let f = arg(a, 0);
+        if !matches!(f, Value::Obj(_)) || get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
+        }
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        let uses_era = cal_uses_era(&cal);
+        let mut any = false;
+        let (era, era_year) = if uses_era {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(i.to_string(&ev).map_err(unab)?.to_lowercase())
+                }
             };
-            let has_year = present(i, "year")? || present(i, "era")? || present(i, "eraYear")?;
-            let has_month = present(i, "month")? || present(i, "monthCode")?;
-            let merged = i.new_object();
-            if !has_year {
-                setm(&merged, "year", Value::Num(cal_year_num(&cal, d) as f64));
-                let (era, ery) = cal_era(&cal, d);
-                if let Some(e) = era {
-                    setm(&merged, "era", Value::str(e));
+            let eyv = getm(i, &f, "eraYear")?;
+            let ey = match eyv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &eyv)?)
                 }
-                if let Some(ey) = ery {
-                    setm(&merged, "eraYear", Value::Num(ey as f64));
-                }
-            }
-            if !has_month {
-                setm(
-                    &merged,
-                    "monthCode",
-                    Value::str(cal_month_code(&cal, d).as_str()),
-                );
-            }
-            for k in ["year", "era", "eraYear", "month", "monthCode"] {
-                let v = getm(i, &f, k)?;
-                if !matches!(v, Value::Undefined) {
-                    setm(&merged, k, v);
-                }
-            }
-            setm(&merged, "day", Value::Num(1.0));
-            let ovf = to_overflow(i, &arg(a, 1))?;
-            let raw = read_date_raw_cal(i, &Value::Obj(merged), &cal, ovf)?;
-            let iso = regulate_date(i, raw, ovf)?;
-            return Ok(make_like(
-                i,
-                &t,
-                "Temporal.PlainYearMonth",
-                Temporal::YearMonth(ym_ref_of(&cal, iso)),
-            ));
-        }
-        let year = field_int(i, &f, "year", d.year)?;
-        let month_raw = field_int(i, &f, "month", d.month as i64)?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
-        let month = match ovf {
-            Overflow::Constrain => month_raw.clamp(1, 12),
-            Overflow::Reject => month_raw,
+            };
+            (era, ey)
+        } else {
+            (None, None)
         };
-        if !(1..=12).contains(&month) || !iso_year_month_within_limits(year, month) {
-            return Err(i.make_error("RangeError", "invalid year-month"));
+        let month = {
+            let fv = getm(i, &f, "month")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let n = to_int(i, &fv)?;
+                    if n < 1 {
+                        return Err(i.make_error("RangeError", "month must be positive"));
+                    }
+                    Some(n)
+                }
+            }
+        };
+        let month_code = {
+            let fv = getm(i, &f, "monthCode")?;
+            match &fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    let prim = i
+                        .to_primitive(&fv, crate::eval::Hint::String)
+                        .map_err(unab)?;
+                    let sv = match &prim {
+                        Value::Str(sv) => sv.clone(),
+                        _ => return Err(i.make_error("TypeError", "monthCode must be a string")),
+                    };
+                    let b = sv.as_bytes();
+                    let ok = (b.len() == 3 || (b.len() == 4 && b[3] == b'L'))
+                        && b[0] == b'M'
+                        && b[1].is_ascii_digit()
+                        && b[2].is_ascii_digit();
+                    if !ok {
+                        return Err(i.make_error("RangeError", format!("invalid monthCode: {sv}")));
+                    }
+                    Some(sv)
+                }
+            }
+        };
+        let year = {
+            let fv = getm(i, &f, "year")?;
+            match fv {
+                Value::Undefined => None,
+                _ => {
+                    any = true;
+                    Some(to_int(i, &fv)?)
+                }
+            }
+        };
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one field"));
         }
+        if era.is_some() != era_year.is_some() {
+            return Err(i.make_error("TypeError", "era and eraYear must both be provided"));
+        }
+        if era_year.is_some() && year.is_some() {
+            return Err(i.make_error("TypeError", "eraYear and year are mutually exclusive"));
+        }
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
+        let bag = Object::new(Some(i.object_proto.clone()));
+        {
+            let mut b = bag.borrow_mut();
+            match year {
+                Some(y) => {
+                    b.props
+                        .insert("year", Property::builtin(Value::Num(y as f64)));
+                }
+                None => {
+                    if era.is_none() || era_year.is_none() {
+                        b.props.insert(
+                            "year",
+                            Property::builtin(Value::Num(cal_year_num(&cal, d) as f64)),
+                        );
+                    }
+                }
+            }
+            if let Some(e2) = &era {
+                b.props
+                    .insert("era", Property::builtin(Value::str(e2.as_str())));
+            }
+            if let Some(ey) = era_year {
+                b.props
+                    .insert("eraYear", Property::builtin(Value::Num(ey as f64)));
+            }
+            match (month, &month_code) {
+                (None, None) => {
+                    b.props.insert(
+                        "monthCode",
+                        Property::builtin(Value::str(cal_month_code(&cal, d))),
+                    );
+                }
+                _ => {
+                    if let Some(m) = month {
+                        b.props
+                            .insert("month", Property::builtin(Value::Num(m as f64)));
+                    }
+                    if let Some(mc) = &month_code {
+                        b.props
+                            .insert("monthCode", Property::builtin(Value::Str(mc.clone())));
+                    }
+                }
+            }
+            b.props.insert("day", Property::builtin(Value::Num(1.0)));
+        }
+        let bagv = Value::Obj(bag);
+        let raw = read_date_raw_cal(i, &bagv, &cal, ovf)?;
+        let iso = regulate_date(i, raw, ovf)?;
         Ok(make_like(
             i,
             &t,
             "Temporal.PlainYearMonth",
-            Temporal::YearMonth(IsoDate {
-                year,
-                month: month as u8,
-                day: 1,
-            }),
+            Temporal::YearMonth(ym_ref_of(&cal, iso)),
         ))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
