@@ -1477,7 +1477,13 @@ impl Interp {
         finalizer: &Option<Vec<Stmt>>,
         env: &Env,
     ) -> Completion {
+        // HasCallInTailPosition: the try block is never a tail position (its calls must run
+        // inside the protection of the catch/finally); a catch block is one only when there is
+        // no finalizer.
+        let saved_tco = self.tco_ok;
+        self.tco_ok = false;
         let result = self.exec_block(block, env);
+        self.tco_ok = saved_tco;
         let after_catch = match result {
             Err(Abrupt::Throw(ex)) => {
                 if let Some((param, body)) = handler {
@@ -1494,6 +1500,8 @@ impl Interp {
                     let mut v = Value::Empty;
                     let mut last = Ok(Value::Empty);
                     self.declare_block_lexicals(body, &body_env, true);
+                    let catch_tco = self.tco_ok && finalizer.is_none();
+                    let saved_tco = std::mem::replace(&mut self.tco_ok, catch_tco);
                     for s in body {
                         match self.exec_stmt(s, &body_env) {
                             Ok(sv) => {
@@ -1508,6 +1516,7 @@ impl Interp {
                             }
                         }
                     }
+                    self.tco_ok = saved_tco;
                     last
                 } else {
                     Err(Abrupt::Throw(ex))
@@ -1521,6 +1530,8 @@ impl Interp {
             // try/catch is parked during the finalizer (which may schedule its own) and dropped
             // if the finalizer overrides the completion.
             let parked = self.pending_tail.take();
+            // A finalizer IS a tail-position context (its `return f()` overrides everything
+            // after it), so tco_ok is inherited here.
             match self.exec_block(fin, env) {
                 Ok(_) => {
                     if parked.is_some() {
@@ -1528,7 +1539,8 @@ impl Interp {
                     }
                 }
                 Err(e) => {
-                    self.pending_tail = None;
+                    // The finalizer overrides the try/catch completion: the parked tail call
+                    // is dropped, but one the finalizer itself scheduled stays pending.
                     return Err(e);
                 }
             }
@@ -3406,11 +3418,16 @@ impl Interp {
                 cur = b.parent.clone();
             }
         }
+        // A direct eval may contain a SuperProperty only when its caller is method code (a home
+        // object is in scope) — otherwise it's an early SyntaxError, before anything evaluates.
+        let allow_super = direct
+            && (self.peek_binding("%homeobject%", caller_env).is_some()
+                || self.peek_binding("%superproto%", caller_env).is_some());
         let body = crate::parser::parse_script_eval(
             code,
             base_strict,
             allow_new_target,
-            direct,
+            allow_super,
             &private_names,
         )
         .map_err(|e| self.throw("SyntaxError", e.message))?;

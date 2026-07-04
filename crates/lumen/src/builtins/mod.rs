@@ -6025,7 +6025,14 @@ fn install_date(it: &mut Interp) {
 fn is_constructor_value(v: &Value) -> bool {
     matches!(v, Value::Obj(o) if {
         let b = o.borrow();
-        !matches!(b.call, Callable::None) && (b.is_constructor || b.props.contains("prototype"))
+        match &b.call {
+            Callable::None => false,
+            // A user function's constructability is determined by its shape: arrows, methods,
+            // generators and async functions are never constructors (a generator still has a
+            // `prototype` property, so the fallback below would misclassify it).
+            Callable::User(f, _) => !f.is_arrow && !f.is_method && !f.is_generator && !f.is_async,
+            _ => b.is_constructor || b.props.contains("prototype"),
+        }
     })
 }
 
@@ -9003,6 +9010,8 @@ pub(crate) fn reflect_ordinary_get(
             Value::Obj(o) => o.clone(),
             _ => return Ok(Value::Undefined),
         };
+        // A deferred namespace on the chain triggers its module's evaluation before the read.
+        ab(i.defer_trigger(&obj, Some(key)))?;
         // A module namespace's [[Get]] reads the export's live value (throwing for a TDZ binding).
         let ptr = Rc::as_ptr(&obj) as usize;
         if i.is_namespace(ptr) {
