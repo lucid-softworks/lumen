@@ -4175,6 +4175,11 @@ impl Interp {
     ) {
         match stmt {
             Stmt::FuncDecl(func) if in_block => {
+                // Annex B.3.3 promotes only *plain* function declarations; a block-scoped
+                // generator or async function stays lexical.
+                if func.is_generator || func.is_async {
+                    return;
+                }
                 if let Some(name) = &func.name {
                     // Skip entirely if an intervening lexical declaration with the same name
                     // would make the equivalent `var` an early error.
