@@ -2055,7 +2055,14 @@ impl Interp {
                 return Ok(false);
             }
         }
-        obj.borrow_mut().props.insert(key, Property::plain(value));
+        // An existing element keeps its attributes; [[Set]] only updates the value.
+        if obj.borrow().props.contains(key) {
+            if let Some(p) = obj.borrow_mut().props.get_mut(key) {
+                p.value = value;
+            }
+        } else {
+            obj.borrow_mut().props.insert(key, Property::plain(value));
+        }
         // Only a canonical array index (< 2^32 - 1) updates `length`; larger numeric keys are
         // ordinary properties.
         if let Some(i) = key.parse::<u64>().ok().filter(|&i| i < 4294967295) {

@@ -8964,37 +8964,9 @@ fn internalize_json_property(
 /// Set(to, key, value) with Throw=true, for Object.assign: a non-writable data property or a
 /// setter-less accessor (own or inherited along the chain) makes the assignment throw a TypeError.
 fn assign_set(i: &mut Interp, to: &Value, key: &str, value: Value) -> Result<(), Value> {
-    if let Value::Obj(o) = to {
-        if proxy_pair(i, to).is_none() && ta_info(i, o).is_none() {
-            let mut cur = Some(o.clone());
-            while let Some(c) = cur {
-                let blocking = {
-                    let b = c.borrow();
-                    b.props.get(key).map(|p| {
-                        if p.accessor {
-                            (true, p.set.is_none())
-                        } else {
-                            (true, !p.writable)
-                        }
-                    })
-                };
-                match blocking {
-                    Some((_, true)) => {
-                        return Err(i.make_error(
-                            "TypeError",
-                            format!("Cannot assign to read-only property '{key}'"),
-                        ))
-                    }
-                    Some((_, false)) => break,
-                    None => {
-                        let next = c.borrow().proto.clone();
-                        cur = next;
-                    }
-                }
-            }
-        }
-    }
-    ab(i.set_member(to, key, value))
+    // Set(to, key, value, true): a false [[Set]] throws even in sloppy mode (read-only
+    // properties, and property creation on a non-extensible/sealed target).
+    set_throw(i, to, key, value)
 }
 
 /// OrdinaryGet(target, key, receiver): walk target's chain; a data property returns its value, an
@@ -9239,8 +9211,26 @@ fn enumerable_own_value_list(i: &mut Interp, o: &Value, entries: bool) -> Result
             }
         }
     } else {
-        let keys: Vec<Rc<str>> = o.as_obj().map(ordered_enum_keys).unwrap_or_default();
+        // EnumerableOwnProperties: snapshot the key list, but re-read each property's descriptor
+        // just before its Get — a getter may delete or hide keys not yet visited.
+        let keys: Vec<Rc<str>> = o
+            .as_obj()
+            .map(|obj| {
+                obj.borrow()
+                    .props
+                    .ordered_keys()
+                    .into_iter()
+                    .filter(|k| !Interp::is_sym_key(k))
+                    .collect()
+            })
+            .unwrap_or_default();
         for k in keys {
+            let live = o
+                .as_obj()
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+            if live != Some(true) {
+                continue;
+            }
             let v = ab(i.get_member(o, &k))?;
             out.push(if entries {
                 i.make_array(vec![Value::Str(k), v])
@@ -10281,6 +10271,10 @@ fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<boo
     if i.strict_equals(proto, &cur) {
         return Ok(true);
     }
+    // %Object.prototype% is an immutable-prototype exotic object: any actual change fails.
+    if Rc::ptr_eq(&o, &i.object_proto) {
+        return Ok(false);
+    }
     if !o.borrow().extensible {
         return Ok(false);
     }
@@ -10774,7 +10768,9 @@ fn proxy_key_enumerable(
 ) -> Result<bool, Value> {
     let trap = ab(i.get_member(handler, "getOwnPropertyDescriptor"))?;
     if trap.is_callable() {
-        let kv = Value::from_string(key.to_string());
+        let kv = i
+            .sym_from_key(key)
+            .unwrap_or_else(|| Value::from_string(key.to_string()));
         let res = ab(i.call(trap, handler.clone(), &[target.clone(), kv]))?;
         if matches!(res, Value::Undefined) {
             return Ok(false);
@@ -10803,10 +10799,7 @@ fn install_object(it: &mut Interp) {
         if key.starts_with('#') {
             return Ok(Value::Bool(false));
         }
-        let o = match this_obj(&this) {
-            Some(o) => o,
-            None => return Ok(Value::Bool(false)),
-        };
+        let o = to_object_arg(i, this, "Object.prototype.hasOwnProperty")?;
         // A TypedArray index in range is an own property even though it isn't in the property map;
         // a canonical-numeric non-index is never an own property.
         if let Some(info) = ta_info(i, &o) {
@@ -10839,33 +10832,31 @@ fn install_object(it: &mut Interp) {
         args: &[Value],
         is_get: bool,
     ) -> Result<Value, Value> {
-        let o = this_obj(this).ok_or_else(|| i.make_error("TypeError", "called on non-object"))?;
+        let name = if is_get {
+            "__defineGetter__"
+        } else {
+            "__defineSetter__"
+        };
+        let o = to_object_arg(i, this.clone(), name)?;
         let f = arg(args, 1);
         if !f.is_callable() {
             return Err(i.make_error("TypeError", "accessor must be a function"));
         }
+        // DefinePropertyOrThrow with { get/set: f, enumerable: true, configurable: true }.
+        let desc = i.new_object();
+        set_data(&desc, if is_get { "get" } else { "set" }, f);
+        set_data(&desc, "enumerable", Value::Bool(true));
+        set_data(&desc, "configurable", Value::Bool(true));
         let key = ab(i.to_property_key(&arg(args, 0)))?;
-        let mut existing = o
-            .borrow()
-            .props
-            .get(&key)
-            .cloned()
-            .filter(|p| p.accessor)
-            .unwrap_or(Property {
-                value: Value::Undefined,
-                get: None,
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: true,
-                configurable: true,
-            });
-        if is_get {
-            existing.get = Some(f);
+        let ov = Value::Obj(o.clone());
+        let ok = if let Some((t, h)) = proxy_pair(i, &ov) {
+            ab(proxy_define_property(i, &t, &h, &key, &Value::Obj(desc)))?
         } else {
-            existing.set = Some(f);
+            ab(define_own_property(i, &o, &key, &Value::Obj(desc)))?
+        };
+        if !ok {
+            return Err(i.make_error("TypeError", format!("cannot define accessor '{key}'")));
         }
-        o.borrow_mut().props.insert(key, existing);
         Ok(Value::Undefined)
     }
     fn lookup_accessor(
@@ -10874,19 +10865,40 @@ fn install_object(it: &mut Interp) {
         args: &[Value],
         is_get: bool,
     ) -> Result<Value, Value> {
-        let mut cur = this_obj(this);
+        let name = if is_get {
+            "__lookupGetter__"
+        } else {
+            "__lookupSetter__"
+        };
+        let o = to_object_arg(i, this.clone(), name)?;
         let key = ab(i.to_property_key(&arg(args, 0)))?;
-        while let Some(o) = cur {
-            if let Some(p) = o.borrow().props.get(&key) {
-                if p.accessor {
-                    let f = if is_get { p.get.clone() } else { p.set.clone() };
-                    return Ok(f.unwrap_or(Value::Undefined));
+        let mut cur = Value::Obj(o);
+        loop {
+            // [[GetOwnProperty]] goes through a proxy's trap, propagating abrupt completions.
+            if let Some((t, h)) = proxy_pair(i, &cur) {
+                let desc = proxy_gopd_value(i, &t, &h, &key)?;
+                if let Value::Obj(d) = &desc {
+                    let is_accessor =
+                        d.borrow().props.contains("get") || d.borrow().props.contains("set");
+                    if !is_accessor {
+                        return Ok(Value::Undefined);
+                    }
+                    return ab(i.get_member(&desc, if is_get { "get" } else { "set" }));
                 }
+            } else if let Value::Obj(co) = &cur {
+                if let Some(p) = co.borrow().props.get(&key) {
+                    if p.accessor {
+                        let f = if is_get { p.get.clone() } else { p.set.clone() };
+                        return Ok(f.unwrap_or(Value::Undefined));
+                    }
+                    return Ok(Value::Undefined);
+                }
+            }
+            cur = js_get_prototype_of(i, &cur)?;
+            if !matches!(cur, Value::Obj(_)) {
                 return Ok(Value::Undefined);
             }
-            cur = o.borrow().proto.clone();
         }
-        Ok(Value::Undefined)
     }
     it.def_method(&op, "__defineGetter__", 2, |i, this, a| {
         define_accessor(i, &this, a, true)
@@ -10900,49 +10912,49 @@ fn install_object(it: &mut Interp) {
     it.def_method(&op, "__lookupSetter__", 1, |i, this, a| {
         lookup_accessor(i, &this, a, false)
     });
-    it.def_method(&op, "isPrototypeOf", 1, |_i, this, args| {
-        let target = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Ok(Value::Bool(false)),
-        };
-        let me = match &this {
-            Value::Obj(o) => o.clone(),
-            _ => return Ok(Value::Bool(false)),
-        };
-        let mut cur = target.borrow().proto.clone();
-        while let Some(o) = cur {
-            if Rc::ptr_eq(&o, &me) {
-                return Ok(Value::Bool(true));
-            }
-            cur = o.borrow().proto.clone();
+    it.def_method(&op, "isPrototypeOf", 1, |i, this, args| {
+        let v = arg(args, 0);
+        if !matches!(v, Value::Obj(_)) {
+            return Ok(Value::Bool(false));
         }
-        Ok(Value::Bool(false))
+        let me = to_object_arg(i, this, "Object.prototype.isPrototypeOf")?;
+        let mut cur = js_get_prototype_of(i, &v)?;
+        loop {
+            match &cur {
+                Value::Obj(o) if Rc::ptr_eq(o, &me) => return Ok(Value::Bool(true)),
+                Value::Obj(_) => {}
+                _ => return Ok(Value::Bool(false)),
+            }
+            cur = js_get_prototype_of(i, &cur)?;
+        }
     });
     it.def_method(&op, "propertyIsEnumerable", 1, |i, this, args| {
         let key = ab(i.to_property_key(&arg(args, 0)))?;
-        if let Some(o) = this_obj(&this) {
-            let ptr = Rc::as_ptr(&o) as usize;
-            if i.is_namespace(ptr) {
-                if let Some(res) = i.namespace_own_property(ptr, &key) {
-                    ab(res)?;
-                    return Ok(Value::Bool(true));
-                }
-            }
-            // A proxy reads [[GetOwnProperty]]'s enumerable flag through its trap.
-            if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
-                let desc = proxy_gopd_value(i, &target, &handler, &key)?;
-                let e = match desc {
-                    Value::Undefined => false,
-                    d => {
-                        let ev = ab(i.get_member(&d, "enumerable"))?;
-                        i.to_boolean(&ev)
-                    }
-                };
-                return Ok(Value::Bool(e));
+        let o = to_object_arg(i, this, "Object.prototype.propertyIsEnumerable")?;
+        let ptr = Rc::as_ptr(&o) as usize;
+        if i.is_namespace(ptr) {
+            if let Some(res) = i.namespace_own_property(ptr, &key) {
+                ab(res)?;
+                return Ok(Value::Bool(true));
             }
         }
-        let e = this_obj(&this)
-            .and_then(|o| o.borrow().props.get(&key).map(|p| p.enumerable))
+        // A proxy reads [[GetOwnProperty]]'s enumerable flag through its trap.
+        if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
+            let desc = proxy_gopd_value(i, &target, &handler, &key)?;
+            let e = match desc {
+                Value::Undefined => false,
+                d => {
+                    let ev = ab(i.get_member(&d, "enumerable"))?;
+                    i.to_boolean(&ev)
+                }
+            };
+            return Ok(Value::Bool(e));
+        }
+        let e = o
+            .borrow()
+            .props
+            .get(&key)
+            .map(|p| p.enumerable)
             .unwrap_or(false);
         Ok(Value::Bool(e))
     });
@@ -10968,7 +10980,9 @@ fn install_object(it: &mut Interp) {
         };
         Ok(Value::str(format!("[object {tag}]")))
     });
-    it.def_method(&op, "valueOf", 0, |_i, this, _args| Ok(this));
+    it.def_method(&op, "valueOf", 0, |i, this, _args| {
+        to_object_arg(i, this, "Object.prototype.valueOf").map(Value::Obj)
+    });
     // Object.prototype.toLocaleString(): the default just invokes `this.toString()`.
     it.def_method(&op, "toLocaleString", 0, |i, this, _args| {
         let to_string = ab(i.get_member(&this, "toString"))?;
@@ -11461,30 +11475,53 @@ fn install_object(it: &mut Interp) {
         }
         Ok(o)
     });
-    it.def_method(&ctor, "isSealed", 1, |_i, _this, args| {
-        let sealed = match arg(args, 0) {
-            Value::Obj(o) => {
-                !o.borrow().extensible && o.borrow().props.iter().all(|(_, p)| !p.configurable)
-            }
-            _ => true,
-        };
-        Ok(Value::Bool(sealed))
+    it.def_method(&ctor, "isSealed", 1, |i, _this, args| {
+        Ok(Value::Bool(test_integrity_level(i, &arg(args, 0), false)?))
     });
-    it.def_method(&ctor, "isFrozen", 1, |_i, _this, args| {
-        let frozen = match arg(args, 0) {
-            Value::Obj(o) => {
-                !o.borrow().extensible
-                    && o.borrow()
-                        .props
-                        .iter()
-                        .all(|(_, p)| !p.configurable && (p.accessor || !p.writable))
-            }
-            _ => true,
-        };
-        Ok(Value::Bool(frozen))
+    it.def_method(&ctor, "isFrozen", 1, |i, _this, args| {
+        Ok(Value::Bool(test_integrity_level(i, &arg(args, 0), true)?))
     });
 
     set_builtin(&it.global, "Object", Value::Obj(ctor));
+}
+
+/// TestIntegrityLevel: extensibility plus per-key configurability (and, for frozen, data-property
+/// writability), through the proxy [[IsExtensible]]/[[OwnPropertyKeys]]/[[GetOwnProperty]] traps.
+fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool, Value> {
+    if !matches!(v, Value::Obj(_)) {
+        return Ok(true);
+    }
+    if js_is_extensible(i, v)? {
+        return Ok(false);
+    }
+    if let Some((t, h)) = proxy_pair(i, v) {
+        for k in proxy_own_keys(i, &t, &h)? {
+            let key = ab(i.to_property_key(&k))?;
+            let desc = proxy_gopd_value(i, &t, &h, &key)?;
+            let d = match &desc {
+                Value::Obj(d) => d.clone(),
+                _ => continue,
+            };
+            let c = ab(i.get_member(&desc, "configurable"))?;
+            if i.to_boolean(&c) {
+                return Ok(false);
+            }
+            if frozen && d.borrow().props.contains("value") {
+                let w = ab(i.get_member(&desc, "writable"))?;
+                if i.to_boolean(&w) {
+                    return Ok(false);
+                }
+            }
+        }
+        return Ok(true);
+    }
+    let o = v.as_obj().unwrap();
+    let ok = o
+        .borrow()
+        .props
+        .iter()
+        .all(|(_, p)| !p.configurable && (!frozen || p.accessor || !p.writable));
+    Ok(ok)
 }
 
 /// Build a property descriptor from a JS descriptor object.

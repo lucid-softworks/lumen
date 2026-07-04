@@ -8885,3 +8885,30 @@ fn promise_already_resolved_is_per_resolver_pair() {
         crate::Completion::Throw { name, message } => panic!("{name}: {message}"),
     }
 }
+
+#[test]
+fn array_element_set_preserves_attributes() {
+    // [[Set]] on an existing array element only updates the value; it must not replace the
+    // property (which would reset enumerable/configurable to the plain defaults).
+    assert_eq!(
+        run("var a = [];
+             Object.defineProperty(a, '0', {writable: true, enumerable: true, configurable: false});
+             a[0] = 'x';
+             var d = Object.getOwnPropertyDescriptor(a, '0');
+             var del = delete a[0];
+             [d.value, d.configurable, del, a.hasOwnProperty('0')].join('|')"),
+        "x|false|false|true"
+    );
+}
+
+#[test]
+fn object_assign_throws_creating_on_sealed_target() {
+    assert_eq!(
+        run("var t = Object.seal({a: 1});
+             var r;
+             try { Object.assign(t, {a: 2, b: 3}); r = 'no throw'; }
+             catch (e) { r = e.constructor.name + ':' + t.a + ':' + t.hasOwnProperty('b'); }
+             r"),
+        "TypeError:2:false"
+    );
+}
