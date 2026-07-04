@@ -25,6 +25,11 @@ fn this_obj(this: &Value) -> Option<Gc> {
     this.as_obj().cloned()
 }
 
+/// The newTarget realm's %RegExp.prototype% (GetFunctionRealm fallback for RegExp construction).
+pub(crate) fn regexp_realm_proto(i: &Interp, nt: &Value) -> Option<Gc> {
+    ctor_realm_proto(i, nt, "RegExp")
+}
+
 /// Set(O, P, V, true): perform [[Set]] and throw a TypeError if it returns false, matching the
 /// spec's `Set(..., Throw=true)` used by Array mutators regardless of the surrounding strict mode.
 fn set_throw(i: &mut Interp, base: &Value, key: &str, value: Value) -> Result<(), Value> {
@@ -1653,7 +1658,32 @@ fn re_flag_get(i: &Interp, this: &Value, flag: Option<char>) -> Result<Value, Va
 fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     if let Some(ptr) = map_ptr(&this) {
         if let Some(re) = i.regexps.get(&ptr) {
-            return Ok(Value::from_string(re.source.clone()));
+            if re.source.is_empty() {
+                return Ok(Value::str("(?:)"));
+            }
+            // EscapeRegExpPattern: "/" and line terminators are escaped so "/"+S+"/"+F re-parses.
+            let mut out = String::new();
+            let mut escaped = false;
+            for c in re.source.chars() {
+                if escaped {
+                    out.push(c);
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    '\\' => {
+                        out.push(c);
+                        escaped = true;
+                    }
+                    '/' => out.push_str("\\/"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\u{2028}' => out.push_str("\\u2028"),
+                    '\u{2029}' => out.push_str("\\u2029"),
+                    c => out.push(c),
+                }
+            }
+            return Ok(Value::from_string(out));
         }
         if i.extra_protos.get("RegExp").map(|p| Rc::as_ptr(p) as usize) == Some(ptr) {
             return Ok(Value::str("(?:)"));
@@ -1788,33 +1818,74 @@ fn install_regexp(it: &mut Interp) {
         Ok(Value::from_string(format!("/{src}/{flags}")))
     });
     let ctor = it.make_native("RegExp", 2, |i, _t, a| {
-        let (source, flags) = match arg(a, 0) {
-            Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(&o) as usize)) => {
-                let re = i.regexps[&(Rc::as_ptr(&o) as usize)].clone();
-                let fl = match arg(a, 1) {
-                    Value::Undefined => re.flags.clone(),
-                    v => ab(i.to_string(&v))?.to_string(),
-                };
-                (re.source.clone(), fl)
+        let pattern = arg(a, 0);
+        let flags_arg = arg(a, 1);
+        // IsRegExp: an Object whose truthy @@match (when defined) or [[RegExpMatcher]] slot.
+        let has_slots = matches!(&pattern, Value::Obj(o)
+            if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)));
+        let pattern_is_regexp = if matches!(pattern, Value::Obj(_)) {
+            let m = match well_known_key(i, "match") {
+                Some(key) => ab(i.get_member(&pattern, &key))?,
+                None => Value::Undefined,
+            };
+            if !matches!(m, Value::Undefined) {
+                i.to_boolean(&m)
+            } else {
+                has_slots
             }
-            Value::Undefined => (
-                String::new(),
-                match arg(a, 1) {
+        } else {
+            false
+        };
+        // Called as a function on a regexp(-like) whose .constructor is this same
+        // constructor: return the argument unchanged.
+        if !i.constructing && pattern_is_regexp && matches!(flags_arg, Value::Undefined) {
+            let c = ab(i.get_member(&pattern, "constructor"))?;
+            let same = match (&c, i.extra_protos.get("%RegExpCtor%")) {
+                (Value::Obj(co), Some(rc)) => Rc::ptr_eq(co, rc),
+                _ => false,
+            };
+            if same {
+                return Ok(pattern);
+            }
+        }
+        let (source, flags) = if has_slots {
+            let re = match &pattern {
+                Value::Obj(o) => i.regexps[&(Rc::as_ptr(o) as usize)].clone(),
+                _ => unreachable!(),
+            };
+            let fl = match flags_arg {
+                Value::Undefined => re.flags.clone(),
+                v => ab(i.to_string(&v))?.to_string(),
+            };
+            (re.source.clone(), fl)
+        } else if pattern_is_regexp {
+            // A regexp-like object: read its `source` and `flags` properties.
+            let src = match ab(i.get_member(&pattern, "source"))? {
+                Value::Undefined => String::new(),
+                v => ab(i.to_string(&v))?.to_string(),
+            };
+            let fl = match flags_arg {
+                Value::Undefined => match ab(i.get_member(&pattern, "flags"))? {
                     Value::Undefined => String::new(),
                     v => ab(i.to_string(&v))?.to_string(),
                 },
-            ),
-            v => {
-                let src = ab(i.to_string(&v))?.to_string();
-                let fl = match arg(a, 1) {
-                    Value::Undefined => String::new(),
-                    v => ab(i.to_string(&v))?.to_string(),
-                };
-                (src, fl)
-            }
+                v => ab(i.to_string(&v))?.to_string(),
+            };
+            (src, fl)
+        } else {
+            let src = match pattern {
+                Value::Undefined => String::new(),
+                v => ab(i.to_string(&v))?.to_string(),
+            };
+            let fl = match flags_arg {
+                Value::Undefined => String::new(),
+                v => ab(i.to_string(&v))?.to_string(),
+            };
+            (src, fl)
         };
         ab(i.make_regexp(&source, &flags))
     });
+    it.extra_protos.insert("%RegExpCtor%", ctor.clone());
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(proto.clone()), false, false, false),
@@ -1827,16 +1898,16 @@ fn install_regexp(it: &mut Interp) {
 
     // The @@match/@@replace/@@search/@@split/@@matchAll methods on RegExp.prototype (what
     // String.prototype.{match,replace,...} dispatch to).
-    let methods: [(&str, NativeFn); 5] = [
-        ("match", re_sym_match),
-        ("replace", re_sym_replace),
-        ("search", re_sym_search),
-        ("split", re_sym_split),
-        ("matchAll", re_sym_matchall),
+    let methods: [(&str, usize, NativeFn); 5] = [
+        ("match", 1, re_sym_match),
+        ("replace", 2, re_sym_replace),
+        ("search", 1, re_sym_search),
+        ("split", 2, re_sym_split),
+        ("matchAll", 1, re_sym_matchall),
     ];
-    for (sym, f) in methods {
+    for (sym, len, f) in methods {
         if let Some(key) = well_known_key(it, sym) {
-            let m = it.make_native(&format!("[Symbol.{sym}]"), 1, f);
+            let m = it.make_native(&format!("[Symbol.{sym}]"), len, f);
             proto
                 .borrow_mut()
                 .props
@@ -1849,17 +1920,21 @@ fn install_regexp(it: &mut Interp) {
             _ => return Err(i.make_error("TypeError", "RegExp.escape requires a string")),
         };
         let mut out = String::new();
-        for (idx, c) in s.chars().enumerate() {
-            out.push_str(&regexp_escape_char(c, idx == 0));
+        for (idx, cp) in crate::jstr::code_points(&s).into_iter().enumerate() {
+            out.push_str(&regexp_escape_cp(cp, idx == 0));
         }
         Ok(Value::from_string(out))
     });
     set_builtin(&it.global, "RegExp", Value::Obj(ctor));
 }
 
-/// EncodeForRegExpEscape: escape one code point for `RegExp.escape`.
-fn regexp_escape_char(c: char, first: bool) -> String {
-    let cp = c as u32;
+/// EncodeForRegExpEscape: escape one code point for `RegExp.escape` (`cp` may be a lone
+/// surrogate, which always hex-escapes).
+fn regexp_escape_cp(cp: u32, first: bool) -> String {
+    if (0xD800..0xE000).contains(&cp) {
+        return format!("\\u{cp:04x}");
+    }
+    let c = char::from_u32(cp).unwrap_or('\u{FFFD}');
     // The first character, if alphanumeric, is hex-escaped so the result can't start an identifier.
     if first && c.is_ascii_alphanumeric() {
         return format!("\\x{cp:02x}");
@@ -1873,7 +1948,11 @@ fn regexp_escape_char(c: char, first: bool) -> String {
         '\u{0b}' => "\\v".into(),
         '\u{0c}' => "\\f".into(),
         '\r' => "\\r".into(),
-        _ if ",-=<>#&!%:;@~'`\"".contains(c) || c.is_whitespace() || c.is_control() => {
+        _ if ",-=<>#&!%:;@~'`\"".contains(c)
+            || c.is_whitespace()
+            || c == '\u{FEFF}'
+            || c.is_control() =>
+        {
             if cp <= 0xff {
                 format!("\\x{cp:02x}")
             } else if cp <= 0xffff {
@@ -1940,7 +2019,7 @@ fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
         return regexp_exec_abstract(i, &this, s);
     }
     let unicode = flags.contains('u') || flags.contains('v');
-    ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+    set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
     let mut results: Vec<Value> = Vec::new();
     loop {
         let result = regexp_exec_abstract(i, &this, s.clone())?;
@@ -1952,9 +2031,9 @@ fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
         results.push(Value::Str(match_str.clone()));
         if match_str.is_empty() {
             let li = ab(i.get_member(&this, "lastIndex"))?;
-            let li = ab(i.to_number(&li))?.max(0.0) as usize;
+            let li = to_length_val(i, &li)?;
             let next = advance_string_index(li, &s, unicode);
-            ab(i.set_member(&this, "lastIndex", Value::Num(next as f64)))?;
+            set_throw(i, &this, "lastIndex", Value::Num(next as f64))?;
         }
     }
     if results.is_empty() {
@@ -1968,12 +2047,12 @@ fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Valu
     let s = ab(i.to_string(&arg(a, 0)))?;
     let prev = ab(i.get_member(&this, "lastIndex"))?;
     if !same_value(&prev, &Value::Num(0.0)) {
-        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+        set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
     }
     let result = regexp_exec_abstract(i, &this, s)?;
     let cur = ab(i.get_member(&this, "lastIndex"))?;
     if !same_value(&cur, &prev) {
-        ab(i.set_member(&this, "lastIndex", prev))?;
+        set_throw(i, &this, "lastIndex", prev)?;
     }
     match result {
         Value::Null => Ok(Value::Num(-1.0)),
@@ -1993,16 +2072,14 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
     } else {
         ab(i.to_string(&repl))?
     };
-    let global_v = ab(i.get_member(&this, "global"))?;
-    let global = i.to_boolean(&global_v);
-    let unicode = if global {
-        let unicode_v = ab(i.get_member(&this, "unicode"))?;
-        let u = i.to_boolean(&unicode_v);
-        ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
-        u
-    } else {
-        false
-    };
+    // Globalness/unicodeness come from the `flags` string (whose getter Gets each flag prop).
+    let flags_v = ab(i.get_member(&this, "flags"))?;
+    let flags = ab(i.to_string(&flags_v))?;
+    let global = flags.contains('g');
+    let unicode = flags.contains('u') || flags.contains('v');
+    if global {
+        set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
+    }
     // Collect every match (RegExpExec advances lastIndex; empty matches step forward manually).
     let mut results: Vec<Value> = Vec::new();
     loop {
@@ -2018,9 +2095,9 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
         let m0 = ab(i.to_string(&m0_v))?;
         if m0.is_empty() {
             let li_v = ab(i.get_member(&this, "lastIndex"))?;
-            let li = ab(i.to_number(&li_v))?.max(0.0) as usize;
+            let li = to_length_val(i, &li_v)?;
             let next = advance_string_index(li, &s, unicode);
-            ab(i.set_member(&this, "lastIndex", Value::Num(next as f64)))?;
+            set_throw(i, &this, "lastIndex", Value::Num(next as f64))?;
         }
     }
     let mut accumulated = String::new();
@@ -2048,7 +2125,16 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
                 Value::Str(ab(i.to_string(&cap))?)
             });
         }
-        let named = ab(i.get_member(result, "groups"))?;
+        let mut named = ab(i.get_member(result, "groups"))?;
+        // Non-functional replace ToObjects a present `groups` (null → TypeError).
+        if !functional && !matches!(named, Value::Undefined) && !matches!(named, Value::Obj(_)) {
+            match named {
+                Value::Null => {
+                    return Err(i.make_error("TypeError", "cannot convert null to object"))
+                }
+                other => named = box_primitive(i, other),
+            }
+        }
         let replacement = if functional {
             let mut cbargs = vec![Value::Str(matched.clone())];
             cbargs.extend(captures.iter().cloned());
@@ -2080,7 +2166,7 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
 fn to_length_val(i: &mut Interp, v: &Value) -> Result<usize, Value> {
     let n = ab(i.to_number(v))?;
     Ok(if n.is_nan() || n < 0.0 {
-        0
+        0usize
     } else {
         n.min(9_007_199_254_740_991.0) as usize
     })
@@ -2213,11 +2299,12 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
     let limit = match arg(a, 1) {
         Value::Undefined => u32::MAX as usize,
         v => {
+            // ToUint32: modular, so a negative limit is a huge one.
             let n = ab(i.to_number(&v))?;
-            if n.is_nan() || n <= 0.0 {
+            if n.is_nan() || n.is_infinite() || n == 0.0 {
                 0
             } else {
-                (n as u64 % (1u64 << 32)) as usize
+                (n.trunc() as i64).rem_euclid(1i64 << 32) as usize
             }
         }
     };
@@ -2283,15 +2370,14 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     // Elements are code units (non-unicode) or code points (u/v); JS-visible indices are units.
     let text = crate::regex::ReText::new(re.unicode, &input);
     let use_last = re.global || re.sticky;
-    let last_units = if use_last {
-        let li = ab(i.get_member(&this, "lastIndex"))?;
-        ab(i.to_number(&li))?.max(0.0) as usize
-    } else {
-        0
-    };
+    // lastIndex is read (and length-coerced) unconditionally; it only *steers* the match when
+    // the regexp is global or sticky.
+    let li = ab(i.get_member(&this, "lastIndex"))?;
+    let read_units = to_length_val(i, &li)?;
+    let last_units = if use_last { read_units } else { 0 };
     if last_units > text.unit_index(text.len()) {
         if use_last {
-            ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+            set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
         }
         return Ok(Value::Null);
     }
@@ -2299,14 +2385,19 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     match re.exec_at(&text.elems, last) {
         None => {
             if use_last {
-                ab(i.set_member(&this, "lastIndex", Value::Num(0.0)))?;
+                set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
             }
             Ok(Value::Null)
         }
         Some(caps) => {
             let (start, end) = caps[0].unwrap();
             if use_last {
-                ab(i.set_member(&this, "lastIndex", Value::Num(text.unit_index(end) as f64)))?;
+                set_throw(
+                    i,
+                    &this,
+                    "lastIndex",
+                    Value::Num(text.unit_index(end) as f64),
+                )?;
             }
             let mut items = vec![Value::from_string(text.slice(start, end))];
             for g in 1..=re.ngroups {

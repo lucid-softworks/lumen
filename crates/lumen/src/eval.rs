@@ -2867,7 +2867,21 @@ impl Interp {
     pub(crate) fn make_regexp(&mut self, source: &str, flags: &str) -> Result<Value, Abrupt> {
         let re =
             crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
-        let obj = Object::new(self.extra_protos.get("RegExp").cloned());
+        // GetPrototypeFromConstructor: `new` with a subclass/cross-realm newTarget overrides the
+        // instance prototype (falling back to newTarget's realm's %RegExp.prototype%).
+        let proto = if self.constructing {
+            match &self.new_target.clone() {
+                nt @ Value::Obj(_) => match self.get_member(nt, "prototype")? {
+                    Value::Obj(p) => Some(p),
+                    _ => crate::builtins::regexp_realm_proto(self, nt)
+                        .or_else(|| self.extra_protos.get("RegExp").cloned()),
+                },
+                _ => self.extra_protos.get("RegExp").cloned(),
+            }
+        } else {
+            self.extra_protos.get("RegExp").cloned()
+        };
+        let obj = Object::new(proto);
         let ptr = Rc::as_ptr(&obj) as usize;
         // source/flags/global/... are accessor getters on RegExp.prototype (computed from the
         // matcher); only `lastIndex` is an own writable data property.

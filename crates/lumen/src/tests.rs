@@ -8768,3 +8768,17 @@ fn dtf_chinese_calendar_year_parts() {
         "Jan 3\u{2009}\u{2013}\u{2009}5, 2019"
     );
 }
+#[test]
+fn regex_smuggle_range_and_vflag() {
+    // U+10FFFF (a smuggle-range character) has length 2 and round-trips through v-mode classes.
+    assert_eq!(run(r"'\u{10FFFF}'.length.toString()"), "2");
+    assert_eq!(run(r"String(/\u{10FFFF}/v.test('\u{10FFFF}'))"), "true");
+    assert_eq!(
+        run(r"String(/[\u{10000}-\u{10FFFF}]/v.exec('\u{10FFFF}')[0] === '\u{10FFFF}')"),
+        "true"
+    );
+    assert_eq!(
+        run(r#"String(/\P{ASCII}/v.exec('a\u{20BB7}b'))"#),
+        "\u{20BB7}"
+    );
+}

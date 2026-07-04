@@ -15,6 +15,7 @@ const STEP_LIMIT: u64 = 2_000_000;
 /// A compiled regular expression.
 pub struct Regex {
     prog: Vec<Inst>,
+    nmarks: usize,
     pub unicode: bool,
     pub ngroups: usize,
     pub source: String,
@@ -30,7 +31,7 @@ pub struct Regex {
 
 #[derive(Clone)]
 enum Inst {
-    Char(char),
+    Char(u32),
     Any,
     Class(Rc<CharClass>),
     Save(usize),
@@ -66,12 +67,17 @@ enum Inst {
     /// group body (`Some` = add/remove, `None` = inherit), then `PopFlags` restores it.
     PushFlags(Option<bool>, Option<bool>, Option<bool>),
     PopFlags,
+    /// RepeatMatcher's empty-iteration rule: `SetMark` records the position entering an optional
+    /// quantifier iteration; `CheckProgress` FAILS (forcing backtracking into the body or out of
+    /// the loop) when the iteration consumed nothing.
+    SetMark(usize),
+    CheckProgress(usize),
 }
 
 /// A single-codepoint matcher, for the `Inst::Many` fast path.
 #[derive(Clone)]
 enum Rep {
-    Char(char),
+    Char(u32),
     Any,
     Class(Rc<CharClass>),
 }
@@ -79,7 +85,7 @@ enum Rep {
 #[derive(Default)]
 struct CharClass {
     negate: bool,
-    ranges: Vec<(char, char)>,
+    ranges: Vec<(u32, u32)>,
     /// Builtin sub-classes by letter: 'd','w','s' (and uppercase negated forms expanded inline).
     builtins: Vec<char>,
     /// Unicode property escapes `\p{…}` / `\P{…}`: `(negated, sorted codepoint ranges)`.
@@ -87,30 +93,36 @@ struct CharClass {
 }
 
 impl CharClass {
-    fn matches(&self, c: char, icase: bool, unicode: bool) -> bool {
-        let mut hit = self.matches_raw(c);
+    fn matches(&self, u: u32, icase: bool, unicode: bool) -> bool {
+        let mut hit = self.matches_raw(u);
+        let c = char::from_u32(u);
         if !hit && icase {
-            if unicode {
-                // Try the opposite case for case-insensitive matching (full folding).
-                for alt in c.to_lowercase().chain(c.to_uppercase()) {
-                    if alt != c && self.matches_raw(alt) {
-                        hit = true;
-                        break;
-                    }
-                }
-            } else {
-                // Legacy Canonicalize: compare via simple uppercase, never folding a non-ASCII
-                // character onto an ASCII one.
-                let cu = canonicalize_legacy(c);
-                if cu != c && self.matches_raw(cu) {
-                    hit = true;
-                }
-                // A class member whose canonical form equals cu also matches (e.g. /[k]/i vs 'K').
-                if !hit {
+            if let Some(c) = c {
+                if unicode {
+                    // Try the opposite case for case-insensitive matching (full folding).
                     for alt in c.to_lowercase().chain(c.to_uppercase()) {
-                        if alt != c && canonicalize_legacy(alt) == cu && self.matches_raw(alt) {
+                        if alt != c && self.matches_raw(alt as u32) {
                             hit = true;
                             break;
+                        }
+                    }
+                } else {
+                    // Legacy Canonicalize: compare via simple uppercase, never folding a
+                    // non-ASCII character onto an ASCII one.
+                    let cu = canonicalize_legacy(c);
+                    if cu != c && self.matches_raw(cu as u32) {
+                        hit = true;
+                    }
+                    // A member whose canonical form equals cu also matches (/[k]/i vs 'K').
+                    if !hit {
+                        for alt in c.to_lowercase().chain(c.to_uppercase()) {
+                            if alt != c
+                                && canonicalize_legacy(alt) == cu
+                                && self.matches_raw(alt as u32)
+                            {
+                                hit = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -118,18 +130,19 @@ impl CharClass {
         }
         hit ^ self.negate
     }
-    fn matches_raw(&self, c: char) -> bool {
+    fn matches_raw(&self, u: u32) -> bool {
+        // Class membership is decided in true code-point space: smuggled surrogate atoms in the
+        // class's own ranges decode to their surrogate values.
         for &(lo, hi) in &self.ranges {
-            if c >= lo && c <= hi {
+            if u >= lo && u <= hi {
                 return true;
             }
         }
         for &b in &self.builtins {
-            if builtin_matches(b, c) {
+            if builtin_matches(b, u) {
                 return true;
             }
         }
-        let u = c as u32;
         for &(neg, ranges) in &self.props {
             // Ranges are sorted and disjoint: binary-search for the one that could contain `u`.
             let in_range = ranges
@@ -151,20 +164,55 @@ impl CharClass {
     }
 }
 
-fn builtin_matches(b: char, c: char) -> bool {
+fn builtin_matches(b: char, u: u32) -> bool {
+    let c = char::from_u32(u);
     match b {
-        'd' => c.is_ascii_digit(),
-        'D' => !c.is_ascii_digit(),
-        'w' => c.is_ascii_alphanumeric() || c == '_',
-        'W' => !(c.is_ascii_alphanumeric() || c == '_'),
-        's' => c.is_whitespace(),
-        'S' => !c.is_whitespace(),
+        'd' => c.map(|c| c.is_ascii_digit()).unwrap_or(false),
+        'D' => !c.map(|c| c.is_ascii_digit()).unwrap_or(false),
+        'w' => is_word(u),
+        'W' => !is_word(u),
+        's' => c.map(js_whitespace).unwrap_or(false),
+        'S' => !c.map(js_whitespace).unwrap_or(false),
         _ => false,
     }
 }
 
-fn is_word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+/// A JS LineTerminator code point.
+fn is_line_terminator_u32(c: u32) -> bool {
+    matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029)
+}
+
+fn is_word(c: u32) -> bool {
+    char::from_u32(c)
+        .map(|c| c.is_ascii_alphanumeric() || c == '_')
+        .unwrap_or(false)
+}
+
+/// The (approximated) full case-folding key: lowercase, plus the classical multi-char folding
+/// equivalences (ſ→s, and the Greek dialytika-tonos pairs).
+fn fold_key(c: char) -> String {
+    match c {
+        '\u{17F}' => "s".to_string(),
+        '\u{1FD3}' => "\u{390}".to_string(),
+        '\u{1FE3}' => "\u{3B0}".to_string(),
+        c => c.to_lowercase().collect(),
+    }
+}
+
+/// The JS WhiteSpace + LineTerminator set: includes U+FEFF and NBSP, but NOT U+0085 (NEL) or
+/// other control characters Rust's `is_whitespace` accepts.
+fn js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
 }
 
 fn uprop_has(name: &str, c: char) -> bool {
@@ -228,7 +276,7 @@ fn regex_ident_part(c: char) -> bool {
 
 enum Node {
     Empty,
-    Char(char),
+    Char(u32),
     Any,
     Class(CharClass),
     Concat(Vec<Node>),
@@ -283,16 +331,22 @@ pub fn pattern_elements(unicode: bool, s: &str) -> Vec<char> {
     } else {
         crate::jstr::units(s)
             .into_iter()
-            .map(elem_of_unit)
+            .map(|u| {
+                if (0xD800..0xE000).contains(&(u as u32)) {
+                    crate::jstr::smuggle(u)
+                } else {
+                    char::from_u32(u as u32).unwrap()
+                }
+            })
             .collect()
     }
 }
 
-fn elem_of_unit(u: u16) -> char {
-    if (0xD800..0xE000).contains(&(u as u32)) {
-        crate::jstr::smuggle(u)
-    } else {
-        char::from_u32(u as u32).unwrap()
+/// The true code-point value of a pattern/subject element (smuggled surrogates decode).
+fn cp_of_elem(c: char) -> u32 {
+    match crate::jstr::smuggled(c) {
+        Some(u) => u as u32,
+        None => c as u32,
     }
 }
 
@@ -308,8 +362,9 @@ fn elem_of_cp(cp: u32) -> char {
 /// (`unit_of.len() == elems.len() + 1`; the last entry is the total unit length). JS-visible
 /// indices (lastIndex, match.index) are always unit offsets.
 pub struct ReText {
-    pub elems: Vec<char>,
+    pub elems: Vec<u32>,
     pub unit_of: Vec<usize>,
+    unicode: bool,
 }
 
 impl ReText {
@@ -318,19 +373,25 @@ impl ReText {
             let cps = crate::jstr::code_points(s);
             let mut unit_of = Vec::with_capacity(cps.len() + 1);
             let mut u = 0usize;
-            let mut elems = Vec::with_capacity(cps.len());
-            for cp in cps {
+            for &cp in &cps {
                 unit_of.push(u);
                 u += if cp >= 0x10000 { 2 } else { 1 };
-                elems.push(elem_of_cp(cp));
             }
             unit_of.push(u);
-            ReText { elems, unit_of }
+            ReText {
+                elems: cps,
+                unit_of,
+                unicode,
+            }
         } else {
             let units = crate::jstr::units(s);
-            let elems: Vec<char> = units.iter().map(|&u| elem_of_unit(u)).collect();
+            let elems: Vec<u32> = units.iter().map(|&u| u as u32).collect();
             let unit_of = (0..=elems.len()).collect();
-            ReText { elems, unit_of }
+            ReText {
+                elems,
+                unit_of,
+                unicode,
+            }
         }
     }
 
@@ -354,8 +415,12 @@ impl ReText {
 
     /// The canonical string for elements `a..b` (surrogate halves recombine).
     pub fn slice(&self, a: usize, b: usize) -> String {
-        let s: String = self.elems[a..b].iter().collect();
-        crate::jstr::canonicalize(&s).unwrap_or(s)
+        if self.unicode {
+            crate::jstr::from_code_points(&self.elems[a..b])
+        } else {
+            let units: Vec<u16> = self.elems[a..b].iter().map(|&e| e as u16).collect();
+            crate::jstr::from_units(&units)
+        }
     }
 }
 
@@ -433,8 +498,13 @@ impl Regex {
         prog.push(Inst::Match);
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
+        let nmarks = prog
+            .iter()
+            .filter(|i| matches!(i, Inst::SetMark(_)))
+            .count();
         Ok(Regex {
             unicode,
+            nmarks,
             prog,
             ngroups: p.ngroups,
             source: if pattern.is_empty() {
@@ -454,7 +524,7 @@ impl Regex {
 
     /// Try to match, scanning forward from `start` (unless sticky/`y`, which requires a match at
     /// exactly `start`). Returns capture spans: index 0 is the whole match, then one per group.
-    pub fn exec_at(&self, input: &[char], start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+    pub fn exec_at(&self, input: &[u32], start: usize) -> Option<Vec<Option<(usize, usize)>>> {
         let mut from = start;
         loop {
             if from > input.len() {
@@ -463,6 +533,7 @@ impl Regex {
             let mut m = Matcher {
                 input,
                 caps: vec![None; 2 * (self.ngroups + 1)],
+                marks: vec![None; self.nmarks],
                 steps: 0,
                 depth: 0,
                 lb_end: None,
@@ -644,7 +715,7 @@ impl Parser {
             Some(c @ ('{' | '}' | ']')) if self.unicode => {
                 Err(format!("lone '{c}' is not valid in a unicode pattern"))
             }
-            Some(c) => Ok(Node::Char(c)),
+            Some(c) => Ok(Node::Char(cp_of_elem(c))),
         }
     }
 
@@ -891,7 +962,8 @@ impl Parser {
                                 }
                                 Some('\\') => {
                                     self.bump();
-                                    cur.push(self.class_set_escape_char()?);
+                                    let v = self.class_set_escape_char()?;
+                                    cur.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
                                 }
                                 Some(c) => {
                                     self.bump();
@@ -910,7 +982,7 @@ impl Parser {
                         self.bump();
                         self.parse_class_set_property(pc == 'P')
                     }
-                    _ => Ok(ClassSet::from_char(self.class_set_escape_char()?)),
+                    _ => Ok(ClassSet::from_cp(self.class_set_escape_char()?)),
                 }
             }
             // ClassSetSyntaxCharacters may not appear literally.
@@ -924,32 +996,32 @@ impl Parser {
                     return Err(format!("reserved doubled punctuator '{c}{c}' in class set"));
                 }
                 self.bump();
-                Ok(ClassSet::from_char(c))
+                Ok(ClassSet::from_cp(cp_of_elem(c)))
             }
         }
     }
 
     /// A single-character escape inside a v-mode class (`\n`, `\u{...}`, `\-`, identity escapes).
-    fn class_set_escape_char(&mut self) -> Result<char, String> {
+    fn class_set_escape_char(&mut self) -> Result<u32, String> {
         match self.bump() {
             None => Err("trailing backslash in class".into()),
-            Some('n') => Ok('\n'),
-            Some('t') => Ok('\t'),
-            Some('r') => Ok('\r'),
-            Some('f') => Ok('\u{000C}'),
-            Some('v') => Ok('\u{000B}'),
-            Some('b') => Ok('\u{0008}'),
-            Some('0') => Ok('\0'),
+            Some('n') => Ok('\n' as u32),
+            Some('t') => Ok('\t' as u32),
+            Some('r') => Ok('\r' as u32),
+            Some('f') => Ok(0x0C),
+            Some('v') => Ok(0x0B),
+            Some('b') => Ok(0x08),
+            Some('0') => Ok(0),
             Some('x') => self.hex_strict(2),
             Some('u') => self.unicode_escape_strict(),
             Some('c') => match self.peek() {
                 Some(l) if l.is_ascii_alphabetic() => {
                     self.bump();
-                    Ok((l as u8 % 32) as char)
+                    Ok((l as u8 % 32) as u32)
                 }
                 _ => Err("invalid \\c escape in class set".into()),
             },
-            Some(c) if is_regex_syntax_char(c) || "/-&!#%,:;<=>@`~\"'".contains(c) => Ok(c),
+            Some(c) if is_regex_syntax_char(c) || "/-&!#%,:;<=>@`~\"'".contains(c) => Ok(c as u32),
             Some(c) => Err(format!("invalid identity escape \\{c} in v-mode class")),
         }
     }
@@ -1032,7 +1104,7 @@ impl Parser {
                             return Err("invalid character class range".into());
                         }
                         push_class_atom(&mut cc, a);
-                        cc.ranges.push(('-', '-'));
+                        cc.ranges.push(('-' as u32, '-' as u32));
                         push_class_atom(&mut cc, b);
                     }
                 }
@@ -1053,25 +1125,25 @@ impl Parser {
                     let prop = self.parse_prop_escape(c == 'P')?;
                     Ok(ClassAtom::Prop(prop))
                 }
-                Some('n') => Ok(ClassAtom::Char('\n')),
-                Some('t') => Ok(ClassAtom::Char('\t')),
-                Some('r') => Ok(ClassAtom::Char('\r')),
-                Some('f') => Ok(ClassAtom::Char('\u{000C}')),
-                Some('v') => Ok(ClassAtom::Char('\u{000B}')),
+                Some('n') => Ok(ClassAtom::Char('\n' as u32)),
+                Some('t') => Ok(ClassAtom::Char('\t' as u32)),
+                Some('r') => Ok(ClassAtom::Char('\r' as u32)),
+                Some('f') => Ok(ClassAtom::Char(0x0C)),
+                Some('v') => Ok(ClassAtom::Char(0x0B)),
                 Some('0') => {
                     if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
                         return Err("legacy octal escape in unicode pattern".into());
                     }
-                    Ok(ClassAtom::Char('\0'))
+                    Ok(ClassAtom::Char(0))
                 }
-                Some('b') => Ok(ClassAtom::Char('\u{0008}')),
+                Some('b') => Ok(ClassAtom::Char(0x08)),
                 Some('c') => match self.peek() {
                     Some(l) if l.is_ascii_alphabetic() => {
                         self.bump();
-                        Ok(ClassAtom::Char((l as u8 % 32) as char))
+                        Ok(ClassAtom::Char((l as u8 % 32) as u32))
                     }
                     _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
-                    _ => Ok(ClassAtom::Char('c')),
+                    _ => Ok(ClassAtom::Char('c' as u32)),
                 },
                 Some('x') => {
                     if self.unicode {
@@ -1090,9 +1162,9 @@ impl Parser {
                 Some(c) if self.unicode && !is_regex_syntax_char(c) && c != '/' && c != '-' => {
                     Err(format!("invalid identity escape \\{c} in unicode class"))
                 }
-                Some(c) => Ok(ClassAtom::Char(c)),
+                Some(c) => Ok(ClassAtom::Char(cp_of_elem(c))),
             },
-            Some(c) => Ok(ClassAtom::Char(c)),
+            Some(c) => Ok(ClassAtom::Char(cp_of_elem(c))),
         }
     }
 
@@ -1123,28 +1195,21 @@ impl Parser {
                     return Err("expected '<' in named back reference".into());
                 }
                 self.bump();
-                let mut name = String::new();
-                loop {
-                    match self.bump() {
-                        Some('>') => break,
-                        Some(c) => name.push(c),
-                        None => return Err("unterminated named back reference".into()),
-                    }
-                }
+                let name = self.parse_group_name()?;
                 self.name_refs.push(name.clone());
                 Ok(Node::NamedBackref(name))
             }
-            Some('n') => Ok(Node::Char('\n')),
-            Some('t') => Ok(Node::Char('\t')),
-            Some('r') => Ok(Node::Char('\r')),
-            Some('f') => Ok(Node::Char('\u{000C}')),
-            Some('v') => Ok(Node::Char('\u{000B}')),
+            Some('n') => Ok(Node::Char('\n' as u32)),
+            Some('t') => Ok(Node::Char('\t' as u32)),
+            Some('r') => Ok(Node::Char('\r' as u32)),
+            Some('f') => Ok(Node::Char(0x0C)),
+            Some('v') => Ok(Node::Char(0x0B)),
             Some('0') => {
                 // `\0` may not be followed by a digit in Unicode mode (a legacy octal escape).
                 if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
                     return Err("legacy octal escape in unicode pattern".into());
                 }
-                Ok(Node::Char('\0'))
+                Ok(Node::Char(0))
             }
             Some('c') => {
                 // `\cX` (a letter) is a control escape; anything else is only tolerated outside
@@ -1152,10 +1217,10 @@ impl Parser {
                 match self.peek() {
                     Some(l) if l.is_ascii_alphabetic() => {
                         self.bump();
-                        Ok(Node::Char((l as u8 % 32) as char))
+                        Ok(Node::Char((l as u8 % 32) as u32))
                     }
                     _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
-                    _ => Ok(Node::Char('c')),
+                    _ => Ok(Node::Char('c' as u32)),
                 }
             }
             Some('x') => {
@@ -1188,7 +1253,7 @@ impl Parser {
             Some(c) if self.unicode && !is_regex_syntax_char(c) && c != '/' => {
                 Err(format!("invalid identity escape \\{c} in unicode pattern"))
             }
-            Some(c) => Ok(Node::Char(c)),
+            Some(c) => Ok(Node::Char(cp_of_elem(c))),
         }
     }
 
@@ -1257,7 +1322,20 @@ impl Parser {
                 }
                 Some(c) => {
                     self.bump();
-                    name.push(c);
+                    // In non-unicode mode the elements are code units: recombine a smuggled
+                    // surrogate pair into the character it encodes.
+                    if let Some(&next) = self.chars.get(self.pos) {
+                        if let Some(real) = crate::jstr::paired_char(c, next) {
+                            self.bump();
+                            name.push(real);
+                            continue;
+                        }
+                    }
+                    match crate::jstr::smuggled(c) {
+                        // A truly lone surrogate can never be part of an identifier.
+                        Some(_) => return Err("invalid capture group name".into()),
+                        None => name.push(c),
+                    }
                 }
                 None => return Err("unterminated capture group name".into()),
             }
@@ -1273,7 +1351,7 @@ impl Parser {
 
     /// Annex B ExtendedHexEscapeSequence: `\x` needs exactly `n` hex digits, otherwise the whole
     /// escape is an IdentityEscape for `esc` (consuming nothing past it).
-    fn hex(&mut self, n: usize, esc: char) -> char {
+    fn hex(&mut self, n: usize, esc: char) -> u32 {
         let save = self.pos;
         let mut s = String::new();
         for _ in 0..n {
@@ -1284,14 +1362,11 @@ impl Parser {
                 }
                 _ => {
                     self.pos = save;
-                    return esc;
+                    return esc as u32;
                 }
             }
         }
-        u32::from_str_radix(&s, 16)
-            .ok()
-            .and_then(char::from_u32)
-            .unwrap_or('\u{FFFD}')
+        u32::from_str_radix(&s, 16).unwrap_or(0xFFFD)
     }
 
     /// Four hex digits as a raw value (surrogate halves pass through).
@@ -1308,12 +1383,12 @@ impl Parser {
         u32::from_str_radix(&s, 16).unwrap_or(0xFFFD)
     }
 
-    fn unicode_escape(&mut self) -> char {
-        char::from_u32(self.unicode_escape_u32()).unwrap_or('\u{FFFD}')
+    fn unicode_escape(&mut self) -> u32 {
+        self.unicode_escape_u32()
     }
 
     /// Exactly `n` hex digits, or a SyntaxError (Unicode mode).
-    fn hex_strict(&mut self, n: usize) -> Result<char, String> {
+    fn hex_strict(&mut self, n: usize) -> Result<u32, String> {
         let mut v: u32 = 0;
         for _ in 0..n {
             match self.peek().and_then(|c| c.to_digit(16)) {
@@ -1324,13 +1399,13 @@ impl Parser {
                 None => return Err("invalid hexadecimal escape".into()),
             }
         }
-        Ok(char::from_u32(v).unwrap_or('\u{FFFD}'))
+        Ok(v)
     }
 
     /// A Unicode-mode `\u` escape: `{…}` bodies are strictly hex and capped at U+10FFFF, plain
     /// escapes are exactly four hex digits, and a lead/trail surrogate escape pair combines into
     /// one code point.
-    fn unicode_escape_strict(&mut self) -> Result<char, String> {
+    fn unicode_escape_strict(&mut self) -> Result<u32, String> {
         if self.peek() == Some('{') {
             self.bump();
             let mut v: u32 = 0;
@@ -1352,7 +1427,7 @@ impl Parser {
             if !any || v > 0x10FFFF {
                 return Err("invalid code point escape".into());
             }
-            return Ok(char::from_u32(v).unwrap_or('\u{FFFD}'));
+            return Ok(v);
         }
         let mut lead: u32 = 0;
         for _ in 0..4 {
@@ -1388,11 +1463,11 @@ impl Parser {
             }
             if ok && (0xDC00..=0xDFFF).contains(&trail) {
                 let cp = 0x10000 + ((lead - 0xD800) << 10) + (trail - 0xDC00);
-                return Ok(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                return Ok(cp);
             }
             self.pos = save;
         }
-        Ok(char::from_u32(lead).unwrap_or('\u{FFFD}'))
+        Ok(lead)
     }
 
     /// The raw code-point value of a `\u` escape body (surrogate values pass through).
@@ -1424,7 +1499,7 @@ impl Parser {
 }
 
 enum ClassAtom {
-    Char(char),
+    Char(u32),
     Builtin(char),
     Prop((bool, &'static [(u32, u32)])),
 }
@@ -1537,10 +1612,8 @@ fn compile_repeat(
     greedy: bool,
     prog: &mut Vec<Inst>,
 ) -> Result<(), String> {
-    if min > MAX_REPEAT || max.map(|m| m > MAX_REPEAT).unwrap_or(false) {
-        return Err("repetition count too large".into());
-    }
-    // Fast path: a repeated single-character atom consumes iteratively (no per-character recursion).
+    // Fast path: a repeated single-character atom consumes iteratively (no per-character
+    // recursion), so arbitrarily large counts (up to 2^53-1) cost nothing to compile.
     if let Some(rep) = single_char_rep(inner) {
         prog.push(Inst::Many {
             rep,
@@ -1549,6 +1622,10 @@ fn compile_repeat(
             greedy,
         });
         return Ok(());
+    }
+    // The general path unrolls `min` copies, so bound it to keep compiled programs small.
+    if min > MAX_REPEAT || max.map(|m| m > MAX_REPEAT).unwrap_or(false) {
+        return Err("repetition count too large".into());
     }
     // RepeatMatcher clears the captures inside the atom at the start of every iteration.
     let span = cap_span(inner);
@@ -1561,14 +1638,24 @@ fn compile_repeat(
     for _ in 0..min {
         body_with_clear(prog)?;
     }
+    // Optional iterations enforce the RepeatMatcher empty-iteration rule: an iteration that
+    // consumes nothing fails, backtracking into the body's other alternatives or out of the loop.
+    let next_mark = |prog: &Vec<Inst>| {
+        prog.iter()
+            .filter(|i| matches!(i, Inst::SetMark(_)))
+            .count()
+    };
     match max {
         None => {
             // Greedy: L1: Split(body, end); body; Jmp(L1); end.
+            let id = next_mark(prog);
             let l1 = prog.len();
             let sp = prog.len();
             prog.push(Inst::Split(0, 0));
             let body = prog.len();
+            prog.push(Inst::SetMark(id));
             body_with_clear(prog)?;
+            prog.push(Inst::CheckProgress(id));
             prog.push(Inst::Jmp(l1));
             let end = prog.len();
             prog[sp] = if greedy {
@@ -1581,11 +1668,14 @@ fn compile_repeat(
             let extra = m.saturating_sub(min);
             let mut splits = Vec::new();
             for _ in 0..extra {
+                let id = next_mark(prog);
                 let sp = prog.len();
                 prog.push(Inst::Split(0, 0));
                 let body = prog.len();
                 splits.push((sp, body));
+                prog.push(Inst::SetMark(id));
                 body_with_clear(prog)?;
+                prog.push(Inst::CheckProgress(id));
             }
             let end = prog.len();
             for (sp, body) in splits {
@@ -1742,8 +1832,9 @@ fn clone_class(cc: &CharClass) -> CharClass {
 const MAX_MATCH_DEPTH: u32 = 3000;
 
 struct Matcher<'a> {
-    input: &'a [char],
+    input: &'a [u32],
     caps: Vec<Option<usize>>,
+    marks: Vec<Option<usize>>,
     steps: u64,
     depth: u32,
     /// When matching a lookbehind body, the position its terminal `Match` must land on (so the body
@@ -1767,24 +1858,29 @@ impl Matcher<'_> {
     fn dotall(&self) -> bool {
         self.flags.last().unwrap().2
     }
-    fn eqc(&self, a: char, b: char) -> bool {
+    /// Compare two subject/pattern code points under the active case rules.
+    fn eqc_uu(&self, a: u32, b: u32) -> bool {
         if a == b {
             return true;
         }
         if self.icase() {
+            let (ca, cb) = match (char::from_u32(a), char::from_u32(b)) {
+                (Some(x), Some(y)) => (x, y),
+                _ => return false, // lone surrogates have no case
+            };
             if self.unicode {
                 // Full (simple-approximated) case folding: Kelvin sign folds to 'k', etc.
-                return a.to_lowercase().eq(b.to_lowercase());
+                return fold_key(ca) == fold_key(cb);
             }
-            return canonicalize_legacy(a) == canonicalize_legacy(b);
+            return canonicalize_legacy(ca) == canonicalize_legacy(cb);
         }
         false
     }
 
-    fn rep_matches(&self, rep: &Rep, c: char) -> bool {
+    fn rep_matches(&self, rep: &Rep, c: u32) -> bool {
         match rep {
-            Rep::Char(ch) => self.eqc(c, *ch),
-            Rep::Any => self.dotall() || c != '\n',
+            Rep::Char(ch) => self.eqc_uu(c, *ch),
+            Rep::Any => self.dotall() || c != '\n' as u32,
             Rep::Class(cc) => cc.matches(c, self.icase(), self.unicode),
         }
     }
@@ -1806,14 +1902,16 @@ impl Matcher<'_> {
             // the anchored end position.
             Inst::Match => self.lb_end.map(|e| e == pos).unwrap_or(true),
             Inst::Char(c) => {
-                if pos < self.input.len() && self.eqc(self.input[pos], *c) {
+                if pos < self.input.len() && self.eqc_uu(self.input[pos], *c) {
                     self.run(prog, pc + 1, pos + 1)
                 } else {
                     false
                 }
             }
             Inst::Any => {
-                if pos < self.input.len() && (self.dotall() || self.input[pos] != '\n') {
+                if pos < self.input.len()
+                    && (self.dotall() || !is_line_terminator_u32(self.input[pos]))
+                {
                     self.run(prog, pc + 1, pos + 1)
                 } else {
                     false
@@ -1841,6 +1939,24 @@ impl Matcher<'_> {
             Inst::Split(a, b) => {
                 let (a, b) = (*a, *b);
                 self.run(prog, a, pos) || self.run(prog, b, pos)
+            }
+            Inst::SetMark(id) => {
+                let id = *id;
+                let old = self.marks[id];
+                self.marks[id] = Some(pos);
+                if self.run(prog, pc + 1, pos) {
+                    true
+                } else {
+                    self.marks[id] = old;
+                    false
+                }
+            }
+            Inst::CheckProgress(id) => {
+                if self.marks[*id] == Some(pos) {
+                    false
+                } else {
+                    self.run(prog, pc + 1, pos)
+                }
             }
             Inst::Many {
                 rep,
@@ -1909,11 +2025,13 @@ impl Matcher<'_> {
             }
             Inst::Jmp(t) => self.run(prog, *t, pos),
             Inst::AssertStart => {
-                let ok = pos == 0 || (self.multiline() && self.input[pos - 1] == '\n');
+                let ok =
+                    pos == 0 || (self.multiline() && is_line_terminator_u32(self.input[pos - 1]));
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::AssertEnd => {
-                let ok = pos == self.input.len() || (self.multiline() && self.input[pos] == '\n');
+                let ok = pos == self.input.len()
+                    || (self.multiline() && is_line_terminator_u32(self.input[pos]));
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::WordBoundary(want) => {
@@ -1929,9 +2047,9 @@ impl Matcher<'_> {
                 }
                 match (self.caps[2 * g], self.caps[2 * g + 1]) {
                     (Some(a), Some(b)) => {
-                        let text: Vec<char> = self.input[a..b].to_vec();
+                        let text: Vec<u32> = self.input[a..b].to_vec();
                         if pos + text.len() <= self.input.len()
-                            && (0..text.len()).all(|i| self.eqc(self.input[pos + i], text[i]))
+                            && (0..text.len()).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
                         {
                             self.run(prog, pc + 1, pos + text.len())
                         } else {
@@ -1952,9 +2070,9 @@ impl Matcher<'_> {
                     None => self.run(prog, pc + 1, pos), // no group captured: matches empty
                     Some(g) => {
                         let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
-                        let text: Vec<char> = self.input[a..b].to_vec();
+                        let text: Vec<u32> = self.input[a..b].to_vec();
                         if pos + text.len() <= self.input.len()
-                            && (0..text.len()).all(|i| self.eqc(self.input[pos + i], text[i]))
+                            && (0..text.len()).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
                         {
                             self.run(prog, pc + 1, pos + text.len())
                         } else {
@@ -2133,9 +2251,9 @@ impl ClassSet {
         Ok(self)
     }
 
-    fn from_char(c: char) -> ClassSet {
+    fn from_cp(c: u32) -> ClassSet {
         ClassSet {
-            ranges: vec![(c as u32, c as u32)],
+            ranges: vec![(c, c)],
             strings: Vec::new(),
         }
     }
@@ -2268,13 +2386,11 @@ fn push_q_alternative(set: &mut ClassSet, alt: Vec<char>) {
 /// dropped (input is scalar values).
 fn class_set_to_node(mut set: ClassSet) -> Node {
     set.normalize();
-    let mut ranges: Vec<(char, char)> = Vec::new();
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
     for &(lo, hi) in &set.ranges {
         let mut push = |a: u32, b: u32| {
             if a <= b {
-                if let (Some(x), Some(y)) = (char::from_u32(a), char::from_u32(b)) {
-                    ranges.push((x, y));
-                }
+                ranges.push((a, b));
             }
         };
         if lo <= 0xD7FF && hi >= 0xE000 {
@@ -2301,7 +2417,7 @@ fn class_set_to_node(mut set: ClassSet) -> Node {
             if cs.is_empty() {
                 Node::Empty
             } else {
-                Node::Concat(cs.into_iter().map(Node::Char).collect())
+                Node::Concat(cs.into_iter().map(|c| Node::Char(c as u32)).collect())
             }
         })
         .collect();
