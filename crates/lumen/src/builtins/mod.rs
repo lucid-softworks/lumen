@@ -10193,7 +10193,7 @@ const TA_META_KEYS: [&str; 5] = [
 ];
 
 /// If `v` is a Proxy, its (target, handler) pair.
-fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
+pub(crate) fn proxy_pair(i: &Interp, v: &Value) -> Option<(Value, Value)> {
     if let Value::Obj(o) = v {
         i.proxies.get(&(Rc::as_ptr(o) as usize)).cloned()
     } else {
@@ -10415,7 +10415,11 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
 }
 /// Proxy `[[OwnPropertyKeys]]`: the trap result (must be a list of strings/symbols) or the target's
 /// own keys.
-fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec<Value>, Value> {
+pub(crate) fn proxy_own_keys(
+    i: &mut Interp,
+    target: &Value,
+    handler: &Value,
+) -> Result<Vec<Value>, Value> {
     let trap = ab(i.get_member(handler, "ownKeys"))?;
     if matches!(trap, Value::Undefined | Value::Null) {
         // Forward to the target's [[OwnPropertyKeys]] (recursing for a proxy target).
@@ -10533,7 +10537,7 @@ pub(crate) fn has_own_property_trapped(
     Ok(matches!(v, Value::Obj(o) if o.borrow().props.contains(key)))
 }
 
-fn proxy_gopd_value(
+pub(crate) fn proxy_gopd_value(
     i: &mut Interp,
     target: &Value,
     handler: &Value,

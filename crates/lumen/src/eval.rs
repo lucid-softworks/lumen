@@ -148,41 +148,7 @@ impl Interp {
                     }
                 }
                 if let Some(rest_name) = &objpat.rest {
-                    // CopyDataProperties into the rest object: [[OwnPropertyKeys]] order (indices,
-                    // strings, then symbols), symbols included, string primitives copy indices.
-                    let obj = self.new_object();
-                    match &value {
-                        Value::Obj(src) => {
-                            let keys = src.borrow().props.ordered_keys();
-                            for k in keys {
-                                if used.iter().any(|u| u.as_str() == &*k) {
-                                    continue;
-                                }
-                                let enumerable = src
-                                    .borrow()
-                                    .props
-                                    .get(&k)
-                                    .map(|p| p.enumerable)
-                                    .unwrap_or(false);
-                                if enumerable {
-                                    let v = self.get_member(&value, &k)?;
-                                    obj.borrow_mut()
-                                        .props
-                                        .insert(k, crate::value::Property::plain(v));
-                                }
-                            }
-                        }
-                        Value::Str(s) => {
-                            for (idx, ch) in s.chars().enumerate() {
-                                let k = idx.to_string();
-                                if used.contains(&k) {
-                                    continue;
-                                }
-                                set_data(&obj, &k, Value::from_string(ch.to_string()));
-                            }
-                        }
-                        _ => {}
-                    }
+                    let obj = self.copy_data_properties(&value, &used)?;
                     self.bind_pattern(
                         &Pattern::Ident(rest_name.clone()),
                         Value::Obj(obj),
@@ -823,21 +789,56 @@ impl Interp {
                 }
             }
         }
+        // CreatePerIterationEnvironment: a `let` head re-binds its names each round, copying the
+        // previous round's values, so closures made in the test/body/update capture that round's
+        // bindings. (`const` heads and expression inits share one environment.)
+        let per_iter: Vec<String> = match init.as_deref() {
+            Some(ForInit::VarDecl {
+                kind: DeclKind::Let,
+                decls,
+            }) => {
+                let mut names = Vec::new();
+                for (pat, _) in decls {
+                    pattern_idents(pat, &mut names);
+                }
+                names
+            }
+            _ => Vec::new(),
+        };
+        let copy_env = |from: &Env| -> Env {
+            let parent = from.borrow().parent.clone();
+            let e = new_scope(parent);
+            for n in &per_iter {
+                let b = from.borrow().vars.get(n).cloned();
+                if let Some(b) = b {
+                    e.borrow_mut().vars.insert(n.clone(), b);
+                }
+            }
+            e
+        };
+        let mut cur_env = if per_iter.is_empty() {
+            loop_env.clone()
+        } else {
+            copy_env(loop_env)
+        };
         let mut first = true;
-        self.run_loop(label, loop_env, |me, env| {
+        self.run_loop(label, loop_env, |me, _env| {
             if !first {
+                if !per_iter.is_empty() {
+                    cur_env = copy_env(&cur_env);
+                }
                 if let Some(u) = update {
-                    me.eval(u, env)?;
+                    me.eval(u, &cur_env)?;
                 }
             }
             first = false;
             if let Some(t) = test {
-                let tv = me.eval(t, env)?;
+                let tv = me.eval(t, &cur_env)?;
                 if !me.to_boolean(&tv) {
                     return Ok(LoopStep::Done(Value::Empty));
                 }
             }
-            let bv = me.exec_stmt(body, env)?;
+            let bv = me.exec_stmt(body, &cur_env)?;
             Ok(LoopStep::Continue(bv))
         })
     }
@@ -2317,21 +2318,10 @@ impl Interp {
                     self.define_accessor(&obj, &k, None, Some(f));
                 }
                 PropDef::Spread(e) => {
+                    // CopyDataProperties (no excluded names) — proxy traps, symbols and string
+                    // indices included.
                     let v = self.eval(e, env)?;
-                    if let Value::Obj(src) = &v {
-                        let keys: Vec<Rc<str>> = {
-                            let b = src.borrow();
-                            b.props
-                                .ordered_keys()
-                                .into_iter()
-                                .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
-                                .collect()
-                        };
-                        for k in keys {
-                            let pv = self.get_member(&v, &k)?;
-                            obj.borrow_mut().props.insert(k, Property::plain(pv));
-                        }
-                    }
+                    self.copy_data_properties_into(&obj, &v, &[])?;
                 }
                 // `__proto__: value` sets the prototype when value is an Object or Null; any other
                 // value type is ignored (no property is created).
@@ -4075,6 +4065,85 @@ impl Interp {
         }
     }
 
+    /// CopyDataProperties(rest, ToObject(value), excludedNames): own keys in [[OwnPropertyKeys]]
+    /// order (through a proxy's ownKeys/getOwnPropertyDescriptor traps, symbols included), copying
+    /// each enumerable non-excluded property.
+    pub(crate) fn copy_data_properties(
+        &mut self,
+        value: &Value,
+        excluded: &[String],
+    ) -> Result<Gc, Abrupt> {
+        let rest = self.new_object();
+        self.copy_data_properties_into(&rest, value, excluded)?;
+        Ok(rest)
+    }
+
+    fn copy_data_properties_into(
+        &mut self,
+        rest: &Gc,
+        value: &Value,
+        excluded: &[String],
+    ) -> Result<(), Abrupt> {
+        let is_excluded = |k: &str| excluded.iter().any(|x| x == k);
+        if let Some((t, h)) = crate::builtins::proxy_pair(self, value) {
+            let keys = crate::builtins::proxy_own_keys(self, &t, &h).map_err(Abrupt::Throw)?;
+            for k in keys {
+                let pk = self.to_property_key(&k)?;
+                if is_excluded(&pk) {
+                    continue;
+                }
+                let desc =
+                    crate::builtins::proxy_gopd_value(self, &t, &h, &pk).map_err(Abrupt::Throw)?;
+                if matches!(desc, Value::Undefined) {
+                    continue;
+                }
+                let e = self.get_member(&desc, "enumerable")?;
+                if self.to_boolean(&e) {
+                    let v = self.get_member(value, &pk)?;
+                    rest.borrow_mut()
+                        .props
+                        .insert(pk, crate::value::Property::plain(v));
+                }
+            }
+            return Ok(());
+        }
+        match value {
+            Value::Obj(src) => {
+                let keys = src.borrow().props.ordered_keys();
+                for k in keys {
+                    if is_excluded(&k) {
+                        continue;
+                    }
+                    let enumerable = src
+                        .borrow()
+                        .props
+                        .get(&k)
+                        .map(|p| p.enumerable)
+                        .unwrap_or(false);
+                    if enumerable {
+                        let v = self.get_member(value, &k)?;
+                        rest.borrow_mut()
+                            .props
+                            .insert(k, crate::value::Property::plain(v));
+                    }
+                }
+            }
+            // ToObject(string): copy the enumerable index properties.
+            Value::Str(s) => {
+                for (idx, ch) in s.chars().enumerate() {
+                    let k = idx.to_string();
+                    if is_excluded(&k) {
+                        continue;
+                    }
+                    set_data(rest, &k, Value::from_string(ch.to_string()));
+                }
+            }
+            // Other primitives wrap to an object with no own enumerable properties.
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn init_instance_fields(&mut self, ctor: &Value, this: &Value) -> Result<(), Abrupt> {
         let obj = match ctor {
             Value::Obj(o) => o.clone(),
@@ -4697,49 +4766,7 @@ impl Interp {
                         }
                         PropDef::Spread(t) => {
                             // CopyDataProperties(rest, ToObject(value), excludedNames = taken).
-                            // Own keys are visited in [[OwnPropertyKeys]] order (indices ascending,
-                            // then strings, then symbols); symbols are copied too.
-                            let rest = self.new_object();
-                            match &value {
-                                Value::Obj(src) => {
-                                    let keys: Vec<Rc<str>> = src.borrow().props.ordered_keys();
-                                    for k in keys {
-                                        if taken.iter().any(|x| x.as_str() == &*k) {
-                                            continue;
-                                        }
-                                        let enumerable = src
-                                            .borrow()
-                                            .props
-                                            .get(&k)
-                                            .map(|p| p.enumerable)
-                                            .unwrap_or(false);
-                                        if enumerable {
-                                            let v = self.get_member(&value, &k)?;
-                                            rest.borrow_mut()
-                                                .props
-                                                .insert(k, crate::value::Property::plain(v));
-                                        }
-                                    }
-                                }
-                                // ToObject(string): copy the enumerable index properties.
-                                Value::Str(s) => {
-                                    for (idx, ch) in s.chars().enumerate() {
-                                        let k = idx.to_string();
-                                        if taken.contains(&k) {
-                                            continue;
-                                        }
-                                        rest.borrow_mut().props.insert(
-                                            Rc::from(k.as_str()),
-                                            crate::value::Property::plain(Value::from_string(
-                                                ch.to_string(),
-                                            )),
-                                        );
-                                    }
-                                }
-                                // Other primitives (number/boolean/symbol/bigint) wrap to an object
-                                // with no own enumerable properties.
-                                _ => {}
-                            }
+                            let rest = self.copy_data_properties(&value, &taken)?;
                             self.assign_to_target(t, Value::Obj(rest), env)?;
                         }
                         _ => return Err(self.throw("SyntaxError", "invalid destructuring target")),
@@ -5447,9 +5474,7 @@ fn stmt_contains(s: &Stmt, pred: fn(&Expr) -> bool) -> bool {
     match s {
         Stmt::Expr(x) | Stmt::Throw(x) => e(x),
         Stmt::Return(x) => x.as_ref().is_some_and(&e),
-        Stmt::VarDecl { decls, .. } => decls
-            .iter()
-            .any(|(_, init)| init.as_ref().is_some_and(&e)),
+        Stmt::VarDecl { decls, .. } => decls.iter().any(|(_, init)| init.as_ref().is_some_and(&e)),
         Stmt::If { test, cons, alt } => {
             e(test)
                 || stmt_contains(cons, pred)
@@ -5526,9 +5551,7 @@ fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
         }),
         // `Contains` descends into arrow functions; an ordinary function/class does not.
         Expr::Func(f) if f.is_arrow => {
-            f.params
-                .iter()
-                .any(|p| p.default.as_ref().is_some_and(&e))
+            f.params.iter().any(|p| p.default.as_ref().is_some_and(&e))
                 || stmts_contain(&f.body, pred)
         }
         _ => false,

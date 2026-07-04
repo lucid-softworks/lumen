@@ -163,6 +163,7 @@ pub struct Scope {
     pub catch_param: bool,
 }
 
+#[derive(Clone)]
 pub struct Binding {
     pub value: Value,
     pub mutable: bool,

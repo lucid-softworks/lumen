@@ -56,6 +56,7 @@ pub fn parse_script_eval(
         super_prop_ok: allow_super,
         super_call_ok: allow_super,
         in_derived_class: false,
+        in_case_clause: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -116,6 +117,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         super_prop_ok: false,
         super_call_ok: false,
         in_derived_class: false,
+        in_case_clause: false,
         proto_dups: Vec::new(),
         last_paren: false,
         single_stmt: false,
@@ -330,6 +332,8 @@ struct Parser {
     super_call_ok: bool,
     /// True while parsing the members of a class that has an `extends` clause.
     in_derived_class: bool,
+    /// True while parsing the statements directly inside a switch case/default clause.
+    in_case_clause: bool,
     /// Deferred duplicate-`__proto__` errors from object literals. The Annex B early error does not
     /// apply when the literal turns out to be a destructuring assignment pattern, so `parse_assign`
     /// forgives entries recorded inside a reinterpreted pattern; leftovers surface at the end of the
@@ -619,6 +623,7 @@ impl Parser {
         // nested context where an import/export declaration is a SyntaxError.
         let at_top = self.top_level;
         self.top_level = false;
+        let in_case = std::mem::take(&mut self.in_case_clause);
         let single_stmt = std::mem::take(&mut self.single_stmt);
         match self.cur().clone() {
             Tok::Punct("{") => {
@@ -643,9 +648,11 @@ impl Parser {
                 self.parse_var_decl(DeclKind::Let)
             }
             Tok::Ident(w) if w == "using" && self.starts_using_decl() => {
+                self.check_using_context(at_top, in_case)?;
                 self.parse_var_decl(DeclKind::Using)
             }
             Tok::Ident(w) if w == "await" && self.in_async && self.starts_await_using() => {
+                self.check_using_context(at_top, in_case)?;
                 self.parse_var_decl(DeclKind::AwaitUsing)
             }
             Tok::Keyword("function") => {
@@ -882,6 +889,18 @@ impl Parser {
         Ok(out)
     }
 
+    /// A `using`/`await using` declaration is illegal at the top level of a script (or eval) and
+    /// directly inside a switch case/default statement list.
+    fn check_using_context(&mut self, at_top: bool, in_case: bool) -> Result<(), ParseError> {
+        if at_top && !self.module && self.fn_depth == 0 {
+            return self.err("'using' declaration is not allowed at the top level of a script");
+        }
+        if in_case {
+            return self.err("'using' declaration is not allowed directly in a case clause");
+        }
+        Ok(())
+    }
+
     fn parse_var_decl(&mut self, kind: DeclKind) -> Result<Stmt, ParseError> {
         self.advance(); // var/let/const/using keyword (or `let`/`using`/`await` ident)
         if kind == DeclKind::AwaitUsing {
@@ -907,6 +926,10 @@ impl Parser {
         let mut names = Vec::new();
         for (pat, _) in &decls {
             pattern_names(pat, &mut names);
+        }
+        // `let` may not be bound by a lexical declaration (even in sloppy mode).
+        if kind != DeclKind::Var && names.iter().any(|n| n == "let") {
+            return self.err("'let' is disallowed as a lexically bound name");
         }
         for n in &names {
             match kind {
@@ -948,8 +971,11 @@ impl Parser {
                         "'{name}' cannot be used as a binding in strict mode"
                     ));
                 }
-                // `await`/`yield` are reserved as bindings inside async/generator bodies.
-                if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
+                // `await`/`yield` are reserved as bindings inside async/generator bodies (and
+                // `await` inside a class static block).
+                if ((self.in_async || self.in_static_block) && name == "await")
+                    || (self.in_generator && name == "yield")
+                {
                     return self.err(format!("'{name}' cannot be used as a binding here"));
                 }
                 self.advance();
@@ -1187,6 +1213,9 @@ impl Parser {
                 ) {
                     let mut names = Vec::new();
                     pattern_names(&first, &mut names);
+                    if names.iter().any(|n| n == "let") {
+                        return self.err("'let' is disallowed as a lexically bound name");
+                    }
                     for n in &names {
                         self.declare_lexical(n)?;
                     }
@@ -1701,7 +1730,9 @@ impl Parser {
                 && !self.is_kw("default")
                 && !self.at_eof()
             {
+                self.in_case_clause = true;
                 body.push(self.parse_stmt()?);
+                self.in_case_clause = false;
             }
             cases.push(SwitchCase { test, body });
         }
@@ -2457,6 +2488,7 @@ impl Parser {
                         super_prop_ok: self.super_prop_ok,
                         super_call_ok: self.super_call_ok,
                         in_derived_class: false,
+                        in_case_clause: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2523,6 +2555,7 @@ impl Parser {
                         super_prop_ok: self.super_prop_ok,
                         super_call_ok: self.super_call_ok,
                         in_derived_class: false,
+                        in_case_clause: false,
                         proto_dups: Vec::new(),
                         last_paren: false,
                         single_stmt: false,
@@ -2574,6 +2607,16 @@ impl Parser {
         Ok(Expr::Array(elems))
     }
 
+    /// A private name is only a valid member name inside a class body, never an object literal.
+    fn reject_private_key(&self, key: &PropKey) -> Result<(), ParseError> {
+        if let PropKey::Ident(n) = key {
+            if n.starts_with('#') {
+                return self.err("private names are only allowed in class bodies");
+            }
+        }
+        Ok(())
+    }
+
     fn parse_object(&mut self) -> Result<Expr, ParseError> {
         self.expect_punct("{")?;
         let saved = self.no_in;
@@ -2601,6 +2644,7 @@ impl Parser {
                 let is_get = self.is_ident_word("get");
                 self.advance();
                 let key = self.parse_prop_key()?;
+                self.reject_private_key(&key)?;
                 let func = self.parse_accessor_function(is_get, member_start)?;
                 props.push(if is_get {
                     PropDef::Getter {
@@ -2631,9 +2675,14 @@ impl Parser {
                 );
             if is_async {
                 self.advance();
+                // `async` must be followed by the method name on the same line.
+                if self.nl_before() && !self.is_punct("*") {
+                    return self.err("line terminator not allowed after 'async' in a method");
+                }
             }
             let is_generator = self.eat_punct("*");
             let key = self.parse_prop_key()?;
+            self.reject_private_key(&key)?;
             if self.is_punct("(") {
                 // Method shorthand.
                 let func = if is_async || is_generator {
@@ -3103,16 +3152,20 @@ impl Parser {
         // A method body (and any parameter default) is a super-property context. Whether it is a
         // SuperCall context was decided by the caller (only a derived class constructor is).
         let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
+        // A method body is a function boundary: it leaves a static block's `await` reservation.
+        let ssb = std::mem::replace(&mut self.in_static_block, false);
         let params = self.parse_params()?;
         // A method has UniqueFormalParameters: duplicate parameter names are always an error.
         if let Some(dup) = duplicate_name(&param_names(&params)) {
             self.in_generator = sg;
             self.in_async = sa;
             self.super_prop_ok = ssuper;
+            self.in_static_block = ssb;
             return self.err(format!("duplicate parameter name '{dup}'"));
         }
         let (body, is_strict) = self.parse_function_body(!params_complex(&params), false)?;
         self.super_prop_ok = ssuper;
+        self.in_static_block = ssb;
         self.in_generator = sg;
         self.in_async = sa;
         if let Some(dup) = params_body_lexical_clash(&params, &body) {
