@@ -4186,7 +4186,14 @@ fn read_date_raw_cal(
         None
     };
     let year = if let Some(y) = year_opt {
-        cal_year_to_iso(cal, y)
+        let iso_y = cal_year_to_iso(cal, y);
+        // A year given alongside era/eraYear must agree with them.
+        if let Some(ei) = era_iso {
+            if ei != iso_y {
+                return Err(i.make_error("RangeError", "year and era/eraYear disagree"));
+            }
+        }
+        iso_y
     } else if let Some(ei) = era_iso {
         ei
     } else {
@@ -5931,19 +5938,52 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
         if !matches!(f, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "toPlainDate() argument must be an object"));
         }
-        // The year is required to complete a date from a month-day.
+        let cal = cal_of(i, &t);
+        // Fields read in alphabetical order (era/eraYear participate for era calendars); a year
+        // (or era pair) is required to complete a date from a month-day.
+        let (era, era_year) = if cal_uses_era(&cal) {
+            let ev = getm(i, &f, "era")?;
+            let era = match ev {
+                Value::Undefined => None,
+                _ => Some(i.to_string(&ev).map_err(unab)?.to_lowercase()),
+            };
+            let eyv = getm(i, &f, "eraYear")?;
+            let ey = match eyv {
+                Value::Undefined => None,
+                _ => Some(to_int(i, &eyv)?),
+            };
+            (era, ey)
+        } else {
+            (None, None)
+        };
         let yv = getm(i, &f, "year")?;
-        if matches!(yv, Value::Undefined) {
+        if matches!(yv, Value::Undefined) && (era.is_none() || era_year.is_none()) {
             return Err(i.make_error("TypeError", "toPlainDate() requires a year"));
         }
-        let year = to_int(i, &yv)?;
-        let cal = cal_of(i, &t);
+        let year = match yv {
+            Value::Undefined => None,
+            _ => Some(to_int(i, &yv)?),
+        };
         let d = if &*cal == "iso8601" {
-            build_date_ovf(i, year, md.month as i64, md.day as i64, Overflow::Constrain)?
+            build_date_ovf(
+                i,
+                year.unwrap_or(1972),
+                md.month as i64,
+                md.day as i64,
+                Overflow::Constrain,
+            )?
         } else {
-            // Combine the month-day's calendar (monthCode, day) with the supplied year.
+            // Combine the month-day's calendar (monthCode, day) with the supplied year/era.
             let merged = i.new_object();
-            setm(&merged, "year", Value::Num(year as f64));
+            if let Some(y) = year {
+                setm(&merged, "year", Value::Num(y as f64));
+            }
+            if let Some(e2) = &era {
+                setm(&merged, "era", Value::str(e2.as_str()));
+            }
+            if let Some(ey) = era_year {
+                setm(&merged, "eraYear", Value::Num(ey as f64));
+            }
             setm(
                 &merged,
                 "monthCode",
