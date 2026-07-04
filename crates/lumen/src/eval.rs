@@ -1825,8 +1825,36 @@ impl Interp {
         if !matches!(with, Value::Obj(_)) {
             return Err(self.throw("TypeError", "import attributes must be an object"));
         }
-        // EnumerableOwnProperties(with, key+value): own string keys in order, re-checking each
-        // descriptor before its Get; every attribute value must be a string.
+        // EnumerableOwnProperties(with, key+value): own string keys in order (through a proxy's
+        // ownKeys/getOwnPropertyDescriptor traps), re-checking each descriptor before its Get;
+        // every attribute value must be a string.
+        let mut ty = None;
+        if let Some((t, h)) = crate::builtins::proxy_pair(self, &with) {
+            let keys = crate::builtins::proxy_own_keys(self, &t, &h).map_err(Abrupt::Throw)?;
+            for k in keys {
+                let pk = self.to_property_key(&k)?;
+                if Interp::is_sym_key(&pk) {
+                    continue;
+                }
+                let desc =
+                    crate::builtins::proxy_gopd_value(self, &t, &h, &pk).map_err(Abrupt::Throw)?;
+                if matches!(desc, Value::Undefined) {
+                    continue;
+                }
+                let e = self.get_member(&desc, "enumerable")?;
+                if !self.to_boolean(&e) {
+                    continue;
+                }
+                let v = self.get_member(&with, &pk)?;
+                let Value::Str(sv) = v else {
+                    return Err(self.throw("TypeError", "import attribute values must be strings"));
+                };
+                if pk == "type" {
+                    ty = Some(sv.to_string());
+                }
+            }
+            return Ok(ty);
+        }
         let keys: Vec<std::rc::Rc<str>> = with
             .as_obj()
             .map(|obj| {
@@ -1838,7 +1866,6 @@ impl Interp {
                     .collect()
             })
             .unwrap_or_default();
-        let mut ty = None;
         for k in keys {
             let live = with
                 .as_obj()
@@ -2877,9 +2904,13 @@ impl Interp {
         // instance-field initializers.
         if matches!(callee, Expr::Super) {
             // A super-call outside a derived constructor body (a method, a field initializer, or
-            // anything reached via a direct `eval` from those) is illegal — and re-entering field
-            // initialization would recurse without bound.
-            if !self.super_call_ok {
+            // anything reached via a direct `eval` from those) is illegal — but an arrow created
+            // inside the constructor keeps its lexical super-call capability even when invoked
+            // later (BindThisValue then throws ReferenceError instead).
+            if !self.super_call_ok
+                && !(self.peek_binding("%superclass%", env).is_some()
+                    && self.peek_binding("%thisctor%", env).is_some())
+            {
                 return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
             }
             if matches!(self.get_var("%superclass%", env)?, Value::Undefined) {

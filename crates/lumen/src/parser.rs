@@ -2389,6 +2389,11 @@ impl Parser {
                     prop: name,
                     optional: false,
                 };
+            } else if let Tok::Template(parts) = self.cur().clone() {
+                // A tagged template is itself a MemberExpression: `new tag\`t\`` invokes the
+                // tag and constructs its result.
+                self.advance();
+                base = self.build_tagged_template(base, parts)?;
             } else if self.eat_punct("[") {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
