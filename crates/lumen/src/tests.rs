@@ -8782,3 +8782,23 @@ fn regex_smuggle_range_and_vflag() {
         "\u{20BB7}"
     );
 }
+#[test]
+fn lookbehind_backwards_matching() {
+    // Lookbehind bodies match right-to-left: greed, alternative order, and captures follow.
+    assert_eq!(run(r#"String('abbbbbbc'.match(/(?<=(b+))c/))"#), "c,bbbbbb");
+    assert_eq!(
+        run(r#"String('abcdef'.match(/(?<=(?<a>\w){3})f/u))"#),
+        "f,c"
+    );
+    assert_eq!(run(r#"String('abcdef'.match(/(?<=(?<a>\w)+)f/u))"#), "f,a");
+    assert_eq!(
+        run(r#"String('abcdef'.match(/(?<=(?<a>\w){6})f/u))"#),
+        "null"
+    );
+    assert_eq!(
+        run(r#"String('ab12b23b34c'.match(/(?<=((?:b\d{2})+))c/))"#),
+        "c,b12b23b34"
+    );
+    // Negative lookbehind discards its captures.
+    assert_eq!(run(r#"String('abcdef'.match(/(?<!(?<a>\d){3})f/u))"#), "f,");
+}

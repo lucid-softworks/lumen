@@ -34,6 +34,8 @@ mod modules;
 mod numbering;
 mod parser;
 mod regex;
+mod regex_emoji;
+mod regex_fold;
 mod temporal;
 mod token;
 mod tz;

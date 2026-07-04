@@ -82,7 +82,7 @@ enum Rep {
     Class(Rc<CharClass>),
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct CharClass {
     negate: bool,
     ranges: Vec<(u32, u32)>,
@@ -94,14 +94,14 @@ struct CharClass {
 
 impl CharClass {
     fn matches(&self, u: u32, icase: bool, unicode: bool) -> bool {
-        let mut hit = self.matches_raw(u);
+        let mut hit = self.matches_raw2(u, icase, unicode);
         let c = char::from_u32(u);
         if !hit && icase {
             if let Some(c) = c {
                 if unicode {
-                    // Try the opposite case for case-insensitive matching (full folding).
-                    for alt in c.to_lowercase().chain(c.to_uppercase()) {
-                        if alt != c && self.matches_raw(alt as u32) {
+                    // Try every member of the character's case-fold orbit.
+                    for alt in fold_orbit(u) {
+                        if alt != u && self.matches_raw2(alt, icase, unicode) {
                             hit = true;
                             break;
                         }
@@ -110,7 +110,7 @@ impl CharClass {
                     // Legacy Canonicalize: compare via simple uppercase, never folding a
                     // non-ASCII character onto an ASCII one.
                     let cu = canonicalize_legacy(c);
-                    if cu != c && self.matches_raw(cu as u32) {
+                    if cu != c && self.matches_raw2(cu as u32, icase, unicode) {
                         hit = true;
                     }
                     // A member whose canonical form equals cu also matches (/[k]/i vs 'K').
@@ -118,7 +118,7 @@ impl CharClass {
                         for alt in c.to_lowercase().chain(c.to_uppercase()) {
                             if alt != c
                                 && canonicalize_legacy(alt) == cu
-                                && self.matches_raw(alt as u32)
+                                && self.matches_raw2(alt as u32, icase, unicode)
                             {
                                 hit = true;
                                 break;
@@ -130,7 +130,7 @@ impl CharClass {
         }
         hit ^ self.negate
     }
-    fn matches_raw(&self, u: u32) -> bool {
+    fn matches_raw2(&self, u: u32, icase: bool, unicode: bool) -> bool {
         // Class membership is decided in true code-point space: smuggled surrogate atoms in the
         // class's own ranges decode to their surrogate values.
         for &(lo, hi) in &self.ranges {
@@ -139,7 +139,7 @@ impl CharClass {
             }
         }
         for &b in &self.builtins {
-            if builtin_matches(b, u) {
+            if builtin_matches_ic(b, u, icase, unicode) {
                 return true;
             }
         }
@@ -164,13 +164,13 @@ impl CharClass {
     }
 }
 
-fn builtin_matches(b: char, u: u32) -> bool {
+fn builtin_matches_ic(b: char, u: u32, icase: bool, unicode: bool) -> bool {
     let c = char::from_u32(u);
     match b {
         'd' => c.map(|c| c.is_ascii_digit()).unwrap_or(false),
         'D' => !c.map(|c| c.is_ascii_digit()).unwrap_or(false),
-        'w' => is_word(u),
-        'W' => !is_word(u),
+        'w' => is_word_ic(u, icase, unicode),
+        'W' => !is_word_ic(u, icase, unicode),
         's' => c.map(js_whitespace).unwrap_or(false),
         'S' => !c.map(js_whitespace).unwrap_or(false),
         _ => false,
@@ -188,15 +188,37 @@ fn is_word(c: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// The (approximated) full case-folding key: lowercase, plus the classical multi-char folding
-/// equivalences (ſ→s, and the Greek dialytika-tonos pairs).
-fn fold_key(c: char) -> String {
-    match c {
-        '\u{17F}' => "s".to_string(),
-        '\u{1FD3}' => "\u{390}".to_string(),
-        '\u{1FE3}' => "\u{3B0}".to_string(),
-        c => c.to_lowercase().collect(),
+/// GetWordCharacters: under unicode case-insensitive matching, characters whose case fold lands
+/// in [A-Za-z0-9_] (ſ, K) are word characters too.
+fn is_word_ic(c: u32, icase: bool, unicode: bool) -> bool {
+    if is_word(c) {
+        return true;
     }
+    if !(icase && unicode) {
+        return false;
+    }
+    fold_orbit(c).any(is_word)
+}
+
+/// The canonical full case-folding representative of a code point (identity outside any orbit).
+fn fold_canon(u: u32) -> u32 {
+    match crate::regex_fold::FOLD_CANON.binary_search_by_key(&u, |&(m, _)| m) {
+        Ok(k) => crate::regex_fold::FOLD_CANON[k].1,
+        Err(_) => u,
+    }
+}
+
+/// Every member of `u`'s case-fold orbit (just `u` when it has none).
+fn fold_orbit(u: u32) -> impl Iterator<Item = u32> {
+    let canon = fold_canon(u);
+    let t = crate::regex_fold::FOLD_ORBITS;
+    let lo = t.partition_point(|&(c, _)| c < canon);
+    let hi = t.partition_point(|&(c, _)| c <= canon);
+    let mut own = if lo == hi { Some(u) } else { None };
+    t[lo..hi]
+        .iter()
+        .map(|&(_, m)| m)
+        .chain(std::iter::from_fn(move || own.take()))
 }
 
 /// The JS WhiteSpace + LineTerminator set: includes U+FEFF and NBSP, but NOT U+0085 (NEL) or
@@ -274,6 +296,7 @@ fn regex_ident_part(c: char) -> bool {
 // AST
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 enum Node {
     Empty,
     Char(u32),
@@ -493,15 +516,12 @@ impl Regex {
         resolve_named_backrefs(&mut ast, &p.names);
         // Wrap the whole match in group-0 saves.
         let mut prog = vec![Inst::Save(0)];
-        compile(&ast, &mut prog)?;
+        let mut nmarks = 0usize;
+        compile(&ast, &mut prog, &mut nmarks)?;
         prog.push(Inst::Save(1));
         prog.push(Inst::Match);
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
-        let nmarks = prog
-            .iter()
-            .filter(|i| matches!(i, Inst::SetMark(_)))
-            .count();
         Ok(Regex {
             unicode,
             nmarks,
@@ -536,7 +556,7 @@ impl Regex {
                 marks: vec![None; self.nmarks],
                 steps: 0,
                 depth: 0,
-                lb_end: None,
+                back: false,
                 flags: vec![(self.ignore_case, self.multiline, self.dotall)],
                 unicode: self.flags.contains('u') || self.flags.contains('v'),
             };
@@ -544,7 +564,8 @@ impl Regex {
                 let mut out = Vec::with_capacity(self.ngroups + 1);
                 for g in 0..=self.ngroups {
                     out.push(match (m.caps[2 * g], m.caps[2 * g + 1]) {
-                        (Some(a), Some(b)) => Some((a, b)),
+                        // A group inside a lookbehind captured right-to-left: normalize the span.
+                        (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
                         _ => None,
                     });
                 }
@@ -1516,7 +1537,7 @@ fn push_class_atom(cc: &mut CharClass, a: ClassAtom) {
 // Compiler
 // ---------------------------------------------------------------------------------------------
 
-fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
+fn compile(node: &Node, prog: &mut Vec<Inst>, nmarks: &mut usize) -> Result<(), String> {
     match node {
         Node::Empty => {}
         Node::Char(c) => prog.push(Inst::Char(*c)),
@@ -1544,12 +1565,12 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
                 opt(add.1, remove.1),
                 opt(add.2, remove.2),
             ));
-            compile(inner, prog)?;
+            compile(inner, prog, nmarks)?;
             prog.push(Inst::PopFlags);
         }
         Node::Concat(v) => {
             for n in v {
-                compile(n, prog)?;
+                compile(n, prog, nmarks)?;
             }
         }
         Node::Alt(v) => {
@@ -1559,13 +1580,13 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
                     let sp = prog.len();
                     prog.push(Inst::Split(0, 0));
                     let a_start = prog.len();
-                    compile(alt, prog)?;
+                    compile(alt, prog, nmarks)?;
                     jmp_ends.push(prog.len());
                     prog.push(Inst::Jmp(0));
                     let next = prog.len();
                     prog[sp] = Inst::Split(a_start, next);
                 } else {
-                    compile(alt, prog)?;
+                    compile(alt, prog, nmarks)?;
                 }
             }
             let end = prog.len();
@@ -1577,14 +1598,14 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
             if let Some(i) = idx {
                 prog.push(Inst::Save(2 * i));
             }
-            compile(inner, prog)?;
+            compile(inner, prog, nmarks)?;
             if let Some(i) = idx {
                 prog.push(Inst::Save(2 * i + 1));
             }
         }
         Node::Look(negate, inner) => {
             let mut sub = Vec::new();
-            compile(inner, &mut sub)?;
+            compile(inner, &mut sub, nmarks)?;
             sub.push(Inst::Match);
             prog.push(Inst::Look {
                 negate: *negate,
@@ -1592,15 +1613,18 @@ fn compile(node: &Node, prog: &mut Vec<Inst>) -> Result<(), String> {
             });
         }
         Node::LookBehind(negate, inner) => {
+            // The body is compiled from the REVERSED AST and executed right-to-left.
             let mut sub = Vec::new();
-            compile(inner, &mut sub)?;
+            compile(&reverse_node(inner), &mut sub, nmarks)?;
             sub.push(Inst::Match);
             prog.push(Inst::LookBehind {
                 negate: *negate,
                 prog: Rc::new(sub),
             });
         }
-        Node::Repeat(inner, min, max, greedy) => compile_repeat(inner, *min, *max, *greedy, prog)?,
+        Node::Repeat(inner, min, max, greedy) => {
+            compile_repeat(inner, *min, *max, *greedy, prog, nmarks)?
+        }
     }
     Ok(())
 }
@@ -1611,6 +1635,7 @@ fn compile_repeat(
     max: Option<usize>,
     greedy: bool,
     prog: &mut Vec<Inst>,
+    nmarks: &mut usize,
 ) -> Result<(), String> {
     // Fast path: a repeated single-character atom consumes iteratively (no per-character
     // recursion), so arbitrarily large counts (up to 2^53-1) cost nothing to compile.
@@ -1629,32 +1654,33 @@ fn compile_repeat(
     }
     // RepeatMatcher clears the captures inside the atom at the start of every iteration.
     let span = cap_span(inner);
-    let body_with_clear = |prog: &mut Vec<Inst>| -> Result<(), String> {
+    let body_with_clear = |prog: &mut Vec<Inst>, nmarks: &mut usize| -> Result<(), String> {
         if let Some((lo, hi)) = span {
             prog.push(Inst::ClearCaps(lo, hi));
         }
-        compile(inner, prog)
+        compile(inner, prog, nmarks)
     };
     for _ in 0..min {
-        body_with_clear(prog)?;
+        body_with_clear(prog, nmarks)?;
     }
     // Optional iterations enforce the RepeatMatcher empty-iteration rule: an iteration that
     // consumes nothing fails, backtracking into the body's other alternatives or out of the loop.
-    let next_mark = |prog: &Vec<Inst>| {
-        prog.iter()
-            .filter(|i| matches!(i, Inst::SetMark(_)))
-            .count()
-    };
+    // Mark ids are globally unique across the whole pattern (nested sub-programs included).
+    fn next_mark(nmarks: &mut usize) -> usize {
+        let id = *nmarks;
+        *nmarks += 1;
+        id
+    }
     match max {
         None => {
             // Greedy: L1: Split(body, end); body; Jmp(L1); end.
-            let id = next_mark(prog);
+            let id = next_mark(nmarks);
             let l1 = prog.len();
             let sp = prog.len();
             prog.push(Inst::Split(0, 0));
             let body = prog.len();
             prog.push(Inst::SetMark(id));
-            body_with_clear(prog)?;
+            body_with_clear(prog, nmarks)?;
             prog.push(Inst::CheckProgress(id));
             prog.push(Inst::Jmp(l1));
             let end = prog.len();
@@ -1668,13 +1694,13 @@ fn compile_repeat(
             let extra = m.saturating_sub(min);
             let mut splits = Vec::new();
             for _ in 0..extra {
-                let id = next_mark(prog);
+                let id = next_mark(nmarks);
                 let sp = prog.len();
                 prog.push(Inst::Split(0, 0));
                 let body = prog.len();
                 splits.push((sp, body));
                 prog.push(Inst::SetMark(id));
-                body_with_clear(prog)?;
+                body_with_clear(prog, nmarks)?;
                 prog.push(Inst::CheckProgress(id));
             }
             let end = prog.len();
@@ -1688,6 +1714,26 @@ fn compile_repeat(
         }
     }
     Ok(())
+}
+
+/// The AST with every concatenation reversed, so a forward compile of the result consumed
+/// right-to-left implements backwards matching. Alternative ORDER is preserved; nested
+/// lookarounds keep their own orientation (their compile handles direction independently).
+fn reverse_node(node: &Node) -> Node {
+    match node {
+        Node::Concat(v) => Node::Concat(v.iter().rev().map(reverse_node).collect()),
+        Node::Alt(v) => Node::Alt(v.iter().map(reverse_node).collect()),
+        Node::Group(idx, inner) => Node::Group(*idx, Box::new(reverse_node(inner))),
+        Node::Repeat(inner, min, max, greedy) => {
+            Node::Repeat(Box::new(reverse_node(inner)), *min, *max, *greedy)
+        }
+        Node::Modifier { add, remove, inner } => Node::Modifier {
+            add: *add,
+            remove: *remove,
+            inner: Box::new(reverse_node(inner)),
+        },
+        other => other.clone(),
+    }
 }
 
 /// The min/max capture-group indices inside `node`, if any (for per-iteration capture resets).
@@ -1837,9 +1883,8 @@ struct Matcher<'a> {
     marks: Vec<Option<usize>>,
     steps: u64,
     depth: u32,
-    /// When matching a lookbehind body, the position its terminal `Match` must land on (so the body
-    /// is anchored to end exactly at the lookbehind point).
-    lb_end: Option<usize>,
+    /// Matching direction: a lookbehind body (compiled from the reversed AST) consumes leftward.
+    back: bool,
     /// `(icase, multiline, dotall)` stack — the base flags, plus an entry per active `(?ims-ims:…)`
     /// inline-modifier group. Reads use the top; the group's Push/Pop instructions undo on backtrack.
     flags: Vec<(bool, bool, bool)>,
@@ -1869,12 +1914,45 @@ impl Matcher<'_> {
                 _ => return false, // lone surrogates have no case
             };
             if self.unicode {
-                // Full (simple-approximated) case folding: Kelvin sign folds to 'k', etc.
-                return fold_key(ca) == fold_key(cb);
+                // Full case folding via the generated orbit table (ſ≡s, ΐ≡ΐ, K≡k, ...).
+                return fold_canon(ca as u32) == fold_canon(cb as u32);
             }
             return canonicalize_legacy(ca) == canonicalize_legacy(cb);
         }
         false
+    }
+
+    /// The next element to consume and the position after it, honouring the match direction.
+    fn step(&self, pos: usize) -> Option<(u32, usize)> {
+        if self.back {
+            if pos > 0 {
+                Some((self.input[pos - 1], pos - 1))
+            } else {
+                None
+            }
+        } else if pos < self.input.len() {
+            Some((self.input[pos], pos + 1))
+        } else {
+            None
+        }
+    }
+
+    /// Consume a backreference's captured text (element order preserved in both directions).
+    fn backref_step(&mut self, prog: &[Inst], pc: usize, pos: usize, text: &[u32]) -> bool {
+        let n = text.len();
+        if self.back {
+            if pos >= n && (0..n).all(|i| self.eqc_uu(self.input[pos - n + i], text[i])) {
+                self.run(prog, pc + 1, pos - n)
+            } else {
+                false
+            }
+        } else if pos + n <= self.input.len()
+            && (0..n).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
+        {
+            self.run(prog, pc + 1, pos + n)
+        } else {
+            false
+        }
     }
 
     fn rep_matches(&self, rep: &Rep, c: u32) -> bool {
@@ -1898,33 +1976,23 @@ impl Matcher<'_> {
 
     fn run_inner(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
         match &prog[pc] {
-            // A normal terminal match succeeds anywhere; inside a lookbehind body it must land on
-            // the anchored end position.
-            Inst::Match => self.lb_end.map(|e| e == pos).unwrap_or(true),
-            Inst::Char(c) => {
-                if pos < self.input.len() && self.eqc_uu(self.input[pos], *c) {
-                    self.run(prog, pc + 1, pos + 1)
-                } else {
-                    false
+            Inst::Match => true,
+            Inst::Char(c) => match self.step(pos) {
+                Some((e, next)) if self.eqc_uu(e, *c) => self.run(prog, pc + 1, next),
+                _ => false,
+            },
+            Inst::Any => match self.step(pos) {
+                Some((e, next)) if self.dotall() || !is_line_terminator_u32(e) => {
+                    self.run(prog, pc + 1, next)
                 }
-            }
-            Inst::Any => {
-                if pos < self.input.len()
-                    && (self.dotall() || !is_line_terminator_u32(self.input[pos]))
-                {
-                    self.run(prog, pc + 1, pos + 1)
-                } else {
-                    false
+                _ => false,
+            },
+            Inst::Class(cc) => match self.step(pos) {
+                Some((e, next)) if cc.matches(e, self.icase(), self.unicode) => {
+                    self.run(prog, pc + 1, next)
                 }
-            }
-            Inst::Class(cc) => {
-                if pos < self.input.len() && cc.matches(self.input[pos], self.icase(), self.unicode)
-                {
-                    self.run(prog, pc + 1, pos + 1)
-                } else {
-                    false
-                }
-            }
+                _ => false,
+            },
             Inst::Save(slot) => {
                 let slot = *slot;
                 let old = self.caps[slot];
@@ -1967,11 +2035,14 @@ impl Matcher<'_> {
                 let (min, max, greedy) = (*min, *max, *greedy);
                 // Consume as many as the input allows (up to `max`), iteratively.
                 let cap = max.unwrap_or(usize::MAX);
+                let room = if self.back {
+                    pos
+                } else {
+                    self.input.len() - pos
+                };
+                let idx = |k: usize| if self.back { pos - 1 - k } else { pos + k };
                 let mut avail = 0;
-                while avail < cap
-                    && pos + avail < self.input.len()
-                    && self.rep_matches(rep, self.input[pos + avail])
-                {
+                while avail < cap && avail < room && self.rep_matches(rep, self.input[idx(avail)]) {
                     avail += 1;
                 }
                 if avail < min {
@@ -1979,10 +2050,14 @@ impl Matcher<'_> {
                 }
                 // Backtrack the count (greedy: high→min; lazy: min→high), recursing only on the
                 // continuation, so a run of N characters costs O(N) here plus one match per attempt.
+                let cont = |m: &mut Self, n: usize| {
+                    let p = if m.back { pos - n } else { pos + n };
+                    m.run(prog, pc + 1, p)
+                };
                 if greedy {
                     let mut n = avail;
                     loop {
-                        if self.run(prog, pc + 1, pos + n) {
+                        if cont(self, n) {
                             return true;
                         }
                         if n == min {
@@ -1993,7 +2068,7 @@ impl Matcher<'_> {
                 } else {
                     let mut n = min;
                     loop {
-                        if self.run(prog, pc + 1, pos + n) {
+                        if cont(self, n) {
                             return true;
                         }
                         if n == avail {
@@ -2035,8 +2110,9 @@ impl Matcher<'_> {
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::WordBoundary(want) => {
-                let before = pos > 0 && is_word(self.input[pos - 1]);
-                let after = pos < self.input.len() && is_word(self.input[pos]);
+                let (icase, unicode) = (self.icase(), self.unicode);
+                let before = pos > 0 && is_word_ic(self.input[pos - 1], icase, unicode);
+                let after = pos < self.input.len() && is_word_ic(self.input[pos], icase, unicode);
                 let boundary = before != after;
                 (boundary == *want) && self.run(prog, pc + 1, pos)
             }
@@ -2047,14 +2123,9 @@ impl Matcher<'_> {
                 }
                 match (self.caps[2 * g], self.caps[2 * g + 1]) {
                     (Some(a), Some(b)) => {
+                        let (a, b) = (a.min(b), a.max(b));
                         let text: Vec<u32> = self.input[a..b].to_vec();
-                        if pos + text.len() <= self.input.len()
-                            && (0..text.len()).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
-                        {
-                            self.run(prog, pc + 1, pos + text.len())
-                        } else {
-                            false
-                        }
+                        self.backref_step(prog, pc, pos, &text)
                     }
                     _ => self.run(prog, pc + 1, pos), // unset group matches empty
                 }
@@ -2070,14 +2141,9 @@ impl Matcher<'_> {
                     None => self.run(prog, pc + 1, pos), // no group captured: matches empty
                     Some(g) => {
                         let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
+                        let (a, b) = (a.min(b), a.max(b));
                         let text: Vec<u32> = self.input[a..b].to_vec();
-                        if pos + text.len() <= self.input.len()
-                            && (0..text.len()).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
-                        {
-                            self.run(prog, pc + 1, pos + text.len())
-                        } else {
-                            false
-                        }
+                        self.backref_step(prog, pc, pos, &text)
                     }
                 }
             }
@@ -2098,11 +2164,10 @@ impl Matcher<'_> {
                 let negate = *negate;
                 let sub = sub.clone();
                 let saved = self.caps.clone();
-                // A nested lookahead is its own assertion: its terminal Match isn't anchored to an
-                // enclosing lookbehind's end.
-                let saved_end = self.lb_end.take();
+                // A nested lookahead always matches forward, even inside a lookbehind body.
+                let saved_back = std::mem::replace(&mut self.back, false);
                 let matched = self.run(&sub, 0, pos);
-                self.lb_end = saved_end;
+                self.back = saved_back;
                 if negate {
                     self.caps = saved; // negative lookahead: discard captures
                     if matched {
@@ -2121,19 +2186,11 @@ impl Matcher<'_> {
                 let negate = *negate;
                 let sub = sub.clone();
                 let saved = self.caps.clone();
-                // The body must match some span ending exactly at `pos`. Try start positions from the
-                // earliest (longest span) so greedy captures behave like a right-anchored match.
-                let saved_end = self.lb_end;
-                self.lb_end = Some(pos);
-                let mut matched = false;
-                for start in 0..=pos {
-                    self.caps = saved.clone();
-                    if self.run(&sub, 0, start) {
-                        matched = true;
-                        break;
-                    }
-                }
-                self.lb_end = saved_end;
+                // The body (compiled from the reversed AST) matches RIGHT-TO-LEFT from `pos`, so
+                // alternative order, greed, and captures follow the spec's backwards semantics.
+                let saved_back = std::mem::replace(&mut self.back, true);
+                let matched = self.run(&sub, 0, pos);
+                self.back = saved_back;
                 if negate {
                     self.caps = saved; // negative lookbehind: discard captures
                     if matched {
@@ -2352,6 +2409,37 @@ fn property_of_strings(name: &str) -> Option<ClassSet> {
                 ranges: Vec::new(),
                 strings,
             })
+        }
+        "RGI_Emoji_Flag_Sequence" => Some(ClassSet {
+            ranges: Vec::new(),
+            strings: crate::regex_emoji::RGI_FLAG_SEQUENCES
+                .iter()
+                .map(|s| s.chars().collect())
+                .collect(),
+        }),
+        "RGI_Emoji_ZWJ_Sequence" => Some(ClassSet {
+            ranges: Vec::new(),
+            strings: crate::regex_emoji::RGI_ZWJ_SEQUENCES
+                .iter()
+                .map(|s| s.chars().collect())
+                .collect(),
+        }),
+        "RGI_Emoji" => {
+            // The union table: single code points join the ranges, sequences the strings.
+            let mut set = ClassSet {
+                ranges: Vec::new(),
+                strings: Vec::new(),
+            };
+            for s in crate::regex_emoji::RGI_EMOJI_ALL {
+                let cs: Vec<char> = s.chars().collect();
+                if cs.len() == 1 {
+                    set.ranges.push((cs[0] as u32, cs[0] as u32));
+                } else {
+                    set.strings.push(cs);
+                }
+            }
+            set.normalize();
+            Some(set)
         }
         "RGI_Emoji_Tag_Sequence" => {
             // The three RGI tag sequences: england, scotland, wales.
