@@ -948,7 +948,12 @@ impl Interp {
                 Ok(LoopStep::Continue(bv))
             });
             if !exhausted {
-                self.iterator_close(&iter_close);
+                match &result {
+                    // A throw completion swallows close errors; every other completion (normal,
+                    // break, return) propagates them and requires an Object result.
+                    Err(Abrupt::Throw(_)) => self.iterator_close(&iter_close),
+                    _ => self.iterator_close_normal(&iter_close)?,
+                }
             }
             return result;
         }
@@ -3195,10 +3200,12 @@ impl Interp {
             Some(e) => Some(self.eval(e, env)?),
             None => None,
         };
+        // (IsConstructor runs BEFORE any `prototype` read; a callable non-constructor like
+        // %IsHTMLDDA% is a TypeError without observable gets.)
         let (proto_parent, ctor_parent): (Option<Gc>, Option<Value>) = match &parent {
             None => (Some(self.object_proto.clone()), None),
             Some(Value::Null) => (None, None),
-            Some(v @ Value::Obj(pc)) if v.is_callable() => {
+            Some(v @ Value::Obj(pc)) if self.value_is_constructor(v) => {
                 let pp = self.get_member(v, "prototype")?;
                 let pp = match pp {
                     Value::Obj(o) => Some(o),
@@ -3942,6 +3949,7 @@ impl Interp {
             // typeof on an unresolved identifier yields "undefined" rather than throwing.
             if let Expr::Ident(name) = arg {
                 match self.get_var(name, env) {
+                    Ok(v) if self.is_htmldda(&v) => return Ok(Value::str("undefined")),
                     Ok(v) => return Ok(Value::from_string(v.type_of().to_string())),
                     // A binding in its temporal dead zone still throws; only a truly-unresolved
                     // name yields "undefined".
@@ -3950,6 +3958,9 @@ impl Interp {
                 }
             }
             let v = self.eval(arg, env)?;
+            if self.is_htmldda(&v) {
+                return Ok(Value::str("undefined"));
+            }
             return Ok(Value::from_string(v.type_of().to_string()));
         }
         if op == "delete" {
@@ -4530,6 +4541,11 @@ impl Interp {
                 }
                 Ok(())
             }
+            // Annex B web compat: assigning to a CallExpression evaluates the call, then throws.
+            Expr::Call { .. } => {
+                self.eval(target, env)?;
+                Err(self.throw("ReferenceError", "invalid assignment target"))
+            }
             _ => Err(self.throw("ReferenceError", "invalid assignment target")),
         }
     }
@@ -4838,7 +4854,9 @@ impl Interp {
             Value::Num(n) => *n != 0.0 && !n.is_nan(),
             Value::BigInt(n) => *n != 0,
             Value::Str(s) => !s.is_empty(),
-            Value::Sym(_) | Value::Obj(_) => true,
+            // The [[IsHTMLDDA]] object is the one falsy Object.
+            Value::Obj(_) => !self.is_htmldda(v),
+            Value::Sym(_) => true,
         }
     }
 
@@ -5044,7 +5062,35 @@ impl Interp {
         }
     }
 
+    /// IsConstructor: whether `v` has a [[Construct]] internal method.
+    pub(crate) fn value_is_constructor(&self, v: &Value) -> bool {
+        let Value::Obj(o) = v else { return false };
+        if self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
+            // A proxy is a constructor exactly when its target is; callability approximates that.
+            return v.is_callable();
+        }
+        let b = o.borrow();
+        match &b.call {
+            Callable::User(f, _) => !(f.is_arrow || f.is_method || f.is_generator || f.is_async),
+            Callable::Native(_) => {
+                b.is_constructor
+                    || b.props
+                        .get("prototype")
+                        .map(|p| !p.accessor)
+                        .unwrap_or(false)
+            }
+            Callable::Bound { .. } => b.is_constructor,
+            _ => false,
+        }
+    }
+
     pub fn loose_equals(&mut self, a: &Value, b: &Value) -> Result<bool, Abrupt> {
+        // [[IsHTMLDDA]] compares loosely equal to undefined/null (and to itself, as an object).
+        if matches!(a, Value::Undefined | Value::Null) && self.is_htmldda(b)
+            || matches!(b, Value::Undefined | Value::Null) && self.is_htmldda(a)
+        {
+            return Ok(true);
+        }
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::BigInt(x), Value::BigInt(y)) => x == y,
@@ -5706,6 +5752,11 @@ impl Interp {
                 let base = self.eval(obj, env)?;
                 let idx = self.eval(index, env)?;
                 Ok(Reference::Prop(base, RefKey::Raw(idx)))
+            }
+            // Annex B web compat: a CallExpression target evaluates the call, then throws.
+            Expr::Call { .. } => {
+                self.eval(target, env)?;
+                Err(self.throw("ReferenceError", "invalid assignment target"))
             }
             // Other targets never reach compound/logical assignment (a SyntaxError at parse).
             _ => Err(self.throw("ReferenceError", "invalid assignment target")),

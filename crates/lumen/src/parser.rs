@@ -755,21 +755,61 @@ impl Parser {
             // Labeled statement: `ident :` with the ident not being a known expression start that
             // would otherwise consume the colon.
             Tok::Ident(name) if matches!(self.peek_kind(1), Tok::Punct(":")) => {
-                if (self.in_async && name == "await") || (self.in_generator && name == "yield") {
-                    return self.err(format!("'{name}' cannot be used as a label here"));
+                // Collect the whole label chain, so an Annex B labelled FunctionDeclaration is
+                // recognized through any number of labels.
+                let _ = &name;
+                let mut chain: Vec<String> = Vec::new();
+                loop {
+                    let n = match self.cur() {
+                        Tok::Ident(n) if matches!(self.peek_kind(1), Tok::Punct(":")) => n.clone(),
+                        _ => break,
+                    };
+                    if (self.in_async && n == "await") || (self.in_generator && n == "yield") {
+                        for _ in 0..chain.len() {
+                            self.labels.pop();
+                        }
+                        return self.err(format!("'{n}' cannot be used as a label here"));
+                    }
+                    if self.labels.contains(&n) {
+                        for _ in 0..chain.len() {
+                            self.labels.pop();
+                        }
+                        return self.err(format!("label '{n}' has already been declared"));
+                    }
+                    self.advance();
+                    self.advance();
+                    self.labels.push(n.clone());
+                    chain.push(n);
                 }
-                self.advance();
-                self.advance();
-                if self.labels.contains(&name) {
-                    return self.err(format!("label '{name}' has already been declared"));
+                // Annex B: LabelledItem may be a plain FunctionDeclaration in sloppy mode.
+                let body = if !self.strict && self.is_kw("function") {
+                    match self.parse_function(false, false, self.cur_start()) {
+                        Ok(f) if f.is_generator || f.is_async => {
+                            self.err("a labelled function declaration must be a plain function")
+                        }
+                        Ok(f) => {
+                            let declared = match &f.name {
+                                Some(n) => self.declare_fn_decl(n, false, false),
+                                None => Ok(()),
+                            };
+                            declared.map(|_| Stmt::FuncDecl(Rc::new(f)))
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    self.parse_substatement(true)
+                };
+                for _ in 0..chain.len() {
+                    self.labels.pop();
                 }
-                self.labels.push(name.clone());
-                let body = self.parse_substatement(true);
-                self.labels.pop();
-                Ok(Stmt::Labeled {
-                    label: name,
-                    body: Box::new(body?),
-                })
+                let mut stmt = body?;
+                for label in chain.into_iter().rev() {
+                    stmt = Stmt::Labeled {
+                        label,
+                        body: Box::new(stmt),
+                    };
+                }
+                Ok(stmt)
             }
             _ => {
                 let e = self.parse_expr()?;
@@ -1153,13 +1193,46 @@ impl Parser {
                     body,
                 });
             }
-            // Plain C-style for with a declaration init (possibly multiple declarators).
+            // Plain C-style for with a declaration init (possibly multiple declarators). The
+            // initializer is parsed [NoIn] so a for-in head's `in` stays visible.
             let init_expr = if self.eat_punct("=") {
-                Some(self.parse_assign()?)
+                let saved = std::mem::replace(&mut self.no_in, true);
+                let e = self.parse_assign();
+                self.no_in = saved;
+                Some(e?)
             } else {
                 None
             };
             let mut decls = vec![(first, init_expr)];
+            // Annex B: `for (var a = 0 in expr)` — a lone var declarator may carry an initializer
+            // in a sloppy for-in head; it runs before the loop.
+            if !self.strict
+                && kind == DeclKind::Var
+                && decls.len() == 1
+                && decls[0].1.is_some()
+                && matches!(decls[0].0, Pattern::Ident(_))
+                && self.is_kw("in")
+            {
+                self.advance();
+                let right = self.parse_expr_allow_in()?;
+                self.expect_punct(")")?;
+                let body = Box::new(self.parse_loop_body()?);
+                let (pat, init) = decls.pop().unwrap();
+                return Ok(Stmt::Block(vec![
+                    Stmt::VarDecl {
+                        kind: DeclKind::Var,
+                        decls: vec![(pat.clone(), init)],
+                    },
+                    Stmt::ForInOf {
+                        decl: Some(DeclKind::Var),
+                        left: pat,
+                        right,
+                        of: false,
+                        is_await,
+                        body,
+                    },
+                ]));
+            }
             while self.eat_punct(",") {
                 let pat = self.parse_binding_pattern()?;
                 let init = if self.eat_punct("=") {
@@ -1188,10 +1261,19 @@ impl Parser {
             };
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
-            let left = expr_to_pattern(&init_expr).ok_or_else(|| ParseError {
-                message: "invalid for-in/of target".into(),
-                line: self.line(),
-            })?;
+            let left = match expr_to_pattern(&init_expr) {
+                Some(p) => p,
+                // Annex B: a sloppy-mode CallExpression head parses; assignment throws at runtime.
+                None if !self.strict && matches!(init_expr, Expr::Call { .. }) => {
+                    Pattern::Member(Box::new(init_expr.clone()))
+                }
+                None => {
+                    return Err(ParseError {
+                        message: "invalid for-in/of target".into(),
+                        line: self.line(),
+                    })
+                }
+            };
             if self.strict && pattern_strict_banned(&init_expr) {
                 return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
             }
@@ -1718,7 +1800,11 @@ impl Parser {
                     // A pattern may repeat `__proto__:` — forgive dups recorded inside it.
                     self.proto_dups.truncate(proto_mark);
                 } else if !is_valid_assign_target(&left) {
-                    return self.err("invalid assignment target");
+                    // Annex B web compat: a CallExpression is a grammatically valid target in
+                    // sloppy mode; the assignment throws a ReferenceError at runtime instead.
+                    if self.strict || !matches!(left, Expr::Call { .. }) {
+                        return self.err("invalid assignment target");
+                    }
                 }
                 // Assigning to `eval`/`arguments` is a SyntaxError in strict mode.
                 if self.strict {
@@ -1967,6 +2053,8 @@ impl Parser {
                 }
             }
             Expr::Member { .. } | Expr::Index { .. } => {}
+            // Annex B: a CallExpression operand parses in sloppy mode (runtime ReferenceError).
+            Expr::Call { .. } if !self.strict => {}
             _ => return self.err("invalid increment/decrement operand"),
         }
         Ok(())

@@ -8802,3 +8802,38 @@ fn lookbehind_backwards_matching() {
     // Negative lookbehind discards its captures.
     assert_eq!(run(r#"String('abcdef'.match(/(?<!(?<a>\d){3})f/u))"#), "f,");
 }
+#[test]
+fn annexb_web_compat_batch() {
+    // Labelled function declarations (through label chains) in sloppy mode.
+    assert_eq!(
+        run("label: function g() {} label1: label2: function f() {} 'ok'"),
+        "ok"
+    );
+    // for-in var initializer runs before the loop.
+    assert_eq!(
+        run("var effects = 0; var stored;
+             for (var a = (++effects, -1) in stored = a, {a: 0, b: 1, c: 2}) {}
+             [effects, stored, a].join('|')"),
+        "1|-1|c"
+    );
+    // CallExpression assignment targets parse; the call runs, then ReferenceError.
+    assert_eq!(
+        run(
+            "var called = false; function f() { called = true; return {}; }
+             var r; try { f() = 1; } catch (e) { r = e.constructor.name; }
+             [called, r].join('|')"
+        ),
+        "true|ReferenceError"
+    );
+    // Legacy octal / identity decimal escapes in regex literals.
+    assert_eq!(run(r"String(/\1/.exec('\x01'))"), "\u{1}");
+    assert_eq!(run(r"String(/(.)\1/.exec('a\x01 aa'))"), "aa,a");
+    assert_eq!(run(r"String(/\0111/.exec('\x091'))"), "\u{9}1");
+    assert_eq!(run(r"String(/\8/.exec('789'))"), "8");
+    // $262.IsHTMLDDA emulates undefined.
+    assert_eq!(
+        run("var d = $262.IsHTMLDDA;
+             [typeof d, !!d, d == null, d === null, String(d())].join('|')"),
+        "undefined|false|true|false|null"
+    );
+}

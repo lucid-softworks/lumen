@@ -540,6 +540,9 @@ pub struct Interp {
     pub new_target: Value,
     /// The `new.target` to install for the next constructor invocation (set by `construct`).
     pub pending_new_target: Value,
+    /// The `$262.IsHTMLDDA` objects, one per realm (emulate `document.all`): typeof "undefined",
+    /// falsy, and loosely equal to undefined/null, despite being callable Objects.
+    pub htmldda: Vec<Gc>,
     /// The caller's realm during a cross-realm [[Construct]]: the spec pops the callee context
     /// before throwing a derived constructor's return/`this` validation errors, so those errors
     /// belong to the caller's realm.
@@ -927,6 +930,7 @@ impl Interp {
             proxies: HashMap::new(),
             new_target: Value::Undefined,
             pending_new_target: Value::Undefined,
+            htmldda: Vec::new(),
             ctor_caller_realm: None,
             realms: HashMap::new(),
             promises: HashMap::new(),
@@ -1502,6 +1506,14 @@ impl Interp {
                 e
             }
             None => self.throw(kind, msg),
+        }
+    }
+
+    /// Whether `v` is the [[IsHTMLDDA]] object.
+    pub(crate) fn is_htmldda(&self, v: &Value) -> bool {
+        match v {
+            Value::Obj(o) => self.htmldda.iter().any(|d| Rc::ptr_eq(o, d)),
+            _ => false,
         }
     }
 
@@ -3021,7 +3033,12 @@ impl Interp {
         }
 
         // Hoist `var`/function declarations into the function scope before executing the body.
-        let param_names = param_bound_names(&func.params);
+        // ("arguments" joins the blocked names: an Annex B block function of that name would
+        // clash with the arguments object, so it is not var-hoisted.)
+        let mut param_names = param_bound_names(&func.params);
+        if !func.is_arrow {
+            param_names.push("arguments".to_string());
+        }
         self.hoist(&func.body, &body, &param_names);
         if let Some(ps) = &param_seed {
             self.seed_param_vars(ps, &body);
@@ -3116,7 +3133,11 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
-            i.hoist(&func.body, &scope, &param_bound_names(&func.params));
+            let mut pn = param_bound_names(&func.params);
+            if !func.is_arrow {
+                pn.push("arguments".to_string());
+            }
+            i.hoist(&func.body, &scope, &pn);
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -3176,7 +3197,11 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
-            i.hoist(&func.body, &scope, &param_bound_names(&func.params));
+            let mut pn = param_bound_names(&func.params);
+            if !func.is_arrow {
+                pn.push("arguments".to_string());
+            }
+            i.hoist(&func.body, &scope, &pn);
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -4013,9 +4038,29 @@ impl Interp {
             Stmt::Block(body) => {
                 let added = block_lexical_names(body);
                 let pushed = push_blocked(blocked, added);
+                // The block's DIRECT function declarations hoist first (their own/sibling names
+                // don't block them)...
                 for s in body {
-                    self.hoist_block_funcs(s, scope, true, blocked);
+                    if matches!(s, Stmt::FuncDecl(_)) {
+                        self.hoist_block_funcs(s, scope, true, blocked);
+                    }
                 }
+                // ...then nested statements see those names as lexical (a same-named function in
+                // an inner block would clash when var-hoisted through this one).
+                let fn_names: Vec<String> = body
+                    .iter()
+                    .filter_map(|s| match s {
+                        Stmt::FuncDecl(f) => f.name.clone(),
+                        _ => None,
+                    })
+                    .collect();
+                let pushed_fns = push_blocked(blocked, fn_names);
+                for s in body {
+                    if !matches!(s, Stmt::FuncDecl(_)) {
+                        self.hoist_block_funcs(s, scope, true, blocked);
+                    }
+                }
+                blocked.truncate(blocked.len() - pushed_fns);
                 blocked.truncate(blocked.len() - pushed);
             }
             Stmt::If { cons, alt, .. } => {

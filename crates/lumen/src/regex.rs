@@ -327,6 +327,9 @@ enum Node {
 
 struct Parser {
     chars: Vec<char>,
+    /// Total capturing groups in the whole pattern (prescanned): Annex B decides decimal escapes
+    /// (backreference vs legacy octal) against this count.
+    total_groups: usize,
     pos: usize,
     ngroups: usize,
     names: Vec<(String, usize)>,
@@ -447,6 +450,32 @@ impl ReText {
     }
 }
 
+/// Count the capturing groups in a pattern (escapes and classes skipped): `(` not followed by
+/// `?`, plus named groups `(?<name>`.
+fn count_capture_groups(chars: &[char]) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    let mut in_class = false;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => {
+                let plain = chars.get(i + 1) != Some(&'?');
+                let named = chars.get(i + 2) == Some(&'<')
+                    && !matches!(chars.get(i + 3), Some('=') | Some('!'));
+                if plain || named {
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    n
+}
+
 /// Whether `pattern` contains a named capture group `(?<name>…)` (not a lookbehind `(?<=`/`(?<!`).
 fn has_named_group(pattern: &str) -> bool {
     let b: Vec<char> = pattern.chars().collect();
@@ -481,9 +510,12 @@ impl Regex {
         let unicode = flags.contains('u') || flags.contains('v');
         let unicode_sets = flags.contains('v');
         let named_mode = unicode || has_named_group(pattern);
+        let elems = pattern_elements(unicode, pattern);
+        let total_groups = count_capture_groups(&elems);
         let mut p = Parser {
-            chars: pattern_elements(unicode, pattern),
+            chars: elems,
             pos: 0,
+            total_groups,
             ngroups: 0,
             names: Vec::new(),
             unicode,
@@ -1163,6 +1195,11 @@ impl Parser {
                         self.bump();
                         Ok(ClassAtom::Char((l as u8 % 32) as u32))
                     }
+                    // Annex B ClassControlLetter also admits digits and '_'.
+                    Some(l) if !self.unicode && (l.is_ascii_digit() || l == '_') => {
+                        self.bump();
+                        Ok(ClassAtom::Char((l as u8 % 32) as u32))
+                    }
                     _ if self.unicode => Err("invalid \\c escape in unicode pattern".into()),
                     _ => Ok(ClassAtom::Char('c' as u32)),
                 },
@@ -1230,7 +1267,20 @@ impl Parser {
                 if self.unicode && self.peek().is_some_and(|d| d.is_ascii_digit()) {
                     return Err("legacy octal escape in unicode pattern".into());
                 }
-                Ok(Node::Char(0))
+                // Annex B: `\0` continues as a LegacyOctalEscapeSequence (up to 2 more digits).
+                let mut v = 0u32;
+                if !self.unicode {
+                    for _ in 0..2 {
+                        match self.peek() {
+                            Some(d @ '0'..='7') => {
+                                v = v * 8 + d.to_digit(8).unwrap();
+                                self.bump();
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                Ok(Node::Char(v))
             }
             Some('c') => {
                 // `\cX` (a letter) is a control escape; anything else is only tolerated outside
@@ -1259,16 +1309,37 @@ impl Parser {
                 }
             }
             Some(c) if c.is_ascii_digit() => {
+                let start = self.pos;
                 let mut num = c.to_digit(10).unwrap() as usize;
                 while let Some(d) = self.peek() {
                     if d.is_ascii_digit() {
-                        num = num * 10 + d.to_digit(10).unwrap() as usize;
+                        num = num.saturating_mul(10) + d.to_digit(10).unwrap() as usize;
                         self.bump();
                     } else {
                         break;
                     }
                 }
-                Ok(Node::Backref(num))
+                if self.unicode || (num >= 1 && num <= self.total_groups) {
+                    return Ok(Node::Backref(num));
+                }
+                // Annex B: a decimal escape naming no capture group is a LegacyOctalEscapeSequence
+                // (\8 and \9 are identity escapes); trailing digits reparse as literal atoms.
+                self.pos = start;
+                if c >= '8' {
+                    return Ok(Node::Char(c as u32));
+                }
+                let mut v = c.to_digit(8).unwrap();
+                let max_more = if c <= '3' { 2 } else { 1 };
+                for _ in 0..max_more {
+                    match self.peek() {
+                        Some(d @ '0'..='7') => {
+                            v = v * 8 + d.to_digit(8).unwrap();
+                            self.bump();
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(Node::Char(v))
             }
             // IdentityEscape in Unicode mode is a SyntaxCharacter or '/' only.
             Some(c) if self.unicode && !is_regex_syntax_char(c) && c != '/' => {
