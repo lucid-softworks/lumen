@@ -1433,13 +1433,22 @@ impl Interp {
                 continue;
             }
             // for-in visits own enumerable string keys in spec order, then up the prototype chain.
+            // TypedArray elements enumerate first (they live outside the property map).
+            if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(&o) as usize)).copied() {
+                for idx in 0..self.ta_len(&info).unwrap_or(0) {
+                    let k = idx.to_string();
+                    if seen.insert(k.clone()) {
+                        out.push(k);
+                    }
+                }
+            }
             let (level, parent) = {
                 let b = o.borrow();
                 let level: Vec<(String, bool)> = b
                     .props
                     .ordered_keys()
                     .into_iter()
-                    .filter(|k| !Interp::is_sym_key(k))
+                    .filter(|k| !Interp::is_sym_key(k) && !Interp::is_private_key(k))
                     .map(|k| {
                         let e = b.props.get(&k).map(|p| p.enumerable).unwrap_or(false);
                         (k.to_string(), e)
@@ -1448,7 +1457,8 @@ impl Interp {
                 (level, b.proto.clone())
             };
             for (k, enumerable) in level {
-                if enumerable && seen.insert(k.clone()) {
+                // A non-enumerable own property still *shadows* an enumerable prototype one.
+                if seen.insert(k.clone()) && enumerable {
                     out.push(k);
                 }
             }
