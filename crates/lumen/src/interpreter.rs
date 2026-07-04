@@ -199,53 +199,88 @@ impl Binding {
     }
 }
 
+thread_local! {
+    /// Every Scope created on this thread, weakly — the cycle collector's scope snapshot
+    /// (mirrors `value::GC_REGISTRY` for objects).
+    static SCOPE_REGISTRY: RefCell<Vec<std::rc::Weak<RefCell<Scope>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn register_scope(e: &Env) {
+    SCOPE_REGISTRY.with(|r| r.borrow_mut().push(Rc::downgrade(e)));
+}
+
+/// The live scopes on this thread (purging dead weak entries as it goes).
+fn scope_snapshot() -> Vec<Env> {
+    SCOPE_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let mut live = Vec::with_capacity(reg.len());
+        reg.retain(|w| match w.upgrade() {
+            Some(e) => {
+                live.push(e);
+                true
+            }
+            None => false,
+        });
+        live
+    })
+}
+
 pub fn new_scope(parent: Option<Env>) -> Env {
-    Rc::new(RefCell::new(Scope {
+    let e = Rc::new(RefCell::new(Scope {
         vars: HashMap::new(),
         parent,
         with_obj: None,
         var_boundary: false,
         catch_param: false,
         lexical_names: Vec::new(),
-    }))
+    }));
+    register_scope(&e);
+    e
 }
 
 /// A *variable* environment: the hoisting target for `var`/function declarations (function body,
 /// global, or `eval` scope). See [`Scope::var_boundary`].
 pub fn new_var_scope(parent: Option<Env>) -> Env {
-    Rc::new(RefCell::new(Scope {
+    let e = Rc::new(RefCell::new(Scope {
         vars: HashMap::new(),
         parent,
         with_obj: None,
         var_boundary: true,
         catch_param: false,
         lexical_names: Vec::new(),
-    }))
+    }));
+    register_scope(&e);
+    e
 }
 
 /// A `catch (e)` parameter environment: like a block scope, but flagged so a sloppy direct `eval`'s
 /// var-hoisting walk skips it (see [`Scope::catch_param`]).
 pub fn new_catch_scope(parent: Env) -> Env {
-    Rc::new(RefCell::new(Scope {
+    let e = Rc::new(RefCell::new(Scope {
         vars: HashMap::new(),
         parent: Some(parent),
         with_obj: None,
         var_boundary: false,
         catch_param: true,
         lexical_names: Vec::new(),
-    }))
+    }));
+    register_scope(&e);
+    e
 }
 
 /// A `with (obj)` environment: identifier lookups consult `obj` before the enclosing scope.
 pub fn new_with_scope(parent: Env, obj: Value) -> Env {
-    Rc::new(RefCell::new(Scope {
+    let e = Rc::new(RefCell::new(Scope {
         vars: HashMap::new(),
         parent: Some(parent),
         with_obj: Some(obj),
         var_boundary: false,
         catch_param: false,
         lexical_names: Vec::new(),
-    }))
+    }));
+    register_scope(&e);
+    e
 }
 
 /// Walk up from `env` to the nearest variable environment (function body, global, or `eval` scope) —
@@ -490,6 +525,9 @@ pub struct Interp {
     pub eval_fn: Option<Gc>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
     pub iterator_sym: Option<Rc<SymbolData>>,
+    /// Well-known symbols, minted once per Interp — additional realms (`$262.createRealm()`) reuse
+    /// them so `@@iterator` etc. have the same identity cross-realm, as the spec requires.
+    pub wk_syms: Vec<(&'static str, Value)>,
     /// Set while a `?.` link in the current optional chain saw a nullish base, so the rest of the
     /// chain short-circuits to `undefined`. Reset at each `OptionalChain` boundary.
     pub short_circuit: bool,
@@ -959,6 +997,7 @@ impl Interp {
             class_info: HashMap::new(),
             eval_fn: None,
             iterator_sym: None,
+            wk_syms: Vec::new(),
             short_circuit: false,
             import_meta: None,
             import_base: String::new(),
@@ -1096,6 +1135,49 @@ impl Interp {
         match self.array_buffers.get(&info.buffer) {
             Some(buf) => decode(buf),
             _ => Value::Undefined,
+        }
+    }
+
+    /// The raw bytes of `nelems` elements starting at element `elem_start` (None when the view
+    /// is detached/out-of-bounds). Used for bitwise same-type copies that must preserve NaN bits.
+    pub fn ta_read_bytes(
+        &self,
+        info: &TaInfo,
+        elem_start: usize,
+        nelems: usize,
+    ) -> Option<Vec<u8>> {
+        let es = info.kind.elsize();
+        let start = info.offset + elem_start * es;
+        let end = start + nelems * es;
+        let take = |buf: &[u8]| {
+            if end <= buf.len() {
+                Some(buf[start..end].to_vec())
+            } else {
+                None
+            }
+        };
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            return shared_mem_get(id).and_then(|mem| take(&mem.lock().unwrap()));
+        }
+        self.array_buffers.get(&info.buffer).and_then(|b| take(b))
+    }
+
+    /// Write raw bytes at element `elem_start` (bounds-checked; silently drops what doesn't fit).
+    pub fn ta_write_bytes(&mut self, info: &TaInfo, elem_start: usize, bytes: &[u8]) {
+        let start = info.offset + elem_start * info.kind.elsize();
+        let put = |buf: &mut [u8]| {
+            if start + bytes.len() <= buf.len() {
+                buf[start..start + bytes.len()].copy_from_slice(bytes);
+            }
+        };
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            if let Some(mem) = shared_mem_get(id) {
+                put(&mut mem.lock().unwrap());
+            }
+            return;
+        }
+        if let Some(b) = self.array_buffers.get_mut(&info.buffer) {
+            put(b);
         }
     }
 
@@ -2299,6 +2381,9 @@ impl Interp {
         }
         self.gc_collect();
         let live = crate::value::live_objects();
+        if std::env::var_os("LUMEN_GC_LOG").is_some() {
+            eprintln!("[gc] live={live}");
+        }
         if live > MAX_LIVE {
             return Err(self.throw("RangeError", "allocation limit exceeded"));
         }
@@ -2351,10 +2436,37 @@ impl Interp {
     /// global, or a side table — so it (and everything it reaches) is live. Everything else is
     /// referenced only from within unreachable cycles and is reclaimed by breaking its references.
     /// This needs no root enumeration, so it is safe to run in the middle of evaluation.
+    /// The scopes `o` refers to: a user function's closure environment, a mapped `arguments`
+    /// object's aliased parameter scope, and a class constructor's field-initializer environment.
+    fn obj_scope_refs(&self, o: &Gc) -> Vec<Env> {
+        let mut out = Vec::new();
+        if let Callable::User(_, env) = &o.borrow().call {
+            out.push(env.clone());
+        }
+        let ptr = Rc::as_ptr(o) as usize;
+        if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
+            out.push(env.clone());
+        }
+        if let Some(ci) = self.class_info.get(&ptr) {
+            out.push(ci.field_env.clone());
+        }
+        out
+    }
+
     pub(crate) fn gc_collect(&mut self) {
         let live = crate::value::gc_snapshot();
+        // Scopes are graph nodes too: a closure's captured environment references objects (its
+        // bindings) and vice versa (`Callable::User`), so cycles routinely pass through them.
+        let scopes = scope_snapshot();
+        let sidx: HashMap<usize, usize> = scopes
+            .iter()
+            .enumerate()
+            .map(|(k, e)| (Rc::as_ptr(e) as usize, k))
+            .collect();
+        let mut s_internal = vec![0u32; scopes.len()];
+        let mut s_mark = vec![false; scopes.len()];
 
-        // Reset scratch, then count references between heap objects.
+        // Reset scratch, then count references between heap nodes (objects and scopes).
         for o in &live {
             let b = o.borrow();
             b.gc_mark.set(false);
@@ -2365,6 +2477,34 @@ impl Interp {
                 let pb = p.borrow();
                 pb.gc_internal.set(pb.gc_internal.get() + 1);
             }
+            for e in self.obj_scope_refs(o) {
+                if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
+                    s_internal[k] += 1;
+                }
+            }
+        }
+        for e in &scopes {
+            let b = e.borrow();
+            if let Some(p) = &b.parent {
+                if let Some(&k) = sidx.get(&(Rc::as_ptr(p) as usize)) {
+                    s_internal[k] += 1;
+                }
+            }
+            if let Some(Value::Obj(o)) = &b.with_obj {
+                let ob = o.borrow();
+                ob.gc_internal.set(ob.gc_internal.get() + 1);
+            }
+            for bind in b.vars.values() {
+                if let Value::Obj(o) = &bind.value {
+                    let ob = o.borrow();
+                    ob.gc_internal.set(ob.gc_internal.get() + 1);
+                }
+                if let Some((ie, _)) = &bind.import_ref {
+                    if let Some(&k) = sidx.get(&(Rc::as_ptr(ie) as usize)) {
+                        s_internal[k] += 1;
+                    }
+                }
+            }
         }
 
         // A pin is bookkeeping, not a real holder: count it like an internal reference so a
@@ -2373,9 +2513,11 @@ impl Interp {
             let b = o.borrow();
             b.gc_internal.set(b.gc_internal.get() + 1);
         }
-        // Roots: objects with a reference from outside the heap-object graph. `strong_count` here
-        // includes exactly one clone held by `live`, so external refs == strong - internal - 1.
+        // Roots: nodes with a reference from outside the heap graph (the Rust call stack, the
+        // Interp's own fields, module/realm registries, coroutine threads). `strong_count`
+        // includes exactly one clone held by the snapshot, so external refs == strong - internal - 1.
         let mut stack: Vec<Gc> = Vec::new();
+        let mut sstack: Vec<Env> = Vec::new();
         for o in &live {
             let internal = o.borrow().gc_internal.get() as usize;
             if Rc::strong_count(o) > internal + 1 {
@@ -2383,12 +2525,61 @@ impl Interp {
                 stack.push(o.clone());
             }
         }
-        // Mark everything reachable from the roots.
-        while let Some(o) = stack.pop() {
-            for p in Self::obj_refs(&o) {
-                if !p.borrow().gc_mark.get() {
-                    p.borrow().gc_mark.set(true);
-                    stack.push(p);
+        for (k, e) in scopes.iter().enumerate() {
+            if Rc::strong_count(e) > s_internal[k] as usize + 1 {
+                s_mark[k] = true;
+                sstack.push(e.clone());
+            }
+        }
+        // Mark everything reachable from the roots, across both node types.
+        loop {
+            if let Some(o) = stack.pop() {
+                for p in Self::obj_refs(&o) {
+                    if !p.borrow().gc_mark.get() {
+                        p.borrow().gc_mark.set(true);
+                        stack.push(p);
+                    }
+                }
+                for e in self.obj_scope_refs(&o) {
+                    if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
+                        if !s_mark[k] {
+                            s_mark[k] = true;
+                            sstack.push(e);
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(e) = sstack.pop() else { break };
+            let b = e.borrow();
+            if let Some(p) = &b.parent {
+                if let Some(&k) = sidx.get(&(Rc::as_ptr(p) as usize)) {
+                    if !s_mark[k] {
+                        s_mark[k] = true;
+                        sstack.push(p.clone());
+                    }
+                }
+            }
+            if let Some(Value::Obj(o)) = &b.with_obj {
+                if !o.borrow().gc_mark.get() {
+                    o.borrow().gc_mark.set(true);
+                    stack.push(o.clone());
+                }
+            }
+            for bind in b.vars.values() {
+                if let Value::Obj(o) = &bind.value {
+                    if !o.borrow().gc_mark.get() {
+                        o.borrow().gc_mark.set(true);
+                        stack.push(o.clone());
+                    }
+                }
+                if let Some((ie, _)) = &bind.import_ref {
+                    if let Some(&k) = sidx.get(&(Rc::as_ptr(ie) as usize)) {
+                        if !s_mark[k] {
+                            s_mark[k] = true;
+                            sstack.push(ie.clone());
+                        }
+                    }
                 }
             }
         }
@@ -2424,6 +2615,15 @@ impl Interp {
                 b.proto = None;
                 b.call = Callable::None;
                 b.exotic = Exotic::None;
+            }
+        }
+        // Sweep garbage scopes the same way: emptying them breaks env-involving cycles.
+        for (k, e) in scopes.iter().enumerate() {
+            if !s_mark[k] {
+                let mut b = e.borrow_mut();
+                b.vars.clear();
+                b.parent = None;
+                b.with_obj = None;
             }
         }
     }

@@ -24,6 +24,7 @@ mod report;
 
 use frontmatter::{Frontmatter, Phase};
 use lumen::{Completion, Engine};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,53 @@ const CHUNK: usize = 40;
 /// of MB in practice), so this can track core count; we still cap it so a huge box doesn't spawn an
 /// absurd number of children.
 const MAX_WORKERS: usize = 16;
+
+/// Hard per-process heap ceiling. macOS does not enforce `ulimit -v` (RLIMIT_AS), so the shell
+/// guard below is a no-op there — this counting allocator is the real backstop. Exceeding it
+/// returns null from `alloc`, which aborts the process (`handle_alloc_error`); the parent records
+/// the worker crash and respawns for the rest of the chunk. 512 MiB is ~10x any legitimate test.
+/// Sized from measurement: the heaviest legitimate tests (RegExp Unicode sweeps) peak just
+/// under 1 GiB in a fresh worker.
+const MEM_CAP: usize = 1536 * 1024 * 1024;
+
+/// Soft ceiling: after finishing (and recording) a test, a worker whose heap counter is still
+/// above this retires with exit 0 — the parent re-enqueues the rest of its chunk on a fresh
+/// process, no test blamed. Tests leak by design between recycles; this bounds the accumulation.
+const MEM_SOFT_CAP: usize = 256 * 1024 * 1024;
+
+static HEAP_USED: AtomicUsize = AtomicUsize::new(0);
+
+struct CapAlloc;
+
+// SAFETY: delegates to `System`; the byte counter never affects layout or pointer validity.
+unsafe impl GlobalAlloc for CapAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if HEAP_USED.fetch_add(layout.size(), Ordering::Relaxed) + layout.size() > MEM_CAP {
+            HEAP_USED.fetch_sub(layout.size(), Ordering::Relaxed);
+            return std::ptr::null_mut();
+        }
+        System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        HEAP_USED.fetch_sub(layout.size(), Ordering::Relaxed);
+        System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if new_size > layout.size() {
+            let grow = new_size - layout.size();
+            if HEAP_USED.fetch_add(grow, Ordering::Relaxed) + grow > MEM_CAP {
+                HEAP_USED.fetch_sub(grow, Ordering::Relaxed);
+                return std::ptr::null_mut();
+            }
+        } else {
+            HEAP_USED.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+        }
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static ALLOC: CapAlloc = CapAlloc;
 
 /// Per-worker address-space ceiling (passed to `ulimit -v`, in KiB) so a runaway allocation makes
 /// `malloc` fail (the worker aborts and is recorded as a crash) instead of eating all RAM. Enforced
@@ -127,6 +175,19 @@ fn main() {
 
     std::panic::set_hook(Box::new(|_| {}));
 
+    // Single-instance lock: a second orchestrator (each spawns up to MAX_WORKERS processes)
+    // refuses to start while one is alive — overlapping runs have exhausted machine RAM before.
+    let _lock = match acquire_instance_lock() {
+        Ok(l) => l,
+        Err(pid) => {
+            eprintln!(
+                "error: another test262-runner (pid {pid}) is already running.\n\
+                 Wait for it to finish — concurrent runs spawn 10+ workers each and exhaust RAM."
+            );
+            std::process::exit(3);
+        }
+    };
+
     let root = match find_root() {
         Some(r) => r,
         None => {
@@ -166,6 +227,58 @@ fn main() {
 // Parent: process-isolated execution
 // ---------------------------------------------------------------------------------------------
 
+/// Removes the lock file when the orchestrator exits (any normal path; a SIGKILL leaves a stale
+/// file, which the next start detects via the recorded pid and replaces).
+struct InstanceLock(PathBuf);
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Take the single-instance lock, or return the pid of the live holder.
+fn acquire_instance_lock() -> Result<InstanceLock, u32> {
+    let path = std::env::temp_dir().join("test262-runner.lock");
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write as _;
+                let _ = write!(f, "{}", std::process::id());
+                return Ok(InstanceLock(path));
+            }
+            Err(_) => {
+                let pid: Option<u32> = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok());
+                match pid {
+                    Some(pid) if pid_alive(pid) => return Err(pid),
+                    // Stale (holder died without cleanup, or unreadable): claim it and retry.
+                    _ => {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether `pid` is a live process (via `kill -0`, which needs no libc binding).
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
+}
+
 fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
     if files.is_empty() {
         return Vec::new();
@@ -195,9 +308,20 @@ fn run_isolated(root: &Path, files: &[PathBuf]) -> Vec<(String, Outcome)> {
     let total = files.len();
     let done = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    let nproc = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
+    let nproc = std::env::var("T262_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            // Half the cores: workers can individually spike near MEM_CAP on the heavy Unicode
+            // tests, and those cluster together in sorted order — full-width parallelism has
+            // aligned several multi-GB spikes at once and exhausted machine RAM.
+            (std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                / 2)
+            .max(1)
+        })
         .min(MAX_WORKERS);
     eprintln!("running {total} tests across {nproc} worker processes...");
     let handles: Vec<_> = (0..nproc)
@@ -317,9 +441,17 @@ fn worker_loop(
         }
         let _ = std::fs::remove_file(&out_file);
 
-        // First index in the chunk with no recorded result = the test the child died on.
+        // First index in the chunk with no recorded result = the test the child died on — unless
+        // the worker exited cleanly (voluntary memory retirement): then nothing is blamed and the
+        // remainder just re-queues on a fresh process.
         let mut finalized = recorded.len();
         if let Some(crashed) = (lo..hi).find(|i| !recorded.contains(i)) {
+            if !timed_out && matches!(&status, Ok(st) if st.success()) {
+                queue.lock().unwrap().push_back((crashed, hi));
+                let prev = done.fetch_add(finalized, Ordering::Relaxed);
+                let _ = prev;
+                continue;
+            }
             let why = if timed_out {
                 "timed out (no progress — pathologically slow / infinite test)".to_string()
             } else {
@@ -354,6 +486,16 @@ fn worker_loop(
 }
 
 fn run_worker(argv: &[String]) {
+    // Die with the parent: an interrupted orchestrator (Ctrl-C, kill, tool timeout) must not
+    // leave workers running — orphans from successive runs stack up and exhaust RAM. When the
+    // parent disappears we get reparented (parent id changes), which this watchdog polls for.
+    let parent = std::os::unix::process::parent_id();
+    std::thread::spawn(move || loop {
+        if std::os::unix::process::parent_id() != parent {
+            std::process::exit(0);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    });
     // Run on a thread with a large stack: a tree-walker (and especially generators/async, which
     // add frames) needs headroom for legitimately deep — but depth-bounded — recursion. The child's
     // 8 MiB main-thread stack is not enough.
@@ -394,6 +536,11 @@ fn run_worker_inner(argv: &[String]) {
         // Flush per line so a stack overflow on the NEXT test still leaves this result on disk.
         let _ = writeln!(out, "{idx}\t{kind}\t{reason}");
         let _ = out.flush();
+        // Retire while still healthy once leaked heap accumulates — the parent respawns a fresh
+        // process for the rest of the chunk (this result is already on disk, so progress is made).
+        if HEAP_USED.load(Ordering::Relaxed) > MEM_SOFT_CAP {
+            std::process::exit(0);
+        }
     }
 }
 

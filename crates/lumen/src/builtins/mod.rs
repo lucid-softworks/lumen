@@ -3687,6 +3687,16 @@ fn ta_native(
         }
     };
     match method {
+        "at" => Some((|| {
+            // Uses [[ArrayLength]], never a `length` Get (an own accessor must not run).
+            let rel = ab(i.to_number(&arg(args, 0)))?;
+            let rel = if rel.is_nan() { 0.0 } else { rel.trunc() };
+            let k = if rel >= 0.0 { rel } else { len as f64 + rel };
+            if k < 0.0 || k >= len as f64 {
+                return Ok(Value::Undefined);
+            }
+            Ok(i.ta_read(&info, k as usize))
+        })()),
         "forEach" => Some((|| {
             require_cb(i)?;
             for k in 0..len {
@@ -4031,12 +4041,20 @@ fn ta_native(
                 let curlen = i.ta_len(&info).ok_or_else(|| {
                     i.make_error("TypeError", "TypedArray source is out of bounds")
                 })?;
-                for j in 0..count {
-                    let src_idx = start + j;
-                    // Indices past the (possibly shrunk) source stay zero-initialised in the result.
-                    if src_idx < curlen {
-                        let v = i.ta_read(&info, src_idx);
-                        ab(i.ta_store(&new_info, j, &v))?;
+                if new_info.kind == info.kind {
+                    // Same element type: a bitwise copy (NaN payloads must survive).
+                    let n = count.min(curlen.saturating_sub(start));
+                    if let Some(bytes) = i.ta_read_bytes(&info, start, n) {
+                        i.ta_write_bytes(&new_info, 0, &bytes);
+                    }
+                } else {
+                    for j in 0..count {
+                        let src_idx = start + j;
+                        // Indices past the (possibly shrunk) source stay zero-initialised.
+                        if src_idx < curlen {
+                            let v = i.ta_read(&info, src_idx);
+                            ab(i.ta_store(&new_info, j, &v))?;
+                        }
                     }
                 }
             }
@@ -11575,6 +11593,15 @@ fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool,
     if js_is_extensible(i, v)? {
         return Ok(false);
     }
+    // A TypedArray's in-bounds elements are always configurable and writable, so a view with any
+    // elements is never sealed or frozen.
+    if let Value::Obj(o) = v {
+        if let Some(info) = ta_info(i, o) {
+            if i.ta_len(&info).unwrap_or(0) > 0 {
+                return Ok(false);
+            }
+        }
+    }
     if let Some((t, h)) = proxy_pair(i, v) {
         for k in proxy_own_keys(i, &t, &h)? {
             let key = ab(i.to_property_key(&k))?;
@@ -17146,7 +17173,16 @@ fn install_symbol(it: &mut Interp) {
         "asyncDispose",
         "metadata",
     ] {
-        let sym = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
+        // Reuse the descriptor if this Interp already minted it (a secondary realm): well-known
+        // symbols are shared across realms.
+        let sym = match it.wk_syms.iter().find(|(n, _)| *n == name) {
+            Some((_, v)) => v.clone(),
+            None => {
+                let s = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
+                it.wk_syms.push((name, s.clone()));
+                s
+            }
+        };
         if name == "iterator" {
             if let Value::Sym(d) = &sym {
                 it.iterator_sym = Some(d.clone());
