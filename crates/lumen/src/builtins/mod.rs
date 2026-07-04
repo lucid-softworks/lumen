@@ -3002,7 +3002,17 @@ fn uri_decode(s: &str, preserve: &str) -> Option<String> {
             buf[k + 1] = bc;
             i += 3;
         }
-        out.push_str(std::str::from_utf8(&buf[..cont + 1]).ok()?);
+        let decoded = std::str::from_utf8(&buf[..cont + 1]).ok()?;
+        for c in decoded.chars() {
+            let cp = c as u32;
+            if cp >= crate::jstr::SMUGGLE_BASE {
+                // A real code point in the lone-surrogate smuggle range must take the
+                // engine's smuggled-pair representation (see jstr).
+                out.push_str(&crate::jstr::from_code_points(&[cp]));
+            } else {
+                out.push(c);
+            }
+        }
     }
     Some(out)
 }
