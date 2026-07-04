@@ -216,6 +216,10 @@ pub struct ObjPatProp {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // some node fields (regex body/flags) are parsed before they are interpreted
 pub enum Expr {
+    /// A parenthesized array/object literal or assignment — recorded so destructuring
+    /// reinterpretation can reject it (parens block the pattern refinement); evaluates
+    /// transparently.
+    Paren(P<Expr>),
     Num(f64),
     BigInt(crate::bigint::JsBigInt),
     Str(Rc<str>),
@@ -342,6 +346,13 @@ pub enum ArrayElem {
 pub enum PropDef {
     /// `key: value` or shorthand `{ x }`.
     KeyValue {
+        key: PropKey,
+        value: Expr,
+    },
+    /// CoverInitializedName (`{ x = default }`): only valid when the literal is reinterpreted as
+    /// a destructuring pattern; the parser rejects it anywhere else. `value` is the
+    /// `x = default` assignment.
+    Cover {
         key: PropKey,
         value: Expr,
     },

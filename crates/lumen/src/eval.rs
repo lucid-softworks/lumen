@@ -1400,6 +1400,10 @@ impl Interp {
             return Err(self.throw("TypeError", "value is not iterable"));
         }
         let iter = self.call(itfn, v.clone(), &[])?;
+        // GetIteratorFromMethod: the iterator must be an object.
+        if !matches!(iter, Value::Obj(_)) {
+            return Err(self.throw("TypeError", "@@iterator returned a non-object"));
+        }
         // GetIterator only *reads* `next`; it is validated as callable when actually called
         // (IteratorNext), so a missing/non-callable `next` doesn't fail at open time.
         let next = self.get_member(&iter, "next")?;
@@ -2347,6 +2351,7 @@ impl Interp {
                 let r = self.eval(right, env)?;
                 self.binary(op, l, r)
             }
+            Expr::Paren(inner) => self.eval(inner, env),
             Expr::Assign { op, target, value } => self.eval_assign(op, target, value, env),
             Expr::ImportMeta => Ok(self
                 .peek_binding("%importmeta%", env)
@@ -2604,7 +2609,10 @@ impl Interp {
         bind(&home_env, "%homeobject%", Value::Obj(obj.clone()));
         for prop in props {
             match prop {
-                PropDef::KeyValue { key, value } => {
+                // A Cover reaching evaluation means the parse accepted it as part of a pattern
+                // that was then used as an expression — unreachable (the parser rejects it), but
+                // evaluate like a plain key/value for robustness.
+                PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
                     let k = self.eval_prop_key(key, env)?;
                     let v = self.eval(value, env)?;
                     if is_anonymous_fn(value) {
@@ -5022,6 +5030,50 @@ impl Interp {
 
     fn eval_delete(&mut self, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match arg {
+            // `delete a?.b` deletes when the base is non-nullish; a short-circuited chain is
+            // simply true.
+            Expr::OptionalChain(inner) => {
+                let saved = self.short_circuit;
+                self.short_circuit = false;
+                let r = self.eval_delete(inner, env);
+                let short = std::mem::replace(&mut self.short_circuit, saved);
+                if short && r.is_ok() {
+                    return Ok(Value::Bool(true));
+                }
+                r
+            }
+            Expr::Member {
+                obj,
+                prop,
+                optional,
+            } if *optional => {
+                let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Bool(true));
+                }
+                if matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
+                    return Ok(Value::Bool(true));
+                }
+                self.delete_prop_on(base, prop)
+            }
+            Expr::Index {
+                obj,
+                index,
+                optional,
+            } if *optional => {
+                let base = self.eval(obj, env)?;
+                if self.short_circuit {
+                    return Ok(Value::Bool(true));
+                }
+                if matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
+                    return Ok(Value::Bool(true));
+                }
+                let idx = self.eval(index, env)?;
+                let key = self.to_property_key(&idx)?;
+                self.delete_prop_on(base, &key)
+            }
             Expr::Member { obj, prop, .. } => {
                 // `delete super.x` is a runtime ReferenceError (the reference is a super
                 // reference) — after GetThisBinding (TDZ ReferenceError first).
@@ -5030,12 +5082,55 @@ impl Interp {
                     return Err(self.throw("ReferenceError", "cannot delete a super property"));
                 }
                 let base = self.eval(obj, env)?;
-                if !self.short_circuit && matches!(base, Value::Undefined | Value::Null) {
+                if self.short_circuit {
+                    return Ok(Value::Bool(true));
+                }
+                if matches!(base, Value::Undefined | Value::Null) {
                     return Err(self.throw(
                         "TypeError",
                         format!("cannot delete property '{prop}' of null or undefined"),
                     ));
                 }
+                self.delete_prop_on(base, prop)
+            }
+            Expr::Index { obj, index, .. } => {
+                if matches!(**obj, Expr::Super) {
+                    // GetThisBinding first (TDZ ReferenceError), then the key expression
+                    // evaluates — without ToPropertyKey — before the ReferenceError.
+                    self.get_var("this", env)?;
+                    self.eval(index, env)?;
+                    return Err(self.throw("ReferenceError", "cannot delete a super property"));
+                }
+                let base = self.eval(obj, env)?;
+                // A short-circuited optional base skips the key expression entirely.
+                if self.short_circuit {
+                    return Ok(Value::Bool(true));
+                }
+                let idx = self.eval(index, env)?;
+                let key = self.to_property_key(&idx)?;
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Err(self.throw(
+                        "TypeError",
+                        format!("cannot delete property '{key}' of null or undefined"),
+                    ));
+                }
+                self.delete_prop_on(base, &key)
+            }
+            // A parenthesized reference still deletes.
+            Expr::Paren(inner) => self.eval_delete(inner, env),
+            Expr::Ident(name) => self.delete_ident(name, env),
+            // Any other operand evaluates (for its side effects) and deletes to `true`.
+            other => {
+                self.eval(other, env)?;
+                Ok(Value::Bool(true))
+            }
+        }
+    }
+
+    /// [[Delete]] on an evaluated base (shared by the plain and optional `delete` paths).
+    fn delete_prop_on(&mut self, base: Value, prop: &str) -> Result<Value, Abrupt> {
+        {
+            {
                 if let Value::Obj(o) = &base {
                     self.defer_trigger(o, Some(prop))?;
                     let ptr = Rc::as_ptr(o) as usize;
@@ -5083,87 +5178,15 @@ impl Interp {
                 }
                 Ok(Value::Bool(true))
             }
-            Expr::Index { obj, index, .. } => {
-                if matches!(**obj, Expr::Super) {
-                    // GetThisBinding first (TDZ ReferenceError), then the key expression
-                    // evaluates — without ToPropertyKey — before the ReferenceError.
-                    self.get_var("this", env)?;
-                    self.eval(index, env)?;
-                    return Err(self.throw("ReferenceError", "cannot delete a super property"));
-                }
-                let base = self.eval(obj, env)?;
-                let idx = self.eval(index, env)?;
-                let key = self.to_property_key(&idx)?;
-                if !self.short_circuit && matches!(base, Value::Undefined | Value::Null) {
-                    return Err(self.throw(
-                        "TypeError",
-                        format!("cannot delete property '{key}' of null or undefined"),
-                    ));
-                }
-                if let Value::Obj(o) = &base {
-                    self.defer_trigger(o, Some(&key))?;
-                    let ptr = Rc::as_ptr(o) as usize;
-                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
-                        let ok = self.proxy_delete(target, handler, &key)?;
-                        if !ok && self.strict {
-                            return Err(
-                                self.throw("TypeError", format!("cannot delete property '{key}'"))
-                            );
-                        }
-                        return Ok(Value::Bool(ok));
-                    }
-                    // A TypedArray integer index can't be deleted ([[Delete]] → false; strict throws);
-                    // a canonical-numeric non-index reports success.
-                    if let Some(info) = self.typed_arrays.get(&ptr).copied() {
-                        match self.ta_index_kind(&info, &key) {
-                            TaIndex::Element(_) => {
-                                if self.strict {
-                                    return Err(
-                                        self.throw("TypeError", "cannot delete a TypedArray index")
-                                    );
-                                }
-                                return Ok(Value::Bool(false));
-                            }
-                            TaIndex::Exotic => return Ok(Value::Bool(true)),
-                            TaIndex::Ordinary => {}
-                        }
-                    }
-                    let configurable = o
-                        .borrow()
-                        .props
-                        .get(&key)
-                        .map(|p| p.configurable)
-                        .unwrap_or(true);
-                    if configurable {
-                        self.unmap_argument(Rc::as_ptr(o) as usize, &key);
-                        o.borrow_mut().props.remove(&key);
-                        return Ok(Value::Bool(true));
-                    }
-                    if self.strict {
-                        return Err(self.throw(
-                            "TypeError",
-                            format!("cannot delete non-configurable property '{key}'"),
-                        ));
-                    }
-                    return Ok(Value::Bool(false));
-                }
-                if let Value::Str(sv) = &base {
-                    if self.string_own_key(sv, &key) {
-                        if self.strict {
-                            return Err(self.throw(
-                                "TypeError",
-                                format!("cannot delete non-configurable property '{key}'"),
-                            ));
-                        }
-                        return Ok(Value::Bool(false));
-                    }
-                }
-                Ok(Value::Bool(true))
-            }
-            // `delete <identifier>`: an environment binding is removable only if it is `deletable`
-            // (a `var`/function created by a sloppy `eval`); a global-object property follows its
-            // own configurability. An unresolvable reference deletes to `true`.
-            Expr::Ident(name) => {
+        }
+    }
+
+    /// `delete <identifier>`: an environment binding is removable only if it is `deletable`
+    /// (a `var`/function created by a sloppy `eval`); a global-object property follows its own
+    /// configurability. An unresolvable reference deletes to `true`.
+    fn delete_ident(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
+        {
+            {
                 let mut cur = Some(env.clone());
                 while let Some(s) = cur {
                     let (has, deletable, with_obj, parent) = {
@@ -5211,11 +5234,6 @@ impl Interp {
                     Some(false) => Ok(Value::Bool(false)),
                     None => Ok(Value::Bool(true)),
                 }
-            }
-            // Any other operand evaluates (for its side effects) and deletes to `true`.
-            other => {
-                self.eval(other, env)?;
-                Ok(Value::Bool(true))
             }
         }
     }
@@ -5541,13 +5559,14 @@ impl Interp {
                 let mut taken: Vec<String> = Vec::new();
                 for prop in props {
                     match prop {
-                        PropDef::KeyValue { .. } | PropDef::Proto(_) => {
+                        PropDef::KeyValue { .. } | PropDef::Cover { .. } | PropDef::Proto(_) => {
                             // KeyedDestructuringAssignmentEvaluation: evaluate the property name,
                             // then the target Reference, THEN GetV(value, name) — for a non-literal
                             // target the reference is evaluated before the source is read. As a
                             // pattern, `__proto__: t` is a normal keyed target (not a proto-setter).
                             let (k, t) = match prop {
-                                PropDef::KeyValue { key, value } => {
+                                PropDef::KeyValue { key, value }
+                                | PropDef::Cover { key, value } => {
                                     (self.propkey_to_string(key, env)?, value)
                                 }
                                 PropDef::Proto(value) => ("__proto__".to_string(), value),
@@ -6403,7 +6422,7 @@ fn stmt_contains(s: &Stmt, pred: fn(&Expr) -> bool) -> bool {
     }
 }
 
-fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
+pub(crate) fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
     if pred(x) {
         return true;
     }
@@ -6411,7 +6430,10 @@ fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
     match x {
         Expr::Call { callee, args, .. } => e(callee) || call_args_contain(args, pred),
         Expr::New { callee, args } => e(callee) || call_args_contain(args, pred),
-        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Await(arg) => e(arg),
+        Expr::Unary { arg, .. }
+        | Expr::Update { arg, .. }
+        | Expr::Await(arg)
+        | Expr::Paren(arg) => e(arg),
         Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => e(left) || e(right),
         Expr::Assign { target, value, .. } => e(target) || e(value),
         Expr::Cond { test, cons, alt } => e(test) || e(cons) || e(alt),
@@ -6424,7 +6446,7 @@ fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
         Expr::PrivateIn { obj, .. } => e(obj),
         Expr::TaggedTemplate { tag, subs, .. } => e(tag) || subs.iter().any(e),
         Expr::Object(props) => props.iter().any(|p| match p {
-            PropDef::KeyValue { value, .. } => e(value),
+            PropDef::KeyValue { value, .. } | PropDef::Cover { value, .. } => e(value),
             PropDef::Spread(x) => e(x),
             // Methods/getters/setters open their own context.
             _ => false,
@@ -6538,7 +6560,9 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
             fi_expr(tag, args).or_else(|| subs.iter().find_map(|e| fi_expr(e, args)))
         }
         Expr::Object(props) => props.iter().find_map(|p| match p {
-            PropDef::KeyValue { key, value } => fi_key(key, args).or_else(|| fi_expr(value, args)),
+            PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
+                fi_key(key, args).or_else(|| fi_expr(value, args))
+            }
             PropDef::Spread(e) | PropDef::Proto(e) => fi_expr(e, args),
             // Methods/getters/setters open their own context (only their computed key inherits).
             PropDef::Method { key, .. }

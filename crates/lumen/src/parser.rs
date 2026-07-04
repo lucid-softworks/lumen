@@ -427,7 +427,9 @@ impl Parser {
         matches!(self.cur(), Tok::Punct(x) if *x == p)
     }
     fn is_kw(&self, k: &str) -> bool {
-        matches!(self.cur(), Tok::Keyword(x) if *x == k)
+        // An escaped spelling (`d\u006f`) is never usable AS the keyword (only as e.g. a
+        // property name, which matches `Tok::Keyword` directly).
+        matches!(self.cur(), Tok::Keyword(x) if *x == k) && !self.cur_escaped()
     }
     /// True for a contextual keyword (`let`, `of`, `async`, ...) carried as an `Ident`.
     fn is_ident_word(&self, w: &str) -> bool {
@@ -508,7 +510,10 @@ impl Parser {
                 "'{name}' is a reserved word and cannot be a shorthand property"
             ));
         }
-        if self.strict && is_strict_reserved_binding(name) {
+        // eval/arguments are legal shorthand *references* even in strict mode — they are only
+        // banned when the literal is reinterpreted as an assignment pattern (checked there).
+        if self.strict && is_strict_reserved_binding(name) && name != "eval" && name != "arguments"
+        {
             return self.err(format!(
                 "'{name}' cannot be used as a shorthand property in strict mode"
             ));
@@ -630,6 +635,9 @@ impl Parser {
     // ----- statements -------------------------------------------------------------------------
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if matches!(self.cur(), Tok::Keyword(_)) && self.cur_escaped() {
+            return self.err("keywords must not contain escape sequences");
+        }
         if self.in_static_block && self.is_kw("return") {
             return self.err("'return' is not allowed directly in a class static block");
         }
@@ -1851,10 +1859,58 @@ impl Parser {
         if name == "yield" && (self.strict || self.in_generator) {
             return self.err("'yield' cannot be used as a label here");
         }
+        // Strict-mode reserved words (and `let`) cannot label a statement.
+        if self.strict
+            && matches!(
+                name,
+                "let"
+                    | "implements"
+                    | "interface"
+                    | "package"
+                    | "private"
+                    | "protected"
+                    | "public"
+                    | "static"
+            )
+        {
+            return self.err(format!("'{name}' cannot be used as a label in strict mode"));
+        }
         if name == "await" && (self.module || self.in_async || self.in_static_block) {
             return self.err("'await' cannot be used as a label here");
         }
         Ok(())
+    }
+
+    /// If the current token is a regex literal, re-lex its text as `/`-division followed by the
+    /// pattern/flags source (used after `yield`/`await` in identifier position — see caller).
+    fn split_regex_as_division(&mut self) {
+        let Tok::Regex { body, flags } = self.cur().clone() else {
+            return;
+        };
+        let tok = &self.toks[self.pos];
+        let (line, start, end) = (tok.line, tok.start, tok.end);
+        let rest = format!("{body}/{flags}");
+        let Ok(mut relexed) = crate::lexer::tokenize(&rest) else {
+            return;
+        };
+        for t in &mut relexed {
+            t.line = line;
+            t.start = start;
+            t.end = end;
+            t.nl_before = false;
+        }
+        let mut spliced = vec![Token {
+            kind: Tok::Punct("/"),
+            line,
+            start,
+            end,
+            nl_before: false,
+            legacy_octal: false,
+            escaped: false,
+            lone_surrogate: false,
+        }];
+        spliced.extend(relexed);
+        self.toks.splice(self.pos..self.pos + 1, spliced);
     }
 
     fn parse_opt_label(&mut self) -> Option<String> {
@@ -1952,7 +2008,7 @@ impl Parser {
                 let mut value = self.parse_assign()?;
                 // NamedEvaluation applies only to an IdentifierReference target: `(x) = fn` does
                 // not name the function. A transparent one-element Seq hides the anonymity.
-                if op == "="
+                if matches!(op, "=" | "&&=" | "||=" | "??=")
                     && left_paren
                     && matches!(left, Expr::Ident(_))
                     && matches!(
@@ -1970,6 +2026,11 @@ impl Parser {
                 if destructuring {
                     if !is_valid_assign_pattern(&left) {
                         return self.err("invalid destructuring assignment target");
+                    }
+                    if pattern_has_stray_cover(&left) {
+                        return self.err(
+                            "invalid shorthand property initializer outside a pattern position",
+                        );
                     }
                     if self.strict && pattern_strict_banned(&left) {
                         return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
@@ -2337,6 +2398,9 @@ impl Parser {
     fn parse_member_expr(&mut self) -> Result<Expr, ParseError> {
         let mut base = if self.is_kw("new") {
             let new_escaped = self.cur_escaped();
+            if new_escaped {
+                return self.err("'new' must not contain escape sequences");
+            }
             self.advance();
             if self.eat_punct(".") {
                 // `new.target` — no escape sequences, and only valid inside a function.
@@ -2364,11 +2428,21 @@ impl Parser {
                 if !self.last_paren && callee_has_import_call(&callee) {
                     return self.err("'import(...)' cannot be used with 'new'");
                 }
-                let args = if self.is_punct("(") {
+                // An optional chain is a CallExpression, never the MemberExpression `new` needs.
+                if !self.last_paren && matches!(callee, Expr::OptionalChain(_)) {
+                    return self.err("an optional chain cannot be the callee of 'new'");
+                }
+                let had_args = self.is_punct("(");
+                let args = if had_args {
                     self.parse_args()?
                 } else {
                     Vec::new()
                 };
+                // Without arguments this is a NewExpression, not a MemberExpression — an optional
+                // chain cannot attach to it (`new C?.()` / `new o?.C()` are SyntaxErrors).
+                if !had_args && self.is_punct("?.") {
+                    return self.err("an optional chain cannot follow 'new' without arguments");
+                }
                 Expr::New {
                     callee: Box::new(callee),
                     args,
@@ -2603,6 +2677,12 @@ impl Parser {
                 if name == "await" && (self.in_async || self.in_static_block) {
                     return self.err("'await' is not a valid identifier here");
                 }
+                // The lexer assumes a `/` after `yield`/`await` starts a regex (they are usually
+                // keywords). When they are plain identifiers, that `/` is division: split the
+                // mis-lexed regex token back into `/` + re-lexed remainder.
+                if matches!(name.as_str(), "yield" | "await") {
+                    self.split_regex_as_division();
+                }
                 match name.as_str() {
                     "undefined" => Ok(Expr::Undefined),
                     _ => Ok(Expr::Ident(name)),
@@ -2613,7 +2693,14 @@ impl Parser {
                 let e = self.parse_expr_allow_in()?;
                 self.expect_punct(")")?;
                 self.last_paren = true;
-                Ok(e)
+                // A parenthesized array/object literal or assignment can never be reinterpreted
+                // as a destructuring (sub)target — the wrapper blocks the pattern refinement.
+                Ok(match e {
+                    e @ (Expr::Array(_) | Expr::Object(_) | Expr::Assign { .. }) => {
+                        Expr::Paren(P::new(e))
+                    }
+                    e => e,
+                })
             }
             Tok::Punct("[") => {
                 let e = self.parse_array();
@@ -2933,11 +3020,16 @@ impl Parser {
                                 line: self.line(),
                             });
                             let default = self.parse_assign()?;
-                            Expr::Assign {
+                            let value = Expr::Assign {
                                 op: "=",
                                 target: Box::new(ident),
                                 value: Box::new(default),
+                            };
+                            props.push(PropDef::Cover { key, value });
+                            if !self.eat_punct(",") {
+                                break;
                             }
+                            continue;
                         } else {
                             ident
                         };
@@ -3762,7 +3854,9 @@ fn valid_assignment_pattern(e: &Expr) -> bool {
             ArrayElem::Item(t) => target_ok(t),
         }),
         Expr::Object(props) => props.iter().enumerate().all(|(idx, p)| match p {
-            PropDef::KeyValue { value, .. } | PropDef::Proto(value) => match value {
+            PropDef::KeyValue { value, .. }
+            | PropDef::Cover { value, .. }
+            | PropDef::Proto(value) => match value {
                 Expr::Assign {
                     op: "=", target, ..
                 } => target_ok(target),
@@ -3796,6 +3890,12 @@ fn pattern_strict_banned(e: &Expr) -> bool {
                     op: "=", target, ..
                 },
                 ..
+            }
+            | PropDef::Cover {
+                value: Expr::Assign {
+                    op: "=", target, ..
+                },
+                ..
             } => pattern_strict_banned(target),
             PropDef::KeyValue { value, .. } => pattern_strict_banned(value),
             PropDef::Proto(Expr::Assign {
@@ -3803,6 +3903,66 @@ fn pattern_strict_banned(e: &Expr) -> bool {
             }) => pattern_strict_banned(target),
             PropDef::Proto(v) => pattern_strict_banned(v),
             PropDef::Spread(t) => pattern_strict_banned(t),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a reinterpreted assignment pattern contains a CoverInitializedName in a
+/// *non-pattern* position (e.g. the member base in `[{a = 0}.x] = []`) — a SyntaxError the
+/// blanket cover-forgiveness must not absorb.
+fn pattern_has_stray_cover(e: &Expr) -> bool {
+    // Generic-expression positions: any object literal with a Cover prop (at any depth) is bad.
+    fn generic(e: &Expr) -> bool {
+        crate::eval::expr_contains(e, |x| {
+            matches!(x, Expr::Object(props)
+                if props.iter().any(|p| matches!(p, PropDef::Cover { .. })))
+        })
+    }
+    fn target(t: &Expr) -> bool {
+        match t {
+            Expr::Array(_) | Expr::Object(_) => pattern_has_stray_cover(t),
+            other => generic(other),
+        }
+    }
+    match e {
+        Expr::Array(elems) => elems.iter().any(|el| match el {
+            ArrayElem::Hole => false,
+            ArrayElem::Spread(t) => target(t),
+            ArrayElem::Item(Expr::Assign {
+                op: "=",
+                target: t,
+                value,
+            }) => target(t) || generic(value),
+            ArrayElem::Item(t) => target(t),
+        }),
+        Expr::Object(props) => props.iter().any(|p| match p {
+            PropDef::KeyValue {
+                value:
+                    Expr::Assign {
+                        op: "=",
+                        target: t,
+                        value,
+                    },
+                ..
+            }
+            | PropDef::Cover {
+                value:
+                    Expr::Assign {
+                        op: "=",
+                        target: t,
+                        value,
+                    },
+                ..
+            }
+            | PropDef::Proto(Expr::Assign {
+                op: "=",
+                target: t,
+                value,
+            }) => target(t) || generic(value),
+            PropDef::KeyValue { value, .. } | PropDef::Proto(value) => target(value),
+            PropDef::Spread(t) => target(t),
             _ => false,
         }),
         _ => false,
@@ -3832,6 +3992,12 @@ fn is_valid_assign_pattern(e: &Expr) -> bool {
         }),
         Expr::Object(props) => props.iter().enumerate().all(|(idx, p)| match p {
             PropDef::KeyValue {
+                value: Expr::Assign {
+                    op: "=", target, ..
+                },
+                ..
+            }
+            | PropDef::Cover {
                 value: Expr::Assign {
                     op: "=", target, ..
                 },
@@ -4206,7 +4372,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
         Expr::Object(props) => {
             for p in props {
                 match p {
-                    PropDef::KeyValue { key, value } => {
+                    PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
                         if let PropKey::Computed(e) = key {
                             pn_expr(e, st)?;
                         }
@@ -4393,7 +4559,7 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
             };
             for p in props {
                 match p {
-                    PropDef::KeyValue { key, value } => {
+                    PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
                         let (value, default) = match value {
                             Expr::Assign {
                                 op: "=",
