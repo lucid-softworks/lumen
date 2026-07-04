@@ -462,7 +462,13 @@ impl Interp {
                         DeclKind::Var => {
                             // `var x;` (no init) keeps the hoisted binding untouched.
                             if let Some(e) = init {
+                                if let Pattern::Ident(n) = pat {
+                                    if matches!(e, Expr::Class(c) if c.name.is_none()) {
+                                        self.pending_fn_name = Some(n.clone());
+                                    }
+                                }
                                 let value = self.eval(e, env)?;
+                                self.pending_fn_name = None;
                                 if let Pattern::Ident(n) = pat {
                                     if is_anonymous_fn(e) {
                                         self.set_fn_name(&value, n);
@@ -472,10 +478,16 @@ impl Interp {
                             }
                         }
                         DeclKind::Let | DeclKind::Const => {
+                            if let (Pattern::Ident(n), Some(e)) = (pat, init) {
+                                if matches!(e, Expr::Class(c) if c.name.is_none()) {
+                                    self.pending_fn_name = Some(n.clone());
+                                }
+                            }
                             let value = match init {
                                 Some(e) => self.eval(e, env)?,
                                 None => Value::Undefined,
                             };
+                            self.pending_fn_name = None;
                             if let (Pattern::Ident(n), Some(e)) = (pat, init) {
                                 if is_anonymous_fn(e) {
                                     self.set_fn_name(&value, n);
@@ -501,7 +513,8 @@ impl Interp {
                             }
                             // Capture the dispose method now (TypeError if not disposable).
                             self.add_disposable(&value, is_async)?;
-                            self.bind_pattern(pat, value, env, BindMode::Lexical(false))?;
+                            // A `using` binding is immutable: assignment is a TypeError.
+                            self.bind_pattern(pat, value, env, BindMode::Lexical(true))?;
                         }
                     }
                 }
@@ -625,7 +638,11 @@ impl Interp {
             Stmt::ExportDecl(inner) => self.exec_stmt(inner, env),
             Stmt::ExportDefault(inner) => match &**inner {
                 Stmt::Expr(e) => {
+                    if matches!(e, Expr::Class(c) if c.name.is_none()) {
+                        self.pending_fn_name = Some("default".to_string());
+                    }
                     let v = self.eval(e, env)?;
+                    self.pending_fn_name = None;
                     // NamedEvaluation: an anonymous function/class default export is named "default".
                     if is_anonymous_fn(e) {
                         self.set_fn_name(&v, "default");
@@ -642,7 +659,9 @@ impl Interp {
                     Ok(Value::Empty)
                 }
                 Stmt::ClassDecl(c) if c.name.is_none() => {
+                    self.pending_fn_name = Some("default".to_string());
                     let v = self.eval_class(c, env)?;
+                    self.pending_fn_name = None;
                     self.set_fn_name(&v, "default");
                     self.init_lexical("*default*", v, false, env);
                     Ok(Value::Empty)
@@ -789,7 +808,9 @@ impl Interp {
                     }
                     let mode = match kind {
                         DeclKind::Var => BindMode::Var,
-                        k => BindMode::Lexical(*k == DeclKind::Const),
+                        DeclKind::Let => BindMode::Lexical(false),
+                        // const and using/await-using bindings are immutable.
+                        _ => BindMode::Lexical(true),
                     };
                     let is_using = matches!(kind, DeclKind::Using | DeclKind::AwaitUsing);
                     let is_async = matches!(kind, DeclKind::AwaitUsing);
@@ -902,7 +923,9 @@ impl Interp {
         // No-decl form assigns to an existing binding; a declaration creates a fresh one per round.
         let mode = match decl {
             Some(DeclKind::Var) | None => BindMode::Var,
-            Some(k) => BindMode::Lexical(k == DeclKind::Const),
+            Some(DeclKind::Let) => BindMode::Lexical(false),
+            // const and using/await-using bindings are immutable.
+            Some(_) => BindMode::Lexical(true),
         };
         // A `for (using x of y)` / `for await (await using x of y)` head disposes each element at
         // the end of its iteration.
@@ -3438,8 +3461,26 @@ impl Interp {
             return Err(self.throw("SyntaxError", "'super' keyword unexpected here"));
         }
         // A direct eval from class-field-initializer code may not reference `arguments` (also an
-        // early error, checked before the body runs).
-        if direct && self.in_field_init_code && stmts_have_arguments_ref(&body) {
+        // early error, checked before the body runs). The context is *lexical*: an arrow created
+        // in an initializer keeps it, while an ordinary function (whose scope binds `arguments`)
+        // shields it — so walk the caller's scope chain.
+        let in_field_init = direct && {
+            let mut found = false;
+            let mut cur = Some(caller_env.clone());
+            while let Some(sc) = cur {
+                let b = sc.borrow();
+                if b.vars.contains_key("arguments") {
+                    break;
+                }
+                if b.vars.contains_key("%fieldinit%") {
+                    found = true;
+                    break;
+                }
+                cur = b.parent.clone();
+            }
+            found
+        };
+        if in_field_init && stmts_have_arguments_ref(&body) {
             return Err(self.throw(
                 "SyntaxError",
                 "'arguments' is not allowed in class field initializer code",
@@ -3847,6 +3888,13 @@ impl Interp {
             .props
             .insert("constructor", Property::builtin(ctor_val.clone()));
         bind(&inst_env, "%thisctor%", ctor_val.clone());
+        // NamedEvaluation: an anonymous class takes its target name *before* any static
+        // initializer runs.
+        if class.name.is_none() {
+            if let Some(n) = self.pending_fn_name.take() {
+                self.set_fn_name(&ctor_val, &n);
+            }
+        }
         // A named class binds its own name (initialized) in the class scope, so methods, static
         // blocks, field initializers and decorators can reference the class itself.
         if let Some(n) = &class.name {
@@ -4094,6 +4142,9 @@ impl Interp {
         for (block, key, init, transforms) in static_els {
             let scope = new_scope(Some(static_env.clone()));
             bind(&scope, "this", ctor_val.clone());
+            if block.is_none() {
+                bind(&scope, "%fieldinit%", Value::Bool(true));
+            }
             if let Some(func) = block {
                 // A static block instantiates its declarations like a function body,
                 // including a `using` disposal frame.
@@ -4696,6 +4747,9 @@ impl Interp {
             for (key, init, transforms) in fields {
                 let scope = new_scope(Some(field_env.clone()));
                 bind(&scope, "this", this.clone());
+                // Field-initializer code: a direct eval from here (or from an arrow created
+                // here) may not reference `arguments`.
+                bind(&scope, "%fieldinit%", Value::Bool(true));
                 let mut v = match init {
                     Some(e) => {
                         let v = me.eval(&e, &scope)?;
@@ -5080,7 +5134,13 @@ impl Interp {
             // A simple target evaluates its Reference (base + computed key expression) BEFORE the
             // RHS; ToPropertyKey and the base's RequireObjectCoercible are deferred to PutValue.
             let mut lref = self.resolve_reference(target, env)?;
+            if let Expr::Ident(n) = target {
+                if matches!(value, Expr::Class(c) if c.name.is_none()) {
+                    self.pending_fn_name = Some(n.clone());
+                }
+            }
             let v = self.eval(value, env)?;
+            self.pending_fn_name = None;
             // `f = function(){}` names the anonymous function after the target identifier.
             if let Expr::Ident(n) = target {
                 if is_anonymous_fn(value) {

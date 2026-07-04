@@ -599,6 +599,9 @@ pub struct Interp {
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
     pub yield_raw_result: bool,
+    /// NamedEvaluation: the binding/property name an anonymous class expression being evaluated
+    /// should take — applied *before* its static initializers run.
+    pub pending_fn_name: Option<String>,
     /// A pending proper tail call: set by `return f(...)` in a strict ordinary function; the
     /// nearest `Interp::call` frame re-dispatches it (a trampoline), keeping the stack flat.
     pub pending_tail: Option<(Value, Value, Vec<Value>)>,
@@ -991,6 +994,7 @@ impl Interp {
             super_call_ok: false,
             in_field_init_code: false,
             yield_raw_result: false,
+            pending_fn_name: None,
             pending_tail: None,
             tco_ok: false,
             template_cache: std::collections::HashMap::new(),

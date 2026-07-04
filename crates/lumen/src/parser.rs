@@ -657,6 +657,7 @@ impl Parser {
             // is an identifier reference (with ASI before a newline-separated binding name).
             Tok::Ident(w)
                 if w == "let"
+                    && !self.cur_escaped()
                     && self.starts_let_decl()
                     && (!single_stmt || matches!(self.peek_kind(1), Tok::Punct("["))) =>
             {
@@ -1220,7 +1221,7 @@ impl Parser {
         } else if self.is_kw("const") {
             self.advance();
             Some(DeclKind::Const)
-        } else if self.is_ident_word("let") && self.starts_let_decl() {
+        } else if self.is_ident_word("let") && !self.cur_escaped() && self.starts_let_decl() {
             self.advance();
             Some(DeclKind::Let)
         } else if self.is_ident_word("using") && self.starts_using_decl() {
@@ -1362,6 +1363,14 @@ impl Parser {
             };
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
+            // `for (async of ...)` is ambiguous with an async arrow head: a bare `async`
+            // LHS in a for-of is a SyntaxError (parenthesize it).
+            if of && !self.last_paren && matches!(&init_expr, Expr::Ident(n) if n == "async") {
+                return Err(ParseError {
+                    message: "'async' as a for-of left side must be parenthesized".into(),
+                    line: self.line(),
+                });
+            }
             let left = match &init_expr {
                 // A destructuring assignment head keeps its expression form: the full
                 // AssignmentPattern semantics (iterator close, member and member-rest targets)
