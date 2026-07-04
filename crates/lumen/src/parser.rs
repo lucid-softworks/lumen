@@ -2040,7 +2040,11 @@ impl Parser {
                     right: Box::new(right),
                 }
             } else if op == "in" {
-                // `#field in obj` is the ergonomic brand check, not a normal `in`.
+                // `#field in obj` is the ergonomic brand check, not a normal `in`; the RHS
+                // itself may not be a bare private name (`#f in #f in x` is a SyntaxError).
+                if matches!(&right, Expr::Ident(r) if r.starts_with('#')) {
+                    return self.err("a private name may only appear to the left of 'in'");
+                }
                 if let Expr::Ident(n) = &left {
                     if n.starts_with('#') {
                         left = Expr::PrivateIn {
@@ -4226,6 +4230,8 @@ fn is_strict_reserved_binding(name: &str) -> bool {
 
 fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
     match e {
+        // A bare private name is never an assignment target.
+        Expr::Ident(name) if name.starts_with('#') => None,
         Expr::Ident(name) => Some(Pattern::Ident(name.clone())),
         Expr::Array(elems) => {
             let mut out = Vec::new();

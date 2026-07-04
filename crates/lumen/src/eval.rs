@@ -2815,7 +2815,8 @@ impl Interp {
         // (so it can see/define local bindings). Any other way of reaching eval is indirect and runs
         // in the global scope (handled by the global `eval` native).
         if let Expr::Ident(name) = callee {
-            if name == "eval" {
+            // `eval?.(...)` is NOT a direct eval — it runs indirectly, in the global scope.
+            if name == "eval" && !optional {
                 if let (Ok(Value::Obj(f)), Some(ef)) =
                     (self.get_var("eval", env), self.eval_fn.clone())
                 {
