@@ -383,7 +383,9 @@ impl Interp {
                         let mut names = Vec::new();
                         pattern_idents(pat, &mut names);
                         for name in names {
-                            scope.borrow_mut().vars.insert(
+                            let mut b = scope.borrow_mut();
+                            b.lexical_names.push(name.clone());
+                            b.vars.insert(
                                 name,
                                 Binding {
                                     value: Value::Undefined,
@@ -416,6 +418,7 @@ impl Interp {
                 Stmt::ClassDecl(class) => {
                     if let Some(name) = &class.name {
                         // Classes are lexically scoped with a TDZ until the declaration executes.
+                        scope.borrow_mut().lexical_names.push(name.clone());
                         scope.borrow_mut().vars.insert(
                             name.clone(),
                             Binding {
@@ -3528,6 +3531,16 @@ impl Interp {
                     }
                 }
                 cur = parent;
+            }
+            // The variable environment itself may hold body-level lexicals (our function body
+            // scope carries both); a var may not hoist over one of those either.
+            for name in &var_names {
+                if var_env.borrow().lexical_names.iter().any(|n| n == name) {
+                    return Err(self.throw(
+                        "SyntaxError",
+                        format!("Identifier '{name}' has already been declared"),
+                    ));
+                }
             }
         }
 

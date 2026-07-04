@@ -161,6 +161,10 @@ pub struct Scope {
     /// EvalDeclarationInstantiation walk skips it, so `eval("var e")` inside `catch (e) { … }` is
     /// allowed (the web-compatibility carve-out for VariableStatements in catch blocks).
     pub catch_param: bool,
+    /// Names declared *lexically* at this scope's own level (let/const/using/class). A function
+    /// body scope holds both hoisted vars and body-level lexicals; a sloppy direct eval's
+    /// var/lexical conflict check needs to tell them apart.
+    pub lexical_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -202,6 +206,7 @@ pub fn new_scope(parent: Option<Env>) -> Env {
         with_obj: None,
         var_boundary: false,
         catch_param: false,
+        lexical_names: Vec::new(),
     }))
 }
 
@@ -214,6 +219,7 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
         with_obj: None,
         var_boundary: true,
         catch_param: false,
+        lexical_names: Vec::new(),
     }))
 }
 
@@ -226,6 +232,7 @@ pub fn new_catch_scope(parent: Env) -> Env {
         with_obj: None,
         var_boundary: false,
         catch_param: true,
+        lexical_names: Vec::new(),
     }))
 }
 
@@ -237,6 +244,7 @@ pub fn new_with_scope(parent: Env, obj: Value) -> Env {
         with_obj: Some(obj),
         var_boundary: false,
         catch_param: false,
+        lexical_names: Vec::new(),
     }))
 }
 
