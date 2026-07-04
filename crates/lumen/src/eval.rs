@@ -5855,6 +5855,10 @@ impl Interp {
                 let res = self.call(handler, r.clone(), std::slice::from_ref(l))?;
                 return Ok(Value::Bool(self.to_boolean(&res)));
             }
+            // GetMethod: a present but non-callable @@hasInstance is a TypeError.
+            if !matches!(handler, Value::Undefined | Value::Null) {
+                return Err(self.throw("TypeError", "@@hasInstance is not callable"));
+            }
         }
         if !r.is_callable() {
             return Err(self.throw("TypeError", "right-hand side of instanceof is not callable"));

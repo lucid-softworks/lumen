@@ -4042,10 +4042,17 @@ fn ta_native(
                     i.make_error("TypeError", "TypedArray source is out of bounds")
                 })?;
                 if new_info.kind == info.kind {
-                    // Same element type: a bitwise copy (NaN payloads must survive).
+                    // Same element type: copy bitwise (NaN payloads must survive) — but element
+                    // by element, forward: a species constructor may hand back a view aliasing
+                    // the source buffer, and the spec's sequential Set makes later reads observe
+                    // earlier writes.
+                    let es = info.kind.elsize();
                     let n = count.min(curlen.saturating_sub(start));
-                    if let Some(bytes) = i.ta_read_bytes(&info, start, n) {
-                        i.ta_write_bytes(&new_info, 0, &bytes);
+                    for j in 0..n {
+                        if let Some(bytes) = i.ta_read_bytes(&info, start + j, 1) {
+                            debug_assert_eq!(bytes.len(), es);
+                            i.ta_write_bytes(&new_info, j, &bytes);
+                        }
                     }
                 } else {
                     for j in 0..count {
@@ -6622,6 +6629,17 @@ fn set_like_keys(i: &mut Interp, keys: &Value, other: &Value) -> Result<Vec<Valu
     Ok(out)
 }
 
+/// SetDataHas against the LIVE backing data (skipping tombstones) — set-like callbacks may have
+/// mutated the receiver since any snapshot was taken.
+fn set_data_has(i: &Interp, ptr: usize, v: &Value) -> bool {
+    match i.map_data.get(&ptr) {
+        Some(entries) => entries
+            .iter()
+            .any(|(k, _)| !is_tombstone(i, k) && same_value_zero(k, v)),
+        None => false,
+    }
+}
+
 fn install_set_methods(it: &mut Interp) {
     let sp = it.extra_protos.get("Set").cloned().unwrap();
     it.def_method(&sp, "union", 1, |i, this, a| {
@@ -6629,8 +6647,11 @@ fn install_set_methods(it: &mut Interp) {
         // BEFORE the result is snapshotted from O.[[SetData]], per spec.
         coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
+        // GetKeysIterator (keys() call + `next` get) precedes the [[SetData]] copy, so mutations
+        // those getters make to the receiver are visible in the result.
+        let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
         let mut vals = set_values(i, &this)?;
-        for k in set_like_keys(i, &keys, &arg(a, 0))? {
+        while let Some(k) = set_like_next(i, &iter, &next)? {
             if !vals.iter().any(|v| same_value_zero(v, &k)) {
                 vals.push(k);
             }
@@ -6638,25 +6659,34 @@ fn install_set_methods(it: &mut Interp) {
         Ok(new_set(i, vals))
     });
     it.def_method(&sp, "intersection", 1, |i, this, a| {
-        coll_ptr_kind(i, &this, Some("Set"))?;
+        let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
         let (has, keys, other_size) = set_record(i, &arg(a, 0))?;
-        let vals = set_values(i, &this)?;
         let mut out = Vec::new();
-        if (vals.len() as f64) <= other_size {
-            // Iterate this Set, probing the other's `has`.
-            for v in vals {
-                if set_like_has(i, &has, &arg(a, 0), &v)?
-                    && !out.iter().any(|o| same_value_zero(o, &v))
+        if (coll_live_len(i, ptr) as f64) <= other_size {
+            // Walk this Set LIVE by index, probing the other's `has` — the callback may delete
+            // and re-append entries, and the walk observes that (appended entries are visited).
+            let mut idx = 0usize;
+            loop {
+                let entry = i.map_data.get(&ptr).and_then(|e| e.get(idx).cloned());
+                idx += 1;
+                let (k, _) = match entry {
+                    Some(kv) => kv,
+                    None => break,
+                };
+                if is_tombstone(i, &k) {
+                    continue;
+                }
+                if set_like_has(i, &has, &arg(a, 0), &k)?
+                    && !out.iter().any(|o| same_value_zero(o, &k))
                 {
-                    out.push(v);
+                    out.push(k);
                 }
             }
         } else {
-            // Iterate the other's keys, probing this Set directly (no `has` calls on the other).
-            for k in set_like_keys(i, &keys, &arg(a, 0))? {
-                if vals.iter().any(|v| same_value_zero(v, &k))
-                    && !out.iter().any(|o| same_value_zero(o, &k))
-                {
+            // Iterate the other's keys, probing this Set's LIVE data (no `has` calls on the other).
+            let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
+            while let Some(k) = set_like_next(i, &iter, &next)? {
+                if set_data_has(i, ptr, &k) && !out.iter().any(|o| same_value_zero(o, &k)) {
                     out.push(k);
                 }
             }
@@ -6686,38 +6716,28 @@ fn install_set_methods(it: &mut Interp) {
         }
     });
     it.def_method(&sp, "symmetricDifference", 1, |i, this, a| {
-        // GetSetRecord (which may mutate the receiver via getters) precedes the snapshot. The result
-        // data keeps stable slots: toggling a present key empties its slot, and adding a key reuses
-        // the first empty slot (else appends) — so a removed-then-re-added key keeps its position.
-        coll_ptr_kind(i, &this, Some("Set"))?;
+        let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, _size) = set_record(i, &arg(a, 0))?;
-        // Each slot remembers its key and whether it is present. Toggling a present key clears it;
-        // re-adding a key reuses *its own* cleared slot; a brand-new key appends.
-        let mut result: Vec<(Value, bool)> = set_values(i, &this)?
-            .into_iter()
-            .map(|v| (v, true))
-            .collect();
+        // GetKeysIterator precedes the [[SetData]] copy. For each key of `other`: present in the
+        // LIVE receiver → remove it from the result (in both); absent → append if not already in
+        // the result (only in other). Removal empties the slot (order is preserved).
         let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
+        let mut result: Vec<Option<Value>> = set_values(i, &this)?.into_iter().map(Some).collect();
         while let Some(k) = set_like_next(i, &iter, &next)? {
-            if let Some(slot) = result
-                .iter_mut()
-                .find(|(v, present)| *present && same_value_zero(v, &k))
-            {
-                slot.1 = false;
-            } else if let Some(slot) = result
-                .iter_mut()
-                .find(|(v, present)| !*present && same_value_zero(v, &k))
-            {
-                slot.1 = true;
-            } else {
-                result.push((k, true));
+            let in_result = result.iter().flatten().any(|v| same_value_zero(v, &k));
+            if set_data_has(i, ptr, &k) {
+                if in_result {
+                    for slot in result.iter_mut() {
+                        if matches!(&slot, Some(v) if same_value_zero(v, &k)) {
+                            *slot = None;
+                        }
+                    }
+                }
+            } else if !in_result {
+                result.push(Some(k));
             }
         }
-        let out: Vec<Value> = result
-            .into_iter()
-            .filter(|(_, present)| *present)
-            .map(|(v, _)| v)
-            .collect();
+        let out: Vec<Value> = result.into_iter().flatten().collect();
         Ok(new_set(i, out))
     });
     it.def_method(&sp, "isSubsetOf", 1, |i, this, a| {
@@ -6746,17 +6766,17 @@ fn install_set_methods(it: &mut Interp) {
         Ok(Value::Bool(true))
     });
     it.def_method(&sp, "isSupersetOf", 1, |i, this, a| {
-        coll_ptr_kind(i, &this, Some("Set"))?;
+        let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
         let (_has, keys, other_size) = set_record(i, &arg(a, 0))?;
-        let vals = set_values(i, &this)?;
-        // A smaller set cannot be a superset; otherwise every other key must be in this. The other's
-        // keys are iterated lazily and the iterator is closed if a missing key exits early.
-        if (vals.len() as f64) < other_size {
+        // A smaller set cannot be a superset; otherwise every other key must be in this. The
+        // other's keys are iterated lazily against the LIVE receiver data (the iterator may add
+        // entries), closing the iterator if a missing key exits early.
+        if (coll_live_len(i, ptr) as f64) < other_size {
             return Ok(Value::Bool(false));
         }
         let (iter, next) = set_like_open(i, &keys, &arg(a, 0))?;
         while let Some(k) = set_like_next(i, &iter, &next)? {
-            if !vals.iter().any(|v| same_value_zero(v, &k)) {
+            if !set_data_has(i, ptr, &k) {
                 set_like_close(i, &iter);
                 return Ok(Value::Bool(false));
             }
@@ -9837,8 +9857,9 @@ fn install_function_proto(it: &mut Interp) {
         ab(i.call(this, this_arg, &list))
     });
     it.def_method(&fp, "bind", 1, |i, this, args| {
+        // Any callable (including a callable proxy) can be bound.
         let target = match &this {
-            Value::Obj(o) if !matches!(o.borrow().call, Callable::None) => o.clone(),
+            Value::Obj(o) if this.is_callable() => o.clone(),
             _ => return Err(i.make_error("TypeError", "bind must be called on a function")),
         };
         let bound_this = arg(args, 0);
@@ -9847,9 +9868,10 @@ fn install_function_proto(it: &mut Interp) {
         } else {
             args[1..].to_vec()
         };
-        // length: 0 unless the target has an OWN `length` that is a Number; then +Infinity stays,
-        // and a finite value becomes max(0, ToInteger(len) - boundArgs). name = "bound " + target.name.
-        let has_own_len = matches!(&this, Value::Obj(o) if o.borrow().props.contains("length"));
+        // length: 0 unless the target has an OWN `length` (HasOwnProperty — proxy-trapped) whose
+        // Get is a Number; +Infinity stays, -Infinity is 0, and a finite value becomes
+        // max(0, ToIntegerOrInfinity(len) - boundArgs). name = "bound " + Get(target, "name").
+        let has_own_len = has_own_property_trapped(i, &this, "length")?;
         let l: f64 = if has_own_len {
             match ab(i.get_member(&this, "length"))? {
                 Value::Num(n) if n == f64::INFINITY => f64::INFINITY,
@@ -9864,8 +9886,14 @@ fn install_function_proto(it: &mut Interp) {
             Value::Str(s) => format!("bound {s}"),
             _ => "bound ".to_string(),
         };
-        let obj = Object::new(Some(i.function_proto.clone()));
-        let target_is_ctor = is_constructor_value(&this);
+        // BoundFunctionCreate: the bound function's [[Prototype]] is the target's (via
+        // [[GetPrototypeOf]], so a proxy trap participates) — possibly null.
+        let bound_proto = match js_get_prototype_of(i, &this)? {
+            Value::Obj(p) => Some(p),
+            _ => None,
+        };
+        let obj = Object::new(bound_proto);
+        let target_is_ctor = i.value_is_constructor(&this);
         obj.borrow_mut().call = Callable::Bound {
             target,
             this: bound_this,
@@ -13110,9 +13138,7 @@ fn install_array(it: &mut Interp) {
         if !matches!(iter_method, Value::Undefined | Value::Null) && !iter_method.is_callable() {
             return Err(i.make_error("TypeError", "@@iterator is not callable"));
         }
-        let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value.clone());
-        let is_array_ctor = matches!((&this, &array_ctor), (Value::Obj(a), Some(Value::Obj(b))) if Rc::ptr_eq(a, b));
-        let use_ctor = this.is_callable() && !is_array_ctor;
+        let use_ctor = i.value_is_constructor(&this);
         if iter_method.is_callable() {
             // Iterator path: the target is constructed BEFORE iteration (constructor errors
             // propagate as-is), then elements are defined one at a time; a map/define failure
@@ -14054,7 +14080,7 @@ fn from_async_body(
     if !matches!(mapfn, Value::Undefined) && !mapfn.is_callable() {
         return Err(i.make_error("TypeError", "Array.fromAsync: mapFn is not callable"));
     }
-    let use_ctor = is_constructor_value(&this);
+    let use_ctor = i.value_is_constructor(&this);
     // Prefer @@asyncIterator, then a sync iterator; otherwise treat `source` as array-like.
     // GetMethod: a present-but-non-callable @@asyncIterator/@@iterator is a TypeError.
     let get_method = |i: &mut Interp, key: &str| -> Result<Value, Value> {
