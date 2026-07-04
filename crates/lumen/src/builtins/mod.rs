@@ -16720,7 +16720,8 @@ fn this_number(i: &mut Interp, this: &Value) -> Result<f64, Value> {
 /// value, rounded to `f` fraction digits with ties away from zero (the spec's "larger n").
 /// `shortest` (fractionDigits undefined) picks the minimal digits that round-trip.
 fn to_exponential(x: f64, f: usize, shortest: bool) -> String {
-    let (sign, x) = if x < 0.0 { ("-", -x) } else { ("", x) };
+    // The sign follows x < 0 exclusively; `+ 0.0` then clears a negative zero so it formats as "0".
+    let (sign, x) = if x < 0.0 { ("-", -x) } else { ("", x + 0.0) };
     let fmt_exp = |exp: i32| format!("e{}{}", if exp < 0 { '-' } else { '+' }, exp.abs());
     if shortest {
         let s = format!("{x:e}");
