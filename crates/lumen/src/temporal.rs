@@ -2516,9 +2516,11 @@ fn ym_in_range(year: i64, month: u8) -> bool {
 fn parse_month_day(s: &str) -> Option<IsoDate> {
     if let Some(p) = parse_iso(s) {
         if let Some(d) = p.date {
-            if p.offset == Off::Z || !cal_ok(&p.calendar) || !date_in_range(d) {
+            if p.offset == Off::Z || !cal_ok(&p.calendar) {
                 return None;
             }
+            // The year of a full-date form is irrelevant for an ISO month-day (any magnitude);
+            // non-ISO calendars validate it separately (their fields need a real date).
             return Some(IsoDate {
                 year: 1972,
                 month: d.month,
@@ -5886,11 +5888,12 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
                 }
             };
             let month2 = regulate_high(i, month2, 12, ovf, "month")? as u8;
-            // The reference ISO year applies the day ceiling but is otherwise inert.
+            // A provided year (of any magnitude) supplies the day ceiling but is otherwise inert.
+            let ceiling_year = year.unwrap_or(md.year);
             let dd = regulate_high(
                 i,
                 day.unwrap_or(md.day as i64),
-                days_in_month(md.year, month2) as i64,
+                days_in_month(ceiling_year, month2) as i64,
                 ovf,
                 "day",
             )? as u8;
@@ -5958,6 +5961,174 @@ fn install_month_day(it: &mut Interp, ns: &Gc) {
 /// CalendarMonthDayToISOReferenceDate for a non-ISO calendar: the reference ISO date is the latest
 /// date at or before 1972-12-31 (in the calendar) whose monthCode and day match the request, so a
 /// leap monthCode anchors to a year that actually has it. `snap` holds the already-read fields.
+
+/// The largest day the month code reaches in any year of the calendar, or None when the
+/// (code, day-30) combination is not known to occur historically (rare Chinese leap months).
+fn md_max_day(cal: &str, code: &str, day: i64) -> Option<i64> {
+    let mn: usize = code[1..3].parse().unwrap_or(0);
+    let leap = code.ends_with('L');
+    match cal {
+        "hebrew" => {
+            if leap {
+                return if code == "M05L" { Some(30) } else { None };
+            }
+            [30, 30, 30, 29, 30, 29, 30, 29, 30, 29, 30, 29]
+                .get(mn.wrapping_sub(1))
+                .copied()
+                .map(|v| v as i64)
+        }
+        "chinese" | "dangi" => {
+            let refs = chinese_md_ref(cal, code)?;
+            if refs.0.is_none() {
+                return None;
+            }
+            if day >= 30 && refs.1.is_none() {
+                return None;
+            }
+            Some(30)
+        }
+        "islamic-civil" | "islamic-tbla" | "islamicc" => {
+            if leap {
+                return None;
+            }
+            [30, 29, 30, 29, 30, 29, 30, 29, 30, 29, 30, 30]
+                .get(mn.wrapping_sub(1))
+                .copied()
+                .map(|v| v as i64)
+        }
+        c if is_islamic(c) => {
+            if leap {
+                None
+            } else if (1..=12).contains(&mn) {
+                Some(30)
+            } else {
+                None
+            }
+        }
+        "persian" => {
+            if leap {
+                return None;
+            }
+            if (1..=12).contains(&mn) {
+                Some(if mn <= 6 { 31 } else { 30 })
+            } else {
+                None
+            }
+        }
+        "indian" => {
+            if leap {
+                return None;
+            }
+            [31, 31, 31, 31, 31, 31, 30, 30, 30, 30, 30, 30]
+                .get(mn.wrapping_sub(1))
+                .copied()
+                .map(|v| v as i64)
+        }
+        c if is_13month(c) => {
+            if leap {
+                return None;
+            }
+            match mn {
+                1..=12 => Some(30),
+                13 => Some(6),
+                _ => None,
+            }
+        }
+        _ => {
+            if leap {
+                return None;
+            }
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                .get(mn.wrapping_sub(1))
+                .copied()
+                .map(|v| v as i64)
+        }
+    }
+}
+/// Chinese/Dangi per-code ISO reference years: (for day <= 29, for day 30). None = never occurs.
+fn chinese_md_ref(cal: &str, code: &str) -> Option<(Option<i64>, Option<i64>)> {
+    let t: (Option<i64>, Option<i64>) = match code {
+        "M01" => (Some(1972), Some(1970)),
+        "M01L" => (None, None),
+        "M02" => (Some(1972), Some(1972)),
+        "M02L" => (Some(1947), None),
+        "M03" if cal == "dangi" => (Some(1972), Some(1968)),
+        "M03" => (Some(1972), Some(1966)),
+        "M03L" => (Some(1966), Some(1955)),
+        "M04" => (Some(1972), Some(1970)),
+        "M04L" => (Some(1963), Some(1944)),
+        "M05" => (Some(1972), Some(1972)),
+        "M05L" => (Some(1971), Some(1952)),
+        "M06" => (Some(1972), Some(1971)),
+        "M06L" => (Some(1960), Some(1941)),
+        "M07" => (Some(1972), Some(1972)),
+        "M07L" => (Some(1968), Some(1938)),
+        "M08" => (Some(1972), Some(1971)),
+        "M08L" => (Some(1957), None),
+        "M09" => (Some(1972), Some(1972)),
+        "M09L" => (Some(2014), None),
+        "M10" => (Some(1972), Some(1972)),
+        "M10L" => (Some(1984), None),
+        "M11" => (Some(1972), Some(1970)),
+        "M11L" => (Some(2034), None),
+        "M12" => (Some(1972), Some(1972)),
+        "M12L" => (None, None),
+        _ => return None,
+    };
+    Some(t)
+}
+/// The ISO year whose Dec 31 anchors the reference-date search for (code, day).
+fn md_ref_iso_year(cal: &str, code: &str, day: i64) -> i64 {
+    match cal {
+        "hebrew" => {
+            if code == "M05L" {
+                1970
+            } else if (code == "M02" || code == "M03") && day == 30 {
+                1971
+            } else {
+                1972
+            }
+        }
+        "chinese" | "dangi" => chinese_md_ref(cal, code)
+            .and_then(|(r29, r30)| if day >= 30 { r30 } else { r29 })
+            .unwrap_or(1972),
+        "islamic-civil" | "islamic-tbla" | "islamicc" => {
+            if code == "M12" && day == 30 {
+                1971
+            } else {
+                1972
+            }
+        }
+        c if is_islamic(c) => {
+            if day == 30 {
+                match &code[..3] {
+                    "M01" => 1972,
+                    "M02" => 1970,
+                    "M03" => 1971,
+                    "M04" => 1972,
+                    "M05" => 1971,
+                    "M06" => 1972,
+                    "M07" => 1969,
+                    "M08" => 1972,
+                    "M09" => 1972,
+                    "M10" => 1970,
+                    "M11" => 1972,
+                    _ => 1971,
+                }
+            } else {
+                1972
+            }
+        }
+        c if is_13month(c) => {
+            if code == "M13" && day == 6 {
+                1971
+            } else {
+                1972
+            }
+        }
+        _ => 1972,
+    }
+}
 fn cal_month_day_reference(
     i: &mut Interp,
     cal: &str,
@@ -6014,32 +6185,80 @@ fn cal_month_day_reference(
     // The wanted monthCode is the caller's verbatim (preserving a leap "L"); with an ordinal `month`
     // it comes from the anchor. Try the exact code first, then (for a leap month that never occurs in
     // range) its plain form — and within each, prefer a year where the day fits un-clamped.
-    let want = match getm(i, &Value::Obj(snap.clone()), "monthCode")? {
-        Value::Undefined => cal_month_code(cal, anchor),
-        mc => i.to_string(&mc).map_err(unab)?.to_string(),
-    };
-    let want_day = match getm(i, &Value::Obj(snap.clone()), "day")? {
-        Value::Undefined => 0,
-        dv => to_int(i, &dv)?,
-    };
-    let plain = want.trim_end_matches('L').to_string();
-    let candidates: Vec<&str> = if want.ends_with('L') {
-        vec![&want, &plain]
+    let (want, want_day) = if has_year {
+        // The year applied its own overflow to the anchor; use its resolved code and day.
+        (cal_month_code(cal, anchor), cal_fields(cal, anchor).2)
     } else {
-        vec![&want]
+        let w = match getm(i, &Value::Obj(snap.clone()), "monthCode")? {
+            Value::Undefined => cal_month_code(cal, anchor),
+            mc => i.to_string(&mc).map_err(unab)?.to_string(),
+        };
+        let wd = match getm(i, &Value::Obj(snap.clone()), "day")? {
+            Value::Undefined => 0,
+            dv => to_int(i, &dv)?,
+        };
+        (w, wd)
     };
-    for cand in &candidates {
-        for require_day in [true, false] {
-            for cy in (start_cy - 40..=start_cy).rev() {
-                if let Ok(iso) = resolve(i, cy) {
-                    if cal_month_code(cal, iso) == *cand
-                        && (!require_day || cal_fields(cal, iso).2 == want_day)
-                        && epoch_days(iso) <= epoch_days(ref_iso)
-                    {
-                        return Ok(iso);
-                    }
-                }
+    // Resolve (year, monthCode, day) strictly — the round-trip must reproduce the code and day.
+    let resolve_at = |i: &mut Interp, cy: i64, code: &str, day: i64| -> Option<IsoDate> {
+        let merged = i.new_object();
+        setm(&merged, "monthCode", Value::str(code));
+        setm(&merged, "day", Value::Num(day as f64));
+        setm(&merged, "year", Value::Num(cy as f64));
+        let raw = read_date_raw_cal(i, &Value::Obj(merged), cal, Overflow::Constrain).ok()?;
+        let iso = regulate_date(i, raw, Overflow::Constrain).ok()?;
+        if cal_month_code(cal, iso) == code && cal_fields(cal, iso).2 == day {
+            Some(iso)
+        } else {
+            None
+        }
+    };
+    let mut code = want.clone();
+    let mut day = want_day.max(1);
+    // Adjust rare (never-occurring) codes and apply the day ceiling.
+    let max_day = match md_max_day(cal, &code, day) {
+        Some(m) => m,
+        None => {
+            if ovf == Overflow::Reject {
+                return Err(i.make_error(
+                    "RangeError",
+                    "no year known to exist with this month code and day",
+                ));
             }
+            code = code.trim_end_matches('L').to_string();
+            md_max_day(cal, &code, day)
+                .ok_or_else(|| i.make_error("RangeError", "invalid monthCode for this calendar"))?
+        }
+    };
+    if day > max_day {
+        if ovf == Overflow::Reject {
+            return Err(i.make_error("RangeError", "day is out of range in the target month"));
+        }
+        day = max_day;
+        // Clamping may make a previously-impossible day-30 combination possible; re-adjust.
+        if let Some(m2) = md_max_day(cal, &code, day) {
+            if day > m2 {
+                day = m2;
+            }
+        }
+    }
+    // Find the latest instance on or before Dec 31 of the reference ISO year.
+    let start_iso = IsoDate {
+        year: md_ref_iso_year(cal, &code, day),
+        month: 12,
+        day: 31,
+    };
+    let cf = cal_fields(cal, start_iso);
+    let start_code = cal_month_code(cal, start_iso);
+    let mut cal_year = cf.0;
+    // Lexicographic month-code ordering decides whether Dec 31 has already passed the target.
+    let passed = start_code.as_str() > code.as_str() || (start_code == code && cf.2 >= day);
+    if !passed {
+        cal_year -= 1;
+    }
+    for back in 0..4 {
+        if let Some(iso) = resolve_at(i, cal_year - back, &code, day) {
+            return Ok(iso);
         }
     }
     // Fallback: the anchor itself (should be unreachable for representable month-days).
@@ -6066,6 +6285,23 @@ fn to_monthday_cal(
                     .unwrap_or("iso8601"),
             );
             to_overflow(i, opts)?;
+            if &*cal != "iso8601" {
+                // A full date string in a non-ISO calendar: its calendar month-code/day determine
+                // the canonical reference date (so the date itself must be representable).
+                let full = parse_iso(s).and_then(|p| p.date).unwrap_or(md);
+                if !date_in_range(full) {
+                    return Err(i.make_error("RangeError", "date outside representable range"));
+                }
+                let snap = i.new_object();
+                setm(
+                    &snap,
+                    "monthCode",
+                    Value::str(cal_month_code(&cal, full).as_str()),
+                );
+                setm(&snap, "day", Value::Num(cal_fields(&cal, full).2 as f64));
+                let d = cal_month_day_reference(i, &cal, &snap, false, Overflow::Constrain)?;
+                return Ok((d, cal));
+            }
             Ok((md, cal))
         }
         Value::Obj(_) => {
