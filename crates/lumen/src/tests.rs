@@ -5814,9 +5814,15 @@ fn promise_internal_function_shapes() {
         run("var f; new Promise(function(res){f=res}); var d=Object.getOwnPropertyDescriptor(f,'name'); d.value+','+d.enumerable+','+d.configurable"),
         ",false,true"
     );
-    // Promise.all element resolve function: name "" length 1.
+    // Promise.all element resolve function: name "" length 1 (captured through a custom
+    // constructor's synchronous fake-promise `.then`, since a plain thenable's `then` now runs
+    // in a microtask per PromiseResolveThenableJob).
     assert_eq!(
-        run("var order=[]; var thenable={then(res){order.push(res)}}; Promise.all([thenable]); var f=order[0]; f.name+','+f.length"),
+        run("var order=[];
+             function P(ex){ ex(function(){}, function(){}); }
+             P.resolve = function(v){ return { then(f, r) { order.push(f); } }; };
+             Promise.all.call(P, [1]);
+             var f = order[0]; f.name + ',' + f.length"),
         ",1"
     );
 }
@@ -8836,4 +8842,46 @@ fn annexb_web_compat_batch() {
              [typeof d, !!d, d == null, d === null, String(d())].join('|')"),
         "undefined|false|true|false|null"
     );
+}
+#[test]
+fn promise_subclass_resolver_settles_subclass_instance() {
+    // The native super() grafts promise state onto the subclass `this`; a resolver captured from
+    // the executor must still settle that instance (via the promise_forward redirect).
+    let mut e = crate::Engine::new();
+    e.eval(
+        "var out='pending';
+         var r;
+         class C2 extends Promise { constructor(ex) { super(ex); C2.last = this; } }
+         var p = new C2(function(res, rej) { r = res; });
+         out = 'id:' + (p === C2.last) + ':' + (Object.getPrototypeOf(p) === C2.prototype);
+         r(1);
+         p.then(v => { out = 'ok:' + v; }, e => { out = 'rej:' + e; });",
+        false,
+    )
+    .unwrap();
+    match e.eval("out", false).unwrap() {
+        crate::Completion::Value(v) => assert_eq!(v, "ok:1"),
+        crate::Completion::Throw { name, message } => panic!("{name}: {message}"),
+    }
+}
+
+#[test]
+fn promise_already_resolved_is_per_resolver_pair() {
+    // [[AlreadyResolved]] belongs to one resolve/reject pair: a second call on the same pair is
+    // ignored, but the fresh pair created for thenable adoption must still be able to settle.
+    let mut e = crate::Engine::new();
+    e.eval(
+        "var out = 'pending';
+         var p = new Promise(function(res, rej) {
+             res({ then: function(res2) { res2('adopted'); } });
+             rej(new Error('ignored: pair already used'));
+         });
+         p.then(v => { out = 'ok:' + v; }, e => { out = 'rej:' + e; });",
+        false,
+    )
+    .unwrap();
+    match e.eval("out", false).unwrap() {
+        crate::Completion::Value(v) => assert_eq!(v, "ok:adopted"),
+        crate::Completion::Throw { name, message } => panic!("{name}: {message}"),
+    }
 }

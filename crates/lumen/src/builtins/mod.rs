@@ -7576,7 +7576,7 @@ fn pf_then_finally(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Valu
     let result = ab(i.call(on_finally, Value::Undefined, &[]))?;
     let resolve = ab(i.get_member(&c, "resolve"))?;
     let p = ab(i.call(resolve, c.clone(), &[result]))?;
-    let thunk = make_bound(i, pf_return, vec![value]);
+    let thunk = make_bound_len(i, pf_return, vec![value], 0.0);
     let then = ab(i.get_member(&p, "then"))?;
     ab(i.call(then, p, &[thunk]))
 }
@@ -7585,7 +7585,7 @@ fn pf_catch_finally(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
     let result = ab(i.call(on_finally, Value::Undefined, &[]))?;
     let resolve = ab(i.get_member(&c, "resolve"))?;
     let p = ab(i.call(resolve, c.clone(), &[result]))?;
-    let thrower = make_bound(i, pf_throw, vec![reason]);
+    let thrower = make_bound_len(i, pf_throw, vec![reason], 0.0);
     let then = ab(i.get_member(&p, "then"))?;
     ab(i.call(then, p, &[thrower]))
 }
@@ -7633,6 +7633,38 @@ fn new_promise_capability(i: &mut Interp, ctor: &Value) -> Result<Value, Value> 
 /// NewPromiseCapability returning `(promise, resolve, reject)`. The resolve/reject are the
 /// constructor's own capability functions, so a combinator that resolves through them works with a
 /// subclass / foreign Promise constructor (not just the native machinery).
+/// PromiseResolveThenableJob: a microtask handler that invokes `then.call(thenable, res, rej)`,
+/// rejecting through `rej` if the call throws.
+pub(crate) fn make_thenable_job(
+    i: &mut Interp,
+    then: Value,
+    thenable: Value,
+    res: Value,
+    rej: Value,
+) -> Value {
+    make_bound(i, thenable_job_run, vec![then, thenable, res, rej])
+}
+
+fn thenable_job_run(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let then = arg(args, 0);
+    let thenable = arg(args, 1);
+    let res = arg(args, 2);
+    let rej = arg(args, 3);
+    if let Err(e) = ab(i.call(then, thenable, &[res, rej.clone()])) {
+        let _ = i.call(rej, Value::Undefined, &[e]);
+    }
+    Ok(Value::Undefined)
+}
+
+/// The combinators' final `Call(capability.[[Resolve]])`: an abrupt completion rejects the
+/// capability instead of being swallowed (IfAbruptRejectPromise).
+fn capability_resolve_or_reject(i: &mut Interp, resolve_fn: Value, reject_fn: Value, v: Value) {
+    if let Err(e) = i.call(resolve_fn, Value::Undefined, &[v]) {
+        let reason = crate::interpreter::abrupt_value(e);
+        let _ = i.call(reject_fn, Value::Undefined, &[reason]);
+    }
+}
+
 fn new_promise_capability_full(
     i: &mut Interp,
     ctor: &Value,
@@ -7686,51 +7718,180 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
-/// Subscribe a Promise combinator's element handlers via the resolved item's user-visible `.then`
-/// (per spec). A throwing `.then` getter/call rejects the combinator's result promise. Returns
-/// `false` if the combinator should bail out (already rejected).
-fn combinator_then(i: &mut Interp, reject: &Value, next: Value, on_f: Value, on_r: Value) -> bool {
-    let then = match i.get_member(&next, "then") {
-        Ok(t) => t,
-        Err(e) => {
-            let r = crate::interpreter::abrupt_value(e);
-            let _ = i.call(reject.clone(), Value::Undefined, &[r]);
-            return false;
+/// Promise.allKeyed / Promise.allSettledKeyed (the await-dictionary proposal): iterate the
+/// input object's enumerable own string keys ([[OwnPropertyKeys]] + [[GetOwnProperty]]), resolve
+/// each value through C.resolve, and settle with a key-ordered plain result object.
+fn promise_keyed_combinator(
+    i: &mut Interp,
+    t: Value,
+    input: Value,
+    settled: bool,
+) -> Result<Value, Value> {
+    let (result, resolve_fn, reject_fn) = new_promise_capability_full(i, &t)?;
+    macro_rules! reject_with {
+        ($e:expr) => {{
+            let e = $e;
+            let _ = i.call(reject_fn.clone(), Value::Undefined, &[e]);
+            return Ok(result);
+        }};
+    }
+    let promise_resolve = match get_promise_resolve(i, &t) {
+        Ok(r) => r,
+        Err(e) => reject_with!(e),
+    };
+    if !matches!(input, Value::Obj(_)) {
+        reject_with!(i.make_error("TypeError", "argument must be an object"));
+    }
+    // allKeys = ? input.[[OwnPropertyKeys]](); keep enumerable string keys (GetOwnProperty each).
+    let keys: Vec<String> = {
+        let attempt = (|i: &mut Interp| -> Result<Vec<String>, Value> {
+            let mut out = Vec::new();
+            if let Some((target, handler)) = proxy_pair(i, &input) {
+                for k in proxy_own_keys(i, &target, &handler)? {
+                    let Value::Str(ks) = &k else { continue };
+                    let desc = proxy_gopd_value(i, &target, &handler, ks)?;
+                    if matches!(desc, Value::Obj(_)) {
+                        let en = ab(i.get_member(&desc, "enumerable"))?;
+                        if i.to_boolean(&en) {
+                            out.push(ks.to_string());
+                        }
+                    }
+                }
+            } else if let Value::Obj(o) = &input {
+                // Enumerable own keys — strings AND symbols, in [[OwnPropertyKeys]] order.
+                let mut strs: Vec<String> = Vec::new();
+                let mut syms: Vec<String> = Vec::new();
+                for (k, p) in o.borrow().props.iter() {
+                    if !p.enumerable {
+                        continue;
+                    }
+                    if Interp::is_sym_key(k) {
+                        syms.push(k.to_string());
+                    } else {
+                        strs.push(k.to_string());
+                    }
+                }
+                out.extend(strs);
+                out.extend(syms);
+            }
+            Ok(out)
+        })(i);
+        match attempt {
+            Ok(k) => k,
+            Err(e) => reject_with!(e),
         }
     };
-    match i.call(then, next, &[on_f, on_r]) {
-        Ok(_) => true,
-        Err(e) => {
-            let r = crate::interpreter::abrupt_value(e);
-            let _ = i.call(reject.clone(), Value::Undefined, &[r]);
-            false
+    let state = i.new_object();
+    let values = i.make_array(vec![Value::Undefined; keys.len()]);
+    let keys_arr = i.make_array(keys.iter().map(|k| Value::from_string(k.clone())).collect());
+    set_internal(&state, "__values", values);
+    set_internal(&state, "__keys", keys_arr);
+    set_internal(&state, "__remaining", Value::Num(1.0));
+    for (idx, key) in keys.iter().enumerate() {
+        let value = match ab(i.get_member(&input, key)) {
+            Ok(v) => v,
+            Err(e) => reject_with!(e),
+        };
+        let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+        let rem = ab(i.to_number(&rem_v))?;
+        set_internal(&state, "__remaining", Value::Num(rem + 1.0));
+        let p = match i.call(promise_resolve.clone(), t.clone(), &[value]) {
+            Ok(p) => p,
+            Err(e) => reject_with!(crate::interpreter::abrupt_value(e)),
+        };
+        let already = i.new_object();
+        set_internal(&already, "__called", Value::Bool(false));
+        let mk = |i: &mut Interp, f: NativeFn| {
+            make_bound(
+                i,
+                f,
+                vec![
+                    Value::Obj(state.clone()),
+                    Value::Num(idx as f64),
+                    Value::Obj(already.clone()),
+                    resolve_fn.clone(),
+                ],
+            )
+        };
+        let (on_f, on_r) = if settled {
+            (mk(i, promise_keyed_settle_f), mk(i, promise_keyed_settle_r))
+        } else {
+            (mk(i, promise_keyed_element), reject_fn.clone())
+        };
+        let then = match i.get_member(&p, "then") {
+            Ok(t) => t,
+            Err(e) => reject_with!(crate::interpreter::abrupt_value(e)),
+        };
+        if let Err(e) = i.call(then, p, &[on_f, on_r]) {
+            reject_with!(crate::interpreter::abrupt_value(e));
         }
     }
+    let rem_v = ab(i.get_member(&Value::Obj(state.clone()), "__remaining"))?;
+    let rem = ab(i.to_number(&rem_v))?;
+    set_internal(&state, "__remaining", Value::Num(rem - 1.0));
+    if rem - 1.0 == 0.0 {
+        let out = promise_keyed_result(i, &Value::Obj(state.clone()))?;
+        capability_resolve_or_reject(i, resolve_fn, reject_fn, out);
+    }
+    Ok(result)
 }
 
-/// Element handler for Promise.allKeyed: store `value` under its key in the result object.
-fn promise_keyed_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    let result = arg(args, 0);
-    let key = ab(i.to_string(&arg(args, 1)))?;
-    let value = arg(args, 2);
-    let results = ab(i.get_member(&result, "__results"))?;
-    if let Value::Obj(o) = &results {
-        o.borrow_mut()
-            .props
-            .insert(&*key, Property::data(value, true, true, true));
+/// Assemble the keyed combinator's result: a plain object with the recorded values in key order.
+fn promise_keyed_result(i: &mut Interp, state: &Value) -> Result<Value, Value> {
+    let keys = ab(i.get_member(state, "__keys"))?;
+    let values = ab(i.get_member(state, "__values"))?;
+    let len = match ab(i.get_member(&keys, "length"))? {
+        Value::Num(n) => n as usize,
+        _ => 0,
+    };
+    let out = i.new_object();
+    out.borrow_mut().proto = None; // the keyed result is a null-prototype object
+    for k in 0..len {
+        let kv = ab(i.get_member(&keys, &k.to_string()))?;
+        let key = ab(i.to_string(&kv))?;
+        let v = ab(i.get_member(&values, &k.to_string()))?;
+        set_data(&out, &key, v);
     }
-    let rem_v = ab(i.get_member(&result, "__remaining"))?;
+    Ok(Value::Obj(out))
+}
+
+/// Shared element bookkeeping for the keyed combinators. `payload` is what lands in the values
+/// slot; the last settlement assembles and resolves the keyed result.
+fn promise_keyed_record(i: &mut Interp, args: &[Value], payload: Value) -> Result<Value, Value> {
+    let state = arg(args, 0);
+    let idx = ab(i.to_number(&arg(args, 1)))? as usize;
+    let already = arg(args, 2);
+    let resolve_fn = arg(args, 3);
+    if let Value::Obj(o) = &already {
+        if matches!(
+            o.borrow().props.get("__called").map(|p| &p.value),
+            Some(Value::Bool(true))
+        ) {
+            return Ok(Value::Undefined);
+        }
+        set_internal(o, "__called", Value::Bool(true));
+    }
+    let values = ab(i.get_member(&state, "__values"))?;
+    if let Value::Obj(o) = &values {
+        crate::value::set_data(o, &idx.to_string(), payload);
+    }
+    let rem_v = ab(i.get_member(&state, "__remaining"))?;
     let rem = ab(i.to_number(&rem_v))? - 1.0;
-    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
+    ab(i.set_member(&state, "__remaining", Value::Num(rem)))?;
     if rem == 0.0 {
-        i.resolve_promise(&result, results);
+        let out = promise_keyed_result(i, &state)?;
+        ab(i.call(resolve_fn, Value::Undefined, &[out]))?;
     }
     Ok(Value::Undefined)
 }
+
+fn promise_keyed_element(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let payload = arg(args, 4);
+    promise_keyed_record(i, args, payload)
+}
+
 fn promise_keyed_settle(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Value, Value> {
-    let result = arg(args, 0);
-    let key = ab(i.to_string(&arg(args, 1)))?;
-    let value = arg(args, 2);
+    let value = arg(args, 4);
     let status = i.new_object();
     set_data(
         &status,
@@ -7738,20 +7899,9 @@ fn promise_keyed_settle(i: &mut Interp, args: &[Value], fulfilled: bool) -> Resu
         Value::str(if fulfilled { "fulfilled" } else { "rejected" }),
     );
     set_data(&status, if fulfilled { "value" } else { "reason" }, value);
-    let results = ab(i.get_member(&result, "__results"))?;
-    if let Value::Obj(o) = &results {
-        o.borrow_mut()
-            .props
-            .insert(&*key, Property::data(Value::Obj(status), true, true, true));
-    }
-    let rem_v = ab(i.get_member(&result, "__remaining"))?;
-    let rem = ab(i.to_number(&rem_v))? - 1.0;
-    ab(i.set_member(&result, "__remaining", Value::Num(rem)))?;
-    if rem == 0.0 {
-        i.resolve_promise(&result, results);
-    }
-    Ok(Value::Undefined)
+    promise_keyed_record(i, args, Value::Obj(status))
 }
+
 fn promise_keyed_settle_f(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
     promise_keyed_settle(i, a, true)
 }
@@ -7834,6 +7984,12 @@ fn make_aggregate_error(i: &mut Interp, errors: Value) -> Result<Value, Value> {
 fn install_promise(it: &mut Interp) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert("Promise", proto.clone());
+    if let Some(key) = to_string_tag_key(it) {
+        proto.borrow_mut().props.insert(
+            key,
+            Property::data(Value::str("Promise"), false, false, true),
+        );
+    }
     it.def_method(&proto, "then", 2, |i, this, a| {
         if map_ptr(&this).map(|p| i.promises.contains_key(&p)) != Some(true) {
             return Err(i.make_error(
@@ -7844,8 +8000,17 @@ fn install_promise(it: &mut Interp) {
         // The result promise is built by SpeciesConstructor(this, %Promise%) via NewPromiseCapability.
         let default_ctor = ab(i.get_member(&Value::Obj(i.global.clone()), "Promise"))?;
         let c = species_constructor(i, &this, &default_ctor)?;
-        let result = new_promise_capability(i, &c)?;
-        i.promise_then_into(&this, arg(a, 0), arg(a, 1), result.clone());
+        let (result, res_f, rej_f) = new_promise_capability_full(i, &c)?;
+        if map_ptr(&result).map(|p| i.promises.contains_key(&p)) == Some(true) {
+            i.promise_then_into(&this, arg(a, 0), arg(a, 1), result.clone());
+        } else {
+            // The constructor produced a promise we don't manage: settle it through the
+            // capability's own resolve/reject functions via a native shadow promise.
+            let shadow = i.new_promise();
+            i.promise_then_into(&this, arg(a, 0), arg(a, 1), shadow.clone());
+            let dummy = i.new_promise();
+            i.promise_then_into(&shadow, res_f, rej_f, dummy);
+        }
         Ok(result)
     });
     it.def_method(&proto, "catch", 1, |i, this, a| {
@@ -7883,10 +8048,21 @@ fn install_promise(it: &mut Interp) {
             return Err(i.make_error("TypeError", "Promise resolver is not a function"));
         }
         let promise = i.new_promise();
-        let res = i.make_resolver(&promise, true);
-        let rej = i.make_resolver(&promise, false);
-        if let Err(Abrupt::Throw(e)) = i.call(executor, Value::Undefined, &[res, rej]) {
-            i.reject_promise(&promise, e);
+        // OrdinaryCreateFromConstructor: newTarget's prototype (its getter may throw).
+        if let (Value::Obj(p), nt @ Value::Obj(_)) = (&promise, &i.new_target.clone()) {
+            match ab(i.get_member(nt, "prototype"))? {
+                Value::Obj(proto) => p.borrow_mut().proto = Some(proto),
+                _ => {
+                    if let Some(proto) = ctor_realm_proto(i, nt, "Promise") {
+                        p.borrow_mut().proto = Some(proto);
+                    }
+                }
+            }
+        }
+        let (res, rej) = i.make_resolver_pair(&promise);
+        if let Err(Abrupt::Throw(e)) = i.call(executor, Value::Undefined, &[res, rej.clone()]) {
+            // The catch goes through the reject RESOLVER: a no-op once resolve/reject ran.
+            let _ = i.call(rej, Value::Undefined, &[e]);
         }
         Ok(promise)
     });
@@ -7903,8 +8079,7 @@ fn install_promise(it: &mut Interp) {
             return Err(i.make_error("TypeError", "Promise.withResolvers called on a non-object"));
         }
         let promise = new_promise_capability(i, &t)?;
-        let resolve = i.make_resolver(&promise, true);
-        let reject = i.make_resolver(&promise, false);
+        let (resolve, reject) = i.make_resolver_pair(&promise);
         let obj = i.new_object();
         set_data(&obj, "promise", promise);
         set_data(&obj, "resolve", resolve);
@@ -7926,17 +8101,19 @@ fn install_promise(it: &mut Interp) {
                 }
             }
         }
-        let cap = new_promise_capability(i, &t)?;
-        i.resolve_promise(&cap, v);
-        Ok(cap)
+        // NewPromiseCapability(C): resolution goes through the capability's own resolve.
+        let (promise, resolve_fn, _reject_fn) = new_promise_capability_full(i, &t)?;
+        ab(i.call(resolve_fn, Value::Undefined, &[v]))?;
+        Ok(promise)
     });
     it.def_method(&ctor, "reject", 1, |i, t, a| {
         if !matches!(t, Value::Obj(_)) {
             return Err(i.make_error("TypeError", "Promise.reject called on a non-object"));
         }
-        let cap = new_promise_capability(i, &t)?;
-        i.reject_promise(&cap, arg(a, 0));
-        Ok(cap)
+        // NewPromiseCapability(C): rejection goes through the capability's own reject.
+        let (promise, _resolve_fn, reject_fn) = new_promise_capability_full(i, &t)?;
+        ab(i.call(reject_fn, Value::Undefined, &[arg(a, 0)]))?;
+        Ok(promise)
     });
     it.def_method(&ctor, "all", 1, |i, t, a| {
         // NewPromiseCapability(C): resolve/reject route through C's own capability so a subclass or
@@ -8039,7 +8216,7 @@ fn install_promise(it: &mut Interp) {
         let rem = ab(i.to_number(&rem_v))?;
         set_internal(&state, "__remaining", Value::Num(rem - 1.0));
         if rem - 1.0 == 0.0 {
-            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
+            capability_resolve_or_reject(i, resolve_fn, reject_fn, results);
         }
         Ok(result)
     });
@@ -8217,7 +8394,7 @@ fn install_promise(it: &mut Interp) {
         let rem = ab(i.to_number(&rem_v))?;
         set_internal(&state, "__remaining", Value::Num(rem - 1.0));
         if rem - 1.0 == 0.0 {
-            let _ = i.call(resolve_fn, Value::Undefined, &[results]);
+            capability_resolve_or_reject(i, resolve_fn, reject_fn, results);
         }
         Ok(result)
     });
@@ -8321,125 +8498,25 @@ fn install_promise(it: &mut Interp) {
         Ok(result)
     });
     it.def_method(&ctor, "allKeyed", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
-        let dict = match arg(a, 0) {
-            Value::Obj(o) => o,
-            _ => {
-                let e = i.make_error("TypeError", "Promise.allKeyed argument must be an object");
-                i.reject_promise(&result, e);
-                return Ok(result);
-            }
-        };
-        let keys: Vec<Rc<str>> = dict
-            .borrow()
-            .props
-            .iter()
-            .filter(|(_, p)| p.enumerable)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let results = i.new_object();
-        results.borrow_mut().proto = None;
-        set_internal(
-            &result.as_obj().unwrap().clone(),
-            "__results",
-            Value::Obj(results.clone()),
-        );
-        set_internal(
-            &result.as_obj().unwrap().clone(),
-            "__remaining",
-            Value::Num(keys.len() as f64),
-        );
-        if keys.is_empty() {
-            i.resolve_promise(&result, Value::Obj(results));
-            return Ok(result);
-        }
-        for k in keys {
-            let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
-            let p = promise_resolve_value(i, item);
-            let on_f = make_bound(
-                i,
-                promise_keyed_element,
-                vec![result.clone(), Value::str(&*k)],
-            );
-            let on_r = i.make_resolver(&result, false);
-            if !combinator_then(i, &on_r.clone(), p, on_f, on_r) {
-                return Ok(result);
-            }
-        }
-        Ok(result)
+        promise_keyed_combinator(i, t, arg(a, 0), false)
     });
     it.def_method(&ctor, "allSettledKeyed", 1, |i, t, a| {
-        let result = match new_promise_capability(i, &t) {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        };
-        let dict = match arg(a, 0) {
-            Value::Obj(o) => o,
-            _ => {
-                let e = i.make_error(
-                    "TypeError",
-                    "Promise.allSettledKeyed argument must be an object",
-                );
-                i.reject_promise(&result, e);
-                return Ok(result);
-            }
-        };
-        let keys: Vec<Rc<str>> = dict
-            .borrow()
-            .props
-            .iter()
-            .filter(|(_, p)| p.enumerable)
-            .map(|(k, _)| k.clone())
-            .collect();
-        let results = i.new_object();
-        results.borrow_mut().proto = None;
-        set_internal(
-            &result.as_obj().unwrap().clone(),
-            "__results",
-            Value::Obj(results.clone()),
-        );
-        set_internal(
-            &result.as_obj().unwrap().clone(),
-            "__remaining",
-            Value::Num(keys.len() as f64),
-        );
-        if keys.is_empty() {
-            i.resolve_promise(&result, Value::Obj(results));
-            return Ok(result);
-        }
-        for k in keys {
-            let item = ab(i.get_member(&Value::Obj(dict.clone()), &k))?;
-            let p = promise_resolve_value(i, item);
-            let on_f = make_bound(
-                i,
-                promise_keyed_settle_f,
-                vec![result.clone(), Value::str(&*k)],
-            );
-            let on_r = make_bound(
-                i,
-                promise_keyed_settle_r,
-                vec![result.clone(), Value::str(&*k)],
-            );
-            let overall_reject = i.make_resolver(&result, false);
-            if !combinator_then(i, &overall_reject, p, on_f, on_r) {
-                return Ok(result);
-            }
-        }
-        Ok(result)
+        promise_keyed_combinator(i, t, arg(a, 0), true)
     });
-    it.def_method(&ctor, "try", 1, |i, _t, a| {
-        // Promise.try(fn, ...args): call fn synchronously, settling a promise with its result/throw.
-        let result = i.new_promise();
+    it.def_method(&ctor, "try", 1, |i, t, a| {
+        // Promise.try(fn, ...args): NewPromiseCapability(this), call fn synchronously, and settle
+        // through the capability.
+        if !matches!(t, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Promise.try called on a non-object"));
+        }
+        let (promise, resolve_fn, reject_fn) = new_promise_capability_full(i, &t)?;
         let func = arg(a, 0);
         let rest: Vec<Value> = a.iter().skip(1).cloned().collect();
         match ab(i.call(func, Value::Undefined, &rest)) {
-            Ok(v) => i.resolve_promise(&result, v),
-            Err(e) => i.reject_promise(&result, e),
-        }
-        Ok(result)
+            Ok(v) => ab(i.call(resolve_fn, Value::Undefined, &[v]))?,
+            Err(e) => ab(i.call(reject_fn, Value::Undefined, &[e]))?,
+        };
+        Ok(promise)
     });
     install_species(it, &ctor);
     set_builtin(&it.global, "Promise", Value::Obj(ctor));

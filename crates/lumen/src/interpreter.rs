@@ -591,6 +591,9 @@ pub struct Interp {
     pub(crate) deferred_ns: HashMap<usize, String>,
     /// module key → its (single) deferred namespace object.
     pub(crate) deferred_ns_objs: HashMap<String, Value>,
+    /// Promise-state forwarding: when a native super() grafts a fresh promise's state onto the
+    /// subclass `this`, the original object's resolvers redirect here.
+    pub promise_forward: HashMap<usize, Value>,
     /// Mapped `arguments` objects: object ptr → (function scope, per-index parameter name — None
     /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
     /// parameter bindings.
@@ -626,6 +629,7 @@ pub struct Job {
 pub struct PromiseState {
     /// 0 = pending, 1 = fulfilled, 2 = rejected.
     pub status: u8,
+
     pub value: Value,
     /// Pending reactions: `(onFulfilled, onRejected, resultPromise)`.
     pub reactions: Vec<(Value, Value, Value)>,
@@ -949,6 +953,7 @@ impl Interp {
             annexb_fn_sync: HashMap::new(),
             deferred_ns: HashMap::new(),
             deferred_ns_objs: HashMap::new(),
+            promise_forward: HashMap::new(),
             mapped_arguments: HashMap::new(),
             module_source_objs: HashMap::new(),
             fr_tokens: HashMap::new(),
@@ -2285,6 +2290,7 @@ impl Interp {
                 self.async_gen_queue.remove(&ptr);
                 self.mapped_arguments.remove(&ptr);
                 self.deferred_ns.remove(&ptr);
+                self.promise_forward.remove(&ptr);
                 self.gc_pins.remove(&ptr);
                 let mut b = o.borrow_mut();
                 b.props.clear();

@@ -2633,8 +2633,7 @@ impl Interp {
                 let then = self.get_member(&v, "then")?;
                 if then.is_callable() {
                     let p = self.new_promise();
-                    let res = self.make_resolver(&p, true);
-                    let rej = self.make_resolver(&p, false);
+                    let (res, rej) = self.make_resolver_pair(&p);
                     if let Err(Abrupt::Throw(e)) = self.call(then, v.clone(), &[res, rej]) {
                         self.reject_promise(&p, e);
                     }
@@ -2665,8 +2664,13 @@ impl Interp {
         Value::Obj(obj)
     }
 
-    /// A bound function that settles `promise` (fulfilling or rejecting) when called.
-    pub(crate) fn make_resolver(&mut self, promise: &Value, fulfilling: bool) -> Value {
+    /// One resolving function of a pair; both share `flag` — their [[AlreadyResolved]] record.
+    pub(crate) fn make_resolver_with(
+        &mut self,
+        promise: &Value,
+        fulfilling: bool,
+        flag: &crate::value::Gc,
+    ) -> Value {
         let target = self.make_native(
             if fulfilling { "resolve" } else { "reject" },
             1,
@@ -2680,7 +2684,7 @@ impl Interp {
         bound.borrow_mut().call = Callable::Bound {
             target,
             this: promise.clone(),
-            args: Vec::new(),
+            args: vec![Value::Obj(flag.clone())],
         };
         // A promise resolving function has `length` 1 and an empty `name`.
         bound.borrow_mut().props.insert(
@@ -2694,7 +2698,24 @@ impl Interp {
         Value::Obj(bound)
     }
 
+    /// The standard resolver pair (shared [[AlreadyResolved]]).
+    pub(crate) fn make_resolver_pair(&mut self, promise: &Value) -> (Value, Value) {
+        let flag = Object::new(None);
+        (
+            self.make_resolver_with(promise, true, &flag),
+            self.make_resolver_with(promise, false, &flag),
+        )
+    }
+
     pub(crate) fn resolve_promise(&mut self, promise: &Value, value: Value) {
+        // Follow a subclass graft's forwarding link (see run_constructor_on's native arm).
+        let mut promise = promise.clone();
+        if let Value::Obj(o) = &promise {
+            if let Some(f) = self.promise_forward.get(&(Rc::as_ptr(o) as usize)) {
+                promise = f.clone();
+            }
+        }
+        let promise = &promise;
         let ptr = match promise {
             Value::Obj(o) => Rc::as_ptr(o) as usize,
             _ => return,
@@ -2702,15 +2723,30 @@ impl Interp {
         if self.promises.get(&ptr).map(|s| s.status).unwrap_or(1) != 0 {
             return;
         }
-        // Adopt a thenable's eventual state; a throwing `then` getter rejects.
+        // Resolving a promise with ITSELF is a TypeError rejection (chaining cycle).
+        if let (Value::Obj(p), Value::Obj(v)) = (promise, &value) {
+            if Rc::ptr_eq(p, v) {
+                let e = crate::interpreter::abrupt_value(
+                    self.throw("TypeError", "Chaining cycle detected for promise"),
+                );
+                self.reject_promise(promise, e);
+                return;
+            }
+        }
+        // Adopt a thenable's eventual state; a throwing `then` getter rejects. The `then` CALL
+        // itself happens in a microtask (PromiseResolveThenableJob).
         if matches!(value, Value::Obj(_)) {
             match self.get_member(&value, "then") {
                 Ok(then) if then.is_callable() => {
-                    let res = self.make_resolver(promise, true);
-                    let rej = self.make_resolver(promise, false);
-                    if let Err(Abrupt::Throw(e)) = self.call(then, value.clone(), &[res, rej]) {
-                        self.reject_promise(promise, e);
-                    }
+                    let (res, rej) = self.make_resolver_pair(promise);
+                    let runner =
+                        crate::builtins::make_thenable_job(self, then, value.clone(), res, rej);
+                    self.microtasks.push_back(crate::interpreter::Job {
+                        handler: runner,
+                        result: Value::Undefined,
+                        value: Value::Undefined,
+                        fulfilled: true,
+                    });
                     return;
                 }
                 Ok(_) => {}
@@ -2725,7 +2761,13 @@ impl Interp {
     }
 
     pub(crate) fn reject_promise(&mut self, promise: &Value, reason: Value) {
-        self.settle(promise, reason, false);
+        let mut promise = promise.clone();
+        if let Value::Obj(o) = &promise {
+            if let Some(f) = self.promise_forward.get(&(Rc::as_ptr(o) as usize)) {
+                promise = f.clone();
+            }
+        }
+        self.settle(&promise, reason, false);
     }
 
     fn settle(&mut self, promise: &Value, value: Value, fulfilled: bool) {
@@ -3887,6 +3929,8 @@ impl Interp {
                         }
                         if let Some(v) = self.promises.remove(&sp) {
                             self.promises.insert(dp, v);
+                            // The native ctor's resolvers are bound to `src`; forward them.
+                            self.promise_forward.insert(sp, this.clone());
                         }
                         if let Some(v) = self.temporal.remove(&sp) {
                             self.temporal.insert(dp, v);
@@ -5525,14 +5569,38 @@ fn dec_add_initializer(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     Ok(Value::Undefined)
 }
 
+/// The resolver pair's shared [[AlreadyResolved]] cell (`args[0]`): true (and mark) on first use.
+fn promise_mark_already(flag: &Value) -> bool {
+    if let Value::Obj(o) = flag {
+        let used = o.borrow().props.contains("__called");
+        if used {
+            return false;
+        }
+        o.borrow_mut().props.insert(
+            "__called",
+            crate::value::Property::data(Value::Bool(true), true, false, true),
+        );
+        return true;
+    }
+    true
+}
+
 fn promise_resolve_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    i.resolve_promise(&this, args.first().cloned().unwrap_or(Value::Undefined));
+    if promise_mark_already(&arg_at(args, 0)) {
+        i.resolve_promise(&this, arg_at(args, 1));
+    }
     Ok(Value::Undefined)
 }
 
 fn promise_reject_native(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
-    i.reject_promise(&this, args.first().cloned().unwrap_or(Value::Undefined));
+    if promise_mark_already(&arg_at(args, 0)) {
+        i.reject_promise(&this, arg_at(args, 1));
+    }
     Ok(Value::Undefined)
+}
+
+fn arg_at(args: &[Value], k: usize) -> Value {
+    args.get(k).cloned().unwrap_or(Value::Undefined)
 }
 
 fn describe_callee(callee: &Expr) -> String {
