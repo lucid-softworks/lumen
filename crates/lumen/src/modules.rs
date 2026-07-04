@@ -66,6 +66,8 @@ pub(crate) struct ModuleRec {
 enum ImportOrigin {
     /// `import * as x from 'dep'` — resolves to `dep`'s namespace object.
     Namespace(String),
+    /// `import defer * as x from 'dep'` — resolves to `dep`'s DEFERRED namespace object.
+    DeferNamespace(String),
     /// `import { y as x } from 'dep'` / `import x from 'dep'` — resolves to `dep`'s export `y`.
     Named(String, String),
 }
@@ -74,6 +76,8 @@ enum ImportOrigin {
 enum Resolution {
     /// A concrete binding: `local` in the given module scope.
     Local(Env, String),
+    /// A re-exported `import defer * as ns` binding: the dep's DEFERRED namespace.
+    DeferNs(String),
     /// A namespace object (a star-as re-export target).
     Ns(Value),
     /// Two star re-exports provide the name with different bindings.
@@ -251,7 +255,7 @@ impl Interp {
         let names: Vec<String> = self.module_recs[key].indirect.keys().cloned().collect();
         for name in names {
             match self.resolve_export(key, &name, &mut Vec::new()) {
-                Resolution::Local(..) | Resolution::Ns(..) => {}
+                Resolution::Local(..) | Resolution::Ns(..) | Resolution::DeferNs(..) => {}
                 Resolution::Ambiguous => {
                     return Err(self.throw(
                         "SyntaxError",
@@ -384,6 +388,11 @@ impl Interp {
                 self.bind_local(env, local, ns);
                 Ok(())
             }
+            Resolution::DeferNs(dep) => {
+                let dns = self.make_deferred_ns(&dep);
+                self.bind_local(env, local, dns);
+                Ok(())
+            }
             Resolution::Ambiguous => Err(self.throw(
                 "SyntaxError",
                 format!("the requested module provides an ambiguous export named '{name}'"),
@@ -460,6 +469,13 @@ impl Interp {
                         Some(d) => Resolution::Ns(d.ns.clone()),
                         None => Resolution::NotFound,
                     },
+                    ImportOrigin::DeferNamespace(dep) => {
+                        if self.module_recs.contains_key(dep) {
+                            Resolution::DeferNs(dep.clone())
+                        } else {
+                            Resolution::NotFound
+                        }
+                    }
                     ImportOrigin::Named(dep, imported) => {
                         let (dep, imported) = (dep.clone(), imported.clone());
                         self.resolve_export(&dep, &imported, seen)
@@ -560,6 +576,13 @@ impl Interp {
                         .props
                         .insert(name.as_str(), Property::data(v, true, true, false));
                 }
+                Resolution::DeferNs(dep) => {
+                    let v = self.make_deferred_ns(&dep);
+                    live.insert(name.clone(), NsBinding::Static(v.clone()));
+                    ns.borrow_mut()
+                        .props
+                        .insert(name.as_str(), Property::data(v, true, true, false));
+                }
                 // Ambiguous / unresolvable star names are omitted from the namespace.
                 _ => {}
             }
@@ -585,6 +608,11 @@ impl Interp {
     /// live bindings as the module's ordinary namespace, but a separate identity, a
     /// "Deferred Module" @@toStringTag, and evaluation-on-first-string-keyed-access.
     fn make_deferred_ns(&mut self, dep: &str) -> Value {
+        // One deferred namespace per module: every `import defer` of the same module (and every
+        // re-export of such a binding) observes the same object.
+        if let Some(v) = self.deferred_ns_objs.get(dep) {
+            return v.clone();
+        }
         let base = self.module_recs[dep].ns.clone();
         let Value::Obj(base_o) = &base else {
             return base;
@@ -611,6 +639,8 @@ impl Interp {
         }
         self.deferred_ns
             .insert(Rc::as_ptr(&dns) as usize, dep.to_string());
+        self.deferred_ns_objs
+            .insert(dep.to_string(), Value::Obj(dns.clone()));
         Value::Obj(dns)
     }
 
@@ -621,9 +651,40 @@ impl Interp {
     /// Deferred-namespace trigger: evaluate a module on first access of its namespace.
     pub(crate) fn evaluate_deferred(&mut self, key: &str) -> Result<(), Abrupt> {
         if self.module_recs.contains_key(key) {
+            // ReadyForSyncExecution: touching a deferred namespace while its module — or any
+            // module in its dependency graph — is still evaluating is a TypeError.
+            if !self.ready_for_sync(key, &mut Vec::new()) {
+                return Err(self.throw(
+                    "TypeError",
+                    "cannot access a deferred namespace while its module graph is evaluating",
+                ));
+            }
             self.evaluate_module(key)?;
         }
         Ok(())
+    }
+
+    /// Whether `key`'s whole (non-deferred) dependency graph is free of mid-evaluation modules.
+    fn ready_for_sync(&self, key: &str, seen: &mut Vec<String>) -> bool {
+        if seen.iter().any(|k| k == key) {
+            return true;
+        }
+        seen.push(key.to_string());
+        let rec = match self.module_recs.get(key) {
+            Some(r) => r,
+            None => return true,
+        };
+        if rec.evaluated {
+            return true;
+        }
+        if rec.evaluating {
+            return false;
+        }
+        let deps = rec.dep_keys.clone();
+        let deferred = rec.deferred_deps.clone();
+        deps.iter()
+            .filter(|d| !deferred.contains(d))
+            .all(|d| self.ready_for_sync(d, seen))
     }
 
     fn evaluate_module(&mut self, key: &str) -> Result<(), Abrupt> {
@@ -640,13 +701,35 @@ impl Interp {
 
         let dep_keys = self.module_recs[key].dep_keys.clone();
         let deferred = self.module_recs[key].deferred_deps.clone();
-        for dep in &dep_keys {
-            // A dependency imported only via `import defer` evaluates lazily, on first
-            // namespace access.
+        // Evaluate dependencies at the position of their first NON-defer clause (an
+        // `import defer` earlier in the file must not pull the module's evaluation forward).
+        let body_order = self.eager_dep_order(key);
+        // Only deps in dep_keys evaluate here (source-phase pseudo-modules are excluded there).
+        let order: Vec<String> = if body_order.is_empty() {
+            dep_keys
+                .iter()
+                .filter(|d| !deferred.contains(*d))
+                .cloned()
+                .collect()
+        } else {
+            body_order
+                .into_iter()
+                .filter(|d| dep_keys.contains(d))
+                .collect()
+        };
+        for dep in &order {
             if deferred.contains(dep) {
+                // A dependency imported only via `import defer` evaluates lazily — but its
+                // ASYNC (top-level-await) transitive dependencies still evaluate eagerly.
+                self.evaluate_async_subgraph(dep, &mut Vec::new())?;
                 continue;
             }
             self.evaluate_module(dep)?;
+        }
+        for dep in &dep_keys {
+            if deferred.contains(dep) && !order.contains(dep) {
+                self.evaluate_async_subgraph(dep, &mut Vec::new())?;
+            }
         }
 
         let (body, env, meta) = {
@@ -675,6 +758,85 @@ impl Interp {
                 Err(Abrupt::Throw(v))
             }
         }
+    }
+
+    /// This module's dependencies in evaluation order: each dep at the position of its first
+    /// non-defer import/export-from clause; defer-only deps at their first (defer) position.
+    fn eager_dep_order(&self, key: &str) -> Vec<String> {
+        let rec = match self.module_recs.get(key) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let body = rec.body.clone();
+        let resolved = rec.resolved.clone();
+        let mut eager: Vec<String> = Vec::new();
+        let mut defer_seen: Vec<String> = Vec::new();
+        let push = |list: &mut Vec<String>, k: &str| {
+            if !list.iter().any(|x| x == k) {
+                list.push(k.to_string());
+            }
+        };
+        for stmt in body.iter() {
+            let (spec, defers) = match stmt {
+                Stmt::Import(decl) => (
+                    decl.source.to_string(),
+                    !decl.specs.is_empty()
+                        && decl
+                            .specs
+                            .iter()
+                            .all(|s| matches!(s, crate::ast::ImportSpec::DeferNamespace(_))),
+                ),
+                Stmt::ExportNamed {
+                    source: Some(src), ..
+                }
+                | Stmt::ExportAll { source: src, .. } => (src.to_string(), false),
+                _ => continue,
+            };
+            let Some(k) = resolved.get(&spec) else {
+                continue;
+            };
+            if defers {
+                push(&mut defer_seen, k);
+            } else {
+                push(&mut eager, k);
+            }
+        }
+        // Defer-only deps (never named eagerly) keep their first position for the async-subgraph
+        // walk; deps named both ways evaluate at the eager position.
+        for k in defer_seen {
+            if !eager.contains(&k) {
+                eager.push(k);
+            }
+        }
+        eager
+    }
+
+    /// Evaluate every module with top-level await (plus its own dependencies) in `key`'s graph —
+    /// the eager part of an `import defer`.
+    fn evaluate_async_subgraph(&mut self, key: &str, seen: &mut Vec<String>) -> Result<(), Abrupt> {
+        if seen.iter().any(|k| k == key) {
+            return Ok(());
+        }
+        seen.push(key.to_string());
+        let rec = match self.module_recs.get(key) {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        if rec.evaluated || rec.evaluating {
+            return Ok(());
+        }
+        if body_has_tla(&rec.body) {
+            return self.evaluate_module(key);
+        }
+        let deps = rec.dep_keys.clone();
+        let deferred = rec.deferred_deps.clone();
+        for dep in deps {
+            if deferred.contains(&dep) {
+                continue;
+            }
+            self.evaluate_async_subgraph(&dep, seen)?;
+        }
+        Ok(())
     }
 
     // --- Namespace exotic-object behaviour ----------------------------------------------------
@@ -706,7 +868,12 @@ impl Interp {
 
     /// `import(specifier)`: synchronously load the module and return an already-resolved promise of
     /// its namespace (or a rejected promise if loading throws).
-    pub(crate) fn dynamic_import(&mut self, specifier: &str, attr_type: Option<&str>) -> Value {
+    pub(crate) fn dynamic_import(
+        &mut self,
+        specifier: &str,
+        attr_type: Option<&str>,
+        defer: bool,
+    ) -> Value {
         let promise = self.new_promise();
         let referrer = match &self.import_meta {
             Some(m) => match self.get_member(&m.clone(), "url") {
@@ -727,6 +894,21 @@ impl Interp {
             Ok(canon)
         })();
         match result {
+            Ok(canon) if defer => {
+                // import.defer: link only; resolve with the (shared) deferred namespace. The
+                // async subgraph still evaluates eagerly.
+                let r = self.evaluate_async_subgraph(&canon, &mut Vec::new());
+                match r {
+                    Ok(()) => {
+                        let dns = self.make_deferred_ns(&canon);
+                        self.resolve_promise(&promise, dns);
+                    }
+                    Err(e) => {
+                        let reason = crate::interpreter::abrupt_value(e);
+                        self.reject_promise(&promise, reason);
+                    }
+                }
+            }
             Ok(canon) => {
                 // Evaluation may suspend at a top-level await: chain the import promise onto the
                 // module's evaluation promise, resolving with the namespace.
@@ -848,6 +1030,7 @@ fn same_binding(a: &Resolution, b: &Resolution) -> bool {
     match (a, b) {
         (Resolution::Local(e1, l1), Resolution::Local(e2, l2)) => Rc::ptr_eq(e1, e2) && l1 == l2,
         (Resolution::Ns(Value::Obj(o1)), Resolution::Ns(Value::Obj(o2))) => Rc::ptr_eq(o1, o2),
+        (Resolution::DeferNs(d1), Resolution::DeferNs(d2)) => d1 == d2,
         _ => false,
     }
 }
@@ -916,14 +1099,144 @@ pub(crate) fn typed_module_source(text: String, attr_type: Option<&str>) -> Stri
         Some("json") => format!("export default JSON.parse({});", js_string_literal(&text)),
         Some("text") => format!("export default {};", js_string_literal(&text)),
         Some("bytes") => {
-            let bytes: Vec<String> = text.bytes().map(|b| b.to_string()).collect();
+            // The text was decoded latin-1 style (char == byte) when non-UTF-8; a UTF-8 source
+            // re-encodes to its original bytes either way.
+            let bytes: Vec<String> = if text.chars().all(|c| (c as u32) < 0x100) {
+                text.chars().map(|c| (c as u32).to_string()).collect()
+            } else {
+                text.bytes().map(|b| b.to_string()).collect()
+            };
             format!(
-                "export default (() => {{ const a = new Uint8Array([{}]); Object.freeze(a.buffer); return a; }})();",
+                "export default new Uint8Array(new Uint8Array([{}]).buffer.sliceToImmutable());",
                 bytes.join(",")
             )
         }
         _ => text,
     }
+}
+
+/// Whether a module body contains top-level `await` (a for-await head, an `await using`, or an
+/// Await expression outside any function/class body) — the async-module test for `import defer`.
+pub(crate) fn body_has_tla(body: &[Stmt]) -> bool {
+    fn stmt(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e) | Stmt::Throw(e) => expr(e),
+            Stmt::Return(v) => v.as_ref().map(expr).unwrap_or(false),
+            Stmt::VarDecl { kind, decls } => {
+                matches!(kind, crate::ast::DeclKind::AwaitUsing)
+                    || decls
+                        .iter()
+                        .any(|(_, init)| init.as_ref().map(expr).unwrap_or(false))
+            }
+            Stmt::If { test, cons, alt } => {
+                expr(test) || stmt(cons) || alt.as_ref().map(|a| stmt(a)).unwrap_or(false)
+            }
+            Stmt::Block(b) => b.iter().any(stmt),
+            Stmt::While { test, body } | Stmt::DoWhile { body, test } => expr(test) || stmt(body),
+            Stmt::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                init.as_ref()
+                    .map(|i| match i.as_ref() {
+                        crate::ast::ForInit::VarDecl { decls, .. } => decls
+                            .iter()
+                            .any(|(_, e)| e.as_ref().map(expr).unwrap_or(false)),
+                        crate::ast::ForInit::Expr(e) => expr(e),
+                    })
+                    .unwrap_or(false)
+                    || test.as_ref().map(expr).unwrap_or(false)
+                    || update.as_ref().map(expr).unwrap_or(false)
+                    || stmt(body)
+            }
+            Stmt::ForInOf {
+                right,
+                body,
+                is_await,
+                ..
+            } => *is_await || expr(right) || stmt(body),
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+                ..
+            } => {
+                block.iter().any(stmt)
+                    || handler
+                        .as_ref()
+                        .map(|(_, h)| h.iter().any(stmt))
+                        .unwrap_or(false)
+                    || finalizer
+                        .as_ref()
+                        .map(|f| f.iter().any(stmt))
+                        .unwrap_or(false)
+            }
+            Stmt::Switch { disc, cases } => {
+                expr(disc)
+                    || cases.iter().any(|c| {
+                        c.test.as_ref().map(expr).unwrap_or(false) || c.body.iter().any(stmt)
+                    })
+            }
+            Stmt::Labeled { body, .. } => stmt(body),
+            Stmt::With { obj, body } => expr(obj) || stmt(body),
+            Stmt::ExportDefault(inner) | Stmt::ExportDecl(inner) => stmt(inner),
+            _ => false,
+        }
+    }
+    fn expr(e: &Expr) -> bool {
+        match e {
+            Expr::Await(_) => true,
+            Expr::ToStr(x) | Expr::OptionalChain(x) => expr(x),
+            Expr::Unary { arg, .. } | Expr::Update { arg, .. } => expr(arg),
+            Expr::Binary { left, right, .. }
+            | Expr::Logical { left, right, .. }
+            | Expr::Assign {
+                target: left,
+                value: right,
+                ..
+            } => expr(left) || expr(right),
+            Expr::Cond { test, cons, alt } => expr(test) || expr(cons) || expr(alt),
+            Expr::Call { callee, args, .. } => {
+                expr(callee)
+                    || args.iter().any(|a| match a {
+                        crate::ast::ArrayElem::Item(e) | crate::ast::ArrayElem::Spread(e) => {
+                            expr(e)
+                        }
+                        _ => false,
+                    })
+            }
+            Expr::New { callee, args } => {
+                expr(callee)
+                    || args.iter().any(|a| match a {
+                        crate::ast::ArrayElem::Item(e) | crate::ast::ArrayElem::Spread(e) => {
+                            expr(e)
+                        }
+                        _ => false,
+                    })
+            }
+            Expr::Member { obj, .. } => expr(obj),
+            Expr::Index { obj, index, .. } => expr(obj) || expr(index),
+            Expr::Seq(v) => v.iter().any(expr),
+            Expr::Array(elems) => elems.iter().any(|a| match a {
+                crate::ast::ArrayElem::Item(e) | crate::ast::ArrayElem::Spread(e) => expr(e),
+                _ => false,
+            }),
+            Expr::Object(props) => props.iter().any(|p| match p {
+                crate::ast::PropDef::KeyValue { value, .. } => expr(value),
+                crate::ast::PropDef::Spread(e) => expr(e),
+                _ => false,
+            }),
+            Expr::Yield { arg, .. } => arg.as_ref().map(|a| expr(a)).unwrap_or(false),
+            Expr::TaggedTemplate { tag, .. } => expr(tag),
+            Expr::ImportCall { spec, options, .. } => {
+                expr(spec) || options.as_ref().map(|o| expr(o)).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+    body.iter().any(stmt)
 }
 
 /// A module's parsed export/import tables.
@@ -955,8 +1268,12 @@ fn build_export_tables(body: &[Stmt], resolved: &HashMap<String, String>) -> Exp
                 let dep = key_of(&decl.source);
                 for spec in &decl.specs {
                     match spec {
-                        ImportSpec::Namespace(local) | ImportSpec::DeferNamespace(local) => {
+                        ImportSpec::Namespace(local) => {
                             imports.insert(local.clone(), ImportOrigin::Namespace(dep.clone()));
+                        }
+                        ImportSpec::DeferNamespace(local) => {
+                            imports
+                                .insert(local.clone(), ImportOrigin::DeferNamespace(dep.clone()));
                         }
                         ImportSpec::Source(local) => {
                             imports.insert(

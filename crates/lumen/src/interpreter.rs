@@ -589,6 +589,8 @@ pub struct Interp {
     /// `import defer` namespaces awaiting first access: namespace object ptr → module key.
     /// Accessing a property of one evaluates the module (then the entry is removed).
     pub(crate) deferred_ns: HashMap<usize, String>,
+    /// module key → its (single) deferred namespace object.
+    pub(crate) deferred_ns_objs: HashMap<String, Value>,
     /// Mapped `arguments` objects: object ptr → (function scope, per-index parameter name — None
     /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
     /// parameter bindings.
@@ -946,6 +948,7 @@ impl Interp {
             decorator_initializers: Vec::new(),
             annexb_fn_sync: HashMap::new(),
             deferred_ns: HashMap::new(),
+            deferred_ns_objs: HashMap::new(),
             mapped_arguments: HashMap::new(),
             module_source_objs: HashMap::new(),
             fr_tokens: HashMap::new(),
@@ -1267,20 +1270,32 @@ impl Interp {
     /// [[Get]](P, Receiver): like [`get_member`] but with an explicit `receiver` — the `this` a
     /// getter is invoked with, the proxy `get` trap's Receiver argument, and what a forwarded
     /// `[[Get]]` carries through a proxy target chain.
+    /// The deferred-namespace evaluation trigger: most operations with a string key (and all
+    /// key-less ones like [[OwnPropertyKeys]]) evaluate the module; symbol keys and the "then"
+    /// property never do. Accessing a namespace whose module is mid-evaluation is a TypeError.
+    pub(crate) fn defer_trigger(&mut self, o: &Gc, key: Option<&str>) -> Result<(), Abrupt> {
+        if self.deferred_ns.is_empty() {
+            return Ok(());
+        }
+        if matches!(key, Some(k) if Interp::is_sym_key(k) || k == "then" || k.starts_with('#')) {
+            return Ok(());
+        }
+        let module_key = match self.deferred_ns.get(&(Rc::as_ptr(o) as usize)) {
+            Some(k) => k.clone(),
+            None => return Ok(()),
+        };
+        self.evaluate_deferred(&module_key)
+    }
+
     pub fn get_member_recv(
         &mut self,
         base: &Value,
         key: &str,
         receiver: Value,
     ) -> Result<Value, Abrupt> {
-        // An `import defer` namespace evaluates its module on first *string-keyed* access
-        // (symbol reads like @@toStringTag never trigger evaluation).
-        if !self.deferred_ns.is_empty() && !Interp::is_sym_key(key) {
-            if let Value::Obj(o) = base {
-                if let Some(module_key) = self.deferred_ns.remove(&(Rc::as_ptr(o) as usize)) {
-                    self.evaluate_deferred(&module_key)?;
-                }
-            }
+        // An `import defer` namespace evaluates its module on string-keyed access.
+        if let Value::Obj(o) = base {
+            self.defer_trigger(o, Some(key))?;
         }
         match base {
             Value::Undefined | Value::Empty | Value::Null => Err(self.throw(
@@ -1433,6 +1448,8 @@ impl Interp {
     fn get_from_chain(&mut self, start: &Gc, key: &str, receiver: &Value) -> Result<Value, Abrupt> {
         let mut cur = Some(start.clone());
         while let Some(obj) = cur {
+            // A deferred namespace anywhere on the chain evaluates its module first.
+            self.defer_trigger(&obj, Some(key))?;
             // A proxy anywhere on the chain handles the read itself (with the original receiver).
             let ptr = Rc::as_ptr(&obj) as usize;
             if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
@@ -1758,6 +1775,8 @@ impl Interp {
         // Walk the chain for an accessor or read-only data property.
         let mut cur = Some(obj.clone());
         while let Some(o) = cur {
+            // A deferred namespace anywhere on the chain evaluates its module first.
+            self.defer_trigger(&o, Some(key))?;
             // A proxy on the chain handles the write itself (with the original receiver).
             let optr = Rc::as_ptr(&o) as usize;
             if let Some((target, handler)) = self.proxies.get(&optr).cloned() {
@@ -1867,6 +1886,8 @@ impl Interp {
         // probing the binding first so a TDZ export surfaces ReferenceError.
         let obj = match &receiver {
             Value::Obj(r) if !Rc::ptr_eq(r, &obj) => {
+                // A deferred-namespace receiver evaluates before its own properties are consulted.
+                self.defer_trigger(r, Some(key))?;
                 let rptr = Rc::as_ptr(r) as usize;
                 if self.is_namespace(rptr) {
                     self.ns_probe_tdz(rptr, key)?;

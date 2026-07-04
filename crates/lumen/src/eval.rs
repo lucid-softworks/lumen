@@ -1837,6 +1837,8 @@ impl Interp {
             Value::Obj(o) => o.clone(),
             _ => return Ok(false),
         };
+        // A deferred namespace evaluates on [[HasProperty]] with a string key.
+        self.defer_trigger(&o, Some(key))?;
         let ptr = Rc::as_ptr(&o) as usize;
         if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
             if matches!(handler, Value::Null) {
@@ -2078,7 +2080,11 @@ impl Interp {
                                 }
                             }
                         }
-                        Ok(self.dynamic_import(&s, attr_type.as_deref()))
+                        Ok(self.dynamic_import(
+                            &s,
+                            attr_type.as_deref(),
+                            matches!(phase, ImportPhase::Defer),
+                        ))
                     }
                 }
             }
@@ -3932,7 +3938,9 @@ impl Interp {
                 for t in &transforms {
                     v = me.call(t.clone(), this.clone(), &[v])?;
                 }
-                me.set_member(this, &key, v)?;
+                // DefineField: CreateDataPropertyOrThrow (an own data property, even over a
+                // setter — and a [[DefineOwnProperty]] on a deferred namespace receiver).
+                crate::builtins::cdp_or_throw(me, this, &key, v).map_err(Abrupt::Throw)?;
             }
             // Decorator addInitializer callbacks run after the fields, with `this` = the instance.
             for init in &initializers {
@@ -3992,6 +4000,7 @@ impl Interp {
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
                 if let Value::Obj(o) = &base {
+                    self.defer_trigger(o, Some(prop))?;
                     let ptr = Rc::as_ptr(o) as usize;
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let ok = self.proxy_delete(target, handler, prop)?;
@@ -4029,6 +4038,7 @@ impl Interp {
                 let idx = self.eval(index, env)?;
                 let key = self.to_property_key(&idx)?;
                 if let Value::Obj(o) = &base {
+                    self.defer_trigger(o, Some(&key))?;
                     let ptr = Rc::as_ptr(o) as usize;
                     if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
                         let ok = self.proxy_delete(target, handler, &key)?;

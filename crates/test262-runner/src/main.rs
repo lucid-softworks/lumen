@@ -625,7 +625,13 @@ fn engine_for(path: &Path) -> Engine {
     engine.set_module_loader(|spec: &str, referrer: &str| {
         let base = Path::new(referrer).parent()?;
         let resolved = normalize_path(&base.join(spec));
-        let text = std::fs::read_to_string(&resolved).ok()?;
+        // Read raw bytes and decode latin-1 style (byte == char), so binary modules imported
+        // with `type: "bytes"` round-trip losslessly.
+        let bytes = std::fs::read(&resolved).ok()?;
+        let text: String = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        };
         Some((resolved.to_string_lossy().into_owned(), text))
     });
     engine.set_import_base(&path.to_string_lossy());
@@ -693,7 +699,12 @@ fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Ou
     let loader = |spec: &str, referrer: &str| -> Option<(String, String)> {
         let base = Path::new(referrer).parent()?;
         let resolved = normalize_path(&base.join(spec));
-        let text = std::fs::read_to_string(&resolved).ok()?;
+        // Raw bytes, decoded latin-1 style when not UTF-8 (binary `type: "bytes"` modules).
+        let bytes = std::fs::read(&resolved).ok()?;
+        let text: String = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        };
         Some((resolved.to_string_lossy().into_owned(), text))
     };
     let result = engine.eval_module(src, &key, loader);

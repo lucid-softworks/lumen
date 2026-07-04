@@ -7311,7 +7311,11 @@ fn install_reflect(it: &mut Interp) {
     });
     it.def_method(&r, "getOwnPropertyDescriptor", 2, |i, _t, a| {
         let o = match arg(a, 0) {
-            Value::Obj(o) => o,
+            Value::Obj(o) => {
+                let key = ab(i.to_property_key(&arg(a, 1)))?;
+                ab(i.defer_trigger(&o, Some(&key)))?;
+                o
+            }
             _ => {
                 return Err(i.make_error(
                     "TypeError",
@@ -7359,6 +7363,7 @@ fn install_reflect(it: &mut Interp) {
     it.def_method(&r, "deleteProperty", 2, |i, _t, a| {
         let key = ab(i.to_property_key(&arg(a, 1)))?;
         if let Value::Obj(o) = arg(a, 0) {
+            ab(i.defer_trigger(&o, Some(&key)))?;
             if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
                 return Ok(Value::Bool(ab(i.proxy_delete(target, handler, &key))?));
             }
@@ -7389,6 +7394,7 @@ fn install_reflect(it: &mut Interp) {
             Value::Obj(o) => o,
             _ => return Err(i.make_error("TypeError", "Reflect.ownKeys called on non-object")),
         };
+        ab(i.defer_trigger(&o, None))?;
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let keys = proxy_own_keys(i, &target, &handler)?;
             return Ok(i.make_array(keys));
@@ -11003,6 +11009,7 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "keys", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.keys")?;
+        ab(i.defer_trigger(&o, None))?;
         if proxy_pair(i, &Value::Obj(o.clone())).is_some() {
             let keys = proxy_enum_string_keys(i, &Value::Obj(o.clone()))?;
             return Ok(i.make_array(keys));
@@ -11023,6 +11030,7 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "getOwnPropertyNames", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyNames")?;
+        ab(i.defer_trigger(&o, None))?;
         if let Some((target, handler)) = proxy_pair(i, &Value::Obj(o.clone())) {
             let keys = proxy_own_keys(i, &target, &handler)?;
             let strs: Vec<Value> = keys
@@ -11060,6 +11068,7 @@ fn install_object(it: &mut Interp) {
     it.def_method(&ctor, "getOwnPropertySymbols", 1, |i, _this, args| {
         // ToObject coerces primitives (and throws for null/undefined).
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertySymbols")?;
+        ab(i.defer_trigger(&o, None))?;
         let ov = Value::Obj(o.clone());
         // A proxy's symbol keys come from its [[OwnPropertyKeys]] trap.
         if let Some((target, handler)) = proxy_pair(i, &ov) {
@@ -11175,6 +11184,7 @@ fn install_object(it: &mut Interp) {
         // ToObject coerces a primitive target (and throws for null/undefined).
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyDescriptor")?;
         let key = ab(i.to_property_key(&arg(args, 1)))?;
+        ab(i.defer_trigger(&o, Some(&key)))?;
         if key.starts_with('#') {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
@@ -11311,10 +11321,12 @@ fn install_object(it: &mut Interp) {
     });
     it.def_method(&ctor, "values", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.values")?;
+        ab(i.defer_trigger(&o, None))?;
         enumerable_own_value_list(i, &Value::Obj(o), false)
     });
     it.def_method(&ctor, "entries", 1, |i, _this, args| {
         let o = to_object_arg(i, arg(args, 0), "Object.entries")?;
+        ab(i.defer_trigger(&o, None))?;
         enumerable_own_value_list(i, &Value::Obj(o), true)
     });
     it.def_method(&ctor, "fromEntries", 1, |i, _this, args| {
@@ -11561,7 +11573,17 @@ fn opt_norm(v: Option<Value>) -> Option<Value> {
 }
 
 /// OrdinaryDefineOwnProperty with the non-configurable / non-extensible invariant checks.
+/// Deferred-namespace trigger for builtin MOP entry points (`None` key = key-less operations
+/// like [[OwnPropertyKeys]], which always trigger).
+fn defer_trigger_v(i: &mut Interp, v: &Value, key: Option<&str>) -> Result<(), Value> {
+    if let Value::Obj(o) = v {
+        ab(i.defer_trigger(o, key))?;
+    }
+    Ok(())
+}
+
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
+    i.defer_trigger(o, Some(key))?;
     let d = build_partial(i, desc)?;
     // ArgumentsExoticObject [[DefineOwnProperty]]: sync the live parameter value into the
     // ordinary property first; after a successful ordinary define, a plain value write goes
@@ -13855,7 +13877,13 @@ fn from_async_body(
 }
 
 /// CreateDataPropertyOrThrow (trap-aware for proxy targets).
-fn cdp_or_throw(i: &mut Interp, target: &Value, key: &str, v: Value) -> Result<(), Value> {
+pub(crate) fn cdp_or_throw(
+    i: &mut Interp,
+    target: &Value,
+    key: &str,
+    v: Value,
+) -> Result<(), Value> {
+    defer_trigger_v(i, target, Some(key))?;
     let Value::Obj(o) = target else {
         return Err(i.make_error("TypeError", "cannot define a property on a non-object"));
     };
