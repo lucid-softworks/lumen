@@ -855,7 +855,32 @@ impl Interp {
         env: &Env,
         label: Option<&str>,
     ) -> Completion {
-        let rhs = self.eval(right, env)?;
+        // A lexical head's bound names are already in scope — uninitialized (TDZ) — while the
+        // RHS evaluates, so `for (const x of x)` is a ReferenceError.
+        let rhs = if matches!(
+            decl,
+            Some(DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing)
+        ) {
+            let tdz = new_scope(Some(env.clone()));
+            let mut names = Vec::new();
+            pattern_idents(left, &mut names);
+            for n in names {
+                tdz.borrow_mut().vars.insert(
+                    n,
+                    Binding {
+                        value: Value::Undefined,
+                        mutable: true,
+                        strict_immutable: false,
+                        initialized: false,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
+            }
+            self.eval(right, &tdz)?
+        } else {
+            self.eval(right, env)?
+        };
         // No-decl form assigns to an existing binding; a declaration creates a fresh one per round.
         let mode = match decl {
             Some(DeclKind::Var) | None => BindMode::Var,
@@ -944,7 +969,11 @@ impl Interp {
             let (iter, next) = self.get_iterator(&rhs)?;
             let iter_close = iter.clone();
             let mut exhausted = false;
+            // A failure in the iteration step itself (next throwing, a non-object result, or a
+            // `value` getter throwing) marks the iterator done: it is NOT closed.
+            let mut step_failed = false;
             let result = self.run_loop(label, env, |me, env| {
+                step_failed = true;
                 let v = match me.iterator_step(&iter, &next)? {
                     Some(x) => x,
                     None => {
@@ -952,11 +981,12 @@ impl Interp {
                         return Ok(LoopStep::Done(Value::Empty));
                     }
                 };
+                step_failed = false;
                 let iter_env = new_scope(Some(env.clone()));
                 let bv = me.for_of_iteration(left, v, mode, body, &iter_env, dispose)?;
                 Ok(LoopStep::Continue(bv))
             });
-            if !exhausted {
+            if !(exhausted || step_failed && result.is_err()) {
                 match &result {
                     // A throw completion swallows close errors; every other completion (normal,
                     // break, return) propagates them and requires an Object result.

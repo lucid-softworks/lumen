@@ -1305,18 +1305,32 @@ impl Parser {
             };
             self.expect_punct(")")?;
             let body = Box::new(self.parse_loop_body()?);
-            let left = match expr_to_pattern(&init_expr) {
-                Some(p) => p,
-                // Annex B: a sloppy-mode CallExpression head parses; assignment throws at runtime.
-                None if !self.strict && matches!(init_expr, Expr::Call { .. }) => {
+            let left = match &init_expr {
+                // A destructuring assignment head keeps its expression form: the full
+                // AssignmentPattern semantics (iterator close, member and member-rest targets)
+                // live in the runtime's assign_to_target.
+                e @ (Expr::Array(_) | Expr::Object(_)) => {
+                    if !valid_assignment_pattern(e) {
+                        return Err(ParseError {
+                            message: "invalid for-in/of target".into(),
+                            line: self.line(),
+                        });
+                    }
                     Pattern::Member(Box::new(init_expr.clone()))
                 }
-                None => {
-                    return Err(ParseError {
-                        message: "invalid for-in/of target".into(),
-                        line: self.line(),
-                    })
-                }
+                _ => match expr_to_pattern(&init_expr) {
+                    Some(p) => p,
+                    // Annex B: a sloppy CallExpression head parses; assignment throws at runtime.
+                    None if !self.strict && matches!(init_expr, Expr::Call { .. }) => {
+                        Pattern::Member(Box::new(init_expr.clone()))
+                    }
+                    None => {
+                        return Err(ParseError {
+                            message: "invalid for-in/of target".into(),
+                            line: self.line(),
+                        })
+                    }
+                },
             };
             if self.strict && pattern_strict_banned(&init_expr) {
                 return self.err("cannot assign to 'eval' or 'arguments' in strict mode");
@@ -3450,9 +3464,57 @@ fn is_valid_assign_target(e: &Expr) -> bool {
 }
 
 /// Whether an array/object literal is a valid *destructuring assignment* pattern. Unlike a binding
-/// pattern (see `expr_to_pattern`), an object `AssignmentRestProperty` target may be any
-/// `LeftHandSideExpression` that is not itself a nested pattern (e.g. a member expression), and
+/// pattern (see `expr_to_pattern`), an object `AssignmentRestProperty` target may be any simple
+/// `LeftHandSideExpression` (e.g. a member expression) — never a nested pattern — and
 /// element/property targets may be member expressions too.
+fn valid_assignment_pattern(e: &Expr) -> bool {
+    fn simple(e: &Expr) -> bool {
+        matches!(
+            e,
+            Expr::Ident(_)
+                | Expr::Member {
+                    optional: false,
+                    ..
+                }
+                | Expr::Index {
+                    optional: false,
+                    ..
+                }
+        )
+    }
+    fn target_ok(e: &Expr) -> bool {
+        simple(e) || valid_assignment_pattern(e)
+    }
+    match e {
+        Expr::Array(elems) => elems.iter().enumerate().all(|(idx, el)| match el {
+            ArrayElem::Hole => true,
+            ArrayElem::Spread(t) => {
+                // A rest element must be last (the parser's Seq wrapper marks one followed
+                // by a comma) and can't carry a default.
+                idx == elems.len() - 1
+                    && !matches!(t, Expr::Seq(_) | Expr::Assign { op: "=", .. })
+                    && target_ok(t)
+            }
+            ArrayElem::Item(Expr::Assign {
+                op: "=", target, ..
+            }) => target_ok(target),
+            ArrayElem::Item(t) => target_ok(t),
+        }),
+        Expr::Object(props) => props.iter().enumerate().all(|(idx, p)| match p {
+            PropDef::KeyValue { value, .. } | PropDef::Proto(value) => match value {
+                Expr::Assign {
+                    op: "=", target, ..
+                } => target_ok(target),
+                v => target_ok(v),
+            },
+            // AssignmentRestProperty: last, and a simple target (never a nested pattern).
+            PropDef::Spread(t) => idx == props.len() - 1 && simple(t),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 /// Whether a destructuring assignment pattern targets `eval`/`arguments` (a strict-mode
 /// SyntaxError). Walks target positions only, not keys or defaults.
 fn pattern_strict_banned(e: &Expr) -> bool {
