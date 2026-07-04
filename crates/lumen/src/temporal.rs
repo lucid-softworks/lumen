@@ -1941,53 +1941,43 @@ fn read_frac_digits(i: &mut Interp, opts: &Value) -> Result<Option<usize>, Value
     }
 }
 /// Format a time honoring `smallestUnit` / `fractionalSecondDigits` options.
-fn fmt_time_opts(i: &mut Interp, t: IsoTime, opts: &Value) -> Result<String, Value> {
-    let smallest_raw = opt_str(i, opts, "smallestUnit", "")?;
-    let smallest = smallest_raw.strip_suffix('s').unwrap_or(&smallest_raw);
-    // A present smallestUnit must be a time unit; the roundingMode option is validated even when the
-    // default is used (a non-string / out-of-range value is a RangeError).
+/// Read a Plain* toString's time-precision options in alphabetical order
+/// (fractionalSecondDigits, roundingMode, smallestUnit), returning
+/// (precision, rounding increment in ns, mode). Restrictions apply after all reads.
+fn time_display_opts(i: &mut Interp, opts: &Value) -> Result<(Option<i64>, i128, String), Value> {
+    let digits = read_frac_digits(i, opts)?;
+    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let smallest = opt_str(i, opts, "smallestUnit", "")?;
+    let su = sing(&smallest);
+    if !smallest.is_empty() && unit_rank(su).is_none() {
+        return Err(i.make_error("RangeError", "invalid smallestUnit"));
+    }
     if !smallest.is_empty()
         && !matches!(
-            smallest,
+            su,
             "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
         )
     {
         return Err(i.make_error("RangeError", "smallestUnit must be a time unit"));
     }
-    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    check_mode(i, &mode)?;
-    let base = format!("{:02}:{:02}", t.hour, t.minute);
-    if smallest == "minute" {
-        return Ok(base);
-    }
-    let mut s = format!("{}:{:02}", base, t.second);
-    let subsec = t.ms as u32 * 1_000_000 + t.us as u32 * 1000 + t.ns as u32;
-    let digits = match smallest {
-        "second" => Some(0),
-        "millisecond" => Some(3),
-        "microsecond" => Some(6),
-        "nanosecond" => Some(9),
-        _ => read_frac_digits(i, opts)?,
-    };
-    match digits {
-        Some(0) => {}
-        Some(n) => {
-            let f = format!("{subsec:09}");
-            s.push('.');
-            s.push_str(&f[..n]);
+    Ok(if !smallest.is_empty() {
+        match su {
+            "minute" => (Some(-1), 60_000_000_000, mode),
+            "second" => (Some(0), 1_000_000_000, mode),
+            "millisecond" => (Some(3), 1_000_000, mode),
+            "microsecond" => (Some(6), 1_000, mode),
+            _ => (Some(9), 1, mode),
         }
-        None => {
-            if subsec > 0 {
-                let mut f = format!("{subsec:09}");
-                while f.ends_with('0') {
-                    f.pop();
-                }
-                s.push('.');
-                s.push_str(&f);
-            }
+    } else {
+        match digits {
+            None => (None, 1, mode),
+            Some(0) => (Some(0), 1_000_000_000, mode),
+            Some(n @ 1..=3) => (Some(n as i64), 10i128.pow(9 - n as u32), mode),
+            Some(n @ 4..=6) => (Some(n as i64), 10i128.pow(9 - n as u32), mode),
+            Some(n) => (Some(n as i64), 10i128.pow(9 - n as u32), mode),
         }
-    }
-    Ok(s)
+    })
 }
 /// The `[u-ca=iso8601]` calendar annotation per the `calendarName` option.
 fn cal_suffix(i: &mut Interp, opts: &Value, cal: &str) -> Result<String, Value> {
@@ -3260,6 +3250,18 @@ fn check_mode(i: &Interp, m: &str) -> Result<(), Value> {
         Err(i.make_error("RangeError", "invalid roundingMode"))
     }
 }
+/// RoundNumberToIncrementAsIfPositive: epoch-valued rounding treats the value as an unsigned
+/// position on the number line ("trunc" floors toward the Big Bang, not toward the epoch).
+fn round_ns_as_positive(value: i128, inc: i128, mode: &str) -> i128 {
+    let mapped = match mode {
+        "ceil" | "expand" => "ceil",
+        "floor" | "trunc" => "floor",
+        "halfCeil" | "halfExpand" => "halfCeil",
+        "halfFloor" | "halfTrunc" => "halfFloor",
+        _ => "halfEven",
+    };
+    round_ns(value, inc, mapped)
+}
 /// Round `value` (signed ns) to a multiple of `inc` ns using a rounding mode.
 fn round_ns(value: i128, inc: i128, mode: &str) -> i128 {
     if inc <= 1 {
@@ -3354,19 +3356,32 @@ fn time_diff(
     since: bool,
     auto_rank: i32,
 ) -> Result<IsoDuration, Value> {
-    // GetDifferenceSettings: read all options in alphabetical order, then validate.
-    let largest_opt = opt_str(i, opts, "largestUnit", "auto")?;
-    let incr = opt_num(i, opts, "roundingIncrement", 1)?;
-    let smallest = sing(&opt_str(i, opts, "smallestUnit", "nanosecond")?).to_string();
+    // GetDifferenceSettings: options read in alphabetical order (largestUnit, roundingIncrement,
+    // roundingMode, smallestUnit), each validated as read.
+    let opts = get_opts_obj(i, opts)?;
+    let largest_opt = sing(&opt_str(i, &opts, "largestUnit", "auto")?).to_string();
+    if largest_opt != "auto" && unit_rank(&largest_opt).is_none() {
+        return Err(i.make_error("RangeError", "invalid largestUnit"));
+    }
+    let incr = read_rounding_increment(i, &opts)?;
+    let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+    check_mode(i, &mode)?;
+    let smallest = sing(&opt_str(i, &opts, "smallestUnit", "nanosecond")?).to_string();
+    if unit_rank(&smallest).is_none() {
+        return Err(i.make_error("RangeError", "invalid smallestUnit"));
+    }
+    // The time-unit-group restriction is algorithmic validation, after all options are read.
     let srank = time_unit_rank(&smallest)
         .ok_or_else(|| i.make_error("RangeError", "smallestUnit must be a time unit"))?;
-    let largest_name = sing(&largest_opt).to_string();
-    let lrank = if largest_name == "auto" {
-        srank.max(auto_rank) // auto ⇒ the type default, but never narrower than smallestUnit
+    let lrank_opt = if largest_opt == "auto" {
+        None
     } else {
-        time_unit_rank(&largest_name)
-            .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a time unit"))?
+        Some(
+            time_unit_rank(&largest_opt)
+                .ok_or_else(|| i.make_error("RangeError", "largestUnit must be a time unit"))?,
+        )
     };
+    let lrank = lrank_opt.unwrap_or_else(|| srank.max(auto_rank));
     if lrank < srank {
         return Err(i.make_error(
             "RangeError",
@@ -3374,13 +3389,18 @@ fn time_diff(
         ));
     }
     check_increment(i, &smallest, incr)?;
-    let mode = opt_str(i, opts, "roundingMode", "trunc")?;
-    check_mode(i, &mode)?;
     let mode = if since { negate_mode(&mode) } else { &mode }.to_string();
     let unit_size = unit_ns(&smallest).unwrap();
-    let rounded = round_ns(diff_ns, unit_size * incr as i128, &mode);
-    let bal = balance_ns(rounded, rank_unit(lrank));
-    Ok(if since { neg_duration(bal) } else { bal })
+    let rounded = round_time_dur(i, diff_ns, unit_size * incr as i128, &mode)?;
+    let internal = InternalDur {
+        years: 0.0,
+        months: 0.0,
+        weeks: 0.0,
+        days: 0.0,
+        time: rounded,
+    };
+    let d = dur_from_internal(i, &internal, rank_unit(lrank))?;
+    Ok(if since { neg_duration(d) } else { d })
 }
 
 /// Rank of a temporal unit (years highest), or None if not a unit name.
@@ -5083,7 +5103,11 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let x = as_time(i, &t)?;
-        Ok(Value::str(fmt_time_opts(i, x, &arg(a, 0))?))
+        let opts = get_opts_obj(i, &arg(a, 0))?;
+        let (prec, inc, mode) = time_display_opts(i, &opts)?;
+        // Rounding can carry across midnight; a PlainTime wraps around.
+        let rounded = round_ns(time_to_ns(x) as i128, inc, &mode).rem_euclid(NS_PER_DAY);
+        Ok(Value::str(fmt_time_prec(ns_to_time(rounded), prec)))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
         Ok(Value::str(fmt_time(as_time(i, &t)?)))
@@ -5102,14 +5126,44 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     it.def_method(&proto, "with", 1, |i, t, a| {
         let x = as_time(i, &t)?;
         let f = arg(a, 0);
-        let hour = field_int(i, &f, "hour", x.hour as i64)?;
-        let minute = field_int(i, &f, "minute", x.minute as i64)?;
-        let second = field_int(i, &f, "second", x.second as i64)?;
-        let ms = field_int(i, &f, "millisecond", x.ms as i64)?;
-        let us = field_int(i, &f, "microsecond", x.us as i64)?;
-        let ns = field_int(i, &f, "nanosecond", x.ns as i64)?;
-        let ovf = to_overflow(i, &arg(a, 1))?;
-        let nt = build_time_ovf(i, hour, minute, second, ms, us, ns, ovf)?;
+        if !matches!(f, Value::Obj(_)) || get(i, &f).is_some() {
+            return Err(i.make_error("TypeError", "with() argument must be a plain object"));
+        }
+        if !matches!(getm(i, &f, "calendar")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'calendar'"));
+        }
+        if !matches!(getm(i, &f, "timeZone")?, Value::Undefined) {
+            return Err(i.make_error("TypeError", "with() argument must not have 'timeZone'"));
+        }
+        let mut merged = [
+            x.hour as i64,
+            x.minute as i64,
+            x.second as i64,
+            x.ms as i64,
+            x.us as i64,
+            x.ns as i64,
+        ];
+        let mut any = false;
+        let keys = [
+            ("hour", 0usize),
+            ("microsecond", 4),
+            ("millisecond", 3),
+            ("minute", 1),
+            ("nanosecond", 5),
+            ("second", 2),
+        ];
+        for (k, slot) in keys {
+            let fv = getm(i, &f, k)?;
+            if !matches!(fv, Value::Undefined) {
+                any = true;
+                merged[slot] = to_int(i, &fv)?;
+            }
+        }
+        if !any {
+            return Err(i.make_error("TypeError", "with() requires at least one time field"));
+        }
+        let ovf = to_overflow(i, &get_opts_obj(i, &arg(a, 1))?)?;
+        let nt = regulate_time(i, merged, ovf)?;
         Ok(make(i, "Temporal.PlainTime", Temporal::Time(nt)))
     });
     it.def_method(&proto, "add", 1, |i, t, a| {
@@ -5148,7 +5202,11 @@ fn install_plain_time(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_time(i, &t)?;
-        let (o, shorthand) = round_opts(&arg(a, 0));
+        let arg0 = arg(a, 0);
+        if !matches!(arg0, Value::Obj(_) | Value::Str(_)) {
+            return Err(i.make_error("TypeError", "options must be an object or a string"));
+        }
+        let (o, shorthand) = round_opts(&arg0);
         // Options are read in alphabetical order before any validation.
         let incr_raw = match shorthand {
             Some(_) => 1,
@@ -5420,12 +5478,22 @@ fn install_plain_datetime(it: &mut Interp, ns: &Gc) {
 
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let (d, tm) = as_datetime(i, &t)?;
-        let ts = fmt_time_opts(i, tm, &arg(a, 0))?;
+        let opts = get_opts_obj(i, &arg(a, 0))?;
+        // calendarName sorts first alphabetically.
+        let suffix = cal_suffix(i, &opts, &cal_of(i, &t))?;
+        let (prec, inc, mode) = time_display_opts(i, &opts)?;
+        // Rounding can carry into the next calendar day.
+        let rounded = round_ns(time_to_ns(tm) as i128, inc, &mode);
+        let nd = civil_of(epoch_days(d) + rounded.div_euclid(NS_PER_DAY) as i64);
+        let ntm = ns_to_time(rounded.rem_euclid(NS_PER_DAY));
+        if !iso_datetime_within_limits(nd, ntm) {
+            return Err(i.make_error("RangeError", "date-time is outside the representable range"));
+        }
         Ok(Value::str(format!(
             "{}T{}{}",
-            fmt_date(d),
-            ts,
-            cal_suffix(i, &arg(a, 0), &cal_of(i, &t))?
+            fmt_date(nd),
+            fmt_time_prec(ntm, prec),
+            suffix
         )))
     });
     it.def_method(&proto, "toJSON", 0, |i, t, _| {
@@ -8385,52 +8453,72 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toString", 0, |i, t, a| {
         let ns_utc = as_instant(i, &t)?;
-        let opts = arg(a, 0);
-        // A timeZone option shifts the displayed local time and shows that zone's offset (a
-        // date-time string's [IANA] annotation names the zone); otherwise the instant renders as UTC.
-        let (local, suffix) = if let Value::Obj(_) = &opts {
-            let tzv = getm(i, &opts, "timeZone")?;
-            if matches!(tzv, Value::Undefined) {
-                (ns_utc, "Z".to_string())
-            } else {
-                let s = i.to_string(&tzv).map_err(unab)?;
-                let tz = normalize_tz(i, &s)?;
-                let off = zone_offset(&tz, ns_utc);
-                // The wall time uses the full offset, but Instant.toString renders the offset string
-                // rounded to the nearest minute (FormatDateTimeUTCOffsetRounded).
+        let opts = get_opts_obj(i, &arg(a, 0))?;
+        // Options in alphabetical order: fractionalSecondDigits, roundingMode, smallestUnit,
+        // timeZone; algorithmic validation only after all reads.
+        let digits = read_frac_digits(i, &opts)?;
+        let mode = opt_str(i, &opts, "roundingMode", "trunc")?;
+        check_mode(i, &mode)?;
+        let smallest = opt_str(i, &opts, "smallestUnit", "")?;
+        let su = sing(&smallest);
+        if !smallest.is_empty() && unit_rank(su).is_none() {
+            return Err(i.make_error("RangeError", "invalid smallestUnit"));
+        }
+        let tzv = match &opts {
+            Value::Obj(_) => getm(i, &opts, "timeZone")?,
+            _ => Value::Undefined,
+        };
+        let tz = match &tzv {
+            Value::Undefined => None,
+            _ => Some(tz_from_field(i, &tzv)?),
+        };
+        if !smallest.is_empty()
+            && !matches!(
+                su,
+                "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+            )
+        {
+            return Err(i.make_error("RangeError", "invalid smallestUnit for toString"));
+        }
+        let (prec, unit, incr): (Option<i64>, &str, i128) = if !smallest.is_empty() {
+            match su {
+                "minute" => (Some(-1), "minute", 1),
+                "second" => (Some(0), "second", 1),
+                "millisecond" => (Some(3), "millisecond", 1),
+                "microsecond" => (Some(6), "microsecond", 1),
+                _ => (Some(9), "nanosecond", 1),
+            }
+        } else {
+            match digits {
+                None => (None, "nanosecond", 1),
+                Some(0) => (Some(0), "second", 1),
+                Some(n @ 1..=3) => (Some(n as i64), "millisecond", 10i128.pow(3 - n as u32)),
+                Some(n @ 4..=6) => (Some(n as i64), "microsecond", 10i128.pow(6 - n as u32)),
+                Some(n) => (Some(n as i64), "nanosecond", 10i128.pow(9 - n as u32)),
+            }
+        };
+        let rounded = round_ns_as_positive(ns_utc, unit_ns(unit).unwrap_or(1) * incr, &mode);
+        let (local, suffix) = match &tz {
+            None => (rounded, "Z".to_string()),
+            Some(tz) => {
+                let off = zone_offset(tz, rounded);
+                // The wall time uses the full offset; the rendered offset rounds to the minute.
                 let minute = 60_000_000_000i64;
                 let (q, r) = (off / minute, off % minute);
-                let rounded = (if r.abs() * 2 >= minute {
+                let rq = (if r.abs() * 2 >= minute {
                     q + r.signum()
                 } else {
                     q
                 }) * minute;
-                (ns_utc + off as i128, offset_string(rounded))
+                (rounded + off as i128, offset_string(rq))
             }
-        } else {
-            (ns_utc, "Z".to_string())
         };
-        let z = local.div_euclid(86_400_000_000_000) as i64;
-        let rem = local.rem_euclid(86_400_000_000_000) as i64;
-        let (y, mo, da) = civil_from_days(z);
-        let secs = rem / 1_000_000_000;
-        let t = IsoTime {
-            hour: (secs / 3600) as u8,
-            minute: ((secs / 60) % 60) as u8,
-            second: (secs % 60) as u8,
-            ms: ((rem / 1_000_000) % 1000) as u16,
-            us: ((rem / 1000) % 1000) as u16,
-            ns: (rem % 1000) as u16,
-        };
-        let ts = fmt_time_opts(i, t, &opts)?;
+        let z = local.div_euclid(NS_PER_DAY) as i64;
+        let tm = ns_to_time(local.rem_euclid(NS_PER_DAY));
         Ok(Value::str(format!(
             "{}T{}{}",
-            fmt_date(IsoDate {
-                year: y,
-                month: mo,
-                day: da
-            }),
-            ts,
+            fmt_date(civil_of(z)),
+            fmt_time_prec(tm, prec),
             suffix
         )))
     });
@@ -8459,32 +8547,14 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "toZonedDateTimeISO", 1, |i, t, a| {
         let e = as_instant(i, &t)?;
-        let tzv = arg(a, 0);
-        let tz_raw: Rc<str> = match &tzv {
-            Value::Str(s) => s.clone(),
-            Value::Obj(_) => match get(i, &tzv) {
-                Some(Temporal::Zoned { tz, .. }) => tz,
-                _ => {
-                    return Err(
-                        i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                    )
-                }
-            },
-            _ => {
-                return Err(
-                    i.make_error("TypeError", "time zone must be a string or a ZonedDateTime")
-                )
-            }
-        };
-        let tz = normalize_tz(i, &tz_raw)?;
-        let offset = zone_offset(&tz, e);
-        Ok(make_like(
+        let tz = tz_from_field(i, &arg(a, 0))?;
+        let off = zone_offset(&tz, e);
+        Ok(make(
             i,
-            &t,
             "Temporal.ZonedDateTime",
             Temporal::Zoned {
                 epoch_ns: e,
-                offset_ns: offset,
+                offset_ns: off,
                 tz,
             },
         ))
@@ -8512,7 +8582,11 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
     });
     it.def_method(&proto, "round", 1, |i, t, a| {
         let x = as_instant(i, &t)?;
-        let (o, shorthand) = round_opts(&arg(a, 0));
+        let arg0 = arg(a, 0);
+        if !matches!(arg0, Value::Obj(_) | Value::Str(_)) {
+            return Err(i.make_error("TypeError", "options must be an object or a string"));
+        }
+        let (o, shorthand) = round_opts(&arg0);
         // Options are read in alphabetical order before any validation.
         let incr_raw = match shorthand {
             Some(_) => 1,
@@ -8539,7 +8613,7 @@ fn install_instant(it: &mut Interp, ns: &Gc) {
         Ok(make(
             i,
             "Temporal.Instant",
-            Temporal::Instant(round_ns(x, unit * incr, &mode)),
+            Temporal::Instant(round_ns_as_positive(x, unit * incr, &mode)),
         ))
     });
     it.def_method(&proto, "until", 1, |i, t, a| {
@@ -8594,14 +8668,15 @@ fn to_instant(i: &mut Interp, v: &Value) -> Result<i128, Value> {
     }
     // ToTemporalInstant: a non-Temporal value is coerced to a string (ToPrimitive, string hint) and
     // parsed as an ISO instant.
-    match v {
-        Value::BigInt(n) => n
-            .to_i128()
-            .ok_or_else(|| i.make_error("RangeError", "Instant outside of supported range")),
-        _ => {
-            let s = i.to_string(v).map_err(unab)?;
-            parse_instant(&s).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
+    let prim = match v {
+        Value::Obj(_) => i.to_primitive(v, crate::eval::Hint::String).map_err(unab)?,
+        other => other.clone(),
+    };
+    match &prim {
+        Value::Str(sv) => {
+            parse_instant(sv).ok_or_else(|| i.make_error("RangeError", "invalid Instant string"))
         }
+        _ => Err(i.make_error("TypeError", "cannot convert to Temporal.Instant")),
     }
 }
 /// ToBigInt for an epoch-nanosecond argument: BigInt/boolean/numeric-string only; number, null,
