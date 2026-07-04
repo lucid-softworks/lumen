@@ -722,7 +722,9 @@ pub const GC_TRIGGER: i64 = 200_000;
 /// materialize more than these bounds raise a RangeError instead. They are generous relative to
 /// real test262 tests but small enough that one runaway test stays bounded.
 pub const MAX_ARRAY_OP_LEN: usize = 1 << 20; // ~1M elements
-pub const MAX_STR_LEN: usize = 1 << 24; // ~16M bytes
+                                             // Large enough for suite tests that build 2^24-char escape strings, small enough that runaway
+                                             // string growth still dies as a RangeError rather than an OOM.
+pub const MAX_STR_LEN: usize = 1 << 26; // ~67M
 
 /// A realm's intrinsics: the global object, its environment, and the per-realm prototypes/constructors
 /// installed by `builtins::install`. Well-known symbols and the engine side tables are shared, not here.
@@ -1226,7 +1228,13 @@ impl Interp {
         format!("\u{0}{}", data.id)
     }
     pub fn is_sym_key(key: &str) -> bool {
-        key.starts_with('\u{0}')
+        // `\0<digits>` (symbol slot) or `\0<lowercase word>` (internal marker) — a user-authored
+        // string key that merely begins with NUL (legal in JS) must not be mistaken for either.
+        key.strip_prefix('\u{0}').is_some_and(|r| {
+            !r.is_empty()
+                && r.bytes()
+                    .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'_' || b == b'-')
+        })
     }
     /// Whether `key` is an internal private-element key. Every runtime private name carries a
     /// `\u{1}<serial>` suffix (auto-accessor backings a `\u{0}` marker), so a user property whose

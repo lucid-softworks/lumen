@@ -452,7 +452,7 @@ impl Props {
             if crate::interpreter::Interp::is_private_key(k) {
                 continue; // private-element slot — not an observable own key
             }
-            if k.starts_with('\u{0}') {
+            if crate::interpreter::Interp::is_sym_key(k) {
                 syms.push(k.clone());
             } else if let Some(n) = canonical_index(k) {
                 ints.push((n, k.clone()));

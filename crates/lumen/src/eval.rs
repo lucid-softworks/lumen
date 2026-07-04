@@ -3460,11 +3460,14 @@ impl Interp {
     /// Compile a regular expression and build a RegExp object (its metadata stored as own props,
     /// the compiled program in the `regexps` side table). A bad pattern throws a SyntaxError.
     pub(crate) fn make_regexp(&mut self, source: &str, flags: &str) -> Result<Value, Abrupt> {
-        let re =
-            crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
-        // GetPrototypeFromConstructor: `new` with a subclass/cross-realm newTarget overrides the
-        // instance prototype (falling back to newTarget's realm's %RegExp.prototype%).
-        let proto = if self.constructing {
+        let proto = self.regexp_alloc_proto()?;
+        self.make_regexp_with_proto(source, flags, proto)
+    }
+
+    /// GetPrototypeFromConstructor for RegExpAlloc: `new` with a subclass/cross-realm newTarget
+    /// overrides the instance prototype (falling back to newTarget's realm's %RegExp.prototype%).
+    pub(crate) fn regexp_alloc_proto(&mut self) -> Result<Option<crate::value::Gc>, Abrupt> {
+        Ok(if self.constructing {
             match &self.new_target.clone() {
                 nt @ Value::Obj(_) => match self.get_member(nt, "prototype")? {
                     Value::Obj(p) => Some(p),
@@ -3475,7 +3478,17 @@ impl Interp {
             }
         } else {
             self.extra_protos.get("RegExp").cloned()
-        };
+        })
+    }
+
+    pub(crate) fn make_regexp_with_proto(
+        &mut self,
+        source: &str,
+        flags: &str,
+        proto: Option<crate::value::Gc>,
+    ) -> Result<Value, Abrupt> {
+        let re =
+            crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
         let obj = Object::new(proto);
         let ptr = Rc::as_ptr(&obj) as usize;
         // source/flags/global/... are accessor getters on RegExp.prototype (computed from the

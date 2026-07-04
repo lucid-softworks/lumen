@@ -1689,31 +1689,24 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
             // EscapeRegExpPattern: "/" and line terminators are escaped so "/"+S+"/"+F re-parses.
             let mut out = String::new();
             let mut escaped = false;
+            let mut in_class = false;
             for c in re.source.chars() {
-                // Line terminators are always escaped (even directly after a backslash) so the
-                // rendered source has no raw line breaks.
-                match c {
-                    '\n' => {
-                        out.push_str("\\n");
-                        escaped = false;
-                        continue;
+                // A line terminator renders as its escape sequence; directly after a backslash the
+                // pair `\<LF>` collapses to `\n` (both match the terminator), reusing that slash.
+                let terminator = match c {
+                    '\n' => Some("n"),
+                    '\r' => Some("r"),
+                    '\u{2028}' => Some("u2028"),
+                    '\u{2029}' => Some("u2029"),
+                    _ => None,
+                };
+                if let Some(esc) = terminator {
+                    if !escaped {
+                        out.push('\\');
                     }
-                    '\r' => {
-                        out.push_str("\\r");
-                        escaped = false;
-                        continue;
-                    }
-                    '\u{2028}' => {
-                        out.push_str("\\u2028");
-                        escaped = false;
-                        continue;
-                    }
-                    '\u{2029}' => {
-                        out.push_str("\\u2029");
-                        escaped = false;
-                        continue;
-                    }
-                    _ => {}
+                    out.push_str(esc);
+                    escaped = false;
+                    continue;
                 }
                 if escaped {
                     out.push(c);
@@ -1725,7 +1718,16 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
                         out.push(c);
                         escaped = true;
                     }
-                    '/' => out.push_str("\\/"),
+                    '[' => {
+                        in_class = true;
+                        out.push(c);
+                    }
+                    ']' => {
+                        in_class = false;
+                        out.push(c);
+                    }
+                    // Inside a character class a solidus can't terminate the literal.
+                    '/' if !in_class => out.push_str("\\/"),
                     c => out.push(c),
                 }
             }
@@ -1868,12 +1870,20 @@ fn install_regexp(it: &mut Interp) {
     });
     it.def_method(&proto, "exec", 1, regexp_exec);
     it.def_method(&proto, "test", 1, |i, this, a| {
+        // RegExpExec: an own/inherited callable `exec` takes precedence over the built-in matcher.
+        if !matches!(this, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "RegExp.prototype.test requires an object"));
+        }
+        let s = ab(i.to_string(&arg(a, 0)))?;
         Ok(Value::Bool(!matches!(
-            regexp_exec(i, this, a)?,
+            regexp_exec_abstract(i, &this, s)?,
             Value::Null
         )))
     });
     it.def_method(&proto, "toString", 0, |i, this, _| {
+        if !matches!(this, Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "RegExp.prototype.toString requires an object"));
+        }
         let src_v = ab(i.get_member(&this, "source"))?;
         let src = ab(i.to_string(&src_v))?;
         let flags_v = ab(i.get_member(&this, "flags"))?;
@@ -1911,42 +1921,40 @@ fn install_regexp(it: &mut Interp) {
                 return Ok(pattern);
             }
         }
-        let (source, flags) = if has_slots {
+        // Observable step order: the pattern's internal slots (or `source`/`flags` Gets) are
+        // read first, then RegExpAlloc fetches newTarget's `prototype`, and only then does
+        // RegExpInitialize run the ToString coercions.
+        let (src_v, fl_v) = if has_slots {
             let re = match &pattern {
                 Value::Obj(o) => i.regexps[&(Rc::as_ptr(o) as usize)].clone(),
                 _ => unreachable!(),
             };
             let fl = match flags_arg {
-                Value::Undefined => re.flags.clone(),
-                v => ab(i.to_string(&v))?.to_string(),
+                Value::Undefined => Value::from_string(re.flags.clone()),
+                v => v,
             };
-            (re.source.clone(), fl)
+            (Value::from_string(re.source.clone()), fl)
         } else if pattern_is_regexp {
             // A regexp-like object: read its `source` and `flags` properties.
-            let src = match ab(i.get_member(&pattern, "source"))? {
-                Value::Undefined => String::new(),
-                v => ab(i.to_string(&v))?.to_string(),
-            };
+            let src = ab(i.get_member(&pattern, "source"))?;
             let fl = match flags_arg {
-                Value::Undefined => match ab(i.get_member(&pattern, "flags"))? {
-                    Value::Undefined => String::new(),
-                    v => ab(i.to_string(&v))?.to_string(),
-                },
-                v => ab(i.to_string(&v))?.to_string(),
+                Value::Undefined => ab(i.get_member(&pattern, "flags"))?,
+                v => v,
             };
             (src, fl)
         } else {
-            let src = match pattern {
-                Value::Undefined => String::new(),
-                v => ab(i.to_string(&v))?.to_string(),
-            };
-            let fl = match flags_arg {
-                Value::Undefined => String::new(),
-                v => ab(i.to_string(&v))?.to_string(),
-            };
-            (src, fl)
+            (pattern, flags_arg)
         };
-        ab(i.make_regexp(&source, &flags))
+        let alloc_proto = ab(i.regexp_alloc_proto())?;
+        let source = match src_v {
+            Value::Undefined => String::new(),
+            v => ab(i.to_string(&v))?.to_string(),
+        };
+        let flags = match fl_v {
+            Value::Undefined => String::new(),
+            v => ab(i.to_string(&v))?.to_string(),
+        };
+        ab(i.make_regexp_with_proto(&source, &flags, alloc_proto))
     });
     it.extra_protos.insert("%RegExpCtor%", ctor.clone());
     install_regexp_legacy_statics(it, &ctor);
@@ -2572,19 +2580,23 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
 /// `lastIndex` for global/sticky regexes.
 fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
+    if !i.regexps.contains_key(&ptr) {
+        return Err(i.make_error("TypeError", "exec on non-RegExp"));
+    }
+    let input = ab(i.to_string(&arg(args, 0)))?;
+    // lastIndex is read (and length-coerced) unconditionally; it only *steers* the match when
+    // the regexp is global or sticky. Its valueOf can recompile the regexp (`compile()`), so the
+    // matcher slot is only sampled afterwards.
+    let li = ab(i.get_member(&this, "lastIndex"))?;
+    let read_units = to_length_val(i, &li)?;
     let re = i
         .regexps
         .get(&ptr)
         .cloned()
         .ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
-    let input = ab(i.to_string(&arg(args, 0)))?;
     // Elements are code units (non-unicode) or code points (u/v); JS-visible indices are units.
     let text = crate::regex::ReText::new(re.unicode, &input);
     let use_last = re.global || re.sticky;
-    // lastIndex is read (and length-coerced) unconditionally; it only *steers* the match when
-    // the regexp is global or sticky.
-    let li = ab(i.get_member(&this, "lastIndex"))?;
-    let read_units = to_length_val(i, &li)?;
     let last_units = if use_last { read_units } else { 0 };
     if last_units > text.unit_index(text.len()) {
         if use_last {
@@ -8799,8 +8811,15 @@ fn json_quote(s: &str) -> String {
     let mut out = String::from("\"");
     let mut chars = s.chars().peekable();
     while let Some(mut c) = chars.next() {
-        // A smuggled pair round-trips as its real character.
+        // A smuggled pair round-trips as its real character. If that character itself falls in
+        // the smuggle range (a real plane-16 PUA code point), keep the smuggled representation so
+        // it isn't re-read as a lone surrogate below.
         if let Some(real) = chars.peek().and_then(|&n| crate::jstr::paired_char(c, n)) {
+            if crate::jstr::smuggled(real).is_some() {
+                out.push(c);
+                out.push(chars.next().unwrap());
+                continue;
+            }
             chars.next();
             c = real;
         }
@@ -17425,7 +17444,26 @@ fn install_math(it: &mut Interp) {
     unary!("tanh", f64::tanh);
     unary!("asinh", f64::asinh);
     unary!("acosh", f64::acosh);
-    unary!("atanh", f64::atanh);
+    // fdlibm atanh — the platform libm loses ~400 ulp near |x| = 1; log1p keeps it exact.
+    unary!("atanh", |x: f64| {
+        let ax = x.abs();
+        if ax > 1.0 {
+            return f64::NAN;
+        }
+        let t = if ax < 0.5 {
+            let t = ax + ax;
+            0.5 * (t + t * ax / (1.0 - ax)).ln_1p()
+        } else {
+            0.5 * ((ax + ax) / (1.0 - ax)).ln_1p()
+        };
+        if x < 0.0 {
+            -t
+        } else if x == 0.0 {
+            x
+        } else {
+            t
+        }
+    });
     unary!("fround", |x: f64| x as f32 as f64);
     unary!(
         "f16round",

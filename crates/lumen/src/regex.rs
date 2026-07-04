@@ -1515,9 +1515,8 @@ impl Parser {
     /// A non-strict (Annex B) `\u` escape: exactly four hex digits or `{…}`, otherwise the
     /// whole escape is an IdentityEscape for `u` (consuming nothing).
     fn unicode_escape(&mut self) -> u32 {
-        if self.peek() == Some('{') {
-            return self.unicode_escape_u32();
-        }
+        // Annex B (no `u` flag): `\u{` is an identity escape for `u` followed by a quantifier —
+        // braced code-point escapes exist only in Unicode mode.
         let save = self.pos;
         let mut v: u32 = 0;
         for _ in 0..4 {
