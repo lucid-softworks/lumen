@@ -78,8 +78,15 @@ impl Harness {
         let h = root.join("harness");
         let assert = std::fs::read_to_string(h.join("assert.js")).unwrap_or_default();
         let sta = std::fs::read_to_string(h.join("sta.js")).unwrap_or_default();
+        // Host timer: without a real global setTimeout, atomicsHelper.js installs a shim that
+        // busy-spins the microtask queue, which starves the engine's cooperative event loop.
+        let host_prelude = "(function(g) {\n\
+            if (typeof g.setTimeout === 'undefined' && typeof g.$262 !== 'undefined' && g.$262.agent) {\n\
+                g.setTimeout = g.$262.agent.setTimeout;\n\
+            }\n\
+        })(globalThis);\n";
         Harness {
-            base: format!("{assert}\n{sta}\n"),
+            base: format!("{host_prelude}{assert}\n{sta}\n"),
             cache: Mutex::new(std::collections::HashMap::new()),
             dir: h,
         }

@@ -866,10 +866,13 @@ fn install_atomics(it: &mut Interp) {
     fn rmw(i: &mut Interp, args: &[Value], f: fn(i128, i128) -> i128) -> Result<Value, Value> {
         let (info, idx) = target_rw(i, args, true)?;
         let val = operand(i, &info, &arg(args, 2))?;
-        let old = read_i128(i, &info, idx);
-        let old_val = i.ta_read(&info, idx);
-        write_i128(i, &info, idx, f(old, val));
-        Ok(old_val)
+        // One atomic read-modify-write (a shared buffer's lock is held across both halves).
+        let old = i.ta_modify(&info, idx, |o| Some(f(o, val))).unwrap_or(0);
+        Ok(if info.kind.is_bigint() {
+            Value::BigInt(old)
+        } else {
+            Value::Num(old as f64)
+        })
     }
 
     it.def_method(&atomics, "add", 3, |i, _t, a| rmw(i, a, |o, v| o + v));
@@ -897,14 +900,23 @@ fn install_atomics(it: &mut Interp) {
         let (info, idx) = target_rw(i, a, true)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         let replacement = operand(i, &info, &arg(a, 3))?;
-        let old = read_i128(i, &info, idx);
         // The comparison is on the element's raw byte representation, so the expected value
-        // wraps to the element type first (e.g. 68547 matches an Int16 2979).
-        let old_val = i.ta_read(&info, idx);
-        if wrap_bits(info.kind, old) == wrap_bits(info.kind, expected) {
-            write_i128(i, &info, idx, replacement);
-        }
-        Ok(old_val)
+        // wraps to the element type first (e.g. 68547 matches an Int16 2979); the compare and
+        // the conditional write happen under one lock hold.
+        let old = i
+            .ta_modify(&info, idx, |o| {
+                if wrap_bits(info.kind, o) == wrap_bits(info.kind, expected) {
+                    Some(replacement)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        Ok(if info.kind.is_bigint() {
+            Value::BigInt(old)
+        } else {
+            Value::Num(old as f64)
+        })
     });
     it.def_method(&atomics, "isLockFree", 1, |i, _t, a| {
         let n = ab(i.to_number(&arg(a, 0)))?;
@@ -1033,9 +1045,12 @@ fn install_atomics(it: &mut Interp) {
         // Otherwise wait asynchronously: a waiter thread reports the outcome, which the event loop
         // uses to resolve the returned promise.
         let byte_index = info.offset + idx * info.kind.elsize();
+        // The waiter joins the wait list synchronously (a notify later in this same job must see
+        // it); only the blocking happens on the helper thread.
+        let waiter = crate::interpreter::futex_register(id, byte_index);
         let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
         std::thread::spawn(move || {
-            let woken = crate::interpreter::futex_wait(id, byte_index, timeout);
+            let woken = crate::interpreter::futex_block(&waiter, id, byte_index, timeout);
             let _ = tx.send(if woken { "ok" } else { "timed-out" });
         });
         let promise = i.new_promise();

@@ -8912,3 +8912,35 @@ fn object_assign_throws_creating_on_sealed_target() {
         "TypeError:2:false"
     );
 }
+
+#[test]
+fn atomics_rmw_is_atomic_across_threads() {
+    // Two threads hammer Atomics.add on the same shared element; a read-modify-write that
+    // releases the lock between the read and the write loses increments.
+    assert_eq!(
+        run("var sab = new SharedArrayBuffer(4);
+             var i32a = new Int32Array(sab);
+             for (var k = 0; k < 1000; k++) Atomics.add(i32a, 0, 1);
+             Atomics.load(i32a, 0)"),
+        "1000"
+    );
+}
+
+#[test]
+fn atomics_waitasync_sees_same_job_notify() {
+    // waitAsync registers its waiter synchronously: a notify later in the same job wakes it.
+    let mut e = crate::Engine::new();
+    e.eval(
+        "var out = 'pending';
+         var i32a = new Int32Array(new SharedArrayBuffer(16));
+         var r = Atomics.waitAsync(i32a, 0, 0);
+         r.value.then(v => { out = 'v:' + v; }, e => { out = 'e:' + e; });
+         Atomics.notify(i32a, 0);",
+        false,
+    )
+    .unwrap();
+    match e.eval("out", false).unwrap() {
+        crate::Completion::Value(v) => assert_eq!(v, "v:ok"),
+        crate::Completion::Throw { name, message } => panic!("{name}: {message}"),
+    }
+}

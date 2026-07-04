@@ -53,14 +53,14 @@ pub fn monotonic_now_ms() -> f64 {
 
 /// A futex-like wait table for `Atomics.wait`/`notify`, keyed by `(shared-memory id, byte index)`.
 /// Each blocked waiter registers an individual wake handle so `notify` can wake an exact count.
-type Waiter = Arc<(Mutex<bool>, Condvar)>;
+pub type Waiter = Arc<(Mutex<bool>, Condvar)>;
 fn wait_table() -> &'static Mutex<HashMap<(u64, usize), Vec<Waiter>>> {
     static T: OnceLock<Mutex<HashMap<(u64, usize), Vec<Waiter>>>> = OnceLock::new();
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
-/// Block on `(id, index)` until notified or `timeout` elapses. Returns `true` if notified (woken),
-/// `false` if it timed out.
-pub fn futex_wait(id: u64, index: usize, timeout: Option<std::time::Duration>) -> bool {
+/// Add a waiter to the list for `(id, index)` without blocking. `Atomics.waitAsync` registers
+/// synchronously (so a notify later in the same job sees it) and blocks on a helper thread.
+pub fn futex_register(id: u64, index: usize) -> Waiter {
     let waiter: Waiter = Arc::new((Mutex::new(false), Condvar::new()));
     wait_table()
         .lock()
@@ -68,7 +68,22 @@ pub fn futex_wait(id: u64, index: usize, timeout: Option<std::time::Duration>) -
         .entry((id, index))
         .or_default()
         .push(waiter.clone());
-    let (lock, cvar) = &*waiter;
+    waiter
+}
+/// Block on `(id, index)` until notified or `timeout` elapses. Returns `true` if notified (woken),
+/// `false` if it timed out.
+pub fn futex_wait(id: u64, index: usize, timeout: Option<std::time::Duration>) -> bool {
+    let waiter = futex_register(id, index);
+    futex_block(&waiter, id, index, timeout)
+}
+/// Block on an already-registered waiter.
+pub fn futex_block(
+    waiter: &Waiter,
+    id: u64,
+    index: usize,
+    timeout: Option<std::time::Duration>,
+) -> bool {
+    let (lock, cvar) = &**waiter;
     let mut woken = lock.lock().unwrap();
     let result = match timeout {
         Some(dur) => {
@@ -101,7 +116,7 @@ pub fn futex_wait(id: u64, index: usize, timeout: Option<std::time::Duration>) -
     // On timeout, remove ourselves from the table (a notify may have already pulled us out).
     if !result {
         if let Some(v) = wait_table().lock().unwrap().get_mut(&(id, index)) {
-            v.retain(|w| !Arc::ptr_eq(w, &waiter));
+            v.retain(|w| !Arc::ptr_eq(w, waiter));
         }
     }
     result
@@ -1039,6 +1054,55 @@ impl Interp {
         match self.array_buffers.get(&info.buffer) {
             Some(buf) => decode(buf),
             _ => Value::Undefined,
+        }
+    }
+
+    /// Atomically read-modify-write an integer TypedArray element: `f` maps the old raw value to
+    /// the new one (or `None` for no write, as in a failed compareExchange). For a shared buffer
+    /// the whole operation happens under one lock hold, so concurrent agents can't interleave
+    /// (a lost `Atomics.add` increment would spin another agent's waitUntil loop forever).
+    /// Returns the old value, or `None` when the index is out of range.
+    pub fn ta_modify(
+        &mut self,
+        info: &TaInfo,
+        idx: usize,
+        f: impl FnOnce(i128) -> Option<i128>,
+    ) -> Option<i128> {
+        if idx >= self.ta_len(info).unwrap_or(0) {
+            return None;
+        }
+        let es = info.kind.elsize();
+        let start = info.offset + idx * es;
+        let apply = |buf: &mut [u8]| -> Option<i128> {
+            if start + es > buf.len() {
+                return None;
+            }
+            let bytes = &buf[start..start + es];
+            let old = if info.kind.is_bigint() {
+                info.kind.read_bigint(bytes)
+            } else {
+                info.kind.read(bytes) as i128
+            };
+            if let Some(new) = f(old) {
+                let nb = if info.kind.is_bigint() {
+                    info.kind.write_bigint(new)
+                } else {
+                    info.kind.write(new as f64)
+                };
+                buf[start..start + es].copy_from_slice(&nb);
+            }
+            Some(old)
+        };
+        if let Some(&id) = self.shared_buffers.get(&info.buffer) {
+            if let Some(mem) = shared_mem_get(id) {
+                let mut buf = mem.lock().unwrap();
+                return apply(&mut buf);
+            }
+            return None;
+        }
+        match self.array_buffers.get_mut(&info.buffer) {
+            Some(buf) => apply(buf),
+            None => None,
         }
     }
 
