@@ -447,6 +447,9 @@ impl<'a> Lexer<'a> {
         self.bump(); // opening backtick
         let mut parts: Vec<TplPart> = Vec::new();
         let mut cooked = String::new();
+        // An invalid escape poisons the chunk's cooked value (None) instead of erroring: the
+        // parser rejects it later unless the template is tagged.
+        let mut invalid = false;
         let mut raw_start = self.pos; // raw source of the current chunk starts here
         loop {
             // The template's raw value normalizes line terminators: <CR><LF> and <CR> → <LF>.
@@ -472,7 +475,8 @@ impl<'a> Lexer<'a> {
                     let raw = raw_of(&self.chars[raw_start..self.pos]);
                     self.bump();
                     parts.push(TplPart::Str {
-                        cooked: std::mem::take(&mut cooked),
+                        cooked: (!std::mem::take(&mut invalid))
+                            .then(|| std::mem::take(&mut cooked)),
                         raw,
                     });
                     break;
@@ -480,23 +484,30 @@ impl<'a> Lexer<'a> {
                 Some('$') if self.chars.get(self.pos + 1) == Some(&'{') => {
                     let raw = raw_of(&self.chars[raw_start..self.pos]);
                     parts.push(TplPart::Str {
-                        cooked: std::mem::take(&mut cooked),
+                        cooked: (!std::mem::take(&mut invalid))
+                            .then(|| std::mem::take(&mut cooked)),
                         raw,
                     });
+                    cooked.clear();
                     self.bump(); // '$'
                     self.bump(); // '{'
                     parts.push(TplPart::Sub(self.read_template_sub()?));
                     raw_start = self.pos;
                 }
                 Some('\\') => {
-                    // Octal / `\8` / `\9` escapes are never allowed in template literals.
+                    // Octal / `\8` / `\9` / malformed hex-unicode escapes poison the chunk's
+                    // cooked value; a tagged template accepts them (cooked = undefined).
+                    if !self.template_escape_ok() {
+                        invalid = true;
+                        self.bump(); // the backslash
+                        self.bump(); // the character after it
+                        continue;
+                    }
                     self.pending_legacy = false;
                     self.bump(); // consume the backslash
                     self.read_escape(&mut cooked)?;
                     if self.pending_legacy {
-                        return Err(
-                            self.err("octal escape sequences are not allowed in template literals")
-                        );
+                        invalid = true;
                     }
                 }
                 Some(c) => {
@@ -661,6 +672,46 @@ impl<'a> Lexer<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the escape starting at the current `\` is valid in a template's cooked string:
+    /// no octal / `\8` / `\9`, `\x` needs two hex digits, `\u` four (or a braced code point).
+    fn template_escape_ok(&self) -> bool {
+        let at = |k: usize| self.chars.get(self.pos + k).copied();
+        let hex = |c: Option<char>| c.is_some_and(|c| c.is_ascii_hexdigit());
+        match at(1) {
+            Some('0') => !matches!(at(2), Some(c) if c.is_ascii_digit()),
+            Some(c @ '1'..='9') => {
+                let _ = c;
+                false
+            }
+            Some('x') => hex(at(2)) && hex(at(3)),
+            Some('u') => {
+                if at(2) == Some('{') {
+                    let mut k = 3;
+                    let mut digits = 0u32;
+                    let mut v: u64 = 0;
+                    loop {
+                        match at(k) {
+                            Some('}') => return digits > 0 && v <= 0x10FFFF,
+                            Some(c) if c.is_ascii_hexdigit() => {
+                                digits += 1;
+                                v = (v.saturating_mul(16)) + c.to_digit(16).unwrap() as u64;
+                                if digits > 8 {
+                                    return false;
+                                }
+                            }
+                            _ => return false,
+                        }
+                        k += 1;
+                    }
+                } else {
+                    hex(at(2)) && hex(at(3)) && hex(at(4)) && hex(at(5))
+                }
+            }
+            None => false,
+            _ => true,
+        }
     }
 
     fn read_escape(&mut self, out: &mut String) -> Result<(), LexError> {

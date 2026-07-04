@@ -46,6 +46,7 @@ pub fn parse_script_eval(
         iter_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
+        iter_labels: Vec::new(),
         decl_scopes: vec![DeclScope {
             fn_boundary: true,
             ..Default::default()
@@ -107,6 +108,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         iter_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
+        iter_labels: Vec::new(),
         decl_scopes: vec![DeclScope {
             fn_boundary: true,
             ..Default::default()
@@ -312,6 +314,9 @@ struct Parser {
     switch_depth: u32,
     /// Active labels in scope (reset at function boundaries).
     labels: Vec<String>,
+    /// The subset of `labels` whose labelled statement is an iteration statement (valid
+    /// `continue` targets).
+    iter_labels: Vec<String>,
     /// Per-scope declared names, for detecting lexical redeclaration.
     decl_scopes: Vec<DeclScope>,
     /// Set just before parsing a function body so the scope it pushes is marked a var boundary.
@@ -731,6 +736,10 @@ impl Parser {
                     Some(l) if !self.labels.contains(l) => {
                         return self.err("undefined continue label")
                     }
+                    // `continue label` must target a label on an iteration statement.
+                    Some(l) if !self.iter_labels.contains(l) => {
+                        return self.err("continue label does not target an iteration statement")
+                    }
                     None if self.iter_depth == 0 => {
                         return self.err("illegal 'continue' statement")
                     }
@@ -788,11 +797,11 @@ impl Parser {
                         Tok::Ident(n) if matches!(self.peek_kind(1), Tok::Punct(":")) => n.clone(),
                         _ => break,
                     };
-                    if (self.in_async && n == "await") || (self.in_generator && n == "yield") {
+                    if let Err(e) = self.check_label_name(&n) {
                         for _ in 0..chain.len() {
                             self.labels.pop();
                         }
-                        return self.err(format!("'{n}' cannot be used as a label here"));
+                        return Err(e);
                     }
                     if self.labels.contains(&n) {
                         for _ in 0..chain.len() {
@@ -804,6 +813,17 @@ impl Parser {
                     self.advance();
                     self.labels.push(n.clone());
                     chain.push(n);
+                }
+                // `continue label` may only target a label whose statement is (a label chain
+                // over) an iteration statement.
+                let iter_ahead = matches!(
+                    self.cur(),
+                    Tok::Keyword("for") | Tok::Keyword("while") | Tok::Keyword("do")
+                );
+                if iter_ahead {
+                    for l in &chain {
+                        self.iter_labels.push(l.clone());
+                    }
                 }
                 // Annex B: LabelledItem may be a plain FunctionDeclaration in sloppy mode.
                 let body = if !self.strict && self.is_kw("function") {
@@ -825,6 +845,9 @@ impl Parser {
                 };
                 for _ in 0..chain.len() {
                     self.labels.pop();
+                    if iter_ahead {
+                        self.iter_labels.pop();
+                    }
                 }
                 let mut stmt = body?;
                 for label in chain.into_iter().rev() {
@@ -1768,6 +1791,18 @@ impl Parser {
         Ok(Stmt::Switch { disc, cases })
     }
 
+    /// A label identifier is subject to the identifier-reference rules: `yield` is reserved in
+    /// strict mode and generators, `await` in modules, async bodies and class static blocks.
+    fn check_label_name(&self, name: &str) -> Result<(), ParseError> {
+        if name == "yield" && (self.strict || self.in_generator) {
+            return self.err("'yield' cannot be used as a label here");
+        }
+        if name == "await" && (self.module || self.in_async || self.in_static_block) {
+            return self.err("'await' cannot be used as a label here");
+        }
+        Ok(())
+    }
+
     fn parse_opt_label(&mut self) -> Option<String> {
         if self.nl_before() {
             return None;
@@ -2502,7 +2537,13 @@ impl Parser {
         let mut expr: Option<Expr> = None;
         for part in parts {
             let piece = match part {
-                TplPart::Str { cooked, .. } => Expr::Str(Rc::from(cooked.as_str())),
+                TplPart::Str { cooked, .. } => match cooked {
+                    Some(c) => Expr::Str(Rc::from(c.as_str())),
+                    // An invalid escape is only legal in a *tagged* template.
+                    None => {
+                        return self.err("invalid escape sequence in template literal");
+                    }
+                },
                 TplPart::Sub(src) => {
                     let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
                         ParseError {
@@ -2526,6 +2567,7 @@ impl Parser {
                         iter_depth: self.iter_depth,
                         switch_depth: self.switch_depth,
                         labels: Vec::new(),
+                        iter_labels: Vec::new(),
                         decl_scopes: vec![DeclScope {
                             fn_boundary: true,
                             ..Default::default()
@@ -2569,7 +2611,7 @@ impl Parser {
         let mut subs = Vec::new();
         for part in parts {
             match part {
-                TplPart::Str { cooked, raw } => quasis.push((Some(cooked), raw)),
+                TplPart::Str { cooked, raw } => quasis.push((cooked, raw)),
                 TplPart::Sub(src) => {
                     let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
                         ParseError {
@@ -2593,6 +2635,7 @@ impl Parser {
                         iter_depth: self.iter_depth,
                         switch_depth: self.switch_depth,
                         labels: Vec::new(),
+                        iter_labels: Vec::new(),
                         decl_scopes: vec![DeclScope {
                             fn_boundary: true,
                             ..Default::default()

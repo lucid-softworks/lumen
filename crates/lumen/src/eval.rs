@@ -2575,7 +2575,13 @@ impl Interp {
                 let strings = self.make_array(cooked);
                 let raw_arr = self.make_array(raw);
                 self.freeze_object(&raw_arr);
-                self.set_member(&strings, "raw", raw_arr)?;
+                if let Value::Obj(so) = &strings {
+                    // `raw` is a non-enumerable data property (then frozen with the rest).
+                    so.borrow_mut().props.insert(
+                        "raw",
+                        crate::value::Property::data(raw_arr, false, false, false),
+                    );
+                }
                 self.freeze_object(&strings);
                 if let Value::Obj(o) = &strings {
                     self.gc_pin(o);
@@ -2628,7 +2634,7 @@ impl Interp {
         let (func, this) = match &**callee {
             // A direct `eval`, `super(...)`, private-name or super-property callee stays on the
             // normal path.
-            Expr::Ident(name) if name != "eval" => {
+            Expr::Ident(name) => {
                 // A `with`-resolved callee needs its receiver; keep it on the slow path.
                 let mut cur = Some(env.clone());
                 let mut plain = true;
@@ -2653,7 +2659,17 @@ impl Interp {
                 if !plain {
                     return Ok(None);
                 }
-                (self.get_var(name, env)?, Value::Undefined)
+                let f = self.get_var(name, env)?;
+                // A callee *named* eval only disqualifies when it is the real eval function
+                // (a direct eval isn't a call at all).
+                if name == "eval" {
+                    if let (Value::Obj(fo), Some(ef)) = (&f, &self.eval_fn) {
+                        if Rc::ptr_eq(fo, ef) {
+                            return Ok(None);
+                        }
+                    }
+                }
+                (f, Value::Undefined)
             }
             Expr::Member { obj, prop, .. }
                 if !matches!(**obj, Expr::Super) && !prop.starts_with('#') =>
@@ -5173,11 +5189,68 @@ impl Interp {
             op,
             "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>"
         ) {
-            let hint = if op == "+" {
-                Hint::Default
-            } else {
-                Hint::Number
-            };
+            // `+` primes both operands with ToPrimitive first (string concatenation dispatch);
+            // every other operator applies ToNumeric to the left operand *completely* before
+            // touching the right one.
+            if op != "+" {
+                let lp = self.to_primitive(&l, Hint::Number)?;
+                let ln = if matches!(lp, Value::BigInt(_)) {
+                    lp
+                } else {
+                    Value::Num(self.to_number(&lp)?)
+                };
+                let rp = self.to_primitive(&r, Hint::Number)?;
+                let rn = if matches!(rp, Value::BigInt(_)) {
+                    rp
+                } else {
+                    Value::Num(self.to_number(&rp)?)
+                };
+                if matches!(ln, Value::BigInt(_)) || matches!(rn, Value::BigInt(_)) {
+                    if let (Value::BigInt(x), Value::BigInt(y)) = (&ln, &rn) {
+                        return self.bigint_binop(op, *x, *y);
+                    }
+                    return Err(self.throw(
+                        "TypeError",
+                        "Cannot mix BigInt and other types, use explicit conversions",
+                    ));
+                }
+                let (a, b) = match (&ln, &rn) {
+                    (Value::Num(a), Value::Num(b)) => (*a, *b),
+                    _ => unreachable!(),
+                };
+                return match op {
+                    "-" => Ok(Value::Num(a - b)),
+                    "*" => Ok(Value::Num(a * b)),
+                    "/" => Ok(Value::Num(a / b)),
+                    "%" => Ok(Value::Num(js_mod(a, b))),
+                    // Number::exponentiate: a NaN exponent is NaN even for base 1, and |base| 1
+                    // with an infinite exponent is NaN (powf disagrees on both).
+                    "**" => Ok(Value::Num(
+                        if b.is_nan() || (a.abs() == 1.0 && b.is_infinite()) {
+                            f64::NAN
+                        } else {
+                            a.powf(b)
+                        },
+                    )),
+                    "&" => Ok(Value::Num(
+                        (self.to_int32(&ln)? & self.to_int32(&rn)?) as f64,
+                    )),
+                    "|" => Ok(Value::Num(
+                        (self.to_int32(&ln)? | self.to_int32(&rn)?) as f64,
+                    )),
+                    "^" => Ok(Value::Num(
+                        (self.to_int32(&ln)? ^ self.to_int32(&rn)?) as f64,
+                    )),
+                    "<<" => Ok(Value::Num(
+                        (self.to_int32(&ln)?.wrapping_shl(self.to_uint32(&rn)? & 31)) as f64,
+                    )),
+                    ">>" => Ok(Value::Num(
+                        (self.to_int32(&ln)? >> (self.to_uint32(&rn)? & 31)) as f64,
+                    )),
+                    _ => unreachable!(),
+                };
+            }
+            let hint = Hint::Default;
             let lp = self.to_primitive(&l, hint)?;
             let rp = self.to_primitive(&r, hint)?;
             if op == "+" && (matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_))) {
@@ -5293,8 +5366,22 @@ impl Interp {
             "&" => x & y,
             "|" => x | y,
             "^" => x ^ y,
-            "<<" => x.wrapping_shl(y.clamp(0, 127) as u32),
-            ">>" => x.wrapping_shr(y.clamp(0, 127) as u32),
+            // A negative BigInt shift count shifts the other way (arbitrary-precision shr
+            // is an arithmetic shift, flooring toward negative infinity).
+            "<<" => {
+                if y < 0 {
+                    x >> (-y).min(127) as u32
+                } else {
+                    x.wrapping_shl(y.min(127) as u32)
+                }
+            }
+            ">>" => {
+                if y < 0 {
+                    x.wrapping_shl((-y).min(127) as u32)
+                } else {
+                    x >> y.min(127) as u32
+                }
+            }
             _ => return Err(self.throw("TypeError", "unsupported BigInt operator")),
         };
         Ok(Value::BigInt(v))

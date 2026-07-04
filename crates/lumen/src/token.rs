@@ -49,7 +49,12 @@ pub enum Tok {
 /// the latter needed for tagged templates' `strings.raw`) or the raw source of a `${...}` hole.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TplPart {
-    Str { cooked: String, raw: String },
+    /// A literal chunk. `cooked` is None when the chunk contains an invalid escape sequence —
+    /// legal only in a *tagged* template (the cooked value is undefined there).
+    Str {
+        cooked: Option<String>,
+        raw: String,
+    },
     Sub(String),
 }
 
