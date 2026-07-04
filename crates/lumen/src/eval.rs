@@ -4103,6 +4103,17 @@ impl Interp {
                         for tr in &transforms {
                             v = self.call(tr.clone(), ctor_val.clone(), &[v])?;
                         }
+                        // Static PrivateFieldAdd: a non-extensible constructor (the initializer
+                        // may have sealed it) or a duplicate is a TypeError.
+                        if Interp::is_private_key(&key)
+                            && (ctor_obj.borrow().props.contains(key.as_str())
+                                || !ctor_obj.borrow().extensible)
+                        {
+                            return Err(self.throw(
+                                "TypeError",
+                                "cannot add a private field to a non-extensible object",
+                            ));
+                        }
                         ctor_obj.borrow_mut().props.insert(key, Property::plain(v));
                     } else {
                         inst_fields.push(FieldInit {
@@ -4453,6 +4464,17 @@ impl Interp {
             .unwrap_or(false);
         let call = obj.borrow().call.clone();
         match call {
+            // A bound-function parent constructs through its target with the bound arguments
+            // prepended (BoundFunction [[Construct]]).
+            Callable::Bound {
+                target,
+                args: bargs,
+                ..
+            } => {
+                let mut all = bargs.clone();
+                all.extend_from_slice(args);
+                return self.run_constructor_on(&Value::Obj(target), this, &all);
+            }
             Callable::User(func, cenv) => {
                 // A base class initializes its fields before its body runs; a derived class does so
                 // inside its own `super()`.
@@ -4652,6 +4674,13 @@ impl Interp {
                         "cannot initialize private methods of a class twice on the same object",
                     ));
                 }
+            }
+            // Extensibility applies to every private element, methods and accessors included.
+            if !priv_members.is_empty() && !o.borrow().extensible {
+                return Err(self.throw(
+                    "TypeError",
+                    "cannot add private members to a non-extensible object",
+                ));
             }
             for (k, p) in &priv_members {
                 o.borrow_mut().props.insert(k.as_str(), p.clone());
@@ -5897,9 +5926,9 @@ impl Interp {
     /// IsConstructor: whether `v` has a [[Construct]] internal method.
     pub(crate) fn value_is_constructor(&self, v: &Value) -> bool {
         let Value::Obj(o) = v else { return false };
-        if self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
-            // A proxy is a constructor exactly when its target is; callability approximates that.
-            return v.is_callable();
+        if let Some((target, _)) = self.proxies.get(&(Rc::as_ptr(o) as usize)) {
+            // A proxy is a constructor exactly when its target is.
+            return self.value_is_constructor(&target.clone());
         }
         let b = o.borrow();
         match &b.call {
@@ -5911,7 +5940,10 @@ impl Interp {
                         .map(|p| !p.accessor)
                         .unwrap_or(false)
             }
-            Callable::Bound { .. } => b.is_constructor,
+            // A bound function constructs exactly when its target does.
+            Callable::Bound { target, .. } => {
+                self.value_is_constructor(&Value::Obj(target.clone()))
+            }
             _ => false,
         }
     }

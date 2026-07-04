@@ -3111,15 +3111,19 @@ impl Parser {
         } else {
             None
         };
+        // All class code — the heritage clause included — is strict mode.
+        let saved = self.strict;
+        self.strict = true;
         let superclass = if self.eat_kw("extends") {
-            Some(Box::new(self.parse_lhs()?))
+            let sc = self.parse_lhs();
+            if sc.is_err() {
+                self.strict = saved;
+            }
+            Some(Box::new(sc?))
         } else {
             None
         };
         self.expect_punct("{")?;
-        // Class bodies are always strict mode.
-        let saved = self.strict;
-        self.strict = true;
         let sderived = std::mem::replace(&mut self.in_derived_class, superclass.is_some());
         let mut members = Vec::new();
         while !self.is_punct("}") && !self.at_eof() {
@@ -3180,12 +3184,17 @@ impl Parser {
             let snt = std::mem::replace(&mut self.allow_new_target, true);
             let ssb = std::mem::replace(&mut self.in_static_block, true);
             let sargs = std::mem::replace(&mut self.no_arguments_refs, true);
-            // The block is a break/continue/label boundary.
+            // The block is function-like code: not generator/async, and a
+            // break/continue/label boundary.
+            let sg = std::mem::take(&mut self.in_generator);
+            let sa = std::mem::take(&mut self.in_async);
             let sid = std::mem::take(&mut self.iter_depth);
             let ssd = std::mem::take(&mut self.switch_depth);
             let slabels = std::mem::take(&mut self.labels);
             let sil = std::mem::take(&mut self.iter_labels);
             let body = self.parse_block_body();
+            self.in_generator = sg;
+            self.in_async = sa;
             self.iter_depth = sid;
             self.switch_depth = ssd;
             self.labels = slabels;

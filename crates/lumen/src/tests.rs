@@ -8986,3 +8986,25 @@ fn arrow_inherits_lexical_new_target() {
         "undefined,undefined,function,function"
     );
 }
+
+#[test]
+fn private_elements_on_non_extensible_receivers() {
+    // PrivateFieldAdd / PrivateMethodOrAccessorAdd throw when the receiver was made
+    // non-extensible before the elements are stamped (instance and static alike).
+    assert_eq!(
+        run("'use strict';
+             class Base { constructor(seal) { if (seal) Object.preventExtensions(this); } }
+             class F extends Base { #v; constructor(s) { super(s); } }
+             class M extends Base { constructor(s) { super(s); } #m() {} }
+             var out = [];
+             for (var K of [F, M]) {
+               try { new K(true); out.push('no'); } catch (e) { out.push(e.constructor.name); }
+             }
+             try {
+               class S { static #g = (Object.preventExtensions(S), 1); }
+               out.push('no');
+             } catch (e) { out.push(e.constructor.name); }
+             out.join(',')"),
+        "TypeError,TypeError,TypeError"
+    );
+}

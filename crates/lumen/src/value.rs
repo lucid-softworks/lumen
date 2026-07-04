@@ -439,7 +439,7 @@ impl Props {
         self.entries
             .iter()
             .map(|(k, _)| k.clone())
-            .filter(|k| !k.starts_with('#'))
+            .filter(|k| !crate::interpreter::Interp::is_private_key(k))
             .collect()
     }
     /// Keys in spec [[OwnPropertyKeys]] order: array-index keys ascending, then other string keys
@@ -449,8 +449,8 @@ impl Props {
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
         for (k, _) in &self.entries {
-            if k.starts_with('#') {
-                continue; // private-name slot — not an observable own key
+            if crate::interpreter::Interp::is_private_key(k) {
+                continue; // private-element slot — not an observable own key
             }
             if k.starts_with('\u{0}') {
                 syms.push(k.clone());
