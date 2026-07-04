@@ -4550,6 +4550,14 @@ fn to_date(i: &mut Interp, v: &Value, opts: &Value) -> Result<IsoDate, Value> {
             to_overflow(i, opts)?;
             return Ok(d);
         }
+        Some(Temporal::Zoned {
+            epoch_ns,
+            offset_ns,
+            ..
+        }) => {
+            to_overflow(i, opts)?;
+            return Ok(zoned_local(epoch_ns, offset_ns).0);
+        }
         _ => {}
     }
     let d = match v {
