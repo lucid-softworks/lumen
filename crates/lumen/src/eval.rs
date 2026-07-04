@@ -3703,7 +3703,9 @@ impl Interp {
                     "classes may not have a static property named 'prototype'",
                 ));
             }
-            let is_private = key.starts_with('#');
+            // Only a syntactic PrivateIdentifier is private; a computed key that merely
+            // evaluates to a "#..." string is an ordinary property name.
+            let is_private = matches!(&m.key, PropKey::Ident(n) if n.starts_with('#'));
             let key = if is_private {
                 self.resolve_private(&key, &class_env)
             } else {
@@ -4221,7 +4223,7 @@ impl Interp {
         mut set: Value,
         inits: &mut Vec<Value>,
     ) -> Result<(Value, Value, Vec<Value>), Abrupt> {
-        let is_private = key.starts_with('#');
+        let is_private = Interp::is_private_key(key);
         let mut transforms = Vec::new();
         for d in decorators.iter().rev() {
             let dec = self.eval(d, env)?;
@@ -4515,9 +4517,33 @@ impl Interp {
                 for t in &transforms {
                     v = me.call(t.clone(), this.clone(), &[v])?;
                 }
-                // DefineField: CreateDataPropertyOrThrow (an own data property, even over a
-                // setter — and a [[DefineOwnProperty]] on a deferred namespace receiver).
-                crate::builtins::cdp_or_throw(me, this, &key, v).map_err(Abrupt::Throw)?;
+                if Interp::is_private_key(&key) {
+                    // PrivateFieldAdd: stamped directly on the object (bypassing proxy traps);
+                    // a second add or a non-extensible receiver is a TypeError.
+                    let Value::Obj(o) = this else {
+                        return Err(me.throw("TypeError", "cannot add a private field"));
+                    };
+                    if o.borrow().props.contains(key.as_str()) {
+                        return Err(me.throw(
+                            "TypeError",
+                            "cannot initialize the same private field twice",
+                        ));
+                    }
+                    if !o.borrow().extensible {
+                        return Err(me.throw(
+                            "TypeError",
+                            "cannot add a private field to a non-extensible object",
+                        ));
+                    }
+                    o.borrow_mut().props.insert(
+                        key.as_str(),
+                        crate::value::Property::data(v, true, false, false),
+                    );
+                } else {
+                    // DefineField: CreateDataPropertyOrThrow (an own data property, even over a
+                    // setter — and a [[DefineOwnProperty]] on a deferred namespace receiver).
+                    crate::builtins::cdp_or_throw(me, this, &key, v).map_err(Abrupt::Throw)?;
+                }
             }
             // Decorator addInitializer callbacks run after the fields, with `this` = the instance.
             for init in &initializers {
@@ -6431,7 +6457,7 @@ impl Interp {
             },
             Reference::Prop(base, key) => {
                 let k = self.ref_prop_key(&base.clone(), key)?;
-                if k.starts_with('#') {
+                if Interp::is_private_key(&k) {
                     return self.get_private_member(&base.clone(), &k);
                 }
                 self.get_member(base, &k)
@@ -6530,7 +6556,7 @@ impl Interp {
             },
             Reference::Prop(base, key) => {
                 let k = self.ref_prop_key(&base.clone(), key)?;
-                if k.starts_with('#') {
+                if Interp::is_private_key(&k) {
                     return self.set_private_member(&base.clone(), &k, value);
                 }
                 self.set_member(base, &k, value)

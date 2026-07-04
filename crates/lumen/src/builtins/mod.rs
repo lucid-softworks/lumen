@@ -4182,7 +4182,7 @@ fn object_define_properties(
             .props
             .ordered_keys()
             .iter()
-            .filter(|k| !k.starts_with('#'))
+            .filter(|k| !Interp::is_private_key(k))
             .map(|k| k.to_string())
             .collect()
     };
@@ -4258,7 +4258,7 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
             .props
             .ordered_keys()
             .iter()
-            .filter(|k| !k.starts_with('#'))
+            .filter(|k| !Interp::is_private_key(k))
             .map(|k| k.to_string())
             .collect()
     };
@@ -7339,7 +7339,7 @@ fn install_reflect(it: &mut Interp) {
             }
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
-        if key.starts_with('#') {
+        if Interp::is_private_key(&key) {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
         // A mapped arguments index reports the live parameter value.
@@ -10790,7 +10790,7 @@ fn install_object(it: &mut Interp) {
     it.def_method(&op, "hasOwnProperty", 1, |i, this, args| {
         let key = ab(i.to_property_key(&arg(args, 0)))?;
         // A private-name slot (`#x`) is never an observable own property.
-        if key.starts_with('#') {
+        if Interp::is_private_key(&key) {
             return Ok(Value::Bool(false));
         }
         let o = to_object_arg(i, this, "Object.prototype.hasOwnProperty")?;
@@ -11145,7 +11145,7 @@ fn install_object(it: &mut Interp) {
             .props
             .ordered_keys()
             .into_iter()
-            .filter(|k| !Interp::is_sym_key(k) && !k.starts_with('#'))
+            .filter(|k| !Interp::is_sym_key(k) && !Interp::is_private_key(k))
             .map(Value::Str)
             .collect();
         Ok(i.make_array(keys))
@@ -11270,7 +11270,7 @@ fn install_object(it: &mut Interp) {
         let o = to_object_arg(i, arg(args, 0), "Object.getOwnPropertyDescriptor")?;
         let key = ab(i.to_property_key(&arg(args, 1)))?;
         ab(i.defer_trigger(&o, Some(&key)))?;
-        if key.starts_with('#') {
+        if Interp::is_private_key(&key) {
             return Ok(Value::Undefined); // private-name slot is not an own property
         }
         // A mapped arguments index reports the live parameter value.
@@ -11328,7 +11328,7 @@ fn install_object(it: &mut Interp) {
             return Ok(Value::Obj(result));
         }
         for key in o.borrow().props.ordered_keys() {
-            if key.starts_with('#') {
+            if Interp::is_private_key(&key) {
                 continue;
             }
             let prop = o.borrow().props.get(&key).cloned();

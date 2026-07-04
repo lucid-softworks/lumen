@@ -1212,6 +1212,12 @@ impl Interp {
     pub fn is_sym_key(key: &str) -> bool {
         key.starts_with('\u{0}')
     }
+    /// Whether `key` is an internal private-element key. Every runtime private name carries a
+    /// `\u{1}<serial>` suffix (auto-accessor backings a `\u{0}` marker), so a user property whose
+    /// *string* name merely starts with `#` (a computed key) is not mistaken for one.
+    pub fn is_private_key(key: &str) -> bool {
+        key.starts_with('#') && (key.contains('\u{1}') || key.contains('\u{0}'))
+    }
     /// Recover the symbol `Value` behind an internal symbol key (for `getOwnPropertySymbols`).
     pub fn sym_from_key(&self, key: &str) -> Option<Value> {
         let id: u64 = key.strip_prefix('\u{0}')?.parse().ok()?;
@@ -1371,7 +1377,8 @@ impl Interp {
         if self.deferred_ns.is_empty() {
             return Ok(());
         }
-        if matches!(key, Some(k) if Interp::is_sym_key(k) || k == "then" || k.starts_with('#')) {
+        if matches!(key, Some(k) if Interp::is_sym_key(k) || k == "then" || Interp::is_private_key(k))
+        {
             return Ok(());
         }
         let module_key = match self.deferred_ns.get(&(Rc::as_ptr(o) as usize)) {
