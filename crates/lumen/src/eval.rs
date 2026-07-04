@@ -1552,6 +1552,24 @@ impl Interp {
         false
     }
 
+    /// Object-environment HasBinding for a `with (obj)` scope: HasProperty, then an object-valued
+    /// `obj[@@unscopables]` whose `name` property is truthy blocks the binding.
+    fn with_has_binding(&mut self, obj: &Value, name: &str) -> Result<bool, Abrupt> {
+        if !self.js_has_property(obj, name)? {
+            return Ok(false);
+        }
+        if let Some(k) = crate::builtins::well_known_key(self, "unscopables") {
+            let uns = self.get_member(obj, &k)?;
+            if matches!(uns, Value::Obj(_)) {
+                let blocked = self.get_member(&uns, name)?;
+                if self.to_boolean(&blocked) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     pub fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
@@ -1575,9 +1593,19 @@ impl Interp {
                 (b.with_obj.clone(), b.parent.clone())
             };
             // `with (obj)`: resolve against the object's properties if it has the name (the proxy
-            // `has` trap participates here).
+            // `has` trap and @@unscopables participate here).
             if let Some(obj @ Value::Obj(_)) = &with_obj {
-                if self.js_has_property(obj, name)? {
+                if self.with_has_binding(obj, name)? {
+                    // GetBindingValue re-checks HasProperty (the property may have vanished while
+                    // @@unscopables ran): strict code throws, sloppy reads undefined.
+                    if !self.js_has_property(obj, name)? {
+                        if self.strict {
+                            return Err(
+                                self.throw("ReferenceError", format!("{name} is not defined"))
+                            );
+                        }
+                        return Ok(Value::Undefined);
+                    }
                     return self.get_member(obj, name);
                 }
             }
@@ -1827,7 +1855,12 @@ impl Interp {
                 (b.with_obj.clone(), b.parent.clone())
             };
             if let Some(obj @ Value::Obj(_)) = &with_obj {
-                if self.js_has_property(obj, name)? {
+                if self.with_has_binding(obj, name)? {
+                    // SetMutableBinding re-checks HasProperty; strict code throws if the
+                    // property vanished while @@unscopables ran.
+                    if !self.js_has_property(obj, name)? && self.strict {
+                        return Err(self.throw("ReferenceError", format!("{name} is not defined")));
+                    }
                     return self.set_member(obj, name, value);
                 }
             }
@@ -2419,24 +2452,36 @@ impl Interp {
         subs: &[Expr],
         env: &Env,
     ) -> Result<Value, Abrupt> {
-        // The template object: a frozen array of cooked strings with a frozen `.raw` array.
-        let cooked: Vec<Value> = quasis
-            .iter()
-            .map(|(c, _)| {
-                c.as_ref()
-                    .map(|s| Value::from_string(s.clone()))
-                    .unwrap_or(Value::Undefined)
-            })
-            .collect();
-        let raw: Vec<Value> = quasis
-            .iter()
-            .map(|(_, r)| Value::from_string(r.clone()))
-            .collect();
-        let strings = self.make_array(cooked);
-        let raw_arr = self.make_array(raw);
-        self.freeze_object(&raw_arr);
-        self.set_member(&strings, "raw", raw_arr)?;
-        self.freeze_object(&strings);
+        // GetTemplateObject: one frozen strings array (with a frozen `.raw`) per template *site* —
+        // re-evaluating the same site passes the identical object.
+        let site = quasis.as_ptr() as usize;
+        let strings = match self.template_cache.get(&site) {
+            Some(v) => v.clone(),
+            None => {
+                let cooked: Vec<Value> = quasis
+                    .iter()
+                    .map(|(c, _)| {
+                        c.as_ref()
+                            .map(|s| Value::from_string(s.clone()))
+                            .unwrap_or(Value::Undefined)
+                    })
+                    .collect();
+                let raw: Vec<Value> = quasis
+                    .iter()
+                    .map(|(_, r)| Value::from_string(r.clone()))
+                    .collect();
+                let strings = self.make_array(cooked);
+                let raw_arr = self.make_array(raw);
+                self.freeze_object(&raw_arr);
+                self.set_member(&strings, "raw", raw_arr)?;
+                self.freeze_object(&strings);
+                if let Value::Obj(o) = &strings {
+                    self.gc_pin(o);
+                }
+                self.template_cache.insert(site, strings.clone());
+                strings
+            }
+        };
         // Evaluate the tag callee, capturing `this` for method tags (`obj.tag\`...\``).
         let (func, this) = match tag {
             Expr::Member { obj, prop, .. } => {
@@ -2584,6 +2629,39 @@ impl Interp {
                 let this = self.get_var("this", env)?;
                 let argv = self.eval_args(args, env)?;
                 return self.call(f, this, &argv);
+            }
+        }
+        // A callee resolved through a `with (obj)` environment is called with `this` = obj.
+        if let Expr::Ident(name) = callee {
+            let mut cur = Some(env.clone());
+            let mut with_hit: Option<(Value, Value)> = None;
+            while let Some(s) = cur {
+                let (has, with_obj, parent) = {
+                    let b = s.borrow();
+                    (
+                        b.vars.contains_key(name),
+                        b.with_obj.clone(),
+                        b.parent.clone(),
+                    )
+                };
+                if has {
+                    break;
+                }
+                if let Some(obj @ Value::Obj(_)) = &with_obj {
+                    if self.with_has_binding(obj, name)? {
+                        let f = self.get_member(obj, name)?;
+                        with_hit = Some((f, obj.clone()));
+                        break;
+                    }
+                }
+                cur = parent;
+            }
+            if let Some((func, this)) = with_hit {
+                let argv = self.eval_args(args, env)?;
+                if !func.is_callable() {
+                    return Err(self.throw("TypeError", format!("{name} is not a function")));
+                }
+                return self.call(func, this, &argv);
             }
         }
         // Determine `this` for method calls (`obj.m()` → this = obj).
@@ -6011,7 +6089,7 @@ impl Interp {
                         return Ok(Reference::Var(RefBase::Scope(s), name.clone()));
                     }
                     if let Some(obj @ Value::Obj(_)) = &with_obj {
-                        if self.js_has_property(obj, name)? {
+                        if self.with_has_binding(obj, name)? {
                             return Ok(Reference::Var(RefBase::With(obj.clone()), name.clone()));
                         }
                     }
@@ -6112,7 +6190,19 @@ impl Interp {
                     }
                     Ok(value)
                 }
-                RefBase::With(obj) => self.get_member(obj, name),
+                RefBase::With(obj) => {
+                    // GetBindingValue: HasProperty runs again before the Get.
+                    let obj = obj.clone();
+                    if !self.js_has_property(&obj, name)? {
+                        if self.strict {
+                            return Err(
+                                self.throw("ReferenceError", format!("{name} is not defined"))
+                            );
+                        }
+                        return Ok(Value::Undefined);
+                    }
+                    self.get_member(&obj, name)
+                }
                 RefBase::Global => self.get_member(&Value::Obj(self.global.clone()), name),
                 RefBase::Unresolvable => {
                     Err(self.throw("ReferenceError", format!("{name} is not defined")))
@@ -6195,12 +6285,13 @@ impl Interp {
                     }
                 }
                 RefBase::With(obj) => {
-                    // Object env record SetMutableBinding: if the binding's property no longer
-                    // exists (e.g. a getter deleted it) and we're strict, throw ReferenceError.
-                    if self.strict && !self.js_has_property(obj, name)? {
+                    // Object env record SetMutableBinding: HasProperty runs again before the Set
+                    // (strict code throws if the property vanished).
+                    let obj = obj.clone();
+                    if !self.js_has_property(&obj, name)? && self.strict {
                         return Err(self.throw("ReferenceError", format!("{name} is not defined")));
                     }
-                    self.set_member(obj, name, value)
+                    self.set_member(&obj, name, value)
                 }
                 RefBase::Global => {
                     let g = Value::Obj(self.global.clone());

@@ -3282,6 +3282,7 @@ impl Parser {
         let arrow_start = self.cur_start();
         // Optional `async` prefix (on the same line) for an async arrow.
         let async_arrow = self.is_ident_word("async")
+            && !self.cur_escaped()
             && !self
                 .toks
                 .get(self.pos + 1)
@@ -3299,6 +3300,19 @@ impl Parser {
                     self.advance(); // (async) ident
                 }
                 self.advance(); // =>
+                                // The lone BindingIdentifier is validated like any binding: strict-reserved
+                                // words (arrow bodies inherit strictness), `await` in async / static-block
+                                // contexts, `yield` in generators.
+                if self.strict && is_strict_reserved_binding(&name) {
+                    return self.err(format!(
+                        "'{name}' cannot be used as a binding in strict mode"
+                    ));
+                }
+                if ((async_arrow || self.in_async || self.in_static_block) && name == "await")
+                    || (self.in_generator && name == "yield")
+                {
+                    return self.err(format!("'{name}' cannot be used as a binding here"));
+                }
                 let params = vec![Param {
                     pattern: Pattern::Ident(name),
                     default: None,
@@ -3318,7 +3332,12 @@ impl Parser {
                     if async_arrow {
                         self.advance();
                     }
-                    let params = self.parse_params()?;
+                    // An async arrow's parameters are [+Await]: `await` is reserved there.
+                    let sa = self.in_async;
+                    self.in_async = sa || async_arrow;
+                    let params = self.parse_params();
+                    self.in_async = sa;
+                    let params = params?;
                     self.expect_punct("=>")?;
                     return Ok(Some(self.finish_arrow(params, async_arrow, arrow_start)?));
                 }
@@ -3341,6 +3360,15 @@ impl Parser {
         self.in_async = is_async;
         let result = if self.is_punct("{") {
             let (body, is_strict) = self.parse_function_body(!params_complex(&params), true)?;
+            // A "use strict" body subjects the parameter names to the strict binding rules.
+            if is_strict && !self.strict {
+                for n in param_names(&params) {
+                    if is_strict_reserved_binding(&n) {
+                        return self
+                            .err(format!("'{n}' cannot be used as a binding in strict mode"));
+                    }
+                }
+            }
             Function {
                 name: None,
                 params,

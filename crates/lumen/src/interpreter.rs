@@ -588,6 +588,9 @@ pub struct Interp {
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
     pub super_call_ok: bool,
+    /// GetTemplateObject cache: one frozen strings array per tagged-template *site* (AST node),
+    /// so the same site always passes the identical object. Keyed by the quasis slice address.
+    pub template_cache: std::collections::HashMap<usize, Value>,
     /// True while class field initializer code runs: a direct eval from there may not contain an
     /// `arguments` reference (arrows inherit the context; ordinary functions clear it).
     pub in_field_init_code: bool,
@@ -970,6 +973,7 @@ impl Interp {
             constructing: false,
             super_call_ok: false,
             in_field_init_code: false,
+            template_cache: std::collections::HashMap::new(),
             using_stack: Vec::new(),
             accessor_seq: 0,
             decorator_initializers: Vec::new(),
@@ -1276,10 +1280,11 @@ impl Interp {
         let is_generator = func.is_generator;
         let is_async = func.is_async;
         // A generator / async / async-generator function object's [[Prototype]] is the matching
-        // intrinsic (%GeneratorFunction.prototype% etc.), not %Function.prototype%. Non-arrow only.
+        // intrinsic (%GeneratorFunction.prototype% etc.), not %Function.prototype%. Async arrows
+        // use %AsyncFunction.prototype% too.
         let fn_proto = match (is_arrow, is_async, is_generator) {
             (false, false, true) => self.extra_protos.get("%GeneratorFunction.prototype%"),
-            (false, true, false) => self.extra_protos.get("%AsyncFunction.prototype%"),
+            (_, true, false) => self.extra_protos.get("%AsyncFunction.prototype%"),
             (false, true, true) => self.extra_protos.get("%AsyncGeneratorFunction.prototype%"),
             _ => None,
         }
