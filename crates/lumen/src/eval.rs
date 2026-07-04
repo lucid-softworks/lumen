@@ -1067,47 +1067,51 @@ impl Interp {
         let (iterator, next) = self.get_iterator(value)?;
         let mut received = Resume::Next(Value::Undefined);
         loop {
-            match received {
-                Resume::Next(v) => {
-                    let result = self.call(next.clone(), iterator.clone(), &[v])?;
-                    let done = self.get_member(&result, "done")?;
-                    if self.to_boolean(&done) {
-                        return self.get_member(&result, "value");
-                    }
-                    let inner = self.get_member(&result, "value")?;
-                    received = crate::coroutine::coroutine_yield(self, inner);
-                }
+            let (result, returning) = match received {
+                Resume::Next(v) => (self.call(next.clone(), iterator.clone(), &[v])?, false),
                 Resume::Throw(e) => {
+                    // GetMethod(iterator, "throw"): a non-callable non-nullish value throws; an
+                    // absent method is a protocol violation — close the inner iterator (close
+                    // errors propagate) and then throw TypeError.
                     let throw = self.get_member(&iterator, "throw")?;
-                    if !throw.is_callable() {
-                        self.iterator_close(&iterator);
+                    if matches!(throw, Value::Undefined | Value::Null) {
+                        self.iterator_close_normal(&iterator)?;
                         return Err(
                             self.throw("TypeError", "the delegated iterator has no 'throw' method")
                         );
                     }
-                    let result = self.call(throw, iterator.clone(), &[e])?;
-                    let done = self.get_member(&result, "done")?;
-                    if self.to_boolean(&done) {
-                        return self.get_member(&result, "value");
+                    if !throw.is_callable() {
+                        return Err(self.throw("TypeError", "iterator 'throw' is not callable"));
                     }
-                    let inner = self.get_member(&result, "value")?;
-                    received = crate::coroutine::coroutine_yield(self, inner);
+                    (self.call(throw, iterator.clone(), &[e])?, false)
                 }
                 Resume::Return(v) => {
                     let ret = self.get_member(&iterator, "return")?;
+                    if matches!(ret, Value::Undefined | Value::Null) {
+                        return Err(Abrupt::Return(v));
+                    }
                     if !ret.is_callable() {
-                        return Err(Abrupt::Return(v));
+                        return Err(self.throw("TypeError", "iterator 'return' is not callable"));
                     }
-                    let result = self.call(ret, iterator.clone(), &[v])?;
-                    let done = self.get_member(&result, "done")?;
-                    if self.to_boolean(&done) {
-                        let v = self.get_member(&result, "value")?;
-                        return Err(Abrupt::Return(v));
-                    }
-                    let inner = self.get_member(&result, "value")?;
-                    received = crate::coroutine::coroutine_yield(self, inner);
+                    (self.call(ret, iterator.clone(), &[v])?, true)
                 }
+            };
+            if !matches!(result, Value::Obj(_)) {
+                return Err(self.throw("TypeError", "iterator result is not an object"));
             }
+            let done = self.get_member(&result, "done")?;
+            if self.to_boolean(&done) {
+                let v = self.get_member(&result, "value")?;
+                return if returning {
+                    Err(Abrupt::Return(v))
+                } else {
+                    Ok(v)
+                };
+            }
+            // GeneratorYield forwards the inner result object as-is — its `value` is not read
+            // here, and the driver must not re-wrap it.
+            self.yield_raw_result = true;
+            received = crate::coroutine::coroutine_yield(self, result);
         }
     }
 

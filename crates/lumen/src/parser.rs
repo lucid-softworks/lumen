@@ -1727,12 +1727,18 @@ impl Parser {
         self.expect_punct(")")?;
         self.expect_punct("{")?;
         self.switch_depth += 1; // `break` is legal directly inside a switch
+        let mut seen_default = false;
         let mut cases = Vec::new();
         while !self.is_punct("}") && !self.at_eof() {
             let test = if self.eat_kw("case") {
                 let e = self.parse_expr()?;
                 Some(e)
             } else if self.eat_kw("default") {
+                if seen_default {
+                    self.switch_depth -= 1;
+                    return self.err("more than one default clause in switch statement");
+                }
+                seen_default = true;
                 None
             } else {
                 self.switch_depth -= 1;
@@ -3381,6 +3387,9 @@ impl Parser {
         }
         let sa = self.in_async;
         self.in_async = is_async;
+        // An arrow body is a function boundary for a static block's `await` reservation
+        // (the parameters, parsed by the caller, are not).
+        let ssb = std::mem::replace(&mut self.in_static_block, false);
         let result = if self.is_punct("{") {
             let (body, is_strict) = self.parse_function_body(!params_complex(&params), true)?;
             // A "use strict" body subjects the parameter names to the strict binding rules.
@@ -3422,6 +3431,7 @@ impl Parser {
             }
         };
         self.in_async = sa;
+        self.in_static_block = ssb;
         Ok(Expr::Func(Rc::new(result)))
     }
 

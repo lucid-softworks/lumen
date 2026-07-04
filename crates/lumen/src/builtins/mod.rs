@@ -15110,7 +15110,10 @@ fn drive_generator(
     }
     let suspend = coro.resume(i, signal);
     i.generators.insert(key, coro);
+    // A `yield*` forwards the inner iterator's result object unwrapped.
+    let raw = std::mem::take(&mut i.yield_raw_result);
     match suspend {
+        Suspend::Yield(v) if raw && matches!(v, Value::Obj(_)) => Ok(v),
         Suspend::Yield(v) => Ok(iter_result(i, v, false)),
         Suspend::Done(v) => Ok(iter_result(i, v, true)),
         Suspend::Throw(e) => Err(e),

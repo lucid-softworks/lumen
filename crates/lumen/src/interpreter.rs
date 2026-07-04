@@ -588,6 +588,9 @@ pub struct Interp {
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
     pub super_call_ok: bool,
+    /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
+    /// object and must pass through the generator driver unwrapped.
+    pub yield_raw_result: bool,
     /// GetTemplateObject cache: one frozen strings array per tagged-template *site* (AST node),
     /// so the same site always passes the identical object. Keyed by the quasis slice address.
     pub template_cache: std::collections::HashMap<usize, Value>,
@@ -973,6 +976,7 @@ impl Interp {
             constructing: false,
             super_call_ok: false,
             in_field_init_code: false,
+            yield_raw_result: false,
             template_cache: std::collections::HashMap::new(),
             using_stack: Vec::new(),
             accessor_seq: 0,
