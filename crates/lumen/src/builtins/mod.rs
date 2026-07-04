@@ -10411,35 +10411,10 @@ fn proxy_own_keys(i: &mut Interp, target: &Value, handler: &Value) -> Result<Vec
             Value::Obj(t) => {
                 // OrdinaryOwnPropertyKeys order: array-index keys ascending, then other string keys in
                 // insertion order, then symbol keys (as their Symbol values) in insertion order.
-                let keys = t.borrow().props.keys();
-                let mut indices: Vec<u32> = Vec::new();
-                let mut strings: Vec<Rc<str>> = Vec::new();
-                let mut symbols: Vec<Rc<str>> = Vec::new();
-                for k in keys {
-                    if Interp::is_sym_key(&k) {
-                        symbols.push(k);
-                    } else if let Ok(n) = k.parse::<u32>() {
-                        if n != u32::MAX && n.to_string() == *k {
-                            indices.push(n);
-                        } else {
-                            strings.push(k);
-                        }
-                    } else {
-                        strings.push(k);
-                    }
-                }
-                indices.sort_unstable();
-                let mut out: Vec<Value> = indices
+                ordinary_own_keys_ordered(i, t)
                     .into_iter()
-                    .map(|n| Value::from_string(n.to_string()))
-                    .collect();
-                out.extend(strings.into_iter().map(Value::Str));
-                out.extend(
-                    symbols
-                        .into_iter()
-                        .map(|k| i.sym_from_key(&k).unwrap_or(Value::Str(k))),
-                );
-                out
+                    .map(|k| i.sym_from_key(&k).unwrap_or_else(|| Value::from_string(k)))
+                    .collect()
             }
             _ => Vec::new(),
         });
@@ -13361,8 +13336,9 @@ fn install_iterator(it: &mut Interp) {
     });
     it.def_method(&proto, "toArray", 0, |i, this, _| {
         require_iterator_object(i, &this)?;
+        let next = ab(i.get_member(&this, "next"))?;
         let mut out = Vec::new();
-        while let Some(v) = step_iter(i, &this)? {
+        while let Some(v) = step_iter_with(i, &this, &next)? {
             out.push(v);
         }
         Ok(i.make_array(out))
@@ -13371,14 +13347,16 @@ fn install_iterator(it: &mut Interp) {
         require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
+            // Closes the underlying iterator without reading `next`; the TypeError wins.
             i.iterator_close(&this);
             return Err(i.make_error(
                 "TypeError",
                 "Iterator.prototype.forEach argument is not callable",
             ));
         }
+        let next = ab(i.get_member(&this, "next"))?;
         let mut k = 0.0;
-        while let Some(v) = step_iter(i, &this)? {
+        while let Some(v) = step_iter_with(i, &this, &next)? {
             if let Err(e) = i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]) {
                 i.iterator_close(&this);
                 return Err(crate::interpreter::abrupt_value(e));
@@ -13391,15 +13369,17 @@ fn install_iterator(it: &mut Interp) {
         require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
+            // Closes the underlying iterator without reading `next`; the TypeError wins.
             i.iterator_close(&this);
             return Err(i.make_error("TypeError", "reducer is not callable"));
         }
+        let next = ab(i.get_member(&this, "next"))?;
         let mut acc;
         let mut k = 0.0;
         if a.len() >= 2 {
             acc = arg(a, 1);
         } else {
-            acc = match step_iter(i, &this)? {
+            acc = match step_iter_with(i, &this, &next)? {
                 Some(v) => v,
                 None => {
                     return Err(i.make_error(
@@ -13410,7 +13390,7 @@ fn install_iterator(it: &mut Interp) {
             };
             k = 1.0;
         }
-        while let Some(v) = step_iter(i, &this)? {
+        while let Some(v) = step_iter_with(i, &this, &next)? {
             acc = match i.call(f.clone(), Value::Undefined, &[acc, v, Value::Num(k)]) {
                 Ok(r) => r,
                 Err(e) => {
@@ -13430,11 +13410,13 @@ fn install_iterator(it: &mut Interp) {
         require_iterator_object(i, &this)?;
         let f = arg(a, 0);
         if !f.is_callable() {
+            // Closes the underlying iterator without reading `next`; the TypeError wins.
             i.iterator_close(&this);
             return Err(i.make_error("TypeError", "predicate is not callable"));
         }
+        let next = ab(i.get_member(&this, "next"))?;
         let mut k = 0.0;
-        while let Some(v) = step_iter(i, &this)? {
+        while let Some(v) = step_iter_with(i, &this, &next)? {
             let r = match i.call(f.clone(), Value::Undefined, &[v.clone(), Value::Num(k)]) {
                 Ok(r) => r,
                 Err(e) => {
@@ -13463,18 +13445,68 @@ fn install_iterator(it: &mut Interp) {
             .insert(key, Property::builtin(Value::Obj(disp)));
     }
 
+    // %WrapForValidIteratorPrototype%: the prototype of Iterator.from's wrappers.
+    {
+        let wrap_proto = Object::new(Some(proto.clone()));
+        fn wrap_slot(this: &Value, key: &str) -> Option<Value> {
+            // [[Iterated]] internal-slot access: read own properties directly (no observable get).
+            let o = this.as_obj()?;
+            let v = o.borrow().props.get(key).map(|p| p.value.clone());
+            v.filter(|v| !matches!(v, Value::Undefined))
+        }
+        it.def_method(&wrap_proto, "next", 0, |i, this, _a| {
+            let Some(iter) = wrap_slot(&this, "__wrap_iter") else {
+                return Err(i.make_error("TypeError", "next called on an incompatible receiver"));
+            };
+            let nx = wrap_slot(&this, "__wrap_next").unwrap_or(Value::Undefined);
+            ab(i.call(nx, iter, &[]))
+        });
+        it.def_method(&wrap_proto, "return", 0, |i, this, _a| {
+            let Some(iter) = wrap_slot(&this, "__wrap_iter") else {
+                return Err(i.make_error("TypeError", "return called on an incompatible receiver"));
+            };
+            // GetMethod(iterator, "return"); its result is returned as-is.
+            let rm = ab(i.get_member(&iter, "return"))?;
+            if matches!(rm, Value::Undefined | Value::Null) {
+                return Ok(iter_result(i, Value::Undefined, true));
+            }
+            if !rm.is_callable() {
+                return Err(i.make_error("TypeError", "iterator return is not callable"));
+            }
+            ab(i.call(rm, iter, &[]))
+        });
+        it.extra_protos
+            .insert("%WrapForValidIteratorPrototype%", wrap_proto);
+    }
+
     let ctor = it.make_native("Iterator", 0, |i, t, _a| {
-        // Abstract: `new Iterator()` (this === undefined) throws, but `super()` from a subclass
-        // (this is the instance) is allowed.
-        if matches!(t, Value::Undefined) {
+        // Abstract: NewTarget must be present and must not be %Iterator% itself.
+        let nt = i.new_target.clone();
+        let is_self = match (&nt, i.extra_protos.get("%IteratorCtorMarker%")) {
+            (Value::Obj(a), Some(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        if !i.constructing || matches!(nt, Value::Undefined) || is_self {
             return Err(i.make_error(
                 "TypeError",
                 "Abstract class Iterator not directly constructable",
             ));
         }
-        Ok(t)
+        // `super()` from a subclass arrives with the instance already created.
+        if matches!(t, Value::Obj(_)) {
+            return Ok(t);
+        }
+        // OrdinaryCreateFromConstructor: a newTarget whose `prototype` is not an object falls
+        // back to the newTarget realm's %Iterator.prototype%.
+        let proto = match ab(i.get_member(&nt, "prototype"))? {
+            Value::Obj(p) => Some(p),
+            _ => ctor_realm_proto(i, &nt, "%IteratorPrototype%")
+                .or_else(|| i.extra_protos.get("%IteratorPrototype%").cloned()),
+        };
+        Ok(Value::Obj(Object::new(proto)))
     });
     ctor.borrow_mut().is_constructor = true;
+    it.extra_protos.insert("%IteratorCtorMarker%", ctor.clone());
     it.def_method(&ctor, "from", 1, |i, _t, a| {
         let v = arg(a, 0);
         // GetIteratorFlattenable (strings allowed): a string/iterable via @@iterator, or an iterator
@@ -13493,22 +13525,11 @@ fn install_iterator(it: &mut Interp) {
         if inherits {
             return Ok(iter);
         }
-        // Wrap: a fresh iterator-helper-bearing object that forwards next/return to `iter`.
+        // Wrap: a %WrapForValidIteratorPrototype% object forwarding next/return to `iter`.
         let next = ab(i.get_member(&iter, "next"))?;
-        let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
+        let obj = Object::new(i.extra_protos.get("%WrapForValidIteratorPrototype%").cloned());
         set_builtin(&obj, "__wrap_iter", iter);
         set_builtin(&obj, "__wrap_next", next);
-        i.def_method(&obj, "next", 0, |i, this, _a| {
-            let it = ab(i.get_member(&this, "__wrap_iter"))?;
-            let nx = ab(i.get_member(&this, "__wrap_next"))?;
-            let res = ab(i.call(nx, it, &[]))?;
-            Ok(res)
-        });
-        i.def_method(&obj, "return", 0, |i, this, _a| {
-            let it = ab(i.get_member(&this, "__wrap_iter"))?;
-            ab(i.iterator_close_normal(&it))?;
-            Ok(iter_result(i, Value::Undefined, true))
-        });
         Ok(Value::Obj(obj))
     });
     it.def_method(&ctor, "zip", 1, |i, _t, a| iterator_zip(i, a, false));
@@ -13545,12 +13566,33 @@ fn install_iterator(it: &mut Interp) {
         i.def_method(&obj, "next", 0, concat_next);
         // return() closes the currently-open inner iterator (once), then reports done.
         i.def_method(&obj, "return", 0, |i, this, _a| {
+            let running = ab(i.get_member(&this, "__cc_running"))?;
+            if i.to_boolean(&running) {
+                return Err(
+                    i.make_error("TypeError", "Iterator.concat iterator is already running")
+                );
+            }
             let done = ab(i.get_member(&this, "__cc_done"))?;
             if !i.to_boolean(&done) {
-                set_internal(this.as_obj().unwrap(), "__cc_done", Value::Bool(true));
+                let o = this.as_obj().unwrap().clone();
                 let cur = ab(i.get_member(&this, "__cc_cur"))?;
                 if matches!(cur, Value::Obj(_)) {
-                    ab(i.iterator_close_normal(&cur))?;
+                    let started = ab(i.get_member(&this, "__cc_gstarted"))?;
+                    let started = i.to_boolean(&started);
+                    if started {
+                        // Suspended at a yield: the close runs in the executing state.
+                        set_internal(&o, "__cc_running", Value::Bool(true));
+                    } else {
+                        set_internal(&o, "__cc_done", Value::Bool(true));
+                    }
+                    let res = i.iterator_close_normal(&cur);
+                    if started {
+                        set_internal(&o, "__cc_running", Value::Bool(false));
+                        set_internal(&o, "__cc_done", Value::Bool(true));
+                    }
+                    ab(res)?;
+                } else {
+                    set_internal(&o, "__cc_done", Value::Bool(true));
                 }
             }
             Ok(iter_result(i, Value::Undefined, true))
@@ -14060,12 +14102,13 @@ fn iter_some_every(i: &mut Interp, this: Value, a: &[Value], want: bool) -> Resu
     require_iterator_object(i, &this)?;
     let f = arg(a, 0);
     if !f.is_callable() {
-        // A non-callable predicate still closes the underlying iterator.
+        // Closes the underlying iterator without reading `next`; the TypeError wins.
         i.iterator_close(&this);
         return Err(i.make_error("TypeError", "predicate is not callable"));
     }
+    let next = ab(i.get_member(&this, "next"))?;
     let mut k = 0.0;
-    while let Some(v) = step_iter(i, &this)? {
+    while let Some(v) = step_iter_with(i, &this, &next)? {
         let r = match i.call(f.clone(), Value::Undefined, &[v, Value::Num(k)]) {
             Ok(r) => r,
             Err(e) => {
@@ -14090,11 +14133,6 @@ fn require_iterator_object(i: &Interp, this: &Value) -> Result<(), Value> {
     } else {
         Err(i.make_error("TypeError", "Iterator method called on a non-object"))
     }
-}
-
-fn step_iter(i: &mut Interp, src: &Value) -> Result<Option<Value>, Value> {
-    let next = ab(i.get_member(src, "next"))?;
-    step_iter_with(i, src, &next)
 }
 
 /// Advance an iterator using an already-captured `next` method (iterator helpers read `next` exactly
@@ -14136,7 +14174,7 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
                 return Err(crate::interpreter::abrupt_value(e));
             }
         };
-        if raw.is_nan() || raw < 0.0 {
+        if raw.is_nan() || raw.trunc() < 0.0 {
             i.iterator_close(&source);
             return Err(i.make_error("RangeError", "limit must be a non-negative number"));
         }
@@ -14161,12 +14199,38 @@ fn make_iter_helper(i: &mut Interp, source: Value, kind: &str, f: Value) -> Resu
     i.def_method(&obj, "next", 0, iter_helper_next);
     // The helper's `return` closes the underlying iterator once (IteratorHelperPrototype %return%).
     i.def_method(&obj, "return", 0, |i, this, _a| {
+        let running = ab(i.get_member(&this, "__ih_running"))?;
+        if i.to_boolean(&running) {
+            return Err(i.make_error("TypeError", "iterator helper is already running"));
+        }
         let done = ab(i.get_member(&this, "__ih_done"))?;
         if !i.to_boolean(&done) {
-            set_internal(this.as_obj().unwrap(), "__ih_done", Value::Bool(true));
-            let src = ab(i.get_member(&this, "__ih_src"))?;
-            // A normal return() propagates an error from the source's return method.
-            ab(i.iterator_close_normal(&src))?;
+            let o = this.as_obj().unwrap().clone();
+            let started = ab(i.get_member(&this, "__ih_gstarted"))?;
+            let started = i.to_boolean(&started);
+            if started {
+                // Suspended at a yield: the close runs in the executing state.
+                set_internal(&o, "__ih_running", Value::Bool(true));
+            } else {
+                // Suspended-start: the generator completes before the close.
+                set_internal(&o, "__ih_done", Value::Bool(true));
+            }
+            let res = (|i: &mut Interp| -> Result<(), Value> {
+                // A helper suspended inside a flatMap inner iterator closes it first.
+                let inner = ab(i.get_member(&this, "__ih_inner"))?;
+                if matches!(inner, Value::Obj(_)) {
+                    ab(i.iterator_close_normal(&inner))?;
+                }
+                let src = ab(i.get_member(&this, "__ih_src"))?;
+                // A normal return() propagates an error from the source's return method.
+                ab(i.iterator_close_normal(&src))?;
+                Ok(())
+            })(i);
+            if started {
+                set_internal(&o, "__ih_running", Value::Bool(false));
+                set_internal(&o, "__ih_done", Value::Bool(true));
+            }
+            res?;
         }
         Ok(iter_result(i, Value::Undefined, true))
     });
@@ -14213,36 +14277,39 @@ fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
     Value::Obj(o)
 }
 
-/// `Iterator.zip` (keyed = `Iterator.zipKeyed`): open every input iterator eagerly and step them in
-/// lockstep, combining the values per the `mode` (shortest/longest/strict) and `padding`.
+/// `Iterator.zip` / `Iterator.zipKeyed`: validate options, open every input iterator eagerly
+/// (closing already-open ones, in reverse order, if anything goes wrong), then step them in
+/// lockstep per the mode (shortest/longest/strict) with `padding` filling exhausted inputs.
 fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value> {
     let input = arg(a, 0);
     if !matches!(input, Value::Obj(_)) {
         return Err(i.make_error("TypeError", "Iterator.zip input is not an object"));
     }
+    // GetOptionsObject + mode: undefined -> "shortest"; anything else must be one of the three
+    // mode strings exactly (no coercion) or it's a TypeError.
     let options = arg(a, 1);
     let mode = match &options {
         Value::Undefined => "shortest".to_string(),
-        Value::Obj(_) => {
-            let m = ab(i.get_member(&options, "mode"))?;
-            match m {
-                Value::Undefined => "shortest".to_string(),
-                _ => ab(i.to_string(&m))?.to_string(),
+        Value::Obj(_) => match ab(i.get_member(&options, "mode"))? {
+            Value::Undefined => "shortest".to_string(),
+            Value::Str(m) if matches!(&*m.to_string(), "shortest" | "longest" | "strict") => {
+                m.to_string()
             }
-        }
+            _ => return Err(i.make_error("TypeError", "invalid Iterator.zip mode")),
+        },
         _ => return Err(i.make_error("TypeError", "Iterator.zip options is not an object")),
     };
-    if !matches!(mode.as_str(), "shortest" | "longest" | "strict") {
-        return Err(i.make_error("RangeError", "invalid Iterator.zip mode"));
-    }
-    // The padding option is read (but not yet iterated) before the inputs are opened.
+    // The padding option is read (and type-checked) before the inputs are opened.
     let padding_value = if mode == "longest" && matches!(&options, Value::Obj(_)) {
-        ab(i.get_member(&options, "padding"))?
+        let p = ab(i.get_member(&options, "padding"))?;
+        if !matches!(p, Value::Undefined | Value::Obj(_)) {
+            return Err(i.make_error("TypeError", "Iterator.zip padding is not an object"));
+        }
+        p
     } else {
         Value::Undefined
     };
-    // Open the inputs in order, GetIteratorFlattenable each as it is read. An error opening one
-    // closes the input iterator and every iterator already opened.
+    // Open the inputs in order, GetIteratorFlattenable each as it is read.
     let mut keys: Vec<String> = Vec::new();
     let mut iters: Vec<Value> = Vec::new();
     let mut nexts: Vec<Value> = Vec::new();
@@ -14257,65 +14324,143 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
         nexts.push(next);
         Ok(())
     };
+    // IteratorCloseAll during setup: close the open inputs in reverse order, swallowing close
+    // errors (the pending error wins), optionally ending with the outer iterables iterator.
+    let close_setup = |i: &mut Interp, iters: &[Value], also: Option<&Value>| {
+        for it in iters.iter().rev() {
+            i.iterator_close(it);
+        }
+        if let Some(it) = also {
+            i.iterator_close(it);
+        }
+    };
     if keyed {
-        // zipKeyed: each own enumerable key's value is an input iterable.
-        if let Value::Obj(o) = &input {
-            for k in ordered_enum_keys(o) {
-                let v = ab(i.get_member(&input, &k))?;
-                if let Err(e) = open_one(i, &v, &mut iters, &mut nexts) {
-                    for it in &iters {
-                        i.iterator_close(it);
+        // zipKeyed: each own enumerable non-undefined-valued key of `iterables` is an input.
+        let all_keys: Vec<String> = if let Some((t, h)) = proxy_pair(i, &input) {
+            let mut ks = Vec::new();
+            for k in proxy_own_keys(i, &t, &h)? {
+                ks.push(ab(i.to_property_key(&k))?);
+            }
+            ks
+        } else {
+            let o = input.as_obj().unwrap();
+            ordinary_own_keys_ordered(i, o)
+        };
+        for k in all_keys {
+            // [[GetOwnProperty]] fresh per key: skip missing or non-enumerable properties.
+            let enumerable = if let Some((t, h)) = proxy_pair(i, &input) {
+                match proxy_gopd_value(i, &t, &h, &k) {
+                    Ok(Value::Undefined) => false,
+                    Ok(d) => {
+                        let ev = ab(i.get_member(&d, "enumerable"))?;
+                        i.to_boolean(&ev)
                     }
+                    Err(e) => {
+                        close_setup(i, &iters, None);
+                        return Err(e);
+                    }
+                }
+            } else {
+                input
+                    .as_obj()
+                    .and_then(|o| o.borrow().props.get(&k).map(|p| p.enumerable))
+                    .unwrap_or(false)
+            };
+            if !enumerable {
+                continue;
+            }
+            let v = match ab(i.get_member(&input, &k)) {
+                Ok(v) => v,
+                Err(e) => {
+                    close_setup(i, &iters, None);
                     return Err(e);
                 }
-                keys.push(k.to_string());
+            };
+            if matches!(v, Value::Undefined) {
+                continue;
             }
+            if let Err(e) = open_one(i, &v, &mut iters, &mut nexts) {
+                close_setup(i, &iters, None);
+                return Err(e);
+            }
+            keys.push(k);
         }
     } else {
-        // zip: step the iterable-of-iterables lazily, opening each input as it is produced.
+        // zip: step the iterable-of-iterables, opening each input as it is produced. An error
+        // opening one closes the already-open inputs (reverse) and then the iterables iterator.
         let (input_iter, input_next) = ab(i.get_iterator(&input))?;
         loop {
             match step_iter_with(i, &input_iter, &input_next) {
                 Ok(None) => break,
                 Ok(Some(v)) => {
                     if let Err(e) = open_one(i, &v, &mut iters, &mut nexts) {
-                        i.iterator_close(&input_iter);
-                        for it in &iters {
-                            i.iterator_close(it);
-                        }
+                        close_setup(i, &iters, Some(&input_iter));
                         return Err(e);
                     }
                 }
                 Err(e) => {
-                    for it in &iters {
-                        i.iterator_close(it);
-                    }
+                    // The failed step already finished the iterables iterator; only the
+                    // open inputs are closed.
+                    close_setup(i, &iters, None);
                     return Err(e);
                 }
             }
         }
     }
-    // `longest` padding: an array aligned with the iterators, filled from the pre-read padding value.
-    let padding = if mode == "longest" {
-        let mut pad = vec![Value::Undefined; iters.len()];
-        if !matches!(padding_value, Value::Undefined) {
-            let vals = ab(i.iterate(&padding_value))?;
-            for (j, v) in vals.into_iter().enumerate().take(iters.len()) {
-                pad[j] = v;
+    let n_iters = iters.len();
+    // `longest` padding, aligned with the inputs: zip iterates the padding iterable at most
+    // iterCount times (it may be infinite); zipKeyed reads padding[key] per input key.
+    let mut padding = vec![Value::Undefined; n_iters];
+    if mode == "longest" && !matches!(padding_value, Value::Undefined) {
+        if keyed {
+            for (j, k) in keys.iter().enumerate() {
+                match ab(i.get_member(&padding_value, k)) {
+                    Ok(v) => padding[j] = v,
+                    Err(e) => {
+                        close_setup(i, &iters, None);
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            let (pit, pnext) = match ab(i.get_iterator(&padding_value)) {
+                Ok(p) => p,
+                Err(e) => {
+                    close_setup(i, &iters, None);
+                    return Err(e);
+                }
+            };
+            let mut using = true;
+            for slot in padding.iter_mut().take(n_iters) {
+                if !using {
+                    break;
+                }
+                match step_iter_with(i, &pit, &pnext) {
+                    Ok(Some(v)) => *slot = v,
+                    Ok(None) => using = false,
+                    Err(e) => {
+                        close_setup(i, &iters, None);
+                        return Err(e);
+                    }
+                }
+            }
+            if using {
+                // The padding iterator wasn't exhausted: close it (normal completion).
+                if let Err(e) = i.iterator_close_normal(&pit) {
+                    let e = crate::interpreter::abrupt_value(e);
+                    close_setup(i, &iters, None);
+                    return Err(e);
+                }
             }
         }
-        pad
-    } else {
-        Vec::new()
-    };
+    }
 
-    let n_iters = iters.len();
     let obj = Object::new(i.extra_protos.get("%IteratorPrototype%").cloned());
     set_builtin(&obj, "__zip_iters", i.make_array(iters));
     set_builtin(&obj, "__zip_nexts", i.make_array(nexts));
     set_builtin(
         &obj,
-        "__zip_done",
+        "__zip_state",
         i.make_array(vec![Value::Bool(false); n_iters]),
     );
     set_builtin(&obj, "__zip_mode", Value::from_string(mode.clone()));
@@ -14326,19 +14471,34 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
         set_builtin(&obj, "__zip_keys", karr);
     }
     i.def_method(&obj, "next", 0, zip_next);
-    // The zip iterator's return() closes every still-open underlying iterator (first error wins).
+    // return(): close every still-open input in reverse order; the close runs in the executing
+    // state, and the first close error wins (later ones are swallowed).
     i.def_method(&obj, "return", 0, |i, this, _a| {
         let finished = ab(i.get_member(&this, "__zip_finished"))?;
-        if !i.to_boolean(&finished) {
-            set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
-            let iters = ab(i.get_member(&this, "__zip_iters"))?;
-            let done = ab(i.get_member(&this, "__zip_done"))?;
-            let n = match &iters {
-                Value::Obj(o) => i.array_length(o),
-                _ => 0,
-            };
-            zip_close_others(i, &iters, &done, n, usize::MAX, true)?;
+        if i.to_boolean(&finished) {
+            return Ok(iter_result(i, Value::Undefined, true));
         }
+        let running = ab(i.get_member(&this, "__zip_running"))?;
+        if i.to_boolean(&running) {
+            return Err(i.make_error("TypeError", "Iterator.zip iterator is already running"));
+        }
+        let o = this.as_obj().unwrap().clone();
+        let started = ab(i.get_member(&this, "__zip_started"))?;
+        let res = if i.to_boolean(&started) {
+            // Suspended at a yield: the close runs in the executing state and the
+            // generator completes afterwards.
+            set_internal(&o, "__zip_running", Value::Bool(true));
+            let res = zip_close_open(i, &this, None);
+            set_internal(&o, "__zip_running", Value::Bool(false));
+            set_internal(&o, "__zip_finished", Value::Bool(true));
+            res
+        } else {
+            // Suspended-start: the generator completes first, then the inputs close
+            // (reentrant next/return during the close see the completed state).
+            set_internal(&o, "__zip_finished", Value::Bool(true));
+            zip_close_open(i, &this, None)
+        };
+        res?;
         Ok(iter_result(i, Value::Undefined, true))
     });
     if let Some(sym) = i.iterator_sym.clone() {
@@ -14350,44 +14510,98 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
     Ok(Value::Obj(obj))
 }
 
-/// Close every still-open zip iterator except `except`, marking them done (used when the zip finishes
-/// or errors mid-round).
-fn zip_close_others(
-    i: &mut Interp,
-    iters: &Value,
-    done: &Value,
-    n: usize,
-    except: usize,
-    propagate: bool,
-) -> Result<(), Value> {
-    for k in 0..n {
-        if k == except {
-            continue;
-        }
-        let dk = ab(i.get_member(done, &k.to_string()))?;
-        if !i.to_boolean(&dk) {
-            let it = ab(i.get_member(iters, &k.to_string()))?;
-            ab(i.set_member(done, &k.to_string(), Value::Bool(true)))?;
-            // On a normal completion the first close error propagates; on a throw completion (an
-            // earlier error already pending) close errors are swallowed.
-            if propagate {
-                ab(i.iterator_close_normal(&it))?;
+/// OrdinaryOwnPropertyKeys as internal key strings: array indices ascending, then other string
+/// keys in insertion order, then symbol keys in insertion order.
+fn ordinary_own_keys_ordered(_i: &Interp, o: &Gc) -> Vec<String> {
+    let all = o.borrow().props.ordered_keys();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut strings: Vec<String> = Vec::new();
+    let mut symbols: Vec<String> = Vec::new();
+    for k in all {
+        if Interp::is_sym_key(&k) {
+            symbols.push(k.to_string());
+        } else if let Ok(n) = k.parse::<u32>() {
+            if n != u32::MAX && n.to_string() == *k {
+                indices.push(n);
             } else {
-                i.iterator_close(&it);
+                strings.push(k.to_string());
             }
+        } else {
+            strings.push(k.to_string());
         }
     }
-    Ok(())
+    indices.sort_unstable();
+    let mut out: Vec<String> = indices.into_iter().map(|n| n.to_string()).collect();
+    out.extend(strings);
+    out.extend(symbols);
+    out
+}
+
+/// IteratorCloseAll over the zip iterator's still-open inputs, in reverse order. With a pending
+/// error (`err`) all close errors are swallowed and the pending error is returned; on a normal
+/// completion the first close error wins (later closes still run but are swallowed).
+fn zip_close_open(i: &mut Interp, this: &Value, err: Option<Value>) -> Result<(), Value> {
+    let iters = ab(i.get_member(this, "__zip_iters"))?;
+    let state = ab(i.get_member(this, "__zip_state"))?;
+    let n = match &iters {
+        Value::Obj(o) => i.array_length(o),
+        _ => 0,
+    };
+    let mut pending = err;
+    for j in (0..n).rev() {
+        let closed = ab(i.get_member(&state, &j.to_string()))?;
+        if i.to_boolean(&closed) {
+            continue;
+        }
+        ab(i.set_member(&state, &j.to_string(), Value::Bool(true)))?;
+        let it = ab(i.get_member(&iters, &j.to_string()))?;
+        if pending.is_some() {
+            i.iterator_close(&it);
+        } else if let Err(e) = i.iterator_close_normal(&it) {
+            pending = Some(crate::interpreter::abrupt_value(e));
+        }
+    }
+    match pending {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // GeneratorValidate: re-entering the running zip iterator throws.
+    let running = ab(i.get_member(&this, "__zip_running"))?;
+    if i.to_boolean(&running) {
+        return Err(i.make_error("TypeError", "Iterator.zip iterator is already running"));
+    }
     let finished = ab(i.get_member(&this, "__zip_finished"))?;
     if i.to_boolean(&finished) {
         return Ok(iter_result(i, Value::Undefined, true));
     }
+    let Some(o) = this.as_obj().cloned() else {
+        return Err(i.make_error("TypeError", "next called on an incompatible receiver"));
+    };
+    set_internal(&o, "__zip_started", Value::Bool(true));
+    set_internal(&o, "__zip_running", Value::Bool(true));
+    let res = zip_step(i, this);
+    set_internal(&o, "__zip_running", Value::Bool(false));
+    let done = match &res {
+        Err(_) => true,
+        Ok(r) => matches!(r, Value::Obj(ro) if matches!(
+            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            Some(Value::Bool(true))
+        )),
+    };
+    if done {
+        set_internal(&o, "__zip_finished", Value::Bool(true));
+    }
+    res
+}
+
+/// One lockstep round of the zip closure.
+fn zip_step(i: &mut Interp, this: Value) -> Result<Value, Value> {
     let iters = ab(i.get_member(&this, "__zip_iters"))?;
     let nexts = ab(i.get_member(&this, "__zip_nexts"))?;
-    let done = ab(i.get_member(&this, "__zip_done"))?;
+    let state = ab(i.get_member(&this, "__zip_state"))?;
     let pad = ab(i.get_member(&this, "__zip_pad"))?;
     let mode_v = ab(i.get_member(&this, "__zip_mode"))?;
     let mode = ab(i.to_string(&mode_v))?.to_string();
@@ -14396,88 +14610,113 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
         _ => 0,
     };
     if n == 0 {
-        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
         return Ok(iter_result(i, Value::Undefined, true));
     }
+    let mark = |i: &mut Interp, state: &Value, j: usize| -> Result<(), Value> {
+        ab(i.set_member(state, &j.to_string(), Value::Bool(true)))
+    };
     let mut values = vec![Value::Undefined; n];
-    let mut all_done = true;
-    // `first_live` records the first iterator's outcome (for strict-mode mismatch detection).
-    let mut first_live: Option<bool> = None;
     for j in 0..n {
-        let dj = ab(i.get_member(&done, &j.to_string()))?;
-        if i.to_boolean(&dj) {
+        let closed = ab(i.get_member(&state, &j.to_string()))?;
+        if i.to_boolean(&closed) {
+            // An exhausted input in `longest` mode contributes its padding value.
             values[j] = ab(i.get_member(&pad, &j.to_string()))?;
             continue;
         }
         let it = ab(i.get_member(&iters, &j.to_string()))?;
         let nx = ab(i.get_member(&nexts, &j.to_string()))?;
-        let stepped = step_iter_with(i, &it, &nx);
-        match stepped {
-            Ok(Some(v)) => {
-                all_done = false;
-                values[j] = v;
-                if first_live.is_none() {
-                    first_live = Some(true);
-                }
-                // strict: a live value after a finished iterator is a length mismatch.
-                if mode == "strict" && first_live == Some(false) {
-                    zip_close_others(i, &iters, &done, n, j, true)?;
-                    set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
-                    return Err(i.make_error("TypeError", "Iterator.zip strict: length mismatch"));
-                }
-            }
+        match step_iter_with(i, &it, &nx) {
+            Ok(Some(v)) => values[j] = v,
             Ok(None) => {
-                ab(i.set_member(&done, &j.to_string(), Value::Bool(true)))?;
-                if first_live.is_none() {
-                    first_live = Some(false);
-                }
+                mark(i, &state, j)?;
                 match mode.as_str() {
                     "shortest" => {
-                        zip_close_others(i, &iters, &done, n, j, true)?;
-                        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
+                        zip_close_open(i, &this, None)?;
                         return Ok(iter_result(i, Value::Undefined, true));
                     }
                     "strict" => {
-                        // A finished iterator after a live one is a mismatch.
-                        if first_live == Some(true) {
-                            zip_close_others(i, &iters, &done, n, j, true)?;
-                            set_internal(
-                                this.as_obj().unwrap(),
-                                "__zip_finished",
-                                Value::Bool(true),
+                        if j != 0 {
+                            let e = i.make_error(
+                                "TypeError",
+                                "Iterator.zip strict: input iterators have different lengths",
                             );
-                            return Err(
-                                i.make_error("TypeError", "Iterator.zip strict: length mismatch")
-                            );
+                            return Err(zip_close_open(i, &this, Some(e)).unwrap_err());
                         }
-                        values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+                        // The first input finished: every other input must be done too
+                        // (checked with IteratorStep — `done` is read, values are not).
+                        for k in 1..n {
+                            let kit = ab(i.get_member(&iters, &k.to_string()))?;
+                            let knx = ab(i.get_member(&nexts, &k.to_string()))?;
+                            let res = (|i: &mut Interp| -> Result<bool, Value> {
+                                if !knx.is_callable() {
+                                    return Err(i.make_error(
+                                        "TypeError",
+                                        "iterator.next is not a function",
+                                    ));
+                                }
+                                let r = ab(i.call(knx.clone(), kit.clone(), &[]))?;
+                                if !matches!(r, Value::Obj(_)) {
+                                    return Err(i.make_error(
+                                        "TypeError",
+                                        "iterator result is not an object",
+                                    ));
+                                }
+                                let d = ab(i.get_member(&r, "done"))?;
+                                Ok(i.to_boolean(&d))
+                            })(i);
+                            match res {
+                                Err(e) => {
+                                    mark(i, &state, k)?;
+                                    return Err(zip_close_open(i, &this, Some(e)).unwrap_err());
+                                }
+                                Ok(true) => mark(i, &state, k)?,
+                                Ok(false) => {
+                                    let e = i.make_error(
+                                        "TypeError",
+                                        "Iterator.zip strict: input iterators have different lengths",
+                                    );
+                                    return Err(zip_close_open(i, &this, Some(e)).unwrap_err());
+                                }
+                            }
+                        }
+                        return Ok(iter_result(i, Value::Undefined, true));
                     }
                     _ => {
+                        // longest: exhausted inputs are padded; finish when all are done.
                         values[j] = ab(i.get_member(&pad, &j.to_string()))?;
+                        let mut any_open = false;
+                        for k in 0..n {
+                            let c = ab(i.get_member(&state, &k.to_string()))?;
+                            if !i.to_boolean(&c) {
+                                any_open = true;
+                                break;
+                            }
+                        }
+                        if !any_open {
+                            return Ok(iter_result(i, Value::Undefined, true));
+                        }
                     }
                 }
             }
             Err(e) => {
-                zip_close_others(i, &iters, &done, n, j, false)?;
-                set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
-                return Err(e);
+                mark(i, &state, j)?;
+                return Err(zip_close_open(i, &this, Some(e)).unwrap_err());
             }
         }
     }
-    // In longest/strict, the round is over only when every iterator is exhausted.
-    if all_done {
-        set_internal(this.as_obj().unwrap(), "__zip_finished", Value::Bool(true));
-        return Ok(iter_result(i, Value::Undefined, true));
-    }
-    let result = if ab(i.get_member(&this, "__zip_keys")).is_ok()
-        && !matches!(ab(i.get_member(&this, "__zip_keys"))?, Value::Undefined)
-    {
-        let keys = ab(i.get_member(&this, "__zip_keys"))?;
-        let o = i.new_object();
-        for j in 0..n {
+    // finishResults: zip yields an Array; zipKeyed a null-prototype object keyed like the input.
+    let keys = ab(i.get_member(&this, "__zip_keys"))?;
+    let result = if matches!(keys, Value::Obj(_)) {
+        let o = Object::new(None);
+        for (j, v) in values.into_iter().enumerate() {
             let k = ab(i.get_member(&keys, &j.to_string()))?;
-            let k = ab(i.to_string(&k))?.to_string();
-            set_data(&o, &k, values[j].clone());
+            let k = match k {
+                Value::Str(s) => s.to_string(),
+                other => ab(i.to_string(&other))?.to_string(),
+            };
+            o.borrow_mut()
+                .props
+                .insert(k, Property::data(v, true, true, true));
         }
         Value::Obj(o)
     } else {
@@ -14488,10 +14727,36 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
 
 /// `Iterator.concat`'s iterator: opens each captured iterable in order and yields its values.
 fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // GeneratorValidate: re-entering the running concat iterator throws.
+    let running = ab(i.get_member(&this, "__cc_running"))?;
+    if i.to_boolean(&running) {
+        return Err(i.make_error("TypeError", "Iterator.concat iterator is already running"));
+    }
     let done = ab(i.get_member(&this, "__cc_done"))?;
     if i.to_boolean(&done) {
         return Ok(iter_result(i, Value::Undefined, true));
     }
+    let Some(o) = this.as_obj().cloned() else {
+        return Err(i.make_error("TypeError", "next called on an incompatible receiver"));
+    };
+    set_internal(&o, "__cc_gstarted", Value::Bool(true));
+    set_internal(&o, "__cc_running", Value::Bool(true));
+    let res = concat_step(i, this);
+    set_internal(&o, "__cc_running", Value::Bool(false));
+    let finished = match &res {
+        Err(_) => true,
+        Ok(r) => matches!(r, Value::Obj(ro) if matches!(
+            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            Some(Value::Bool(true))
+        )),
+    };
+    if finished {
+        set_internal(&o, "__cc_done", Value::Bool(true));
+    }
+    res
+}
+
+fn concat_step(i: &mut Interp, this: Value) -> Result<Value, Value> {
     loop {
         let cur = ab(i.get_member(&this, "__cc_cur"))?;
         if matches!(cur, Value::Undefined) {
@@ -14560,42 +14825,39 @@ fn get_iterator_flattenable(
     Ok(iter)
 }
 
-/// GetIteratorFlattenable(obj, reject-primitives) then drain it: a primitive is a TypeError; an
-/// object's @@iterator is used if present, else the object itself is treated as the iterator.
-fn flatmap_flatten(i: &mut Interp, mapped: &Value) -> Result<Vec<Value>, Value> {
-    if !matches!(mapped, Value::Obj(_)) {
-        return Err(i.make_error("TypeError", "flatMap mapper must return an object"));
-    }
-    let iter_key = i
-        .iterator_sym
-        .clone()
-        .map(|s| Interp::sym_key(&s))
-        .unwrap_or_default();
-    let itf = ab(i.get_member(mapped, &iter_key))?;
-    let iter = if matches!(itf, Value::Undefined | Value::Null) {
-        mapped.clone() // already an iterator
-    } else if itf.is_callable() {
-        ab(i.call(itf, mapped.clone(), &[]))?
-    } else {
-        return Err(i.make_error("TypeError", "@@iterator is not callable"));
-    };
-    let next = ab(i.get_member(&iter, "next"))?;
-    if !next.is_callable() {
-        return Err(i.make_error("TypeError", "iterator has no next method"));
-    }
-    let mut out = Vec::new();
-    while let Some(v) = step_iter_with(i, &iter, &next)? {
-        out.push(v);
-    }
-    Ok(out)
-}
-
 fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    // GeneratorValidate: re-entering a running helper throws.
+    let running = ab(i.get_member(&this, "__ih_running"))?;
+    if i.to_boolean(&running) {
+        return Err(i.make_error("TypeError", "iterator helper is already running"));
+    }
     // A helper that has already finished stays done (and never re-touches the source).
     let done = ab(i.get_member(&this, "__ih_done"))?;
     if i.to_boolean(&done) {
         return Ok(iter_result(i, Value::Undefined, true));
     }
+    let Some(o) = this.as_obj().cloned() else {
+        return Err(i.make_error("TypeError", "next called on an incompatible receiver"));
+    };
+    set_internal(&o, "__ih_gstarted", Value::Bool(true));
+    set_internal(&o, "__ih_running", Value::Bool(true));
+    let res = iter_helper_step(i, this);
+    set_internal(&o, "__ih_running", Value::Bool(false));
+    // Any completion — a done result or a throw — moves the helper to the completed state.
+    let finished = match &res {
+        Err(_) => true,
+        Ok(r) => matches!(r, Value::Obj(ro) if matches!(
+            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            Some(Value::Bool(true))
+        )),
+    };
+    if finished {
+        set_internal(&o, "__ih_done", Value::Bool(true));
+    }
+    res
+}
+
+fn iter_helper_step(i: &mut Interp, this: Value) -> Result<Value, Value> {
     let src = ab(i.get_member(&this, "__ih_src"))?;
     let inext = ab(i.get_member(&this, "__ih_next"))?;
     let kind_v = ab(i.get_member(&this, "__ih_kind"))?;
@@ -14687,24 +14949,24 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         "flatMap" => {
             let mut c = count;
             loop {
-                // Drain the current inner buffer first.
-                let buf = ab(i.get_member(&this, "__ih_buf"))?;
-                if matches!(buf, Value::Obj(_)) {
-                    let bi_v = ab(i.get_member(&this, "__ih_bi"))?;
-                    let bi = ab(i.to_number(&bi_v))? as usize;
-                    let len_v = ab(i.get_member(&buf, "length"))?;
-                    let len = ab(i.to_number(&len_v))? as usize;
-                    if bi < len {
-                        let v = ab(i.get_member(&buf, &bi.to_string()))?;
-                        set_internal(
-                            this.as_obj().unwrap(),
-                            "__ih_bi",
-                            Value::Num((bi + 1) as f64),
-                        );
-                        return Ok(iter_result(i, v, false));
+                // Drain the active inner iterator first (lazily — it may be infinite).
+                let inner = ab(i.get_member(&this, "__ih_inner"))?;
+                if matches!(inner, Value::Obj(_)) {
+                    let inext = ab(i.get_member(&this, "__ih_inner_next"))?;
+                    match step_iter_with(i, &inner, &inext) {
+                        Ok(Some(v)) => return Ok(iter_result(i, v, false)),
+                        Ok(None) => {
+                            set_internal(this.as_obj().unwrap(), "__ih_inner", Value::Undefined);
+                            continue;
+                        }
+                        Err(e) => {
+                            // An abrupt inner step closes the outer iterator with the same error.
+                            i.iterator_close(&src);
+                            return Err(e);
+                        }
                     }
                 }
-                // Refill from the source: map a value to an iterable and flatten it.
+                // Refill: map the next outer value to an iterable and open it.
                 match step_iter_with(i, &src, &inext)? {
                     None => return Ok(iter_result(i, Value::Undefined, true)),
                     Some(v) => {
@@ -14718,18 +14980,22 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
                         };
                         c += 1.0;
                         set_internal(this.as_obj().unwrap(), "__ih_count", Value::Num(c));
-                        // GetIteratorFlattenable (reject primitives): an @@iterator-bearing iterable,
-                        // or the object itself if it's already an iterator.
-                        let inner = match flatmap_flatten(i, &mapped) {
-                            Ok(v) => v,
+                        // GetIteratorFlattenable (reject primitives), fetching `next` once.
+                        let opened = (|i: &mut Interp| -> Result<(Value, Value), Value> {
+                            let it = get_iterator_flattenable(i, &mapped, false)?;
+                            let n = ab(i.get_member(&it, "next"))?;
+                            Ok((it, n))
+                        })(i);
+                        match opened {
+                            Ok((it, n)) => {
+                                set_internal(this.as_obj().unwrap(), "__ih_inner", it);
+                                set_internal(this.as_obj().unwrap(), "__ih_inner_next", n);
+                            }
                             Err(e) => {
                                 i.iterator_close(&src);
                                 return Err(e);
                             }
-                        };
-                        let arr = i.make_array(inner);
-                        set_internal(this.as_obj().unwrap(), "__ih_buf", arr);
-                        set_internal(this.as_obj().unwrap(), "__ih_bi", Value::Num(0.0));
+                        }
                     }
                 }
             }

@@ -4078,8 +4078,8 @@ fn iterator_zip_basics() {
         run("var z=Iterator.zipKeyed({a:[1,2],b:[3,4]}).toArray(); z[0].a+''+z[0].b"),
         "13"
     );
-    // An invalid mode is a RangeError.
-    assert_eq!(throws("Iterator.zip([[1]], {mode:'bogus'})"), "RangeError");
+    // An invalid mode is a TypeError (no coercion of the mode value).
+    assert_eq!(throws("Iterator.zip([[1]], {mode:'bogus'})"), "TypeError");
 }
 
 #[test]
