@@ -4489,6 +4489,17 @@ pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, V
 }
 
 fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, Value> {
+    // With an Object first argument (buffer / typed array / iterable) — or none —
+    // AllocateTypedArray runs before the argument coercions: newTarget's `prototype` getter
+    // (which may throw or revoke) is observed first. A non-object first argument instead runs
+    // ToIndex first (spec step 6.c). The value is re-read cheaply below.
+    if matches!(args.first(), None | Some(Value::Obj(_)) | Some(Value::Undefined)) {
+        if let nt @ Value::Obj(_) = &i.new_target.clone() {
+            if !matches!(ab(i.get_member(nt, "prototype"))?, Value::Obj(_)) {
+                ctor_realm_proto(i, nt, kind.name())?;
+            }
+        }
+    }
     if !i.constructing {
         return Err(i.make_error("TypeError", "TypedArray constructor requires 'new'"));
     }
@@ -4506,11 +4517,9 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
                 || o.borrow().props.contains("__abMaxByteLength") =>
         {
             let bp = Rc::as_ptr(o) as usize;
-            if !i.array_buffers.contains_key(&bp) {
-                return Err(i.make_error("TypeError", "ArrayBuffer is detached"));
-            }
             let bv = Value::Obj(o.clone());
-            // byteOffset is a ToIndex value and must be a multiple of the element size.
+            // byteOffset is a ToIndex value and must be a multiple of the element size — both
+            // observed BEFORE the detached-buffer check (spec steps 6-7 precede step 9).
             let offset = match args.get(1) {
                 Some(v) if !matches!(v, Value::Undefined) => to_index(i, v)?,
                 _ => 0,
