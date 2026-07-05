@@ -1,0 +1,31 @@
+name: Scripts
+
+# Runs the shell-based tests for the helper scripts in scripts/ (e.g. the Octane benchmark runner's
+# scripts/run-octane.test.sh) on every push and pull request, so their logic can't silently rot.
+# These tests stub out cargo and the lumen binary, so they need only bash — no Rust build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/*.test.sh
+        run: |
+          shopt -s nullglob
+          tests=(scripts/*.test.sh)
+          # Fail loudly rather than pass green if the tests ever vanish (renamed/deleted).
+          if [ ${#tests[@]} -eq 0 ]; then
+            echo "error: no scripts/*.test.sh found" >&2
+            exit 1
+          fi
+          for t in "${tests[@]}"; do
+            echo "== $t =="
+            bash "$t"
+          done
