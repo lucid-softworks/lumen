@@ -1,0 +1,299 @@
+//! lumen-web — the WinterTC "Minimum Common Web Platform API", incrementally.
+//!
+//! Pure-JS pieces ship as `js_init` glue (see `src/js/`); Rust backs parsing, crypto, and the
+//! network. Conformance checklist against the WinterTC minimum common API:
+//!
+//! - [x] `console`, timers, `queueMicrotask` (lumen-runtime/lumen-timers)
+//! - [x] `DOMException`, `Event`, `CustomEvent`, `EventTarget`, `AbortController`,
+//!   `AbortSignal` (incl. `abort()`/`timeout()` statics) — flat target, no capture phase
+//! - [x] `TextEncoder` / `TextDecoder` (utf-8 only; `fatal` supported)
+//! - [x] `atob` / `btoa`
+//! - [x] `structuredClone` (objects/arrays/cycles, Date, RegExp, Map, Set, Error,
+//!   ArrayBuffer, typed arrays; no transfer list)
+//! - [x] `URL` / `URLSearchParams` (see url.rs for the parser's declared subset — no IDNA)
+//! - [x] `performance.now()` (+`timeOrigin`), `navigator.userAgent`
+//! - [x] `crypto.getRandomValues` / `crypto.randomUUID` (`/dev/urandom` via std::fs — no
+//!   syscalls, no crates), `crypto.subtle.digest` (SHA-256 only)
+//! - [x] `fetch` / `Headers` / `Request` / `Response` — **http only**: TLS cannot be built on
+//!   std and is not implemented (STOP-AND-FLAG); https rejects with a clear error
+//! - [ ] Streams (`ReadableStream`/`WritableStream`/`TransformStream`) — the largest gap;
+//!   response bodies are buffered, not streamed
+//! - [ ] `Blob` / `File` / `FormData`, `URLPattern`, `TextEncoderStream`/`TextDecoderStream`,
+//!   `crypto.subtle` beyond digest, `WebSocket`, compression streams
+
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::Read;
+use std::time::Instant;
+
+use lumen_host::{ops, Ctx, Extension, OpState, SpawnHandle, TaskRegistry, Value};
+
+mod http;
+mod sha256;
+mod url;
+
+pub fn extension() -> Extension {
+    Extension {
+        name: "web",
+        globals: &[],
+        namespaces: &[
+            ("performance", ops!["now" (0) => op_perf_now]),
+            (
+                "__encoding",
+                ops!["encode" (1) => op_encode, "decode" (2) => op_decode],
+            ),
+            ("__url", ops!["parse" (2) => op_url_parse]),
+            ("__http", ops!["request" (6) => op_http_request]),
+            (
+                "__crypto",
+                ops![
+                    "fill" (1) => op_random_fill,
+                    "uuid" (0) => op_uuid,
+                    "sha256" (1) => op_sha256,
+                ],
+            ),
+        ],
+        state_init: Some(|state: &mut OpState| state.put(WebState::default())),
+        js_init: Some(JS_GLUE),
+    }
+}
+
+/// One IIFE: the preamble captures and deletes the raw `__*` namespaces, the rest defines the
+/// standard classes over them.
+const JS_GLUE: &str = concat!(
+    "(() => {\n",
+    include_str!("js/preamble.js"),
+    include_str!("js/events.js"),
+    include_str!("js/encoding.js"),
+    include_str!("js/url.js"),
+    include_str!("js/fetch.js"),
+    include_str!("js/crypto.js"),
+    "\n})();"
+);
+
+#[derive(Default)]
+struct WebState {
+    /// `performance.now()`'s zero point (set at install = runtime construction).
+    start: Option<Instant>,
+    /// Cached `/dev/urandom` handle (macOS/Linux; the only randomness std can reach without
+    /// syscalls or crates).
+    urandom: Option<RefCell<File>>,
+}
+
+fn op_perf_now(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let state = ctx.host_mut::<WebState>().expect("web state installed");
+    let start = *state.start.get_or_insert_with(Instant::now);
+    Ok(Value::Num(start.elapsed().as_secs_f64() * 1000.0))
+}
+
+// ---- encoding ----
+
+fn op_encode(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let s = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?;
+    let bytes = s.as_bytes().to_vec();
+    ctx.make_uint8array(&bytes)
+}
+
+/// `(u8array, fatal)`; the glue has already converted ArrayBuffer inputs to views.
+fn op_decode(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let v = args.first().unwrap_or(&Value::Undefined);
+    let Some(bytes) = ctx.typed_array_bytes(v) else {
+        return Err(ctx.make_error("TypeError", "TextDecoder.decode expects a BufferSource"));
+    };
+    let fatal = matches!(args.get(1), Some(Value::Bool(true)));
+    if fatal {
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(Value::from_string(s)),
+            Err(_) => Err(ctx.make_error("TypeError", "TextDecoder: invalid utf-8 (fatal)")),
+        }
+    } else {
+        Ok(Value::from_string(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ))
+    }
+}
+
+// ---- url ----
+
+/// `(input, base?)` -> component object. Throws TypeError, as the URL constructor must.
+fn op_url_parse(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let input = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    let base = match args.get(1) {
+        None | Some(Value::Undefined) => None,
+        Some(v) => Some(ctx.coerce_string(v)?.to_string()),
+    };
+    let u = url::parse(&input, base.as_deref())
+        .map_err(|e| ctx.make_error("TypeError", format!("URL: {e}")))?;
+    let obj = Value::Obj(ctx.new_object());
+    let port = u.port.map(|p| p.to_string()).unwrap_or_default();
+    let href = u.href();
+    let origin = u.origin();
+    for (k, v) in [
+        ("scheme", u.scheme),
+        ("username", u.username),
+        ("password", u.password),
+        ("host", u.host),
+        ("port", port),
+        ("path", u.path),
+        ("query", u.query),
+        ("fragment", u.fragment),
+        ("href", href),
+        ("origin", origin),
+    ] {
+        let _ = ctx.set_member(&obj, k, Value::from_string(v));
+    }
+    Ok(obj)
+}
+
+// ---- crypto ----
+
+fn random_bytes(ctx: &mut Ctx, n: usize) -> Result<Vec<u8>, Value> {
+    let state = ctx.host_mut::<WebState>().expect("web state installed");
+    if state.urandom.is_none() {
+        match File::open("/dev/urandom") {
+            Ok(f) => state.urandom = Some(RefCell::new(f)),
+            Err(e) => {
+                return Err(ctx.make_error("Error", format!("no randomness source: {e}")));
+            }
+        }
+    }
+    let mut buf = vec![0u8; n];
+    let ok = {
+        let state = ctx.host_mut::<WebState>().expect("just set");
+        let f = state.urandom.as_ref().expect("just set");
+        f.borrow_mut().read_exact(&mut buf).is_ok()
+    };
+    if !ok {
+        return Err(ctx.make_error("Error", "randomness source read failed"));
+    }
+    Ok(buf)
+}
+
+/// Fill the given typed array in place (the glue enforces the 65536-byte quota + returns it).
+fn op_random_fill(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let v = args.first().cloned().unwrap_or(Value::Undefined);
+    let Some(existing) = ctx.typed_array_bytes(&v) else {
+        return Err(ctx.make_error("TypeError", "getRandomValues expects a typed array"));
+    };
+    let bytes = random_bytes(ctx, existing.len())?;
+    ctx.typed_array_set_bytes(&v, &bytes);
+    Ok(Value::Undefined)
+}
+
+fn op_uuid(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let mut b = random_bytes(ctx, 16)?;
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+    let h: Vec<String> = b.iter().map(|x| format!("{x:02x}")).collect();
+    let s = h.join("");
+    Ok(Value::from_string(format!(
+        "{}-{}-{}-{}-{}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    )))
+}
+
+fn op_sha256(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let v = args.first().unwrap_or(&Value::Undefined);
+    let Some(bytes) = ctx.typed_array_bytes(v) else {
+        return Err(ctx.make_error("TypeError", "digest expects a BufferSource"));
+    };
+    let digest = sha256::sha256(&bytes);
+    ctx.make_uint8array(&digest)
+}
+
+// ---- fetch ----
+
+/// `(method, url, headerPairs, bodyOrUndefined, resolve, reject)`: one HTTP request on the
+/// threadpool, settled through the TaskRegistry like every async op.
+fn op_http_request(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let method = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    let target = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let headers = read_header_pairs(ctx, args.get(2).unwrap_or(&Value::Undefined))?;
+    let body = match args.get(3) {
+        None | Some(Value::Undefined) | Some(Value::Null) => None,
+        Some(v) => match ctx.typed_array_bytes(v) {
+            Some(bytes) => Some(bytes),
+            None => Some(ctx.coerce_string(v)?.as_bytes().to_vec()),
+        },
+    };
+    let (resolve, reject) = match (args.get(4), args.get(5)) {
+        (Some(res), Some(rej)) if res.is_callable() && rej.is_callable() => {
+            (res.clone(), rej.clone())
+        }
+        _ => return Err(ctx.make_error("TypeError", "__http.request expects (resolve, reject)")),
+    };
+    let id = ctx
+        .host_mut::<TaskRegistry>()
+        .expect("runtime installs the registry")
+        .register(resolve, Some(reject), decode_http);
+    let spawn = ctx
+        .op_state()
+        .get::<SpawnHandle>()
+        .expect("runtime installs the spawn handle")
+        .clone();
+    spawn.spawn_blocking(id, move || {
+        Box::new(http::request(&method, &target, &headers, body.as_deref()))
+    });
+    Ok(Value::Undefined)
+}
+
+/// A JS `[[k, v], ...]` array into Rust pairs, via the curated member API.
+fn read_header_pairs(ctx: &mut Ctx, v: &Value) -> Result<Vec<(String, String)>, Value> {
+    let mut out = Vec::new();
+    if v.as_obj().is_none() {
+        return Ok(out);
+    }
+    let len = ctx
+        .get_member(v, "length")
+        .map_err(|_| ctx.make_error("TypeError", "__http.request: headers must be an array"))?;
+    let Value::Num(len) = len else {
+        return Ok(out);
+    };
+    for i in 0..(len as usize) {
+        let pair = ctx
+            .get_member(v, &i.to_string())
+            .unwrap_or(Value::Undefined);
+        let k = ctx.get_member(&pair, "0").unwrap_or(Value::Undefined);
+        let val = ctx.get_member(&pair, "1").unwrap_or(Value::Undefined);
+        out.push((
+            ctx.coerce_string(&k)?.to_string(),
+            ctx.coerce_string(&val)?.to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Build the raw-response object the JS glue wraps into a `Response`.
+fn decode_http(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
+    let result = *payload
+        .downcast::<Result<http::HttpResponse, String>>()
+        .expect("http payload");
+    let response = match result {
+        Ok(r) => r,
+        Err(message) => return Err(ctx.make_error("TypeError", message)),
+    };
+    let obj = Value::Obj(ctx.new_object());
+    let _ = ctx.set_member(&obj, "status", Value::Num(response.status as f64));
+    let _ = ctx.set_member(&obj, "statusText", Value::from_string(response.status_text));
+    let _ = ctx.set_member(&obj, "url", Value::from_string(response.url));
+    let pairs: Vec<Value> = response
+        .headers
+        .into_iter()
+        .map(|(k, v)| ctx.make_array(vec![Value::from_string(k), Value::from_string(v)]))
+        .collect();
+    let headers = ctx.make_array(pairs);
+    let _ = ctx.set_member(&obj, "headers", headers);
+    let body = ctx.make_uint8array(&response.body)?;
+    let _ = ctx.set_member(&obj, "body", body);
+    Ok(vec![obj])
+}

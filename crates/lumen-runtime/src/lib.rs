@@ -60,6 +60,7 @@ impl Runtime {
                 console::extension(),
                 process::extension(),
                 lumen_fs::extension(),
+                lumen_web::extension(),
             ],
         );
         process::install_data_props(&mut engine);

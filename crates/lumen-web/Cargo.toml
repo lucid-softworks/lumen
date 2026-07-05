@@ -1,0 +1,18 @@
+# WinterTC "Minimum Common Web Platform API" op crate: Event/AbortController, TextEncoder/
+# TextDecoder, atob/btoa, structuredClone, URL/URLSearchParams, performance.now, crypto
+# (getRandomValues/randomUUID/subtle.digest), fetch (http only — TLS can't be done in std and
+# is not implemented; https rejects with a clear error). Pure-JS pieces ship as js_init glue;
+# Rust backs the parsing/crypto/network ops. See lib.rs for the conformance checklist.
+[package]
+name = "lumen-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+
+[lints]
+workspace = true

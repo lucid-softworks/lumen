@@ -9,6 +9,7 @@ members = [
     "crates/lumen-repl",
     "crates/lumen-runtime",
     "crates/lumen-timers",
+    "crates/lumen-web",
     "crates/lumen-wasm",
     "crates/test262-runner",
 ]

@@ -362,3 +362,182 @@ fn fs_sync_error_throws_catchable_error() {
     );
     assert_eq!(out.lines(), ["caught true"]);
 }
+
+// ---- lumen-web (WinterTC minimum common API; the runtime assembles it) ----
+
+#[test]
+fn web_encoding_and_base64() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const enc = new TextEncoder().encode("hi \u{1F600}");
+        console.log(enc.length, new TextDecoder().decode(enc));
+        console.log(btoa("Man"), atob("TWFu"));
+        try { new TextDecoder().decode(new Uint8Array([0xff]), undefined) } catch { console.log("nonfatal-ok") }
+        console.log(new TextDecoder("utf-8", { fatal: true }).constructor.name);
+        "#,
+    );
+    assert_eq!(out.lines(), ["7 hi \u{1F600}", "TWFu Man", "TextDecoder"]);
+}
+
+#[test]
+fn web_url_and_search_params() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const u = new URL("http://user@ex.com/a/b?x=1&y=2#f");
+        console.log(u.protocol, u.hostname, u.pathname, u.hash);
+        console.log(u.searchParams.get("x"), u.searchParams.getAll("y").length);
+        u.searchParams.set("x", "9");
+        console.log(u.search);
+        console.log(new URL("../c", "http://ex.com/a/b/").href);
+        console.log(URL.canParse("nope"), URL.canParse("http://ok.com"));
+        const sp = new URLSearchParams("a=1&a=2&b=3");
+        console.log([...sp.keys()].join(","), sp.toString());
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "http: ex.com /a/b #f",
+            "1 1",
+            "?x=9&y=2",
+            "http://ex.com/a/c",
+            "false true",
+            "a,a,b a=1&a=2&b=3",
+        ]
+    );
+}
+
+#[test]
+fn web_events_and_abort() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const et = new EventTarget();
+        let count = 0;
+        const cb = (e) => { count += e.detail; };
+        et.addEventListener("ping", cb);
+        et.dispatchEvent(new CustomEvent("ping", { detail: 5 }));
+        et.dispatchEvent(new CustomEvent("ping", { detail: 5 }));
+        et.removeEventListener("ping", cb);
+        et.dispatchEvent(new CustomEvent("ping", { detail: 5 }));
+        console.log("count", count);
+
+        let onceCount = 0;
+        et.addEventListener("x", () => onceCount++, { once: true });
+        et.dispatchEvent(new Event("x"));
+        et.dispatchEvent(new Event("x"));
+        console.log("once", onceCount);
+
+        const ac = new AbortController();
+        let aborted = false;
+        ac.signal.addEventListener("abort", () => { aborted = true; });
+        console.log("pre", ac.signal.aborted);
+        ac.abort();
+        console.log("post", ac.signal.aborted, aborted, ac.signal.reason.name);
+        console.log("static", AbortSignal.abort().aborted);
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "count 10",
+            "once 1",
+            "pre false",
+            "post true true AbortError",
+            "static true"
+        ]
+    );
+}
+
+#[test]
+fn web_structured_clone() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const orig = { a: [1, 2, { deep: true }], m: new Map([["k", 1]]), d: new Date(1000) };
+        orig.self = orig;
+        const c = structuredClone(orig);
+        console.log(c !== orig, c.a[2].deep, c.m.get("k"), c.d.getTime());
+        console.log(c.self === c, c.a !== orig.a);
+        try { structuredClone(() => {}); } catch (e) { console.log("fn", e.name); }
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        ["true true 1 1000", "true true", "fn DataCloneError"]
+    );
+}
+
+#[test]
+fn web_crypto() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const a = new Uint8Array(16), b = new Uint8Array(16);
+        crypto.getRandomValues(a); crypto.getRandomValues(b);
+        // Astronomically unlikely to be equal: a real randomness source.
+        console.log(a.some((v, i) => v !== b[i]));
+        console.log(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID()));
+        try { crypto.getRandomValues(new Uint8Array(70000)); } catch (e) { console.log("quota", e.name); }
+        crypto.subtle.digest("SHA-256", new TextEncoder().encode("abc")).then((d) => {
+            const hex = [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, "0")).join("");
+            console.log(hex);
+        });
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "true",
+            "true",
+            "quota QuotaExceededError",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ]
+    );
+}
+
+#[test]
+fn web_fetch_roundtrip_over_local_http() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().unwrap();
+    // One-shot server on a background thread: read the request, reply with a JSON body.
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = br#"{"ok":true,"n":42}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nx-test: yes\r\ncontent-length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(body);
+    });
+
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            (async () => {{
+                const r = await fetch("http://{addr}/data");
+                console.log(r.status, r.ok, r.headers.get("x-test"));
+                const j = await r.json();
+                console.log(j.ok, j.n);
+            }})();
+            "#,
+        ),
+    );
+    server.join().ok();
+    assert_eq!(out.lines(), ["200 true yes", "true 42"]);
+}

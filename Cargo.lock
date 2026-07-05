@@ -98,6 +98,7 @@ dependencies = [
  "lumen-fs",
  "lumen-host",
  "lumen-timers",
+ "lumen-web",
 ]
 
 [[package]]
@@ -114,6 +115,13 @@ dependencies = [
  "js-sys",
  "lumen",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "lumen-web"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
 ]
 
 [[package]]
