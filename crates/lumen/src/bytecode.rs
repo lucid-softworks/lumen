@@ -16,7 +16,6 @@
 //! `bytecode` (compile at `tier_threshold` calls; 0 = immediately). Selectable via the `LUMEN_TIER`
 //! / `LUMEN_TIER_THRESHOLD` env vars, the CLI's `--tier`, or `Engine::set_tier`.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -86,6 +85,9 @@ pub enum Op {
     JumpIfNotNullishPeek(u32),
     /// Plain call: pops argc args and the callee; `this` is undefined.
     Call(u16),
+    /// Resolve a free name as a call target *before* the arguments evaluate (spec order):
+    /// pushes the `with`-object `this` (or undefined) then the callee, feeding CallWithThis.
+    LoadNameForCall(u32),
     /// Method call: pops argc args, the method, and the receiver pushed by GetMethod*.
     CallWithThis(u16),
     New(u16),
@@ -98,6 +100,7 @@ pub enum Op {
 }
 
 pub struct Chunk {
+    // (fields below; Debug is manual — `consts` holds engine Values)
     ops: Vec<Op>,
     consts: Vec<Value>,
     names: Vec<Rc<str>>,
@@ -110,6 +113,12 @@ pub struct Chunk {
     /// hoisting overwrites same-named params; replicated bug-for-bug — it is the oracle).
     var_force_resets: Vec<u16>,
     uses_this: bool,
+}
+
+impl std::fmt::Debug for Chunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Chunk({} ops, {} slots)", self.ops.len(), self.n_slots)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -128,7 +137,7 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     if func.is_arrow && scan & SCAN_THIS != 0 {
         return None;
     }
-    if func.is_generator || func.is_async || func.expr_body && !func.is_arrow {
+    if func.is_generator || func.is_async {
         return None;
     }
     // A named function expression binds its own name inside the body — an env-side binding the
@@ -418,7 +427,7 @@ impl Compiler {
                 body,
             } => {
                 self.scopes.push(Vec::new());
-                let r = self.for_loop(init.as_deref(), test.as_deref(), update.as_deref(), body);
+                let r = self.for_loop(init.as_deref(), test.as_ref(), update.as_ref(), body);
                 self.scopes.pop();
                 r
             }
@@ -532,7 +541,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::Str(s) => {
-                let i = self.const_idx(Value::str(s));
+                let i = self.const_idx(Value::Str(s.clone()));
                 self.emit(Op::Const(i));
                 Ok(())
             }
@@ -715,11 +724,7 @@ impl Compiler {
                 args,
                 optional: false,
             } => {
-                if args.iter().any(|a| matches!(a, Arg::Spread(_))) {
-                    return Err(Bail);
-                }
-                // Direct eval can see the activation — the whole function bails at scan time,
-                // but guard here too.
+                // Direct eval can see the activation — bail the function.
                 if matches!(&**callee, Expr::Ident(n) if n == "eval") {
                     return Err(Bail);
                 }
@@ -733,7 +738,7 @@ impl Compiler {
                         let i = self.name_idx(prop);
                         self.emit(Op::GetMethod(i));
                         for a in args {
-                            let Arg::Plain(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else { return Err(Bail) };
                             self.expr(a)?;
                         }
                         self.emit(Op::CallWithThis(args.len() as u16));
@@ -747,16 +752,27 @@ impl Compiler {
                         self.expr(index)?;
                         self.emit(Op::GetMethodElem);
                         for a in args {
-                            let Arg::Plain(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else { return Err(Bail) };
                             self.expr(a)?;
                         }
                         self.emit(Op::CallWithThis(args.len() as u16));
                     }
                     Expr::Super => return Err(Bail),
+                    Expr::Ident(name) if self.lookup(name).is_none() => {
+                        // Free-name callee: resolved before the arguments (spec order), and a
+                        // `with (obj) f()` hit supplies obj as `this`.
+                        let i = self.name_idx(name);
+                        self.emit(Op::LoadNameForCall(i));
+                        for a in args {
+                            let ArrayElem::Item(a) = a else { return Err(Bail) };
+                            self.expr(a)?;
+                        }
+                        self.emit(Op::CallWithThis(args.len() as u16));
+                    }
                     other => {
                         self.expr(other)?;
                         for a in args {
-                            let Arg::Plain(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else { return Err(Bail) };
                             self.expr(a)?;
                         }
                         self.emit(Op::Call(args.len() as u16));
@@ -765,12 +781,9 @@ impl Compiler {
                 Ok(())
             }
             Expr::New { callee, args } => {
-                if args.iter().any(|a| matches!(a, Arg::Spread(_))) {
-                    return Err(Bail);
-                }
                 self.expr(callee)?;
                 for a in args {
-                    let Arg::Plain(a) = a else { return Err(Bail) };
+                    let ArrayElem::Item(a) = a else { return Err(Bail) };
                     self.expr(a)?;
                 }
                 self.emit(Op::New(args.len() as u16));
@@ -787,22 +800,29 @@ impl Compiler {
                 Ok(())
             }
             Expr::Object(props) => {
-                let start = self.names.len() as u32;
                 let mut count = 0u16;
                 // Keys must land contiguously in `names`; values go on the stack in order.
-                let mut keys = Vec::new();
+                let mut keys: Vec<String> = Vec::new();
                 for p in props {
-                    match p {
-                        ObjProp::KeyValue { key: PropKey::Ident(k) | PropKey::Str(k), value }
-                            if !k.starts_with('#') =>
-                        {
-                            keys.push(k.clone());
-                            self.expr(value)?;
-                            count += 1;
-                        }
+                    let PropDef::KeyValue { key, value } = p else {
+                        return Err(Bail);
+                    };
+                    let k = match key {
+                        PropKey::Ident(k) => k.clone(),
+                        PropKey::Str(k) => k.to_string(),
                         _ => return Err(Bail),
+                    };
+                    // `__proto__:` in literal position sets the prototype, not a property.
+                    if k == "__proto__" || k.starts_with('#') {
+                        return Err(Bail);
                     }
+                    keys.push(k);
+                    self.expr(value)?;
+                    count += 1;
                 }
+                // Keys go into `names` only after every value is compiled — value expressions
+                // add names of their own, and the key range must stay contiguous.
+                let start = self.names.len() as u32;
                 for k in &keys {
                     self.names.push(Rc::from(k.as_str()));
                 }
@@ -899,12 +919,6 @@ impl Compiler {
 // VM
 // ---------------------------------------------------------------------------------------------
 
-thread_local! {
-    /// VM re-entrancy depth: contributes to the interpreter's recursion accounting indirectly
-    /// via the calls the VM makes; kept simple here.
-    static VM_DEPTH: Cell<u32> = const { Cell::new(0) };
-}
-
 /// Execute a compiled function body. `env` is the activation environment (used only as the root
 /// for free-name resolution); parameters are seeded straight into slots.
 pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<Value, Abrupt> {
@@ -996,16 +1010,16 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let key = pop!();
                 let obj = pop!();
                 if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                    let ret = v.clone();
                     match i.fast_set_elem(o, *n, v) {
                         Ok(()) => {
-                            let ret = i.fast_get_elem(o, *n).unwrap_or(Value::Undefined);
                             stack.push(ret);
                             continue;
                         }
                         Err(back) => {
                             let k = i.to_property_key(&key)?;
-                            i.set_member(&obj, &k, back.clone())?;
-                            stack.push(back);
+                            i.set_member(&obj, &k, back)?;
+                            stack.push(ret);
                             continue;
                         }
                     }
@@ -1152,6 +1166,11 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let callee = pop!();
                 let v = i.call(callee, Value::Undefined, &args)?;
                 stack.push(v);
+            }
+            Op::LoadNameForCall(n) => {
+                let (callee, with_this) = i.get_var_with(&chunk.names[n as usize], env)?;
+                stack.push(with_this.unwrap_or(Value::Undefined));
+                stack.push(callee);
             }
             Op::CallWithThis(argc) => {
                 let at = stack.len() - argc as usize;

@@ -27,6 +27,7 @@ mod bigint;
 mod builtins;
 mod coroutine;
 mod eval;
+pub mod bytecode;
 mod fasthash;
 mod interpreter;
 mod intl;
@@ -187,6 +188,18 @@ impl Engine {
             Ok(_) => Completion::Value(String::new()),
             Err(a) => self.describe_throw(interpreter::abrupt_value(a)),
         })
+    }
+
+    /// Select the execution tier (see [`bytecode::Tier`]). `Interp` — the default — never
+    /// touches any codegen path; `Bytecode` compiles eligible functions after
+    /// [`set_tier_threshold`](Engine::set_tier_threshold) calls.
+    pub fn set_tier(&mut self, tier: bytecode::Tier) {
+        self.interp.tier = tier;
+    }
+
+    /// Calls before a function is considered for bytecode compilation (0 = immediately).
+    pub fn set_tier_threshold(&mut self, threshold: u32) {
+        self.interp.tier_threshold = threshold;
     }
 
     /// Drain anything written to `console.*` since the last call.

@@ -1,5 +1,5 @@
 //! Minimal shell: evaluate JS files in one engine, printing console output as it appears.
-//! Usage: lumen [--module] <file.js> [more.js ...]
+//! Usage: lumen [--module] [--tier=interp|bytecode] [--tier-threshold=N] <file.js> [more.js ...]
 //!
 //! With `--module` each file is evaluated as an ES module; relative import specifiers resolve
 //! against the importing file on disk (what a test262 host like test262.fyi expects).
@@ -10,11 +10,26 @@ use lumen::{Completion, Engine};
 
 fn main() {
     let mut module = false;
+    let mut tier = None;
+    let mut threshold = None;
     let args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|a| {
             if a == "--module" {
                 module = true;
+                false
+            } else if let Some(t) = a.strip_prefix("--tier=") {
+                tier = Some(match t {
+                    "bytecode" => lumen::bytecode::Tier::Bytecode,
+                    "interp" => lumen::bytecode::Tier::Interp,
+                    other => {
+                        eprintln!("error: unknown tier '{other}' (interp|bytecode)");
+                        std::process::exit(2);
+                    }
+                });
+                false
+            } else if let Some(n) = a.strip_prefix("--tier-threshold=") {
+                threshold = n.parse::<u32>().ok();
                 false
             } else {
                 true
@@ -26,6 +41,12 @@ fn main() {
         std::process::exit(2);
     }
     let mut engine = Engine::new();
+    if let Some(t) = tier {
+        engine.set_tier(t);
+    }
+    if let Some(n) = threshold {
+        engine.set_tier_threshold(n);
+    }
     for path in &args {
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,

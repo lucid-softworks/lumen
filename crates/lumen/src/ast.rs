@@ -415,6 +415,10 @@ pub struct Function {
     /// ops), so calls replay a flat list instead of re-walking the AST (see
     /// `interpreter::collect_hoist_ops`).
     pub hoist: std::cell::OnceCell<(bool, Rc<Vec<HoistOp>>)>,
+    /// Bytecode-tier state: call count until tier-up, and the compile result once attempted
+    /// (`None` = uses constructs outside the bytecode subset; runs in the tree-walker forever).
+    pub calls: std::cell::Cell<u32>,
+    pub code: std::cell::OnceCell<Option<Rc<crate::bytecode::Chunk>>>,
 }
 
 /// One pre-scanned hoisting action for a statement list, replayed against a scope at function

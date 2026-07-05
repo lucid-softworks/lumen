@@ -540,6 +540,11 @@ pub struct Interp {
     pub console: Vec<String>,
     /// Current strict-mode flag (pushed/popped around function bodies).
     pub strict: bool,
+    /// Execution tier (env `LUMEN_TIER`, CLI `--tier`, [`Engine::set_tier`]). `Interp` is the
+    /// reference tree-walker and the default; the bytecode VM is opt-in.
+    pub tier: crate::bytecode::Tier,
+    /// Calls before an eligible function tier-ups to bytecode (env `LUMEN_TIER_THRESHOLD`).
+    pub tier_threshold: u32,
     /// Live interpreter recursion depth (expression eval + calls). Bounded by [`MAX_EVAL_DEPTH`]
     /// so runaway recursion throws a RangeError instead of overflowing the native stack.
     pub depth: u32,
@@ -1055,6 +1060,14 @@ impl Interp {
             module_recs: Default::default(),
             module_loader: None,
             module_ns: Default::default(),
+            tier: match std::env::var("LUMEN_TIER").as_deref() {
+                Ok("bytecode") => crate::bytecode::Tier::Bytecode,
+                _ => crate::bytecode::Tier::Interp,
+            },
+            tier_threshold: std::env::var("LUMEN_TIER_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
             map_data: Default::default(),
             extra_protos: Default::default(),
             array_buffers: Default::default(),
@@ -3725,7 +3738,26 @@ impl Interp {
             &mut self.tco_ok,
             func.is_strict && !func.is_generator && !func.is_async && !is_construct,
         );
+        // Bytecode tier: an eligible function (compiled whole; see crate::bytecode) runs in the
+        // VM instead of the statement walk. The activation env stays the root for free-name
+        // resolution; locals live in VM slots. Never taken in the default `interp` tier.
+        let mut vm_chunk = None;
+        if matches!(self.tier, crate::bytecode::Tier::Bytecode) && !is_construct {
+            if func.code.get().is_none() {
+                let n = func.calls.get().saturating_add(1);
+                func.calls.set(n);
+                if n > self.tier_threshold {
+                    let _ = func.code.set(crate::bytecode::compile(func));
+                }
+            }
+            if let Some(Some(chunk)) = func.code.get() {
+                vm_chunk = Some(chunk.clone());
+            }
+        }
         let mut result = Ok(Value::Undefined);
+        if let Some(chunk) = vm_chunk {
+            result = crate::bytecode::run(self, &chunk, &body, args);
+        } else {
         for stmt in &func.body {
             match self.exec_stmt(stmt, &body) {
                 Ok(_) => {}
@@ -3738,6 +3770,7 @@ impl Interp {
                     break;
                 }
             }
+        }
         }
         self.tco_ok = saved_tco;
         if has_using {
@@ -4750,7 +4783,7 @@ fn undef_var_binding() -> Binding {
 /// Build the hoisting plan for a statement list: `var` names in traversal order, then function
 /// declarations in source order, then (sloppy mode) Annex B block-function promotions. Pure — the
 /// plan for a function body is cached on its [`Function`] and replayed each call.
-fn collect_hoist_ops(stmts: &[Stmt], strict: bool, param_blocked: &[String]) -> Vec<HoistOp> {
+pub(crate) fn collect_hoist_ops(stmts: &[Stmt], strict: bool, param_blocked: &[String]) -> Vec<HoistOp> {
     let mut out = Vec::new();
     for stmt in stmts {
         collect_hoist_stmt(stmt, &mut out);

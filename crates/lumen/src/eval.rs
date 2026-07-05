@@ -5032,6 +5032,63 @@ impl Interp {
         result
     }
 
+    /// Unary operator on an already-evaluated value (bytecode VM fallback path); mirrors
+    /// [`eval_unary`] exactly for `- + ~ typeof` (never `delete`/`!`/`void` — the VM handles
+    /// those without coercion hooks).
+    pub(crate) fn eval_unary_vm(&mut self, op: &str, v: Value) -> Result<Value, Abrupt> {
+        if op == "typeof" {
+            if self.is_htmldda(&v) {
+                return Ok(Value::str("undefined"));
+            }
+            return Ok(Value::from_string(v.type_of().to_string()));
+        }
+        let v = if matches!(op, "-" | "~") && matches!(v, Value::Obj(_)) {
+            self.to_primitive(&v, Hint::Number)?
+        } else {
+            v
+        };
+        if let Value::BigInt(n) = v {
+            return match op {
+                "-" => Ok(Value::BigInt(n.neg())),
+                "~" => Ok(Value::BigInt(n.not())),
+                "+" => Err(self.throw("TypeError", "Cannot convert a BigInt value to a number")),
+                _ => unreachable!("unary_vm {op}"),
+            };
+        }
+        match op {
+            "-" => Ok(Value::Num(-self.to_number(&v)?)),
+            "+" => Ok(Value::Num(self.to_number(&v)?)),
+            "~" => Ok(Value::Num(!(self.to_int32(&v)?) as f64)),
+            _ => unreachable!("unary_vm {op}"),
+        }
+    }
+
+    /// Assign to a free (non-slot) name from the bytecode VM: exactly the tree-walker's
+    /// Reference::Var resolution + PutValue.
+    pub(crate) fn assign_free_name(
+        &mut self,
+        name: &str,
+        v: Value,
+        env: &Env,
+    ) -> Result<(), Abrupt> {
+        let target = Expr::Ident(name.to_string());
+        let mut r = self.resolve_reference(&target, env)?;
+        self.put_reference(&mut r, v)
+    }
+
+    /// A plain-data object literal for the bytecode VM (`{ a: 1, b: 2 }` — no accessors,
+    /// methods, spreads, computed keys, or `__proto__`; the compiler bails on those).
+    pub(crate) fn make_plain_object_vm(&mut self, keys: &[std::rc::Rc<str>], values: Vec<Value>) -> Value {
+        let obj = crate::value::Object::new(Some(self.object_proto.clone()));
+        {
+            let mut b = obj.borrow_mut();
+            for (k, v) in keys.iter().zip(values) {
+                b.props.insert(k.clone(), crate::value::Property::plain(v));
+            }
+        }
+        Value::Obj(obj)
+    }
+
     fn eval_unary(&mut self, op: &str, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         if op == "typeof" {
             // typeof on an unresolved identifier yields "undefined" rather than throwing.
@@ -5796,7 +5853,7 @@ impl Interp {
 
     // ----- operators --------------------------------------------------------------------------
 
-    fn binary(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
+    pub(crate) fn binary(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
         // Hot path: number ⊕ number has no observable coercion steps (no ToPrimitive hooks, no
         // BigInt mixing) — compute directly. Rust f64 comparisons share JS NaN semantics (all
         // false), and +0 == -0 holds, so the comparison arms are exact.
@@ -6543,6 +6600,8 @@ fn default_constructor(derived: bool) -> Function {
     Function {
         scan: std::cell::Cell::new(0),
             hoist: std::cell::OnceCell::new(),
+            calls: std::cell::Cell::new(0),
+            code: std::cell::OnceCell::new(),
         name: None,
         params,
         body,
@@ -6943,7 +7002,7 @@ fn block_declares_lexical(s: &Stmt) -> bool {
     )
 }
 
-fn js_mod(a: f64, b: f64) -> f64 {
+pub(crate) fn js_mod(a: f64, b: f64) -> f64 {
     if b == 0.0 || a.is_nan() || b.is_nan() || a.is_infinite() {
         return f64::NAN;
     }
@@ -6956,7 +7015,7 @@ fn js_mod(a: f64, b: f64) -> f64 {
     a % b
 }
 
-fn to_int32(n: f64) -> i32 {
+pub(crate) fn to_int32(n: f64) -> i32 {
     if !n.is_finite() || n == 0.0 {
         return 0;
     }
