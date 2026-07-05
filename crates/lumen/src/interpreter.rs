@@ -1834,7 +1834,11 @@ impl Interp {
                 })
             };
             if let Some((accessor, getter, value)) = prop {
-                let p = PropRead { accessor, get: getter, value };
+                let p = PropRead {
+                    accessor,
+                    get: getter,
+                    value,
+                };
                 if p.accessor {
                     // Legacy `fn.caller` / `fn.arguments`: reading the poisoned
                     // %Function.prototype% accessor through an ordinary sloppy function
@@ -3758,19 +3762,19 @@ impl Interp {
         if let Some(chunk) = vm_chunk {
             result = crate::bytecode::run(self, &chunk, &body, args);
         } else {
-        for stmt in &func.body {
-            match self.exec_stmt(stmt, &body) {
-                Ok(_) => {}
-                Err(Abrupt::Return(v)) => {
-                    result = Ok(v);
-                    break;
-                }
-                Err(e) => {
-                    result = Err(e);
-                    break;
+            for stmt in &func.body {
+                match self.exec_stmt(stmt, &body) {
+                    Ok(_) => {}
+                    Err(Abrupt::Return(v)) => {
+                        result = Ok(v);
+                        break;
+                    }
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
                 }
             }
-        }
         }
         self.tco_ok = saved_tco;
         if has_using {
@@ -4705,9 +4709,12 @@ impl Interp {
         param_blocked: &[String],
     ) {
         let strict = self.strict;
-        let cached = func
-            .hoist
-            .get_or_init(|| (strict, Rc::new(collect_hoist_ops(&func.body, strict, param_blocked))));
+        let cached = func.hoist.get_or_init(|| {
+            (
+                strict,
+                Rc::new(collect_hoist_ops(&func.body, strict, param_blocked)),
+            )
+        });
         if cached.0 == strict {
             let ops = cached.1.clone();
             self.apply_hoist_ops(&ops, scope);
@@ -4725,11 +4732,17 @@ impl Interp {
             match op {
                 HoistOp::Var(name) => {
                     if !scope.borrow().vars.contains_key(name.as_str()) {
-                        scope.borrow_mut().vars.insert(name.clone(), undef_var_binding());
+                        scope
+                            .borrow_mut()
+                            .vars
+                            .insert(name.clone(), undef_var_binding());
                     }
                 }
                 HoistOp::VarForce(name) => {
-                    scope.borrow_mut().vars.insert(name.clone(), undef_var_binding());
+                    scope
+                        .borrow_mut()
+                        .vars
+                        .insert(name.clone(), undef_var_binding());
                 }
                 HoistOp::Fn(name, func) => {
                     let f = self.make_function(func.clone(), scope.clone());
@@ -4750,7 +4763,10 @@ impl Interp {
                 }
                 HoistOp::AnnexB(name, func) => {
                     if !scope.borrow().vars.contains_key(name.as_str()) {
-                        scope.borrow_mut().vars.insert(name.clone(), undef_var_binding());
+                        scope
+                            .borrow_mut()
+                            .vars
+                            .insert(name.clone(), undef_var_binding());
                     }
                     self.annexb_fn_sync
                         .insert(Rc::as_ptr(func) as usize, func.clone());
@@ -4783,7 +4799,11 @@ fn undef_var_binding() -> Binding {
 /// Build the hoisting plan for a statement list: `var` names in traversal order, then function
 /// declarations in source order, then (sloppy mode) Annex B block-function promotions. Pure — the
 /// plan for a function body is cached on its [`Function`] and replayed each call.
-pub(crate) fn collect_hoist_ops(stmts: &[Stmt], strict: bool, param_blocked: &[String]) -> Vec<HoistOp> {
+pub(crate) fn collect_hoist_ops(
+    stmts: &[Stmt],
+    strict: bool,
+    param_blocked: &[String],
+) -> Vec<HoistOp> {
     let mut out = Vec::new();
     for stmt in stmts {
         collect_hoist_stmt(stmt, &mut out);

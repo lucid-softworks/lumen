@@ -213,8 +213,8 @@ impl Gen {
     }
     fn binop(&mut self) -> &'static str {
         const OPS: &[&str] = &[
-            "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>", "<", ">", "<=", ">=",
-            "==", "!=", "===", "!==",
+            "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", ">>>", "<", ">", "<=", ">=", "==",
+            "!=", "===", "!==",
         ];
         OPS[self.rng.below(OPS.len())]
     }
@@ -356,7 +356,6 @@ fn generate(seed: u64) -> String {
 // Minimizer
 // ---------------------------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------------------------
@@ -366,7 +365,13 @@ fn main() {
     // RangeError at MAX_EVAL_DEPTH) instead of overflowing — same reason the test262 runner
     // gives its workers large stacks.
     std::thread::Builder::new()
-        .stack_size(std::env::var("DIFFTEST_STACK_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32) << 20)
+        .stack_size(
+            std::env::var("DIFFTEST_STACK_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32)
+                << 20,
+        )
         .spawn(dispatch)
         .unwrap()
         .join()
@@ -399,7 +404,9 @@ fn dispatch() {
         Some("--check") => {
             // Hard allocation ceiling for this child: an over-budget program's allocation fails
             // and aborts the child (exit != 3 → parent reads Inconclusive) with no RSS spike.
-            ALLOC.cap.store(CAP_MB as usize * 1024 * 1024, Ordering::Relaxed);
+            ALLOC
+                .cap
+                .store(CAP_MB as usize * 1024 * 1024, Ordering::Relaxed);
             let src = std::fs::read_to_string(&args[1]).unwrap();
             std::process::exit(if diverges(&src) { 3 } else { 0 });
         }
@@ -557,5 +564,8 @@ fn fuzz_parent(args: Vec<String>) {
         }
     }
     let _ = std::fs::remove_file(&tmp);
-    println!("done: {agreed} agree, {skipped} skipped (budget) across seeds {seed}..{}", seed + count);
+    println!(
+        "done: {agreed} agree, {skipped} skipped (budget) across seeds {seed}..{}",
+        seed + count
+    );
 }

@@ -210,8 +210,7 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<C
                     let _ = yl.suspend_tx.send(outcome);
                 }
             });
-        })
-?;
+        })?;
     Ok(Coroutine {
         resume_tx,
         suspend_rx,

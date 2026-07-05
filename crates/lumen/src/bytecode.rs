@@ -292,7 +292,17 @@ impl Compiler {
                             return Err(Bail);
                         };
                         let slot = self.fresh_slot(name);
-                        self.scope_bind(name, slot, matches!(s, Stmt::VarDecl { kind: DeclKind::Const, .. }));
+                        self.scope_bind(
+                            name,
+                            slot,
+                            matches!(
+                                s,
+                                Stmt::VarDecl {
+                                    kind: DeclKind::Const,
+                                    ..
+                                }
+                            ),
+                        );
                         self.emit(Op::Tdz(slot));
                     }
                 }
@@ -738,7 +748,9 @@ impl Compiler {
                         let i = self.name_idx(prop);
                         self.emit(Op::GetMethod(i));
                         for a in args {
-                            let ArrayElem::Item(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else {
+                                return Err(Bail);
+                            };
                             self.expr(a)?;
                         }
                         self.emit(Op::CallWithThis(args.len() as u16));
@@ -752,7 +764,9 @@ impl Compiler {
                         self.expr(index)?;
                         self.emit(Op::GetMethodElem);
                         for a in args {
-                            let ArrayElem::Item(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else {
+                                return Err(Bail);
+                            };
                             self.expr(a)?;
                         }
                         self.emit(Op::CallWithThis(args.len() as u16));
@@ -764,7 +778,9 @@ impl Compiler {
                         let i = self.name_idx(name);
                         self.emit(Op::LoadNameForCall(i));
                         for a in args {
-                            let ArrayElem::Item(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else {
+                                return Err(Bail);
+                            };
                             self.expr(a)?;
                         }
                         self.emit(Op::CallWithThis(args.len() as u16));
@@ -772,7 +788,9 @@ impl Compiler {
                     other => {
                         self.expr(other)?;
                         for a in args {
-                            let ArrayElem::Item(a) = a else { return Err(Bail) };
+                            let ArrayElem::Item(a) = a else {
+                                return Err(Bail);
+                            };
                             self.expr(a)?;
                         }
                         self.emit(Op::Call(args.len() as u16));
@@ -783,7 +801,9 @@ impl Compiler {
             Expr::New { callee, args } => {
                 self.expr(callee)?;
                 for a in args {
-                    let ArrayElem::Item(a) = a else { return Err(Bail) };
+                    let ArrayElem::Item(a) = a else {
+                        return Err(Bail);
+                    };
                     self.expr(a)?;
                 }
                 self.emit(Op::New(args.len() as u16));
@@ -1071,7 +1091,8 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let b = pop!();
                 let a = pop!();
                 if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
-                    let r = (crate::eval::to_int32(*x) as u32) >> (crate::eval::to_int32(*y) as u32 & 31);
+                    let r = (crate::eval::to_int32(*x) as u32)
+                        >> (crate::eval::to_int32(*y) as u32 & 31);
                     stack.push(Value::Num(r as f64));
                 } else {
                     let v = i.binary(">>>", a, b)?;

@@ -1204,16 +1204,16 @@ impl Interp {
                 Some(t) => t,
                 None => self.new_promise(),
             };
-            let coro = match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(closure))
-            {
-                Ok(c) => c,
-                Err(_) => {
-                    let e = self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG);
-                    self.finish_dynamic_module(key, Some(e.clone()));
-                    self.reject_promise(&top, e);
-                    return;
-                }
-            };
+            let coro =
+                match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(closure)) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let e = self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG);
+                        self.finish_dynamic_module(key, Some(e.clone()));
+                        self.reject_promise(&top, e);
+                        return;
+                    }
+                };
             if let Value::Obj(o) = &top {
                 self.generators.insert(Rc::as_ptr(o) as usize, coro);
             }

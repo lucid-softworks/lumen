@@ -7,6 +7,9 @@ use crate::token::{Tok, Token, TplPart, KEYWORDS, PUNCTUATORS};
 pub struct LexError {
     pub message: String,
     pub line: u32,
+    /// The lexer ran out of input mid-construct (unterminated template/comment/...). A REPL uses
+    /// this to keep reading lines instead of reporting a SyntaxError.
+    pub at_eof: bool,
 }
 
 struct Lexer<'a> {
@@ -91,6 +94,7 @@ impl<'a> Lexer<'a> {
         LexError {
             message: message.into(),
             line: self.line,
+            at_eof: self.pos >= self.chars.len(),
         }
     }
 

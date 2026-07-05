@@ -25,9 +25,9 @@
 mod ast;
 mod bigint;
 mod builtins;
+pub mod bytecode;
 mod coroutine;
 mod eval;
-pub mod bytecode;
 mod fasthash;
 mod interpreter;
 mod intl;
@@ -83,6 +83,9 @@ pub(crate) fn host_now_ms() -> Option<f64> {
 pub struct ParseError {
     pub message: String,
     pub line: u32,
+    /// The parse failed only because the input ended too soon (e.g. an unclosed block or
+    /// template). A REPL treats this as "keep reading lines", not a SyntaxError.
+    pub at_eof: bool,
 }
 
 /// The outcome of evaluating a script.
@@ -143,6 +146,7 @@ impl Engine {
         let body = parser::parse_script(src, strict).map_err(|e| ParseError {
             message: e.message,
             line: e.line,
+            at_eof: e.at_eof,
         })?;
         // A top-level `"use strict"` directive prologue turns on strict mode for the whole script.
         let directive_strict = matches!(

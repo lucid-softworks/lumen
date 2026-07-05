@@ -5078,7 +5078,11 @@ impl Interp {
 
     /// A plain-data object literal for the bytecode VM (`{ a: 1, b: 2 }` — no accessors,
     /// methods, spreads, computed keys, or `__proto__`; the compiler bails on those).
-    pub(crate) fn make_plain_object_vm(&mut self, keys: &[std::rc::Rc<str>], values: Vec<Value>) -> Value {
+    pub(crate) fn make_plain_object_vm(
+        &mut self,
+        keys: &[std::rc::Rc<str>],
+        values: Vec<Value>,
+    ) -> Value {
         let obj = crate::value::Object::new(Some(self.object_proto.clone()));
         {
             let mut b = obj.borrow_mut();
@@ -5882,7 +5886,11 @@ impl Interp {
                         to_int32(a).wrapping_shl(to_int32(b) as u32 & 31) as f64,
                     ))
                 }
-                ">>" => return Ok(Value::Num((to_int32(a) >> (to_int32(b) as u32 & 31)) as f64)),
+                ">>" => {
+                    return Ok(Value::Num(
+                        (to_int32(a) >> (to_int32(b) as u32 & 31)) as f64,
+                    ))
+                }
                 ">>>" => {
                     return Ok(Value::Num(
                         ((to_int32(a) as u32) >> (to_int32(b) as u32 & 31)) as f64,
@@ -6599,9 +6607,9 @@ fn default_constructor(derived: bool) -> Function {
     };
     Function {
         scan: std::cell::Cell::new(0),
-            hoist: std::cell::OnceCell::new(),
-            calls: std::cell::Cell::new(0),
-            code: std::cell::OnceCell::new(),
+        hoist: std::cell::OnceCell::new(),
+        calls: std::cell::Cell::new(0),
+        code: std::cell::OnceCell::new(),
         name: None,
         params,
         body,
@@ -6983,7 +6991,6 @@ pub(crate) fn is_anonymous_fn(e: &Expr) -> bool {
         _ => false,
     }
 }
-
 
 /// Whether `s` (labels and export wrappers unwrapped) is a block-scoped declaration — the set
 /// [`Interp::declare_block_lexicals`] instantiates at block entry.

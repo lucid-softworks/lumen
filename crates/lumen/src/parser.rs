@@ -9,6 +9,9 @@ use std::rc::Rc;
 pub struct ParseError {
     pub message: String,
     pub line: u32,
+    /// The parse failed because the input ended too soon (error at the EOF token, or the lexer ran
+    /// out mid-construct). A REPL uses this to keep reading lines instead of reporting the error.
+    pub at_eof: bool,
 }
 
 /// Parse a complete script. `strict` seeds strict mode (e.g. for the strict test262 variant); a
@@ -29,6 +32,7 @@ pub fn parse_script_eval(
     let tokens = tokenize(src).map_err(|e| ParseError {
         message: e.message,
         line: e.line,
+        at_eof: e.at_eof,
     })?;
     let mut p = Parser {
         toks: tokens,
@@ -73,12 +77,17 @@ pub fn parse_script_eval(
     if !private_names.is_empty() {
         st.push(private_names.to_vec());
     }
-    pn_stmts(&body, &mut st).map_err(|message| ParseError { message, line: 0 })?;
+    pn_stmts(&body, &mut st).map_err(|message| ParseError {
+        at_eof: false,
+        message,
+        line: 0,
+    })?;
     // A super call is never valid in script/global code (only a derived constructor, or a direct
     // eval inside one, may contain it).
     if !allow_super {
         if let Some(message) = crate::eval::top_level_super_call_error(&body) {
             return Err(ParseError {
+                at_eof: false,
                 message: message.into(),
                 line: 0,
             });
@@ -91,6 +100,7 @@ pub fn parse_script_eval(
 /// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let tokens = crate::lexer::tokenize_goal(src, false).map_err(|e| ParseError {
+        at_eof: e.at_eof,
         message: e.message,
         line: e.line,
     })?;
@@ -131,7 +141,11 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
-    validate_private_names(&body).map_err(|message| ParseError { message, line: 0 })?;
+    validate_private_names(&body).map_err(|message| ParseError {
+        at_eof: false,
+        message,
+        line: 0,
+    })?;
     Ok(body)
 }
 
@@ -189,12 +203,14 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
 
     if let Some(dup) = first_duplicate(&exported) {
         return Err(ParseError {
+            at_eof: false,
             message: format!("duplicate export name '{dup}'"),
             line: 0,
         });
     }
     if let Some(dup) = first_duplicate(&lexical) {
         return Err(ParseError {
+            at_eof: false,
             message: format!("Identifier '{dup}' has already been declared"),
             line: 0,
         });
@@ -202,6 +218,7 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
     for v in &vars {
         if lexical.iter().any(|l| l == v) {
             return Err(ParseError {
+                at_eof: false,
                 message: format!("Identifier '{v}' has already been declared"),
                 line: 0,
             });
@@ -210,6 +227,7 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
     for local in &export_locals {
         if !lexical.iter().any(|l| l == local) && !vars.iter().any(|v| v == local) {
             return Err(ParseError {
+                at_eof: false,
                 message: format!("export '{local}' is not declared in the module"),
                 line: 0,
             });
@@ -424,6 +442,7 @@ impl Parser {
         Err(ParseError {
             message: msg.into(),
             line: self.line(),
+            at_eof: self.at_eof(),
         })
     }
 
@@ -1426,6 +1445,7 @@ impl Parser {
                 && matches!(&init_expr, Expr::Ident(n) if n == "async")
             {
                 return Err(ParseError {
+                    at_eof: false,
                     message: "'async' as a for-of left side must be parenthesized".into(),
                     line: self.line(),
                 });
@@ -1437,6 +1457,7 @@ impl Parser {
                 e @ (Expr::Array(_) | Expr::Object(_)) => {
                     if !valid_assignment_pattern(e) {
                         return Err(ParseError {
+                            at_eof: false,
                             message: "invalid for-in/of target".into(),
                             line: self.line(),
                         });
@@ -1454,6 +1475,7 @@ impl Parser {
                     }
                     None => {
                         return Err(ParseError {
+                            at_eof: false,
                             message: "invalid for-in/of target".into(),
                             line: self.line(),
                         })
@@ -2781,6 +2803,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
                         ParseError {
+                            at_eof: false,
                             message: e.message,
                             line: e.line,
                         }
@@ -2851,6 +2874,7 @@ impl Parser {
                 TplPart::Sub(src) => {
                     let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
                         ParseError {
+                            at_eof: false,
                             message: e.message,
                             line: e.line,
                         }
@@ -3039,6 +3063,7 @@ impl Parser {
                 if is_proto {
                     if proto_seen {
                         self.proto_dups.push(ParseError {
+                            at_eof: false,
                             message: "duplicate __proto__ property in object literal".into(),
                             line: self.line(),
                         });
@@ -3065,6 +3090,7 @@ impl Parser {
                             // as a destructuring pattern; as a plain literal it is a SyntaxError
                             // (deferred exactly like duplicate `__proto__`).
                             self.proto_dups.push(ParseError {
+                                at_eof: false,
                                 message: "invalid shorthand property initializer".into(),
                                 line: self.line(),
                             });
@@ -3340,6 +3366,7 @@ impl Parser {
             }
         }
         validate_class(&members).map_err(|m| ParseError {
+            at_eof: false,
             message: m,
             line: self.line(),
         })?;
@@ -3405,9 +3432,9 @@ impl Parser {
             let body = body?;
             let func = Function {
                 scan: std::cell::Cell::new(0),
-            hoist: std::cell::OnceCell::new(),
-            calls: std::cell::Cell::new(0),
-            code: std::cell::OnceCell::new(),
+                hoist: std::cell::OnceCell::new(),
+                calls: std::cell::Cell::new(0),
+                code: std::cell::OnceCell::new(),
                 name: None,
                 params: Vec::new(),
                 body,
@@ -3485,6 +3512,7 @@ impl Parser {
             let mut func = func?;
             if matches!(kind, MemberKind::Get | MemberKind::Set) {
                 check_accessor_arity(&func, kind == MemberKind::Get).map_err(|m| ParseError {
+                    at_eof: false,
                     message: m,
                     line: self.line(),
                 })?;
@@ -3603,6 +3631,7 @@ impl Parser {
     ) -> Result<Function, ParseError> {
         let f = self.parse_method_function(start)?;
         check_accessor_arity(&f, is_get).map_err(|m| ParseError {
+            at_eof: false,
             message: m,
             line: self.line(),
         })?;
@@ -3809,9 +3838,9 @@ impl Parser {
             }
             Function {
                 scan: std::cell::Cell::new(0),
-            hoist: std::cell::OnceCell::new(),
-            calls: std::cell::Cell::new(0),
-            code: std::cell::OnceCell::new(),
+                hoist: std::cell::OnceCell::new(),
+                calls: std::cell::Cell::new(0),
+                code: std::cell::OnceCell::new(),
                 name: None,
                 params,
                 body,
@@ -3828,9 +3857,9 @@ impl Parser {
             let expr = self.parse_assign()?;
             Function {
                 scan: std::cell::Cell::new(0),
-            hoist: std::cell::OnceCell::new(),
-            calls: std::cell::Cell::new(0),
-            code: std::cell::OnceCell::new(),
+                hoist: std::cell::OnceCell::new(),
+                calls: std::cell::Cell::new(0),
+                code: std::cell::OnceCell::new(),
                 name: None,
                 params,
                 body: vec![Stmt::Return(Some(expr))],
