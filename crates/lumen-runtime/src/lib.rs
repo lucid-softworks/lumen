@@ -25,7 +25,7 @@ use lumen_host::{
 mod console;
 mod process;
 
-pub use console::ConsoleOut;
+pub use console::{describe_error, render_value, ConsoleOut};
 pub use lumen_host::{Completion, Ctx};
 
 /// Workers for blocking work. libuv's default; revisit when async fs lands and has numbers.

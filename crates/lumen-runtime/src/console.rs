@@ -86,8 +86,13 @@ fn op_error(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value>
     write_line(ctx, args, true)
 }
 
+/// [`render`] for hosts above the runtime (the REPL prints results with it).
+pub fn render_value(ctx: &mut Ctx, v: &Value) -> String {
+    render(ctx, v)
+}
+
 /// `"TypeError: boom"` for an Error object, else the rendered value — for uncaught reports.
-pub(crate) fn describe_error(ctx: &mut Ctx, error: &Value) -> String {
+pub fn describe_error(ctx: &mut Ctx, error: &Value) -> String {
     if error.as_obj().is_some() {
         let name = ctx
             .get_member(error, "name")
