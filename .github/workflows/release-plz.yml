@@ -26,5 +26,16 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: release-plz/action@v0.5
+        id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Tags created above use GITHUB_TOKEN, whose events never start `push`-triggered workflows
+      # (recursive-trigger protection) — so kick the Release build via workflow_dispatch, which is
+      # exempt from that rule.
+      - name: Trigger the Release workflow for the new tag
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$(jq -r '.[0].tag' <<< '${{ steps.release-plz.outputs.releases }}')"
+          gh workflow run release.yml --ref "$tag"

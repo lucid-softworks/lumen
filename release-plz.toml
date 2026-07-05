@@ -7,3 +7,9 @@ git_release_enable = false   # the binary GitHub release is created by release.y
 git_tag_name = "v{{ version }}"   # so the Release workflow's `v*` trigger fires
 # Treat the workspace as one product: all crates share a version and a single tag.
 dependencies_update = true
+
+# Only the `lumen` package mints the shared v{{ version }} tag — a second create of the same ref
+# from test262-runner 422s with "Reference already exists" (which failed the first release run).
+[[package]]
+name = "test262-runner"
+release = false
