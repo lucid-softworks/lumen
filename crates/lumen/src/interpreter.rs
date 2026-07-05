@@ -637,6 +637,8 @@ pub struct Interp {
     /// Live user-function activations, oldest first: (fn ptr, fn object, arguments object,
     /// strict). Backs the legacy SpiderMonkey `fn.caller` / `fn.arguments` reflection.
     pub fn_frames: Vec<(usize, Value, Value, bool)>,
+    /// Monotonic [[AsyncEvaluationOrder]] source for module evaluation.
+    pub(crate) module_async_seq: u64,
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
     pub yield_raw_result: bool,
@@ -1044,6 +1046,7 @@ impl Interp {
             constructing: false,
             super_call_ok: false,
             fn_frames: Vec::new(),
+            module_async_seq: 0,
             in_field_init_code: false,
             yield_raw_result: false,
             in_async_gen_body: false,

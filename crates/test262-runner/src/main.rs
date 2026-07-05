@@ -876,11 +876,15 @@ fn normalize_path(p: &Path) -> PathBuf {
 /// Run a `module`-flagged test: evaluate the harness as a script (for the global helpers), then
 /// load the test as an ES module with a filesystem loader resolving relative specifiers.
 fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Outcome {
-    if fm.has_flag("async") {
-        return Outcome::Skip("async".into());
-    }
+    let is_async = fm.has_flag("async");
     let mut engine = engine_for(path);
     let mut preamble = harness.base.clone();
+    // Async tests report completion via `$DONE`, defined in the implicitly-included
+    // doneprintHandle (routed through `print` to the engine console).
+    if is_async && !fm.includes.iter().any(|i| i == "doneprintHandle.js") {
+        preamble.push_str(&harness.include("doneprintHandle.js"));
+        preamble.push('\n');
+    }
     for inc in &fm.includes {
         preamble.push_str(&harness.include(inc));
         preamble.push('\n');
@@ -901,6 +905,33 @@ fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Ou
         Some((resolved.to_string_lossy().into_owned(), text))
     };
     let result = engine.eval_module(src, &key, loader);
+    if is_async {
+        // A negative async module still judges by its parse/link/runtime error.
+        if fm.negative.is_some() {
+            return judge_module(result, fm);
+        }
+        match result {
+            Err(e) => return Outcome::Fail(format!("unexpected SyntaxError: {}", e.message)),
+            Ok(Completion::Throw { name, message }) => {
+                return Outcome::Fail(format!("unexpected throw {name}: {message}"));
+            }
+            Ok(Completion::Value(_)) => {}
+        }
+        let console = engine.take_console();
+        if console.iter().any(|l| l == "Test262:AsyncTestComplete") {
+            return Outcome::Pass;
+        }
+        if let Some(fail) = console
+            .iter()
+            .find(|l| l.starts_with("Test262:AsyncTestFailure:"))
+        {
+            return Outcome::Fail(format!(
+                "async: {}",
+                &fail["Test262:AsyncTestFailure:".len()..]
+            ));
+        }
+        return Outcome::Fail("async test did not signal completion".into());
+    }
     judge_module(result, fm)
 }
 

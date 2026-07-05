@@ -60,6 +60,20 @@ pub(crate) struct ModuleRec {
     /// For a dynamically-imported module evaluating in a coroutine (top-level await): the promise
     /// that settles when the body finishes.
     top_promise: Option<Value>,
+    /// This batch has visited the module (spec [[Status]] >= evaluating).
+    started: bool,
+    /// Count of not-yet-finished async-evaluating dependencies ([[PendingAsyncDependencies]]).
+    pending_async: usize,
+    /// Position in the async execution queue ([[AsyncEvaluationOrder]]).
+    async_order: Option<u64>,
+    /// Importers waiting on this module ([[AsyncParentModules]]).
+    async_parents: Vec<String>,
+    /// Tarjan bookkeeping for the evaluation DFS ([[DFSIndex]] / [[DFSAncestorIndex]]).
+    dfs_index: Option<usize>,
+    dfs_anc: usize,
+    on_stack: bool,
+    /// The root of this module's strongly-connected component ([[CycleRoot]]).
+    cycle_root: Option<String>,
 }
 
 /// The origin of a local name that is an import binding (so re-exports resolve to the source).
@@ -94,9 +108,46 @@ impl Interp {
         self.parse_and_register(key, Some(src.to_string()))?;
         // Phase 2: link (hoist bindings, wire live imports, build namespaces) depth-first.
         self.link_module(key)?;
-        // Phase 3: evaluate module bodies depth-first.
-        self.evaluate_module(key)?;
+        // Phase 3: evaluate module bodies depth-first. A graph containing top-level await
+        // evaluates through the async machinery (awaits interleave with the job queue, an async
+        // module doesn't block siblings, ancestors run in [[AsyncEvaluationOrder]]); a fully
+        // synchronous graph runs directly.
+        // Pre-create every graph member's evaluation promise, so a dynamic import of a
+        // not-yet-executed batch member waits for the batch instead of executing it early.
+        let mut graph = Vec::new();
+        self.collect_graph(key, &mut graph);
+        for m in &graph {
+            if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
+                let p = self.new_promise();
+                self.module_recs.get_mut(m).unwrap().top_promise = Some(p);
+            }
+        }
+        let top = self.module_recs[key].top_promise.clone().unwrap();
+        let mut stack = Vec::new();
+        self.inner_module_evaluation_async(key, &mut stack, &mut 0);
+        self.run_agent_event_loop();
+        if let Value::Obj(o) = &top {
+            if let Some(ps) = self.promises.get(&(Rc::as_ptr(o) as usize)) {
+                if ps.status == 2 {
+                    let reason = ps.value.clone();
+                    return Err(Abrupt::Throw(reason));
+                }
+            }
+        }
         Ok(self.module_recs[key].ns.clone())
+    }
+
+    /// Every module in `key`'s dependency graph (including itself), depth-first.
+    fn collect_graph(&self, key: &str, out: &mut Vec<String>) {
+        if out.iter().any(|k| k == key) {
+            return;
+        }
+        out.push(key.to_string());
+        if let Some(rec) = self.module_recs.get(key) {
+            for d in rec.dep_keys.clone() {
+                self.collect_graph(&d, out);
+            }
+        }
     }
 
     // --- Parse phase --------------------------------------------------------------------------
@@ -211,6 +262,14 @@ impl Interp {
                 eval_error: None,
                 deferred_deps,
                 top_promise: None,
+                started: false,
+                pending_async: 0,
+                async_order: None,
+                async_parents: Vec::new(),
+                dfs_index: None,
+                dfs_anc: 0,
+                on_stack: false,
+                cycle_root: None,
             },
         );
 
@@ -677,10 +736,14 @@ impl Interp {
             Some(r) => r,
             None => return true,
         };
-        if rec.evaluated {
+        if rec.evaluated && rec.eval_error.is_none() {
             return true;
         }
-        if rec.evaluating {
+        // evaluating, evaluating-async (started and not finished), or parked at an await.
+        if rec.evaluating || (rec.started && !rec.evaluated) {
+            return false;
+        }
+        if !rec.evaluated && body_has_tla(&rec.body) {
             return false;
         }
         let deps = rec.dep_keys.clone();
@@ -804,14 +867,346 @@ impl Interp {
                 push(&mut eager, k);
             }
         }
-        // Defer-only deps (never named eagerly) keep their first position for the async-subgraph
-        // walk; deps named both ways evaluate at the eager position.
-        for k in defer_seen {
-            if !eager.contains(&k) {
-                eager.push(k);
+        // A defer-only dep (never named eagerly) keeps its SOURCE position — its async
+        // subgraph evaluates there. A dep imported both ways evaluates at its first EAGER
+        // position (the defer clause never pulls it forward).
+        let mut merged: Vec<String> = Vec::new();
+        for stmt in body.iter() {
+            let (spec, defers) = match stmt {
+                Stmt::Import(decl) => (
+                    decl.source.to_string(),
+                    !decl.specs.is_empty()
+                        && decl
+                            .specs
+                            .iter()
+                            .all(|s| matches!(s, crate::ast::ImportSpec::DeferNamespace(_))),
+                ),
+                Stmt::ExportNamed {
+                    source: Some(src), ..
+                }
+                | Stmt::ExportAll { source: src, .. } => (src.to_string(), false),
+                _ => continue,
+            };
+            if let Some(k) = resolved.get(&spec) {
+                let is_defer_only = defer_seen.contains(k) && !eager.contains(k);
+                let place = if is_defer_only { true } else { !defers };
+                if place && !merged.iter().any(|x| x == k) {
+                    merged.push(k.clone());
+                }
             }
         }
-        eager
+        merged
+    }
+
+    /// InnerModuleEvaluation for a graph containing top-level await. Dependencies process in
+    /// source order; a module executes once its [[PendingAsyncDependencies]] hits zero — in a
+    /// coroutine for a TLA body (each await interleaves with the job queue), synchronously
+    /// otherwise. Completion cascades through [[AsyncParentModules]] in [[AsyncEvaluationOrder]].
+    fn inner_module_evaluation_async(
+        &mut self,
+        key: &str,
+        stack: &mut Vec<String>,
+        index: &mut usize,
+    ) {
+        if self.module_recs[key].started || self.module_recs[key].evaluated {
+            return;
+        }
+        {
+            let rec = self.module_recs.get_mut(key).unwrap();
+            rec.started = true;
+            rec.dfs_index = Some(*index);
+            rec.dfs_anc = *index;
+            rec.on_stack = true;
+        }
+        *index += 1;
+        stack.push(key.to_string());
+
+        let dep_keys = self.module_recs[key].dep_keys.clone();
+        let deferred = self.module_recs[key].deferred_deps.clone();
+        let body_order = self.eager_dep_order(key);
+        let order: Vec<String> = if body_order.is_empty() {
+            dep_keys
+                .iter()
+                .filter(|d| !deferred.contains(*d))
+                .cloned()
+                .collect()
+        } else {
+            body_order
+                .into_iter()
+                .filter(|d| dep_keys.contains(d))
+                .collect()
+        };
+        for dep in &order {
+            if deferred.contains(dep) {
+                self.defer_async_deps(key, dep, stack, index);
+                continue;
+            }
+            self.inner_module_evaluation_async(dep, stack, index);
+            if self.module_recs[dep.as_str()].on_stack {
+                // Still on the DFS stack: same strongly-connected component. An in-cycle
+                // dependency that already parked at a top-level await still counts as pending.
+                let danc = self.module_recs[dep.as_str()].dfs_anc;
+                {
+                    let rec = self.module_recs.get_mut(key).unwrap();
+                    rec.dfs_anc = rec.dfs_anc.min(danc);
+                }
+                let dep_parked = {
+                    let d = &self.module_recs[dep.as_str()];
+                    d.async_order.is_some() && !d.evaluated
+                };
+                if dep_parked {
+                    self.module_recs.get_mut(key).unwrap().pending_async += 1;
+                    self.module_recs
+                        .get_mut(dep.as_str())
+                        .unwrap()
+                        .async_parents
+                        .push(key.to_string());
+                }
+                continue;
+            }
+            // Completed (or async-parked) dependency: waiting attaches to its CYCLE ROOT.
+            let root = self.module_recs[dep.as_str()]
+                .cycle_root
+                .clone()
+                .unwrap_or_else(|| dep.to_string());
+            let (dep_err, dep_done, dep_async) = {
+                let d = &self.module_recs[&root];
+                (d.eval_error.clone(), d.evaluated, d.async_order.is_some())
+            };
+            if let Some(err) = dep_err {
+                self.finish_scc(key, stack);
+                self.async_module_rejected(key, err);
+                return;
+            }
+            if !dep_done && dep_async {
+                self.module_recs.get_mut(key).unwrap().pending_async += 1;
+                self.module_recs
+                    .get_mut(&root)
+                    .unwrap()
+                    .async_parents
+                    .push(key.to_string());
+            }
+        }
+        for dep in &dep_keys {
+            if deferred.contains(dep) && !order.contains(dep) {
+                self.defer_async_deps(key, dep, stack, index);
+            }
+        }
+        let has_tla = body_has_tla(&self.module_recs[key].body);
+        if self.module_recs[key].pending_async > 0 || has_tla {
+            self.module_async_seq += 1;
+            self.module_recs.get_mut(key).unwrap().async_order = Some(self.module_async_seq);
+        }
+        if self.module_recs[key].pending_async == 0 {
+            self.module_execute_async(key);
+        }
+        self.finish_scc(key, stack);
+    }
+
+    /// `import defer`: the deferred module's own evaluation waits for a namespace access, but
+    /// every module in its subgraph with top-level await evaluates NOW — and the deferring
+    /// parent pends on each (so the later synchronous evaluation meets no pending async dep).
+    fn defer_async_deps(
+        &mut self,
+        parent: &str,
+        dep: &str,
+        stack: &mut Vec<String>,
+        index: &mut usize,
+    ) {
+        let mut graph = Vec::new();
+        self.collect_graph(dep, &mut graph);
+        for m in graph {
+            if !body_has_tla(&self.module_recs[&m].body) {
+                continue;
+            }
+            if !self.module_recs[&m].evaluated && self.module_recs[&m].top_promise.is_none() {
+                let p = self.new_promise();
+                self.module_recs.get_mut(&m).unwrap().top_promise = Some(p);
+            }
+            self.inner_module_evaluation_async(&m, stack, index);
+            if self.module_recs[&m].on_stack {
+                continue;
+            }
+            let root = self.module_recs[&m]
+                .cycle_root
+                .clone()
+                .unwrap_or_else(|| m.clone());
+            let (dep_err, dep_done, dep_async) = {
+                let d = &self.module_recs[&root];
+                (d.eval_error.clone(), d.evaluated, d.async_order.is_some())
+            };
+            if dep_err.is_some() || dep_done || !dep_async {
+                continue;
+            }
+            let already = self.module_recs[&root]
+                .async_parents
+                .iter()
+                .any(|p| p == parent);
+            if !already {
+                self.module_recs.get_mut(parent).unwrap().pending_async += 1;
+                self.module_recs
+                    .get_mut(&root)
+                    .unwrap()
+                    .async_parents
+                    .push(parent.to_string());
+            }
+        }
+    }
+
+    /// If `key` is its component's root, pop the SCC off the DFS stack and stamp each member's
+    /// [[CycleRoot]].
+    fn finish_scc(&mut self, key: &str, stack: &mut Vec<String>) {
+        let (di, danc, on_stack) = {
+            let r = &self.module_recs[key];
+            (r.dfs_index, r.dfs_anc, r.on_stack)
+        };
+        if !on_stack {
+            return;
+        }
+        let Some(di) = di else { return };
+        if danc != di {
+            return;
+        }
+        while let Some(m) = stack.pop() {
+            let rec = self.module_recs.get_mut(&m).unwrap();
+            rec.on_stack = false;
+            rec.cycle_root = Some(key.to_string());
+            if m == key {
+                break;
+            }
+        }
+    }
+
+    /// Execute `key`'s own body (all dependencies done): a TLA body parks in a coroutine whose
+    /// completion runs the ancestor cascade; a synchronous body runs now.
+    fn module_execute_async(&mut self, key: &str) {
+        let top = self.module_recs[key].top_promise.clone();
+        let (body, env, meta) = {
+            let rec = &self.module_recs[key];
+            (rec.body.clone(), rec.env.clone(), rec.meta.clone())
+        };
+        if body_has_tla(&body) {
+            self.module_recs.get_mut(key).unwrap().evaluating = true;
+            let module_key = key.to_string();
+            let closure: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> =
+                Box::new(move |i| {
+                    let saved_meta = i.import_meta.take();
+                    let saved_strict = i.strict;
+                    i.import_meta = Some(meta);
+                    i.strict = true;
+                    let result = i.run_stmt_list(&body, &env);
+                    i.import_meta = saved_meta;
+                    i.strict = saved_strict;
+                    match result {
+                        Ok(_) => {
+                            i.finish_dynamic_module(&module_key, None);
+                            crate::coroutine::Suspend::Done(Value::Undefined)
+                        }
+                        Err(a) => {
+                            let v = crate::interpreter::abrupt_value(a);
+                            i.finish_dynamic_module(&module_key, Some(v.clone()));
+                            crate::coroutine::Suspend::Throw(v)
+                        }
+                    }
+                });
+            let ptr = self as *mut Interp;
+            let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(closure));
+            let top = match top {
+                Some(t) => t,
+                None => self.new_promise(),
+            };
+            if let Value::Obj(o) = &top {
+                self.generators.insert(Rc::as_ptr(o) as usize, coro);
+            }
+            let top_key = match &top {
+                Value::Obj(o) => Rc::as_ptr(o) as usize,
+                _ => return,
+            };
+            self.drive_async(
+                top_key,
+                top,
+                crate::coroutine::Resume::Next(Value::Undefined),
+            );
+            return;
+        }
+        let saved_meta = self.import_meta.take();
+        let saved_strict = self.strict;
+        self.import_meta = Some(meta);
+        self.strict = true;
+        self.module_recs.get_mut(key).unwrap().evaluating = true;
+        let result = self.run_stmt_list(&body, &env);
+        self.import_meta = saved_meta;
+        self.strict = saved_strict;
+        self.module_recs.get_mut(key).unwrap().evaluating = false;
+        match result {
+            Ok(_) => {
+                self.module_recs.get_mut(key).unwrap().evaluated = true;
+                if let Some(t) = self.module_recs[key].top_promise.clone() {
+                    self.resolve_promise(&t, Value::Undefined);
+                }
+            }
+            Err(a) => {
+                let v = crate::interpreter::abrupt_value(a);
+                self.async_module_rejected(key, v);
+            }
+        }
+    }
+
+    /// AsyncModuleExecutionFulfilled: run every ancestor whose pending count reaches zero, in
+    /// [[AsyncEvaluationOrder]] (ascending).
+    pub(crate) fn async_module_fulfilled(&mut self, key: &str) {
+        let mut exec: Vec<(u64, String)> = Vec::new();
+        self.gather_available_ancestors(key, &mut exec);
+        exec.sort_by_key(|(o, _)| *o);
+        for (_, m) in exec {
+            if self.module_recs[&m].evaluated || self.module_recs[&m].eval_error.is_some() {
+                continue;
+            }
+            self.module_execute_async(&m);
+        }
+    }
+
+    fn gather_available_ancestors(&mut self, key: &str, out: &mut Vec<(u64, String)>) {
+        let parents = self.module_recs[key].async_parents.clone();
+        for parent in parents {
+            let (done, err, pending) = {
+                let p = &self.module_recs[&parent];
+                (p.evaluated, p.eval_error.is_some(), p.pending_async)
+            };
+            if done || err || pending == 0 {
+                continue;
+            }
+            let p = self.module_recs.get_mut(&parent).unwrap();
+            p.pending_async -= 1;
+            if p.pending_async == 0 {
+                let order = p.async_order.unwrap_or(u64::MAX);
+                out.push((order, parent.clone()));
+                // A synchronous ancestor completes as part of this cascade, so its own parents
+                // become available too (GatherAvailableAncestors' recursion).
+                if !body_has_tla(&self.module_recs[&parent].body) {
+                    self.gather_available_ancestors(&parent, out);
+                }
+            }
+        }
+    }
+
+    /// AsyncModuleExecutionRejected: the error propagates to every waiting ancestor.
+    pub(crate) fn async_module_rejected(&mut self, key: &str, err: Value) {
+        {
+            let rec = self.module_recs.get_mut(key).unwrap();
+            if rec.evaluated || rec.eval_error.is_some() {
+                return;
+            }
+            rec.eval_error = Some(err.clone());
+            rec.evaluated = true;
+            rec.evaluating = false;
+        }
+        if let Some(t) = self.module_recs[key].top_promise.clone() {
+            self.reject_promise(&t, err.clone());
+        }
+        for parent in self.module_recs[key].async_parents.clone() {
+            self.async_module_rejected(&parent, err.clone());
+        }
     }
 
     /// Evaluate every module with top-level await (plus its own dependencies) in `key`'s graph —
@@ -829,7 +1224,18 @@ impl Interp {
             return Ok(());
         }
         if body_has_tla(&rec.body) {
-            return self.evaluate_module(key);
+            // The async module (and its own graph) evaluates through the batch machinery — the
+            // deferring parent does NOT wait on it.
+            let mut graph = Vec::new();
+            self.collect_graph(key, &mut graph);
+            for m in &graph {
+                if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
+                    let p = self.new_promise();
+                    self.module_recs.get_mut(m).unwrap().top_promise = Some(p);
+                }
+            }
+            self.inner_module_evaluation_async(key, &mut Vec::new(), &mut 0);
+            return Ok(());
         }
         let deps = rec.dep_keys.clone();
         let deferred = rec.deferred_deps.clone();
@@ -955,74 +1361,48 @@ impl Interp {
             self.resolve_promise(&p, Value::Undefined);
             return p;
         }
-        let dep_keys = self.module_recs[key].dep_keys.clone();
-        let deferred = self.module_recs[key].deferred_deps.clone();
-        for dep in &dep_keys {
-            if deferred.contains(dep) {
-                continue;
-            }
-            if let Err(e) = self.evaluate_module(dep) {
+        // Same batch machinery as a top-level Evaluate(): pre-create the graph's promises and
+        // run InnerModuleEvaluation (awaits park; siblings continue; ancestors cascade).
+        let mut graph = Vec::new();
+        self.collect_graph(key, &mut graph);
+        for m in &graph {
+            if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
                 let p = self.new_promise();
-                let reason = crate::interpreter::abrupt_value(e);
-                self.reject_promise(&p, reason);
-                return p;
+                self.module_recs.get_mut(m).unwrap().top_promise = Some(p);
             }
         }
-        let top = self.new_promise();
-        {
-            let rec = self.module_recs.get_mut(key).unwrap();
-            rec.evaluating = true;
-            rec.top_promise = Some(top.clone());
-        }
-        let (body, env, meta) = {
-            let rec = &self.module_recs[key];
-            (rec.body.clone(), rec.env.clone(), rec.meta.clone())
-        };
-        let module_key = key.to_string();
-        let closure: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> =
-            Box::new(move |i| {
-                let saved_meta = i.import_meta.take();
-                let saved_strict = i.strict;
-                i.import_meta = Some(meta);
-                i.strict = true;
-                let result = i.run_stmt_list(&body, &env);
-                i.import_meta = saved_meta;
-                i.strict = saved_strict;
-                match result {
-                    Ok(_) => {
-                        i.finish_dynamic_module(&module_key, None);
-                        crate::coroutine::Suspend::Done(Value::Undefined)
-                    }
-                    Err(a) => {
-                        let v = crate::interpreter::abrupt_value(a);
-                        i.finish_dynamic_module(&module_key, Some(v.clone()));
-                        crate::coroutine::Suspend::Throw(v)
-                    }
+        self.inner_module_evaluation_async(key, &mut Vec::new(), &mut 0);
+        self.module_recs[key]
+            .top_promise
+            .clone()
+            .unwrap_or_else(|| {
+                let p = self.new_promise();
+                match self.module_recs[key].eval_error.clone() {
+                    Some(e) => self.reject_promise(&p, e),
+                    None => self.resolve_promise(&p, Value::Undefined),
                 }
-            });
-        let ptr = self as *mut Interp;
-        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(closure));
-        if let Value::Obj(o) = &top {
-            self.generators.insert(Rc::as_ptr(o) as usize, coro);
-        }
-        let top_key = match &top {
-            Value::Obj(o) => Rc::as_ptr(o) as usize,
-            _ => unreachable!(),
-        };
-        self.drive_async(
-            top_key,
-            top.clone(),
-            crate::coroutine::Resume::Next(Value::Undefined),
-        );
-        top
+                p
+            })
     }
 
     /// Record a dynamically-evaluated module's completion (run from inside its coroutine).
     fn finish_dynamic_module(&mut self, key: &str, error: Option<Value>) {
-        if let Some(rec) = self.module_recs.get_mut(key) {
-            rec.evaluated = true;
-            rec.evaluating = false;
-            rec.eval_error = error;
+        match error {
+            None => {
+                if let Some(rec) = self.module_recs.get_mut(key) {
+                    rec.evaluated = true;
+                    rec.evaluating = false;
+                }
+                // The module's own promise settles first (the coroutine driver resolves it when
+                // this returns), then ancestors execute in [[AsyncEvaluationOrder]].
+                self.async_module_fulfilled(key);
+            }
+            Some(err) => {
+                if let Some(rec) = self.module_recs.get_mut(key) {
+                    rec.evaluated = false; // async_module_rejected records the error
+                }
+                self.async_module_rejected(key, err);
+            }
         }
     }
 }
