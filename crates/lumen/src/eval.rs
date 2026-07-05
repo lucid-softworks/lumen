@@ -195,6 +195,10 @@ impl Interp {
     }
 
     pub fn exec_block(&mut self, stmts: &[Stmt], parent: &Env) -> Completion {
+        // An empty block needs no environment (a hot case in machine-generated code).
+        if stmts.is_empty() {
+            return Ok(Value::Empty);
+        }
         let scope = new_scope(Some(parent.clone()));
         self.declare_block_lexicals(stmts, &scope, true);
         // A block is a disposal boundary only when it actually declares a `using` resource.

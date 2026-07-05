@@ -2241,7 +2241,11 @@ impl Interp {
                     .props
                     .keys()
                     .iter()
-                    .filter_map(|k| k.parse::<usize>().ok())
+                    .filter_map(|k| {
+                        // Only array-index keys (canonical, < 2^32-1) participate in truncation;
+                        // "4294967296" and friends are ordinary properties.
+                        crate::value::canonical_index(k).map(|n| n as usize)
+                    })
                     .filter(|&idx| idx >= new_len)
                     .collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));

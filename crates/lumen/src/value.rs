@@ -473,7 +473,7 @@ impl Props {
 }
 
 /// A canonical array-index property key (`"0"`, `"42"` — decimal, no leading zeros, fits u32).
-fn canonical_index(k: &str) -> Option<u32> {
+pub(crate) fn canonical_index(k: &str) -> Option<u32> {
     if k == "0" {
         return Some(0);
     }

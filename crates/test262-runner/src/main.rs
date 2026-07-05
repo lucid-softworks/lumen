@@ -59,9 +59,9 @@ const MAX_WORKERS: usize = 16;
 /// guard below is a no-op there — this counting allocator is the real backstop. Exceeding it
 /// returns null from `alloc`, which aborts the process (`handle_alloc_error`); the parent records
 /// the worker crash and respawns for the rest of the chunk. 512 MiB is ~10x any legitimate test.
-/// Sized from measurement: the heaviest legitimate tests (RegExp Unicode sweeps) peak just
-/// under 1 GiB in a fresh worker.
-const MEM_CAP: usize = 1536 * 1024 * 1024;
+/// Sized from measurement: the heaviest legitimate tests peak ~1 GiB (RegExp Unicode sweeps) to
+/// ~2.4 GiB (regress-610026's two-million-block parse) in a fresh worker.
+const MEM_CAP: usize = 2560 * 1024 * 1024;
 
 /// Soft ceiling: after finishing (and recording) a test, a worker whose heap counter is still
 /// above this retires with exit 0 — the parent re-enqueues the rest of its chunk on a fresh
@@ -111,7 +111,9 @@ const WORKER_AS_LIMIT_KIB: u64 = 2 * 1024 * 1024; // 2 GiB
 /// second; this only fires for a genuinely pathological test (e.g. an O(n²) `s += x` loop run a
 /// million times, or an infinite `while (true) {}`). On timeout the parent kills the worker, marks
 /// the test it was stuck on as a timeout-fail, and re-enqueues the rest — same path as a crash.
-const CHUNK_TIMEOUT_DEFAULT_SECS: u64 = 20;
+// Sized for the heaviest legitimate tests (the dst-offset-caching and large-sort perf tests run
+// tens of seconds of pure interpreter loops); only genuinely-stuck tests wait this long to die.
+const CHUNK_TIMEOUT_DEFAULT_SECS: u64 = 60;
 
 /// Per-test watchdog: a worker is killed when no test completes within this window. A few
 /// conformance tests are legitimate interpreter stress loops (e.g. the decodeURI RFC 3629

@@ -9074,3 +9074,14 @@ fn scratch_eval_file() {
         }
     }
 }
+
+#[test]
+fn debug_type_sizes() {
+    if std::env::var("LUMEN_SIZES").is_err() {
+        return;
+    }
+    println!("Stmt: {}", std::mem::size_of::<crate::ast::Stmt>());
+    println!("Expr: {}", std::mem::size_of::<crate::ast::Expr>());
+    println!("Token: {}", std::mem::size_of::<crate::token::Token>());
+    println!("Tok: {}", std::mem::size_of::<crate::token::Tok>());
+}

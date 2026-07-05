@@ -4042,6 +4042,45 @@ fn ta_native(
             if in_place && i.immutable_buffers.contains(&info.buffer) {
                 return Err(i.make_error("TypeError", "Cannot write to an immutable ArrayBuffer"));
             }
+            // Default (no comparator) numeric sort runs natively — the Value-boxed merge sort
+            // is far too slow for the quarter-million-element perf tests.
+            if matches!(cmp, Value::Undefined) && !info.kind.is_bigint() {
+                let mut nums: Vec<f64> = (0..len)
+                    .map(|k| match i.ta_read(&info, k) {
+                        Value::Num(n) => n,
+                        _ => f64::NAN,
+                    })
+                    .collect();
+                // TypedArray sort order: numeric ascending, -0 before +0, NaNs last.
+                nums.sort_unstable_by(|a, b| {
+                    match (a.is_nan(), b.is_nan()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            if a == b {
+                                // -0 sorts before +0.
+                                (1.0f64 / a)
+                                    .partial_cmp(&(1.0f64 / b))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            } else {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                        }
+                    }
+                });
+                if in_place {
+                    for (k, n) in nums.iter().enumerate() {
+                        ab(i.ta_store(&info, k, &Value::Num(*n)))?;
+                    }
+                    return Ok(this.clone());
+                }
+                let (new_ta, new_info) = ta_create_same(i, info.kind, len)?;
+                for (k, n) in nums.iter().enumerate() {
+                    ab(i.ta_store(&new_info, k, &Value::Num(*n)))?;
+                }
+                return Ok(new_ta);
+            }
             let mut vals: Vec<Value> = (0..len).map(|k| i.ta_read(&info, k)).collect();
             ta_merge_sort(i, &mut vals, &cmp, info.kind.is_bigint())?;
             if in_place {
@@ -4493,7 +4532,10 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     // AllocateTypedArray runs before the argument coercions: newTarget's `prototype` getter
     // (which may throw or revoke) is observed first. A non-object first argument instead runs
     // ToIndex first (spec step 6.c). The value is re-read cheaply below.
-    if matches!(args.first(), None | Some(Value::Obj(_)) | Some(Value::Undefined)) {
+    if matches!(
+        args.first(),
+        None | Some(Value::Obj(_)) | Some(Value::Undefined)
+    ) {
         if let nt @ Value::Obj(_) = &i.new_target.clone() {
             if !matches!(ab(i.get_member(nt, "prototype"))?, Value::Obj(_)) {
                 ctor_realm_proto(i, nt, kind.name())?;
