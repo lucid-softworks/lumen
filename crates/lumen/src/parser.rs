@@ -1900,6 +1900,9 @@ impl Parser {
     /// A label identifier is subject to the identifier-reference rules: `yield` is reserved in
     /// strict mode and generators, `await` in modules, async bodies and class static blocks.
     fn check_label_name(&self, name: &str) -> Result<(), ParseError> {
+        if name.starts_with('#') {
+            return self.err("private names cannot be used as labels");
+        }
         if name == "yield" && (self.strict || self.in_generator) {
             return self.err("'yield' cannot be used as a label here");
         }

@@ -26,8 +26,8 @@ fn this_obj(this: &Value) -> Option<Gc> {
 }
 
 /// The newTarget realm's %RegExp.prototype% (GetFunctionRealm fallback for RegExp construction).
-pub(crate) fn regexp_realm_proto(i: &mut Interp, nt: &Value) -> Option<Gc> {
-    ctor_realm_proto(i, nt, "RegExp").unwrap_or(None)
+pub(crate) fn regexp_realm_proto(i: &mut Interp, nt: &Value) -> Result<Option<Gc>, Value> {
+    ctor_realm_proto(i, nt, "RegExp")
 }
 
 /// Set(O, P, V, true): perform [[Set]] and throw a TypeError if it returns false, matching the
@@ -16806,7 +16806,7 @@ fn install_string(it: &mut Interp) {
             )),
             Some(v) => Value::Str(ab(i.to_string(v))?),
         };
-        Ok(maybe_box(i, s))
+        maybe_box(i, s)
     });
     ctor.borrow_mut().props.insert(
         "prototype",
@@ -16918,9 +16918,9 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
 /// Box only when a wrapper constructor is invoked via `new` (`new Number(x)` boxes, `Number(x)` does
 /// not). The instance prototype honors newTarget (OrdinaryCreateFromConstructor), falling back to
 /// newTarget's *realm's* intrinsic when its `prototype` isn't an object.
-fn maybe_box(i: &mut Interp, v: Value) -> Value {
+fn maybe_box(i: &mut Interp, v: Value) -> Result<Value, Value> {
     if !i.constructing {
-        return v;
+        return Ok(v);
     }
     let boxed = box_primitive(i, v);
     let nt = i.new_target.clone();
@@ -16935,15 +16935,15 @@ fn maybe_box(i: &mut Interp, v: Value) -> Value {
             match i.get_member(&nt, "prototype") {
                 Ok(Value::Obj(p)) => o.borrow_mut().proto = Some(p),
                 Ok(_) => {
-                    if let Ok(Some(p)) = ctor_realm_proto(i, &nt, key) {
+                    if let Some(p) = ctor_realm_proto(i, &nt, key)? {
                         o.borrow_mut().proto = Some(p);
                     }
                 }
-                Err(_) => {}
+                Err(e) => return Err(crate::interpreter::abrupt_value(e)),
             }
         }
     }
-    boxed
+    Ok(boxed)
 }
 
 fn string_pad(i: &mut Interp, this: Value, args: &[Value], at_start: bool) -> Result<Value, Value> {
@@ -17278,7 +17278,7 @@ fn install_number(it: &mut Interp) {
             Some(Value::BigInt(n)) => n.to_f64(),
             Some(v) => ab(i.to_number(v))?,
         };
-        Ok(maybe_box(i, Value::Num(n)))
+        maybe_box(i, Value::Num(n))
     });
     ctor.borrow_mut().props.insert(
         "prototype",
@@ -17384,7 +17384,7 @@ fn install_boolean(it: &mut Interp) {
     });
     let ctor = it.make_native("Boolean", 1, |i, _this, args| {
         let b = Value::Bool(i.to_boolean(&arg(args, 0)));
-        Ok(maybe_box(i, b))
+        maybe_box(i, b)
     });
     ctor.borrow_mut().props.insert(
         "prototype",

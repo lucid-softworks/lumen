@@ -3508,6 +3508,7 @@ impl Interp {
                 nt @ Value::Obj(_) => match self.get_member(nt, "prototype")? {
                     Value::Obj(p) => Some(p),
                     _ => crate::builtins::regexp_realm_proto(self, nt)
+                        .map_err(Abrupt::Throw)?
                         .or_else(|| self.extra_protos.get("RegExp").cloned()),
                 },
                 _ => self.extra_protos.get("RegExp").cloned(),

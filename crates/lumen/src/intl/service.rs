@@ -227,6 +227,8 @@ pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Result<Option<Gc>, Val
             // *newTarget's realm* intrinsic (found by matching its prototype chain's Function.prototype
             // against each realm), not necessarily the current realm's.
             Ok(_) => {
+                // GetFunctionRealm throws for a proxy revoked by its own prototype getter.
+                ab(i.get_function_realm_global(&nt))?;
                 if let Some(protos) = realm_protos_of(i, &nt) {
                     return Ok(protos.get(intrinsic).cloned());
                 }
