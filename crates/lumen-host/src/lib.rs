@@ -18,6 +18,7 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::mpsc;
 
+pub use lumen::bytecode::Tier;
 pub use lumen::embed::{Ctx, NativeFn, OpState, ResourceId, ResourceTable, Value};
 pub use lumen::{Completion, Engine, ParseError};
 

@@ -54,6 +54,15 @@ name = "lumen"
 version = "0.1.1"
 
 [[package]]
+name = "lumen-cli"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
+ "lumen-repl",
+ "lumen-runtime",
+]
+
+[[package]]
 name = "lumen-difftest"
 version = "0.1.1"
 dependencies = [
@@ -65,6 +74,14 @@ name = "lumen-host"
 version = "0.1.1"
 dependencies = [
  "lumen",
+]
+
+[[package]]
+name = "lumen-repl"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
+ "lumen-runtime",
 ]
 
 [[package]]

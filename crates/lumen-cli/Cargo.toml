@@ -1,0 +1,18 @@
+# The node/deno-style entrypoint: dispatches repl / run-file / -e eval over the assembled
+# runtime. The binary is `lumen-cli` for now — the engine's own `lumen` bin (the test262 host
+# that test262.fyi runs) keeps its name until renaming is coordinated.
+[package]
+name = "lumen-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+lumen-repl = { path = "../lumen-repl" }
+lumen-runtime = { path = "../lumen-runtime" }
+
+[lints]
+workspace = true
