@@ -760,6 +760,10 @@ pub const GC_TRIGGER: i64 = 200_000;
 /// materialize more than these bounds raise a RangeError instead. They are generous relative to
 /// real test262 tests but small enough that one runaway test stays bounded.
 pub const MAX_ARRAY_OP_LEN: usize = 1 << 20; // ~1M elements
+
+/// Byte ceiling for a single ArrayBuffer/SharedArrayBuffer allocation (real programs allocate
+/// tens of MB; runaway growth is still stopped well below the process heap cap).
+pub const MAX_BUFFER_BYTES: usize = 1 << 28; // 256 MiB
                                              // Large enough for suite tests that build 2^24-char escape strings, small enough that runaway
                                              // string growth still dies as a RangeError rather than an OOM.
 pub const MAX_STR_LEN: usize = 1 << 26; // ~67M

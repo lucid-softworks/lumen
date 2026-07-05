@@ -8630,8 +8630,9 @@ fn function_to_string_source_text() {
         run("(class A { constructor() {} m() {} }).toString()"),
         "class A { constructor() {} m() {} }"
     );
-    // Natives and bound functions render as native code.
-    assert_eq!(run("Math.max.toString()"), "function () { [native code] }");
+    // Natives render as native code carrying their name; bound functions drop the
+    // "bound f" compound (not a valid PropertyName).
+    assert_eq!(run("Math.max.toString()"), "function max() { [native code] }");
     assert_eq!(
         run("(function f(){}).bind(null).toString()"),
         "function () { [native code] }"

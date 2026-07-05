@@ -2019,10 +2019,8 @@ impl Parser {
                 if matches!(op, "=" | "&&=" | "||=" | "??=")
                     && left_paren
                     && matches!(left, Expr::Ident(_))
-                    && matches!(
-                        &value,
-                        Expr::Func(f) if f.name.is_none()
-                    )
+                    && (matches!(&value, Expr::Func(f) if f.name.is_none())
+                        || matches!(&value, Expr::Class(c) if c.name.is_none()))
                 {
                     value = Expr::Seq(vec![value]);
                 }

@@ -2,7 +2,7 @@
 //! calls [`install`] to populate `globalThis`, the standard constructors/prototypes, `Math`, and
 //! the global functions. The set grows as the test262 score climbs — it is intentionally a subset.
 
-use crate::interpreter::{Abrupt, Interp, MAX_ARRAY_OP_LEN, MAX_STR_LEN};
+use crate::interpreter::{Abrupt, Interp, MAX_ARRAY_OP_LEN, MAX_BUFFER_BYTES, MAX_STR_LEN};
 use crate::value::*;
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -1337,6 +1337,37 @@ fn dv_info(i: &mut Interp, this: &Value) -> Result<(usize, usize, usize, bool), 
 
 /// The DataView's current byte length, or `None` when its buffer is detached or (over a resizable
 /// buffer) the view is now out of bounds.
+/// Read `n` raw bytes of a (possibly shared) buffer.
+fn dv_bytes(i: &Interp, buf: usize, start: usize, n: usize) -> Option<Vec<u8>> {
+    if let Some(&id) = i.shared_buffers.get(&buf) {
+        return crate::interpreter::shared_mem_get(id).and_then(|m| {
+            let g = m.lock().unwrap();
+            (start + n <= g.len()).then(|| g[start..start + n].to_vec())
+        });
+    }
+    i.array_buffers
+        .get(&buf)
+        .and_then(|b| (start + n <= b.len()).then(|| b[start..start + n].to_vec()))
+}
+
+/// Write raw bytes into a (possibly shared) buffer (bounds-checked, silently dropped otherwise).
+fn dv_put(i: &mut Interp, buf: usize, start: usize, bytes: &[u8]) {
+    if let Some(&id) = i.shared_buffers.get(&buf) {
+        if let Some(m) = crate::interpreter::shared_mem_get(id) {
+            let mut g = m.lock().unwrap();
+            if start + bytes.len() <= g.len() {
+                g[start..start + bytes.len()].copy_from_slice(bytes);
+            }
+        }
+        return;
+    }
+    if let Some(b) = i.array_buffers.get_mut(&buf) {
+        if start + bytes.len() <= b.len() {
+            b[start..start + bytes.len()].copy_from_slice(bytes);
+        }
+    }
+}
+
 fn dv_view_len(i: &Interp, buf: usize, off: usize, len: usize, track: bool) -> Option<usize> {
     let blen = i.array_buffers.get(&buf)?.len();
     if track {
@@ -1396,9 +1427,9 @@ fn dv_get(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
-    let mut b = match i.array_buffers.get(&buf) {
-        Some(buf) if start + es <= buf.len() => buf[start..start + es].to_vec(),
-        _ => return Err(i.make_error("TypeError", "detached buffer")),
+    let mut b = match dv_bytes(i, buf, start, es) {
+        Some(b) => b,
+        None => return Err(i.make_error("TypeError", "detached buffer")),
     };
     // `kind.read` is little-endian; DataView defaults to big-endian, so reverse unless little.
     if !little {
@@ -1436,11 +1467,7 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
         bytes.reverse();
     }
     let start = off + byte_off;
-    if let Some(b) = i.array_buffers.get_mut(&buf) {
-        if start + es <= b.len() {
-            b[start..start + es].copy_from_slice(&bytes);
-        }
-    }
+    dv_put(i, buf, start, &bytes);
     Ok(Value::Undefined)
 }
 
@@ -1472,9 +1499,9 @@ fn dv_get_big(i: &mut Interp, this: &Value, args: &[Value], signed: bool) -> Res
         return Err(i.make_error("RangeError", "Offset is outside the bounds of the DataView"));
     }
     let start = off + byte_off;
-    let mut b = match i.array_buffers.get(&buf) {
-        Some(buf) if start + 8 <= buf.len() => buf[start..start + 8].to_vec(),
-        _ => return Err(i.make_error("TypeError", "detached buffer")),
+    let mut b = match dv_bytes(i, buf, start, 8) {
+        Some(b) => b,
+        None => return Err(i.make_error("TypeError", "detached buffer")),
     };
     if !little {
         b.reverse();
@@ -1513,11 +1540,7 @@ fn dv_set_big(i: &mut Interp, this: &Value, args: &[Value]) -> Result<Value, Val
         bytes.reverse();
     }
     let start = off + byte_off;
-    if let Some(b) = i.array_buffers.get_mut(&buf) {
-        if start + 8 <= b.len() {
-            b[start..start + 8].copy_from_slice(&bytes);
-        }
-    }
+    dv_put(i, buf, start, &bytes);
     Ok(Value::Undefined)
 }
 
@@ -2937,8 +2960,8 @@ fn install_shared_array_buffer(it: &mut Interp) {
         let obj = new_from_ctor(i, "SharedArrayBuffer")?;
         // Data allocation happens after the object exists — an oversized request fails here.
         let len = n as usize;
-        if n as u128 > MAX_ARRAY_OP_LEN as u128
-            || max.is_some_and(|m| m as u128 > MAX_ARRAY_OP_LEN as u128)
+        if n as u128 > MAX_BUFFER_BYTES as u128
+            || max.is_some_and(|m| m as u128 > MAX_BUFFER_BYTES as u128)
         {
             return Err(i.make_error("RangeError", "SharedArrayBuffer allocation too large"));
         }
@@ -3427,7 +3450,7 @@ fn install_array_buffer(it: &mut Interp) {
         // OrdinaryCreateFromConstructor: new.target's prototype is read (observably) before the
         // data block is allocated, so a poisoned getter beats an allocation RangeError.
         let obj = new_from_ctor(i, "ArrayBuffer")?;
-        if n as usize > MAX_ARRAY_OP_LEN || max.is_some_and(|m| m as usize > MAX_ARRAY_OP_LEN) {
+        if n as usize > MAX_BUFFER_BYTES || max.is_some_and(|m| m as usize > MAX_BUFFER_BYTES) {
             return Err(i.make_error("RangeError", "ArrayBuffer allocation too large"));
         }
         let len = n as usize;
@@ -9976,13 +9999,37 @@ fn install_function_proto(it: &mut Interp) {
             ));
         }
         // A user function returns the source text it was parsed from; everything else
-        // (natives, bound functions, proxies) renders as a native function.
+        // (natives, bound functions, proxies) renders as a native function carrying its name.
         if let Value::Obj(o) = &this {
             if let Callable::User(f, _) = &o.borrow().call {
                 if let Some(src) = &f.source {
                     return Ok(Value::from_string(src.to_string()));
                 }
             }
+            let name = match o.borrow().props.get("name").map(|p| p.value.clone()) {
+                Some(Value::Str(n)) => n.to_string(),
+                _ => String::new(),
+            };
+            // Render the name only when it's a well-formed PropertyName (optionally get/set
+            // prefixed, or a computed [Symbol.x] form) — a bound function's "bound f" is not.
+            let is_ident = |t: &str| {
+                !t.is_empty()
+                    && t.chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+                    && t.chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+            };
+            let renderable = is_ident(&name)
+                || (name.starts_with('[') && name.ends_with(']'))
+                || name
+                    .strip_prefix("get ")
+                    .or_else(|| name.strip_prefix("set "))
+                    .is_some_and(is_ident);
+            let name = if renderable { name.as_str() } else { "" };
+            return Ok(Value::from_string(format!(
+                "function {name}() {{ [native code] }}"
+            )));
         }
         Ok(Value::str("function () { [native code] }"))
     });
@@ -10110,6 +10157,13 @@ fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Resu
         let body = ab(i.to_string(args.last().unwrap()))?.to_string();
         (ps.join(","), body)
     };
+    // The parameter text must parse as FormalParameters ON ITS OWN — a "/*" or "//" in it must
+    // not be able to swallow the synthesized ") {" (spec: ParseText(P, FormalParameters)).
+    if !params.is_empty() {
+        let probe = format!("{prefix} __check({params}\n) {{}}");
+        crate::parser::parse_script(&probe, false)
+            .map_err(|e| i.make_error("SyntaxError", e.message))?;
+    }
     let src = format!("{prefix} anonymous({params}\n) {{\n{body}\n}}");
     let program = crate::parser::parse_script(&src, false)
         .map_err(|e| i.make_error("SyntaxError", e.message))?;
@@ -12375,7 +12429,7 @@ fn install_array(it: &mut Interp) {
         for k in 1..len {
             let from = k.to_string();
             let to = (k - 1).to_string();
-            if i.has_property(&o, &from) {
+            if ab(i.js_has_property(&ov, &from))? {
                 let v = ab(i.get_member(&ov, &from))?;
                 set_throw(i, &ov, &to, v)?;
             } else {
@@ -12824,8 +12878,12 @@ fn install_array(it: &mut Interp) {
             Value::Undefined => len,
             x => norm_index(ab(i.to_number(&x))?, len),
         };
-        // Only the filled span is bounded by the engine cap; the total length may be near 2^53.
-        if (end - start).max(0) as usize > MAX_ARRAY_OP_LEN {
+        // A real Array's filled span is bounded by the engine cap (it materializes one property
+        // per index); a generic array-like iterates lazily — its accessors typically throw or
+        // the per-op caps stop runaway growth.
+        if matches!(o.borrow().exotic, Exotic::Array)
+            && (end - start).max(0) as usize > MAX_ARRAY_OP_LEN
+        {
             return Err(i.make_error("RangeError", "array length exceeds engine limit"));
         }
         let ov = Value::Obj(o.clone());
@@ -12937,9 +12995,10 @@ fn install_array(it: &mut Interp) {
                 ));
             }
         }
-        // Vacated trailing indices (originally holes, or beyond the present count) are deleted.
+        // Vacated trailing indices (originally holes, or beyond the present count) are deleted
+        // in ascending order through [[Delete]] (a proxy's deleteProperty trap observes each).
         for k in item_count..len {
-            o.borrow_mut().props.remove(k.to_string().as_str());
+            delete_or_throw(i, &ov, &k.to_string())?;
         }
         Ok(ov)
     });
