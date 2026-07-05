@@ -29,6 +29,7 @@ pub mod bytecode;
 mod coroutine;
 mod eval;
 mod fasthash;
+mod host;
 mod interpreter;
 mod intl;
 mod jstr;
@@ -241,6 +242,94 @@ impl Engine {
             other => self.render(other),
         };
         Completion::Throw { name, message }
+    }
+}
+
+/// The curated embedder surface (`feature = "embed"`), for runtime layers (event loop, host
+/// APIs) built on top of the engine. Gated because everything here is a semver commitment on a
+/// published crate; it stabilizes together with the `lumen-host`/`lumen-runtime` crates.
+#[cfg(feature = "embed")]
+pub mod embed {
+    pub use crate::host::{OpState, ResourceId, ResourceTable};
+    /// The context a [`NativeFn`] receives: a curated view of the interpreter. Only the
+    /// audited embedder-safe methods are `pub`; the rest of the interpreter is `pub(crate)`.
+    pub use crate::interpreter::Interp as Ctx;
+    /// JS values. Matching/constructing the primitive variants is supported API; object
+    /// internals stay opaque — an object handle is only usable through [`Ctx`] methods.
+    pub use crate::value::{NativeFn, Value};
+}
+
+/// Embedder methods (`feature = "embed"`). Native functions registered here are bare `fn`
+/// pointers (they cannot capture); Rust state lives in [`embed::OpState`], reached through the
+/// `&mut Ctx` argument.
+#[cfg(feature = "embed")]
+impl Engine {
+    /// Direct access to the native-function context (also where [`embed::OpState`] lives, via
+    /// [`embed::Ctx::op_state`]).
+    pub fn ctx(&mut self) -> &mut embed::Ctx {
+        &mut self.interp
+    }
+
+    /// The realm's global object — the root from which an embedder reaches user-defined JS
+    /// (e.g. `ctx().get_member(&engine.global_this(), "myCallback")`).
+    pub fn global_this(&self) -> embed::Value {
+        Value::Obj(self.interp.global.clone())
+    }
+
+    /// Define `globalThis.<name>` as a native function (non-enumerable, like built-ins).
+    pub fn define_global(&mut self, name: &str, len: usize, f: embed::NativeFn) {
+        let global = self.interp.global.clone();
+        self.interp.def_method(&global, name, len, f);
+    }
+
+    /// Define `globalThis.<name>` as a namespace object (like `Math`) with the given
+    /// `(name, arity, fn)` native methods.
+    pub fn define_namespace(&mut self, name: &str, ops: &[(&str, usize, embed::NativeFn)]) {
+        let ns = self.interp.new_object();
+        for (op, len, f) in ops {
+            self.interp.def_method(&ns, op, *len, *f);
+        }
+        self.interp
+            .global
+            .borrow_mut()
+            .props
+            .insert(name, crate::value::Property::builtin(Value::Obj(ns)));
+    }
+
+    /// Call a JS function value; `Err` is the thrown value. This is how the runtime's event
+    /// loop re-enters the engine to fire a timer/IO callback, so it must work on every
+    /// execution tier, not just the interpreter.
+    pub fn call_function(
+        &mut self,
+        func: &embed::Value,
+        this: embed::Value,
+        args: &[embed::Value],
+    ) -> Result<embed::Value, embed::Value> {
+        self.interp
+            .call(func.clone(), this, args)
+            .map_err(interpreter::abrupt_value)
+    }
+
+    /// Drain the microtask (promise-reaction) queue to quiescence.
+    pub fn run_microtasks(&mut self) {
+        self.interp.drain_microtasks();
+    }
+
+    /// Whether promise-reaction jobs are queued (the loop uses this to decide when a turn is
+    /// really over).
+    pub fn has_pending_jobs(&self) -> bool {
+        !self.interp.microtasks.is_empty()
+    }
+
+    /// Run a single queued job; `false` when the queue was empty.
+    pub fn run_one_job(&mut self) -> bool {
+        match self.interp.microtasks.pop_front() {
+            Some(job) => {
+                self.interp.run_job(job);
+                true
+            }
+            None => false,
+        }
     }
 }
 

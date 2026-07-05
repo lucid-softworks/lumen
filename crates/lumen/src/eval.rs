@@ -194,7 +194,7 @@ impl Interp {
         Ok(last)
     }
 
-    pub fn exec_block(&mut self, stmts: &[Stmt], parent: &Env) -> Completion {
+    pub(crate) fn exec_block(&mut self, stmts: &[Stmt], parent: &Env) -> Completion {
         // An empty block needs no environment (a hot case in machine-generated code).
         if stmts.is_empty() {
             return Ok(Value::Empty);
@@ -421,7 +421,12 @@ impl Interp {
 
     /// Pre-declare `let`/`const` (uninitialised — TDZ) and, when `with_functions`, block-level
     /// function declarations (initialised) for the statements directly in a block.
-    pub fn declare_block_lexicals(&mut self, stmts: &[Stmt], scope: &Env, with_functions: bool) {
+    pub(crate) fn declare_block_lexicals(
+        &mut self,
+        stmts: &[Stmt],
+        scope: &Env,
+        with_functions: bool,
+    ) {
         for s in stmts {
             // Annex B labelled function declarations (`l: function f() {}`) instantiate at block
             // entry exactly like unlabelled ones — labels are transparent here.
@@ -492,7 +497,7 @@ impl Interp {
         }
     }
 
-    pub fn exec_stmt(&mut self, stmt: &Stmt, env: &Env) -> Completion {
+    pub(crate) fn exec_stmt(&mut self, stmt: &Stmt, env: &Env) -> Completion {
         match stmt {
             Stmt::Empty | Stmt::Debugger => Ok(Value::Empty),
             Stmt::FuncDecl(func) => {
@@ -1795,7 +1800,7 @@ impl Interp {
         Ok(true)
     }
 
-    pub fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
+    pub(crate) fn get_var(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
         self.get_var_with(name, env).map(|(v, _)| v)
     }
 
@@ -2132,7 +2137,7 @@ impl Interp {
         }
     }
 
-    pub fn assign_var(&mut self, name: &str, value: Value, env: &Env) -> Result<(), Abrupt> {
+    pub(crate) fn assign_var(&mut self, name: &str, value: Value, env: &Env) -> Result<(), Abrupt> {
         let mut cur = Some(env.clone());
         while let Some(s) = cur {
             let (with_obj, parent) = {
@@ -2289,7 +2294,7 @@ impl Interp {
 
     // ----- expressions ------------------------------------------------------------------------
 
-    pub fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Abrupt> {
+    pub(crate) fn eval(&mut self, expr: &Expr, env: &Env) -> Result<Value, Abrupt> {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::BigInt(n) => Ok(Value::BigInt(n.clone())),
@@ -3509,21 +3514,27 @@ impl Interp {
                 self.microtasks.clear();
                 break;
             }
-            if job.handler.is_callable() {
-                match self.call(
-                    job.handler.clone(),
-                    Value::Undefined,
-                    std::slice::from_ref(&job.value),
-                ) {
-                    Ok(r) => self.resolve_promise(&job.result, r),
-                    Err(Abrupt::Throw(e)) => self.reject_promise(&job.result, e),
-                    Err(_) => {}
-                }
-            } else if job.fulfilled {
-                self.resolve_promise(&job.result, job.value);
-            } else {
-                self.reject_promise(&job.result, job.value);
+            self.run_job(job);
+        }
+    }
+
+    /// Run one promise-reaction job (settle `job.result` from the handler, or pass the
+    /// settlement through when there is no handler).
+    pub(crate) fn run_job(&mut self, job: crate::interpreter::Job) {
+        if job.handler.is_callable() {
+            match self.call(
+                job.handler.clone(),
+                Value::Undefined,
+                std::slice::from_ref(&job.value),
+            ) {
+                Ok(r) => self.resolve_promise(&job.result, r),
+                Err(Abrupt::Throw(e)) => self.reject_promise(&job.result, e),
+                Err(_) => {}
             }
+        } else if job.fulfilled {
+            self.resolve_promise(&job.result, job.value);
+        } else {
+            self.reject_promise(&job.result, job.value);
         }
     }
 
@@ -4726,7 +4737,7 @@ impl Interp {
     /// Run a constructor's body against an already-allocated `this`, used by both `construct` and
     /// `super(...)`. Handles base-class field init, derived classes (their `super()` does the work),
     /// plain function constructors, and native parents (e.g. `extends Error`).
-    pub fn run_constructor_on(
+    pub(crate) fn run_constructor_on(
         &mut self,
         ctor: &Value,
         this: &Value,
@@ -6210,7 +6221,7 @@ impl Interp {
 
     /// OrdinaryHasInstance(C, O): unwrap bound functions to their target, then test whether `C`'s
     /// `prototype` appears on `O`'s prototype chain.
-    pub fn ordinary_has_instance(&mut self, c: &Value, o: &Value) -> Result<bool, Abrupt> {
+    pub(crate) fn ordinary_has_instance(&mut self, c: &Value, o: &Value) -> Result<bool, Abrupt> {
         let co = match c {
             Value::Obj(x) if !matches!(x.borrow().call, Callable::None) => x.clone(),
             _ => return Ok(false),
@@ -6284,11 +6295,11 @@ impl Interp {
         })
     }
 
-    pub fn to_int32(&mut self, v: &Value) -> Result<i32, Abrupt> {
+    pub(crate) fn to_int32(&mut self, v: &Value) -> Result<i32, Abrupt> {
         let n = self.to_number(v)?;
         Ok(to_int32(n))
     }
-    pub fn to_uint32(&mut self, v: &Value) -> Result<u32, Abrupt> {
+    pub(crate) fn to_uint32(&mut self, v: &Value) -> Result<u32, Abrupt> {
         let n = self.to_number(v)?;
         Ok(to_int32(n) as u32)
     }
@@ -6316,7 +6327,7 @@ impl Interp {
         })
     }
 
-    pub fn to_property_key(&mut self, v: &Value) -> Result<String, Abrupt> {
+    pub(crate) fn to_property_key(&mut self, v: &Value) -> Result<String, Abrupt> {
         // A symbol key maps to its internal NUL-prefixed key; everything else is its string form.
         if let Value::Sym(s) = v {
             return Ok(Interp::sym_key(s));
@@ -6349,7 +6360,7 @@ impl Interp {
         None
     }
 
-    pub fn to_primitive(&mut self, v: &Value, hint: Hint) -> Result<Value, Abrupt> {
+    pub(crate) fn to_primitive(&mut self, v: &Value, hint: Hint) -> Result<Value, Abrupt> {
         let obj = match v {
             Value::Obj(o) => o.clone(),
             _ => return Ok(v.clone()),
@@ -6394,7 +6405,7 @@ impl Interp {
 
     /// ECMAScript `Number::toString` (base 10): the shortest round-tripping digit string, formatted
     /// fixed or exponential per the spec's exponent thresholds (≥1e21 or <1e-6 → exponential).
-    pub fn num_to_str(&self, n: f64) -> String {
+    pub(crate) fn num_to_str(&self, n: f64) -> String {
         // Integer fast path: array indices and loop counters dominate ToString(Number) traffic,
         // and integers never need the shortest-float machinery. (-0.0 correctly prints "0".)
         if n.trunc() == n && n.abs() <= 9_007_199_254_740_992.0 {
@@ -6451,7 +6462,7 @@ impl Interp {
         }
     }
 
-    pub fn strict_equals(&self, a: &Value, b: &Value) -> bool {
+    pub(crate) fn strict_equals(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Undefined, Value::Undefined) => true,
             (Value::Null, Value::Null) => true,
@@ -6490,7 +6501,7 @@ impl Interp {
         }
     }
 
-    pub fn loose_equals(&mut self, a: &Value, b: &Value) -> Result<bool, Abrupt> {
+    pub(crate) fn loose_equals(&mut self, a: &Value, b: &Value) -> Result<bool, Abrupt> {
         // [[IsHTMLDDA]] compares loosely equal to undefined/null (and to itself, as an object).
         if matches!(a, Value::Undefined | Value::Null) && self.is_htmldda(b)
             || matches!(b, Value::Undefined | Value::Null) && self.is_htmldda(a)

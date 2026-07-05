@@ -136,20 +136,20 @@ pub enum Exotic {
 }
 
 pub struct Object {
-    pub proto: Option<Gc>,
-    pub props: Props,
-    pub extensible: bool,
-    pub call: Callable,
-    pub exotic: Exotic,
+    pub(crate) proto: Option<Gc>,
+    pub(crate) props: Props,
+    pub(crate) extensible: bool,
+    pub(crate) call: Callable,
+    pub(crate) exotic: Exotic,
     /// The construct-time prototype handed to instances (`F.prototype`), cached for `new`.
-    pub is_constructor: bool,
+    pub(crate) is_constructor: bool,
     /// GC scratch: mark bit (reachability) and a count of references from other heap objects.
-    pub gc_mark: Cell<bool>,
-    pub gc_internal: Cell<u32>,
+    pub(crate) gc_mark: Cell<bool>,
+    pub(crate) gc_internal: Cell<u32>,
 }
 
 impl Object {
-    pub fn new(proto: Option<Gc>) -> Gc {
+    pub(crate) fn new(proto: Option<Gc>) -> Gc {
         LIVE_OBJECTS.with(|c| c.set(c.get() + 1));
         let obj = Rc::new(RefCell::new(Object {
             proto,
@@ -220,7 +220,7 @@ pub enum TaKind {
 }
 
 impl TaKind {
-    pub fn elsize(self) -> usize {
+    pub(crate) fn elsize(self) -> usize {
         match self {
             TaKind::I8 | TaKind::U8 | TaKind::U8Clamped => 1,
             TaKind::I16 | TaKind::U16 | TaKind::F16 => 2,
@@ -229,11 +229,11 @@ impl TaKind {
         }
     }
     /// Whether elements are BigInt (BigInt64Array / BigUint64Array) rather than Number.
-    pub fn is_bigint(self) -> bool {
+    pub(crate) fn is_bigint(self) -> bool {
         matches!(self, TaKind::I64 | TaKind::U64)
     }
     /// Constructor / prototype name, e.g. "Int8Array".
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             TaKind::I8 => "Int8Array",
             TaKind::U8 => "Uint8Array",
@@ -250,7 +250,7 @@ impl TaKind {
         }
     }
     /// Read a BigInt element (little-endian) from `b` (8 bytes) as an i128.
-    pub fn read_bigint(self, b: &[u8]) -> i128 {
+    pub(crate) fn read_bigint(self, b: &[u8]) -> i128 {
         let arr = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
         match self {
             TaKind::U64 => u64::from_le_bytes(arr) as i128,
@@ -258,11 +258,11 @@ impl TaKind {
         }
     }
     /// Convert a BigInt (i128) to this element's 8 little-endian bytes, wrapping mod 2^64.
-    pub fn write_bigint(self, n: i128) -> Vec<u8> {
+    pub(crate) fn write_bigint(self, n: i128) -> Vec<u8> {
         (n as u64).to_le_bytes().to_vec()
     }
     /// Read one element (little-endian) from `b` (which must be `elsize()` bytes) as a Number.
-    pub fn read(self, b: &[u8]) -> f64 {
+    pub(crate) fn read(self, b: &[u8]) -> f64 {
         match self {
             TaKind::I8 => b[0] as i8 as f64,
             TaKind::U8 | TaKind::U8Clamped => b[0] as f64,
@@ -277,7 +277,7 @@ impl TaKind {
         }
     }
     /// Convert a Number to this element type's little-endian bytes (JS integer-conversion rules).
-    pub fn write(self, n: f64) -> Vec<u8> {
+    pub(crate) fn write(self, n: f64) -> Vec<u8> {
         let int = |n: f64| if n.is_finite() { n.trunc() as i64 } else { 0 };
         match self {
             TaKind::I8 => vec![int(n) as i8 as u8],
@@ -352,7 +352,12 @@ pub struct Property {
 }
 
 impl Property {
-    pub fn data(value: Value, writable: bool, enumerable: bool, configurable: bool) -> Property {
+    pub(crate) fn data(
+        value: Value,
+        writable: bool,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Property {
         Property {
             value,
             get: None,
@@ -364,11 +369,11 @@ impl Property {
         }
     }
     /// A default plain data property: writable, enumerable, configurable.
-    pub fn plain(value: Value) -> Property {
+    pub(crate) fn plain(value: Value) -> Property {
         Property::data(value, true, true, true)
     }
     /// A non-enumerable method/builtin property: writable + configurable, not enumerable.
-    pub fn builtin(value: Value) -> Property {
+    pub(crate) fn builtin(value: Value) -> Property {
         Property::data(value, true, false, true)
     }
 }
@@ -395,7 +400,7 @@ impl Default for Props {
 }
 
 impl Props {
-    pub fn new() -> Props {
+    pub(crate) fn new() -> Props {
         Props {
             entries: Vec::new(),
             index: Default::default(),
@@ -406,7 +411,7 @@ impl Props {
     /// The own property for canonical index `n`, without hashing. `None` only means "not in the
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
     #[inline]
-    pub fn get_index(&self, n: u32) -> Option<&Property> {
+    pub(crate) fn get_index(&self, n: u32) -> Option<&Property> {
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
@@ -416,7 +421,7 @@ impl Props {
 
     /// Mutable [`get_index`].
     #[inline]
-    pub fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+    pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
@@ -446,26 +451,26 @@ impl Props {
             }
         }
     }
-    pub fn get(&self, key: &str) -> Option<&Property> {
+    pub(crate) fn get(&self, key: &str) -> Option<&Property> {
         self.index.get(key).map(|i| &self.entries[*i].1)
     }
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
+    pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
         if let Some(i) = self.index.get(key) {
             Some(&mut self.entries[*i].1)
         } else {
             None
         }
     }
-    pub fn contains(&self, key: &str) -> bool {
+    pub(crate) fn contains(&self, key: &str) -> bool {
         self.index.contains_key(key)
     }
     /// Drop every property (used by the GC to break a garbage object's reference cycles).
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.index.clear();
         self.elems.clear();
     }
-    pub fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
+    pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
         if let Some(i) = self.index.get(&key) {
             self.entries[*i].1 = prop;
@@ -476,7 +481,7 @@ impl Props {
             self.note_inserted(slot);
         }
     }
-    pub fn remove(&mut self, key: &str) -> bool {
+    pub(crate) fn remove(&mut self, key: &str) -> bool {
         if let Some(i) = self.index.remove(key) {
             self.entries.remove(i);
             // Re-index everything after the removed slot.
@@ -501,7 +506,7 @@ impl Props {
     }
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
-    pub fn keys(&self) -> Vec<Rc<str>> {
+    pub(crate) fn keys(&self) -> Vec<Rc<str>> {
         self.entries
             .iter()
             .map(|(k, _)| k.clone())
@@ -510,7 +515,7 @@ impl Props {
     }
     /// Keys in spec [[OwnPropertyKeys]] order: array-index keys ascending, then other string keys
     /// in insertion order, then symbol keys in insertion order.
-    pub fn ordered_keys(&self) -> Vec<Rc<str>> {
+    pub(crate) fn ordered_keys(&self) -> Vec<Rc<str>> {
         let mut ints: Vec<(u32, Rc<str>)> = Vec::new();
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
@@ -533,7 +538,7 @@ impl Props {
             .chain(syms)
             .collect()
     }
-    pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Property)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Property)> {
         self.entries.iter().map(|(k, p)| (k, p))
     }
 }

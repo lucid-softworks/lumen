@@ -103,7 +103,7 @@ impl Coroutine {
     /// Hand control to the generator and block until it next parks or finishes. Saves/restores the
     /// interpreter's scalar execution context (`strict`, recursion `depth`) across the handoff so the
     /// driver and the body don't clobber each other's.
-    pub fn resume(&mut self, i: &mut Interp, signal: Resume) -> Suspend {
+    pub(crate) fn resume(&mut self, i: &mut Interp, signal: Resume) -> Suspend {
         if self.done {
             return Suspend::Done(Value::Undefined);
         }

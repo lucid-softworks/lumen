@@ -197,7 +197,7 @@ pub struct Binding {
 }
 
 impl Binding {
-    pub fn data(value: Value, mutable: bool, initialized: bool) -> Binding {
+    pub(crate) fn data(value: Value, mutable: bool, initialized: bool) -> Binding {
         Binding {
             value,
             mutable,
@@ -522,124 +522,124 @@ fn pattern_has_expr(pat: &Pattern) -> bool {
 }
 
 pub struct Interp {
-    pub global: Gc,
-    pub global_env: Env,
-    pub object_proto: Gc,
-    pub function_proto: Gc,
-    pub array_proto: Gc,
-    pub string_proto: Gc,
-    pub number_proto: Gc,
-    pub boolean_proto: Gc,
-    pub symbol_proto: Gc,
-    pub error_protos: crate::fasthash::FastMap<&'static str, Gc>,
+    pub(crate) global: Gc,
+    pub(crate) global_env: Env,
+    pub(crate) object_proto: Gc,
+    pub(crate) function_proto: Gc,
+    pub(crate) array_proto: Gc,
+    pub(crate) string_proto: Gc,
+    pub(crate) number_proto: Gc,
+    pub(crate) boolean_proto: Gc,
+    pub(crate) symbol_proto: Gc,
+    pub(crate) error_protos: crate::fasthash::FastMap<&'static str, Gc>,
     /// Monotonic id source + registry for live symbols (so a symbol used as a property key can be
     /// recovered for `Object.getOwnPropertySymbols`). `sym_for` backs the `Symbol.for` registry.
-    pub sym_counter: u64,
-    pub sym_registry: crate::fasthash::FastMap<u64, Rc<SymbolData>>,
+    pub(crate) sym_counter: u64,
+    pub(crate) sym_registry: crate::fasthash::FastMap<u64, Rc<SymbolData>>,
 
-    pub console: Vec<String>,
+    pub(crate) console: Vec<String>,
     /// Current strict-mode flag (pushed/popped around function bodies).
-    pub strict: bool,
+    pub(crate) strict: bool,
     /// Execution tier (env `LUMEN_TIER`, CLI `--tier`, [`Engine::set_tier`]). `Interp` is the
     /// reference tree-walker and the default; the bytecode VM is opt-in.
-    pub tier: crate::bytecode::Tier,
+    pub(crate) tier: crate::bytecode::Tier,
     /// Calls before an eligible function tier-ups to bytecode (env `LUMEN_TIER_THRESHOLD`).
-    pub tier_threshold: u32,
+    pub(crate) tier_threshold: u32,
     /// Live interpreter recursion depth (expression eval + calls). Bounded by [`MAX_EVAL_DEPTH`]
     /// so runaway recursion throws a RangeError instead of overflowing the native stack.
-    pub depth: u32,
+    pub(crate) depth: u32,
     /// Per-class metadata (instance fields + whether the class extends another), keyed by the
     /// constructor object's pointer (`Rc::as_ptr(..) as usize`). Lets `construct`/`super` run field
     /// initializers without attaching engine data to the `Object` itself.
-    pub class_info: crate::fasthash::FastMap<usize, ClassInfo>,
+    pub(crate) class_info: crate::fasthash::FastMap<usize, ClassInfo>,
     /// The global `eval` function object, so a *direct* eval call (`eval(src)` by that name) can be
     /// distinguished from an indirect one and run in the caller's scope.
-    pub eval_fn: Option<Gc>,
+    pub(crate) eval_fn: Option<Gc>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
-    pub iterator_sym: Option<Rc<SymbolData>>,
+    pub(crate) iterator_sym: Option<Rc<SymbolData>>,
     /// Well-known symbols, minted once per Interp — additional realms (`$262.createRealm()`) reuse
     /// them so `@@iterator` etc. have the same identity cross-realm, as the spec requires.
-    pub wk_syms: Vec<(&'static str, Value)>,
+    pub(crate) wk_syms: Vec<(&'static str, Value)>,
     /// Set while a `?.` link in the current optional chain saw a nullish base, so the rest of the
     /// chain short-circuits to `undefined`. Reset at each `OptionalChain` boundary.
-    pub short_circuit: bool,
+    pub(crate) short_circuit: bool,
     /// The `import.meta` object for the module currently executing (None in script code).
-    pub import_meta: Option<Value>,
+    pub(crate) import_meta: Option<Value>,
     /// Default referrer for a bare `import()` in script code (so relative specifiers resolve).
-    pub import_base: String,
+    pub(crate) import_base: String,
     /// Loaded module namespace objects, keyed by canonical specifier (for `import()` + caching).
-    pub modules: std::collections::HashMap<String, Value>,
+    pub(crate) modules: std::collections::HashMap<String, Value>,
     /// Full module records (parsed body, environment, resolved export tables, evaluation status),
     /// keyed by canonical specifier. Drives the two-phase Instantiate/Evaluate module linking.
     pub(crate) module_recs: std::collections::HashMap<String, crate::modules::ModuleRec>,
     /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
     #[allow(clippy::type_complexity)]
-    pub module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
+    pub(crate) module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
     /// Live module-namespace state keyed by the namespace object's pointer: for each exported name,
     /// how to read its current value (a live binding in some module scope, or a static value for a
     /// star-as namespace re-export). Namespace property reads consult this so they stay live.
-    pub module_ns: crate::fasthash::FastMap<
+    pub(crate) module_ns: crate::fasthash::FastMap<
         usize,
         crate::fasthash::FastMap<String, crate::modules::NsBinding>,
     >,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
-    pub map_data: crate::fasthash::FastMap<usize, Vec<(Value, Value)>>,
+    pub(crate) map_data: crate::fasthash::FastMap<usize, Vec<(Value, Value)>>,
     /// Prototypes for builtins created after `new()` (Map/Set/Date/...), looked up by name so their
     /// native constructors can stamp the right `[[Prototype]]`.
-    pub extra_protos: crate::fasthash::FastMap<&'static str, Gc>,
+    pub(crate) extra_protos: crate::fasthash::FastMap<&'static str, Gc>,
     /// ArrayBuffer byte storage, keyed by the ArrayBuffer object's pointer.
-    pub array_buffers: crate::fasthash::FastMap<usize, Vec<u8>>,
+    pub(crate) array_buffers: crate::fasthash::FastMap<usize, Vec<u8>>,
     /// SharedArrayBuffer pointers → their global shared-memory id (`array_buffers` keeps a
     /// same-length placeholder so detach/length checks still work; the bytes live in the registry).
-    pub shared_buffers: crate::fasthash::FastMap<usize, u64>,
+    pub(crate) shared_buffers: crate::fasthash::FastMap<usize, u64>,
     /// Immutable ArrayBuffer pointers (created via `transferToImmutable`/`sliceToImmutable`): their
     /// bytes can be read but never written, resized, detached, or transferred.
-    pub immutable_buffers: std::collections::HashSet<usize>,
+    pub(crate) immutable_buffers: std::collections::HashSet<usize>,
     /// Whether this agent may block in `Atomics.wait` (false for the main agent, true for the
     /// worker agents spawned by `$262.agent.start`).
-    pub can_block: bool,
+    pub(crate) can_block: bool,
     /// Pending `Atomics.waitAsync` operations: each carries the result promise and a channel that a
     /// waiter thread sends "ok"/"timed-out" on. The event loop resolves them as they complete.
-    pub pending_async_waits: Vec<(Value, std::sync::mpsc::Receiver<&'static str>)>,
+    pub(crate) pending_async_waits: Vec<(Value, std::sync::mpsc::Receiver<&'static str>)>,
     /// Host timers from `$262.agent.setTimeout`: (callback, deadline).
-    pub pending_timers: Vec<(Value, std::time::Instant)>,
+    pub(crate) pending_timers: Vec<(Value, std::time::Instant)>,
     /// Agent-harness wiring (present only in spawned agents / a main with agents).
-    pub agent: Option<Box<AgentChannels>>,
+    pub(crate) agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
-    pub typed_arrays: crate::fasthash::FastMap<usize, TaInfo>,
+    pub(crate) typed_arrays: crate::fasthash::FastMap<usize, TaInfo>,
     /// Object pointers of async generator instances (the AsyncGenerator brand).
-    pub async_gens: std::collections::HashSet<usize>,
+    pub(crate) async_gens: std::collections::HashSet<usize>,
     /// The global environment's [[VarNames]]: names declared by `var`/function in global code, for
     /// GlobalDeclarationInstantiation's cross-script clash checks.
-    pub global_var_names: std::collections::HashSet<String>,
+    pub(crate) global_var_names: std::collections::HashSet<String>,
 
     /// GC pins: one `Gc` clone per object that has an entry in a pointer-keyed side table
     /// (typed_arrays, promises, array_buffers, …). The pin keeps the object from being freed by
     /// plain refcounting — which would let a later allocation reuse its address and inherit the
     /// stale side-table entry — so such objects die only in `gc_collect`'s sweep, which evicts
     /// their table entries first. The collector discounts pins when finding roots.
-    pub gc_pins: crate::fasthash::FastMap<usize, Gc>,
+    pub(crate) gc_pins: crate::fasthash::FastMap<usize, Gc>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
-    pub ta_buffer: crate::fasthash::FastMap<usize, Value>,
+    pub(crate) ta_buffer: crate::fasthash::FastMap<usize, Value>,
     /// Each `ShadowRealm` instance owns an isolated realm (a full sub-interpreter), keyed by the
     /// ShadowRealm object's pointer. Only primitive completion values cross the boundary.
-    pub shadow_realms: crate::fasthash::FastMap<usize, Box<Interp>>,
+    pub(crate) shadow_realms: crate::fasthash::FastMap<usize, Box<Interp>>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
     /// DataView state: (buffer ptr, byteOffset, byteLength, is-length-tracking).
-    pub data_views: crate::fasthash::FastMap<usize, (usize, usize, usize, bool)>,
+    pub(crate) data_views: crate::fasthash::FastMap<usize, (usize, usize, usize, bool)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
-    pub regexps: crate::fasthash::FastMap<usize, Rc<crate::regex::Regex>>,
+    pub(crate) regexps: crate::fasthash::FastMap<usize, Rc<crate::regex::Regex>>,
     /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
-    pub proxies: crate::fasthash::FastMap<usize, (Value, Value)>,
+    pub(crate) proxies: crate::fasthash::FastMap<usize, (Value, Value)>,
     /// The active `new.target` for the function currently executing (Undefined outside a `new`).
-    pub new_target: Value,
+    pub(crate) new_target: Value,
     /// The `new.target` to install for the next constructor invocation (set by `construct`).
-    pub pending_new_target: Value,
+    pub(crate) pending_new_target: Value,
     /// The `$262.IsHTMLDDA` objects, one per realm (emulate `document.all`): typeof "undefined",
     /// falsy, and loosely equal to undefined/null, despite being callable Objects.
-    pub htmldda: Vec<Gc>,
+    pub(crate) htmldda: Vec<Gc>,
     /// The caller's realm during a cross-realm [[Construct]]: the spec pops the callee context
     /// before throwing a derived constructor's return/`this` validation errors, so those errors
     /// belong to the caller's realm.
@@ -647,70 +647,73 @@ pub struct Interp {
     /// Additional realms created via `$262.createRealm()`, keyed by the realm's global-object pointer.
     /// Each holds its own intrinsics; the shared side tables (proxies, buffers, …) and well-known
     /// symbols are common, so objects cross realm boundaries freely.
-    pub realms: crate::fasthash::FastMap<usize, RealmState>,
+    pub(crate) realms: crate::fasthash::FastMap<usize, RealmState>,
     /// Promise state keyed by the promise object's pointer.
-    pub promises: crate::fasthash::FastMap<usize, PromiseState>,
+    pub(crate) promises: crate::fasthash::FastMap<usize, PromiseState>,
     /// Temporal object internal slots, keyed by the object's pointer.
-    pub temporal: crate::fasthash::FastMap<usize, crate::temporal::Temporal>,
+    pub(crate) temporal: crate::fasthash::FastMap<usize, crate::temporal::Temporal>,
     /// The calendar id of a Temporal date-bearing object (default "iso8601"), keyed by object ptr.
-    pub temporal_cal: crate::fasthash::FastMap<usize, std::rc::Rc<str>>,
+    pub(crate) temporal_cal: crate::fasthash::FastMap<usize, std::rc::Rc<str>>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
-    pub microtasks: std::collections::VecDeque<Job>,
+    pub(crate) microtasks: std::collections::VecDeque<Job>,
+    /// Embedder host state (typed slots + resource table); see [`crate::host`]. Reached from
+    /// native fns via [`Interp::op_state`] — the only way, since `NativeFn` cannot capture.
+    pub(crate) host_state: crate::host::OpState,
     /// Live generator coroutines, keyed by the generator object's pointer. Each owns an OS thread
     /// that runs the body and parks at every `yield` (see [`crate::coroutine`]).
-    pub generators: crate::fasthash::FastMap<usize, crate::coroutine::Coroutine>,
+    pub(crate) generators: crate::fasthash::FastMap<usize, crate::coroutine::Coroutine>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
-    pub gc_next: i64,
+    pub(crate) gc_next: i64,
     /// Prune the scope registry once its entry count passes this floating threshold.
-    pub scope_gc_next: usize,
+    pub(crate) scope_gc_next: usize,
     /// True while a native constructor is being invoked via `new` (lets e.g. `Number`/`String`
     /// build a wrapper object instead of returning a primitive).
-    pub constructing: bool,
+    pub(crate) constructing: bool,
     /// True only while a *derived* class constructor body is executing — the one context where a
     /// `super(...)` call is legal. Field initializers, methods, plain functions and global code all
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
-    pub super_call_ok: bool,
+    pub(crate) super_call_ok: bool,
     /// Live user-function activations, oldest first: (fn ptr, fn object, arguments object,
     /// strict). Backs the legacy SpiderMonkey `fn.caller` / `fn.arguments` reflection.
-    pub fn_frames: Vec<FnFrame>,
+    pub(crate) fn_frames: Vec<FnFrame>,
     /// Monotonic [[AsyncEvaluationOrder]] source for module evaluation.
     pub(crate) module_async_seq: u64,
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
-    pub yield_raw_result: bool,
+    pub(crate) yield_raw_result: bool,
     /// True while statements *directly* in an async generator's body run (nested ordinary
     /// functions clear it; arrows inherit): `return <expr>` awaits its value only there.
-    pub in_async_gen_body: bool,
+    pub(crate) in_async_gen_body: bool,
     /// NamedEvaluation: the binding/property name an anonymous class expression being evaluated
     /// should take — applied *before* its static initializers run.
-    pub pending_fn_name: Option<String>,
+    pub(crate) pending_fn_name: Option<String>,
     /// A pending proper tail call: set by `return f(...)` in a strict ordinary function; the
     /// nearest `Interp::call` frame re-dispatches it (a trampoline), keeping the stack flat.
-    pub pending_tail: Option<(Value, Value, Vec<Value>)>,
+    pub(crate) pending_tail: Option<(Value, Value, Vec<Value>)>,
     /// True while executing a body where `return f(...)` is a proper tail call (a strict,
     /// ordinary, non-constructor function).
-    pub tco_ok: bool,
+    pub(crate) tco_ok: bool,
     /// GetTemplateObject cache: one frozen strings array per tagged-template *site* (AST node),
     /// so the same site always passes the identical object. Keyed by the quasis slice address.
-    pub template_cache: std::collections::HashMap<usize, Value>,
+    pub(crate) template_cache: std::collections::HashMap<usize, Value>,
     /// True while class field initializer code runs: a direct eval from there may not contain an
     /// `arguments` reference (arrows inherit the context; ordinary functions clear it).
-    pub in_field_init_code: bool,
+    pub(crate) in_field_init_code: bool,
     /// A stack of disposal scopes — one frame per block/function body that can hold `using`
     /// declarations. Resources are disposed in reverse on scope exit (see `dispose_frame`).
-    pub using_stack: Vec<Vec<Disposable>>,
+    pub(crate) using_stack: Vec<Vec<Disposable>>,
     /// Monotonic counter minting globally-unique private backing keys for auto-accessors (so a
     /// subclass's accessor never collides with a superclass's on the same instance).
-    pub accessor_seq: u64,
+    pub(crate) accessor_seq: u64,
     /// Scratch collector for `context.addInitializer(fn)` calls during decorator application; drained
     /// after each decorator runs.
-    pub decorator_initializers: Vec<Value>,
+    pub(crate) decorator_initializers: Vec<Value>,
     /// Annex B.3.3 web-compat function hoisting: block/if-position function declarations (in sloppy
     /// code) whose names got a function-scope `var` binding, keyed by AST pointer. When such a
     /// declaration is *evaluated*, the block binding's value is copied into the var binding. The
     /// `Rc` value keeps the AST alive so a pointer is never reused by a different function.
-    pub annexb_fn_sync: crate::fasthash::FastMap<usize, Rc<Function>>,
+    pub(crate) annexb_fn_sync: crate::fasthash::FastMap<usize, Rc<Function>>,
     /// `import defer` namespaces awaiting first access: namespace object ptr → module key.
     /// Accessing a property of one evaluates the module (then the entry is removed).
     pub(crate) deferred_ns: crate::fasthash::FastMap<usize, String>,
@@ -718,7 +721,7 @@ pub struct Interp {
     pub(crate) deferred_ns_objs: crate::fasthash::FastMap<String, Value>,
     /// Promise-state forwarding: when a native super() grafts a fresh promise's state onto the
     /// subclass `this`, the original object's resolvers redirect here.
-    pub promise_forward: crate::fasthash::FastMap<usize, Value>,
+    pub(crate) promise_forward: crate::fasthash::FastMap<usize, Value>,
     /// Mapped `arguments` objects: object ptr → (function scope, per-index parameter name — None
     /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
     /// parameter bindings.
@@ -873,7 +876,7 @@ impl Interp {
 
     /// `$262.createRealm()`: build a fresh realm (its own global + intrinsics) and register it. The
     /// well-known symbols are shared with the creating realm so `@@iterator` etc. match cross-realm.
-    pub fn create_realm(&mut self) -> Value {
+    pub(crate) fn create_realm(&mut self) -> Value {
         // Register the creating (main) realm too, so cross-realm dispatch can switch BACK to it
         // and resolve its intrinsics like any other realm's.
         if self.realms.is_empty() {
@@ -1018,7 +1021,7 @@ const WELL_KNOWN_SYMBOLS: &[&str] = &[
 ];
 
 impl Interp {
-    pub fn new() -> Interp {
+    pub(crate) fn new() -> Interp {
         let object_proto = Object::new(None);
         let function_proto = Object::new(Some(object_proto.clone()));
         let array_proto = Object::new(Some(object_proto.clone()));
@@ -1095,6 +1098,7 @@ impl Interp {
             temporal: Default::default(),
             temporal_cal: Default::default(),
             microtasks: std::collections::VecDeque::new(),
+            host_state: Default::default(),
             generators: Default::default(),
             gc_next: GC_TRIGGER,
             scope_gc_next: SCOPE_GC_TRIGGER,
@@ -1174,7 +1178,7 @@ impl Interp {
     // ----- typed arrays -----------------------------------------------------------------------
 
     /// Read element `idx` of a TypedArray as a Number (or undefined if out of range / detached).
-    pub fn ta_read(&self, info: &TaInfo, idx: usize) -> Value {
+    pub(crate) fn ta_read(&self, info: &TaInfo, idx: usize) -> Value {
         if idx >= self.ta_len(info).unwrap_or(0) {
             return Value::Undefined;
         }
@@ -1206,7 +1210,7 @@ impl Interp {
 
     /// The raw bytes of `nelems` elements starting at element `elem_start` (None when the view
     /// is detached/out-of-bounds). Used for bitwise same-type copies that must preserve NaN bits.
-    pub fn ta_read_bytes(
+    pub(crate) fn ta_read_bytes(
         &self,
         info: &TaInfo,
         elem_start: usize,
@@ -1229,7 +1233,7 @@ impl Interp {
     }
 
     /// Write raw bytes at element `elem_start` (bounds-checked; silently drops what doesn't fit).
-    pub fn ta_write_bytes(&mut self, info: &TaInfo, elem_start: usize, bytes: &[u8]) {
+    pub(crate) fn ta_write_bytes(&mut self, info: &TaInfo, elem_start: usize, bytes: &[u8]) {
         let start = info.offset + elem_start * info.kind.elsize();
         let put = |buf: &mut [u8]| {
             if start + bytes.len() <= buf.len() {
@@ -1252,7 +1256,7 @@ impl Interp {
     /// the whole operation happens under one lock hold, so concurrent agents can't interleave
     /// (a lost `Atomics.add` increment would spin another agent's waitUntil loop forever).
     /// Returns the old value, or `None` when the index is out of range.
-    pub fn ta_modify(
+    pub(crate) fn ta_modify(
         &mut self,
         info: &TaInfo,
         idx: usize,
@@ -1298,7 +1302,7 @@ impl Interp {
 
     /// Store a JS value into a TypedArray element, coercing per the element type. BigInt arrays
     /// require a BigInt (TypeError otherwise); numeric arrays coerce with ToNumber.
-    pub fn ta_store(&mut self, info: &TaInfo, idx: usize, v: &Value) -> Result<(), Abrupt> {
+    pub(crate) fn ta_store(&mut self, info: &TaInfo, idx: usize, v: &Value) -> Result<(), Abrupt> {
         if info.kind.is_bigint() {
             let n = self.to_bigint(v)?;
             self.ta_write_bigint(info, idx, n.to_i128_wrapping());
@@ -1310,7 +1314,7 @@ impl Interp {
     }
 
     /// Write a BigInt (i128) into element `idx` (out-of-range writes are ignored).
-    pub fn ta_write_bigint(&mut self, info: &TaInfo, idx: usize, n: i128) {
+    pub(crate) fn ta_write_bigint(&mut self, info: &TaInfo, idx: usize, n: i128) {
         if idx >= self.ta_len(info).unwrap_or(0) {
             return;
         }
@@ -1334,7 +1338,7 @@ impl Interp {
     }
 
     /// Write Number `n` into element `idx` of a TypedArray (out-of-range writes are ignored).
-    pub fn ta_write(&mut self, info: &TaInfo, idx: usize, n: f64) {
+    pub(crate) fn ta_write(&mut self, info: &TaInfo, idx: usize, n: f64) {
         if idx >= self.ta_len(info).unwrap_or(0) {
             return;
         }
@@ -1372,10 +1376,10 @@ impl Interp {
 
     /// The internal property-map key a symbol maps to. A leading NUL never appears in a real
     /// JS-authored property name in the suite, so it cleanly separates symbol keys from string keys.
-    pub fn sym_key(data: &SymbolData) -> String {
+    pub(crate) fn sym_key(data: &SymbolData) -> String {
         format!("\u{0}{}", data.id)
     }
-    pub fn is_sym_key(key: &str) -> bool {
+    pub(crate) fn is_sym_key(key: &str) -> bool {
         // `\0<digits>` (symbol slot) or `\0<lowercase word>` (internal marker) — a user-authored
         // string key that merely begins with NUL (legal in JS) must not be mistaken for either.
         key.strip_prefix('\u{0}').is_some_and(|r| {
@@ -1387,11 +1391,11 @@ impl Interp {
     /// Whether `key` is an internal private-element key. Every runtime private name carries a
     /// `\u{1}<serial>` suffix (auto-accessor backings a `\u{0}` marker), so a user property whose
     /// *string* name merely starts with `#` (a computed key) is not mistaken for one.
-    pub fn is_private_key(key: &str) -> bool {
+    pub(crate) fn is_private_key(key: &str) -> bool {
         key.starts_with('#') && (key.contains('\u{1}') || key.contains('\u{0}'))
     }
     /// Recover the symbol `Value` behind an internal symbol key (for `getOwnPropertySymbols`).
-    pub fn sym_from_key(&self, key: &str) -> Option<Value> {
+    pub(crate) fn sym_from_key(&self, key: &str) -> Option<Value> {
         let id: u64 = key.strip_prefix('\u{0}')?.parse().ok()?;
         self.sym_registry.get(&id).map(|d| Value::Sym(d.clone()))
     }
@@ -1464,7 +1468,40 @@ impl Interp {
             .insert(name, Property::builtin(Value::Obj(func)));
     }
 
-    pub fn make_function(&self, func: Rc<Function>, env: Env) -> Value {
+    /// Embedder host state (typed per-subsystem slots + the resource table). This is how a
+    /// native fn reaches Rust state: `NativeFn` is a bare `fn` pointer and cannot capture.
+    pub fn op_state(&mut self) -> &mut crate::host::OpState {
+        &mut self.host_state
+    }
+
+    /// Shorthand for `op_state().get_mut::<T>()`.
+    pub fn host_mut<T: std::any::Any>(&mut self) -> Option<&mut T> {
+        self.host_state.get_mut()
+    }
+
+    /// Shorthand for `op_state().resources`.
+    pub fn resource_table(&mut self) -> &mut crate::host::ResourceTable {
+        &mut self.host_state.resources
+    }
+
+    /// [`call`](Interp::call) with an abrupt completion lowered to the thrown value — the
+    /// shape a [`NativeFn`] returns, for native fns that call back into JS.
+    pub fn invoke(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
+        self.call(callee, this, args).map_err(abrupt_value)
+    }
+
+    /// ToNumber with the abrupt completion lowered to the thrown value (see [`invoke`]).
+    /// Conversions can throw: they may run user `valueOf`/`toString`.
+    pub fn coerce_number(&mut self, v: &Value) -> Result<f64, Value> {
+        self.to_number(v).map_err(abrupt_value)
+    }
+
+    /// ToString with the abrupt completion lowered to the thrown value (see [`invoke`]).
+    pub fn coerce_string(&mut self, v: &Value) -> Result<Rc<str>, Value> {
+        self.to_string(v).map_err(abrupt_value)
+    }
+
+    pub(crate) fn make_function(&self, func: Rc<Function>, env: Env) -> Value {
         let is_arrow = func.is_arrow;
         let is_method = func.is_method;
         let is_generator = func.is_generator;
@@ -1633,7 +1670,7 @@ impl Interp {
         self.evaluate_deferred(&module_key)
     }
 
-    pub fn get_member_recv(
+    pub(crate) fn get_member_recv(
         &mut self,
         base: &Value,
         key: &str,
@@ -2006,7 +2043,7 @@ impl Interp {
     /// [[Set]](P, V, Receiver): like [`set_member`] but with an explicit `receiver` and returning the
     /// [[Set]] success boolean. The receiver is the object a setter is invoked on, the proxy `set`
     /// trap's Receiver argument, and what a forwarded `[[Set]]` carries through a proxy target chain.
-    pub fn set_member_recv(
+    pub(crate) fn set_member_recv(
         &mut self,
         base: &Value,
         key: &str,
@@ -2494,7 +2531,7 @@ impl Interp {
     /// A TypedArray's *current* element length, or `None` if it's out of bounds (a fixed-length view
     /// whose resizable buffer shrank below its range) or its buffer is detached. A length-tracking
     /// view recomputes its length from the buffer's current size.
-    pub fn ta_len(&self, info: &TaInfo) -> Option<usize> {
+    pub(crate) fn ta_len(&self, info: &TaInfo) -> Option<usize> {
         let buflen = self.array_buffers.get(&info.buffer)?.len();
         let es = info.kind.elsize();
         if info.track {
@@ -2513,7 +2550,7 @@ impl Interp {
     /// Classify a property key against a TypedArray's integer-index exotic behavior: a valid
     /// in-range element index, a *canonical numeric* key that isn't one (e.g. "1.5", "-0", "-1",
     /// out of range — these are inert: never stored, never reach the prototype), or an ordinary key.
-    pub fn ta_index_kind(&self, info: &TaInfo, key: &str) -> TaIndex {
+    pub(crate) fn ta_index_kind(&self, info: &TaInfo, key: &str) -> TaIndex {
         let n = match self.canonical_numeric_index(key) {
             Some(n) => n,
             None => return TaIndex::Ordinary,
@@ -2532,7 +2569,7 @@ impl Interp {
 
     /// CanonicalNumericIndexString: the numeric value when `key` is the canonical string form of a
     /// Number ("0", "1.5", "-0", "Infinity", "NaN"…), else None.
-    pub fn canonical_numeric_index(&self, key: &str) -> Option<f64> {
+    pub(crate) fn canonical_numeric_index(&self, key: &str) -> Option<f64> {
         if key == "-0" {
             return Some(-0.0);
         }
@@ -2549,7 +2586,7 @@ impl Interp {
         }
     }
 
-    pub fn array_length(&self, obj: &Gc) -> usize {
+    pub(crate) fn array_length(&self, obj: &Gc) -> usize {
         // A TypedArray's length lives in its info slot, not an own `length` property.
         if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
             return self.ta_len(info).unwrap_or(0);
@@ -2562,7 +2599,7 @@ impl Interp {
 
     /// Array length for an operation that will iterate/allocate proportional to it. Errors with a
     /// RangeError past [`MAX_ARRAY_OP_LEN`] so a huge `.length` cannot exhaust memory.
-    pub fn checked_array_len(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
+    pub(crate) fn checked_array_len(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
         let len = self.to_length(obj)?;
         if len > MAX_ARRAY_OP_LEN {
             return Err(self.throw("RangeError", "array length exceeds engine limit"));
@@ -2572,7 +2609,7 @@ impl Interp {
 
     /// ToLength of an array-like's `length` property (coercing string/object lengths), clamped to
     /// the 2^53-1 spec maximum.
-    pub fn to_length(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
+    pub(crate) fn to_length(&mut self, obj: &Gc) -> Result<usize, Abrupt> {
         let v = self.get_member(&Value::Obj(obj.clone()), "length")?;
         let n = self.to_number(&v)?;
         Ok(if n.is_nan() || n <= 0.0 {
@@ -3217,7 +3254,11 @@ impl Interp {
         ))
     }
 
-    pub fn make_wrapped_shadow(&mut self, realm: usize, target: Value) -> Result<Value, Abrupt> {
+    pub(crate) fn make_wrapped_shadow(
+        &mut self,
+        realm: usize,
+        target: Value,
+    ) -> Result<Value, Abrupt> {
         let f = Object::new(Some(self.function_proto.clone()));
         f.borrow_mut().call = Callable::WrappedShadow {
             realm,
@@ -4308,7 +4349,7 @@ impl Interp {
 
     /// Like `construct`, but with an explicit `new.target` (for `Reflect.construct`'s third argument
     /// and a proxy's `[[Construct]]` forwarding, where new.target differs from the callee).
-    pub fn construct_nt(
+    pub(crate) fn construct_nt(
         &mut self,
         callee: Value,
         args: &[Value],
@@ -4553,7 +4594,7 @@ impl Interp {
         Ok(())
     }
 
-    pub fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
+    pub(crate) fn run_program(&mut self, body: &[Stmt]) -> Result<Value, Value> {
         // GlobalDeclarationInstantiation early checks, before any binding is created. A probe
         // hoist into a throwaway scope yields this script's VarDeclaredNames.
         let probe = new_scope(None);
