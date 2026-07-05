@@ -2304,13 +2304,21 @@ impl Interp {
             Expr::Ident(name) => self.get_var(name, env),
             Expr::This => {
                 // A TDZ read (derived constructor before super()) must surface as a
-                // ReferenceError; only a genuinely absent binding reads undefined.
+                // ReferenceError; only a genuinely absent binding reads undefined. Single walk:
+                // the binding is read where it is found (get_var would walk a second time).
                 let mut cur = Some(env.clone());
                 while let Some(scope) = cur {
-                    if scope.borrow().vars.contains_key("this") {
-                        return self.get_var("this", env);
-                    }
-                    let parent = scope.borrow().parent.clone();
+                    let parent = {
+                        let b = scope.borrow();
+                        if let Some(bd) = b.vars.get("this") {
+                            if bd.initialized && bd.import_ref.is_none() {
+                                return Ok(bd.value.clone());
+                            }
+                            drop(b);
+                            return self.get_var("this", env);
+                        }
+                        b.parent.clone()
+                    };
                     cur = parent;
                 }
                 Ok(Value::Undefined)
@@ -2558,6 +2566,11 @@ impl Interp {
                     return Err(
                         self.throw("TypeError", "cannot read property of null or undefined")
                     );
+                }
+                if let (Value::Obj(o), Value::Num(n)) = (&base, &idx) {
+                    if let Some(v) = self.fast_get_elem(o, *n) {
+                        return Ok(v);
+                    }
                 }
                 let key = self.to_property_key(&idx)?;
                 self.get_member(&base, &key)
@@ -5374,6 +5387,35 @@ impl Interp {
         Ok(true)
     }
 
+    /// The scope holding an ordinary, initialized, mutable, non-import binding for `name` —
+    /// walking plain scopes only. `None` (any `with` frame, TDZ, const, import, or not found)
+    /// sends the caller down the full Reference path.
+    fn plain_binding_scope(&self, name: &str, env: &Env) -> Option<Env> {
+        let mut cur = Some(env.clone());
+        while let Some(s) = cur {
+            let (found, parent) = {
+                let b = s.borrow();
+                if b.with_obj.is_some() {
+                    return None;
+                }
+                match b.vars.get(name) {
+                    Some(bd) => {
+                        if !bd.initialized || bd.import_ref.is_some() || !bd.mutable {
+                            return None;
+                        }
+                        (true, None)
+                    }
+                    None => (false, b.parent.clone()),
+                }
+            };
+            if found {
+                return Some(s);
+            }
+            cur = parent;
+        }
+        None
+    }
+
     fn eval_update(
         &mut self,
         op: &str,
@@ -5381,6 +5423,26 @@ impl Interp {
         arg: &Expr,
         env: &Env,
     ) -> Result<Value, Abrupt> {
+        // Numeric update of an ordinary binding: read and write it in place (one scope walk, no
+        // Reference allocation) — the ubiquitous `i++` of every loop.
+        if let Expr::Ident(name) = arg {
+            if let Some(scope) = self.plain_binding_scope(name, env) {
+                let old = scope
+                    .borrow()
+                    .vars
+                    .get(name)
+                    .map(|bd| bd.value.clone())
+                    .unwrap_or(Value::Undefined);
+                if let Value::Num(n) = old {
+                    let new = if op == "++" { n + 1.0 } else { n - 1.0 };
+                    if let Some(bd) = scope.borrow_mut().vars.get_mut(name) {
+                        bd.value = Value::Num(new);
+                        return Ok(Value::Num(if prefix { new } else { n }));
+                    }
+                }
+                // Non-number (BigInt, coercible object) or vanished binding: generic path.
+            }
+        }
         // Resolve the reference once, then GetValue/PutValue through it (spec Reference semantics).
         let mut lref = self.resolve_reference(arg, env)?;
         let old = self.get_reference(&mut lref)?;
@@ -5403,6 +5465,32 @@ impl Interp {
         value: &Expr,
         env: &Env,
     ) -> Result<Value, Abrupt> {
+        // Compound assignment to an ordinary binding: GetValue, RHS, op, PutValue — all against
+        // the one scope found up front. Logical forms short-circuit and are excluded. If the RHS
+        // deleted the binding (direct eval tricks), PutValue falls back to the Reference path.
+        if op != "=" && !matches!(op, "&&=" | "||=" | "??=") {
+            if let Expr::Ident(name) = target {
+                if let Some(scope) = self.plain_binding_scope(name, env) {
+                    let old = scope
+                        .borrow()
+                        .vars
+                        .get(name)
+                        .map(|bd| bd.value.clone())
+                        .unwrap_or(Value::Undefined);
+                    let rhs = self.eval(value, env)?;
+                    let result = self.binary(&op[..op.len() - 1], old, rhs)?;
+                    match scope.borrow_mut().vars.get_mut(name) {
+                        Some(bd) if bd.mutable => bd.value = result.clone(),
+                        _ => {
+                            let mut lref =
+                                Reference::Var(RefBase::Scope(scope.clone()), name.clone());
+                            self.put_reference(&mut lref, result.clone())?;
+                        }
+                    }
+                    return Ok(result);
+                }
+            }
+        }
         if op == "=" {
             // A destructuring target evaluates the RHS first, then iterates the pattern.
             if matches!(target, Expr::Array(_) | Expr::Object(_)) {
@@ -7140,6 +7228,12 @@ impl Interp {
                 }
             },
             Reference::Prop(base, key) => {
+                if let (Value::Obj(o), RefKey::Raw(Value::Num(n))) = (&*base, &*key) {
+                    let (o, n) = (o.clone(), *n);
+                    if let Some(v) = self.fast_get_elem(&o, n) {
+                        return Ok(v);
+                    }
+                }
                 let k = self.ref_prop_key(&base.clone(), key)?;
                 if Interp::is_private_key(&k) {
                     return self.get_private_member(&base.clone(), &k);
@@ -7241,6 +7335,14 @@ impl Interp {
                 }
             },
             Reference::Prop(base, key) => {
+                let mut value = value;
+                if let (Value::Obj(o), RefKey::Raw(Value::Num(n))) = (&*base, &*key) {
+                    let (o, n) = (o.clone(), *n);
+                    match self.fast_set_elem(&o, n, value) {
+                        Ok(()) => return Ok(()),
+                        Err(v) => value = v,
+                    }
+                }
                 let k = self.ref_prop_key(&base.clone(), key)?;
                 if Interp::is_private_key(&k) {
                     return self.set_private_member(&base.clone(), &k, value);

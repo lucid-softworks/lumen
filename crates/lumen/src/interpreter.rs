@@ -1526,6 +1526,64 @@ impl Interp {
         self.get_member_recv(base, key, base.clone())
     }
 
+    /// Whether `o` may take the dense element fast paths: a plain object or array — not an
+    /// exotic (wrapper/arguments), module namespace, or deferred namespace, whose reads/writes
+    /// have extra semantics the fast paths would skip. (Typed arrays and proxies keep their
+    /// indexed data out of `props`, so a dense hit on them is impossible and they need no guard.)
+    #[inline]
+    fn plain_for_elems(&self, o: &Gc) -> bool {
+        if !matches!(o.borrow().exotic, Exotic::Array | Exotic::None) {
+            return false;
+        }
+        if !self.module_ns.is_empty() || !self.deferred_ns.is_empty() {
+            let ptr = Rc::as_ptr(o) as usize;
+            if self.module_ns.contains_key(&ptr) || self.deferred_ns.contains_key(&ptr) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `o[n]` read fast path: an own dense data element on a plain object/array, fetched without
+    /// stringifying or hashing the index. `None` means "take the generic path" (miss, accessor,
+    /// exotic receiver, non-index number) — never "absent".
+    #[inline]
+    pub(crate) fn fast_get_elem(&mut self, o: &Gc, n: f64) -> Option<Value> {
+        if n.trunc() != n || !(0.0..u32::MAX as f64).contains(&n) {
+            return None;
+        }
+        if !self.plain_for_elems(o) {
+            return None;
+        }
+        let b = o.borrow();
+        let p = b.props.get_index(n as u32)?;
+        if p.accessor {
+            return None;
+        }
+        Some(p.value.clone())
+    }
+
+    /// `o[n] = v` write fast path: overwrite an existing own writable dense data element.
+    /// Correct regardless of the prototype chain — an own writable data property always wins
+    /// OrdinarySet. Returns the value back on miss so the caller runs the generic path.
+    #[inline]
+    pub(crate) fn fast_set_elem(&mut self, o: &Gc, n: f64, v: Value) -> Result<(), Value> {
+        if n.trunc() != n || !(0.0..u32::MAX as f64).contains(&n) {
+            return Err(v);
+        }
+        if !self.plain_for_elems(o) {
+            return Err(v);
+        }
+        let mut b = o.borrow_mut();
+        match b.props.get_index_mut(n as u32) {
+            Some(p) if !p.accessor && p.writable => {
+                p.value = v;
+                Ok(())
+            }
+            _ => Err(v),
+        }
+    }
+
     /// [[Get]](P, Receiver): like [`get_member`] but with an explicit `receiver` — the `this` a
     /// getter is invoked with, the proxy `get` trap's Receiver argument, and what a forwarded
     /// `[[Get]]` carries through a proxy target chain.

@@ -378,7 +378,15 @@ impl Property {
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
     index: crate::fasthash::FastMap<Rc<str>, usize>,
+    /// Dense element map: `elems[n]` is the `entries` slot of canonical-index key `n`, or
+    /// `NO_SLOT`. Maintained for a (near-)contiguous prefix from 0 — a canonical key far past the
+    /// dense frontier lives only in `index` (see `note_inserted`). This is what makes `a[i]`
+    /// O(1) without hashing or stringifying the index (see `get_index`).
+    elems: Vec<u32>,
 }
+
+/// `elems` hole marker (also caps how many entries dense slots can address).
+const NO_SLOT: u32 = u32::MAX;
 
 impl Default for Props {
     fn default() -> Self {
@@ -391,6 +399,51 @@ impl Props {
         Props {
             entries: Vec::new(),
             index: Default::default(),
+            elems: Vec::new(),
+        }
+    }
+
+    /// The own property for canonical index `n`, without hashing. `None` only means "not in the
+    /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
+    #[inline]
+    pub fn get_index(&self, n: u32) -> Option<&Property> {
+        let slot = *self.elems.get(n as usize)?;
+        if slot == NO_SLOT {
+            return None;
+        }
+        Some(&self.entries[slot as usize].1)
+    }
+
+    /// Mutable [`get_index`].
+    #[inline]
+    pub fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+        let slot = *self.elems.get(n as usize)?;
+        if slot == NO_SLOT {
+            return None;
+        }
+        Some(&mut self.entries[slot as usize].1)
+    }
+
+    /// Record a fresh entry at `slot` in the dense map when its key is a canonical index at (or
+    /// within a small pad of) the dense frontier. Far-past-the-frontier keys stay map-only.
+    fn note_inserted(&mut self, slot: usize) {
+        if slot >= NO_SLOT as usize {
+            return;
+        }
+        let key = &self.entries[slot].0;
+        if !key.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+            return;
+        }
+        if let Some(n) = canonical_index(key) {
+            let n = n as usize;
+            if n < self.elems.len() {
+                self.elems[n] = slot as u32;
+            } else if n <= self.elems.len() + 32 {
+                while self.elems.len() < n {
+                    self.elems.push(NO_SLOT);
+                }
+                self.elems.push(slot as u32);
+            }
         }
     }
     pub fn get(&self, key: &str) -> Option<&Property> {
@@ -410,14 +463,17 @@ impl Props {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.index.clear();
+        self.elems.clear();
     }
     pub fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
         if let Some(i) = self.index.get(&key) {
             self.entries[*i].1 = prop;
         } else {
-            self.index.insert(key.clone(), self.entries.len());
+            let slot = self.entries.len();
+            self.index.insert(key.clone(), slot);
             self.entries.push((key, prop));
+            self.note_inserted(slot);
         }
     }
     pub fn remove(&mut self, key: &str) -> bool {
@@ -426,6 +482,17 @@ impl Props {
             // Re-index everything after the removed slot.
             for (j, (k, _)) in self.entries.iter().enumerate().skip(i) {
                 self.index.insert(k.clone(), j);
+            }
+            // Dense slots shift down past the removed entry; the removed key's own slot holes.
+            for e in self.elems.iter_mut() {
+                if *e == NO_SLOT {
+                    continue;
+                }
+                match (*e as usize).cmp(&i) {
+                    std::cmp::Ordering::Equal => *e = NO_SLOT,
+                    std::cmp::Ordering::Greater => *e -= 1,
+                    std::cmp::Ordering::Less => {}
+                }
             }
             true
         } else {
