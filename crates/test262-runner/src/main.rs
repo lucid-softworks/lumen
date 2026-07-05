@@ -820,7 +820,7 @@ fn engine_for(path: &Path) -> Engine {
         };
         Some((resolved.to_string_lossy().into_owned(), text))
     });
-    engine.set_import_base(&path.to_string_lossy());
+    engine.set_import_base(&normalize_path(path).to_string_lossy());
     engine
 }
 
@@ -892,7 +892,9 @@ fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Ou
     if let Ok(Completion::Throw { name, message }) = engine.eval(&preamble, false) {
         return Outcome::Fail(format!("harness threw {name}: {message}"));
     }
-    let key = path.to_string_lossy().into_owned();
+    // Normalized so a self-import by a fixture resolves to this same registration ("./x/../a.js"
+    // and "a.js" must be one module, not two evaluations).
+    let key = normalize_path(path).to_string_lossy().into_owned();
     let loader = |spec: &str, referrer: &str| -> Option<(String, String)> {
         let base = Path::new(referrer).parent()?;
         let resolved = normalize_path(&base.join(spec));

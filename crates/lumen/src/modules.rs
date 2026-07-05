@@ -115,7 +115,7 @@ impl Interp {
         // Pre-create every graph member's evaluation promise, so a dynamic import of a
         // not-yet-executed batch member waits for the batch instead of executing it early.
         let mut graph = Vec::new();
-        self.collect_graph(key, &mut graph);
+        self.collect_eager_graph(key, &mut graph);
         for m in &graph {
             if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
                 let p = self.new_promise();
@@ -148,6 +148,63 @@ impl Interp {
                 self.collect_graph(&d, out);
             }
         }
+    }
+
+    /// Like collect_graph, but follows only eager (non-deferred) requests — exactly the modules a
+    /// batch Evaluate() will execute, and therefore the ones whose evaluation promises may be
+    /// pre-created. A deferred-only member must NOT get an orphan pending promise, or a later
+    /// dynamic import of it would wait forever instead of evaluating it.
+    fn collect_eager_graph(&self, key: &str, out: &mut Vec<String>) {
+        if out.iter().any(|k| k == key) {
+            return;
+        }
+        out.push(key.to_string());
+        if let Some(rec) = self.module_recs.get(key) {
+            let deferred = rec.deferred_deps.clone();
+            let eager_named = self.eager_named_deps(key);
+            for d in rec.dep_keys.clone() {
+                // A dep imported both eagerly and with defer still evaluates with the batch.
+                if deferred.contains(&d) && !eager_named.contains(&d) {
+                    continue;
+                }
+                self.collect_eager_graph(&d, out);
+            }
+        }
+    }
+
+    /// Dependencies named by at least one non-defer import/export-from clause.
+    fn eager_named_deps(&self, key: &str) -> Vec<String> {
+        let rec = match self.module_recs.get(key) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let mut eager: Vec<String> = Vec::new();
+        for stmt in rec.body.iter() {
+            let (spec, defers) = match stmt {
+                Stmt::Import(decl) => (
+                    decl.source.to_string(),
+                    !decl.specs.is_empty()
+                        && decl
+                            .specs
+                            .iter()
+                            .all(|s| matches!(s, crate::ast::ImportSpec::DeferNamespace(_))),
+                ),
+                Stmt::ExportNamed {
+                    source: Some(src), ..
+                }
+                | Stmt::ExportAll { source: src, .. } => (src.to_string(), false),
+                _ => continue,
+            };
+            if defers {
+                continue;
+            }
+            if let Some(k) = rec.resolved.get(&spec) {
+                if !eager.iter().any(|x| x == k) {
+                    eager.push(k.clone());
+                }
+            }
+        }
+        eager
     }
 
     // --- Parse phase --------------------------------------------------------------------------
@@ -722,6 +779,40 @@ impl Interp {
                 ));
             }
             self.evaluate_module(key)?;
+            // A stub minted mid-link for a cyclic dependency copied an empty export table —
+            // hydrate it from the real namespace now that the module is linked and evaluated.
+            if let Some(Value::Obj(stub)) = self.deferred_ns_objs.get(key).cloned() {
+                let hydrated = self.module_ns.contains_key(&(Rc::as_ptr(&stub) as usize));
+                if !hydrated {
+                    let base = self.module_recs[key].ns.clone();
+                    if let Value::Obj(base_o) = &base {
+                        {
+                            let src = base_o.borrow();
+                            let mut dst = stub.borrow_mut();
+                            for (k, p) in src.props.iter() {
+                                if dst.props.get(k).is_none() {
+                                    let mut p = p.clone();
+                                    if Interp::is_sym_key(k) {
+                                        if let Value::Str(tag) = &p.value {
+                                            if &**tag == "Module" {
+                                                p.value = Value::from_string(
+                                                    "Deferred Module".to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    dst.props.insert(k.clone(), p);
+                                }
+                            }
+                        }
+                        if let Some(live) =
+                            self.module_ns.get(&(Rc::as_ptr(base_o) as usize)).cloned()
+                        {
+                            self.module_ns.insert(Rc::as_ptr(&stub) as usize, live);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -746,11 +837,10 @@ impl Interp {
         if !rec.evaluated && body_has_tla(&rec.body) {
             return false;
         }
+        // Every requested module counts — deferred requests included (a deferred dep that is
+        // itself mid-evaluation still blocks synchronous evaluation).
         let deps = rec.dep_keys.clone();
-        let deferred = rec.deferred_deps.clone();
-        deps.iter()
-            .filter(|d| !deferred.contains(d))
-            .all(|d| self.ready_for_sync(d, seen))
+        deps.iter().all(|d| self.ready_for_sync(d, seen))
     }
 
     fn evaluate_module(&mut self, key: &str) -> Result<(), Abrupt> {
@@ -1155,6 +1245,11 @@ impl Interp {
     /// AsyncModuleExecutionFulfilled: run every ancestor whose pending count reaches zero, in
     /// [[AsyncEvaluationOrder]] (ascending).
     pub(crate) fn async_module_fulfilled(&mut self, key: &str) {
+        // Spec step 7: the fulfilled module's own capability resolves before any ancestor
+        // executes — leaf-to-root fulfilment order is observable through dynamic import.
+        if let Some(t) = self.module_recs[key].top_promise.clone() {
+            self.resolve_promise(&t, Value::Undefined);
+        }
         let mut exec: Vec<(u64, String)> = Vec::new();
         self.gather_available_ancestors(key, &mut exec);
         exec.sort_by_key(|(o, _)| *o);
@@ -1227,7 +1322,7 @@ impl Interp {
             // The async module (and its own graph) evaluates through the batch machinery — the
             // deferring parent does NOT wait on it.
             let mut graph = Vec::new();
-            self.collect_graph(key, &mut graph);
+            self.collect_eager_graph(key, &mut graph);
             for m in &graph {
                 if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
                     let p = self.new_promise();
@@ -1348,6 +1443,8 @@ impl Interp {
                 rec.evaluated || rec.evaluating,
             )
         };
+        // An existing top promise means the module belongs to an in-flight batch (or already
+        // finished): the batch's DFS will execute it in order, so wait rather than preempt.
         if let Some(top) = top {
             return top;
         }
@@ -1364,7 +1461,7 @@ impl Interp {
         // Same batch machinery as a top-level Evaluate(): pre-create the graph's promises and
         // run InnerModuleEvaluation (awaits park; siblings continue; ancestors cascade).
         let mut graph = Vec::new();
-        self.collect_graph(key, &mut graph);
+        self.collect_eager_graph(key, &mut graph);
         for m in &graph {
             if !self.module_recs[m].evaluated && self.module_recs[m].top_promise.is_none() {
                 let p = self.new_promise();

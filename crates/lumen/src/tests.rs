@@ -9085,3 +9085,101 @@ fn debug_type_sizes() {
     println!("Token: {}", std::mem::size_of::<crate::token::Token>());
     println!("Tok: {}", std::mem::size_of::<crate::token::Tok>());
 }
+
+#[test]
+fn deferred_ns_in_tla_cycle_hydrates_after_evaluation() {
+    // dep defers the TLA module that imported it: reading ns.foo during evaluation is a
+    // TypeError, and a read after the graph settles sees the real export (the stub is
+    // hydrated lazily — at link time the base namespace was still empty).
+    assert_eq!(
+        run_module(
+            &[
+                (
+                    "main",
+                    r#"import "tla"; globalThis.late = globalThis.check();"#
+                ),
+                (
+                    "tla",
+                    r#"import "dep"; await Promise.resolve(); export let foo = 1;"#
+                ),
+                (
+                    "dep",
+                    r#"import defer * as ns from "tla";
+                       try { void ns.foo; globalThis.early = "no-throw"; }
+                       catch (e) { globalThis.early = e.constructor.name; }
+                       globalThis.check = () => ns.foo;"#
+                ),
+            ],
+            "globalThis.early + \":\" + globalThis.late"
+        ),
+        "TypeError:1"
+    );
+}
+
+#[test]
+fn dynamic_import_of_deferred_module_evaluates_it() {
+    // A deferred-only dep never joins the batch: a later dynamic import must evaluate it
+    // (and surface its evaluation error) instead of waiting on an orphan promise forever.
+    assert_eq!(
+        run_module(
+            &[
+                (
+                    "main",
+                    r#"import defer * as ns from "boom";
+                       import("boom").catch(e => {
+                         globalThis.err1 = e.someError;
+                         try { void ns.x; } catch (e2) { globalThis.same = e2 === e; }
+                       });"#
+                ),
+                ("boom", r#"throw { someError: "from boom" };"#),
+            ],
+            "globalThis.err1 + \":\" + globalThis.same"
+        ),
+        "from boom:true"
+    );
+}
+
+#[test]
+fn tla_fulfillment_resolves_leaf_before_ancestors() {
+    // AsyncModuleExecutionFulfilled step 7: the fulfilled module's own promise resolves
+    // before available ancestors execute, so import(b) settles before import(a) even though
+    // a's reaction was registered first.
+    assert_eq!(
+        run_module(
+            &[
+                (
+                    "main",
+                    r#"globalThis.logs = [];
+                       import("a").then(() => globalThis.logs.push("A"));
+                       import("b").then(() => globalThis.logs.push("B"));"#
+                ),
+                ("a", r#"import "b";"#),
+                ("b", r#"await Promise.resolve();"#),
+            ],
+            "globalThis.logs.join(\",\")"
+        ),
+        "B,A"
+    );
+}
+
+#[test]
+fn dynamic_import_does_not_preempt_dfs_order() {
+    // A dynamic import of a later sibling in an in-flight Evaluate() waits for the batch's
+    // DFS to reach it instead of executing it early.
+    assert_eq!(
+        run_module(
+            &[
+                ("main", r#"import "a"; import "b";"#),
+                (
+                    "a",
+                    r#"globalThis.logs = [];
+                       import("b").then(() => globalThis.logs.push("dyn"));
+                       globalThis.logs.push("A");"#
+                ),
+                ("b", r#"globalThis.logs.push("B");"#),
+            ],
+            "globalThis.logs.join(\",\")"
+        ),
+        "A,B,dyn"
+    );
+}
