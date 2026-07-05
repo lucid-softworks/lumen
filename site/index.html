@@ -10,6 +10,7 @@
     --bg: #f7f7f8; --panel: #ffffff; --text: #1a1a20; --muted: #6b6b76;
     --accent: #6d5ae0; --accent-text: #ffffff; --border: #e3e3e8;
     --ok: #1a7f4b; --err: #c33c3c; --console: #3b3b44;
+    --tok-kw: #7c3aed; --tok-str: #1a7f4b; --tok-num: #b45309; --tok-com: #9a9aa4; --tok-lit: #0e7490;
     color-scheme: light dark;
   }
   @media (prefers-color-scheme: dark) {
@@ -17,6 +18,7 @@
       --bg: #101014; --panel: #17171d; --text: #e8e8ec; --muted: #8f8f9a;
       --accent: #8b7cf0; --accent-text: #101014; --border: #26262e;
       --ok: #4ecf8a; --err: #f07b7b; --console: #c9c9d4;
+      --tok-kw: #b39dfa; --tok-str: #7fd6a4; --tok-num: #e6b422; --tok-com: #6d6d78; --tok-lit: #7cc7de;
     }
   }
   * { box-sizing: border-box; }
@@ -60,12 +62,23 @@
   }
   button.run { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
   button:disabled { opacity: .45; cursor: default; }
-  textarea {
-    flex: 1; width: 100%; border: 0; outline: none; resize: none; padding: 14px;
-    background: transparent; color: var(--text);
+  /* Overlay editor: a transparent textarea (caret + input) over a highlighted <pre>. Both share
+     the exact same font metrics and padding so glyphs line up. */
+  .editor { position: relative; flex: 1; min-height: 0; }
+  .editor textarea, .editor pre {
+    position: absolute; inset: 0; margin: 0; border: 0; padding: 14px;
     font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    tab-size: 2; white-space: pre; overflow-x: auto;
+    tab-size: 2; white-space: pre; word-break: normal; overflow-wrap: normal;
   }
+  .editor pre { pointer-events: none; overflow: hidden; }
+  .editor textarea {
+    outline: none; resize: none; overflow: auto; background: transparent;
+    color: transparent; caret-color: var(--text); -webkit-text-fill-color: transparent;
+  }
+  .editor textarea::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .t-kw { color: var(--tok-kw); } .t-str { color: var(--tok-str); }
+  .t-num { color: var(--tok-num); } .t-com { color: var(--tok-com); font-style: italic; }
+  .t-lit { color: var(--tok-lit); }
   #out {
     flex: 1; margin: 0; padding: 14px; overflow: auto;
     font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -101,10 +114,12 @@
         <option value="">examples…</option>
       </select>
       <span class="spacer"></span>
-      <button id="reset" title="Fresh realm: clears all globals">Reset realm</button>
       <button id="run" class="run" disabled>Run ▸</button>
     </div>
-    <textarea id="src" spellcheck="false" aria-label="JavaScript source"></textarea>
+    <div class="editor">
+      <pre id="hl" aria-hidden="true"></pre>
+      <textarea id="src" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="JavaScript source"></textarea>
+    </div>
   </section>
   <section class="pane">
     <div class="pane-bar"><span>output</span><span class="spacer"></span><span id="status">loading engine…</span></div>
@@ -113,15 +128,15 @@
 </main>
 <footer>
   lumen is a JavaScript engine written in Rust (zero dependencies), compiled here to WebAssembly.
-  The realm persists between runs — variables stick around until you reset. <kbd>⌘</kbd>+<kbd>Enter</kbd> runs.
+  Every run starts from a fresh realm. <kbd>⌘</kbd>+<kbd>Enter</kbd> runs.
   Browser-build limits: generators and <code>async</code>/<code>await</code> throw for now (lumen's
   coroutines run on OS threads, which wasm doesn't have) — promises and everything else work;
   <code>Math.random()</code> is deterministic.
 </footer>
 <script type="module">
 const $ = (id) => document.getElementById(id);
-const src = $('src'), out = $('out'), status = $('status');
-const runBtn = $('run'), resetBtn = $('reset');
+const src = $('src'), hl = $('hl'), out = $('out'), status = $('status');
+const runBtn = $('run');
 
 const EXAMPLES = {
   'hello': `const who = ['world', 'lumen'];
@@ -162,15 +177,49 @@ const re = /(?<year>\\d{4})-(?<month>\\d{2})/u;
 'released 2026-07'.match(re).groups.year`,
 };
 
+// --- syntax highlighting (small single-pass tokenizer; wrong colors beat wrong dependencies) ---
+const TOKEN_RE = new RegExp(
+  [
+    /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/.source,                                    // 1 comment
+    /(`(?:\\[\s\S]|[^`])*`?|'(?:\\.|[^'\\\n])*'?|"(?:\\.|[^"\\\n])*"?)/.source, // 2 string
+    /\b(0[xXoObB][0-9a-fA-F_]+n?|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?n?)\b/.source, // 3 number
+    /\b(const|let|var|function|class|extends|return|if|else|for|while|do|switch|case|default|break|continue|new|delete|typeof|instanceof|in|of|void|this|super|yield|await|async|try|catch|finally|throw|import|export|from|static|get|set)\b/.source, // 4 keyword
+    /\b(true|false|null|undefined|NaN|Infinity|globalThis)\b/.source,          // 5 literal
+  ].join('|'),
+  'g'
+);
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function highlight(code) {
+  let html = '', last = 0;
+  for (const m of code.matchAll(TOKEN_RE)) {
+    html += esc(code.slice(last, m.index));
+    const cls = m[1] ? 'com' : m[2] ? 'str' : m[3] ? 'num' : m[4] ? 'kw' : 'lit';
+    html += `<span class="t-${cls}">${esc(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return html + esc(code.slice(last)) + '\n'; // trailing \n keeps pre and textarea heights equal
+}
+function paint() {
+  hl.innerHTML = highlight(src.value);
+  syncScroll();
+}
+function syncScroll() {
+  hl.scrollTop = src.scrollTop;
+  hl.scrollLeft = src.scrollLeft;
+}
+src.addEventListener('input', paint);
+src.addEventListener('scroll', syncScroll);
+
 const sel = $('examples');
 for (const name of Object.keys(EXAMPLES)) {
   const o = document.createElement('option');
   o.value = o.textContent = name;
   sel.appendChild(o);
 }
-sel.onchange = () => { if (sel.value) { src.value = EXAMPLES[sel.value]; sel.value = ''; run(); } };
+sel.onchange = () => { if (sel.value) { src.value = EXAMPLES[sel.value]; sel.value = ''; paint(); run(); } };
 
 src.value = EXAMPLES['hello'];
+paint();
 
 fetch('./version.json').then(r => r.ok ? r.json() : null).then(v => {
   if (!v) return;
@@ -187,33 +236,29 @@ function spawn() {
   status.textContent = 'loading engine…';
   runBtn.disabled = true;
   worker.onerror = (e) => {
-    // Engine crash (e.g. a stack overflow inside wasm): report it and start a fresh realm
+    // Engine crash (e.g. a stack overflow inside wasm): report it and start a fresh worker
     // instead of hanging on "running…".
     worker.terminate();
     running = false;
     runBtn.textContent = 'Run ▸';
-    resetBtn.disabled = false;
-    line('error', 'engine crashed (' + (e.message || 'worker error') + ') — spawning a fresh realm');
+    line('error', 'engine crashed (' + (e.message || 'worker error') + ') — restarting');
     spawn();
   };
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === 'ready') { status.textContent = 'ready'; runBtn.disabled = false; }
-    if (m.type === 'reset-done') { status.textContent = 'ready · fresh realm'; runBtn.disabled = false; }
     if (m.type === 'result' && m.id === evalId) {
       running = false;
       runBtn.textContent = 'Run ▸';
       runBtn.disabled = false;
-      resetBtn.disabled = false;
       render(m.result, m.ms);
     }
     if (m.type === 'fatal') {
       worker.terminate();
       running = false;
       runBtn.textContent = 'Run ▸';
-      resetBtn.disabled = false;
       out.textContent = '';
-      line('error', 'engine crashed (' + m.message + ') — spawning a fresh realm');
+      line('error', 'engine crashed (' + m.message + ') — restarting');
       spawn();
     }
   };
@@ -245,24 +290,17 @@ function run() {
     worker.terminate();
     running = false;
     runBtn.textContent = 'Run ▸';
-    resetBtn.disabled = false;
-    line('error', '— stopped; spawning a fresh realm —');
+    line('error', '— stopped —');
     spawn();
     return;
   }
   running = true;
   runBtn.textContent = 'Stop ■';
-  resetBtn.disabled = true;
   status.textContent = 'running…';
   worker.postMessage({ type: 'eval', id: ++evalId, src: src.value });
 }
 
 runBtn.onclick = run;
-resetBtn.onclick = () => {
-  runBtn.disabled = true;
-  worker.postMessage({ type: 'reset' });
-  out.textContent = '';
-};
 addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
 });
@@ -271,6 +309,7 @@ src.addEventListener('keydown', (e) => {
     e.preventDefault();
     const { selectionStart: s, selectionEnd: t } = src;
     src.setRangeText('  ', s, t, 'end');
+    paint();
   }
 });
 </script>
