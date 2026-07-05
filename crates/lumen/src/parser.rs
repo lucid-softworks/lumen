@@ -1341,6 +1341,14 @@ impl Parser {
                 decls.push((pat, init));
             }
             self.expect_punct(";")?;
+            // A C-style head's `const` declarator always needs an initializer; a `let`/`var`
+            // destructuring declarator does too.
+            for (pat, init) in &decls {
+                if init.is_none() && (kind == DeclKind::Const || !matches!(pat, Pattern::Ident(_)))
+                {
+                    return self.err("missing initializer in for-loop declaration");
+                }
+            }
             // The head's bound names live in the for statement's own scope: a lexical head name
             // redeclared by a `var` in the body is a SyntaxError.
             {

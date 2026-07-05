@@ -4421,9 +4421,14 @@ impl Interp {
             self.hoist_stmt(stmt, scope);
         }
         // Function declarations are also initialised eagerly (in source order, after var names). An
-        // anonymous `export default function(){}` is a HoistableDeclaration too, bound to `*default*`.
+        // anonymous `export default function(){}` is a HoistableDeclaration too, bound to
+        // `*default*`. Annex B: labels over a top-level function declaration are transparent.
         for stmt in stmts {
-            if let Stmt::FuncDecl(func) = unwrap_export(stmt) {
+            let mut inner = unwrap_export(stmt);
+            while let (false, Stmt::Labeled { body, .. }) = (self.strict, inner) {
+                inner = body;
+            }
+            if let Stmt::FuncDecl(func) = inner {
                 let name = match &func.name {
                     Some(n) => n.clone(),
                     None if matches!(stmt, Stmt::ExportDefault(_)) => "*default*".to_string(),

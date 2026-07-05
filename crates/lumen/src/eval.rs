@@ -402,7 +402,13 @@ impl Interp {
     /// function declarations (initialised) for the statements directly in a block.
     pub fn declare_block_lexicals(&mut self, stmts: &[Stmt], scope: &Env, with_functions: bool) {
         for s in stmts {
-            match crate::interpreter::unwrap_export(s) {
+            // Annex B labelled function declarations (`l: function f() {}`) instantiate at block
+            // entry exactly like unlabelled ones — labels are transparent here.
+            let mut s = crate::interpreter::unwrap_export(s);
+            while let Stmt::Labeled { body, .. } = s {
+                s = body;
+            }
+            match s {
                 Stmt::VarDecl {
                     kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                     decls,
@@ -1980,16 +1986,28 @@ impl Interp {
                     b.value = val;
                     return;
                 }
+                // The binding can be missing here only if a deletable (eval-created) one was
+                // deleted; B.3.3.3 re-creates it, still deletable.
+                if !Rc::ptr_eq(&s, &self.global_env) {
+                    let mut b = Binding::data(val, true, true);
+                    b.deletable = true;
+                    s.borrow_mut().vars.insert(name.to_string(), b);
+                    return;
+                }
                 break;
             }
             let parent = s.borrow().parent.clone();
             cur = parent;
         }
-        // Global code: the var binding lives as a global-object property.
-        if let Some(p) = self.global.borrow_mut().props.get_mut(name) {
+        // Global code: the var binding lives as a global-object property (re-created when a
+        // deletable eval-made one was deleted).
+        let mut g = self.global.borrow_mut();
+        if let Some(p) = g.props.get_mut(name) {
             if p.writable && !p.accessor {
                 p.value = val;
             }
+        } else if g.extensible {
+            g.props.insert(name, Property::data(val, true, true, true));
         }
     }
 
@@ -5222,8 +5240,12 @@ impl Interp {
                         }
                         return Ok(Value::Bool(false));
                     }
-                    if let Some(Value::Obj(o)) = &with_obj {
-                        if self.js_has_property(&Value::Obj(o.clone()), name)? {
+                    if let Some(wobj @ Value::Obj(o)) = &with_obj {
+                        // @@unscopables-blocked names skip this scope entirely; a present
+                        // binding deletes via the object's [[Delete]] (own property only —
+                        // an inherited one is untouched and reports true per OrdinaryDelete).
+                        let (wobj, o) = (wobj.clone(), o.clone());
+                        if self.with_has_binding(&wobj, name)? {
                             let configurable = o
                                 .borrow()
                                 .props

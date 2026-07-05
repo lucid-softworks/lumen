@@ -736,6 +736,17 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     if path.ends_with("TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js") {
         return Outcome::Skip("upstream: missing immutable exclusion".into());
     }
+    // Upstream conflict: this SpiderMonkey staging test expects an Annex B block function named
+    // `arguments` to be promoted over the arguments object, but the normative
+    // annexB/language/function-code/block-decl-func-skip-arguments.js requires the promotion be
+    // SKIPPED ("arguments" is in parameterNames). One engine cannot pass both; lumen follows the
+    // spec.
+    if path.ends_with("staging/sm/lexical-environment/block-scoped-functions-annex-b-arguments.js")
+    {
+        return Outcome::Skip(
+            "upstream: conflicts with annexB block-decl-func-skip-arguments".into(),
+        );
+    }
     let fm = Frontmatter::parse(&src);
 
     if fm.has_flag("module") {
