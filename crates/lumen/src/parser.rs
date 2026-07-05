@@ -438,11 +438,26 @@ impl Parser {
         }
         t
     }
+    /// A parse error at the current token. `at_eof` (the "more input could fix this" signal a
+    /// REPL keys on) is set when that token is Eof — right for expectation failures ("expected
+    /// ')'", "unexpected token Eof"). Validation that runs AFTER consuming a construct must use
+    /// [`err_semantic`](Parser::err_semantic) instead: it may sit at Eof coincidentally, and a
+    /// spurious `at_eof` traps a REPL in its continuation prompt.
     fn err<T>(&self, msg: impl Into<String>) -> Result<T, ParseError> {
         Err(ParseError {
             message: msg.into(),
             line: self.line(),
             at_eof: self.at_eof(),
+        })
+    }
+
+    /// [`err`](Parser::err) for post-consumption semantic checks (duplicate bindings, `let` as
+    /// a lexical name, ...): the input is complete — more of it can't fix the error.
+    fn err_semantic<T>(&self, msg: impl Into<String>) -> Result<T, ParseError> {
+        Err(ParseError {
+            message: msg.into(),
+            line: self.line(),
+            at_eof: false,
         })
     }
 
@@ -512,7 +527,7 @@ impl Parser {
                 s.lexical.iter().any(|n| n == name) || s.var.iter().any(|n| n == name)
             };
             if clash {
-                return self.err(format!("Identifier '{name}' has already been declared"));
+                return self.err_semantic(format!("Identifier '{name}' has already been declared"));
             }
             self.decl_scopes
                 .last_mut()
@@ -578,7 +593,7 @@ impl Parser {
                 || s.fn_lexical.iter().any(|n| n == name)
         };
         if conflict {
-            return self.err(format!("Identifier '{name}' has already been declared"));
+            return self.err_semantic(format!("Identifier '{name}' has already been declared"));
         }
         self.decl_scopes
             .last_mut()
@@ -595,7 +610,7 @@ impl Parser {
         for scope in self.decl_scopes.iter().rev() {
             if scope.lexical.iter().any(|n| n == name) || scope.fn_lexical.iter().any(|n| n == name)
             {
-                return self.err(format!("Identifier '{name}' has already been declared"));
+                return self.err_semantic(format!("Identifier '{name}' has already been declared"));
             }
             if scope.fn_boundary || !hoist_through {
                 break;
@@ -852,7 +867,7 @@ impl Parser {
                         for _ in 0..chain.len() {
                             self.labels.pop();
                         }
-                        return self.err(format!("label '{n}' has already been declared"));
+                        return self.err_semantic(format!("label '{n}' has already been declared"));
                     }
                     self.advance();
                     self.advance();
@@ -999,7 +1014,7 @@ impl Parser {
         }
         // `let` may not be bound by a lexical declaration (even in sloppy mode).
         if kind != DeclKind::Var && names.iter().any(|n| n == "let") {
-            return self.err("'let' is disallowed as a lexically bound name");
+            return self.err_semantic("'let' is disallowed as a lexically bound name");
         }
         for n in &names {
             match kind {
@@ -1310,7 +1325,7 @@ impl Parser {
                     let mut names = Vec::new();
                     pattern_names(&first, &mut names);
                     if names.iter().any(|n| n == "let") {
-                        return self.err("'let' is disallowed as a lexically bound name");
+                        return self.err_semantic("'let' is disallowed as a lexically bound name");
                     }
                     for n in &names {
                         self.declare_lexical(n)?;
@@ -1404,7 +1419,7 @@ impl Parser {
                     pattern_names(pat, &mut names);
                 }
                 if kind != DeclKind::Var && names.iter().any(|n| n == "let") {
-                    return self.err("'let' is disallowed as a lexically bound name");
+                    return self.err_semantic("'let' is disallowed as a lexically bound name");
                 }
                 for n in &names {
                     match kind {
@@ -1847,7 +1862,8 @@ impl Parser {
                     collect_top_decl(s, &mut lexical, &mut vars);
                 }
                 if let Some(name) = lexical.iter().find(|n| params.contains(n)) {
-                    return self.err(format!("Identifier '{name}' has already been declared"));
+                    return self
+                        .err_semantic(format!("Identifier '{name}' has already been declared"));
                 }
             }
             Some((param, body))
@@ -3236,7 +3252,7 @@ impl Parser {
             }
         }
         if let Some(dup) = params_body_lexical_clash(&params, &body) {
-            return self.err(format!("Identifier '{dup}' has already been declared"));
+            return self.err_semantic(format!("Identifier '{dup}' has already been declared"));
         }
         let func = Function {
             scan: std::cell::Cell::new(0),
@@ -3603,7 +3619,7 @@ impl Parser {
         self.in_generator = sg;
         self.in_async = sa;
         if let Some(dup) = params_body_lexical_clash(&params, &body) {
-            return self.err(format!("Identifier '{dup}' has already been declared"));
+            return self.err_semantic(format!("Identifier '{dup}' has already been declared"));
         }
         Ok(Function {
             scan: std::cell::Cell::new(0),
@@ -3825,7 +3841,7 @@ impl Parser {
             if let Some(dup) = params_body_lexical_clash(&params, &body) {
                 self.in_async = sa;
                 self.in_static_block = ssb;
-                return self.err(format!("Identifier '{dup}' has already been declared"));
+                return self.err_semantic(format!("Identifier '{dup}' has already been declared"));
             }
             // A "use strict" body subjects the parameter names to the strict binding rules.
             if is_strict && !self.strict {

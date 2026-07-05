@@ -276,6 +276,30 @@ impl Engine {
         Value::Obj(self.interp.global.clone())
     }
 
+    /// [`eval`](Engine::eval), but the completion comes back as real values (`Err` = the
+    /// thrown value) and NO microtask checkpoint runs — the caller owns the event loop and
+    /// decides when jobs fire (a REPL runs its runtime to quiescence between inputs). The
+    /// spec's EMPTY completion (a value-less final statement) is lowered to `undefined`.
+    pub fn eval_value(
+        &mut self,
+        src: &str,
+    ) -> Result<Result<embed::Value, embed::Value>, ParseError> {
+        let body = parser::parse_script(src, false).map_err(|e| ParseError {
+            message: e.message,
+            line: e.line,
+            at_eof: e.at_eof,
+        })?;
+        let directive_strict = matches!(
+            body.first(),
+            Some(ast::Stmt::Expr(ast::Expr::Str(s))) if &**s == "use strict"
+        );
+        self.interp.strict = directive_strict;
+        Ok(match self.interp.run_program(&body) {
+            Ok(Value::Empty) => Ok(Value::Undefined),
+            result => result,
+        })
+    }
+
     /// Define `globalThis.<name>` as a native function (non-enumerable, like built-ins).
     pub fn define_global(&mut self, name: &str, len: usize, f: embed::NativeFn) {
         let global = self.interp.global.clone();
