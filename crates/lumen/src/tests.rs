@@ -9045,8 +9045,17 @@ fn scratch_eval_file() {
         }
         let strict = std::env::var("LUMEN_SCRATCH_STRICT").is_ok();
         let r = if module {
-            e.eval_module(&src, "scratch.js", |_, _| None)
-                .expect("parse")
+            // Resolve relative imports against the scratch file's directory.
+            let base = std::path::Path::new(&p)
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_default();
+            e.eval_module(&src, &p, move |spec, _referrer| {
+                let resolved = base.join(spec.trim_start_matches("./"));
+                let text = std::fs::read_to_string(&resolved).ok()?;
+                Some((resolved.to_string_lossy().into_owned(), text))
+            })
+            .expect("parse")
         } else {
             match e.eval(&src, strict) {
                 Ok(c) => c,

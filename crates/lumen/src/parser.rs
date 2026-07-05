@@ -40,6 +40,7 @@ pub fn parse_script_eval(
         in_async: false,
         in_params: false,
         no_in: false,
+        last_for_await: false,
         module: false,
         fn_depth: 0,
         nonarrow_fn_depth: 0,
@@ -103,6 +104,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
         in_async: true,
         in_params: false,
         no_in: false,
+        last_for_await: false,
         module: true,
         fn_depth: 0,
         nonarrow_fn_depth: 0,
@@ -305,6 +307,8 @@ struct Parser {
     /// Suppress `in` as a binary operator (the `[NoIn]` grammar productions in a `for` head, before
     /// `in`/`of` is reached). Reset inside any bracketed/parenthesized sub-expression.
     no_in: bool,
+    /// Whether the innermost `for` head being parsed had `await` (see parse_for's of-form check).
+    last_for_await: bool,
     /// Whether the top-level goal is a Module (so `import`/`export` declarations are allowed).
     module: bool,
     /// Context depths for early-error checks: `return` requires a function, `continue` an iteration,
@@ -1214,12 +1218,27 @@ impl Parser {
         self.push_decl_scope();
         let r = self.parse_for_inner();
         self.pop_decl_scope();
+        // `for await` only exists in the for-of form: a C-style or for-in head is a SyntaxError.
+        if let Ok(stmt) = &r {
+            fn body_is_await_of(stmt: &Stmt) -> bool {
+                match stmt {
+                    Stmt::ForInOf { of, .. } => *of,
+                    // The Annex B lone-initializer for-in desugars into a block.
+                    Stmt::Block(items) => items.iter().all(body_is_await_of),
+                    _ => false,
+                }
+            }
+            if self.last_for_await && !body_is_await_of(stmt) {
+                return self.err("'for await' is only valid with a for-of head");
+            }
+        }
         r
     }
 
     fn parse_for_inner(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         let is_await = self.eat_ident_word("await");
+        self.last_for_await = is_await;
         if is_await && !self.in_async {
             return self.err("'for await' is only valid in an async context");
         }
@@ -1523,6 +1542,13 @@ impl Parser {
         if !self.is_kw("with") && !self.is_ident_word("assert") {
             return Ok(None);
         }
+        // The legacy `assert { … }` clause has [no LineTerminator here] before `assert` — a
+        // next-line `assert.sameValue(...)` statement is not an attributes clause.
+        if self.is_ident_word("assert")
+            && (self.nl_before() || !matches!(self.peek_kind(1), Tok::Punct("{")))
+        {
+            return Ok(None);
+        }
         self.advance(); // 'with' / 'assert'
         self.expect_punct("{")?;
         let mut keys: Vec<String> = Vec::new();
@@ -1685,6 +1711,7 @@ impl Parser {
         if self.eat_kw("default") {
             let stmt = if self.is_kw("function")
                 || (self.is_ident_word("async")
+                    && !self.cur_escaped()
                     && matches!(self.peek_kind(1), Tok::Keyword("function")))
             {
                 let start = self.cur_start();
@@ -1910,6 +1937,8 @@ impl Parser {
         let Ok(mut relexed) = crate::lexer::tokenize(&rest) else {
             return;
         };
+        // Drop the sub-lex's EOF token — splicing it mid-stream would truncate the program.
+        relexed.retain(|t| !matches!(t.kind, Tok::Eof));
         for t in &mut relexed {
             t.line = line;
             t.start = start;
@@ -2689,7 +2718,7 @@ impl Parser {
                 if name == "yield" && self.in_generator {
                     return self.err("'yield' is not a valid identifier in a generator");
                 }
-                if name == "await" && (self.in_async || self.in_static_block) {
+                if name == "await" && (self.in_async || self.in_static_block || self.module) {
                     return self.err("'await' is not a valid identifier here");
                 }
                 // The lexer assumes a `/` after `yield`/`await` starts a regex (they are usually
@@ -2763,6 +2792,7 @@ impl Parser {
                         in_async: self.in_async,
                         in_params: self.in_params,
                         no_in: false,
+                        last_for_await: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
                         nonarrow_fn_depth: self.nonarrow_fn_depth,
@@ -2832,6 +2862,7 @@ impl Parser {
                         in_async: self.in_async,
                         in_params: self.in_params,
                         no_in: false,
+                        last_for_await: false,
                         module: self.module,
                         fn_depth: self.fn_depth,
                         nonarrow_fn_depth: self.nonarrow_fn_depth,
@@ -3469,10 +3500,17 @@ impl Parser {
                 let ssuper = std::mem::replace(&mut self.super_prop_ok, true);
                 let scall = std::mem::replace(&mut self.super_call_ok, false);
                 let snt = std::mem::replace(&mut self.allow_new_target, true);
+                // Field initializers are their own function-like context: an enclosing async
+                // function's [+Await] (or a generator's [+Yield]) does not apply. In modules
+                // `await` stays reserved regardless.
+                let sasync = std::mem::replace(&mut self.in_async, false);
+                let sgen = std::mem::replace(&mut self.in_generator, false);
                 let v = self.parse_assign();
                 self.super_prop_ok = ssuper;
                 self.super_call_ok = scall;
                 self.allow_new_target = snt;
+                self.in_async = sasync;
+                self.in_generator = sgen;
                 Some(v?)
             } else {
                 None
