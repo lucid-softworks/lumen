@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "lumen"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "test262-runner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lumen",
 ]

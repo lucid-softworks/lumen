@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/lumen", "crates/test262-runner"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
