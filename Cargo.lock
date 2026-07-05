@@ -68,6 +68,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-runtime"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
+ "lumen-timers",
+]
+
+[[package]]
+name = "lumen-timers"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
+]
+
+[[package]]
 name = "lumen-wasm"
 version = "0.1.1"
 dependencies = [

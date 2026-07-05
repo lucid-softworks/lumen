@@ -1,0 +1,18 @@
+# The runtime spine: assembles an Engine + extensions and owns the event loop (the engine is
+# !Send, so one loop thread owns it; blocking work runs on lumen-host's threadpool and comes
+# back as mpsc completions). Also home to the light host globals that don't earn their own
+# crate yet: the streaming console and a minimal `process`. Std-only.
+[package]
+name = "lumen-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+lumen-timers = { path = "../lumen-timers" }
+
+[lints]
+workspace = true
