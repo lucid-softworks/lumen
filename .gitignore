@@ -1,0 +1,6 @@
+/target/
+# tc39/test262 conformance suite (cloned on demand by scripts/test262-clone.sh) + its score report.
+/test262/
+/test262-report/
+# Classic V8 benchmark suite (downloaded on demand by scripts/run-v8bench.sh).
+/v8-v7/

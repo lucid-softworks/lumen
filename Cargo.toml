@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/lumen", "crates/test262-runner"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+# Lints shared by every crate (each crate opts in with `[lints] workspace = true`). Two lints
+# fight the nature of an engine — deeply nested callback / `dyn Fn` types and pipeline functions
+# that legitimately take many parameters — everything else stays denied in CI
+# (`cargo clippy -- -D warnings`).
+[workspace.lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
+doc_lazy_continuation = "allow"
+needless_range_loop = "allow"
+
+# Optimize the release build of the engine; debug stays fast to compile.
+[profile.release]
+opt-level = 3
+lto = "thin"
