@@ -21,6 +21,7 @@ pub(crate) fn extension() -> Extension {
             ],
         )],
         state_init: Some(|state: &mut OpState| state.put(ConsoleOut::default())),
+        js_init: None,
     }
 }
 

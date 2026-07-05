@@ -50,16 +50,18 @@ impl Runtime {
         let (tx, rx) = mpsc::channel();
         let pool = ThreadPool::new(POOL_SIZE, tx);
         let mut engine = Engine::new();
+        // Substrate first: fs's js_init runs during install and its ops need these.
+        engine.ctx().op_state().put(pool.handle());
+        engine.ctx().op_state().put(TaskRegistry::default());
         install(
             &mut engine,
             &[
                 lumen_timers::extension(),
                 console::extension(),
                 process::extension(),
+                lumen_fs::extension(),
             ],
         );
-        engine.ctx().op_state().put(pool.handle());
-        engine.ctx().op_state().put(TaskRegistry::default());
         process::install_data_props(&mut engine);
         // queueMicrotask, via the promise queue the engine already has. Close enough to spec
         // for v0 (a thrown callback error becomes an unhandled rejection, not a reported
@@ -108,7 +110,7 @@ impl Runtime {
             .ctx()
             .host_mut::<TaskRegistry>()
             .expect("installed in new()");
-        let id = registry.register(callback, decode);
+        let id = registry.register(callback, None, decode);
         self.pool.spawn_blocking(id, work);
     }
 
@@ -199,19 +201,23 @@ impl Runtime {
             .next_deadline()
     }
 
-    /// Settle one completed task: decode the payload and run its JS callback.
+    /// Settle one completed task: decode the payload, then run the success callback — or the
+    /// failure one (a promise's reject) when the decoder says the work failed.
     fn dispatch(&mut self, done: TaskCompletion) {
         let entry = self
             .engine
             .ctx()
             .host_mut::<TaskRegistry>()
             .and_then(|r| r.take(done.task));
-        let Some((callback, decode)) = entry else {
+        let Some(entry) = entry else {
             return; // cancelled while in flight
         };
-        match decode(self.engine.ctx(), done.result) {
-            Ok(args) => self.fire(&callback, &args),
-            Err(e) => self.report_uncaught(&e),
+        match (entry.decode)(self.engine.ctx(), done.result) {
+            Ok(args) => self.fire(&entry.on_ok, &args),
+            Err(e) => match &entry.on_err {
+                Some(reject) => self.fire(reject, std::slice::from_ref(&e)),
+                None => self.report_uncaught(&e),
+            },
         }
         self.engine.run_microtasks();
     }

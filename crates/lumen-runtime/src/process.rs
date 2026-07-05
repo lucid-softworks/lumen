@@ -17,6 +17,7 @@ pub(crate) fn extension() -> Extension {
             ],
         )],
         state_init: None,
+        js_init: None,
     }
 }
 

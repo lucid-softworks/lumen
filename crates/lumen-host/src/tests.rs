@@ -41,6 +41,7 @@ fn extension_installs_state_globals_and_namespaces() {
         globals: ops!["bump" (0) => bump],
         namespaces: &[("counterNs", ops!["bumpToo" (0) => bump])],
         state_init: Some(|state| state.put(Counter(0))),
+        js_init: None,
     };
     let mut engine = Engine::new();
     install(&mut engine, std::slice::from_ref(&EXT));

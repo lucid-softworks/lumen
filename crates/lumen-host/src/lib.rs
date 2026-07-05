@@ -50,6 +50,10 @@ pub struct Extension {
     pub namespaces: &'static [(&'static str, &'static [OpDecl])],
     /// Installs this extension's state (timer heap, fd table, ...) into [`OpState`].
     pub state_init: Option<fn(&mut OpState)>,
+    /// JS glue evaluated after this extension's ops are installed — the promise-returning
+    /// public API is JS wrapping raw callback ops (e.g. `fs.promises` over `__fs_async`).
+    /// A parse/throw here is a bug in the extension: `install` panics with its name.
+    pub js_init: Option<&'static str>,
 }
 
 impl Extension {
@@ -60,11 +64,13 @@ impl Extension {
             globals: &[],
             namespaces: &[],
             state_init: None,
+            js_init: None,
         }
     }
 }
 
-/// Install extensions into an engine: state first (an op may fire during install), then ops.
+/// Install extensions into an engine: state first (an op may fire during install), then ops,
+/// then JS glue.
 pub fn install(engine: &mut Engine, extensions: &[Extension]) {
     for ext in extensions {
         if let Some(init) = ext.state_init {
@@ -77,6 +83,18 @@ pub fn install(engine: &mut Engine, extensions: &[Extension]) {
             let table: Vec<(&str, usize, NativeFn)> =
                 ops.iter().map(|o| (o.name, o.len, o.f)).collect();
             engine.define_namespace(ns, &table);
+        }
+        if let Some(src) = ext.js_init {
+            match engine.eval(src, false) {
+                Ok(Completion::Value(_)) => {}
+                Ok(Completion::Throw { name, message }) => {
+                    panic!("extension '{}' js_init threw {name}: {message}", ext.name)
+                }
+                Err(e) => panic!(
+                    "extension '{}' js_init: SyntaxError: {}",
+                    ext.name, e.message
+                ),
+            }
         }
     }
 }
@@ -217,19 +235,35 @@ pub type TaskDecoder = fn(&mut Ctx, Box<dyn Any + Send>) -> Result<Vec<Value>, V
 #[derive(Default)]
 pub struct TaskRegistry {
     next: TaskId,
-    map: std::collections::HashMap<TaskId, (Value, TaskDecoder)>,
+    map: std::collections::HashMap<TaskId, TaskEntry>,
+}
+
+/// How to settle one in-flight task: success callback, optional failure callback (a promise's
+/// reject — when absent, a decode error is reported as an uncaught exception), and the
+/// payload decoder.
+pub struct TaskEntry {
+    pub on_ok: Value,
+    pub on_err: Option<Value>,
+    pub decode: TaskDecoder,
 }
 
 impl TaskRegistry {
     /// Reserve an id for work about to be spawned, remembering how to settle it.
-    pub fn register(&mut self, callback: Value, decode: TaskDecoder) -> TaskId {
+    pub fn register(&mut self, on_ok: Value, on_err: Option<Value>, decode: TaskDecoder) -> TaskId {
         let id = self.next;
         self.next += 1;
-        self.map.insert(id, (callback, decode));
+        self.map.insert(
+            id,
+            TaskEntry {
+                on_ok,
+                on_err,
+                decode,
+            },
+        );
         id
     }
-    /// Claim a completed task's callback + decoder (a missing id means it was cancelled).
-    pub fn take(&mut self, id: TaskId) -> Option<(Value, TaskDecoder)> {
+    /// Claim a completed task's settlement entry (a missing id means it was cancelled).
+    pub fn take(&mut self, id: TaskId) -> Option<TaskEntry> {
         self.map.remove(&id)
     }
     pub fn is_empty(&self) -> bool {
