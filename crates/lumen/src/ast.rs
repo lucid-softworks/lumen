@@ -407,6 +407,371 @@ pub struct Function {
     pub is_fn_expr: bool,
     /// The source text this function was parsed from, for `Function.prototype.toString`.
     pub source: Option<Rc<str>>,
+    /// Lazily-computed body facts (see [`Function::scan_flags`]): bit 0 = scanned, bit 1 =
+    /// references `arguments`, bit 2 = references `new.target`, bit 3 = references `this`.
+    /// A direct `eval` sets all three (it can reach any of them dynamically).
+    pub scan: std::cell::Cell<u8>,
+}
+
+pub const SCAN_DONE: u8 = 1;
+pub const SCAN_ARGUMENTS: u8 = 2;
+pub const SCAN_NEW_TARGET: u8 = 4;
+pub const SCAN_THIS: u8 = 8;
+
+impl Function {
+    /// What this function's own activation must provide: whether the body (or a nested arrow, or a
+    /// possible direct `eval`) can observe `arguments`, `new.target`, or `this`. Ordinary nested
+    /// functions are opaque (they get their own); arrows are transparent. Conservative on the
+    /// safe side: a false positive only costs an unused binding.
+    pub fn scan_flags(&self) -> u8 {
+        let cached = self.scan.get();
+        if cached & SCAN_DONE != 0 {
+            return cached;
+        }
+        let mut flags = SCAN_DONE;
+        for p in &self.params {
+            scan_pattern(&p.pattern, &mut flags);
+            if let Some(d) = &p.default {
+                scan_expr(d, &mut flags);
+            }
+        }
+        scan_stmts(&self.body, &mut flags);
+        self.scan.set(flags);
+        flags
+    }
+}
+
+const SCAN_ALL: u8 = SCAN_DONE | SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS;
+
+fn scan_stmts(body: &[Stmt], flags: &mut u8) {
+    for s in body {
+        scan_stmt(s, flags);
+        if *flags == SCAN_ALL {
+            return;
+        }
+    }
+}
+
+fn scan_stmt(s: &Stmt, flags: &mut u8) {
+    match s {
+        Stmt::Expr(e) | Stmt::Throw(e) => scan_expr(e, flags),
+        Stmt::VarDecl { kind: _, decls } => {
+            for (pat, init) in decls {
+                scan_pattern(pat, flags);
+                if let Some(e) = init {
+                    scan_expr(e, flags);
+                }
+            }
+        }
+        // A nested (non-arrow) function has its own arguments/new.target/this.
+        Stmt::FuncDecl(_) => {}
+        Stmt::Return(e) => {
+            if let Some(e) = e {
+                scan_expr(e, flags);
+            }
+        }
+        Stmt::If { test, cons, alt } => {
+            scan_expr(test, flags);
+            scan_stmt(cons, flags);
+            if let Some(a) = alt {
+                scan_stmt(a, flags);
+            }
+        }
+        Stmt::Block(b) => scan_stmts(b, flags),
+        Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
+            scan_expr(test, flags);
+            scan_stmt(body, flags);
+        }
+        Stmt::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            match init.as_deref() {
+                Some(ForInit::VarDecl { kind: _, decls }) => {
+                    for (pat, e) in decls {
+                        scan_pattern(pat, flags);
+                        if let Some(e) = e {
+                            scan_expr(e, flags);
+                        }
+                    }
+                }
+                Some(ForInit::Expr(e)) => scan_expr(e, flags),
+                None => {}
+            }
+            if let Some(e) = test {
+                scan_expr(e, flags);
+            }
+            if let Some(e) = update {
+                scan_expr(e, flags);
+            }
+            scan_stmt(body, flags);
+        }
+        Stmt::ForInOf {
+            decl: _,
+            left,
+            right,
+            of: _,
+            is_await: _,
+            body,
+        } => {
+            scan_pattern(left, flags);
+            scan_expr(right, flags);
+            scan_stmt(body, flags);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Empty | Stmt::Debugger => {}
+        Stmt::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            scan_stmts(block, flags);
+            if let Some((param, hbody)) = handler {
+                if let Some(p) = param {
+                    scan_pattern(p, flags);
+                }
+                scan_stmts(hbody, flags);
+            }
+            if let Some(f) = finalizer {
+                scan_stmts(f, flags);
+            }
+        }
+        Stmt::Switch { disc, cases } => {
+            scan_expr(disc, flags);
+            for c in cases {
+                if let Some(t) = &c.test {
+                    scan_expr(t, flags);
+                }
+                scan_stmts(&c.body, flags);
+            }
+        }
+        Stmt::Labeled { label: _, body } => scan_stmt(body, flags),
+        Stmt::With { obj, body } => {
+            scan_expr(obj, flags);
+            scan_stmt(body, flags);
+        }
+        Stmt::ClassDecl(c) => scan_class(c, flags),
+        Stmt::Import(_) | Stmt::ExportNamed { .. } | Stmt::ExportAll { .. } => {}
+        Stmt::ExportDecl(inner) | Stmt::ExportDefault(inner) => scan_stmt(inner, flags),
+    }
+}
+
+fn scan_expr(e: &Expr, flags: &mut u8) {
+    match e {
+        Expr::Ident(n) => {
+            if n == "arguments" {
+                *flags |= SCAN_ARGUMENTS;
+            }
+        }
+        Expr::This => *flags |= SCAN_THIS,
+        Expr::NewTarget => *flags |= SCAN_NEW_TARGET,
+        Expr::Num(_)
+        | Expr::BigInt(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::Regex { .. }
+        | Expr::ImportMeta => {}
+        // `super.x` resolves its receiver through the `this` binding; `super()` initializes it.
+        Expr::Super => *flags |= SCAN_THIS,
+        Expr::Paren(inner)
+        | Expr::ToStr(inner)
+        | Expr::Await(inner)
+        | Expr::OptionalChain(inner) => scan_expr(inner, flags),
+        Expr::Array(elems) => {
+            for el in elems {
+                match el {
+                    ArrayElem::Item(e) | ArrayElem::Spread(e) => scan_expr(e, flags),
+                    ArrayElem::Hole => {}
+                }
+            }
+        }
+        Expr::Object(props) => {
+            for p in props {
+                match p {
+                    PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
+                        scan_prop_key(key, flags);
+                        scan_expr(value, flags);
+                    }
+                    // A concise method/accessor body is its own function scope; only its
+                    // (computed) key evaluates here.
+                    PropDef::Method { key, func: _ }
+                    | PropDef::Getter { key, func: _ }
+                    | PropDef::Setter { key, func: _ } => scan_prop_key(key, flags),
+                    PropDef::Spread(e) | PropDef::Proto(e) => scan_expr(e, flags),
+                }
+            }
+        }
+        // An arrow is transparent (it closes over the enclosing activation); an ordinary
+        // function expression is opaque.
+        Expr::Func(f) => {
+            if f.is_arrow {
+                let inner = f.scan_flags();
+                *flags |= inner & (SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS);
+            }
+        }
+        Expr::Class(c) => scan_class(c, flags),
+        Expr::Yield { delegate: _, arg } => {
+            if let Some(a) = arg {
+                scan_expr(a, flags);
+            }
+        }
+        Expr::Unary { op: _, arg }
+        | Expr::Update {
+            op: _,
+            prefix: _,
+            arg,
+        } => scan_expr(arg, flags),
+        Expr::Binary { op: _, left, right } | Expr::Logical { op: _, left, right } => {
+            scan_expr(left, flags);
+            scan_expr(right, flags);
+        }
+        Expr::Assign {
+            op: _,
+            target,
+            value,
+        } => {
+            scan_expr(target, flags);
+            scan_expr(value, flags);
+        }
+        Expr::Cond { test, cons, alt } => {
+            scan_expr(test, flags);
+            scan_expr(cons, flags);
+            scan_expr(alt, flags);
+        }
+        Expr::Call {
+            callee,
+            args,
+            optional: _,
+        } => {
+            // A direct `eval` can name any of the three dynamically.
+            if matches!(&**callee, Expr::Ident(n) if n == "eval") {
+                *flags |= SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS;
+            }
+            scan_expr(callee, flags);
+            for a in args {
+                match a {
+                    ArrayElem::Item(e) | ArrayElem::Spread(e) => scan_expr(e, flags),
+                    ArrayElem::Hole => {}
+                }
+            }
+        }
+        Expr::New { callee, args } => {
+            scan_expr(callee, flags);
+            for a in args {
+                match a {
+                    ArrayElem::Item(e) | ArrayElem::Spread(e) => scan_expr(e, flags),
+                    ArrayElem::Hole => {}
+                }
+            }
+        }
+        Expr::Member {
+            obj,
+            prop: _,
+            optional: _,
+        } => scan_expr(obj, flags),
+        Expr::Index {
+            obj,
+            index,
+            optional: _,
+        } => {
+            scan_expr(obj, flags);
+            scan_expr(index, flags);
+        }
+        Expr::Seq(exprs) => {
+            for e in exprs {
+                scan_expr(e, flags);
+            }
+        }
+        Expr::TaggedTemplate {
+            tag,
+            quasis: _,
+            subs,
+        } => {
+            scan_expr(tag, flags);
+            for e in subs {
+                scan_expr(e, flags);
+            }
+        }
+        Expr::PrivateIn { name: _, obj } => scan_expr(obj, flags),
+        Expr::ImportCall {
+            spec,
+            phase: _,
+            options,
+        } => {
+            scan_expr(spec, flags);
+            if let Some(o) = options {
+                scan_expr(o, flags);
+            }
+        }
+    }
+}
+
+fn scan_class(c: &Class, flags: &mut u8) {
+    // Heritage, decorators, and computed keys evaluate in the enclosing scope. Member bodies are
+    // their own function scopes; field/accessor initializers and static blocks can't legally name
+    // `arguments`, but walking them costs only a possible false positive.
+    if let Some(sc) = &c.superclass {
+        scan_expr(sc, flags);
+    }
+    for d in &c.decorators {
+        scan_expr(d, flags);
+    }
+    for m in &c.members {
+        scan_prop_key(&m.key, flags);
+        for d in &m.decorators {
+            scan_expr(d, flags);
+        }
+        if let Some(v) = &m.value {
+            scan_expr(v, flags);
+        }
+    }
+}
+
+fn scan_prop_key(k: &PropKey, flags: &mut u8) {
+    match k {
+        PropKey::Ident(_) | PropKey::Str(_) | PropKey::Num(_) => {}
+        PropKey::Computed(e) => scan_expr(e, flags),
+    }
+}
+
+fn scan_pattern(p: &Pattern, flags: &mut u8) {
+    match p {
+        Pattern::Ident(n) => {
+            if n == "arguments" {
+                *flags |= SCAN_ARGUMENTS;
+            }
+        }
+        Pattern::Array(elems) => {
+            for el in elems {
+                match el {
+                    ArrayPatElem::Hole => {}
+                    ArrayPatElem::Elem { pattern, default } => {
+                        scan_pattern(pattern, flags);
+                        if let Some(d) = default {
+                            scan_expr(d, flags);
+                        }
+                    }
+                    ArrayPatElem::Rest(pat) => scan_pattern(pat, flags),
+                }
+            }
+        }
+        Pattern::Object(op) => {
+            for prop in &op.props {
+                scan_prop_key(&prop.key, flags);
+                scan_pattern(&prop.value, flags);
+                if let Some(d) = &prop.default {
+                    scan_expr(d, flags);
+                }
+            }
+            if op.rest.as_deref() == Some("arguments") {
+                *flags |= SCAN_ARGUMENTS;
+            }
+        }
+        Pattern::Member(e) => scan_expr(e, flags),
+    }
 }
 
 #[derive(Debug, Clone)]

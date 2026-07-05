@@ -244,7 +244,7 @@ pub fn instance_proto(i: &mut Interp, intrinsic: &str) -> Result<Option<Gc>, Val
 fn realm_protos_of<'a>(
     i: &'a Interp,
     func: &Gc,
-) -> Option<&'a std::collections::HashMap<&'static str, Gc>> {
+) -> Option<&'a crate::fasthash::FastMap<&'static str, Gc>> {
     let mut cur = func.borrow().proto.clone();
     while let Some(p) = cur {
         if std::rc::Rc::ptr_eq(&p, &i.function_proto) {

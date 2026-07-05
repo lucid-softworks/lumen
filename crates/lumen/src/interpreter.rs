@@ -26,7 +26,7 @@ pub struct AgentChannels {
 pub type SharedMem = Arc<Mutex<Vec<u8>>>;
 pub fn shared_mem_registry() -> &'static Mutex<HashMap<u64, SharedMem>> {
     static R: OnceLock<Mutex<HashMap<u64, SharedMem>>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(HashMap::new()))
+    R.get_or_init(|| Mutex::new(Default::default()))
 }
 pub fn next_shared_id() -> u64 {
     static N: AtomicU64 = AtomicU64::new(1);
@@ -56,7 +56,7 @@ pub fn monotonic_now_ms() -> f64 {
 pub type Waiter = Arc<(Mutex<bool>, Condvar)>;
 fn wait_table() -> &'static Mutex<HashMap<(u64, usize), Vec<Waiter>>> {
     static T: OnceLock<Mutex<HashMap<(u64, usize), Vec<Waiter>>>> = OnceLock::new();
-    T.get_or_init(|| Mutex::new(HashMap::new()))
+    T.get_or_init(|| Mutex::new(Default::default()))
 }
 /// Add a waiter to the list for `(id, index)` without blocking. `Atomics.waitAsync` registers
 /// synchronously (so a notify later in the same job sees it) and blocks on a helper thread.
@@ -147,8 +147,19 @@ pub fn futex_notify(id: u64, index: usize, max: i64) -> u64 {
 
 pub type Env = Rc<RefCell<Scope>>;
 
+/// One entry of the legacy `fn.caller`/`fn.arguments` reflection stack (see `call_user`). The
+/// arguments object materializes lazily: a body that never names `arguments` skips building it,
+/// and `lazy` keeps what a later reflective read needs to conjure it on demand.
+pub struct FnFrame {
+    pub fn_ptr: usize,
+    pub fn_obj: Value,
+    pub args_obj: Value,
+    pub strict: bool,
+    pub lazy: Option<(Rc<crate::ast::Function>, Rc<[Value]>, Env)>,
+}
+
 pub struct Scope {
-    pub vars: HashMap<String, Binding>,
+    pub vars: crate::fasthash::FastMap<String, Binding>,
     pub parent: Option<Env>,
     /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
     pub with_obj: Option<Value>,
@@ -210,6 +221,22 @@ fn register_scope(e: &Env) {
     SCOPE_REGISTRY.with(|r| r.borrow_mut().push(Rc::downgrade(e)));
 }
 
+/// Registered scope entries (live + not-yet-purged dead weaks) on this thread.
+fn scope_registry_len() -> usize {
+    SCOPE_REGISTRY.with(|r| r.borrow().len())
+}
+
+/// Purge dead weak entries, returning the live count. A dead `Weak` still pins its `RcBox`
+/// allocation, so an interpreter that churns through scopes without allocating many objects
+/// (which is what arms the main GC) must prune on scope volume too — see `gc_check`.
+fn scope_registry_prune() -> usize {
+    SCOPE_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        reg.retain(|w| w.strong_count() > 0);
+        reg.len()
+    })
+}
+
 /// The live scopes on this thread (purging dead weak entries as it goes).
 fn scope_snapshot() -> Vec<Env> {
     SCOPE_REGISTRY.with(|r| {
@@ -228,7 +255,7 @@ fn scope_snapshot() -> Vec<Env> {
 
 pub fn new_scope(parent: Option<Env>) -> Env {
     let e = Rc::new(RefCell::new(Scope {
-        vars: HashMap::new(),
+        vars: Default::default(),
         parent,
         with_obj: None,
         var_boundary: false,
@@ -243,7 +270,7 @@ pub fn new_scope(parent: Option<Env>) -> Env {
 /// global, or `eval` scope). See [`Scope::var_boundary`].
 pub fn new_var_scope(parent: Option<Env>) -> Env {
     let e = Rc::new(RefCell::new(Scope {
-        vars: HashMap::new(),
+        vars: Default::default(),
         parent,
         with_obj: None,
         var_boundary: true,
@@ -258,7 +285,7 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
 /// var-hoisting walk skips it (see [`Scope::catch_param`]).
 pub fn new_catch_scope(parent: Env) -> Env {
     let e = Rc::new(RefCell::new(Scope {
-        vars: HashMap::new(),
+        vars: Default::default(),
         parent: Some(parent),
         with_obj: None,
         var_boundary: false,
@@ -272,7 +299,7 @@ pub fn new_catch_scope(parent: Env) -> Env {
 /// A `with (obj)` environment: identifier lookups consult `obj` before the enclosing scope.
 pub fn new_with_scope(parent: Env, obj: Value) -> Env {
     let e = Rc::new(RefCell::new(Scope {
-        vars: HashMap::new(),
+        vars: Default::default(),
         parent: Some(parent),
         with_obj: Some(obj),
         var_boundary: false,
@@ -331,7 +358,7 @@ pub(crate) fn update_abrupt_empty(a: Abrupt, v: Value) -> Abrupt {
 thread_local! {
     /// The GlobalSymbolRegistry (`Symbol.for`): shared by every realm (incl. ShadowRealms).
     static SYM_FOR: std::cell::RefCell<HashMap<String, Rc<crate::value::SymbolData>>> =
-        RefCell::new(HashMap::new());
+        RefCell::new(Default::default());
 }
 
 /// Reset the `Symbol.for` registry (a fresh Engine starts a fresh agent, but ShadowRealms and
@@ -504,11 +531,11 @@ pub struct Interp {
     pub number_proto: Gc,
     pub boolean_proto: Gc,
     pub symbol_proto: Gc,
-    pub error_protos: HashMap<&'static str, Gc>,
+    pub error_protos: crate::fasthash::FastMap<&'static str, Gc>,
     /// Monotonic id source + registry for live symbols (so a symbol used as a property key can be
     /// recovered for `Object.getOwnPropertySymbols`). `sym_for` backs the `Symbol.for` registry.
     pub sym_counter: u64,
-    pub sym_registry: HashMap<u64, Rc<SymbolData>>,
+    pub sym_registry: crate::fasthash::FastMap<u64, Rc<SymbolData>>,
 
     pub console: Vec<String>,
     /// Current strict-mode flag (pushed/popped around function bodies).
@@ -519,7 +546,7 @@ pub struct Interp {
     /// Per-class metadata (instance fields + whether the class extends another), keyed by the
     /// constructor object's pointer (`Rc::as_ptr(..) as usize`). Lets `construct`/`super` run field
     /// initializers without attaching engine data to the `Object` itself.
-    pub class_info: HashMap<usize, ClassInfo>,
+    pub class_info: crate::fasthash::FastMap<usize, ClassInfo>,
     /// The global `eval` function object, so a *direct* eval call (`eval(src)` by that name) can be
     /// distinguished from an indirect one and run in the caller's scope.
     pub eval_fn: Option<Gc>,
@@ -546,18 +573,21 @@ pub struct Interp {
     /// Live module-namespace state keyed by the namespace object's pointer: for each exported name,
     /// how to read its current value (a live binding in some module scope, or a static value for a
     /// star-as namespace re-export). Namespace property reads consult this so they stay live.
-    pub module_ns: HashMap<usize, HashMap<String, crate::modules::NsBinding>>,
+    pub module_ns: crate::fasthash::FastMap<
+        usize,
+        crate::fasthash::FastMap<String, crate::modules::NsBinding>,
+    >,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
-    pub map_data: HashMap<usize, Vec<(Value, Value)>>,
+    pub map_data: crate::fasthash::FastMap<usize, Vec<(Value, Value)>>,
     /// Prototypes for builtins created after `new()` (Map/Set/Date/...), looked up by name so their
     /// native constructors can stamp the right `[[Prototype]]`.
-    pub extra_protos: HashMap<&'static str, Gc>,
+    pub extra_protos: crate::fasthash::FastMap<&'static str, Gc>,
     /// ArrayBuffer byte storage, keyed by the ArrayBuffer object's pointer.
-    pub array_buffers: HashMap<usize, Vec<u8>>,
+    pub array_buffers: crate::fasthash::FastMap<usize, Vec<u8>>,
     /// SharedArrayBuffer pointers → their global shared-memory id (`array_buffers` keeps a
     /// same-length placeholder so detach/length checks still work; the bytes live in the registry).
-    pub shared_buffers: HashMap<usize, u64>,
+    pub shared_buffers: crate::fasthash::FastMap<usize, u64>,
     /// Immutable ArrayBuffer pointers (created via `transferToImmutable`/`sliceToImmutable`): their
     /// bytes can be read but never written, resized, detached, or transferred.
     pub immutable_buffers: std::collections::HashSet<usize>,
@@ -572,7 +602,7 @@ pub struct Interp {
     /// Agent-harness wiring (present only in spawned agents / a main with agents).
     pub agent: Option<Box<AgentChannels>>,
     /// TypedArray view state, keyed by the typed-array object's pointer.
-    pub typed_arrays: HashMap<usize, TaInfo>,
+    pub typed_arrays: crate::fasthash::FastMap<usize, TaInfo>,
     /// Object pointers of async generator instances (the AsyncGenerator brand).
     pub async_gens: std::collections::HashSet<usize>,
     /// The global environment's [[VarNames]]: names declared by `var`/function in global code, for
@@ -584,20 +614,20 @@ pub struct Interp {
     /// plain refcounting — which would let a later allocation reuse its address and inherit the
     /// stale side-table entry — so such objects die only in `gc_collect`'s sweep, which evicts
     /// their table entries first. The collector discounts pins when finding roots.
-    pub gc_pins: HashMap<usize, Gc>,
+    pub gc_pins: crate::fasthash::FastMap<usize, Gc>,
     /// The backing ArrayBuffer *object* for each TypedArray (so the `buffer` getter can return it
     /// without storing it as an observable own property). Keyed by the TypedArray's pointer.
-    pub ta_buffer: HashMap<usize, Value>,
+    pub ta_buffer: crate::fasthash::FastMap<usize, Value>,
     /// Each `ShadowRealm` instance owns an isolated realm (a full sub-interpreter), keyed by the
     /// ShadowRealm object's pointer. Only primitive completion values cross the boundary.
-    pub shadow_realms: HashMap<usize, Box<Interp>>,
+    pub shadow_realms: crate::fasthash::FastMap<usize, Box<Interp>>,
     /// DataView state `(buffer ptr, byteOffset, byteLength)`, keyed by the DataView's pointer.
     /// DataView state: (buffer ptr, byteOffset, byteLength, is-length-tracking).
-    pub data_views: HashMap<usize, (usize, usize, usize, bool)>,
+    pub data_views: crate::fasthash::FastMap<usize, (usize, usize, usize, bool)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
-    pub regexps: HashMap<usize, Rc<crate::regex::Regex>>,
+    pub regexps: crate::fasthash::FastMap<usize, Rc<crate::regex::Regex>>,
     /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
-    pub proxies: HashMap<usize, (Value, Value)>,
+    pub proxies: crate::fasthash::FastMap<usize, (Value, Value)>,
     /// The active `new.target` for the function currently executing (Undefined outside a `new`).
     pub new_target: Value,
     /// The `new.target` to install for the next constructor invocation (set by `construct`).
@@ -612,20 +642,22 @@ pub struct Interp {
     /// Additional realms created via `$262.createRealm()`, keyed by the realm's global-object pointer.
     /// Each holds its own intrinsics; the shared side tables (proxies, buffers, …) and well-known
     /// symbols are common, so objects cross realm boundaries freely.
-    pub realms: HashMap<usize, RealmState>,
+    pub realms: crate::fasthash::FastMap<usize, RealmState>,
     /// Promise state keyed by the promise object's pointer.
-    pub promises: HashMap<usize, PromiseState>,
+    pub promises: crate::fasthash::FastMap<usize, PromiseState>,
     /// Temporal object internal slots, keyed by the object's pointer.
-    pub temporal: HashMap<usize, crate::temporal::Temporal>,
+    pub temporal: crate::fasthash::FastMap<usize, crate::temporal::Temporal>,
     /// The calendar id of a Temporal date-bearing object (default "iso8601"), keyed by object ptr.
-    pub temporal_cal: HashMap<usize, std::rc::Rc<str>>,
+    pub temporal_cal: crate::fasthash::FastMap<usize, std::rc::Rc<str>>,
     /// The microtask queue (drained after the main script by [`crate::Engine::eval`]).
     pub microtasks: std::collections::VecDeque<Job>,
     /// Live generator coroutines, keyed by the generator object's pointer. Each owns an OS thread
     /// that runs the body and parks at every `yield` (see [`crate::coroutine`]).
-    pub generators: HashMap<usize, crate::coroutine::Coroutine>,
+    pub generators: crate::fasthash::FastMap<usize, crate::coroutine::Coroutine>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub gc_next: i64,
+    /// Prune the scope registry once its entry count passes this floating threshold.
+    pub scope_gc_next: usize,
     /// True while a native constructor is being invoked via `new` (lets e.g. `Number`/`String`
     /// build a wrapper object instead of returning a primitive).
     pub constructing: bool,
@@ -636,7 +668,7 @@ pub struct Interp {
     pub super_call_ok: bool,
     /// Live user-function activations, oldest first: (fn ptr, fn object, arguments object,
     /// strict). Backs the legacy SpiderMonkey `fn.caller` / `fn.arguments` reflection.
-    pub fn_frames: Vec<(usize, Value, Value, bool)>,
+    pub fn_frames: Vec<FnFrame>,
     /// Monotonic [[AsyncEvaluationOrder]] source for module evaluation.
     pub(crate) module_async_seq: u64,
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
@@ -673,23 +705,23 @@ pub struct Interp {
     /// code) whose names got a function-scope `var` binding, keyed by AST pointer. When such a
     /// declaration is *evaluated*, the block binding's value is copied into the var binding. The
     /// `Rc` value keeps the AST alive so a pointer is never reused by a different function.
-    pub annexb_fn_sync: HashMap<usize, Rc<Function>>,
+    pub annexb_fn_sync: crate::fasthash::FastMap<usize, Rc<Function>>,
     /// `import defer` namespaces awaiting first access: namespace object ptr → module key.
     /// Accessing a property of one evaluates the module (then the entry is removed).
-    pub(crate) deferred_ns: HashMap<usize, String>,
+    pub(crate) deferred_ns: crate::fasthash::FastMap<usize, String>,
     /// module key → its (single) deferred namespace object.
-    pub(crate) deferred_ns_objs: HashMap<String, Value>,
+    pub(crate) deferred_ns_objs: crate::fasthash::FastMap<String, Value>,
     /// Promise-state forwarding: when a native super() grafts a fresh promise's state onto the
     /// subclass `this`, the original object's resolvers redirect here.
-    pub promise_forward: HashMap<usize, Value>,
+    pub promise_forward: crate::fasthash::FastMap<usize, Value>,
     /// Mapped `arguments` objects: object ptr → (function scope, per-index parameter name — None
     /// once unmapped by delete/defineProperty). Reads/writes of still-mapped indices alias the
     /// parameter bindings.
-    pub(crate) mapped_arguments: HashMap<usize, (Env, Vec<Option<String>>)>,
+    pub(crate) mapped_arguments: crate::fasthash::FastMap<usize, (Env, Vec<Option<String>>)>,
     /// Source-phase imports: canonical module key → its (cached) ModuleSource object.
-    pub(crate) module_source_objs: HashMap<String, Value>,
+    pub(crate) module_source_objs: crate::fasthash::FastMap<String, Value>,
     /// FinalizationRegistry registrations (ptr → unregister tokens), for `unregister`'s result.
-    pub(crate) fr_tokens: HashMap<usize, Vec<Value>>,
+    pub(crate) fr_tokens: crate::fasthash::FastMap<usize, Vec<Value>>,
     /// Async generators mid-step (running or parked at an `await`): further next/return/throw
     /// requests queue here (the spec's AsyncGeneratorRequest queue) until the step completes.
     pub(crate) async_gen_busy: std::collections::HashSet<usize>,
@@ -758,6 +790,8 @@ pub const MAX_LIVE: i64 = 3_000_000;
 
 /// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
 pub const GC_TRIGGER: i64 = 200_000;
+/// Scope-registry entry count that arms a registry prune.
+const SCOPE_GC_TRIGGER: usize = 250_000;
 
 /// Memory safety valves. lumen has no garbage collector and several built-ins iterate/allocate in
 /// proportion to a user-controlled `length`, so without these a single adversarial test (e.g.
@@ -785,9 +819,9 @@ pub struct RealmState {
     pub number_proto: Gc,
     pub boolean_proto: Gc,
     pub symbol_proto: Gc,
-    pub error_protos: HashMap<&'static str, Gc>,
+    pub error_protos: crate::fasthash::FastMap<&'static str, Gc>,
     pub eval_fn: Option<Gc>,
-    pub extra_protos: HashMap<&'static str, Gc>,
+    pub extra_protos: crate::fasthash::FastMap<&'static str, Gc>,
 }
 
 impl Interp {
@@ -869,8 +903,8 @@ impl Interp {
         self.symbol_proto = symbol_proto;
         self.global = global.clone();
         self.global_env = new_var_scope(None);
-        self.error_protos = HashMap::new();
-        self.extra_protos = HashMap::new();
+        self.error_protos = Default::default();
+        self.extra_protos = Default::default();
         self.eval_fn = None;
         crate::builtins::install(self);
         // Top-level `this` is the new global.
@@ -997,52 +1031,53 @@ impl Interp {
             number_proto,
             boolean_proto,
             symbol_proto,
-            error_protos: HashMap::new(),
+            error_protos: Default::default(),
             sym_counter: 0,
-            sym_registry: HashMap::new(),
+            sym_registry: Default::default(),
             console: Vec::new(),
             strict: false,
             depth: 0,
-            class_info: HashMap::new(),
+            class_info: Default::default(),
             eval_fn: None,
             iterator_sym: None,
             wk_syms: Vec::new(),
             short_circuit: false,
             import_meta: None,
             import_base: String::new(),
-            modules: std::collections::HashMap::new(),
-            module_recs: std::collections::HashMap::new(),
+            modules: Default::default(),
+            module_recs: Default::default(),
             module_loader: None,
-            module_ns: HashMap::new(),
-            map_data: HashMap::new(),
-            extra_protos: HashMap::new(),
-            array_buffers: HashMap::new(),
-            shared_buffers: HashMap::new(),
+            module_ns: Default::default(),
+            map_data: Default::default(),
+            extra_protos: Default::default(),
+            array_buffers: Default::default(),
+            shared_buffers: Default::default(),
             immutable_buffers: std::collections::HashSet::new(),
             can_block: true,
             pending_async_waits: Vec::new(),
             pending_timers: Vec::new(),
             agent: None,
-            typed_arrays: HashMap::new(),
+            typed_arrays: Default::default(),
             async_gens: std::collections::HashSet::new(),
             global_var_names: std::collections::HashSet::new(),
-            gc_pins: HashMap::new(),
-            ta_buffer: HashMap::new(),
-            shadow_realms: HashMap::new(),
-            data_views: HashMap::new(),
-            regexps: HashMap::new(),
-            proxies: HashMap::new(),
+            gc_pins: Default::default(),
+            ta_buffer: Default::default(),
+            shadow_realms: Default::default(),
+            data_views: Default::default(),
+            regexps: Default::default(),
+            proxies: Default::default(),
             new_target: Value::Undefined,
             pending_new_target: Value::Undefined,
             htmldda: Vec::new(),
             ctor_caller_realm: None,
-            realms: HashMap::new(),
-            promises: HashMap::new(),
-            temporal: HashMap::new(),
-            temporal_cal: HashMap::new(),
+            realms: Default::default(),
+            promises: Default::default(),
+            temporal: Default::default(),
+            temporal_cal: Default::default(),
             microtasks: std::collections::VecDeque::new(),
-            generators: HashMap::new(),
+            generators: Default::default(),
             gc_next: GC_TRIGGER,
+            scope_gc_next: SCOPE_GC_TRIGGER,
             constructing: false,
             super_call_ok: false,
             fn_frames: Vec::new(),
@@ -1053,19 +1088,19 @@ impl Interp {
             pending_fn_name: None,
             pending_tail: None,
             tco_ok: false,
-            template_cache: std::collections::HashMap::new(),
+            template_cache: Default::default(),
             using_stack: Vec::new(),
             accessor_seq: 0,
             decorator_initializers: Vec::new(),
-            annexb_fn_sync: HashMap::new(),
-            deferred_ns: HashMap::new(),
-            deferred_ns_objs: HashMap::new(),
-            promise_forward: HashMap::new(),
-            mapped_arguments: HashMap::new(),
-            module_source_objs: HashMap::new(),
-            fr_tokens: HashMap::new(),
+            annexb_fn_sync: Default::default(),
+            deferred_ns: Default::default(),
+            deferred_ns_objs: Default::default(),
+            promise_forward: Default::default(),
+            mapped_arguments: Default::default(),
+            module_source_objs: Default::default(),
+            fr_tokens: Default::default(),
             async_gen_busy: std::collections::HashSet::new(),
-            async_gen_queue: HashMap::new(),
+            async_gen_queue: Default::default(),
         };
         crate::builtins::install(&mut interp);
         // `this` at the top level is the global object (sloppy mode).
@@ -1726,14 +1761,27 @@ impl Interp {
                                 // strict caller is censored to null). Eval runs inline, so eval
                                 // frames are naturally skipped.
                                 let rptr = Rc::as_ptr(r) as usize;
-                                let top = self.fn_frames.iter().rposition(|fr| fr.0 == rptr);
+                                let top = self.fn_frames.iter().rposition(|fr| fr.fn_ptr == rptr);
                                 return Ok(match (key, top) {
                                     (_, None) => Value::Null,
-                                    ("arguments", Some(k)) => self.fn_frames[k].2.clone(),
+                                    ("arguments", Some(k)) => {
+                                        // The activation skipped building its arguments object
+                                        // (the body never names it) — conjure it now.
+                                        if matches!(self.fn_frames[k].args_obj, Value::Null) {
+                                            if let Some((func, args, scope)) =
+                                                self.fn_frames[k].lazy.clone()
+                                            {
+                                                let ao = self
+                                                    .make_arguments_object(&func, &args, &scope, r);
+                                                self.fn_frames[k].args_obj = Value::Obj(ao);
+                                            }
+                                        }
+                                        self.fn_frames[k].args_obj.clone()
+                                    }
                                     (_, Some(k)) => match self.fn_frames[..k].last() {
                                         None => Value::Null,
-                                        Some(fr) if fr.3 => Value::Null,
-                                        Some(fr) => fr.1.clone(),
+                                        Some(fr) if fr.strict => Value::Null,
+                                        Some(fr) => fr.fn_obj.clone(),
                                     },
                                 });
                             }
@@ -2430,6 +2478,12 @@ impl Interp {
     /// Allocation safe point. When live objects pass the floating threshold, run the cycle
     /// collector; if genuine retention still exceeds `MAX_LIVE`, throw rather than exhaust RAM.
     pub(crate) fn gc_check(&mut self) -> Result<(), Abrupt> {
+        // Scope churn is tracked separately: call-heavy code can retire millions of scopes while
+        // allocating few objects, and each dead weak registry entry pins its allocation.
+        if scope_registry_len() > self.scope_gc_next {
+            let live = scope_registry_prune();
+            self.scope_gc_next = live.saturating_mul(2).max(SCOPE_GC_TRIGGER);
+        }
         if crate::value::live_objects() <= self.gc_next {
             return Ok(());
         }
@@ -3217,6 +3271,98 @@ impl Interp {
         Value::Obj(f)
     }
 
+    /// Build the `arguments` exotic object for an activation: indexed own props + configurable
+    /// `length`, `@@iterator` = Array.prototype.values. An unmapped one (strict function OR
+    /// non-simple parameter list) exposes `callee` as the %ThrowTypeError% poison accessor; a
+    /// mapped one aliases still-mapped indices to the parameter bindings in `scope` (see
+    /// `mapped_arguments`) and carries the function as `callee`.
+    pub(crate) fn make_arguments_object(
+        &mut self,
+        func: &Rc<Function>,
+        args: &[Value],
+        scope: &Env,
+        fn_obj: &Gc,
+    ) -> Gc {
+        let ao = Object::new(Some(self.object_proto.clone()));
+        ao.borrow_mut().exotic = crate::value::Exotic::Arguments;
+        for (idx, v) in args.iter().enumerate() {
+            ao.borrow_mut().props.insert(
+                idx.to_string().as_str(),
+                Property::data(v.clone(), true, true, true),
+            );
+        }
+        ao.borrow_mut().props.insert(
+            "length",
+            Property::data(Value::Num(args.len() as f64), true, false, true),
+        );
+        if let Some(sym) = self.iterator_sym.clone() {
+            let values = self
+                .array_proto
+                .borrow()
+                .props
+                .get("values")
+                .map(|p| p.value.clone());
+            if let Some(v) = values {
+                ao.borrow_mut()
+                    .props
+                    .insert(Self::sym_key(&sym), Property::builtin(v));
+            }
+        }
+        let simple_params = func
+            .params
+            .iter()
+            .all(|p| !p.rest && p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
+        if func.is_strict || !simple_params {
+            if let Some(tte) = self.extra_protos.get("%ThrowTypeError%").cloned() {
+                ao.borrow_mut().props.insert(
+                    "callee",
+                    crate::value::Property {
+                        value: Value::Undefined,
+                        get: Some(Value::Obj(tte.clone())),
+                        set: Some(Value::Obj(tte)),
+                        accessor: true,
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+            }
+        } else {
+            ao.borrow_mut().props.insert(
+                "callee",
+                crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
+            );
+            // Mapped: indices alias the parameter bindings (which live in `scope`). With
+            // duplicate parameter names only the LAST occurrence is mapped — earlier indices
+            // stay plain data properties holding the original argument values.
+            let mut names: Vec<Option<String>> = func
+                .params
+                .iter()
+                .take(args.len())
+                .map(|p| match &p.pattern {
+                    Pattern::Ident(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect();
+            let mut seen: Vec<String> = Vec::new();
+            for slot in names.iter_mut().rev() {
+                if let Some(n) = slot {
+                    if seen.contains(n) {
+                        *slot = None;
+                    } else {
+                        seen.push(n.clone());
+                    }
+                }
+            }
+            if names.iter().any(Option::is_some) {
+                self.gc_pin(&ao);
+                self.mapped_arguments
+                    .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
+            }
+        }
+        ao
+    }
+
     pub(crate) fn call_user(
         &mut self,
         func: &Rc<Function>,
@@ -3226,12 +3372,13 @@ impl Interp {
         is_construct: bool,
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
-        self.fn_frames.push((
-            Rc::as_ptr(fn_obj) as usize,
-            Value::Obj(fn_obj.clone()),
-            Value::Null,
-            func.is_strict,
-        ));
+        self.fn_frames.push(FnFrame {
+            fn_ptr: Rc::as_ptr(fn_obj) as usize,
+            fn_obj: Value::Obj(fn_obj.clone()),
+            args_obj: Value::Null,
+            strict: func.is_strict,
+            lazy: None,
+        });
         let r = self.call_user_inner(func, closure, this, args, is_construct, fn_obj);
         self.fn_frames.pop();
         r
@@ -3307,144 +3454,84 @@ impl Interp {
         }
 
         if !func.is_arrow {
-            // `this` binding. Strict: pass through. Sloppy: undefined/null → global; primitive → box.
-            let this_val = if func.is_strict || is_construct {
-                this
-            } else {
-                match this {
-                    Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
-                    other @ Value::Obj(_) => other,
-                    // Sloppy mode: a primitive `this` is boxed to its wrapper object (ToObject).
-                    prim => crate::builtins::box_primitive_pub(self, prim),
-                }
-            };
+            let scan = func.scan_flags();
             // `new.target` resolves lexically (arrows and closures created here keep seeing this
-            // function's value, even after it returns).
-            scope.borrow_mut().vars.insert(
-                "%newtarget%".to_string(),
-                Binding {
-                    value: self.new_target.clone(),
-                    mutable: false,
-                    strict_immutable: false,
-                    initialized: true,
-                    import_ref: None,
-                    deletable: false,
-                },
-            );
-            // A derived class constructor's `this` stays in TDZ until `super()` runs.
+            // function's value, even after it returns). Skipped when nothing in the activation
+            // can name it — Expr::NewTarget peeks up the scope chain, so an unused binding here
+            // would only shadow an (equally unread) outer one.
+            if scan & crate::ast::SCAN_NEW_TARGET != 0 {
+                scope.borrow_mut().vars.insert(
+                    "%newtarget%".to_string(),
+                    Binding {
+                        value: self.new_target.clone(),
+                        mutable: false,
+                        strict_immutable: false,
+                        initialized: true,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
+            }
+            // Class machinery and every [[Construct]] need the `this` binding regardless of the
+            // body: a derived constructor's stays in TDZ until `super()` initializes it in place,
+            // `super.x` resolves its receiver through it, and a constructor's non-object return
+            // reads the *current* binding back out of the scope. Otherwise it exists only for
+            // bodies that can name `this`.
+            let is_class_fn = self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize));
             let derived_tdz = is_construct
                 && self
                     .class_info
                     .get(&(Rc::as_ptr(fn_obj) as usize))
                     .map(|ci| ci.derived)
                     .unwrap_or(false);
-            scope.borrow_mut().vars.insert(
-                "this".to_string(),
-                Binding {
-                    value: this_val,
-                    mutable: false,
-                    strict_immutable: true,
-                    initialized: !derived_tdz,
-                    import_ref: None,
-                    deletable: false,
-                },
-            );
-            // The `arguments` exotic object: indexed own props + configurable `length`, with
-            // `@@iterator` = Array.prototype.values. An unmapped one (strict function OR
-            // non-simple parameter list) exposes `callee` as the %ThrowTypeError% poison
-            // accessor; a mapped one aliases still-mapped indices to the parameter bindings
-            // (see `mapped_arguments`) and carries the function as `callee`.
-            let ao = Object::new(Some(self.object_proto.clone()));
-            ao.borrow_mut().exotic = crate::value::Exotic::Arguments;
-            for (idx, v) in args.iter().enumerate() {
-                ao.borrow_mut().props.insert(
-                    idx.to_string().as_str(),
-                    Property::data(v.clone(), true, true, true),
-                );
-            }
-            ao.borrow_mut().props.insert(
-                "length",
-                Property::data(Value::Num(args.len() as f64), true, false, true),
-            );
-            if let Some(sym) = self.iterator_sym.clone() {
-                let values = self
-                    .array_proto
-                    .borrow()
-                    .props
-                    .get("values")
-                    .map(|p| p.value.clone());
-                if let Some(v) = values {
-                    ao.borrow_mut()
-                        .props
-                        .insert(Self::sym_key(&sym), Property::builtin(v));
-                }
-            }
-            let simple_params = func
-                .params
-                .iter()
-                .all(|p| !p.rest && p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
-            if func.is_strict || !simple_params {
-                if let Some(tte) = self.extra_protos.get("%ThrowTypeError%").cloned() {
-                    ao.borrow_mut().props.insert(
-                        "callee",
-                        crate::value::Property {
-                            value: Value::Undefined,
-                            get: Some(Value::Obj(tte.clone())),
-                            set: Some(Value::Obj(tte)),
-                            accessor: true,
-                            writable: false,
-                            enumerable: false,
-                            configurable: false,
-                        },
-                    );
-                }
-            } else {
-                ao.borrow_mut().props.insert(
-                    "callee",
-                    crate::value::Property::data(Value::Obj(fn_obj.clone()), true, false, true),
-                );
-                // Mapped: indices alias the parameter bindings (which live in `scope`). With
-                // duplicate parameter names only the LAST occurrence is mapped — earlier indices
-                // stay plain data properties holding the original argument values.
-                let mut names: Vec<Option<String>> = func
-                    .params
-                    .iter()
-                    .take(args.len())
-                    .map(|p| match &p.pattern {
-                        Pattern::Ident(n) => Some(n.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                let mut seen: Vec<String> = Vec::new();
-                for slot in names.iter_mut().rev() {
-                    if let Some(n) = slot {
-                        if seen.contains(n) {
-                            *slot = None;
-                        } else {
-                            seen.push(n.clone());
-                        }
+            if scan & crate::ast::SCAN_THIS != 0 || func.is_method || is_class_fn || is_construct {
+                // Strict: pass through. Sloppy: undefined/null → global; primitive → box.
+                let this_val = if func.is_strict || is_construct {
+                    this
+                } else {
+                    match this {
+                        Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
+                        other @ Value::Obj(_) => other,
+                        // Sloppy mode: a primitive `this` is boxed to its wrapper (ToObject).
+                        prim => crate::builtins::box_primitive_pub(self, prim),
                     }
+                };
+                scope.borrow_mut().vars.insert(
+                    "this".to_string(),
+                    Binding {
+                        value: this_val,
+                        mutable: false,
+                        strict_immutable: true,
+                        initialized: !derived_tdz,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
+            }
+            // The `arguments` exotic object is built only when the body (or a nested arrow, or a
+            // possible direct eval) can name it. Otherwise a plain sloppy function stashes what a
+            // reflective `fn.arguments` read would need to materialize it on demand.
+            if scan & crate::ast::SCAN_ARGUMENTS != 0 {
+                let ao = self.make_arguments_object(func, args, &scope, fn_obj);
+                if let Some(frame) = self.fn_frames.last_mut() {
+                    frame.args_obj = Value::Obj(ao.clone());
                 }
-                if names.iter().any(Option::is_some) {
-                    self.gc_pin(&ao);
-                    self.mapped_arguments
-                        .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
+                scope.borrow_mut().vars.insert(
+                    "arguments".to_string(),
+                    Binding {
+                        value: Value::Obj(ao),
+                        mutable: true,
+                        strict_immutable: false,
+                        initialized: true,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
+            } else if !func.is_strict && !func.is_generator && !func.is_async && !func.is_method {
+                if let Some(frame) = self.fn_frames.last_mut() {
+                    frame.lazy = Some((func.clone(), Rc::from(args), scope.clone()));
                 }
             }
-            if let Some(frame) = self.fn_frames.last_mut() {
-                frame.2 = Value::Obj(ao.clone());
-            }
-            scope.borrow_mut().vars.insert(
-                "arguments".to_string(),
-                Binding {
-                    value: Value::Obj(ao),
-                    mutable: true,
-                    strict_immutable: false,
-                    initialized: true,
-                    import_ref: None,
-                    deletable: false,
-                },
-            );
             // Methods and class constructors may reference `super.x` — including from a direct
             // eval in a nested arrow, which resolves this marker lexically long after the call.
             if func.is_method || self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize)) {

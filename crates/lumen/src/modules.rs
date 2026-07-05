@@ -677,7 +677,7 @@ impl Interp {
     fn build_namespace(&mut self, key: &str, ns: &crate::value::Gc) -> Result<(), Abrupt> {
         let mut names = self.exported_names(key, &mut Vec::new());
         names.sort();
-        let mut live: HashMap<String, NsBinding> = HashMap::new();
+        let mut live: crate::fasthash::FastMap<String, NsBinding> = Default::default();
         for name in &names {
             match self.resolve_export(key, name, &mut Vec::new()) {
                 Resolution::Local(env, local) => {

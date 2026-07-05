@@ -27,6 +27,7 @@ mod bigint;
 mod builtins;
 mod coroutine;
 mod eval;
+mod fasthash;
 mod interpreter;
 mod intl;
 mod jstr;

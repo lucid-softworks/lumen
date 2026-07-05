@@ -6388,6 +6388,7 @@ fn default_constructor(derived: bool) -> Function {
         Vec::new()
     };
     Function {
+        scan: std::cell::Cell::new(0),
         name: None,
         params,
         body,

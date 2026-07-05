@@ -5,7 +5,6 @@
 use crate::ast::Function;
 use crate::interpreter::{Env, Interp};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 pub type Gc = Rc<RefCell<Object>>;
@@ -378,7 +377,7 @@ impl Property {
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
-    index: HashMap<Rc<str>, usize>,
+    index: crate::fasthash::FastMap<Rc<str>, usize>,
 }
 
 impl Default for Props {
@@ -391,7 +390,7 @@ impl Props {
     pub fn new() -> Props {
         Props {
             entries: Vec::new(),
-            index: HashMap::new(),
+            index: Default::default(),
         }
     }
     pub fn get(&self, key: &str) -> Option<&Property> {

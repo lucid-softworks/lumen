@@ -3213,6 +3213,7 @@ impl Parser {
             return self.err(format!("Identifier '{dup}' has already been declared"));
         }
         let func = Function {
+            scan: std::cell::Cell::new(0),
             name,
             params,
             body,
@@ -3400,6 +3401,7 @@ impl Parser {
             self.no_arguments_refs = sargs;
             let body = body?;
             let func = Function {
+                scan: std::cell::Cell::new(0),
                 name: None,
                 params: Vec::new(),
                 body,
@@ -3570,6 +3572,7 @@ impl Parser {
             return self.err(format!("Identifier '{dup}' has already been declared"));
         }
         Ok(Function {
+            scan: std::cell::Cell::new(0),
             name: None,
             params,
             body,
@@ -3796,6 +3799,7 @@ impl Parser {
                 }
             }
             Function {
+                scan: std::cell::Cell::new(0),
                 name: None,
                 params,
                 body,
@@ -3811,6 +3815,7 @@ impl Parser {
         } else {
             let expr = self.parse_assign()?;
             Function {
+                scan: std::cell::Cell::new(0),
                 name: None,
                 params,
                 body: vec![Stmt::Return(Some(expr))],
