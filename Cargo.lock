@@ -70,6 +70,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-fs"
+version = "0.1.1"
+dependencies = [
+ "lumen-host",
+]
+
+[[package]]
 name = "lumen-host"
 version = "0.1.1"
 dependencies = [
@@ -88,6 +95,7 @@ dependencies = [
 name = "lumen-runtime"
 version = "0.1.1"
 dependencies = [
+ "lumen-fs",
  "lumen-host",
  "lumen-timers",
 ]

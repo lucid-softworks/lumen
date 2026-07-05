@@ -4,6 +4,7 @@ members = [
     "crates/lumen",
     "crates/lumen-cli",
     "crates/lumen-difftest",
+    "crates/lumen-fs",
     "crates/lumen-host",
     "crates/lumen-repl",
     "crates/lumen-runtime",

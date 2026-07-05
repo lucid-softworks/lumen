@@ -11,6 +11,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+lumen-fs = { path = "../lumen-fs" }
 lumen-host = { path = "../lumen-host" }
 lumen-timers = { path = "../lumen-timers" }
 

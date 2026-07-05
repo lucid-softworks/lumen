@@ -1,0 +1,17 @@
+# Filesystem op crate: sync ops are plain std::fs behind native fns; async fs.promises runs
+# the same std::fs calls on the threadpool (regular files are not pollable — completion, not
+# readiness, is the only honest async fs) and settles promises through the TaskRegistry. Open
+# file handles live in the ResourceTable. Std-only.
+[package]
+name = "lumen-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+
+[lints]
+workspace = true

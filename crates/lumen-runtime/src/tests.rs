@@ -228,3 +228,137 @@ fn async_await_settles_before_loop_exit() {
     );
     assert_eq!(out.lines(), ["before", "after"]);
 }
+
+// ---- fs (the runtime assembles lumen-fs, so its behavior tests live here) ----
+
+/// A unique temp dir per test, cleaned up on drop.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("lumen-fs-test-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir tempdir");
+        TempDir(dir)
+    }
+    fn path(&self, name: &str) -> String {
+        self.0.join(name).to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The Phase-4 acceptance test: sync and async read/write both round-trip a file from JS.
+#[test]
+fn fs_sync_and_async_roundtrip() {
+    let dir = TempDir::new("roundtrip");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const sync = {sync:?}, asyncPath = {async_:?};
+            fs.writeFileSync(sync, "hello sync");
+            console.log("sync:", fs.readFileSync(sync));
+            (async () => {{
+                await fs.promises.writeFile(asyncPath, "hello async");
+                console.log("async:", await fs.promises.readFile(asyncPath));
+            }})();
+            "#,
+            sync = dir.path("s.txt"),
+            async_ = dir.path("a.txt"),
+        ),
+    );
+    assert_eq!(out.lines(), ["sync: hello sync", "async: hello async"]);
+}
+
+#[test]
+fn fs_exists_readdir_unlink_append() {
+    let dir = TempDir::new("meta");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const d = {dir:?}, f = {file:?};
+            console.log(fs.existsSync(f));
+            fs.writeFileSync(f, "a");
+            fs.appendFileSync(f, "b");
+            console.log(fs.existsSync(f), fs.readFileSync(f));
+            console.log(fs.readdirSync(d).join(","));
+            fs.unlinkSync(f);
+            console.log(fs.existsSync(f));
+            "#,
+            dir = dir.path(""),
+            file = dir.path("x.txt"),
+        ),
+    );
+    assert_eq!(out.lines(), ["false", "true ab", "x.txt", "false"]);
+}
+
+#[test]
+fn fs_handles_via_resource_table() {
+    let dir = TempDir::new("handles");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const f = {file:?};
+            const w = fs.openSync(f, "w");
+            fs.writeSync(w, "line one\n");
+            fs.writeSync(w, "line two\n");
+            fs.closeSync(w);
+            const r = fs.openSync(f, "r");
+            console.log(JSON.stringify(fs.readSync(r)));
+            fs.closeSync(r);
+            try {{ fs.readSync(r) }} catch (e) {{ console.log("stale:", e.constructor.name) }}
+            "#,
+            file = dir.path("h.txt"),
+        ),
+    );
+    assert_eq!(
+        out.lines(),
+        [r#""line one\nline two\n""#, "stale: TypeError"]
+    );
+}
+
+#[test]
+fn fs_promise_rejection_is_catchable() {
+    let dir = TempDir::new("reject");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            (async () => {{
+                try {{
+                    await fs.promises.readFile({missing:?});
+                    console.log("unexpected success");
+                }} catch (e) {{
+                    console.log("caught:", e.message.includes("readFile"), e.message.includes("nope.txt"));
+                }}
+            }})();
+            "#,
+            missing = dir.path("nope.txt"),
+        ),
+    );
+    assert_eq!(out.lines(), ["caught: true true"]);
+}
+
+#[test]
+fn fs_sync_error_throws_catchable_error() {
+    let dir = TempDir::new("syncerr");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            "try {{ fs.readFileSync({missing:?}) }} catch (e) {{ console.log('caught', e instanceof Error) }}",
+            missing = dir.path("gone.txt"),
+        ),
+    );
+    assert_eq!(out.lines(), ["caught true"]);
+}
