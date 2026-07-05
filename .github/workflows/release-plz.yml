@@ -1,0 +1,30 @@
+name: release-plz
+
+# On every push to main, release-plz:
+#   * opens/updates a "release" PR that bumps crate versions + writes CHANGELOGs from the
+#     Conventional Commits since the last release, and
+#   * once that PR is merged, creates the version tag — which triggers .github/workflows/release.yml
+#     to build and publish the per-platform CLI binaries.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-plz
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

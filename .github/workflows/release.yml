@@ -1,0 +1,49 @@
+name: Release
+
+# Pushing a version tag (e.g. v0.1.0 — release-plz creates these when the release PR merges) builds
+# the `lumen` CLI in release mode for each supported platform and publishes a GitHub release with
+# the binaries attached, named by target triple (lumen-<target-triple>).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub release + upload assets
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p lumen --bin lumen
+      - run: cp target/release/lumen lumen-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-${{ matrix.target }}
+          path: lumen-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

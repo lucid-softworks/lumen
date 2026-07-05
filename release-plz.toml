@@ -1,0 +1,9 @@
+# release-plz configuration. The workspace ships binaries (the `lumen` CLI), not library crates, so
+# we never publish to crates.io — release-plz only manages versions + CHANGELOGs from Conventional
+# Commits.
+[workspace]
+publish = false              # do not push any crate to crates.io
+git_release_enable = false   # the binary GitHub release is created by release.yml on the tag
+git_tag_name = "v{{ version }}"   # so the Release workflow's `v*` trigger fires
+# Treat the workspace as one product: all crates share a version and a single tag.
+dependencies_update = true
