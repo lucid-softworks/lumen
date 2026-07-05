@@ -2370,6 +2370,10 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
         if position >= next_pos {
             accumulated.push_str(&crate::jstr::from_units(&sunits[next_pos..position]));
             accumulated.push_str(&replacement);
+            // Pathological expansion ($1 of a huge match, repeated) dies as a RangeError.
+            if accumulated.len() > MAX_STR_LEN {
+                return Err(i.make_error("RangeError", "Invalid string length"));
+            }
             next_pos = position + match_len;
         }
     }
@@ -2412,6 +2416,11 @@ fn get_substitution(
     let mut out = String::new();
     let mut k = 0;
     while k < t.len() {
+        // A pathological template ($1 of a megabyte match, tens of thousands of times) must die
+        // as a RangeError before it exhausts memory.
+        if out.len() > MAX_STR_LEN {
+            return Err(i.make_error("RangeError", "Invalid string length"));
+        }
         if t[k] != '$' || k + 1 >= t.len() {
             out.push(t[k]);
             k += 1;
@@ -9108,6 +9117,15 @@ pub(crate) fn reflect_ordinary_get(
                 return Ok(ab(res)?.value);
             }
         }
+        // A TypedArray's integer-indexed elements are own properties; a canonical-numeric
+        // non-index short-circuits to undefined without consulting the prototype chain.
+        if let Some(info) = i.typed_arrays.get(&ptr).copied() {
+            match i.ta_index_kind(&info, key) {
+                TaIndex::Element(idx) => return Ok(i.ta_read(&info, idx)),
+                TaIndex::Exotic => return Ok(Value::Undefined),
+                TaIndex::Ordinary => {}
+            }
+        }
         let own = obj.borrow().props.get(key).cloned();
         match own {
             Some(p) if p.accessor => {
@@ -9321,6 +9339,45 @@ fn enumerable_own_value_list(i: &mut Interp, o: &Value, entries: bool) -> Result
                         v
                     });
                 }
+            }
+        }
+    } else if let Some(info) = o.as_obj().and_then(|obj| ta_info(i, obj)) {
+        // A TypedArray's enumerable own properties are its integer indices (plus any expandos).
+        let n = i.ta_len(&info).unwrap_or(0);
+        for idx in 0..n {
+            let v = i.ta_read(&info, idx);
+            out.push(if entries {
+                i.make_array(vec![Value::from_string(idx.to_string()), v])
+            } else {
+                v
+            });
+        }
+        let expandos: Vec<Rc<str>> = o
+            .as_obj()
+            .map(|obj| {
+                obj.borrow()
+                    .props
+                    .ordered_keys()
+                    .into_iter()
+                    .filter(|k| {
+                        !Interp::is_sym_key(k)
+                            && k.parse::<usize>().is_err()
+                            && !TA_META_KEYS.contains(&&**k)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for k in expandos {
+            let enumerable = o
+                .as_obj()
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+            if enumerable == Some(true) {
+                let v = ab(i.get_member(o, &k))?;
+                out.push(if entries {
+                    i.make_array(vec![Value::Str(k.clone()), v])
+                } else {
+                    v
+                });
             }
         }
     } else {
@@ -10794,16 +10851,37 @@ fn proxy_define_property(
     let key_val = i
         .sym_from_key(key)
         .unwrap_or_else(|| Value::from_string(key.to_string()));
+    // The trap receives FromPropertyDescriptor(desc): a fresh object holding only the present
+    // fields, in the spec's order (value, writable, get, set, enumerable, configurable).
+    let pd = build_partial(i, desc)?;
+    let norm = i.new_object();
+    if let Some(v) = &pd.value {
+        set_data(&norm, "value", v.clone());
+    }
+    if let Some(w) = pd.writable {
+        set_data(&norm, "writable", Value::Bool(w));
+    }
+    if let Some(g) = &pd.get {
+        set_data(&norm, "get", g.clone());
+    }
+    if let Some(st) = &pd.set {
+        set_data(&norm, "set", st.clone());
+    }
+    if let Some(e) = pd.enumerable {
+        set_data(&norm, "enumerable", Value::Bool(e));
+    }
+    if let Some(c) = pd.configurable {
+        set_data(&norm, "configurable", Value::Bool(c));
+    }
     let res = i.call(
         trap,
         handler.clone(),
-        &[target.clone(), key_val, desc.clone()],
+        &[target.clone(), key_val, Value::Obj(norm)],
     )?;
     if !i.to_boolean(&res) {
         return Ok(false);
     }
     // Invariants relative to the target's existing property and extensibility.
-    let pd = build_partial(i, desc)?;
     let setting_config_false = matches!(pd.configurable, Some(false));
     if let Value::Obj(t) = target {
         let tprop = t.borrow().props.get(key).cloned();
@@ -11230,6 +11308,17 @@ fn install_object(it: &mut Interp) {
         ab(i.defer_trigger(&o, None))?;
         if proxy_pair(i, &Value::Obj(o.clone())).is_some() {
             let keys = proxy_enum_string_keys(i, &Value::Obj(o.clone()))?;
+            return Ok(i.make_array(keys));
+        }
+        // A TypedArray's enumerable own keys are its integer indices plus string expandos.
+        if let Some(info) = ta_info(i, &o) {
+            let n = i.ta_len(&info).unwrap_or(0);
+            let mut keys: Vec<Value> = (0..n).map(|k| Value::from_string(k.to_string())).collect();
+            for k in ordered_enum_keys(&o) {
+                if k.parse::<usize>().is_err() && !TA_META_KEYS.contains(&&*k) {
+                    keys.push(Value::Str(k));
+                }
+            }
             return Ok(i.make_array(keys));
         }
         let names = ordered_enum_keys(&o);
@@ -16742,12 +16831,14 @@ fn string_replacement(
     pos: usize,
 ) -> Result<String, Value> {
     if let Repl::Fn(f) = repl {
+        // The callback's position argument counts UTF-16 code units, not bytes.
+        let unit_pos = crate::jstr::unit_len(&whole[..pos.min(whole.len())]);
         let r = ab(i.call(
             f.clone(),
             Value::Undefined,
             &[
                 Value::from_string(matched.to_string()),
-                Value::Num(pos as f64),
+                Value::Num(unit_pos as f64),
                 Value::from_string(whole.to_string()),
             ],
         ))?;
@@ -16759,7 +16850,8 @@ fn string_replacement(
             Repl::Fn(_) => unreachable!(),
         };
         // GetSubstitution for a string match: $$ → $, $& → match, $` → preceding, $' → following.
-        // (No captures, so $n and $<name> stay literal.)
+        // (No captures, so $n and $<name> stay literal.) Growth past the engine's string
+        // ceiling dies as a RangeError, not an OOM.
         let before = &whole[..pos.min(whole.len())];
         let after = whole.get(pos + matched.len()..).unwrap_or("");
         let tchars: Vec<char> = template.chars().collect();

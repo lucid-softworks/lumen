@@ -1074,26 +1074,72 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             }
         }
     } else if have_date {
-        // numeric M/D/Y
+        // Numeric date: field order and separator follow the locale's CLDR short pattern
+        // (en: M/D/Y, de: D.M.Y, ja: Y/M/D, ...). Default is M/D/Y with "/".
+        let lang = {
+            let loc = match o
+                .borrow()
+                .props
+                .get("__dtf_locale")
+                .map(|p| p.value.clone())
+            {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "en".to_string(),
+            };
+            loc.split('-').next().unwrap_or("en").to_string()
+        };
+        // (order, separator, trailing separator after the year — de/fi style "1.2.1970" has none)
+        let (order, sep): (&[u8], &str) = match lang.as_str() {
+            "de" | "ru" | "fi" | "cs" | "sk" | "uk" | "bg" | "sr" | "lv" | "et" | "ro" | "no"
+            | "nb" | "da" | "is" | "mk" | "sq" | "hr" => (b"dmy", "."),
+            "fr" | "es" | "it" | "pt" | "el" | "id" | "ms" | "vi" | "he" | "ar" | "th" | "ca"
+            | "gl" | "uz" => (b"dmy", "/"),
+            "nl" | "sw" => (b"dmy", "-"),
+            "pl" | "sl" => (b"dmy", "."),
+            "hu" | "lt" | "sv" => (b"ymd", "."),
+            "ja" | "zh" | "ko" | "eu" => (b"ymd", "/"),
+            _ => (b"mdy", "/"),
+        };
+        // Hungarian/Swedish/Lithuanian actually use "y. m. d." / "y-m-d"; keep it simple with
+        // the dominant separator per language above.
+        let (order, sep): (&[u8], &str) = match lang.as_str() {
+            "hu" => (b"ymd", ". "),
+            "lt" | "sv" => (b"ymd", "-"),
+            _ => (order, sep),
+        };
         let mut first = true;
-        if let Some(m) = &month_str {
-            parts.push(("month", m.clone()));
-            first = false;
-        }
-        if let Some(dd) = &day_str {
-            if !first {
-                lit(&mut parts, "/");
-            }
-            parts.push(("day", dd.clone()));
-            first = false;
-        }
-        if let Some(yy) = &year_str {
-            if !first {
-                lit(&mut parts, "/");
-            }
-            match &year_cluster {
-                Some(c) => parts.extend(c.iter().cloned()),
-                None => parts.push(("year", yy.clone())),
+        for f in order {
+            match f {
+                b'm' => {
+                    if let Some(m) = &month_str {
+                        if !first {
+                            lit(&mut parts, sep);
+                        }
+                        parts.push(("month", m.clone()));
+                        first = false;
+                    }
+                }
+                b'd' => {
+                    if let Some(dd) = &day_str {
+                        if !first {
+                            lit(&mut parts, sep);
+                        }
+                        parts.push(("day", dd.clone()));
+                        first = false;
+                    }
+                }
+                _ => {
+                    if let Some(yy) = &year_str {
+                        if !first {
+                            lit(&mut parts, sep);
+                        }
+                        match &year_cluster {
+                            Some(c) => parts.extend(c.iter().cloned()),
+                            None => parts.push(("year", yy.clone())),
+                        }
+                        first = false;
+                    }
+                }
             }
         }
     }
