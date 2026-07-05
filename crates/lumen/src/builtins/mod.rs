@@ -11913,11 +11913,11 @@ fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool,
         return Ok(true);
     }
     let o = v.as_obj().unwrap();
-    let ok = o
-        .borrow()
-        .props
-        .iter()
-        .all(|(_, p)| !p.configurable && (!frozen || p.accessor || !p.writable));
+    let ok = o.borrow().props.iter().all(|(k, p)| {
+        // Private fields are invisible to integrity levels (they stay mutable on a frozen
+        // object and never count against isSealed/isFrozen).
+        Interp::is_private_key(k) || (!p.configurable && (!frozen || p.accessor || !p.writable))
+    });
     Ok(ok)
 }
 

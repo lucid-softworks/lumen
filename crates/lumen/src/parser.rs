@@ -1012,6 +1012,10 @@ impl Parser {
     fn parse_binding_ident_name(&mut self) -> Result<String, ParseError> {
         match self.cur().clone() {
             Tok::Ident(name) => {
+                // A private name is never a binding identifier (`var #a` / `function f(#a)`).
+                if name.starts_with('#') {
+                    return self.err("private names cannot be used as binding identifiers");
+                }
                 // In strict mode `eval`/`arguments` and the strict-reserved words can't be bound.
                 if self.strict && is_strict_reserved_binding(&name) {
                     return self.err(format!(
@@ -1334,7 +1338,12 @@ impl Parser {
             while self.eat_punct(",") {
                 let pat = self.parse_binding_pattern()?;
                 let init = if self.eat_punct("=") {
-                    Some(self.parse_assign()?)
+                    // Every for-head initializer is [NoIn] — `for (var x, y = 3 in {};;)` is a
+                    // SyntaxError (the exposed `in` fails the ';' expectation below).
+                    let saved = std::mem::replace(&mut self.no_in, true);
+                    let e = self.parse_assign();
+                    self.no_in = saved;
+                    Some(e?)
                 } else {
                     None
                 };
@@ -3099,6 +3108,10 @@ impl Parser {
         self.eat_kw("function");
         let is_generator = self.eat_punct("*");
         let name = if let Tok::Ident(n) = self.cur().clone() {
+            // A private name is never a function name.
+            if n.starts_with('#') {
+                return self.err("private names cannot be used as binding identifiers");
+            }
             // A *declaration*'s name is a BindingIdentifier in the enclosing context: `await`
             // is reserved in async bodies / static blocks / modules, `yield` in generators.
             // (An expression's name binds inside the function, past those boundaries.)
@@ -4324,6 +4337,13 @@ fn pn_args(args: &[ArrayElem], st: &mut Vec<Vec<String>>) -> Result<(), String> 
 
 fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
     match expr {
+        // A bare private name is only grammatical as `#x in obj` (parsed as PrivateIn); anywhere
+        // else — `#x`, `!#x`, `1 + #x` — it is a SyntaxError.
+        Expr::Ident(n) if n.starts_with('#') => {
+            return Err(format!(
+                "private name '{n}' may only be used in a member access or 'in' expression"
+            ));
+        }
         Expr::Member { obj, prop, .. } => {
             if prop.starts_with('#') && !pn_declared(st, prop) {
                 return Err(format!(

@@ -1132,7 +1132,8 @@ impl Interp {
                 let v = items[idx].clone();
                 idx += 1;
                 if let Value::Str(k) = &v {
-                    if !me.js_has_property(&rhs, k)? {
+                    // (A string-primitive RHS's index keys are always present.)
+                    if matches!(rhs, Value::Obj(_)) && !me.js_has_property(&rhs, k)? {
                         continue;
                     }
                 }
@@ -1517,6 +1518,13 @@ impl Interp {
     fn enum_keys(&mut self, v: &Value) -> Result<Vec<String>, Abrupt> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
+        // A string primitive enumerates its index keys (ToObject makes them own properties).
+        if let Value::Str(sv) = v {
+            for k in 0..crate::jstr::unit_len(sv) {
+                out.push(k.to_string());
+            }
+            return Ok(out);
+        }
         let mut cur = match v {
             Value::Obj(o) => Some(o.clone()),
             _ => None,
@@ -4097,7 +4105,9 @@ impl Interp {
             if m.kind == MemberKind::Constructor {
                 continue;
             }
-            let key = self.eval_prop_key(&m.key, env)?;
+            // Computed keys evaluate with the class's PrivateEnvironment active: an arrow made
+            // inside one may capture `A.#x` (class_env holds the runtime private-name bindings).
+            let key = self.eval_prop_key(&m.key, &class_env)?;
             // A *computed* static member key evaluating to "prototype" is a runtime TypeError
             // (the syntactic form is already an early error).
             if m.is_static && key == "prototype" && matches!(m.key, PropKey::Computed(_)) {
