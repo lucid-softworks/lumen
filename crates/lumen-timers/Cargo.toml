@@ -1,0 +1,16 @@
+# Timer op crate: setTimeout/setInterval/clearTimeout/clearInterval/setImmediate. The timer
+# heap lives in OpState; the runtime's loop asks it for the next deadline and the due batch
+# each turn (the ops themselves never sleep or spawn). Std-only.
+[package]
+name = "lumen-timers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+
+[lints]
+workspace = true
