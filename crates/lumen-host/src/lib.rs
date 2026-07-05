@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 
 pub use lumen::embed::{Ctx, NativeFn, OpState, ResourceId, ResourceTable, Value};
-pub use lumen::{Completion, Engine};
+pub use lumen::{Completion, Engine, ParseError};
 
 /// One native op: a named native function with its JS arity.
 #[derive(Clone, Copy)]
@@ -173,6 +173,66 @@ impl ThreadPool {
                 work: Box::new(work),
             })
             .expect("worker threads gone");
+    }
+
+    /// A cloneable spawn handle. The runtime puts one in [`OpState`], which is how a native fn
+    /// (holding only `&mut Ctx`) reaches the pool.
+    pub fn handle(&self) -> SpawnHandle {
+        SpawnHandle {
+            work_tx: self.work_tx.clone().expect("pool shut down"),
+        }
+    }
+}
+
+/// [`ThreadPool::spawn_blocking`] as an [`OpState`]-storable handle, so op crates can spawn
+/// blocking work from inside a native fn.
+#[derive(Clone)]
+pub struct SpawnHandle {
+    work_tx: mpsc::Sender<Task>,
+}
+
+impl SpawnHandle {
+    pub fn spawn_blocking(
+        &self,
+        id: TaskId,
+        work: impl FnOnce() -> Box<dyn Any + Send> + Send + 'static,
+    ) {
+        self.work_tx
+            .send(Task {
+                id,
+                work: Box::new(work),
+            })
+            .expect("worker threads gone");
+    }
+}
+
+/// Turns a completed task's `Send` payload back into JS callback arguments, on the loop
+/// thread. `Err` is a JS value to report as an uncaught exception (later: a rejection).
+pub type TaskDecoder = fn(&mut Ctx, Box<dyn Any + Send>) -> Result<Vec<Value>, Value>;
+
+/// In-flight async tasks: `TaskId -> (JS callback, payload decoder)`. Lives in [`OpState`];
+/// the op that spawns work registers here, the loop settles from [`TaskCompletion`]s. The
+/// event loop stays alive while this is non-empty.
+#[derive(Default)]
+pub struct TaskRegistry {
+    next: TaskId,
+    map: std::collections::HashMap<TaskId, (Value, TaskDecoder)>,
+}
+
+impl TaskRegistry {
+    /// Reserve an id for work about to be spawned, remembering how to settle it.
+    pub fn register(&mut self, callback: Value, decode: TaskDecoder) -> TaskId {
+        let id = self.next;
+        self.next += 1;
+        self.map.insert(id, (callback, decode));
+        id
+    }
+    /// Claim a completed task's callback + decoder (a missing id means it was cancelled).
+    pub fn take(&mut self, id: TaskId) -> Option<(Value, TaskDecoder)> {
+        self.map.remove(&id)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
