@@ -4448,9 +4448,16 @@ pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, V
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
-            // The constructor's `prototype` isn't an object — use its realm's intrinsic.
-            _ => ctor_realm_proto(i, &i.new_target.clone(), default_proto)
-                .or_else(|| i.extra_protos.get(default_proto).cloned()),
+            // The constructor's `prototype` isn't an object — use its realm's intrinsic
+            // (GetFunctionRealm, which throws for a proxy revoked mid-construct — the
+            // `prototype` getter may have revoked it).
+            _ => {
+                if let Value::Obj(nt_o) = i.new_target.clone() {
+                    ab(i.get_function_realm_global(&nt_o))?;
+                }
+                ctor_realm_proto(i, &i.new_target.clone(), default_proto)
+                    .or_else(|| i.extra_protos.get(default_proto).cloned())
+            }
         },
         _ => i.extra_protos.get(default_proto).cloned(),
     };
@@ -9064,6 +9071,11 @@ fn internalize_json_property(
                         _ => None,
                     })
                     .collect()
+            } else if let Some(info) = val.as_obj().and_then(|o| ta_info(i, o)) {
+                // A TypedArray holder (a reviver may graft one in) walks its integer indices.
+                (0..i.ta_len(&info).unwrap_or(0))
+                    .map(|k| k.to_string())
+                    .collect()
             } else {
                 val.as_obj()
                     .map(|o| ordered_enum_keys(o).iter().map(|k| k.to_string()).collect())
@@ -10629,21 +10641,17 @@ fn proxy_get_prototype(i: &mut Interp, target: &Value, handler: &Value) -> Resul
                 "getPrototypeOf trap must return an object or null",
             ));
         }
-        // Invariant: for a non-extensible target the reported prototype must be the real one.
-        if let Value::Obj(t) = target {
-            if !t.borrow().extensible {
-                let actual = t
-                    .borrow()
-                    .proto
-                    .clone()
-                    .map(Value::Obj)
-                    .unwrap_or(Value::Null);
-                if !i.strict_equals(&res, &actual) {
-                    return Err(i.make_error(
-                        "TypeError",
-                        "getPrototypeOf trap result differs from a non-extensible target's prototype",
-                    ));
-                }
+        // Step 9: IsExtensible(target) runs unconditionally (its trap is observable and may
+        // throw); a non-extensible target pins the reported prototype to the real one (via the
+        // target's own [[GetPrototypeOf]], which may itself be a trap).
+        let extensible = js_is_extensible(i, target)?;
+        if !extensible {
+            let actual = js_get_prototype_of(i, target)?;
+            if !i.strict_equals(&res, &actual) {
+                return Err(i.make_error(
+                    "TypeError",
+                    "getPrototypeOf trap result differs from a non-extensible target's prototype",
+                ));
             }
         }
         Ok(res)
@@ -10850,6 +10858,71 @@ pub(crate) fn proxy_gopd_value(
             ));
         }
     }
+    // A non-configurable target property pins the reported descriptor: configurability,
+    // enumerability and the data/accessor shape must all match (IsCompatiblePropertyDescriptor).
+    if let Value::Obj(t) = target {
+        if let Some(p) = t.borrow().props.get(key) {
+            if !p.configurable {
+                if !matches!(pd.configurable, Some(false)) {
+                    return Err(i.make_error(
+                        "TypeError",
+                        format!("proxy can't report an existing non-configurable property '{key}' as configurable"),
+                    ));
+                }
+                if let Some(e) = pd.enumerable {
+                    if e != p.enumerable {
+                        return Err(i.make_error(
+                            "TypeError",
+                            format!("proxy can't report a different 'enumerable' for '{key}' when the target property is not configurable"),
+                        ));
+                    }
+                }
+                let reported_accessor = pd.get.is_some() || pd.set.is_some();
+                let reported_data = pd.value.is_some() || pd.writable.is_some();
+                if (reported_accessor && !p.accessor) || (reported_data && p.accessor) {
+                    return Err(i.make_error(
+                        "TypeError",
+                        format!("proxy can't report a differently-shaped descriptor for the non-configurable property '{key}'"),
+                    ));
+                }
+                if !p.accessor && !p.writable && matches!(pd.writable, Some(true)) {
+                    return Err(i.make_error(
+                        "TypeError",
+                        format!("proxy can't report a non-configurable, non-writable property '{key}' as writable"),
+                    ));
+                }
+                if !p.accessor && !p.writable {
+                    if let Some(v) = &pd.value {
+                        if !same_value(v, &p.value) {
+                            return Err(i.make_error(
+                                "TypeError",
+                                format!("proxy must report the same value for the non-writable, non-configurable property '{key}'"),
+                            ));
+                        }
+                    }
+                }
+                if p.accessor {
+                    let same_fn = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
+                        (Some(x), Some(y)) => same_value(x, y),
+                        (None, None) => true,
+                        (Some(x), None) | (None, Some(x)) => matches!(x, Value::Undefined),
+                    };
+                    if pd.get.is_some() && !same_fn(&pd.get, &p.get) {
+                        return Err(i.make_error(
+                            "TypeError",
+                            format!("proxy must report the same getter for the non-configurable property '{key}'"),
+                        ));
+                    }
+                    if pd.set.is_some() && !same_fn(&pd.set, &p.set) {
+                        return Err(i.make_error(
+                            "TypeError",
+                            format!("proxy must report the same setter for the non-configurable property '{key}'"),
+                        ));
+                    }
+                }
+            }
+        }
+    }
     // A reported non-configurable descriptor must be backed by the target.
     if matches!(pd.configurable, Some(false)) {
         if let Value::Obj(t) = target {
@@ -10963,12 +11036,49 @@ fn proxy_define_property(
                     ));
                 }
                 // IsCompatiblePropertyDescriptor: a non-configurable target property can't be
-                // redefined as configurable.
+                // redefined as configurable, change enumerability, or switch shape.
                 if !p.configurable && matches!(pd.configurable, Some(true)) {
                     return Err(i.throw(
                         "TypeError",
                         "proxy 'defineProperty' made a non-configurable target property configurable",
                     ));
+                }
+                if !p.configurable {
+                    if let Some(e) = pd.enumerable {
+                        if e != p.enumerable {
+                            return Err(i.throw(
+                                "TypeError",
+                                format!("proxy can't report a different 'enumerable' for '{key}' when the target property is not configurable"),
+                            ));
+                        }
+                    }
+                    let rep_acc = pd.get.is_some() || pd.set.is_some();
+                    let rep_data = pd.value.is_some() || pd.writable.is_some();
+                    if (rep_acc && !p.accessor) || (rep_data && p.accessor) {
+                        return Err(i.throw(
+                            "TypeError",
+                            format!("proxy can't change the descriptor shape of the non-configurable property '{key}'"),
+                        ));
+                    }
+                    if p.accessor {
+                        let same_fn = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
+                            (Some(x), Some(y)) => same_value(x, y),
+                            (None, None) => true,
+                            (Some(x), None) | (None, Some(x)) => matches!(x, Value::Undefined),
+                        };
+                        if pd.get.is_some() && !same_fn(&pd.get, &p.get) {
+                            return Err(i.throw(
+                                "TypeError",
+                                format!("proxy must define the same getter for the non-configurable property '{key}'"),
+                            ));
+                        }
+                        if pd.set.is_some() && !same_fn(&pd.set, &p.set) {
+                            return Err(i.throw(
+                                "TypeError",
+                                format!("proxy must define the same setter for the non-configurable property '{key}'"),
+                            ));
+                        }
+                    }
                 }
                 if !p.configurable && !p.accessor && !p.writable {
                     if matches!(pd.writable, Some(true)) {

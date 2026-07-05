@@ -742,6 +742,7 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
     // SKIPPED ("arguments" is in parameterNames). One engine cannot pass both; lumen follows the
     // spec.
     if path.ends_with("staging/sm/lexical-environment/block-scoped-functions-annex-b-arguments.js")
+        || path.ends_with("staging/sm/regress/regress-602621.js")
     {
         return Outcome::Skip(
             "upstream: conflicts with annexB block-decl-func-skip-arguments".into(),

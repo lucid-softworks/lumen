@@ -634,6 +634,9 @@ pub struct Interp {
     /// clear it, so a stray `super()` (including one reached through a direct `eval`) is rejected
     /// instead of re-entering instance-field initialization unboundedly.
     pub super_call_ok: bool,
+    /// Live user-function activations, oldest first: (fn ptr, fn object, arguments object,
+    /// strict). Backs the legacy SpiderMonkey `fn.caller` / `fn.arguments` reflection.
+    pub fn_frames: Vec<(usize, Value, Value, bool)>,
     /// Set by `yield*` just before parking: the yielded value is the inner iterator's result
     /// object and must pass through the generator driver unwrapped.
     pub yield_raw_result: bool,
@@ -1040,6 +1043,7 @@ impl Interp {
             gc_next: GC_TRIGGER,
             constructing: false,
             super_call_ok: false,
+            fn_frames: Vec::new(),
             in_field_init_code: false,
             yield_raw_result: false,
             in_async_gen_body: false,
@@ -1703,10 +1707,32 @@ impl Interp {
                         )
                     {
                         if let Value::Obj(r) = receiver {
-                            if let Callable::User(f, _) = &r.borrow().call {
-                                if !f.is_strict && !f.is_arrow && !f.is_generator && !f.is_async {
-                                    return Ok(Value::Undefined);
+                            let plain = match &r.borrow().call {
+                                Callable::User(f, _) => {
+                                    !f.is_strict
+                                        && !f.is_arrow
+                                        && !f.is_generator
+                                        && !f.is_async
+                                        && !f.is_method
                                 }
+                                _ => false,
+                            };
+                            if plain {
+                                // Legacy SpiderMonkey reflection: the youngest activation's
+                                // arguments object / calling function (null when inactive; a
+                                // strict caller is censored to null). Eval runs inline, so eval
+                                // frames are naturally skipped.
+                                let rptr = Rc::as_ptr(r) as usize;
+                                let top = self.fn_frames.iter().rposition(|fr| fr.0 == rptr);
+                                return Ok(match (key, top) {
+                                    (_, None) => Value::Null,
+                                    ("arguments", Some(k)) => self.fn_frames[k].2.clone(),
+                                    (_, Some(k)) => match self.fn_frames[..k].last() {
+                                        None => Value::Null,
+                                        Some(fr) if fr.3 => Value::Null,
+                                        Some(fr) => fr.1.clone(),
+                                    },
+                                });
                             }
                         }
                     }
@@ -3193,7 +3219,15 @@ impl Interp {
         is_construct: bool,
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
-        self.call_user_inner(func, closure, this, args, is_construct, fn_obj)
+        self.fn_frames.push((
+            Rc::as_ptr(fn_obj) as usize,
+            Value::Obj(fn_obj.clone()),
+            Value::Null,
+            func.is_strict,
+        ));
+        let r = self.call_user_inner(func, closure, this, args, is_construct, fn_obj);
+        self.fn_frames.pop();
+        r
     }
 
     fn call_user_inner(
@@ -3389,6 +3423,9 @@ impl Interp {
                     self.mapped_arguments
                         .insert(Rc::as_ptr(&ao) as usize, (scope.clone(), names));
                 }
+            }
+            if let Some(frame) = self.fn_frames.last_mut() {
+                frame.2 = Value::Obj(ao.clone());
             }
             scope.borrow_mut().vars.insert(
                 "arguments".to_string(),

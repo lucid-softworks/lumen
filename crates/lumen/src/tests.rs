@@ -8632,7 +8632,10 @@ fn function_to_string_source_text() {
     );
     // Natives render as native code carrying their name; bound functions drop the
     // "bound f" compound (not a valid PropertyName).
-    assert_eq!(run("Math.max.toString()"), "function max() { [native code] }");
+    assert_eq!(
+        run("Math.max.toString()"),
+        "function max() { [native code] }"
+    );
     assert_eq!(
         run("(function f(){}).bind(null).toString()"),
         "function () { [native code] }"
