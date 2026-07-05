@@ -17,3 +17,7 @@ release = false
 [[package]]
 name = "lumen-wasm"
 release = false
+
+[[package]]
+name = "lumen-difftest"
+release = false

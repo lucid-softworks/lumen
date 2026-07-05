@@ -1,0 +1,15 @@
+# Differential fuzzer: the same generated program runs in the interp tier (reference oracle) and
+# the bytecode tier; any observable divergence is minimized and archived. See src/main.rs.
+[package]
+name = "lumen-difftest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen = { path = "../lumen" }
+
+[lints]
+workspace = true

@@ -54,6 +54,13 @@ name = "lumen"
 version = "0.1.1"
 
 [[package]]
+name = "lumen-difftest"
+version = "0.1.1"
+dependencies = [
+ "lumen",
+]
+
+[[package]]
 name = "lumen-wasm"
 version = "0.1.1"
 dependencies = [
