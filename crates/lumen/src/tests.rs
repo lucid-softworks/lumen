@@ -1501,10 +1501,11 @@ fn regex_validation() {
 }
 #[test]
 fn poison_pill() {
-    // Function.prototype.caller/arguments: the getter yields undefined for an ordinary sloppy
-    // function (legacy web compat) and throws for strict ones; the setter always throws.
-    assert_eq!(run("function f(){}; String(f.caller)"), "undefined");
-    assert_eq!(run("function f(){}; String(f.arguments)"), "undefined");
+    // Function.prototype.caller/arguments: the getter reflects the call stack for an ordinary
+    // sloppy function (null while inactive — legacy web compat) and throws for strict ones; the
+    // setter always throws.
+    assert_eq!(run("function f(){}; String(f.caller)"), "null");
+    assert_eq!(run("function f(){}; String(f.arguments)"), "null");
     assert_eq!(
         throws("function f(){}; 'use strict'; f.caller = 1"),
         "TypeError"
@@ -8604,8 +8605,8 @@ fn restricted_caller_arguments_shared_accessor() {
         ),
         "true"
     );
-    // ...but reading it through an ordinary sloppy function still yields undefined,
-    assert_eq!(run("function f() {} String(f.caller)"), "undefined");
+    // ...but reading it through an ordinary sloppy function reflects the stack (inactive: null),
+    assert_eq!(run("function f() {} String(f.caller)"), "null");
     // while strict functions and Function.prototype itself throw.
     assert_eq!(
         throws("'use strict'; function f() {} f.caller"),
