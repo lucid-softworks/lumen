@@ -1817,9 +1817,10 @@ impl Interp {
             }
             cur = parent;
         }
-        // Fall back to a property of the global object (where builtins live).
+        // Fall back to a property of the global object (where builtins live). The lookup is the
+        // full trap-aware [[HasProperty]]: the global's prototype may be (or contain) a proxy.
         let g = Value::Obj(self.global.clone());
-        if self.has_property(&self.global.clone(), name) {
+        if self.js_has_property(&g, name)? {
             return Ok((self.get_member(&g, name)?, None));
         }
         Err(self.throw("ReferenceError", format!("{name} is not defined")))
@@ -2136,8 +2137,9 @@ impl Interp {
             }
             cur = parent;
         }
-        // A declared global `var`/`function` lives as a property of the global object.
-        if self.has_property(&self.global.clone(), name) {
+        // A declared global `var`/`function` lives as a property of the global object (the check
+        // is the trap-aware [[HasProperty]] — the global's proto chain may contain a proxy).
+        if self.js_has_property(&Value::Obj(self.global.clone()), name)? {
             return self.set_member(&Value::Obj(self.global.clone()), name, value);
         }
         // Truly undeclared: strict → ReferenceError; sloppy → create a global property.
@@ -6924,7 +6926,7 @@ impl Interp {
                     }
                     cur = parent;
                 }
-                if self.has_property(&self.global.clone(), name) {
+                if self.js_has_property(&Value::Obj(self.global.clone()), name)? {
                     return Ok(Reference::Var(RefBase::Global, name.clone()));
                 }
                 Ok(Reference::Var(RefBase::Unresolvable, name.clone()))
@@ -7124,7 +7126,9 @@ impl Interp {
                 }
                 RefBase::Global => {
                     let g = Value::Obj(self.global.clone());
-                    if self.strict && !self.has_property(&self.global.clone(), name) {
+                    // SetMutableBinding re-checks HasProperty — trap-aware, the global's proto
+                    // chain may contain a proxy.
+                    if self.strict && !self.js_has_property(&g, name)? {
                         return Err(self.throw("ReferenceError", format!("{name} is not defined")));
                     }
                     self.set_member(&g, name, value)

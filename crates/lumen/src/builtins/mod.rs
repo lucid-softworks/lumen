@@ -26,8 +26,8 @@ fn this_obj(this: &Value) -> Option<Gc> {
 }
 
 /// The newTarget realm's %RegExp.prototype% (GetFunctionRealm fallback for RegExp construction).
-pub(crate) fn regexp_realm_proto(i: &Interp, nt: &Value) -> Option<Gc> {
-    ctor_realm_proto(i, nt, "RegExp")
+pub(crate) fn regexp_realm_proto(i: &mut Interp, nt: &Value) -> Option<Gc> {
+    ctor_realm_proto(i, nt, "RegExp").unwrap_or(None)
 }
 
 /// Set(O, P, V, true): perform [[Set]] and throw a TypeError if it returns false, matching the
@@ -4400,20 +4400,25 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
 /// GetFunctionRealm-style lookup: when `new.target`'s `prototype` isn't an object, the instance's
 /// [[Prototype]] is `new.target`'s realm's intrinsic. The realm is identified by which registered
 /// realm's `Function.prototype` lies on `new.target`'s own prototype chain.
-fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
-    let mut ntobj: Gc = nt.as_obj()?.clone();
+/// GetFunctionRealm-backed intrinsic lookup for OrdinaryCreateFromConstructor's fallback: a
+/// revoked proxy on the newTarget chain is a TypeError (the spec's GetFunctionRealm throws).
+fn ctor_realm_proto(i: &mut Interp, nt: &Value, default_proto: &str) -> Result<Option<Gc>, Value> {
+    let Some(o) = nt.as_obj() else {
+        return Ok(None);
+    };
+    let mut ntobj: Gc = o.clone();
     // GetFunctionRealm unwraps bound functions and (unrevoked) proxies to their targets.
     for _ in 0..64 {
         if let Some((target, handler)) = i.proxies.get(&(Rc::as_ptr(&ntobj) as usize)) {
             if matches!(handler, Value::Null) {
-                return None;
+                return Err(i.make_error("TypeError", "cannot get the realm of a revoked proxy"));
             }
             match target {
                 Value::Obj(t) => {
                     ntobj = t.clone();
                     continue;
                 }
-                _ => return None,
+                _ => return Ok(None),
             }
         }
         let bound = match &ntobj.borrow().call {
@@ -4425,10 +4430,14 @@ fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
             None => break,
         }
     }
-    let g = i.callee_realm_global(&ntobj)?;
-    let rs = i.realms.get(&g)?;
+    let Some(g) = i.callee_realm_global(&ntobj) else {
+        return Ok(None);
+    };
+    let Some(rs) = i.realms.get(&g) else {
+        return Ok(None);
+    };
     // Core intrinsics live in named fields; errors in error_protos; the rest in extra_protos.
-    match default_proto {
+    Ok(match default_proto {
         "Object" => Some(rs.object_proto.clone()),
         "Array" => Some(rs.array_proto.clone()),
         "Function" => Some(rs.function_proto.clone()),
@@ -4441,7 +4450,7 @@ fn ctor_realm_proto(i: &Interp, nt: &Value, default_proto: &str) -> Option<Gc> {
             .get(other)
             .cloned()
             .or_else(|| rs.extra_protos.get(other).cloned()),
-    }
+    })
 }
 
 pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, Value> {
@@ -4451,13 +4460,8 @@ pub(crate) fn new_from_ctor(i: &mut Interp, default_proto: &str) -> Result<Gc, V
             // The constructor's `prototype` isn't an object — use its realm's intrinsic
             // (GetFunctionRealm, which throws for a proxy revoked mid-construct — the
             // `prototype` getter may have revoked it).
-            _ => {
-                if let Value::Obj(nt_o) = i.new_target.clone() {
-                    ab(i.get_function_realm_global(&nt_o))?;
-                }
-                ctor_realm_proto(i, &i.new_target.clone(), default_proto)
-                    .or_else(|| i.extra_protos.get(default_proto).cloned())
-            }
+            _ => ctor_realm_proto(i, &i.new_target.clone(), default_proto)?
+                .or_else(|| i.extra_protos.get(default_proto).cloned()),
         },
         _ => i.extra_protos.get(default_proto).cloned(),
     };
@@ -4595,7 +4599,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     let proto = match &i.new_target {
         nt @ Value::Obj(_) => match ab(i.get_member(&nt.clone(), "prototype"))? {
             Value::Obj(p) => Some(p),
-            _ => ctor_realm_proto(i, &i.new_target.clone(), kind.name())
+            _ => ctor_realm_proto(i, &i.new_target.clone(), kind.name())?
                 .or_else(|| i.extra_protos.get(kind.name()).cloned()),
         },
         _ => i.extra_protos.get(kind.name()).cloned(),
@@ -7607,6 +7611,10 @@ fn install_reflect(it: &mut Interp) {
         Ok(Value::Bool(ok))
     });
     it.def_method(&r, "apply", 3, |i, _t, a| {
+        // IsCallable(target) is checked before the argument list is read.
+        if !arg(a, 0).is_callable() {
+            return Err(i.make_error("TypeError", "Reflect.apply target is not callable"));
+        }
         let args = create_list_from_array_like(i, &arg(a, 2))?;
         ab(i.call(arg(a, 0), arg(a, 1), &args))
     });
@@ -8196,7 +8204,7 @@ fn install_promise(it: &mut Interp) {
             match ab(i.get_member(nt, "prototype"))? {
                 Value::Obj(proto) => p.borrow_mut().proto = Some(proto),
                 _ => {
-                    if let Some(proto) = ctor_realm_proto(i, nt, "Promise") {
+                    if let Some(proto) = ctor_realm_proto(i, &nt.clone(), "Promise")? {
                         p.borrow_mut().proto = Some(proto);
                     }
                 }
@@ -10201,7 +10209,7 @@ fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Resu
                         }
                     }
                     _ => {
-                        if let Some(p) = ctor_realm_proto(i, &nt, kind_key) {
+                        if let Some(p) = ctor_realm_proto(i, &nt, kind_key)? {
                             if let Value::Obj(fo) = &func {
                                 fo.borrow_mut().proto = Some(p);
                             }
@@ -11408,7 +11416,7 @@ fn install_object(it: &mut Interp) {
                 if !is_self {
                     let proto = match ab(i.get_member(&Value::Obj(nt.clone()), "prototype"))? {
                         Value::Obj(p) => Some(p),
-                        _ => ctor_realm_proto(i, &Value::Obj(nt), "Object")
+                        _ => ctor_realm_proto(i, &Value::Obj(nt), "Object")?
                             .or_else(|| Some(i.object_proto.clone())),
                     };
                     return Ok(Value::Obj(Object::new(proto)));
@@ -13319,7 +13327,7 @@ fn install_array(it: &mut Interp) {
             if let Value::Obj(_) = &nt {
                 let proto = match ab(i.get_member(&nt, "prototype"))? {
                     Value::Obj(p) => Some(p),
-                    _ => ctor_realm_proto(i, &nt, "Array"),
+                    _ => ctor_realm_proto(i, &nt, "Array")?,
                 };
                 if let (Value::Obj(o), Some(p)) = (&a, proto) {
                     if !Rc::ptr_eq(&p, &i.array_proto) {
@@ -13937,7 +13945,7 @@ fn install_iterator(it: &mut Interp) {
         // back to the newTarget realm's %Iterator.prototype%.
         let proto = match ab(i.get_member(&nt, "prototype"))? {
             Value::Obj(p) => Some(p),
-            _ => ctor_realm_proto(i, &nt, "%IteratorPrototype%")
+            _ => ctor_realm_proto(i, &nt, "%IteratorPrototype%")?
                 .or_else(|| i.extra_protos.get("%IteratorPrototype%").cloned()),
         };
         Ok(Value::Obj(Object::new(proto)))
@@ -16927,7 +16935,7 @@ fn maybe_box(i: &mut Interp, v: Value) -> Value {
             match i.get_member(&nt, "prototype") {
                 Ok(Value::Obj(p)) => o.borrow_mut().proto = Some(p),
                 Ok(_) => {
-                    if let Some(p) = ctor_realm_proto(i, &nt, key) {
+                    if let Ok(Some(p)) = ctor_realm_proto(i, &nt, key) {
                         o.borrow_mut().proto = Some(p);
                     }
                 }
@@ -18178,7 +18186,7 @@ fn install_errors(it: &mut Interp) {
             let nt = i.new_target.clone();
             let proto = match i.get_member(&nt, "prototype") {
                 Ok(Value::Obj(p)) => Some(p),
-                _ => ctor_realm_proto(i, &nt, "AggregateError")
+                _ => ctor_realm_proto(i, &nt, "AggregateError")?
                     .or_else(|| i.error_protos.get("AggregateError").cloned()),
             };
             if let (Value::Obj(o), Some(p)) = (&err, proto) {
@@ -18231,7 +18239,7 @@ fn install_errors(it: &mut Interp) {
             let nt = i.new_target.clone();
             let proto = match i.get_member(&nt, "prototype") {
                 Ok(Value::Obj(p)) => Some(p),
-                _ => ctor_realm_proto(i, &nt, "SuppressedError")
+                _ => ctor_realm_proto(i, &nt, "SuppressedError")?
                     .or_else(|| i.error_protos.get("SuppressedError").cloned()),
             };
             if let (Value::Obj(o), Some(p)) = (&err, proto) {
@@ -18279,7 +18287,7 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Result<Value, Value> 
         let nt = i.new_target.clone();
         let proto = match i.get_member(&nt, "prototype") {
             Ok(Value::Obj(p)) => Some(p),
-            _ => ctor_realm_proto(i, &nt, kind).or_else(|| i.error_protos.get(kind).cloned()),
+            _ => ctor_realm_proto(i, &nt, kind)?.or_else(|| i.error_protos.get(kind).cloned()),
         };
         if let (Value::Obj(o), Some(p)) = (&err, proto) {
             o.borrow_mut().proto = Some(p);

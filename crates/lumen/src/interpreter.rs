@@ -4166,6 +4166,7 @@ impl Interp {
                 // `prototype` property; only real built-in constructors do. Reject `new` on the rest.
                 let constructable =
                     obj.borrow().is_constructor || obj.borrow().props.contains("prototype");
+
                 if !constructable {
                     return Err(self.throw("TypeError", "function is not a constructor"));
                 }
