@@ -1,0 +1,17 @@
+# The substrate every lumen op crate and the runtime share: the Extension/OpDecl registration
+# model (deno_core's shape), plus the two scheduling primitives (threadpool completions and
+# loop-turn callbacks) that timers/fs/net are all built on. Sits *below* the op crates so the
+# runtime <-> ops dependency cycle never forms. Std-only, like everything in this workspace.
+[package]
+name = "lumen-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen = { path = "../lumen", features = ["embed"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,191 @@
+//! lumen-host — the substrate shared by every op crate and the runtime.
+//!
+//! An *op crate* (timers, fs, ...) exports one [`Extension`]: a named bundle of native
+//! functions plus host-state initialization. A runtime is assembled by [`install`]ing a list
+//! of extensions into an [`Engine`]. Rust state never lives in the native fns themselves
+//! (they are bare `fn` pointers): it lives in [`OpState`], reached through the `&mut Ctx`
+//! argument every native fn receives.
+//!
+//! Two scheduling primitives serve every async op (this mirrors libuv's own fs strategy —
+//! regular files are not pollable, so async fs is threadpool + completion, not readiness):
+//! - [`ThreadPool::spawn_blocking`]: run blocking work off-thread; its result comes back to
+//!   the loop thread as a [`TaskCompletion`] over `mpsc`.
+//! - [`CallbackQueue`]: loop-thread-local queue of JS callbacks to fire on the next turn
+//!   (JS values are `!Send`, so they never cross threads; off-thread work refers to its
+//!   callback by [`TaskId`]).
+
+use std::any::Any;
+use std::collections::VecDeque;
+use std::sync::mpsc;
+
+pub use lumen::embed::{Ctx, NativeFn, OpState, ResourceId, ResourceTable, Value};
+pub use lumen::{Completion, Engine};
+
+/// One native op: a named native function with its JS arity.
+#[derive(Clone, Copy)]
+pub struct OpDecl {
+    pub name: &'static str,
+    pub len: usize,
+    pub f: NativeFn,
+}
+
+/// Declarative op-declaration table: `ops!["add" (2) => add_impl, ...]`. Uniform by design so
+/// op registration stays a table, never hand-written glue (deno's `#[op2]` lesson).
+#[macro_export]
+macro_rules! ops {
+    ($($name:literal ($len:expr) => $f:expr),* $(,)?) => {
+        &[$($crate::OpDecl { name: $name, len: $len, f: $f }),*]
+    };
+}
+
+/// A bundle of native ops + host-state init, exported one per op crate. Composing a runtime
+/// is `install(&mut engine, &[timers::extension(), fs::extension(), ...])`.
+pub struct Extension {
+    pub name: &'static str,
+    /// Installed as `globalThis.<name>` functions (e.g. `setTimeout`).
+    pub globals: &'static [OpDecl],
+    /// Installed as `globalThis.<ns>.<name>` namespace methods (e.g. a `__lumen_fs` ops
+    /// object that a JS shim wraps into the public API).
+    pub namespaces: &'static [(&'static str, &'static [OpDecl])],
+    /// Installs this extension's state (timer heap, fd table, ...) into [`OpState`].
+    pub state_init: Option<fn(&mut OpState)>,
+}
+
+impl Extension {
+    /// An empty extension named `name`; fill in the fields that apply.
+    pub const fn new(name: &'static str) -> Extension {
+        Extension {
+            name,
+            globals: &[],
+            namespaces: &[],
+            state_init: None,
+        }
+    }
+}
+
+/// Install extensions into an engine: state first (an op may fire during install), then ops.
+pub fn install(engine: &mut Engine, extensions: &[Extension]) {
+    for ext in extensions {
+        if let Some(init) = ext.state_init {
+            init(engine.ctx().op_state());
+        }
+        for op in ext.globals {
+            engine.define_global(op.name, op.len, op.f);
+        }
+        for (ns, ops) in ext.namespaces {
+            let table: Vec<(&str, usize, NativeFn)> =
+                ops.iter().map(|o| (o.name, o.len, o.f)).collect();
+            engine.define_namespace(ns, &table);
+        }
+    }
+}
+
+/// Identifies an in-flight async task. The op that spawns work registers `TaskId -> JS
+/// callback/promise` in its own [`OpState`] slot; the completion carries the id back so the
+/// loop thread can look the JS value up (JS values themselves are `!Send`).
+pub type TaskId = u64;
+
+/// What off-thread work sends back to the loop thread. `result` is whatever `Send` payload
+/// the spawning op chose; that op downcasts it when the loop hands the completion over.
+pub struct TaskCompletion {
+    pub task: TaskId,
+    pub result: Box<dyn Any + Send>,
+}
+
+/// JS callbacks queued (on the loop thread) to run on the next loop turn — the
+/// `enqueue_callback` primitive. Lives in [`OpState`]; the runtime drains it each turn.
+#[derive(Default)]
+pub struct CallbackQueue {
+    pub queue: VecDeque<(Value, Vec<Value>)>,
+}
+
+impl CallbackQueue {
+    /// Queue `callback(args...)` for the next loop turn.
+    pub fn enqueue(state: &mut OpState, callback: Value, args: Vec<Value>) {
+        if !state.has::<CallbackQueue>() {
+            state.put(CallbackQueue::default());
+        }
+        state
+            .get_mut::<CallbackQueue>()
+            .expect("just installed")
+            .queue
+            .push_back((callback, args));
+    }
+}
+
+struct Task {
+    id: TaskId,
+    work: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>,
+}
+
+/// A fixed pool of std worker threads running blocking work (`std::fs`, blocking
+/// `std::net`); completions come back over the `mpsc` channel given at construction. This is
+/// the whole async-I/O story until (if ever) a hand-rolled readiness reactor on raw platform
+/// syscalls is explicitly authorized — never via a crate.
+pub struct ThreadPool {
+    work_tx: Option<mpsc::Sender<Task>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadPool {
+    /// `size` worker threads sending [`TaskCompletion`]s to `completions` (the loop thread
+    /// holds the receiving end).
+    pub fn new(size: usize, completions: mpsc::Sender<TaskCompletion>) -> ThreadPool {
+        let (work_tx, work_rx) = mpsc::channel::<Task>();
+        // std's mpsc receiver is single-consumer: share it across workers behind a mutex.
+        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
+        let workers = (0..size.max(1))
+            .map(|_| {
+                let work_rx = std::sync::Arc::clone(&work_rx);
+                let completions = completions.clone();
+                std::thread::spawn(move || loop {
+                    let task = match work_rx.lock().expect("worker queue poisoned").recv() {
+                        Ok(t) => t,
+                        Err(_) => return, // pool dropped: no more work
+                    };
+                    let result = (task.work)();
+                    // The loop shutting down first is fine; the result just has nowhere to go.
+                    let _ = completions.send(TaskCompletion {
+                        task: task.id,
+                        result,
+                    });
+                })
+            })
+            .collect();
+        ThreadPool {
+            work_tx: Some(work_tx),
+            workers,
+        }
+    }
+
+    /// Run `work` on a pool thread; its return value comes back to the loop as a
+    /// [`TaskCompletion`] tagged with `id`.
+    pub fn spawn_blocking(
+        &self,
+        id: TaskId,
+        work: impl FnOnce() -> Box<dyn Any + Send> + Send + 'static,
+    ) {
+        self.work_tx
+            .as_ref()
+            .expect("pool shut down")
+            .send(Task {
+                id,
+                work: Box::new(work),
+            })
+            .expect("worker threads gone");
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        // Closing the work channel ends each worker's recv loop; join so no worker outlives
+        // the runtime that owns the completion receiver.
+        self.work_tx.take();
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
