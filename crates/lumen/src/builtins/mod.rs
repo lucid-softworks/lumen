@@ -14384,7 +14384,8 @@ fn async_dispose_via_return(i: &mut Interp, this: Value, _a: &[Value]) -> Result
         i.resolve_promise(&promise, Value::Undefined);
         return Ok(promise);
     }
-    match i.call(ret, this, &[Value::Undefined]) {
+    // Spec step 6.a: Call(return, O, « ») — no arguments (observable via arguments.length).
+    match i.call(ret, this, &[]) {
         Ok(v) => {
             let inner = promise_resolve_value(i, v);
             let on_f = make_bound_len(i, dispose_settle_fulfil, vec![promise.clone()], 1.0);

@@ -750,6 +750,13 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
             "upstream: conflicts with annexB block-decl-func-skip-arguments".into(),
         );
     }
+    // Upstream test bug: verifies result.fulfilled / result.rejected with the destructive
+    // verifyProperty (isConfigurable deletes the property and does not restore it), then reads
+    // the now-deleted entries. A spec-perfect implementation fails identically (verified against
+    // V8 with a by-the-spec polyfill); the test needs `{restore: true}` or reordering upstream.
+    if path.ends_with("Promise/allSettledKeyed/result-property-descriptors.js") {
+        return Outcome::Skip("upstream: destructive verifyProperty before entry reads".into());
+    }
     let fm = Frontmatter::parse(&src);
 
     if fm.has_flag("module") {
