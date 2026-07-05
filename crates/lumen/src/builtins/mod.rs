@@ -827,14 +827,30 @@ fn install_atomics(it: &mut Interp) {
                 "Atomics: cannot write into a view over an immutable ArrayBuffer",
             ));
         }
-        // ValidateAtomicAccess: ToIndex truncates toward zero (NaN→0); a negative or out-of-bounds
-        // result is a RangeError, but a fractional request index is simply truncated.
+        // ValidateAtomicAccess: the length is retrieved BEFORE the index coercion (which may
+        // detach or resize the buffer); ToIndex truncates toward zero (NaN→0); a negative or
+        // out-of-bounds result is a RangeError, a fractional request index simply truncated.
+        // ValidateIntegerTypedArray: an already-detached buffer is a TypeError up front.
+        let len0 = i
+            .ta_len(&info)
+            .ok_or_else(|| i.make_error("TypeError", "Atomics: detached TypedArray"))?;
         let raw = ab(i.to_number(&arg(args, 1)))?;
         let idx = if raw.is_nan() { 0.0 } else { raw.trunc() };
-        if idx < 0.0 || !idx.is_finite() || idx as usize >= info.len {
+        if idx < 0.0 || !idx.is_finite() || idx as usize >= len0 {
             return Err(i.make_error("RangeError", "Atomics: index out of range"));
         }
         Ok((info, idx as usize))
+    }
+
+    /// RevalidateAtomicAccess after a value coercion (which may detach or shrink the buffer).
+    fn revalidate(i: &mut Interp, info: &TaInfo, idx: usize) -> Result<(), Value> {
+        if i.ta_len(info).map(|l| idx < l) != Some(true) {
+            return Err(i.make_error(
+                "TypeError",
+                "Atomics: buffer was detached or shrunk during value coercion",
+            ));
+        }
+        Ok(())
     }
     fn operand(i: &mut Interp, info: &TaInfo, v: &Value) -> Result<i128, Value> {
         if info.kind.is_bigint() {
@@ -866,6 +882,7 @@ fn install_atomics(it: &mut Interp) {
     fn rmw(i: &mut Interp, args: &[Value], f: fn(i128, i128) -> i128) -> Result<Value, Value> {
         let (info, idx) = target_rw(i, args, true)?;
         let val = operand(i, &info, &arg(args, 2))?;
+        revalidate(i, &info, idx)?;
         // One atomic read-modify-write (a shared buffer's lock is held across both halves).
         let old = i.ta_modify(&info, idx, |o| Some(f(o, val))).unwrap_or(0);
         Ok(if info.kind.is_bigint() {
@@ -883,11 +900,13 @@ fn install_atomics(it: &mut Interp) {
     it.def_method(&atomics, "exchange", 3, |i, _t, a| rmw(i, a, |_o, v| v));
     it.def_method(&atomics, "load", 2, |i, _t, a| {
         let (info, idx) = target(i, a)?;
+        revalidate(i, &info, idx)?;
         Ok(i.ta_read(&info, idx))
     });
     it.def_method(&atomics, "store", 3, |i, _t, a| {
         let (info, idx) = target_rw(i, a, true)?;
         let val = operand(i, &info, &arg(a, 2))?;
+        revalidate(i, &info, idx)?;
         write_i128(i, &info, idx, val);
         // store returns the coerced value itself, not the (possibly wrapped) stored representation.
         Ok(if info.kind.is_bigint() {
@@ -900,6 +919,7 @@ fn install_atomics(it: &mut Interp) {
         let (info, idx) = target_rw(i, a, true)?;
         let expected = operand(i, &info, &arg(a, 2))?;
         let replacement = operand(i, &info, &arg(a, 3))?;
+        revalidate(i, &info, idx)?;
         // The comparison is on the element's raw byte representation, so the expected value
         // wraps to the element type first (e.g. 68547 matches an Int16 2979); the compare and
         // the conditional write happen under one lock hold.
@@ -5682,49 +5702,143 @@ fn parse_rfc(s: &str) -> f64 {
 
 fn parse_iso(s: &str) -> f64 {
     let s = s.trim();
-    let (date_part, time_part) = match s.split_once('T') {
-        Some((d, t)) => (d, Some(t)),
-        None => (s, None),
+    // The 'T' separator demands strict ISO component widths; the web-reality space separator
+    // (SpiderMonkey's NOTE-datetime extension) is lenient (1-2 digit fields, `±hh` offsets).
+    let (date_part, time_part, strict) = match s.split_once('T') {
+        Some((d, t)) => (d, Some(t), true),
+        None => match s.split_once(' ') {
+            Some((d, t)) => (d, Some(t), false),
+            None => (s, None, true),
+        },
     };
-    // Extended years carry an explicit sign and six digits (`+275760-…`, `-271821-…`);
-    // "-000000" is explicitly rejected.
-    let (neg_year, date_part) = match date_part.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, date_part.strip_prefix('+').unwrap_or(date_part)),
+    // Extended years carry an explicit sign and six digits (`+275760-…`); "-000000" is rejected.
+    let (neg_year, signed_year, date_part) = match date_part.strip_prefix('-') {
+        Some(r) => (true, true, r),
+        None => match date_part.strip_prefix('+') {
+            Some(r) => (false, true, r),
+            None => (false, false, date_part),
+        },
     };
-    if neg_year
-        && date_part
-            .split('-')
-            .next()
-            .is_some_and(|y| y.bytes().all(|b| b == b'0'))
-    {
+    let mut dp = date_part.splitn(3, '-');
+    let ystr = dp.next().unwrap_or("");
+    if !ystr.bytes().all(|b| b.is_ascii_digit()) || ystr.is_empty() {
         return f64::NAN;
     }
-    let mut dp = date_part.splitn(3, '-');
-    let y: i64 = match dp.next().and_then(|x| x.parse::<i64>().ok()) {
-        Some(v) => {
+    if strict {
+        let want = if signed_year { 6 } else { 4 };
+        if ystr.len() != want {
+            return f64::NAN;
+        }
+    }
+    if neg_year && ystr.bytes().all(|b| b == b'0') {
+        return f64::NAN;
+    }
+    let y: i64 = match ystr.parse::<i64>() {
+        Ok(v) => {
             if neg_year {
                 -v
             } else {
                 v
             }
         }
-        None => return f64::NAN,
+        Err(_) => return f64::NAN,
     };
-    let mo: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
-    let d: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
-    let (mut h, mut mi, mut s, mut ml) = (0i64, 0i64, 0i64, 0i64);
+    let field = |txt: Option<&str>, strict: bool| -> Option<i64> {
+        let t = txt?;
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if strict && t.len() != 2 {
+            return None;
+        }
+        if !strict && t.len() > 2 {
+            return None;
+        }
+        t.parse().ok()
+    };
+    let (mo_txt, d_txt) = (dp.next(), dp.next());
+    let mo = match mo_txt {
+        None => 1,
+        some => match field(some, strict) {
+            Some(v) => v,
+            None => return f64::NAN,
+        },
+    };
+    let d = match d_txt {
+        None => 1,
+        some => match field(some, strict) {
+            Some(v) => v,
+            None => return f64::NAN,
+        },
+    };
+    let (mut h, mut mi, mut sec, mut ml) = (0i64, 0i64, 0i64, 0i64);
+    let mut offset_min: Option<i64> = None;
     if let Some(tp) = time_part {
-        let tp = tp.trim_end_matches('Z');
-        let (hms, frac) = match tp.split_once('.') {
-            Some((a, b)) => (a, Some(b)),
-            None => (tp, None),
+        if tp.is_empty() {
+            return f64::NAN;
+        }
+        // Split a trailing zone: 'Z', or ±hh[:mm] / ±hhmm (strict requires ±hh:mm).
+        let (hms_frac, zone) = if let Some(rest) = tp.strip_suffix('Z') {
+            (rest, Some(0i64))
+        } else if let Some(pos) = tp.rfind(['+', '-']) {
+            let (a, z) = tp.split_at(pos);
+            let sign = if z.starts_with('-') { -1 } else { 1 };
+            let z = &z[1..];
+            let (zh, zm) = if let Some((zh, zm)) = z.split_once(':') {
+                (zh, zm)
+            } else if z.len() == 4 {
+                if strict {
+                    return f64::NAN;
+                }
+                z.split_at(2)
+            } else if z.len() == 2 {
+                if strict {
+                    return f64::NAN;
+                }
+                (z, "")
+            } else {
+                return f64::NAN;
+            };
+            if zh.len() != 2
+                || !(zm.is_empty() || zm.len() == 2)
+                || !zh.bytes().all(|b| b.is_ascii_digit())
+                || !zm.bytes().all(|b| b.is_ascii_digit())
+            {
+                return f64::NAN;
+            }
+            let mins = zh.parse::<i64>().unwrap_or(0) * 60 + zm.parse::<i64>().unwrap_or(0);
+            (a, Some(sign * mins))
+        } else {
+            (tp, None)
         };
-        let mut parts = hms.split(':');
-        h = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        mi = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        s = parts.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let (hms, frac) = match hms_frac.split_once('.') {
+            Some((a, b)) => (a, Some(b)),
+            None => (hms_frac, None),
+        };
+        let mut parts = hms.splitn(3, ':');
+        h = match field(parts.next(), strict) {
+            Some(v) => v,
+            None => return f64::NAN,
+        };
+        mi = match parts.next() {
+            // A lone hour ("T11" / "1997-03-08 11") parses as HH:00 in both forms.
+            None => 0,
+            some => match field(some, strict) {
+                Some(v) => v,
+                None => return f64::NAN,
+            },
+        };
+        sec = match parts.next() {
+            None => 0,
+            some => match field(some, strict) {
+                Some(v) => v,
+                None => return f64::NAN,
+            },
+        };
         if let Some(f) = frac {
+            if f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return f64::NAN;
+            }
             let f3: String = f
                 .chars()
                 .take(3)
@@ -5733,8 +5847,14 @@ fn parse_iso(s: &str) -> f64 {
                 .collect();
             ml = f3.parse().unwrap_or(0);
         }
+        offset_min = zone;
     }
-    time_clip(parts_to_ms(y, mo - 1, d, h, mi, s, ml))
+    let base = parts_to_ms(y, mo - 1, d, h, mi, sec, ml);
+    let adjusted = match offset_min {
+        Some(mins) => base - (mins as f64) * 60_000.0,
+        None => base,
+    };
+    time_clip(adjusted)
 }
 
 fn date_to_string(t: f64) -> String {
