@@ -13,3 +13,7 @@ dependencies_update = true
 [[package]]
 name = "test262-runner"
 release = false
+
+[[package]]
+name = "lumen-wasm"
+release = false

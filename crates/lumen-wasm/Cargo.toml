@@ -1,0 +1,20 @@
+# WebAssembly bindings for the playground (https://lucid-softworks.github.io/lumen/). Not published;
+# built by .github/workflows/pages.yml with wasm-pack.
+[package]
+name = "lumen-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lumen = { path = "../lumen" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[lints]
+workspace = true

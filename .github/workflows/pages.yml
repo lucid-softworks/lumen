@@ -1,0 +1,53 @@
+name: Pages
+
+# Builds the playground (the lumen engine compiled to WebAssembly + the static page in site/) and
+# deploys it to GitHub Pages on every push to main: https://lucid-softworks.github.io/lumen/
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - name: Build the wasm bundle
+        # 8 MiB shadow stack: the tree-walking interpreter recurses deeply (MAX_EVAL_DEPTH frames),
+        # and the wasm32 default of 1 MiB overflows on recursion-heavy scripts.
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: -C link-arg=-zstack-size=8388608
+        run: wasm-pack build crates/lumen-wasm --target web --release --no-typescript --out-dir "$GITHUB_WORKSPACE/site/pkg"
+      - name: Stamp the build
+        run: |
+          printf '{"sha":"%s","date":"%s"}' "$GITHUB_SHA" "$(date -u +%Y-%m-%d)" > site/version.json
+          rm -f site/pkg/.gitignore
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

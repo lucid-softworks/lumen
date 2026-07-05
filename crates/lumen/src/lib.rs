@@ -61,6 +61,22 @@ mod value;
 use interpreter::Interp;
 use value::Value;
 
+/// Host wall-clock override: milliseconds since the Unix epoch. Targets without a usable
+/// `SystemTime` (wasm32-unknown-unknown) install one at startup; when unset, `Date`/`Temporal.Now`
+/// fall back to `SystemTime`.
+static HOST_CLOCK: std::sync::OnceLock<fn() -> f64> = std::sync::OnceLock::new();
+
+/// Install a process-wide wall-clock source (first call wins). The embedder's `f` returns
+/// milliseconds since the Unix epoch.
+pub fn set_host_clock(f: fn() -> f64) {
+    let _ = HOST_CLOCK.set(f);
+}
+
+/// The installed host clock's current time, if one was set.
+pub(crate) fn host_now_ms() -> Option<f64> {
+    HOST_CLOCK.get().map(|f| f())
+}
+
 /// A parse-phase failure. test262 reports these as a `SyntaxError` thrown during parsing.
 #[derive(Debug)]
 pub struct ParseError {

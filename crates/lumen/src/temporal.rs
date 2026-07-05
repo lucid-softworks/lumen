@@ -10625,6 +10625,9 @@ fn install_now(it: &mut Interp, ns: &Gc) {
     let now = Object::new(Some(it.object_proto.clone()));
     // The system clock, in epoch nanoseconds (millisecond resolution, like Date.now()).
     fn now_ns() -> i128 {
+        if let Some(ms) = crate::host_now_ms() {
+            return ms.trunc() as i128 * 1_000_000;
+        }
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i128 * 1_000_000)

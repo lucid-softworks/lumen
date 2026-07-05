@@ -168,8 +168,14 @@ pub fn coroutine_await(i: &mut Interp, value: Value) -> Resume {
     park(i, Suspend::Await(value))
 }
 
+/// Thrown as a JS `Error` when a coroutine cannot start (wasm32 has no OS threads, so
+/// `std::thread::Builder::spawn` reports `Unsupported` there).
+pub const UNSUPPORTED_MSG: &str =
+    "generators and async functions require OS threads, which this WebAssembly build does not have";
+
 /// Spawn a generator coroutine over `body`, parked until its first [`Coroutine::resume`].
-pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> Coroutine {
+/// `Err` when the platform cannot spawn threads (wasm32).
+pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<Coroutine> {
     let (resume_tx, resume_rx) = std::sync::mpsc::channel::<Resume>();
     let (suspend_tx, suspend_rx) = std::sync::mpsc::channel::<Suspend>();
     let ptr = InterpPtr(interp);
@@ -205,12 +211,12 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> Coroutine {
                 }
             });
         })
-        .expect("spawn generator thread");
-    Coroutine {
+?;
+    Ok(Coroutine {
         resume_tx,
         suspend_rx,
         done: false,
         started: false,
         _handle: handle,
-    }
+    })
 }

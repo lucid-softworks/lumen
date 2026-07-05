@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lumen playground</title>
+<meta name="description" content="Run JavaScript in lumen — a JS engine written in Rust, passing 100% of test262 — compiled to WebAssembly, right in your browser.">
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --text: #1a1a20; --muted: #6b6b76;
+    --accent: #6d5ae0; --accent-text: #ffffff; --border: #e3e3e8;
+    --ok: #1a7f4b; --err: #c33c3c; --console: #3b3b44;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101014; --panel: #17171d; --text: #e8e8ec; --muted: #8f8f9a;
+      --accent: #8b7cf0; --accent-text: #101014; --border: #26262e;
+      --ok: #4ecf8a; --err: #f07b7b; --console: #c9c9d4;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 22px 0;
+  }
+  header h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: .2px; }
+  header h1 .dot { color: var(--accent); }
+  .badge {
+    font-size: 12px; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--panel);
+    white-space: nowrap;
+  }
+  .badge b { color: var(--ok); font-weight: 600; }
+  header nav { margin-left: auto; display: flex; gap: 14px; }
+  header a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  header a:hover { color: var(--text); }
+  main {
+    flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    padding: 14px 22px 22px; min-height: 0;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .pane {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; flex-direction: column; min-height: 320px; overflow: hidden;
+  }
+  .pane-bar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--border); font-size: 13px; color: var(--muted);
+  }
+  .pane-bar .spacer { flex: 1; }
+  select, button {
+    font: 13px/1 inherit; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); padding: 6px 12px; cursor: pointer;
+  }
+  button.run { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  textarea {
+    flex: 1; width: 100%; border: 0; outline: none; resize: none; padding: 14px;
+    background: transparent; color: var(--text);
+    font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    tab-size: 2; white-space: pre; overflow-x: auto;
+  }
+  #out {
+    flex: 1; margin: 0; padding: 14px; overflow: auto;
+    font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  #out .console { color: var(--console); }
+  #out .value { color: var(--ok); }
+  #out .error { color: var(--err); }
+  #out .meta { color: var(--muted); font-size: 12px; }
+  footer { padding: 0 22px 16px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+  kbd {
+    font: 11px ui-monospace, monospace; border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>lumen<span class="dot">.</span>playground</h1>
+  <span class="badge">test262 <b>100%</b> · 53,284 tests</span>
+  <span class="badge" id="version" hidden></span>
+  <nav>
+    <a href="https://github.com/lucid-softworks/lumen">GitHub</a>
+    <a href="https://test262.fyi/">test262.fyi</a>
+  </nav>
+</header>
+<main>
+  <section class="pane">
+    <div class="pane-bar">
+      <span>editor</span>
+      <select id="examples" aria-label="Load example">
+        <option value="">examples…</option>
+      </select>
+      <span class="spacer"></span>
+      <button id="reset" title="Fresh realm: clears all globals">Reset realm</button>
+      <button id="run" class="run" disabled>Run ▸</button>
+    </div>
+    <textarea id="src" spellcheck="false" aria-label="JavaScript source"></textarea>
+  </section>
+  <section class="pane">
+    <div class="pane-bar"><span>output</span><span class="spacer"></span><span id="status">loading engine…</span></div>
+    <pre id="out"></pre>
+  </section>
+</main>
+<footer>
+  lumen is a JavaScript engine written in Rust (zero dependencies), compiled here to WebAssembly.
+  The realm persists between runs — variables stick around until you reset. <kbd>⌘</kbd>+<kbd>Enter</kbd> runs.
+  Browser-build limits: generators and <code>async</code>/<code>await</code> throw for now (lumen's
+  coroutines run on OS threads, which wasm doesn't have) — promises and everything else work;
+  <code>Math.random()</code> is deterministic.
+</footer>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const src = $('src'), out = $('out'), status = $('status');
+const runBtn = $('run'), resetBtn = $('reset');
+
+const EXAMPLES = {
+  'hello': `const who = ['world', 'lumen'];
+for (const w of who) console.log(\`hello, \${w}!\`);
+'done'`,
+  'bigint fib': `let [a, b] = [0n, 1n];
+const fib = [];
+while (fib.length < 40) { fib.push(a); [a, b] = [b, a + b]; }
+console.log('fib(39) = ' + fib.at(-1));
+fib.slice(0, 12).join(', ')`,
+  'temporal': `const now = Temporal.Now.instant();
+const paris = now.toZonedDateTimeISO('Europe/Paris');
+const tokyo = now.toZonedDateTimeISO('Asia/Tokyo');
+console.log('Paris: ' + paris.toPlainTime().toString({ smallestUnit: 'second' }));
+console.log('Tokyo: ' + tokyo.toPlainTime().toString({ smallestUnit: 'second' }));
+tokyo.until(paris.withTimeZone('Asia/Tokyo')).toString()`,
+  'intl': `const fmt = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' });
+console.log(fmt.format(['Rust', 'WebAssembly', 'JavaScript']));
+new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(1234567.89)`,
+  'classes & proxies': `class Vec {
+  #x; #y;
+  constructor(x, y) { this.#x = x; this.#y = y; }
+  get length() { return Math.hypot(this.#x, this.#y); }
+}
+const audited = [];
+const v = new Proxy(new Vec(3, 4), {
+  get(t, k) { audited.push(String(k)); return Reflect.get(t, k); }
+});
+console.log('length = ' + v.length);
+'audited keys: ' + audited.join(', ')`,
+  'promises': `Promise.resolve(6)
+  .then(v => v * 7)
+  .then(v => console.log('the answer, via microtask: ' + v));
+'scheduled — the callbacks above run before this result is shown'`,
+  'regexp unicode': `const greek = [...'αβγ Ω π'.matchAll(/\\p{Script=Greek}/gu)];
+console.log('greek letters: ' + greek.map(m => m[0]).join(''));
+const re = /(?<year>\\d{4})-(?<month>\\d{2})/u;
+'released 2026-07'.match(re).groups.year`,
+};
+
+const sel = $('examples');
+for (const name of Object.keys(EXAMPLES)) {
+  const o = document.createElement('option');
+  o.value = o.textContent = name;
+  sel.appendChild(o);
+}
+sel.onchange = () => { if (sel.value) { src.value = EXAMPLES[sel.value]; sel.value = ''; run(); } };
+
+src.value = EXAMPLES['hello'];
+
+fetch('./version.json').then(r => r.ok ? r.json() : null).then(v => {
+  if (!v) return;
+  const el = $('version');
+  el.textContent = v.sha.slice(0, 7);
+  el.hidden = false;
+  el.title = 'built ' + v.date;
+}).catch(() => {});
+
+let worker = null, running = false, evalId = 0;
+
+function spawn() {
+  worker = new Worker('./worker.js', { type: 'module' });
+  status.textContent = 'loading engine…';
+  runBtn.disabled = true;
+  worker.onerror = (e) => {
+    // Engine crash (e.g. a stack overflow inside wasm): report it and start a fresh realm
+    // instead of hanging on "running…".
+    worker.terminate();
+    running = false;
+    runBtn.textContent = 'Run ▸';
+    resetBtn.disabled = false;
+    line('error', 'engine crashed (' + (e.message || 'worker error') + ') — spawning a fresh realm');
+    spawn();
+  };
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'ready') { status.textContent = 'ready'; runBtn.disabled = false; }
+    if (m.type === 'reset-done') { status.textContent = 'ready · fresh realm'; runBtn.disabled = false; }
+    if (m.type === 'result' && m.id === evalId) {
+      running = false;
+      runBtn.textContent = 'Run ▸';
+      runBtn.disabled = false;
+      resetBtn.disabled = false;
+      render(m.result, m.ms);
+    }
+    if (m.type === 'fatal') {
+      worker.terminate();
+      running = false;
+      runBtn.textContent = 'Run ▸';
+      resetBtn.disabled = false;
+      out.textContent = '';
+      line('error', 'engine crashed (' + m.message + ') — spawning a fresh realm');
+      spawn();
+    }
+  };
+}
+spawn();
+
+function line(cls, text) {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  out.appendChild(div);
+}
+
+function render(r, ms) {
+  out.textContent = '';
+  for (const c of r.console) line('console', c);
+  if (r.ok) {
+    line('value', '→ ' + (r.value ?? 'undefined'));
+  } else {
+    line('error', r.error);
+  }
+  line('meta', `\n${ms.toFixed(1)} ms`);
+  status.textContent = r.ok ? 'ready' : 'ready · last run threw';
+}
+
+function run() {
+  if (runBtn.disabled && !running) return;
+  if (running) { // acts as Stop: kill the worker mid-flight
+    worker.terminate();
+    running = false;
+    runBtn.textContent = 'Run ▸';
+    resetBtn.disabled = false;
+    line('error', '— stopped; spawning a fresh realm —');
+    spawn();
+    return;
+  }
+  running = true;
+  runBtn.textContent = 'Stop ■';
+  resetBtn.disabled = true;
+  status.textContent = 'running…';
+  worker.postMessage({ type: 'eval', id: ++evalId, src: src.value });
+}
+
+runBtn.onclick = run;
+resetBtn.onclick = () => {
+  runBtn.disabled = true;
+  worker.postMessage({ type: 'reset' });
+  out.textContent = '';
+};
+addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+});
+src.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const { selectionStart: s, selectionEnd: t } = src;
+    src.setRangeText('  ', s, t, 'end');
+  }
+});
+</script>
+</body>
+</html>

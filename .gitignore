@@ -4,3 +4,6 @@
 /test262-report/
 # Classic V8 benchmark suite (downloaded on demand by scripts/run-v8bench.sh).
 /v8-v7/
+# Playground wasm bundle + build stamp (built by wasm-pack in .github/workflows/pages.yml).
+/site/pkg/
+/site/version.json

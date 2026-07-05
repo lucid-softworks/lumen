@@ -781,7 +781,14 @@ pub struct FieldInit {
 
 /// Recursion ceiling for the interpreter. Paired with the large worker-thread stacks the runner
 /// uses; beyond this we raise "Maximum call stack size exceeded" (a RangeError).
+#[cfg(not(target_arch = "wasm32"))]
 pub const MAX_EVAL_DEPTH: u32 = 1500;
+/// On wasm32 the ceiling is the engine's *host* call stack (V8's, not raisable from content):
+/// measured in Chrome, the simplest interpreted frame overflows it near depth ~220, and heavier
+/// frames die sooner — 128 keeps the guard firing as a clean RangeError before the host stack
+/// does.
+#[cfg(target_arch = "wasm32")]
+pub const MAX_EVAL_DEPTH: u32 = 128;
 
 /// Live-object ceiling (≈ a few hundred MB). When a safe point sees this many *live* objects, the
 /// cycle collector runs; if it can't get back under, a RangeError is thrown rather than exhausting
@@ -3758,7 +3765,14 @@ impl Interp {
             outcome
         });
         let ptr = self as *mut Interp;
-        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
+        let coro = match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body)) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(Abrupt::Throw(
+                    self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG),
+                ))
+            }
+        };
         let obj = self.make_generator(is_async, gen_proto);
         if let Value::Obj(o) = &obj {
             self.gc_pin(o);
@@ -3821,7 +3835,14 @@ impl Interp {
             outcome
         });
         let ptr = self as *mut Interp;
-        let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
+        let coro = match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body)) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(Abrupt::Throw(
+                    self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG),
+                ))
+            }
+        };
         let promise = self.new_promise();
         if let Value::Obj(o) = &promise {
             self.gc_pin(o);

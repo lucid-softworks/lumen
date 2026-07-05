@@ -5452,6 +5452,9 @@ fn ta_from(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> 
 // ---------------------------------------------------------------------------------------------
 
 fn now_ms() -> f64 {
+    if let Some(ms) = crate::host_now_ms() {
+        return ms.trunc();
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
@@ -6369,8 +6372,9 @@ fn map_ptr(this: &Value) -> Option<usize> {
 /// ArraySpeciesCreate(originalArray, length): build the result array for a method like map/filter,
 /// honoring `this.constructor[@@species]`; for an ordinary array (or no species) it's a plain array.
 fn make_sparse_array(i: &mut Interp, len: usize) -> Result<Value, Value> {
-    // ArrayCreate: a length past 2^32-1 is a RangeError.
-    if len > 4294967295 {
+    // ArrayCreate: a length past 2^32-1 is a RangeError. (Compared as u64: usize is 32-bit on
+    // wasm32, where the comparison would be vacuous.)
+    if len as u64 > 4294967295 {
         return Err(i.make_error("RangeError", "invalid array length"));
     }
     let arr = i.make_array(Vec::new());
@@ -13629,7 +13633,7 @@ fn install_array(it: &mut Interp) {
         let arr = if use_ctor {
             ab(i.construct(this, &[Value::Num(len as f64)]))?
         } else {
-            if len > 4294967295 {
+            if len as u64 > 4294967295 {
                 return Err(i.make_error("RangeError", "invalid array length"));
             }
             i.make_array(Vec::new())
@@ -13764,7 +13768,8 @@ fn flatten_into(
                 &Value::Undefined,
             )?;
         } else {
-            if target_index >= 9_007_199_254_740_991 {
+            // Compared as u64: usize is 32-bit on wasm32, where 2^53 - 1 overflows the type.
+            if target_index as u64 >= 9_007_199_254_740_991 {
                 return Err(i.make_error("TypeError", "flattened array length exceeds 2^53 - 1"));
             }
             json_create_data_prop_or_throw(i, target, &target_index.to_string(), element)?;
@@ -14511,7 +14516,15 @@ fn array_from_async(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, V
         },
     );
     let ptr = i as *mut Interp;
-    let coro = crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body));
+    let coro = match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body)) {
+        Ok(c) => c,
+        Err(_) => {
+            // No threads (wasm32): reject the returned promise rather than trapping.
+            let e = i.make_error("Error", crate::coroutine::UNSUPPORTED_MSG);
+            i.reject_promise(&promise, e);
+            return Ok(promise);
+        }
+    };
     if let Value::Obj(o) = &promise {
         let key = Rc::as_ptr(o) as usize;
         i.generators.insert(key, coro);
@@ -14641,7 +14654,7 @@ fn from_async_body(
         let arr = if use_ctor {
             ab(i.construct(this.clone(), &[Value::Num(len as f64)]))?
         } else {
-            if len > 4294967295 {
+            if len as u64 > 4294967295 {
                 return Err(i.make_error("RangeError", "invalid array length"));
             }
             i.make_array(Vec::new())
