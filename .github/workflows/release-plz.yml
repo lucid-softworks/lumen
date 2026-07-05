@@ -12,6 +12,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write   # dispatch release.yml for the tag it creates
 
 concurrency:
   group: release-plz
