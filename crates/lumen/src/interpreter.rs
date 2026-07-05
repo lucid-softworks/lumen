@@ -1501,6 +1501,47 @@ impl Interp {
         self.to_string(v).map_err(abrupt_value)
     }
 
+    /// The bytes a TypedArray view covers (`None` when `v` isn't a typed array or its buffer
+    /// is detached). The embedder's binary bridge: encoders/crypto/fetch move bytes through
+    /// this.
+    pub fn typed_array_bytes(&self, v: &Value) -> Option<Vec<u8>> {
+        let obj = v.as_obj()?;
+        let info = self
+            .typed_arrays
+            .get(&(Rc::as_ptr(obj) as usize))
+            .copied()?;
+        let len = self.ta_len(&info)?;
+        self.ta_read_bytes(&info, 0, len)
+    }
+
+    /// Overwrite a TypedArray's covered bytes from the start (a write past the view's end is
+    /// a bounds-checked no-op, matching the engine's internal write semantics). `false` when
+    /// `v` isn't a typed array.
+    pub fn typed_array_set_bytes(&mut self, v: &Value, bytes: &[u8]) -> bool {
+        let Some(obj) = v.as_obj() else {
+            return false;
+        };
+        let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)).copied() else {
+            return false;
+        };
+        self.ta_write_bytes(&info, 0, bytes);
+        true
+    }
+
+    /// A fresh `Uint8Array` holding `bytes`, constructed through the realm's own
+    /// `Uint8Array` constructor.
+    pub fn make_uint8array(&mut self, bytes: &[u8]) -> Result<Value, Value> {
+        let global = Value::Obj(self.global.clone());
+        let ctor = self
+            .get_member(&global, "Uint8Array")
+            .map_err(abrupt_value)?;
+        let ta = self
+            .construct(ctor, &[Value::Num(bytes.len() as f64)])
+            .map_err(abrupt_value)?;
+        self.typed_array_set_bytes(&ta, bytes);
+        Ok(ta)
+    }
+
     pub(crate) fn make_function(&self, func: Rc<Function>, env: Env) -> Value {
         let is_arrow = func.is_arrow;
         let is_method = func.is_method;
