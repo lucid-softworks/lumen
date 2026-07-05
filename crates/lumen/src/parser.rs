@@ -3214,6 +3214,7 @@ impl Parser {
         }
         let func = Function {
             scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
             name,
             params,
             body,
@@ -3402,6 +3403,7 @@ impl Parser {
             let body = body?;
             let func = Function {
                 scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
                 name: None,
                 params: Vec::new(),
                 body,
@@ -3573,6 +3575,7 @@ impl Parser {
         }
         Ok(Function {
             scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
             name: None,
             params,
             body,
@@ -3800,6 +3803,7 @@ impl Parser {
             }
             Function {
                 scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
                 name: None,
                 params,
                 body,
@@ -3816,6 +3820,7 @@ impl Parser {
             let expr = self.parse_assign()?;
             Function {
                 scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
                 name: None,
                 params,
                 body: vec![Stmt::Return(Some(expr))],

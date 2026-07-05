@@ -33,6 +33,10 @@ pub fn smuggle(unit: u16) -> char {
 
 /// The UTF-16 code units of `s` (smuggled scalars decode to their lone surrogates).
 pub fn units(s: &str) -> Vec<u16> {
+    // ASCII fast path: units are exactly the bytes (no surrogates, no smuggling possible).
+    if s.is_ascii() {
+        return s.as_bytes().iter().map(|&b| b as u16).collect();
+    }
     let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
         match smuggled(c) {
@@ -48,6 +52,9 @@ pub fn units(s: &str) -> Vec<u16> {
 
 /// The UTF-16 length of `s` without materializing the units.
 pub fn unit_len(s: &str) -> usize {
+    if s.is_ascii() {
+        return s.len();
+    }
     s.chars()
         .map(|c| {
             if smuggled(c).is_some() {
@@ -62,6 +69,11 @@ pub fn unit_len(s: &str) -> usize {
 /// Rebuild a string from code units: valid surrogate pairs combine into their code point, lone
 /// surrogates are smuggled.
 pub fn from_units(units: &[u16]) -> String {
+    // ASCII fast path: no pairs or smuggling below 0x80.
+    if units.iter().all(|&u| u < 0x80) {
+        let bytes: Vec<u8> = units.iter().map(|&u| u as u8).collect();
+        return String::from_utf8(bytes).unwrap();
+    }
     let mut out = String::with_capacity(units.len());
     let mut i = 0;
     while i < units.len() {
@@ -227,6 +239,9 @@ pub fn canonicalize(s: &str) -> Option<String> {
 /// The code points of `s`, with lone surrogates as their surrogate values (paired smuggled
 /// high+low decode to the real character they canonically encode — see module docs).
 pub fn code_points(s: &str) -> Vec<u32> {
+    if s.is_ascii() {
+        return s.as_bytes().iter().map(|&b| b as u32).collect();
+    }
     let units = units(s);
     let mut out = Vec::with_capacity(units.len());
     let mut i = 0;

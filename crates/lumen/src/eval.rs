@@ -199,6 +199,23 @@ impl Interp {
         if stmts.is_empty() {
             return Ok(Value::Empty);
         }
+        // A block declaring nothing block-scoped needs no environment either: nothing would bind
+        // in it, so running the statements in the parent scope is observationally identical and
+        // skips a scope allocation + declaration walk per entry (hot for loop and if bodies).
+        if !stmts.iter().any(block_declares_lexical) {
+            let mut v = Value::Empty;
+            for s in stmts {
+                match self.exec_stmt(s, parent) {
+                    Ok(sv) => {
+                        if !matches!(sv, Value::Empty) {
+                            v = sv;
+                        }
+                    }
+                    Err(e) => return Err(crate::interpreter::update_abrupt_empty(e, v)),
+                }
+            }
+            return Ok(v);
+        }
         let scope = new_scope(Some(parent.clone()));
         self.declare_block_lexicals(stmts, &scope, true);
         // A block is a disposal boundary only when it actually declares a `using` resource.
@@ -2190,7 +2207,7 @@ impl Interp {
         // A deferred namespace evaluates on [[HasProperty]] with a string key.
         self.defer_trigger(&o, Some(key))?;
         let ptr = Rc::as_ptr(&o) as usize;
-        if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+        if let Some((target, handler)) = self.proxy_at(ptr) {
             if matches!(handler, Value::Null) {
                 return Err(self.throw("TypeError", "cannot perform 'has' on a revoked proxy"));
             }
@@ -5169,7 +5186,7 @@ impl Interp {
                 if let Value::Obj(o) = &base {
                     self.defer_trigger(o, Some(prop))?;
                     let ptr = Rc::as_ptr(o) as usize;
-                    if let Some((target, handler)) = self.proxies.get(&ptr).cloned() {
+                    if let Some((target, handler)) = self.proxy_at(ptr) {
                         let ok = self.proxy_delete(target, handler, prop)?;
                         if !ok && self.strict {
                             return Err(
@@ -5692,6 +5709,49 @@ impl Interp {
     // ----- operators --------------------------------------------------------------------------
 
     fn binary(&mut self, op: &str, l: Value, r: Value) -> Result<Value, Abrupt> {
+        // Hot path: number ⊕ number has no observable coercion steps (no ToPrimitive hooks, no
+        // BigInt mixing) — compute directly. Rust f64 comparisons share JS NaN semantics (all
+        // false), and +0 == -0 holds, so the comparison arms are exact.
+        if let (Value::Num(a), Value::Num(b)) = (&l, &r) {
+            let (a, b) = (*a, *b);
+            match op {
+                "+" => return Ok(Value::Num(a + b)),
+                "-" => return Ok(Value::Num(a - b)),
+                "*" => return Ok(Value::Num(a * b)),
+                "/" => return Ok(Value::Num(a / b)),
+                "%" => return Ok(Value::Num(js_mod(a, b))),
+                "**" => {
+                    return Ok(Value::Num(
+                        if b.is_nan() || (a.abs() == 1.0 && b.is_infinite()) {
+                            f64::NAN
+                        } else {
+                            a.powf(b)
+                        },
+                    ))
+                }
+                "&" => return Ok(Value::Num((to_int32(a) & to_int32(b)) as f64)),
+                "|" => return Ok(Value::Num((to_int32(a) | to_int32(b)) as f64)),
+                "^" => return Ok(Value::Num((to_int32(a) ^ to_int32(b)) as f64)),
+                "<<" => {
+                    return Ok(Value::Num(
+                        to_int32(a).wrapping_shl(to_int32(b) as u32 & 31) as f64,
+                    ))
+                }
+                ">>" => return Ok(Value::Num((to_int32(a) >> (to_int32(b) as u32 & 31)) as f64)),
+                ">>>" => {
+                    return Ok(Value::Num(
+                        ((to_int32(a) as u32) >> (to_int32(b) as u32 & 31)) as f64,
+                    ))
+                }
+                "<" => return Ok(Value::Bool(a < b)),
+                ">" => return Ok(Value::Bool(a > b)),
+                "<=" => return Ok(Value::Bool(a <= b)),
+                ">=" => return Ok(Value::Bool(a >= b)),
+                "==" | "===" => return Ok(Value::Bool(a == b)),
+                "!=" | "!==" => return Ok(Value::Bool(a != b)),
+                _ => {}
+            }
+        }
         // Arithmetic, bitwise, and `+` convert both operands to primitives first (left then right),
         // then dispatch on BigInt / string (for `+`) / number. ToPrimitive runs before the BigInt
         // mixing check so a wrapped BigInt object coerces correctly.
@@ -6182,6 +6242,11 @@ impl Interp {
     /// ECMAScript `Number::toString` (base 10): the shortest round-tripping digit string, formatted
     /// fixed or exponential per the spec's exponent thresholds (≥1e21 or <1e-6 → exponential).
     pub fn num_to_str(&self, n: f64) -> String {
+        // Integer fast path: array indices and loop counters dominate ToString(Number) traffic,
+        // and integers never need the shortest-float machinery. (-0.0 correctly prints "0".)
+        if n.trunc() == n && n.abs() <= 9_007_199_254_740_992.0 {
+            return (n as i64).to_string();
+        }
         if n.is_nan() {
             return "NaN".to_string();
         }
@@ -6389,6 +6454,7 @@ fn default_constructor(derived: bool) -> Function {
     };
     Function {
         scan: std::cell::Cell::new(0),
+            hoist: std::cell::OnceCell::new(),
         name: None,
         params,
         body,
@@ -6769,6 +6835,24 @@ pub(crate) fn is_anonymous_fn(e: &Expr) -> bool {
         Expr::Class(c) => c.name.is_none(),
         _ => false,
     }
+}
+
+
+/// Whether `s` (labels and export wrappers unwrapped) is a block-scoped declaration — the set
+/// [`Interp::declare_block_lexicals`] instantiates at block entry.
+fn block_declares_lexical(s: &Stmt) -> bool {
+    let mut s = crate::interpreter::unwrap_export(s);
+    while let Stmt::Labeled { body, .. } = s {
+        s = body;
+    }
+    matches!(
+        s,
+        Stmt::VarDecl {
+            kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
+            ..
+        } | Stmt::FuncDecl(_)
+            | Stmt::ClassDecl(_)
+    )
 }
 
 fn js_mod(a: f64, b: f64) -> f64 {

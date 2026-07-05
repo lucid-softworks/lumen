@@ -384,19 +384,36 @@ fn elem_of_cp(cp: u32) -> char {
     }
 }
 
-/// A subject string prepared for matching: its elements plus each element's unit offset
-/// (`unit_of.len() == elems.len() + 1`; the last entry is the total unit length). JS-visible
-/// indices (lastIndex, match.index) are always unit offsets.
+/// A subject string prepared for matching: its elements plus each element's unit offset.
+/// `unit_of` is `None` when element index == unit offset (always true in non-unicode mode, and in
+/// unicode mode for BMP-only subjects); otherwise `unit_of.len() == elems.len() + 1` with the last
+/// entry the total unit length. JS-visible indices (lastIndex, match.index) are unit offsets.
 pub struct ReText {
     pub elems: Vec<u32>,
-    pub unit_of: Vec<usize>,
+    pub unit_of: Option<Vec<usize>>,
     unicode: bool,
 }
 
 impl ReText {
     pub fn new(unicode: bool, s: &str) -> ReText {
+        // ASCII: elements are the bytes, and element index == unit offset in both modes.
+        if s.is_ascii() {
+            return ReText {
+                elems: s.as_bytes().iter().map(|&b| b as u32).collect(),
+                unit_of: None,
+                unicode,
+            };
+        }
         if unicode {
             let cps = crate::jstr::code_points(s);
+            if cps.iter().all(|&cp| cp < 0x10000) {
+                // BMP-only: one unit per element.
+                return ReText {
+                    elems: cps,
+                    unit_of: None,
+                    unicode,
+                };
+            }
             let mut unit_of = Vec::with_capacity(cps.len() + 1);
             let mut u = 0usize;
             for &cp in &cps {
@@ -406,16 +423,14 @@ impl ReText {
             unit_of.push(u);
             ReText {
                 elems: cps,
-                unit_of,
+                unit_of: Some(unit_of),
                 unicode,
             }
         } else {
             let units = crate::jstr::units(s);
-            let elems: Vec<u32> = units.iter().map(|&u| u as u32).collect();
-            let unit_of = (0..=elems.len()).collect();
             ReText {
-                elems,
-                unit_of,
+                elems: units.iter().map(|&u| u as u32).collect(),
+                unit_of: None,
                 unicode,
             }
         }
@@ -423,15 +438,21 @@ impl ReText {
 
     /// The element index containing unit offset `u` (== len when `u` is at/past the end).
     pub fn elem_at_unit(&self, u: usize) -> usize {
-        match self.unit_of.binary_search(&u) {
-            Ok(k) => k.min(self.elems.len()),
-            Err(k) => k - 1,
+        match &self.unit_of {
+            None => u.min(self.elems.len()),
+            Some(unit_of) => match unit_of.binary_search(&u) {
+                Ok(k) => k.min(self.elems.len()),
+                Err(k) => k - 1,
+            },
         }
     }
 
     /// The unit offset of element `e`.
     pub fn unit_index(&self, e: usize) -> usize {
-        self.unit_of[e.min(self.elems.len())]
+        match &self.unit_of {
+            None => e.min(self.elems.len()),
+            Some(unit_of) => unit_of[e.min(self.elems.len())],
+        }
     }
 
     #[allow(clippy::len_without_is_empty)]
@@ -441,10 +462,16 @@ impl ReText {
 
     /// The canonical string for elements `a..b` (surrogate halves recombine).
     pub fn slice(&self, a: usize, b: usize) -> String {
+        let elems = &self.elems[a..b];
+        // ASCII fast path: elements are the bytes.
+        if elems.iter().all(|&e| e < 0x80) {
+            let bytes: Vec<u8> = elems.iter().map(|&e| e as u8).collect();
+            return String::from_utf8(bytes).unwrap();
+        }
         if self.unicode {
-            crate::jstr::from_code_points(&self.elems[a..b])
+            crate::jstr::from_code_points(elems)
         } else {
-            let units: Vec<u16> = self.elems[a..b].iter().map(|&e| e as u16).collect();
+            let units: Vec<u16> = elems.iter().map(|&e| e as u16).collect();
             crate::jstr::from_units(&units)
         }
     }

@@ -411,6 +411,26 @@ pub struct Function {
     /// references `arguments`, bit 2 = references `new.target`, bit 3 = references `this`.
     /// A direct `eval` sets all three (it can reach any of them dynamically).
     pub scan: std::cell::Cell<u8>,
+    /// Lazily-computed hoisting plan for the body (the strict flag it was computed under plus the
+    /// ops), so calls replay a flat list instead of re-walking the AST (see
+    /// `interpreter::collect_hoist_ops`).
+    pub hoist: std::cell::OnceCell<(bool, Rc<Vec<HoistOp>>)>,
+}
+
+/// One pre-scanned hoisting action for a statement list, replayed against a scope at function
+/// call / script entry (see `interpreter::collect_hoist_ops` — order matters: `var`s in
+/// traversal order, then function declarations in source order, then Annex B promotions).
+#[derive(Debug, Clone)]
+pub enum HoistOp {
+    /// Declare a `var` binding (undefined) unless the name is already bound.
+    Var(String),
+    /// Declare a `var` binding (undefined) unconditionally (`for` / `for-in/of` heads).
+    VarForce(String),
+    /// Bind a hoisted function declaration (`*default*` names as "default").
+    Fn(String, Rc<Function>),
+    /// Annex B.3.3: promote a sloppy block function to an (if-absent) var binding and register
+    /// it for declaration-time sync.
+    AnnexB(String, Rc<Function>),
 }
 
 pub const SCAN_DONE: u8 = 1;
