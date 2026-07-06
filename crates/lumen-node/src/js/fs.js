@@ -5,8 +5,9 @@
 const nodeFs = {
   readFileSync(path, options) {
     const enc = typeof options === "string" ? options : options && options.encoding;
-    const text = fs.readFileSync(String(path));
-    return enc ? text : Buffer.from(text, "utf8");
+    // Read raw bytes; decoding to text (the lumen-fs string path) would corrupt binary files.
+    const bytes = Buffer.from(__node.readBytes(String(path)));
+    return enc ? bytes.toString(enc) : bytes;
   },
   writeFileSync(path, data, options) {
     const enc = typeof options === "string" ? options : options && options.encoding;

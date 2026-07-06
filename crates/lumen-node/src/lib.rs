@@ -33,6 +33,7 @@ pub fn extension() -> Extension {
                     "isFile" (1) => op_is_file,
                     "isDir" (1) => op_is_dir,
                     "readText" (1) => op_read_text,
+                    "readBytes" (1) => op_read_bytes,
                     "realpath" (1) => op_realpath,
                 ],
             ),
@@ -89,6 +90,25 @@ fn op_read_text(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Va
     match std::fs::read_to_string(&p) {
         Ok(s) => Ok(Value::from_string(s)),
         Err(e) => Err(ctx.make_error("Error", format!("cannot read '{p}': {e}"))),
+    }
+}
+
+/// Read a file as raw bytes (a Uint8Array), for `fs.readFileSync` without an encoding — the text
+/// path corrupts binary. Errors carry the errno `code` Node users switch on.
+fn op_read_bytes(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let p = arg_path(ctx, args)?;
+    match std::fs::read(&p) {
+        Ok(bytes) => ctx.make_uint8array(&bytes),
+        Err(e) => {
+            let err = ctx.make_error("Error", format!("cannot read '{p}': {e}"));
+            let code = match e.kind() {
+                std::io::ErrorKind::NotFound => "ENOENT",
+                std::io::ErrorKind::PermissionDenied => "EACCES",
+                _ => "EIO",
+            };
+            let _ = ctx.set_member(&err, "code", Value::str(code));
+            Err(err)
+        }
     }
 }
 
