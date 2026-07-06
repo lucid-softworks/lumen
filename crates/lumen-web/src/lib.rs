@@ -70,6 +70,17 @@ pub fn extension() -> Extension {
                     "sha256" (1) => op_sha256,
                 ],
             ),
+            (
+                "__compress",
+                ops![
+                    "deflate" (1) => op_deflate,
+                    "inflate" (1) => op_inflate,
+                    "deflateRaw" (1) => op_deflate_raw,
+                    "inflateRaw" (1) => op_inflate_raw,
+                    "gzip" (1) => op_gzip,
+                    "gunzip" (1) => op_gunzip,
+                ],
+            ),
         ],
         state_init: Some(|state: &mut OpState| {
             state.put(WebState::default());
@@ -244,6 +255,54 @@ fn op_sha256(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
     };
     let digest = sha256::sha256(&bytes);
     ctx.make_uint8array(&digest)
+}
+
+// ---- compression (DEFLATE/zlib/gzip, backing CompressionStream/DecompressionStream) ----
+
+fn compress_op(
+    ctx: &mut Ctx,
+    args: &[Value],
+    codec: fn(&[u8]) -> Vec<u8>,
+) -> Result<Value, Value> {
+    let v = args.first().unwrap_or(&Value::Undefined);
+    let Some(bytes) = ctx.typed_array_bytes(v) else {
+        return Err(ctx.make_error("TypeError", "compression expects a BufferSource"));
+    };
+    ctx.make_uint8array(&codec(&bytes))
+}
+
+fn decompress_op(
+    ctx: &mut Ctx,
+    args: &[Value],
+    codec: fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<Value, Value> {
+    let v = args.first().unwrap_or(&Value::Undefined);
+    let Some(bytes) = ctx.typed_array_bytes(v) else {
+        return Err(ctx.make_error("TypeError", "decompression expects a BufferSource"));
+    };
+    match codec(&bytes) {
+        Ok(out) => ctx.make_uint8array(&out),
+        Err(e) => Err(ctx.make_error("TypeError", e)),
+    }
+}
+
+fn op_deflate(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    compress_op(ctx, a, lumen_host::deflate::zlib_compress)
+}
+fn op_inflate(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    decompress_op(ctx, a, lumen_host::deflate::zlib_decompress)
+}
+fn op_deflate_raw(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    compress_op(ctx, a, lumen_host::deflate::deflate)
+}
+fn op_inflate_raw(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    decompress_op(ctx, a, lumen_host::deflate::inflate)
+}
+fn op_gzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    compress_op(ctx, a, lumen_host::deflate::gzip_compress)
+}
+fn op_gunzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    decompress_op(ctx, a, lumen_host::deflate::gzip_decompress)
 }
 
 // ---- fetch ----

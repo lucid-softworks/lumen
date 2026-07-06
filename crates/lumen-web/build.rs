@@ -20,6 +20,7 @@ const JS_FILES: &[&str] = &[
     "urlpattern.js",
     "streams.js",
     "writable.js",
+    "compression.js",
     "blob.js",
     "fetch.js",
     "server.js",

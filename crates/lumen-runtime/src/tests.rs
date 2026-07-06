@@ -647,13 +647,13 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "TextEncoderStream",
     "TextDecoderStream",
     "URLPattern",
+    "CompressionStream",
+    "DecompressionStream",
 ];
 const WINTERTC_NOT_YET: &[&str] = &[
     "ReadableStreamBYOBReader",
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",
-    "CompressionStream",
-    "DecompressionStream",
     "WebAssembly",
 ];
 

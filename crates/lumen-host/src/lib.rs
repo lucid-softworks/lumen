@@ -22,6 +22,9 @@ pub use lumen::bytecode::Tier;
 pub use lumen::embed::{Ctx, NativeFn, OpState, ResourceId, ResourceTable, Value};
 pub use lumen::{Completion, Engine, ParseError};
 
+/// DEFLATE/zlib/gzip codec (std-only), shared by web CompressionStream and node:zlib.
+pub mod deflate;
+
 /// One native op: a named native function with its JS arity.
 #[derive(Clone, Copy)]
 pub struct OpDecl {
