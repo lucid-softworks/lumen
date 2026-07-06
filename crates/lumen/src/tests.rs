@@ -2001,6 +2001,34 @@ fn bytecode_async_vm() {
 }
 
 #[test]
+fn bytecode_try_catch() {
+    // try/catch compiles to the VM: a thrown value / native throw is caught, nested try rethrows to
+    // the outer catch, `return` inside try still returns, and — the reason Hono's async `compose`
+    // now compiles — a rejected `await` inside a `try` lands in its `catch`.
+    let mut e = Engine::new();
+    e.interp.tier = crate::bytecode::Tier::Bytecode;
+    e.interp.tier_threshold = 0;
+    let src = r#"
+      function f(x){ try { if (x<0) throw "neg"+x; return "ok"+x; } catch(e){ return "c:"+e; } }
+      function native(){ try { null.x; } catch(e){ return e.constructor.name; } }
+      function nested(){ try { try { throw "in"; } catch(e){ throw e+"!"; } } catch(e){ return "out:"+e; } }
+      function noParam(){ try { throw 1; } catch { return "swallowed"; } }
+      var out = "";
+      async function ar(x){ try { return await Promise.reject("r"+x); } catch(e){ return "ac:"+e; } }
+      async function main(){
+        out = [f(2), f(-1), native(), nested(), noParam(), await ar(9)].join("|");
+      }
+      main();
+    "#;
+    e.eval(src, false).expect("parse");
+    let got = match e.eval("out", false).expect("parse") {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    };
+    assert_eq!(got, "ok2|c:neg-1|TypeError|out:in!|swallowed|ac:r9");
+}
+
+#[test]
 fn array_species() {
     assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
     assert_eq!(run("[1,2,3,4].filter(x=>x%2===0).join(',')"), "2,4");

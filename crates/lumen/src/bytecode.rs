@@ -125,6 +125,19 @@ pub enum Op {
     /// `await expr`: suspend the async body, handing the popped operand to the driver; on resume the
     /// settled value is pushed back (or a rejection is thrown). Only emitted for async functions.
     Await,
+    /// Enter a `try` region: register a handler that, on a throw anywhere in the region, unwinds the
+    /// stack and jumps to the operand (the catch pc, with the exception pushed).
+    PushHandler(u32),
+    /// Leave a `try` region without throwing: drop the innermost handler.
+    PopHandler,
+}
+
+/// An active `try` region on the VM's handler stack.
+struct Handler {
+    /// Where to jump on a throw (the catch entry).
+    catch_pc: usize,
+    /// The operand-stack depth to unwind to before pushing the exception.
+    stack_depth: usize,
 }
 
 pub struct Chunk {
@@ -495,6 +508,52 @@ impl Compiler {
             Stmt::Continue(None) => {
                 let j = self.emit(Op::Jump(0));
                 self.loops.last_mut().ok_or(Bail)?.continues.push(j);
+                Ok(())
+            }
+            // `try { ... } catch (e?) { ... }` — no `finally` (bails), catch param an ident or none.
+            // On a throw in the try region the VM unwinds to `catch_pc` with the exception pushed.
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                if finalizer.is_some() {
+                    return Err(Bail); // `finally` is not modeled in the VM yet
+                }
+                let Some((param, catch_body)) = handler else {
+                    return Err(Bail); // `try`/`finally` with no `catch`
+                };
+                if matches!(param, Some(p) if !matches!(p, Pattern::Ident(_))) {
+                    return Err(Bail); // destructuring catch param
+                }
+                let push = self.emit(Op::PushHandler(0));
+                self.scopes.push(Vec::new());
+                let tr = self.block_body(block);
+                self.scopes.pop();
+                tr?;
+                self.emit(Op::PopHandler);
+                let jmp_after = self.emit(Op::Jump(0));
+                // Catch entry: the exception is on the stack.
+                let catch_pc = self.ops.len() as u32;
+                match &mut self.ops[push] {
+                    Op::PushHandler(t) => *t = catch_pc,
+                    _ => unreachable!(),
+                }
+                self.scopes.push(Vec::new());
+                match param {
+                    Some(Pattern::Ident(name)) => {
+                        let slot = self.fresh_slot(name);
+                        self.scope_bind(name, slot, false);
+                        self.emit(Op::StoreLocal(slot));
+                    }
+                    _ => {
+                        self.emit(Op::Pop); // no binding (or `catch {}`): discard the exception
+                    }
+                }
+                let cr = self.block_body(catch_body);
+                self.scopes.pop();
+                cr?;
+                self.patch(jmp_after);
                 Ok(())
             }
             _ => Err(Bail),
@@ -1121,15 +1180,55 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
     };
     let mut stack: Vec<Value> = Vec::with_capacity(16);
     let mut pc = 0usize;
-    match run_vm(i, chunk, env, &mut slots, &mut stack, &mut pc, &this_val)? {
+    let mut handlers: Vec<Handler> = Vec::new();
+    match drive_vm(
+        i, chunk, env, &mut slots, &mut stack, &mut pc, &this_val, &mut handlers, None,
+    )? {
         VmStep::Done(v) => Ok(v),
         VmStep::Await(_) => unreachable!("a synchronous bytecode function cannot await"),
     }
 }
 
+/// Drive the VM through throws: run to `Done`/`Await`, or on an uncaught op throw unwind to the
+/// innermost `try` handler (restore its stack depth, push the exception, jump to its catch) and
+/// keep going — propagating only when no handler remains. `pending_throw` injects a throw *before*
+/// the first step: a rejected `await` resuming inside a `try` (see [`VmCoro::resume`]).
+#[allow(clippy::too_many_arguments)]
+fn drive_vm(
+    i: &mut Interp,
+    chunk: &Chunk,
+    env: &Env,
+    slots: &mut Vec<Value>,
+    stack: &mut Vec<Value>,
+    pc: &mut usize,
+    this_val: &Value,
+    handlers: &mut Vec<Handler>,
+    mut pending_throw: Option<Value>,
+) -> Result<VmStep, Abrupt> {
+    loop {
+        let outcome = match pending_throw.take() {
+            Some(e) => Err(Abrupt::Throw(e)),
+            None => run_vm(i, chunk, env, slots, stack, pc, this_val, handlers),
+        };
+        match outcome {
+            Ok(step) => return Ok(step),
+            Err(Abrupt::Throw(e)) => match handlers.pop() {
+                Some(h) => {
+                    stack.truncate(h.stack_depth);
+                    stack.push(e);
+                    *pc = h.catch_pc;
+                }
+                None => return Err(Abrupt::Throw(e)),
+            },
+            // Return/Break/Continue never escape a compiled body as an Abrupt; propagate defensively.
+            Err(other) => return Err(other),
+        }
+    }
+}
+
 /// Run from `*pc` until the body returns (`Done`), suspends at an `await` (`Await`, async bodies
-/// only), or throws (`Err(Abrupt::Throw)`). Operates on borrowed state so an async [`VmCoro`] can
-/// save it at a suspension and restore it on resume.
+/// only), or throws (`Err(Abrupt::Throw)`, caught by [`drive_vm`]). Operates on borrowed state so an
+/// async [`VmCoro`] can save it at a suspension and restore it on resume.
 #[allow(clippy::too_many_arguments)]
 fn run_vm(
     i: &mut Interp,
@@ -1139,6 +1238,7 @@ fn run_vm(
     stack: &mut Vec<Value>,
     pc: &mut usize,
     this_val: &Value,
+    handlers: &mut Vec<Handler>,
 ) -> Result<VmStep, Abrupt> {
     macro_rules! pop {
         () => {
@@ -1500,6 +1600,13 @@ fn run_vm(
             Op::Return => return Ok(VmStep::Done(pop!())),
             Op::ReturnUndef => return Ok(VmStep::Done(Value::Undefined)),
             Op::Await => return Ok(VmStep::Await(pop!())),
+            Op::PushHandler(catch_pc) => handlers.push(Handler {
+                catch_pc: catch_pc as usize,
+                stack_depth: stack.len(),
+            }),
+            Op::PopHandler => {
+                handlers.pop();
+            }
         }
     }
 }
@@ -1515,6 +1622,9 @@ pub struct VmCoro {
     slots: Vec<Value>,
     stack: Vec<Value>,
     pc: usize,
+    /// The `try` handler stack, saved across suspensions so a rejected `await` inside a `try` still
+    /// lands in its `catch`.
+    handlers: Vec<Handler>,
     pub done: bool,
     pub started: bool,
 }
@@ -1537,15 +1647,15 @@ impl VmCoro {
             slots,
             stack: Vec::with_capacity(16),
             pc: 0,
+            handlers: Vec::new(),
             done: false,
             started: false,
         }
     }
 
     /// Drive one step: run to the next `await` (`Suspend::Await`), to completion (`Done`), or to an
-    /// uncaught throw (`Throw`). `Resume::Throw` rejects immediately — a compiled async body has no
-    /// `try`/`catch`/`finally`/`using` (all of which bail from `compile`), so a rejected await just
-    /// escapes the function.
+    /// uncaught throw (`Throw`). A `Resume::Throw` (rejected await) is injected at the await point so
+    /// an enclosing `try`/`catch` in the body can catch it; only an uncaught one rejects the function.
     pub fn resume(
         &mut self,
         i: &mut Interp,
@@ -1555,12 +1665,15 @@ impl VmCoro {
         if self.done {
             return Suspend::Done(Value::Undefined);
         }
-        match signal {
+        let pending_throw = match signal {
             Resume::Next(v) => {
                 if self.started {
                     self.stack.push(v); // the settled value of the await we parked at
                 }
+                None
             }
+            // A rejected await: re-enter the VM throwing `e` at the suspension point.
+            Resume::Throw(e) if self.started => Some(e),
             Resume::Throw(e) => {
                 self.done = true;
                 return Suspend::Throw(e);
@@ -1569,9 +1682,9 @@ impl VmCoro {
                 self.done = true;
                 return Suspend::Done(v);
             }
-        }
+        };
         self.started = true;
-        match run_vm(
+        match drive_vm(
             i,
             &self.chunk,
             &self.env,
@@ -1579,6 +1692,8 @@ impl VmCoro {
             &mut self.stack,
             &mut self.pc,
             &self.this_val,
+            &mut self.handlers,
+            pending_throw,
         ) {
             Ok(VmStep::Await(a)) => Suspend::Await(a),
             Ok(VmStep::Done(v)) => {
