@@ -102,4 +102,10 @@ scripts/run-test262.sh      # run it (see crates/test262-runner for env knobs)
 
 ```sh
 scripts/run-v8bench.sh      # classic V8 suite (v8-v7); downloads on first run
+
+git clone https://github.com/chromium/octane.git ../octane   # one-time: Octane checkout
+scripts/run-octane.sh                    # full Octane suite
+scripts/run-octane.sh richards crypto    # selected benchmarks
 ```
+
+Octane is expected at `../octane` by default; set `OCTANE=/path/to/octane` to override.
