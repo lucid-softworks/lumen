@@ -1,9 +1,9 @@
 // Drive the Hono app through a series of requests and print the responses.
 //
-// lumen doesn't have an HTTP server yet, so instead of binding a port we call
-// `app.fetch(request)` — the same entry point a server adapter would call per
-// connection. This exercises ESM import from node_modules plus the web
-// platform: Request, Response, Headers, and URL.
+// This is the in-process variant: instead of binding a port (see serve-http.js for the real
+// `Lumen.serve` server) we call `app.fetch(request)` directly — the same entry point the server
+// calls per connection. Handy for exercising routing without a socket. Touches ESM import from
+// node_modules plus the web platform: Request, Response, Headers, and URL.
 
 import app from './app.js';
 
