@@ -16,8 +16,10 @@
 //!   syscalls, no crates), `crypto.subtle.digest` (SHA-256 only)
 //! - [x] `fetch` / `Headers` / `Request` / `Response` — **http only**: TLS cannot be built on
 //!   std and is not implemented (STOP-AND-FLAG); https rejects with a clear error
-//! - [ ] Streams (`ReadableStream`/`WritableStream`/`TransformStream`) — the largest gap;
-//!   response bodies are buffered, not streamed
+//! - [~] Streams: `ReadableStream` (default reader, async iteration, `getReader`/`cancel`/
+//!   `values`) backing Request/Response `.body` over the buffered bytes; no BYOB/byte streams,
+//!   `tee()`, piping, `WritableStream`, or `TransformStream` yet. Bodies remain buffered, so a
+//!   stream used as a body must produce its data synchronously.
 //! - [ ] `Blob` / `File` / `FormData`, `URLPattern`, `TextEncoderStream`/`TextDecoderStream`,
 //!   `crypto.subtle` beyond digest, `WebSocket`, compression streams
 
@@ -66,6 +68,7 @@ const JS_GLUE: &str = concat!(
     include_str!("js/events.js"),
     include_str!("js/encoding.js"),
     include_str!("js/url.js"),
+    include_str!("js/streams.js"),
     include_str!("js/fetch.js"),
     include_str!("js/crypto.js"),
     "\n})();"

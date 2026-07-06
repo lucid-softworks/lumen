@@ -412,6 +412,57 @@ fn web_url_and_search_params() {
 }
 
 #[test]
+fn web_response_status_defaults() {
+    // An explicit `undefined` status/statusText counts as absent (WebIDL) and takes the default,
+    // rather than coercing to `Number(undefined)` → NaN / `String(undefined)` → "undefined". This
+    // is the path Hono's `c.json()` hits (its internal status is left undefined).
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        console.log(new Response("x").status);
+        console.log(new Response("x", { status: undefined }).status);
+        console.log(new Response("x", { status: 201 }).status);
+        const r = new Response("x", { status: undefined, statusText: undefined });
+        console.log(JSON.stringify(r.statusText), r.ok);
+        "#,
+    );
+    assert_eq!(out.lines(), ["200", "200", "201", "\"\" true"]);
+}
+
+#[test]
+fn web_readable_stream_body() {
+    // `Response`/`Request` expose their buffered body as a `ReadableStream` via `.body`, and the
+    // constructors accept a stream body — so `new Response(res.body, res)` (Hono's `c.header()`
+    // rebuild) round-trips the payload instead of dropping it. Also covers reader reads, async
+    // iteration, a user-authored stream as a body, and `null` for an empty body.
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        (async () => {
+            const a = new Response('{"x":1}', { headers: { "content-type": "application/json" } });
+            const rebuilt = new Response(a.body, a);            // c.header() rebuild pattern
+            console.log(await rebuilt.text());
+            console.log(new Response("hi").body instanceof ReadableStream, new Response(null).body);
+            const rd = new Response("hello").body.getReader();
+            const c = await rd.read();
+            console.log(new TextDecoder().decode(c.value), (await rd.read()).done);
+            let acc = "";
+            for await (const ch of new Response("abc").body) acc += new TextDecoder().decode(ch);
+            console.log(acc);
+            const us = new ReadableStream({ start(ctrl) { ctrl.enqueue(new TextEncoder().encode("strm")); ctrl.close(); } });
+            console.log(await new Response(us).text());
+        })();
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        ["{\"x\":1}", "true null", "hello true", "abc", "strm"]
+    );
+}
+
+#[test]
 fn web_events_and_abort() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

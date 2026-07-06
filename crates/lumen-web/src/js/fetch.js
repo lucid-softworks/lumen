@@ -1,5 +1,6 @@
-// Headers/Request/Response + fetch over the native __http.request op. Bodies are buffered
-// (no ReadableStream yet); a Response body can be consumed once.
+// Headers/Request/Response + fetch over the native __http.request op. Bodies are buffered; a body
+// can be consumed once, either through `text()`/`json()`/… or by reading its `.body` ReadableStream
+// (see streams.js). The two share one "consumed" flag.
 
 function normalizeHeaderName(name) {
   name = String(name);
@@ -66,6 +67,7 @@ class Headers {
 }
 
 const kConsumed = Symbol("bodyConsumed");
+const kBodyStream = Symbol("bodyStream");
 
 function bodyMixin(proto) {
   proto.text = async function () {
@@ -91,6 +93,16 @@ function bodyMixin(proto) {
       return !!this[kConsumed];
     },
   });
+  // `.body` is a ReadableStream over the buffered bytes, or `null` when there is no body. The same
+  // stream instance is handed out on repeated access (per spec); reading it consumes the body.
+  Object.defineProperty(proto, "body", {
+    configurable: true,
+    get() {
+      if (this._bodyBytes === undefined) return null;
+      if (this[kBodyStream] === undefined) this[kBodyStream] = makeBodyStream(this);
+      return this[kBodyStream];
+    },
+  });
 }
 
 function toBodyBytes(body) {
@@ -99,8 +111,60 @@ function toBodyBytes(body) {
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
   if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  if (body instanceof ReadableStream) return drainStreamSync(body);
   if (body instanceof URLSearchParams) return new TextEncoder().encode(body.toString());
   return new TextEncoder().encode(String(body));
+}
+
+// Read a whole ReadableStream into one Uint8Array *synchronously*. Bodies are buffered, so a stream
+// used as a request/response body must produce its data without awaiting (our own body streams do;
+// so does any source whose `start`/`pull` enqueues synchronously).
+function drainStreamSync(stream) {
+  if (stream.locked) throw new TypeError("cannot construct a body from a locked ReadableStream");
+  const reader = stream.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const r = reader._readSync();
+    if (r.pending) {
+      throw new TypeError("a body ReadableStream must produce its data synchronously in this runtime");
+    }
+    if (r.done) break;
+    let chunk = r.value;
+    if (typeof chunk === "string") chunk = new TextEncoder().encode(chunk);
+    else if (chunk instanceof ArrayBuffer) chunk = new Uint8Array(chunk);
+    else if (ArrayBuffer.isView(chunk)) chunk = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    else if (!(chunk instanceof Uint8Array)) throw new TypeError("ReadableStream chunk is not binary data");
+    parts.push(chunk);
+    total += chunk.length;
+  }
+  reader.releaseLock();
+  if (parts.length === 1) return parts[0];
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+// The `.body` ReadableStream for a Request/Response: it lazily hands out the buffered bytes as a
+// single chunk (marking the body consumed, shared with `text()`/`json()`), or is empty when there
+// is no body.
+function makeBodyStream(owner) {
+  return new ReadableStream({
+    pull(controller) {
+      if (owner[kConsumed]) {
+        controller.error(new TypeError("body already consumed"));
+        return;
+      }
+      owner[kConsumed] = true;
+      const bytes = owner._bodyBytes;
+      if (bytes && bytes.length) controller.enqueue(bytes);
+      controller.close();
+    },
+  });
 }
 
 class Request {
@@ -138,11 +202,13 @@ bodyMixin(Request.prototype);
 class Response {
   constructor(body = null, init = {}) {
     init = init && typeof init === "object" ? init : {};
-    this.status = "status" in init ? Number(init.status) : 200;
+    // A dictionary member set to `undefined` counts as absent (WebIDL), so `{ status: undefined }`
+    // takes the default 200 rather than coercing to `Number(undefined)` → NaN.
+    this.status = init.status !== undefined ? Number(init.status) : 200;
     if (this.status < 200 || this.status > 599) {
       throw new RangeError(`invalid response status ${this.status}`);
     }
-    this.statusText = "statusText" in init ? String(init.statusText) : "";
+    this.statusText = init.statusText !== undefined ? String(init.statusText) : "";
     this.headers = new Headers(init.headers);
     this.url = "";
     this.redirected = false;
