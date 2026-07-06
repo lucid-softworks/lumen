@@ -26,6 +26,7 @@ const JS_FILES: &[&str] = &[
     "server.js",
     "crypto.js",
     "platform.js",
+    "wasm.js",
 ];
 
 fn main() {

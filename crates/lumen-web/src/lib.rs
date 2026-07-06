@@ -37,6 +37,12 @@ mod http;
 mod server;
 mod sha256;
 mod url;
+// The decoder parses the whole binary format; the MVP interpreter doesn't consume every field yet
+// (reserved value-type data, mutability flags, etc.), and a few opcode matches read cleaner as
+// explicit lists than ranges.
+#[allow(dead_code, clippy::manual_range_patterns)]
+mod wasm;
+mod wasm_ops;
 
 pub fn extension() -> Extension {
     Extension {
@@ -81,10 +87,25 @@ pub fn extension() -> Extension {
                     "gunzip" (1) => op_gunzip,
                 ],
             ),
+            (
+                "__wasm",
+                ops![
+                    "validate" (1) => wasm_ops::op_validate,
+                    "compile" (1) => wasm_ops::op_compile,
+                    "moduleExports" (1) => wasm_ops::op_module_exports,
+                    "moduleImports" (1) => wasm_ops::op_module_imports,
+                    "instantiate" (2) => wasm_ops::op_instantiate,
+                    "call" (3) => wasm_ops::op_call,
+                    "memBytes" (1) => wasm_ops::op_mem_bytes,
+                    "memWrite" (3) => wasm_ops::op_mem_write,
+                    "globalGet" (2) => wasm_ops::op_global_get,
+                ],
+            ),
         ],
         state_init: Some(|state: &mut OpState| {
             state.put(WebState::default());
             state.put(server::ServerRegistry::default());
+            state.put(wasm_ops::WasmStore::default());
         }),
         js_init: Some(JS_GLUE),
         js_init_snapshot: Some(JS_GLUE_SNAPSHOT),

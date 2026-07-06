@@ -652,8 +652,9 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "ReadableStreamBYOBReader",
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",
+    "WebAssembly",
 ];
-const WINTERTC_NOT_YET: &[&str] = &["WebAssembly"];
+const WINTERTC_NOT_YET: &[&str] = &[];
 
 #[test]
 fn wintertc_minimum_common_api() {
