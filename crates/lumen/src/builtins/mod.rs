@@ -2299,7 +2299,7 @@ fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
                 "Arguments"
             } else if !matches!(b.call, Callable::None) {
                 "Function"
-            } else if matches!(b.exotic, Exotic::Error) {
+            } else if matches!(b.exotic, Exotic::Error(_)) {
                 "Error"
             } else if matches!(b.exotic, Exotic::BoolWrap(_)) {
                 "Boolean"

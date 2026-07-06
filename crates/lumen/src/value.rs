@@ -127,9 +127,12 @@ pub enum Exotic {
     StrWrap(Rc<str>),
     SymWrap(Rc<SymbolData>),
     BigIntWrap(crate::bigint::JsBigInt),
-    /// An error object — carries no extra data (name/message live as ordinary properties) but the
-    /// tag lets `Error.prototype.toString` and the test262 runner recognise it cheaply.
-    Error,
+    /// An error object. Carries the captured call-stack frames as a preformatted string (the
+    /// `\n    at <fn>` lines, empty when thrown at top level), snapshotted at construction; the
+    /// `Error.prototype.stack` getter prepends the live `name: message` head. name/message live as
+    /// ordinary properties, and the tag lets `Error.prototype.toString` / the test262 runner
+    /// recognise an error cheaply.
+    Error(Rc<str>),
     /// An `arguments` exotic object (mapped index/parameter aliasing lives in
     /// `Interp::mapped_arguments`).
     Arguments,

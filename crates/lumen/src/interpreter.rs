@@ -1158,7 +1158,7 @@ impl Interp {
             .cloned()
             .unwrap_or_else(|| self.error_protos["Error"].clone());
         let obj = Object::new(Some(proto));
-        obj.borrow_mut().exotic = Exotic::Error;
+        obj.borrow_mut().exotic = Exotic::Error(self.capture_stack());
         let msg = message.into();
         if !msg.is_empty() {
             obj.borrow_mut()
@@ -1167,6 +1167,27 @@ impl Interp {
         }
         Value::Obj(obj)
     }
+    /// Snapshot the current call stack as the `\n    at <fn>` lines for an error's `stack`.
+    /// Innermost frame first (Node order). We are a tree-walker without per-call source spans, so
+    /// frames carry the function name only (`<anonymous>` when unnamed); the `stack` getter adds
+    /// the `name: message` head. Bounded by the engine's own recursion guard (~128 frames).
+    fn capture_stack(&self) -> Rc<str> {
+        let mut out = String::new();
+        for frame in self.fn_frames.iter().rev() {
+            let name = frame
+                .fn_obj
+                .as_obj()
+                .and_then(|o| match &o.borrow().props.get("name")?.value {
+                    Value::Str(s) if !s.is_empty() => Some(s.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            out.push_str("\n    at ");
+            out.push_str(&name);
+        }
+        Rc::from(out.as_str())
+    }
+
     pub fn throw(&self, kind: &str, message: impl Into<String>) -> Abrupt {
         Abrupt::Throw(self.make_error(kind, message))
     }

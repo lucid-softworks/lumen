@@ -40,17 +40,40 @@ pub(super) fn install_errors(it: &mut Interp) {
             format!("{name}: {msg}")
         }))
     });
-    // Error.prototype.stack accessor (error-stack-accessor proposal). lumen captures no stack trace,
-    // so the getter yields "" for an Error receiver (undefined otherwise); the setter shadows it.
-    // get stack: non-object → TypeError; an object without [[ErrorData]] → undefined; an Error
-    // instance → an implementation-defined stack string (lumen captures no trace, so "").
-    let get_stack = it.make_native("get stack", 0, |i, this, _| match &this {
-        Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error) => Ok(Value::str("")),
-        Value::Obj(_) => Ok(Value::Undefined),
-        _ => Err(i.make_error(
-            "TypeError",
-            "Error.prototype.stack getter called on a non-object",
-        )),
+    // Error.prototype.stack accessor (error-stack-accessor proposal). The frames are snapshotted
+    // at construction (Exotic::Error); the getter formats V8-style: `Name: message` followed by the
+    // `\n    at <fn>` lines. get stack: non-object → TypeError; an object without [[ErrorData]] →
+    // undefined; an Error instance → the formatted (implementation-defined) trace. The setter
+    // shadows this with an own data property, so `err.stack = x` caches as usual.
+    let get_stack = it.make_native("get stack", 0, |i, this, _| {
+        let frames = match &this {
+            Value::Obj(o) => match &o.borrow().exotic {
+                Exotic::Error(frames) => frames.clone(),
+                _ => return Ok(Value::Undefined),
+            },
+            _ => {
+                return Err(i.make_error(
+                    "TypeError",
+                    "Error.prototype.stack getter called on a non-object",
+                ))
+            }
+        };
+        let name = match ab(i.get_member(&this, "name"))? {
+            Value::Undefined => "Error".to_string(),
+            v => ab(i.to_string(&v))?.to_string(),
+        };
+        let msg = match ab(i.get_member(&this, "message"))? {
+            Value::Undefined => String::new(),
+            v => ab(i.to_string(&v))?.to_string(),
+        };
+        let head = if msg.is_empty() {
+            name
+        } else if name.is_empty() {
+            msg
+        } else {
+            format!("{name}: {msg}")
+        };
+        Ok(Value::from_string(format!("{head}{frames}")))
     });
     // set stack: SetterThatIgnoresPrototypeProperties(this, %Error.prototype%, "stack", v).
     let set_stack = it.make_native("set stack", 1, |i, this, a| {
@@ -161,7 +184,7 @@ pub(super) fn install_errors(it: &mut Interp) {
         if name == "Error" {
             it.def_method(&ctor, "isError", 1, |_i, _t, a| {
                 Ok(Value::Bool(
-                    matches!(arg(a, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error)),
+                    matches!(arg(a, 0), Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Error(_))),
                 ))
             });
             error_ctor = Some(ctor.clone());
