@@ -193,7 +193,7 @@ fn read_body(
     Ok(body)
 }
 
-fn read_chunked(reader: &mut impl BufRead) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_chunked(reader: &mut impl BufRead) -> std::io::Result<Vec<u8>> {
     let mut body = Vec::new();
     loop {
         let mut size_line = String::new();

@@ -16,6 +16,9 @@
 //!   syscalls, no crates), `crypto.subtle.digest` (SHA-256 only)
 //! - [x] `fetch` / `Headers` / `Request` / `Response` — **http only**: TLS cannot be built on
 //!   std and is not implemented (STOP-AND-FLAG); https rejects with a clear error
+//! - [~] `Lumen.serve` — an HTTP/1.1 *server* (not a WinterTC API; follows the cross-runtime
+//!   `serve((request) => Response)` convention of Deno/Bun/Workers). v1 is single-accept,
+//!   `Connection: close`, buffered bodies, http only — see `server.rs` for what's deferred.
 //! - [~] Streams: `ReadableStream` (default reader, async iteration, `getReader`/`cancel`/
 //!   `values`) backing Request/Response `.body` over the buffered bytes; no BYOB/byte streams,
 //!   `tee()`, piping, `WritableStream`, or `TransformStream` yet. Bodies remain buffered, so a
@@ -31,6 +34,7 @@ use std::time::Instant;
 use lumen_host::{ops, Ctx, Extension, OpState, SpawnHandle, TaskRegistry, Value};
 
 mod http;
+mod server;
 mod sha256;
 mod url;
 
@@ -47,6 +51,15 @@ pub fn extension() -> Extension {
             ("__url", ops!["parse" (2) => op_url_parse]),
             ("__http", ops!["request" (6) => op_http_request]),
             (
+                "__http_server",
+                ops![
+                    "listen" (3) => server::op_server_listen,
+                    "respond" (7) => server::op_server_respond,
+                    "close" (1) => server::op_server_close,
+                    "version" (0) => server::op_server_version,
+                ],
+            ),
+            (
                 "__crypto",
                 ops![
                     "fill" (1) => op_random_fill,
@@ -55,7 +68,10 @@ pub fn extension() -> Extension {
                 ],
             ),
         ],
-        state_init: Some(|state: &mut OpState| state.put(WebState::default())),
+        state_init: Some(|state: &mut OpState| {
+            state.put(WebState::default());
+            state.put(server::ServerRegistry::default());
+        }),
         js_init: Some(JS_GLUE),
     }
 }
@@ -70,6 +86,7 @@ const JS_GLUE: &str = concat!(
     include_str!("js/url.js"),
     include_str!("js/streams.js"),
     include_str!("js/fetch.js"),
+    include_str!("js/server.js"),
     include_str!("js/crypto.js"),
     "\n})();"
 );
@@ -251,7 +268,7 @@ fn op_http_request(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value,
 }
 
 /// A JS `[[k, v], ...]` array into Rust pairs, via the curated member API.
-fn read_header_pairs(ctx: &mut Ctx, v: &Value) -> Result<Vec<(String, String)>, Value> {
+pub(crate) fn read_header_pairs(ctx: &mut Ctx, v: &Value) -> Result<Vec<(String, String)>, Value> {
     let mut out = Vec::new();
     if v.as_obj().is_none() {
         return Ok(out);

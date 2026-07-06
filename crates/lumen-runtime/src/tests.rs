@@ -593,6 +593,47 @@ fn web_fetch_roundtrip_over_local_http() {
     assert_eq!(out.lines(), ["200 true yes", "true 42"]);
 }
 
+#[test]
+fn web_serve_roundtrip_over_loopback() {
+    // A whole HTTP server + client on one loop: Lumen.serve binds, the same runtime fetches
+    // itself through the loopback socket (server accept, client request, and response write all
+    // run concurrently on the threadpool), then shutdown() lets the loop go idle so eval returns.
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        (async () => {
+            const server = Lumen.serve(async (req) => {
+                const u = new URL(req.url);
+                if (u.pathname === "/json") {
+                    return Response.json({ ok: true, id: u.searchParams.get("id") });
+                }
+                if (req.method === "POST") return new Response("got:" + (await req.text()));
+                return new Response("pong\n", { headers: { "x-cta": "hi" } });
+            }, { hostname: "127.0.0.1", port: 0 });
+
+            const base = `http://127.0.0.1:${server.port}`;
+            const r1 = await fetch(base + "/");
+            console.log(r1.status, r1.headers.get("x-cta"), (await r1.text()).trim());
+
+            const r2 = await fetch(base + "/json?id=42");
+            const j = await r2.json();
+            console.log(r2.status, j.ok, j.id);
+
+            const r3 = await fetch(base + "/echo", { method: "POST", body: "hey" });
+            console.log(r3.status, await r3.text());
+
+            await server.shutdown();
+            console.log("closed");
+        })();
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        ["200 hi pong", "200 true 42", "200 got:hey", "closed"]
+    );
+}
+
 // ---- lumen-node (node: compat; the runtime assembles it) ----
 
 #[test]

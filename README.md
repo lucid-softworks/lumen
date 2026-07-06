@@ -51,6 +51,11 @@ On top of that:
   implemented on std alone and no third-party crate is permitted, so `https` URLs reject with
   a clear error; plain `http` works.
 
+  `Lumen.serve((request) => Response)` is the matching HTTP/1.1 **server** — not a WinterTC API,
+  but the cross-runtime `serve(handler)` convention (Deno/Bun/Workers), so a Hono app runs with
+  `Lumen.serve(app.fetch)`. v1 is single-accept, `Connection: close`, buffered bodies, http only
+  (see `crates/lumen-web/src/server.rs`). Cold-start and usage: `examples/hono-app`.
+
 - **Modules — both CommonJS and ESM.** `lumen-cli` picks the module kind the way Node does:
   `.mjs` is ESM, `.cjs` is CommonJS, `.js` follows the nearest `package.json` `"type"`. ES
   modules run through the engine's real module graph (linking, top-level `await`); `import`
