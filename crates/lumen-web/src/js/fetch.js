@@ -68,6 +68,21 @@ class Headers {
 
 const kConsumed = Symbol("bodyConsumed");
 const kBodyStream = Symbol("bodyStream");
+// A user-supplied ReadableStream body, kept un-drained until the body is actually consumed or
+// sent. Draining at construction would break feature-detection code (e.g. ky) that builds — but
+// never sends — a `new Request(url, { body: new ReadableStream() })` just to probe support.
+const kSourceStream = Symbol("bodySourceStream");
+
+// Set `owner`'s body from a BodyInit. A ReadableStream is stored, not drained (see kSourceStream);
+// everything else is encoded to bytes eagerly.
+function initBody(owner, body) {
+  if (body instanceof ReadableStream) {
+    owner[kSourceStream] = body;
+    owner._bodyBytes = undefined;
+  } else {
+    owner._bodyBytes = toBodyBytes(body);
+  }
+}
 
 function bodyMixin(proto) {
   proto.text = async function () {
@@ -86,18 +101,28 @@ function bodyMixin(proto) {
   proto._consume = async function () {
     if (this[kConsumed]) throw new TypeError("body already consumed");
     this[kConsumed] = true;
+    this._materialize();
     return this._bodyBytes || new Uint8Array(0);
+  };
+  // Drain a deferred ReadableStream body into bytes, on first consume/send.
+  proto._materialize = function () {
+    if (this[kSourceStream] !== undefined) {
+      this._bodyBytes = drainStreamSync(this[kSourceStream]);
+      this[kSourceStream] = undefined;
+    }
   };
   Object.defineProperty(proto, "bodyUsed", {
     get() {
       return !!this[kConsumed];
     },
   });
-  // `.body` is a ReadableStream over the buffered bytes, or `null` when there is no body. The same
-  // stream instance is handed out on repeated access (per spec); reading it consumes the body.
+  // `.body` is the user's ReadableStream if one was given (un-drained), else a stream over the
+  // buffered bytes, or `null` when there is no body. The same stream instance is handed out on
+  // repeated access (per spec); reading it consumes the body.
   Object.defineProperty(proto, "body", {
     configurable: true,
     get() {
+      if (this[kSourceStream] !== undefined) return this[kSourceStream];
       if (this._bodyBytes === undefined) return null;
       if (this[kBodyStream] === undefined) this[kBodyStream] = makeBodyStream(this);
       return this[kBodyStream];
@@ -174,21 +199,31 @@ class Request {
       this.url = input.url;
       this.method = init.method ? String(init.method).toUpperCase() : input.method;
       this.headers = new Headers(init.headers || input.headers);
-      this._bodyBytes = "body" in init ? toBodyBytes(init.body) : input._bodyBytes;
+      if ("body" in init) {
+        initBody(this, init.body);
+      } else {
+        // Inherit the source request's body (its deferred stream, if any).
+        this._bodyBytes = input._bodyBytes;
+        this[kSourceStream] = input[kSourceStream];
+      }
       this.signal = init.signal || input.signal || null;
     } else {
       this.url = new URL(String(input)).href;
       this.method = init.method ? String(init.method).toUpperCase() : "GET";
       this.headers = new Headers(init.headers);
-      this._bodyBytes = toBodyBytes(init.body);
+      initBody(this, init.body);
       this.signal = init.signal || null;
     }
-    if ((this.method === "GET" || this.method === "HEAD") && this._bodyBytes !== undefined) {
+    if (
+      (this.method === "GET" || this.method === "HEAD") &&
+      (this._bodyBytes !== undefined || this[kSourceStream] !== undefined)
+    ) {
       throw new TypeError(`${this.method} request cannot have a body`);
     }
     this[kConsumed] = false;
   }
   clone() {
+    this._materialize(); // can't tee a deferred stream; buffer it, then both share the bytes
     return new Request(this.url, {
       method: this.method,
       headers: this.headers,
@@ -212,7 +247,7 @@ class Response {
     this.headers = new Headers(init.headers);
     this.url = "";
     this.redirected = false;
-    this._bodyBytes = toBodyBytes(body);
+    initBody(this, body);
     this[kConsumed] = false;
   }
   get ok() {
@@ -220,6 +255,7 @@ class Response {
   }
   clone() {
     if (this[kConsumed]) throw new TypeError("cannot clone a used Response");
+    this._materialize();
     const r = new Response(this._bodyBytes, {
       status: this.status,
       statusText: this.statusText,
@@ -258,6 +294,14 @@ function fetch(input, init = {}) {
       return;
     }
     const headerPairs = request.headers._pairs();
+    let bodyBytes;
+    try {
+      request._materialize(); // drain a deferred stream body now that we're actually sending
+      bodyBytes = request._bodyBytes;
+    } catch (e) {
+      reject(e);
+      return;
+    }
     let settled = false;
     const onAbort = () => {
       if (settled) return;
@@ -270,7 +314,7 @@ function fetch(input, init = {}) {
       request.method,
       request.url,
       headerPairs,
-      request._bodyBytes,
+      bodyBytes,
       (raw) => {
         if (settled) return; // aborted first
         settled = true;
