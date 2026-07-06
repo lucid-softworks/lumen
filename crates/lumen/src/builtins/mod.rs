@@ -17448,7 +17448,7 @@ fn install_number(it: &mut Interp) {
         }
         let digits = d as usize;
         // The sign is `-` only for a strictly-negative value (not -0), and the magnitude is rounded.
-        let body = format!("{:.*}", digits, n.abs());
+        let body = to_fixed_magnitude(n.abs(), digits);
         Ok(Value::from_string(if n < 0.0 {
             format!("-{body}")
         } else {
@@ -17508,6 +17508,75 @@ fn install_number(it: &mut Interp) {
         ))
     });
     set_builtin(&it.global, "Number", Value::Obj(ctor));
+}
+
+/// Format the magnitude `x` (assumed ≥ 0, finite, and < 1e21) to exactly `digits` fractional
+/// places for `Number.prototype.toFixed`. The spec rounds to nearest and, on an *exact* tie, picks
+/// the larger n (ties away from zero) — whereas Rust's `{:.*}` rounds ties to even. The tie must be
+/// judged on the true binary64 value: `0.15` is really `0.1499…` and must round down, while `0.5`
+/// is an exact tie and rounds up. We therefore expand `x` to its exact decimal digits and round
+/// half-up ourselves: round up iff the exact digit just past the cut is ≥ 5.
+fn to_fixed_magnitude(x: f64, digits: usize) -> String {
+    // The exact decimal expansion of a finite f64 terminates. Its number of fractional digits is
+    // `-e2` where `x = significand × 2^e2` with an integer significand — bounded by 1074 (the
+    // smallest subnormal). Formatting to at least that many places incurs no rounding, so the digit
+    // we inspect is the true one. Derive the needed precision from the bit pattern to avoid always
+    // emitting ~1074 digits.
+    let bits = x.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & 0xf_ffff_ffff_ffff;
+    let significand = if biased == 0 {
+        mantissa // subnormal (or zero)
+    } else {
+        (1u64 << 52) | mantissa // normal: implicit leading 1
+    };
+    let e2 = if biased == 0 { -1074 } else { biased - 1075 } + significand.trailing_zeros() as i64;
+    let exact_frac = if e2 < 0 && significand != 0 {
+        (-e2) as usize
+    } else {
+        0
+    };
+    // Expand to enough places to (a) reach the digit past the cut and (b) be exact there.
+    let prec = exact_frac.max(digits + 1);
+    let exact = format!("{:.*}", prec, x);
+    let dot = exact.find('.').unwrap();
+    let int_digits = exact[..dot].bytes();
+    let frac = &exact.as_bytes()[dot + 1..];
+    let round_up = frac[digits] >= b'5';
+    // Digits we keep: the whole integer part plus the first `digits` fractional digits.
+    let mut ds: Vec<u8> = int_digits
+        .chain(frac[..digits].iter().copied())
+        .map(|b| b - b'0')
+        .collect();
+    if round_up {
+        // Propagate the carry leftward; a carry out of the most-significant digit prepends a 1.
+        let mut i = ds.len();
+        loop {
+            match i.checked_sub(1) {
+                None => {
+                    ds.insert(0, 1);
+                    break;
+                }
+                Some(j) => {
+                    i = j;
+                    if ds[j] == 9 {
+                        ds[j] = 0;
+                    } else {
+                        ds[j] += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let int_len = ds.len() - digits; // grew by 1 iff the carry rippled out the front
+    let mut out = String::with_capacity(ds.len() + 1);
+    out.extend(ds[..int_len].iter().map(|d| (d + b'0') as char));
+    if digits > 0 {
+        out.push('.');
+        out.extend(ds[int_len..].iter().map(|d| (d + b'0') as char));
+    }
+    out
 }
 
 fn to_radix_string(n: f64, radix: u32) -> String {

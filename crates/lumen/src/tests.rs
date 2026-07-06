@@ -3420,6 +3420,26 @@ fn number_methods_fixed() {
         ("(1).toPrecision(5)", "1.0000"),
         ("(255).toString(16)", "ff"),
         ("(123.456).toExponential(2)", "1.23e+2"),
+        // toFixed rounds half *up* (ties toward the larger n), not half-to-even (issue #5).
+        ("(0.5).toFixed(0)", "1"),
+        ("(2.5).toFixed(0)", "3"),
+        ("(4.5).toFixed(0)", "5"),
+        ("(1.25).toFixed(1)", "1.3"),
+        ("(-2.5).toFixed(0)", "-3"),
+        // Ties are judged on the exact binary64 value: these only *look* like halves, so they
+        // round down (0.15 is really 0.1499…, 1.005 is 1.00499…, 8.575 is 8.57499…).
+        ("(0.15).toFixed(1)", "0.1"),
+        ("(0.35).toFixed(1)", "0.3"),
+        ("(0.045).toFixed(2)", "0.04"),
+        ("(1.005).toFixed(2)", "1.00"),
+        ("(8.575).toFixed(2)", "8.57"),
+        ("(9.995).toFixed(2)", "9.99"),
+        // Rounding up must propagate the carry across a run of nines.
+        ("(0.996).toFixed(2)", "1.00"),
+        ("(9.5).toFixed(0)", "10"),
+        ("(99.5).toFixed(0)", "100"),
+        // Exact expansion at high precision stays faithful (no spurious rounding).
+        ("(1234.5678).toFixed(20)", "1234.56780000000003383320"),
     ];
     for (src, want) in cases {
         assert_eq!(run(src), want, "{src}");
