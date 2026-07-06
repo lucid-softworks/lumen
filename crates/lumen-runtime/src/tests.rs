@@ -593,6 +593,62 @@ fn web_fetch_roundtrip_over_local_http() {
     assert_eq!(out.lines(), ["200 true yes", "true 42"]);
 }
 
+// Cold-boot cost breakdown (realm intrinsics + per-extension install), for tracking the
+// startup floor. `#[ignore]`d (timing, not correctness):
+//   cargo test -p lumen-runtime perf_boot_breakdown --release -- --ignored --nocapture
+#[test]
+#[ignore]
+fn perf_boot_breakdown() {
+    use std::time::Instant;
+
+    fn median(mut xs: Vec<f64>) -> f64 {
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs[xs.len() / 2]
+    }
+    // Time a closure's median over N runs, in microseconds.
+    fn bench(n: usize, mut f: impl FnMut() -> f64) -> f64 {
+        median((0..n).map(|_| f()).collect())
+    }
+
+    let engine_us = bench(30, || {
+        let t = Instant::now();
+        let _e = lumen_host::Engine::new();
+        t.elapsed().as_secs_f64() * 1e6
+    });
+    println!("Engine::new (realm intrinsics)   {engine_us:8.1} us");
+
+    // Per-extension install (state + ops + js_init parse+eval), in the real order.
+    let names = ["timers", "console", "process", "fs", "web", "node"];
+    let mut totals = vec![Vec::new(); names.len()];
+    for _ in 0..30 {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pool = ThreadPool::new(4, tx);
+        let mut engine = lumen_host::Engine::new();
+        engine.ctx().op_state().put(pool.handle());
+        engine.ctx().op_state().put(TaskRegistry::default());
+        let exts = [
+            lumen_timers::extension(),
+            console::extension(),
+            process::extension(),
+            lumen_fs::extension(),
+            lumen_web::extension(),
+            lumen_node::extension(),
+        ];
+        for (i, ext) in exts.into_iter().enumerate() {
+            let t = Instant::now();
+            install(&mut engine, std::slice::from_ref(&ext));
+            totals[i].push(t.elapsed().as_secs_f64() * 1e6);
+        }
+    }
+    let mut sum = 0.0;
+    for (i, name) in names.iter().enumerate() {
+        let m = median(std::mem::take(&mut totals[i]));
+        sum += m;
+        println!("install {name:<8}                 {m:8.1} us");
+    }
+    println!("---\nextensions total                 {sum:8.1} us");
+}
+
 #[test]
 fn web_serve_roundtrip_over_loopback() {
     // A whole HTTP server + client on one loop: Lumen.serve binds, the same runtime fetches
