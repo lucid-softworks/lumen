@@ -6,7 +6,9 @@ name: Scripts
 on:
   push:
     branches: [main]
+    paths: ['scripts/**', '.github/workflows/scripts.yml']
   pull_request:
+    paths: ['scripts/**', '.github/workflows/scripts.yml']
 
 permissions:
   contents: read

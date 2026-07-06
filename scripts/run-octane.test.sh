@@ -10,10 +10,11 @@ FAKE_OCTANE="$TMP/octane"
 FAKE_BIN="$TMP/bin"
 CARGO_LOG="$TMP/cargo.log"
 LUMEN_LOG="$TMP/lumen.args"
+DRIVER_CAPTURE="$TMP/driver.js"
 STDERR_LOG="$TMP/stderr.log"
-LUMEN="$ROOT/target/release/lumen"
-BACKUP_DIR="$TMP/backup"
-HAD_LUMEN=0
+# The lumen stub lives in the test's own tmp dir and is passed via LUMEN_BIN, so
+# the runner never builds or touches the real target/release/lumen artifact.
+LUMEN_STUB="$FAKE_BIN/lumen"
 
 fail() {
   echo "not ok - $*" >&2
@@ -46,24 +47,33 @@ assert_file_equals() {
   fi
 }
 
-cleanup() {
-  if [ "$HAD_LUMEN" -eq 1 ]; then
-    rm -f "$LUMEN"
-    mv "$BACKUP_DIR/lumen" "$LUMEN"
-  else
-    rm -f "$LUMEN"
+# The driver is a mktemp path, so assert the base + suite args exactly and that
+# the final argument is *some* octane-driver.js.
+assert_lumen_suite_args() {
+  local expected="$1"
+  local total body last
+  total="$(wc -l < "$LUMEN_LOG")"
+  body="$(head -n "$((total - 1))" "$LUMEN_LOG")"
+  last="$(tail -n 1 "$LUMEN_LOG")"
+  if [ "$body" != "$expected" ]; then
+    echo "--- expected suite args ---" >&2
+    printf '%s\n' "$expected" >&2
+    echo "--- actual ---" >&2
+    printf '%s\n' "$body" >&2
+    fail "lumen suite args did not match"
   fi
+  case "$last" in
+    */octane-driver.js) ;;
+    *) fail "last lumen arg was not the driver: $last" ;;
+  esac
+}
+
+cleanup() {
   rm -rf "$TMP"
 }
 
 setup_stubs() {
-  mkdir -p "$TMP_ROOT"
-  mkdir -p "$FAKE_BIN" target/release "$BACKUP_DIR"
-
-  if [ -e "$LUMEN" ]; then
-    HAD_LUMEN=1
-    mv "$LUMEN" "$BACKUP_DIR/lumen"
-  fi
+  mkdir -p "$TMP_ROOT" "$FAKE_BIN"
 
   cat > "$FAKE_BIN/cargo" <<'SH'
 #!/usr/bin/env bash
@@ -72,19 +82,23 @@ exit 0
 SH
   chmod +x "$FAKE_BIN/cargo"
 
-  cat > "$LUMEN" <<'SH'
+  cat > "$LUMEN_STUB" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$LUMEN_LOG"
+# Capture the driver (last arg) so tests can assert the sed transform before the
+# runner's trap removes its work dir.
+driver="${@: -1}"
+cp "$driver" "$DRIVER_CAPTURE" 2>/dev/null || true
 if [ -n "${LUMEN_STUB_OUTPUT:-}" ]; then
   printf '%s\n' "$LUMEN_STUB_OUTPUT"
 elif [ "${LUMEN_STUB_NO_SCORE:-0}" -eq 0 ]; then
   printf '%s\n' 'Score (version 9): 1'
 fi
-exit "${LUMEN_STUB_STATUS:-0}"
+exit 0
 SH
-  chmod +x "$LUMEN"
+  chmod +x "$LUMEN_STUB"
 
-  export CARGO_LOG LUMEN_LOG
+  export CARGO_LOG LUMEN_LOG DRIVER_CAPTURE
   export PATH="$FAKE_BIN:$PATH"
 }
 
@@ -119,6 +133,8 @@ run_expect_failure() {
 }
 
 test_missing_octane_error() {
+  # No LUMEN_BIN: the build path is active, proving the Octane check fails before
+  # any build is attempted.
   run_expect_failure env OCTANE="$TMP/missing-octane" "$SCRIPT"
 
   assert_contains "$STDERR_LOG" "error: Octane not found at $TMP/missing-octane"
@@ -129,26 +145,43 @@ test_missing_octane_error() {
   fi
 }
 
-test_selected_suite_expansion_and_driver() {
+test_lumen_bin_skips_build_and_expands_suites() {
   write_fake_octane
-  env OCTANE="$FAKE_OCTANE" "$SCRIPT" richards gbemu crypto.js > "$TMP/stdout.log"
+  # A trailing `.js` (e.g. from tab-completion) is tolerated on every suite.
+  env OCTANE="$FAKE_OCTANE" LUMEN_BIN="$LUMEN_STUB" "$SCRIPT" richards gbemu crypto.js \
+    > "$TMP/stdout.log"
 
-  assert_file_equals "$CARGO_LOG" "build --release -q -p lumen --bin lumen"
-  assert_file_equals "$LUMEN_LOG" "$FAKE_OCTANE/base.js
+  assert_lumen_suite_args "$FAKE_OCTANE/base.js
 $FAKE_OCTANE/richards.js
 $FAKE_OCTANE/gbemu-part1.js
 $FAKE_OCTANE/gbemu-part2.js
-$FAKE_OCTANE/crypto.js
-$ROOT/target/octane-driver.js"
-  assert_file_equals "$ROOT/target/octane-driver.js" 'print("driver");'
+$FAKE_OCTANE/crypto.js"
+  assert_file_equals "$DRIVER_CAPTURE" 'print("driver");'
+  if [ -f "$CARGO_LOG" ]; then
+    fail "cargo must not run when LUMEN_BIN is provided"
+  fi
+}
+
+test_js_suffix_expands_multifile_suites() {
+  write_fake_octane
+  # Regression: `zlib.js` / `typescript.js` must expand to the full multi-file
+  # suite, not silently run only the single same-named file.
+  env OCTANE="$FAKE_OCTANE" LUMEN_BIN="$LUMEN_STUB" "$SCRIPT" zlib.js typescript.js \
+    > "$TMP/stdout.log"
+
+  assert_lumen_suite_args "$FAKE_OCTANE/base.js
+$FAKE_OCTANE/zlib.js
+$FAKE_OCTANE/zlib-data.js
+$FAKE_OCTANE/typescript.js
+$FAKE_OCTANE/typescript-input.js
+$FAKE_OCTANE/typescript-compiler.js"
 }
 
 test_full_suite_order() {
-  : > "$CARGO_LOG"
   write_fake_octane
-  env OCTANE="$FAKE_OCTANE" "$SCRIPT" > "$TMP/stdout.log"
+  env OCTANE="$FAKE_OCTANE" LUMEN_BIN="$LUMEN_STUB" "$SCRIPT" > "$TMP/stdout.log"
 
-  assert_file_equals "$LUMEN_LOG" "$FAKE_OCTANE/base.js
+  assert_lumen_suite_args "$FAKE_OCTANE/base.js
 $FAKE_OCTANE/richards.js
 $FAKE_OCTANE/deltablue.js
 $FAKE_OCTANE/crypto.js
@@ -167,20 +200,23 @@ $FAKE_OCTANE/zlib.js
 $FAKE_OCTANE/zlib-data.js
 $FAKE_OCTANE/typescript.js
 $FAKE_OCTANE/typescript-input.js
-$FAKE_OCTANE/typescript-compiler.js
-$ROOT/target/octane-driver.js"
+$FAKE_OCTANE/typescript-compiler.js"
 }
 
-test_unknown_suite_error() {
+test_unknown_suite_fails_before_build() {
   write_fake_octane
+  # No LUMEN_BIN: suite validation must reject the typo before the release build.
   run_expect_failure env OCTANE="$FAKE_OCTANE" "$SCRIPT" nope
 
   assert_contains "$STDERR_LOG" "error: unknown/missing Octane suite file: $FAKE_OCTANE/nope.js (from suite 'nope')"
+  if [ -f "$CARGO_LOG" ]; then
+    fail "suite validation must run before the release build"
+  fi
 }
 
 test_octane_reported_error_fails() {
   write_fake_octane
-  run_expect_failure env OCTANE="$FAKE_OCTANE" \
+  run_expect_failure env OCTANE="$FAKE_OCTANE" LUMEN_BIN="$LUMEN_STUB" \
     LUMEN_STUB_OUTPUT='zlib: ReferenceError: read is not defined' \
     "$SCRIPT" zlib
 
@@ -190,7 +226,8 @@ test_octane_reported_error_fails() {
 
 test_missing_score_fails() {
   write_fake_octane
-  run_expect_failure env OCTANE="$FAKE_OCTANE" LUMEN_STUB_NO_SCORE=1 "$SCRIPT" mandreel
+  run_expect_failure env OCTANE="$FAKE_OCTANE" LUMEN_BIN="$LUMEN_STUB" LUMEN_STUB_NO_SCORE=1 \
+    "$SCRIPT" mandreel
 
   assert_contains "$STDERR_LOG" "error: Octane completed without reporting a score."
 }
@@ -199,9 +236,10 @@ trap cleanup EXIT
 setup_stubs
 
 test_missing_octane_error
-test_selected_suite_expansion_and_driver
+test_lumen_bin_skips_build_and_expands_suites
+test_js_suffix_expands_multifile_suites
 test_full_suite_order
-test_unknown_suite_error
+test_unknown_suite_fails_before_build
 test_octane_reported_error_fails
 test_missing_score_fails
 
