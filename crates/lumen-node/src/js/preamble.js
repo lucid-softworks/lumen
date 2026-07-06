@@ -2,8 +2,10 @@
 "use strict";
 const __node = globalThis.__node;
 const __os = globalThis.__os;
+const __zlib = globalThis.__zlib;
 delete globalThis.__node;
 delete globalThis.__os;
+delete globalThis.__zlib;
 
 // Node's `global` is an alias for the global object.
 if (typeof globalThis.global === "undefined") {

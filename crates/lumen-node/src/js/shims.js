@@ -218,16 +218,67 @@ __builtins.set("tty", {
 }
 
 // ---- node:zlib --------------------------------------------------------------------------------
-// Declared so `require('zlib')` succeeds (body-parser/send import it eagerly); the actual codecs
-// need a real DEFLATE implementation, which lumen doesn't have. Identity (no Content-Encoding) is
-// the happy path; a compressed request/response body throws clearly.
+// Real gzip/deflate over the shared DEFLATE codec (__zlib native ops). Sync, async-callback, and
+// Transform-stream (createGzip/…) forms. Brotli is not implemented (no Brotli codec).
 {
-  const notImpl = () => { throw new Error("node:zlib (gzip/deflate) is not supported in lumen; send identity-encoded bodies"); };
-  __builtins.set("zlib", {
-    createGzip: notImpl, createGunzip: notImpl, createDeflate: notImpl, createInflate: notImpl,
-    createDeflateRaw: notImpl, createInflateRaw: notImpl, createBrotliCompress: notImpl, createBrotliDecompress: notImpl,
-    gzip: notImpl, gunzip: notImpl, deflate: notImpl, inflate: notImpl,
-    gzipSync: notImpl, gunzipSync: notImpl, deflateSync: notImpl, inflateSync: notImpl,
-    constants: {},
-  });
+  const codecs = {
+    gzip: __zlib.gzip, gunzip: __zlib.gunzip,
+    deflate: __zlib.deflate, inflate: __zlib.inflate,
+    deflateRaw: __zlib.deflateRaw, inflateRaw: __zlib.inflateRaw,
+  };
+
+  const sync = (fn) => (input) => Buffer.from(fn(input instanceof Uint8Array ? input : Buffer.from(input)));
+  const asyncOf = (syncFn) => (input, opts, cb) => {
+    if (typeof opts === "function") cb = opts;
+    queueMicrotask(() => {
+      try {
+        const out = syncFn(input);
+        cb(null, out);
+      } catch (e) {
+        cb(e);
+      }
+    });
+  };
+  // A Transform that buffers input and (de)compresses it whole on flush (the codec is one-shot).
+  // `stream` (node:stream) is looked up lazily: shims.js loads before stream.js.
+  const stream = (syncFn) => () => {
+    const Transform = __builtins.get("stream").Transform;
+    const chunks = [];
+    return new Transform({
+      transform(chunk, enc, next) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc));
+        next();
+      },
+      flush(done) {
+        try {
+          this.push(syncFn(Buffer.concat(chunks)));
+          done();
+        } catch (e) {
+          done(e);
+        }
+      },
+    });
+  };
+
+  const zlib = { constants: {} };
+  for (const [name, fn] of Object.entries(codecs)) {
+    const cap = name[0].toUpperCase() + name.slice(1);
+    const syncFn = sync(fn);
+    zlib[`${name}Sync`] = syncFn;
+    zlib[name] = asyncOf(syncFn);
+    // create<Gzip|Gunzip|Deflate|Inflate|DeflateRaw|InflateRaw>
+    zlib[`create${cap}`] = stream(syncFn);
+  }
+  // Aliases Node exposes.
+  zlib.unzipSync = zlib.gunzipSync;
+  zlib.unzip = zlib.gunzip;
+  zlib.createUnzip = zlib.createGunzip;
+  const brotliUnsupported = () => {
+    throw new Error("node:zlib Brotli is not supported in lumen");
+  };
+  zlib.createBrotliCompress = brotliUnsupported;
+  zlib.createBrotliDecompress = brotliUnsupported;
+  zlib.brotliCompressSync = brotliUnsupported;
+  zlib.brotliDecompressSync = brotliUnsupported;
+  __builtins.set("zlib", zlib);
 }
