@@ -54,6 +54,11 @@ pub struct Extension {
     /// public API is JS wrapping raw callback ops (e.g. `fs.promises` over `__fs_async`).
     /// A parse/throw here is a bug in the extension: `install` panics with its name.
     pub js_init: Option<&'static str>,
+    /// A build-time snapshot of `js_init`'s parsed AST (see `Engine::eval_snapshot`). When
+    /// present, `install` decodes it instead of re-lexing/parsing `js_init` every boot — the
+    /// dominant cold-start cost. A decode failure (version skew) falls back to `js_init`, so it
+    /// is a pure optimization. `js_init` must still be set (the fallback source).
+    pub js_init_snapshot: Option<&'static [u8]>,
 }
 
 impl Extension {
@@ -65,6 +70,7 @@ impl Extension {
             namespaces: &[],
             state_init: None,
             js_init: None,
+            js_init_snapshot: None,
         }
     }
 }
@@ -85,7 +91,14 @@ pub fn install(engine: &mut Engine, extensions: &[Extension]) {
             engine.define_namespace(ns, &table);
         }
         if let Some(src) = ext.js_init {
-            match engine.eval(src, false) {
+            // Prefer the precompiled snapshot (skips lex+parse); on a decode failure fall back to
+            // parsing the source, so the snapshot can never change behavior — only speed.
+            let completion = ext
+                .js_init_snapshot
+                .and_then(|bytes| engine.eval_snapshot(bytes, false).ok())
+                .map(Ok)
+                .unwrap_or_else(|| engine.eval(src, false));
+            match completion {
                 Ok(Completion::Value(_)) => {}
                 Ok(Completion::Throw { name, message }) => {
                     panic!("extension '{}' js_init threw {name}: {message}", ext.name)

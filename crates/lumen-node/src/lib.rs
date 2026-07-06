@@ -46,19 +46,14 @@ pub fn extension() -> Extension {
         ],
         state_init: None,
         js_init: Some(JS_GLUE),
+        js_init_snapshot: Some(JS_GLUE_SNAPSHOT),
     }
 }
 
-const JS_GLUE: &str = concat!(
-    "(() => {\n",
-    include_str!("js/preamble.js"),
-    include_str!("js/buffer.js"),
-    include_str!("js/path.js"),
-    include_str!("js/os.js"),
-    include_str!("js/fs.js"),
-    include_str!("js/module.js"),
-    "\n})();"
-);
+// Assembled by build.rs from src/js/*.js (single source of truth). JS_GLUE is the fallback
+// source; JS_GLUE_SNAPSHOT is its precompiled AST, decoded at boot to skip re-parsing.
+const JS_GLUE: &str = include_str!(concat!(env!("OUT_DIR"), "/node_glue.js"));
+const JS_GLUE_SNAPSHOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/node_glue.snap"));
 
 fn arg_path(ctx: &mut Ctx, args: &[Value]) -> Result<String, Value> {
     Ok(ctx

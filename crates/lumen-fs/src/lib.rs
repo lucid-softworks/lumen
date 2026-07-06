@@ -52,6 +52,7 @@ pub fn extension() -> Extension {
         ],
         state_init: None,
         js_init: Some(JS_PROMISES),
+        js_init_snapshot: None,
     }
 }
 

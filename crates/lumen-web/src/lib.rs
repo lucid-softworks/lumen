@@ -73,23 +73,16 @@ pub fn extension() -> Extension {
             state.put(server::ServerRegistry::default());
         }),
         js_init: Some(JS_GLUE),
+        js_init_snapshot: Some(JS_GLUE_SNAPSHOT),
     }
 }
 
-/// One IIFE: the preamble captures and deletes the raw `__*` namespaces, the rest defines the
-/// standard classes over them.
-const JS_GLUE: &str = concat!(
-    "(() => {\n",
-    include_str!("js/preamble.js"),
-    include_str!("js/events.js"),
-    include_str!("js/encoding.js"),
-    include_str!("js/url.js"),
-    include_str!("js/streams.js"),
-    include_str!("js/fetch.js"),
-    include_str!("js/server.js"),
-    include_str!("js/crypto.js"),
-    "\n})();"
-);
+/// One IIFE (preamble captures and deletes the raw `__*` namespaces, the rest defines the
+/// standard classes over them), assembled by `build.rs` from `src/js/*.js` — the single source
+/// of truth. `JS_GLUE` is the fallback source; `JS_GLUE_SNAPSHOT` is its precompiled AST, decoded
+/// at boot to skip re-parsing (see `lumen_host::install` / `Engine::eval_snapshot`).
+const JS_GLUE: &str = include_str!(concat!(env!("OUT_DIR"), "/web_glue.js"));
+const JS_GLUE_SNAPSHOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/web_glue.snap"));
 
 #[derive(Default)]
 struct WebState {

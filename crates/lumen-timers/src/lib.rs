@@ -27,6 +27,7 @@ pub fn extension() -> Extension {
         namespaces: &[],
         state_init: Some(|state| state.put(Timers::default())),
         js_init: None,
+        js_init_snapshot: None,
     }
 }
 
