@@ -40,6 +40,7 @@ mod parser;
 mod regex;
 mod regex_emoji;
 mod regex_fold;
+mod snapshot;
 mod temporal;
 mod token;
 mod tz;
@@ -77,6 +78,16 @@ pub fn set_host_clock(f: fn() -> f64) {
 /// The installed host clock's current time, if one was set.
 pub(crate) fn host_now_ms() -> Option<f64> {
     HOST_CLOCK.get().map(|f| f())
+}
+
+/// Parse `src` as a script and encode its AST to a snapshot blob — a build-time helper (used
+/// from op crates' `build.rs`) so static JS glue is parsed once at build and decoded, not
+/// re-parsed, on every boot. Decode it at runtime with [`Engine::eval_snapshot`]. `Err` is a
+/// parse-error message.
+pub fn compile_snapshot(src: &str) -> Result<Vec<u8>, String> {
+    let body = parser::parse_script(src, false)
+        .map_err(|e| format!("{} (line {})", e.message, e.line))?;
+    Ok(snapshot::encode(&body))
 }
 
 /// A parse-phase failure. test262 reports these as a `SyntaxError` thrown during parsing.
@@ -157,6 +168,31 @@ impl Engine {
         self.interp.strict = strict || directive_strict;
         let result = self.interp.run_program(&body);
         // Run queued promise reactions (the microtask checkpoint after the script).
+        self.interp.run_agent_event_loop();
+        match result {
+            Ok(v) => Ok(Completion::Value(self.render(&v))),
+            Err(thrown) => Ok(self.describe_throw(thrown)),
+        }
+    }
+
+    /// Like [`eval`](Engine::eval), but the script body comes from a precompiled snapshot blob
+    /// (see [`compile_snapshot`]) instead of parsing source — the runtime uses this to skip
+    /// re-lexing/parsing its static JS glue on every boot. A decode failure (version skew,
+    /// corruption) surfaces as `Err(ParseError)` so the caller can fall back to `eval` on the
+    /// original source; the resulting AST is otherwise identical to a parsed one, so execution
+    /// is byte-for-byte the same.
+    pub fn eval_snapshot(&mut self, bytes: &[u8], strict: bool) -> Result<Completion, ParseError> {
+        let body = snapshot::decode(bytes).map_err(|message| ParseError {
+            message,
+            line: 0,
+            at_eof: false,
+        })?;
+        let directive_strict = matches!(
+            body.first(),
+            Some(ast::Stmt::Expr(ast::Expr::Str(s))) if &**s == "use strict"
+        );
+        self.interp.strict = strict || directive_strict;
+        let result = self.interp.run_program(&body);
         self.interp.run_agent_event_loop();
         match result {
             Ok(v) => Ok(Completion::Value(self.render(&v))),
