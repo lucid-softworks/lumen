@@ -211,8 +211,12 @@ function makeBuiltinEsmSource(name) {
   return src;
 }
 
-// The clean builtin base names (skip the "node:module" alias key).
-const __BUILTIN_NAMES = ["buffer", "path", "os", "fs", "module"];
+// The clean builtin base names (skip the "node:module" alias key). Order is cosmetic here.
+const __BUILTIN_NAMES = [
+  "buffer", "path", "os", "fs", "module",
+  "events", "util", "crypto", "querystring", "url", "net", "assert",
+  "string_decoder", "tty", "async_hooks", "zlib", "stream", "http", "https",
+];
 const __esmBuiltinSources = {};
 for (const name of __BUILTIN_NAMES) {
   const source = makeBuiltinEsmSource(name);

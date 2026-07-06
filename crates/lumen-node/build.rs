@@ -5,14 +5,31 @@
 
 use std::path::PathBuf;
 
-/// Order matters (preamble first; module.js's require builds on the others).
-const JS_FILES: &[&str] = &[
-    "preamble.js",
-    "buffer.js",
-    "path.js",
-    "os.js",
-    "fs.js",
-    "module.js",
+/// Order matters: preamble first; each builtin registers itself into `__builtins` as it loads, so
+/// dependencies must come first (events ← stream ← http; util/crypto/shims before their users);
+/// module.js is LAST because it snapshots `__builtins.keys()` as the core-module set.
+///
+/// `wrap` puts a file's body in its own `{ }` block so its top-level `const`/`class` names stay
+/// private (the whole glue is one IIFE, so unwrapped files share a scope and would collide). The
+/// original files kept names globally unique; the newer module files reuse names (EventEmitter,
+/// Readable, …) and rely on block isolation, talking to each other only through `__builtins`.
+struct GlueFile {
+    name: &'static str,
+    wrap: bool,
+}
+const JS_FILES: &[GlueFile] = &[
+    GlueFile { name: "preamble.js", wrap: false },
+    GlueFile { name: "buffer.js", wrap: false },
+    GlueFile { name: "path.js", wrap: false },
+    GlueFile { name: "os.js", wrap: false },
+    GlueFile { name: "fs.js", wrap: false },
+    GlueFile { name: "events.js", wrap: true },
+    GlueFile { name: "util.js", wrap: true },
+    GlueFile { name: "crypto.js", wrap: true },
+    GlueFile { name: "shims.js", wrap: true },
+    GlueFile { name: "stream.js", wrap: true },
+    GlueFile { name: "http.js", wrap: true },
+    GlueFile { name: "module.js", wrap: false },
 ];
 
 fn main() {
@@ -21,12 +38,17 @@ fn main() {
 
     let mut glue = String::from("(() => {\n");
     for file in JS_FILES {
-        let path = src_dir.join(file);
+        let path = src_dir.join(file.name);
         println!("cargo:rerun-if-changed={}", path.display());
-        glue.push_str(
-            &std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
-        );
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        if file.wrap {
+            glue.push_str("{\n");
+            glue.push_str(&body);
+            glue.push_str("\n}\n");
+        } else {
+            glue.push_str(&body);
+        }
     }
     glue.push_str("\n})();");
 

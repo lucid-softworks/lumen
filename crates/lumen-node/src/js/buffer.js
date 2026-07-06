@@ -133,8 +133,25 @@ class Buffer extends Uint8Array {
   static allocUnsafe(size) {
     return new Buffer(size);
   }
+  // Node distinguishes allocUnsafeSlow (un-pooled) from allocUnsafe; we don't pool, so they are
+  // the same. Its presence also matters for feature-detection: safe-buffer only passes the real
+  // Buffer through when all four of from/alloc/allocUnsafe/allocUnsafeSlow exist.
+  static allocUnsafeSlow(size) {
+    return new Buffer(size);
+  }
   static isBuffer(x) {
     return x instanceof Buffer;
+  }
+  static isEncoding(enc) {
+    return typeof enc === "string" && ["utf8", "utf-8", "hex", "base64", "base64url", "latin1", "binary", "ascii", "ucs2", "ucs-2", "utf16le", "utf-16le"].includes(enc.toLowerCase());
+  }
+  static compare(a, b) {
+    if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) throw new TypeError("Arguments must be Buffers");
+    const len = Math.min(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+    }
+    return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
   }
   static byteLength(str, enc) {
     if (typeof str !== "string") return str.byteLength ?? str.length ?? 0;
