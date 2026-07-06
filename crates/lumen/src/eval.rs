@@ -638,33 +638,8 @@ impl Interp {
                     Err(e) => Err(crate::interpreter::update_abrupt_empty(e, Value::Undefined)),
                 }
             }
-            Stmt::While { test, body } => self.run_loop(None, env, |me, env| {
-                let t = me.eval(test, env)?;
-                if !me.to_boolean(&t) {
-                    return Ok(LoopStep::Done(Value::Empty));
-                }
-                let bv = me.exec_stmt(body, env)?;
-                Ok(LoopStep::Continue(bv))
-            }),
-            Stmt::DoWhile { body, test } => {
-                let mut first = true;
-                self.run_loop(None, env, |me, env| {
-                    if !first {
-                        let t = me.eval(test, env)?;
-                        if !me.to_boolean(&t) {
-                            return Ok(LoopStep::Done(Value::Empty));
-                        }
-                    }
-                    first = false;
-                    let bv = me.exec_stmt(body, env)?;
-                    let t = me.eval(test, env)?;
-                    if !me.to_boolean(&t) {
-                        Ok(LoopStep::Done(bv))
-                    } else {
-                        Ok(LoopStep::Continue(bv))
-                    }
-                })
-            }
+            Stmt::While { test, body } => self.exec_while(test, body, env, None),
+            Stmt::DoWhile { body, test } => self.exec_do_while(body, test, env, None),
             Stmt::For {
                 init,
                 test,
@@ -764,13 +739,51 @@ impl Interp {
                 is_await,
                 body,
             } => self.exec_for_in_of(*decl, left, right, *of, *is_await, body, env, Some(label)),
-            Stmt::While { .. } | Stmt::DoWhile { .. } => self.exec_stmt(body, env),
+            Stmt::While { test, body } => self.exec_while(test, body, env, Some(label)),
+            Stmt::DoWhile { body, test } => self.exec_do_while(body, test, env, Some(label)),
             other => self.exec_stmt(other, env),
         };
         match result {
             Err(Abrupt::Break(Some(l), bv)) if l == label => Ok(bv),
             other => other,
         }
+    }
+
+    fn exec_while(&mut self, test: &Expr, body: &Stmt, env: &Env, label: Option<&str>) -> Completion {
+        self.run_loop(label, env, |me, env| {
+            let t = me.eval(test, env)?;
+            if !me.to_boolean(&t) {
+                return Ok(LoopStep::Done(Value::Empty));
+            }
+            let bv = me.exec_stmt(body, env)?;
+            Ok(LoopStep::Continue(bv))
+        })
+    }
+
+    fn exec_do_while(
+        &mut self,
+        body: &Stmt,
+        test: &Expr,
+        env: &Env,
+        label: Option<&str>,
+    ) -> Completion {
+        let mut first = true;
+        self.run_loop(label, env, |me, env| {
+            if !first {
+                let t = me.eval(test, env)?;
+                if !me.to_boolean(&t) {
+                    return Ok(LoopStep::Done(Value::Empty));
+                }
+            }
+            first = false;
+            let bv = me.exec_stmt(body, env)?;
+            let t = me.eval(test, env)?;
+            if !me.to_boolean(&t) {
+                Ok(LoopStep::Done(bv))
+            } else {
+                Ok(LoopStep::Continue(bv))
+            }
+        })
     }
 
     fn run_loop(

@@ -1155,6 +1155,37 @@ fn label_validation() {
     assert_eq!(run("x: 1; x: 2; 'ok'"), "ok"); // sequential same label is fine
 }
 #[test]
+fn labelled_continue_while() {
+    // Regression: a labelled `continue` targeting a while/do-while used to escape the loop as an
+    // uncaught completion and silently terminate the script (issue #4). It must restart the loop.
+    assert_eq!(
+        run("var i=0; a: while(i<3){ i++; continue a; } i"),
+        "3"
+    );
+    assert_eq!(
+        run("var i=0; a: do { i++; continue a; } while(i<3); i"),
+        "3"
+    );
+    // Labelled `break` on a while/do-while keeps working.
+    assert_eq!(run("var i=0; a: while(i<3){ i++; break a; } i"), "1");
+    assert_eq!(run("var i=0; a: do { i++; break a; } while(i<3); i"), "1");
+    // Inner while `continue`s the outer label: the outer loop advances, the inner is abandoned.
+    assert_eq!(
+        run("var log=[]; a: for(var i=0;i<3;i++){ var j=0; while(j<3){ j++; if(j===2) continue a; log.push(i+':'+j);} } log.join(',')"),
+        "0:1,1:1,2:1"
+    );
+    // Labelled continue on an outer while, driven from an inner while.
+    assert_eq!(
+        run("var n=0; a: while(n<3){ n++; var k=0; while(k<5){ k++; continue a; } } n"),
+        "3"
+    );
+    // Completion value threading: the loop's value is the last non-empty body completion.
+    assert_eq!(
+        run("var i=0; a: while(i<3){ i++; if(i<3){ i; continue a; } 42; }"),
+        "42"
+    );
+}
+#[test]
 fn named_eval_defaults() {
     assert_eq!(run("var {a=function(){}}={}; a.name"), "a");
     assert_eq!(run("var [b=()=>{}]=[]; b.name"), "b");
