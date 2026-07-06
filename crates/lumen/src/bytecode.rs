@@ -271,6 +271,9 @@ struct Compiler {
     n_params: usize,
     var_force_resets: Vec<u16>,
     loops: Vec<LoopCtx>,
+    /// Labels collected from an enclosing `Stmt::Labeled` chain, waiting to be attached to the next
+    /// loop's `LoopCtx` (drained when that loop pushes its context).
+    pending_labels: Vec<String>,
     uses_this: bool,
     caches: Vec<std::cell::Cell<u32>>,
 }
@@ -279,6 +282,9 @@ struct Compiler {
 struct LoopCtx {
     breaks: Vec<usize>,
     continues: Vec<usize>,
+    /// Labels naming this loop (usually zero or one; `a: b: for(…)` stacks several). A labelled
+    /// `break`/`continue` searches the loop stack for the ctx carrying its target label.
+    labels: Vec<String>,
 }
 
 /// Compilation bail: the construct is outside the v0 subset.
@@ -447,10 +453,14 @@ impl Compiler {
                 r
             }
             Stmt::While { test, body } => {
+                let labels = std::mem::take(&mut self.pending_labels);
                 let start = self.ops.len();
                 self.expr(test)?;
                 let jf = self.emit(Op::JumpIfFalse(0));
-                self.loops.push(LoopCtx::default());
+                self.loops.push(LoopCtx {
+                    labels,
+                    ..LoopCtx::default()
+                });
                 let r = self.stmt(body);
                 let ctx = self.loops.pop().unwrap();
                 r?;
@@ -468,8 +478,12 @@ impl Compiler {
                 Ok(())
             }
             Stmt::DoWhile { body, test } => {
+                let labels = std::mem::take(&mut self.pending_labels);
                 let start = self.ops.len();
-                self.loops.push(LoopCtx::default());
+                self.loops.push(LoopCtx {
+                    labels,
+                    ..LoopCtx::default()
+                });
                 let r = self.stmt(body);
                 let ctx = self.loops.pop().unwrap();
                 r?;
@@ -510,6 +524,28 @@ impl Compiler {
                 self.loops.last_mut().ok_or(Bail)?.continues.push(j);
                 Ok(())
             }
+            // Labelled break/continue: jump to the loop on the stack that carries the target label.
+            // A `break` to a labelled *block* (not a loop) isn't modeled here — no ctx matches, so
+            // it bails to the interpreter.
+            Stmt::Break(Some(name)) => {
+                let j = self.emit(Op::Jump(0));
+                self.labeled_loop_mut(name).ok_or(Bail)?.breaks.push(j);
+                Ok(())
+            }
+            Stmt::Continue(Some(name)) => {
+                let j = self.emit(Op::Jump(0));
+                self.labeled_loop_mut(name).ok_or(Bail)?.continues.push(j);
+                Ok(())
+            }
+            // A label naming a loop attaches to that loop's context; stacked labels (`a: b: for`)
+            // accumulate through the recursion. A label on any other statement bails.
+            Stmt::Labeled { label, body } => match &**body {
+                Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::Labeled { .. } => {
+                    self.pending_labels.push(label.clone());
+                    self.stmt(body)
+                }
+                _ => Err(Bail),
+            },
             // `try { ... } catch (e?) { ... }` — no `finally` (bails), catch param an ident or none.
             // On a throw in the try region the VM unwinds to `catch_pc` with the exception pushed.
             Stmt::Try {
@@ -560,6 +596,14 @@ impl Compiler {
         }
     }
 
+    /// The nearest enclosing loop context labelled `name`, searched innermost-first.
+    fn labeled_loop_mut(&mut self, name: &str) -> Option<&mut LoopCtx> {
+        self.loops
+            .iter_mut()
+            .rev()
+            .find(|c| c.labels.iter().any(|l| l == name))
+    }
+
     fn block_body(&mut self, body: &[Stmt]) -> CResult {
         self.declare_block_lexicals(body)?;
         for s in body {
@@ -575,6 +619,9 @@ impl Compiler {
         update: Option<&Expr>,
         body: &Stmt,
     ) -> CResult {
+        // Claim any labels from an enclosing `Stmt::Labeled` before the head runs, so they land on
+        // this loop's context (the head itself introduces no labelled break/continue targets).
+        let labels = std::mem::take(&mut self.pending_labels);
         match init {
             Some(ForInit::VarDecl { kind, decls }) => {
                 if matches!(kind, DeclKind::Using | DeclKind::AwaitUsing) {
@@ -622,7 +669,10 @@ impl Compiler {
             }
             None => None,
         };
-        self.loops.push(LoopCtx::default());
+        self.loops.push(LoopCtx {
+            labels,
+            ..LoopCtx::default()
+        });
         let r = self.stmt(body);
         let ctx = self.loops.pop().unwrap();
         r?;

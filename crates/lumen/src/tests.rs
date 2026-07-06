@@ -2003,6 +2003,59 @@ fn bytecode_property_inline_cache() {
 }
 
 #[test]
+fn bytecode_compiles_labelled_loops() {
+    // Labelled loops used to bail out of the compiler (falling back to the interpreter). They now
+    // compile to the fast tier: assert `compile` actually produces a chunk rather than `None`.
+    fn compiles(src: &str) -> bool {
+        let stmts = crate::parser::parse_script(src, false).ok().expect("parse");
+        let func = stmts
+            .iter()
+            .find_map(|s| match s {
+                crate::ast::Stmt::FuncDecl(f) => Some(f.clone()),
+                _ => None,
+            })
+            .expect("a function declaration");
+        crate::bytecode::compile(&func).is_some()
+    }
+    assert!(compiles("function f(){ var i=0; a: while(i<3){ i++; continue a; } }"));
+    assert!(compiles("function f(){ a: do { break a; } while(false); }"));
+    assert!(compiles("function f(){ a: for(;;){ continue a; } }"));
+    assert!(compiles("function f(){ var r=0; a: b: for(var i=0;i<2;i++){ continue a; } }"));
+    assert!(compiles(
+        "function f(){ outer: for(var i=0;i<2;i++){ for(var j=0;j<2;j++){ continue outer; } } }"
+    ));
+    // A label on a non-loop statement stays outside the compiled subset (bails to the interpreter).
+    assert!(!compiles("function f(){ a: { break a; } }"));
+}
+
+#[test]
+fn bytecode_labelled_loops_match_interp() {
+    // The compiled labelled-loop behavior must match the tree-walker exactly. Run each snippet on
+    // both tiers (threshold 0 forces immediate compilation) and require identical results.
+    fn on_tier(src: &str, tier: crate::bytecode::Tier) -> String {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = 0;
+        match e.eval(src, false).expect("parse") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+    for src in [
+        "function f(){ var i=0; a: while(i<3){ i++; continue a; } return i; } f()",
+        "function f(){ var i=0; a: do { i++; continue a; } while(i<3); return i; } f()",
+        "function f(){ var n=0; a: while(n<5){ n++; if(n===3) break a; } return n; } f()",
+        "function f(){ var r=0; a: b: for(var i=0;i<4;i++){ if(i===2) continue a; r+=i; } return r; } f()",
+        "function f(){ var s=0; outer: for(var i=0;i<3;i++){ for(var j=0;j<3;j++){ if(j===1) continue outer; s+=10*i+j; } } return s; } f()",
+        "function f(){ var s=''; a: for(var i=0;i<3;i++){ for(var j=0;j<3;j++){ if(j===1) break a; s+=i+''+j; } } return s; } f()",
+    ] {
+        let interp = on_tier(src, crate::bytecode::Tier::Interp);
+        let bytecode = on_tier(src, crate::bytecode::Tier::Bytecode);
+        assert_eq!(interp, bytecode, "tier mismatch for: {src}");
+    }
+}
+
+#[test]
 fn bytecode_async_vm() {
     // Async bodies compile to the bytecode VM and suspend at `await` without an OS-thread
     // coroutine. Checks the awaited value flows back, `await` in a loop accumulates, the return
