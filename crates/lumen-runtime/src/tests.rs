@@ -693,3 +693,126 @@ fn node_require_missing_module_throws() {
     );
     assert_eq!(out.lines(), ["MODULE_NOT_FOUND true"]);
 }
+
+// ---- ESM (run_module: the import graph resolves against disk + node_modules) ----
+
+#[test]
+fn esm_named_default_json_and_dynamic_import() {
+    use std::fs;
+    let dir = TempDir::new("esm-basic");
+    let root = dir.0.clone();
+    fs::write(
+        root.join("util.mjs"),
+        "export const double = (n) => n * 2;\nexport default { tag: 'd' };",
+    )
+    .unwrap();
+    fs::write(root.join("data.json"), r#"{ "answer": 42 }"#).unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import def, { double } from "./util.mjs";
+        import data from "./data.json";
+        console.log(double(21), def.tag, data.answer);
+        const dyn = await import("./util.mjs");
+        console.log(dyn.double(4));
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("module runs");
+    assert_eq!(out.lines(), ["42 d 42", "8"]);
+}
+
+#[test]
+fn esm_imports_node_builtins_named_and_default() {
+    use std::fs;
+    let dir = TempDir::new("esm-builtin");
+    let entry = dir.0.join("b.mjs");
+    fs::write(
+        &entry,
+        r#"
+        import { readFileSync, writeFileSync } from "node:fs";
+        import path, { join } from "node:path";
+        import os from "os";
+        console.log(typeof readFileSync, typeof writeFileSync);
+        console.log(path.basename("/a/b.js"), join("x", "y"));
+        console.log(typeof os.platform());
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&entry.to_string_lossy()).expect("runs");
+    assert_eq!(out.lines(), ["function function", "b.js x/y", "string"]);
+}
+
+#[test]
+fn esm_resolves_node_modules_packages() {
+    use std::fs;
+    let dir = TempDir::new("esm-pkg");
+    let root = dir.0.clone();
+    let esm = root.join("node_modules").join("esmpkg");
+    fs::create_dir_all(&esm).unwrap();
+    fs::write(
+        esm.join("package.json"),
+        r#"{ "name":"esmpkg", "type":"module", "main":"index.js" }"#,
+    )
+    .unwrap();
+    fs::write(esm.join("index.js"), "export const from = 'esm-pkg';").unwrap();
+    let cjs = root.join("node_modules").join("cjspkg");
+    fs::create_dir_all(&cjs).unwrap();
+    fs::write(
+        cjs.join("package.json"),
+        r#"{ "name":"cjspkg", "main":"index.js" }"#,
+    )
+    .unwrap();
+    fs::write(
+        cjs.join("index.js"),
+        "module.exports = { from: 'cjs-pkg' };",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import { from as e } from "esmpkg";
+        import cjs from "cjspkg";
+        console.log(e, cjs.from);
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("runs");
+    assert_eq!(out.lines(), ["esm-pkg cjs-pkg"]);
+}
+
+#[test]
+fn esm_top_level_await_on_timer_settles() {
+    use std::fs;
+    let dir = TempDir::new("esm-tla");
+    let entry = dir.0.join("tla.mjs");
+    fs::write(
+        &entry,
+        r#"
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        console.log("before");
+        await sleep(10);
+        console.log("after");
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&entry.to_string_lossy()).expect("runs");
+    assert_eq!(out.lines(), ["before", "after"]);
+}
+
+#[test]
+fn esm_module_not_found_is_an_error() {
+    use std::fs;
+    let dir = TempDir::new("esm-missing");
+    let entry = dir.0.join("bad.mjs");
+    fs::write(&entry, "import x from './nope.mjs';\n").unwrap();
+    let (mut rt, _out, _err) = test_runtime();
+    let err = rt.run_module(&entry.to_string_lossy()).unwrap_err();
+    assert!(err.contains("not found") || err.contains("nope"), "{err}");
+}

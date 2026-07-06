@@ -192,3 +192,31 @@ __builtins.set("node:module", __builtins.get("module"));
 
 // Exposed to the CLI (via a tiny bootstrap) to run a file as the main module.
 globalThis.__runMain = runMain;
+
+// --- ESM interop: synthetic re-export modules for the builtins ---
+// The runtime's module loader (Rust) can't enumerate a builtin's keys, so we precompute one
+// ESM source per builtin here — where Object.keys works — and the loader ferries the strings.
+globalThis.__esmBuiltin = (name) => __builtins.get(name);
+
+function makeBuiltinEsmSource(name) {
+  const m = __builtins.get(name);
+  let src = `const __m = globalThis.__esmBuiltin(${JSON.stringify(name)});\nexport default __m;\n`;
+  if (m && (typeof m === "object" || typeof m === "function")) {
+    for (const k of Object.keys(m)) {
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) && k !== "default") {
+        src += `export const ${k} = __m[${JSON.stringify(k)}];\n`;
+      }
+    }
+  }
+  return src;
+}
+
+// The clean builtin base names (skip the "node:module" alias key).
+const __BUILTIN_NAMES = ["buffer", "path", "os", "fs", "module"];
+const __esmBuiltinSources = {};
+for (const name of __BUILTIN_NAMES) {
+  const source = makeBuiltinEsmSource(name);
+  __esmBuiltinSources["node:" + name] = source;
+}
+globalThis.__esmBuiltinSources = __esmBuiltinSources;
+globalThis.__builtinNames = __BUILTIN_NAMES.join(",");

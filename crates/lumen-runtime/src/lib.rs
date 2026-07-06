@@ -23,6 +23,7 @@ use lumen_host::{
 };
 
 mod console;
+mod esm;
 mod process;
 
 pub use console::{describe_error, render_value, ConsoleOut};
@@ -111,6 +112,56 @@ impl Runtime {
         result
             .map(|_| ())
             .map_err(|e| describe_error(self.engine.ctx(), &e))
+    }
+
+    /// Run `path` as an ES module: its `import` graph resolves against disk + `node_modules`
+    /// (and the `node:` builtins), then the loop runs to quiescence so top-level `await`,
+    /// timers, and I/O settle. `Err` is the rendered uncaught error.
+    pub fn run_module(&mut self, path: &str) -> Result<(), String> {
+        let source =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let key = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path))
+            .to_string_lossy()
+            .into_owned();
+        let loader = esm::make_loader(self.builtin_modules());
+        let result = self.engine.eval_module(&source, &key, loader);
+        self.run_to_completion();
+        match result {
+            Ok(Completion::Value(_)) => Ok(()),
+            Ok(Completion::Throw { name, message }) => Err(if name.is_empty() {
+                message
+            } else {
+                format!("{name}: {message}")
+            }),
+            Err(e) => Err(format!("SyntaxError: {} (line {})", e.message, e.line)),
+        }
+    }
+
+    /// Pull the JS-precomputed synthetic ESM source for each `node:` builtin out of the engine
+    /// (the loader can't enumerate a builtin's exports from Rust; see the node module glue).
+    fn builtin_modules(&mut self) -> esm::BuiltinModules {
+        let global = self.engine.global_this();
+        let ctx = self.engine.ctx();
+        let mut map = std::collections::HashMap::new();
+        let names = ctx
+            .get_member(&global, "__builtinNames")
+            .ok()
+            .and_then(|v| ctx.coerce_string(&v).ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let sources = ctx.get_member(&global, "__esmBuiltinSources").ok();
+        if let Some(sources) = sources {
+            for name in names.split(',').filter(|s| !s.is_empty()) {
+                let key = format!("node:{name}");
+                if let Ok(src) = ctx.get_member(&sources, &key) {
+                    if let Ok(src) = ctx.coerce_string(&src) {
+                        map.insert(key, src.to_string());
+                    }
+                }
+            }
+        }
+        esm::BuiltinModules(map)
     }
 
     /// Evaluate a script, then run the event loop until quiescent — timers fired, spawned
