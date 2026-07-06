@@ -649,13 +649,11 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "URLPattern",
     "CompressionStream",
     "DecompressionStream",
-];
-const WINTERTC_NOT_YET: &[&str] = &[
     "ReadableStreamBYOBReader",
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",
-    "WebAssembly",
 ];
+const WINTERTC_NOT_YET: &[&str] = &["WebAssembly"];
 
 #[test]
 fn wintertc_minimum_common_api() {
