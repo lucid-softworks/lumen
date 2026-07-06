@@ -258,14 +258,12 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Result<(Huffman, Huffman), Str
                 }
             }
             17 => {
-                for _ in 0..(reader.bits(3)? + 3) {
-                    lengths.push(0);
-                }
+                let n = reader.bits(3)? as usize + 3;
+                lengths.resize(lengths.len() + n, 0);
             }
             18 => {
-                for _ in 0..(reader.bits(7)? + 11) {
-                    lengths.push(0);
-                }
+                let n = reader.bits(7)? as usize + 11;
+                lengths.resize(lengths.len() + n, 0);
             }
             _ => return Err("inflate: invalid code-length symbol".into()),
         }
