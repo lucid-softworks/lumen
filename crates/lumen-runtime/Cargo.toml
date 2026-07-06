@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 lumen-fs = { path = "../lumen-fs" }
 lumen-host = { path = "../lumen-host" }
+lumen-node = { path = "../lumen-node" }
 lumen-timers = { path = "../lumen-timers" }
 lumen-web = { path = "../lumen-web" }
 

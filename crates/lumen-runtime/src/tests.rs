@@ -541,3 +541,155 @@ fn web_fetch_roundtrip_over_local_http() {
     server.join().ok();
     assert_eq!(out.lines(), ["200 true yes", "true 42"]);
 }
+
+// ---- lumen-node (node: compat; the runtime assembles it) ----
+
+#[test]
+fn node_path_and_os_builtins() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const path = require("node:path");
+        console.log(path.join("a", "b", "..", "c"), path.extname("x.tar.gz"), path.basename("/p/q.js", ".js"));
+        console.log(path.dirname("/a/b/c"), path.isAbsolute("/x"), path.isAbsolute("x"));
+        const os = require("os");
+        console.log(typeof os.platform(), typeof os.homedir(), os.EOL === "\n" || os.EOL === "\r\n");
+        console.log(require("path") === require("node:path"));
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        ["a/c .gz q", "/a/b true false", "string string true", "true",]
+    );
+}
+
+#[test]
+fn node_buffer() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        console.log(Buffer.from("hé").length, Buffer.from("hé").toString("hex"));
+        console.log(Buffer.from("6869", "hex").toString());
+        console.log(Buffer.from("aGVsbG8=", "base64").toString());
+        console.log(Buffer.alloc(3, 7).toString("hex"));
+        console.log(Buffer.concat([Buffer.from("ab"), Buffer.from("cd")]).toString());
+        console.log(Buffer.isBuffer(Buffer.from("x")), Buffer.isBuffer(new Uint8Array(1)));
+        console.log(Buffer.from("abc").equals(Buffer.from("abc")), Buffer.from("abc").compare(Buffer.from("abd")));
+        const b = Buffer.alloc(4); b.writeUInt32LE(0x01020304, 0);
+        console.log(b.toString("hex"), b.readUInt32BE(0).toString(16));
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "3 68c3a9",
+            "hi",
+            "hello",
+            "070707",
+            "abcd",
+            "true false",
+            "true -1",
+            "04030201 4030201",
+        ]
+    );
+}
+
+#[test]
+fn node_require_resolution() {
+    use std::fs;
+    let dir = TempDir::new("require");
+    let root = dir.0.clone();
+    fs::write(
+        root.join("lib.js"),
+        "module.exports = { v: require('./data.json').v + 1 };",
+    )
+    .unwrap();
+    fs::write(root.join("data.json"), r#"{ "v": 41 }"#).unwrap();
+    let pkg = root.join("node_modules").join("widget");
+    fs::create_dir_all(pkg.join("lib")).unwrap();
+    fs::write(
+        pkg.join("package.json"),
+        r#"{ "name": "widget", "main": "lib/main.js" }"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("lib").join("main.js"),
+        "module.exports = () => 'widget-ok';",
+    )
+    .unwrap();
+    fs::write(
+        root.join("entry.js"),
+        r#"
+        const lib = require("./lib");
+        const widget = require("widget");
+        console.log(lib.v, widget());
+        console.log(require.resolve("./lib").endsWith("lib.js"));
+        // cache: requiring twice yields the same exports object
+        console.log(require("./lib") === require("./lib"));
+        "#,
+    )
+    .unwrap();
+
+    let (mut rt, out, _err) = test_runtime();
+    let entry = root.join("entry.js").to_string_lossy().into_owned();
+    rt.run_main(&entry).expect("main runs");
+    assert_eq!(out.lines(), ["42 widget-ok", "true", "true"]);
+}
+
+#[test]
+fn node_run_main_dirname_and_module() {
+    use std::fs;
+    let dir = TempDir::new("main");
+    let entry = dir.0.join("prog.js");
+    fs::write(
+        &entry,
+        r#"
+        const path = require("node:path");
+        console.log(__filename.endsWith("prog.js"));
+        console.log(__dirname === path.dirname(__filename));
+        console.log(require.main.filename === __filename);
+        module.exports = { ran: true };
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_main(&entry.to_string_lossy()).expect("runs");
+    assert_eq!(out.lines(), ["true", "true", "true"]);
+}
+
+#[test]
+fn node_fs_module_over_global_fs() {
+    use std::fs;
+    let dir = TempDir::new("nodefs");
+    let target = dir.path("f.txt");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const nfs = require("node:fs");
+            nfs.writeFileSync({target:?}, "node fs content");
+            console.log(nfs.readFileSync({target:?}, "utf8"));
+            console.log(nfs.readFileSync({target:?}) instanceof Buffer);
+            console.log(nfs.existsSync({target:?}), nfs.statSync({target:?}).isFile());
+            "#,
+        ),
+    );
+    let _ = fs::remove_file(&target);
+    assert_eq!(out.lines(), ["node fs content", "true", "true true"]);
+}
+
+#[test]
+fn node_require_missing_module_throws() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        try { require("./does-not-exist"); }
+        catch (e) { console.log(e.code, e.message.includes("Cannot find module")); }
+        "#,
+    );
+    assert_eq!(out.lines(), ["MODULE_NOT_FOUND true"]);
+}

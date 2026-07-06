@@ -60,11 +60,13 @@ fn main() {
     if let Some(code) = eval_source {
         run_source(&mut runtime, &code);
     } else if let Some(path) = file {
-        let src = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => die(2, &format!("cannot read {path}: {e}")),
-        };
-        run_source(&mut runtime, &src);
+        // Run as a CommonJS main module (require/module/__dirname in scope), like `node file`.
+        if !std::path::Path::new(&path).is_file() {
+            die(2, &format!("cannot read {path}: not a file"));
+        }
+        if let Err(e) = runtime.run_main(&path) {
+            die(1, &format!("Uncaught {e}"));
+        }
     } else if force_repl || std::io::stdin().is_terminal() {
         println!(
             "lumen {} (.help for help, .exit or Ctrl-D to quit)",

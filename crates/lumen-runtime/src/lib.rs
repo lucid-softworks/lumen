@@ -61,6 +61,9 @@ impl Runtime {
                 process::extension(),
                 lumen_fs::extension(),
                 lumen_web::extension(),
+                // Last: node's glue wraps the fs global, Buffer uses TextEncoder (web), and
+                // require() calls process.cwd().
+                lumen_node::extension(),
             ],
         );
         process::install_data_props(&mut engine);
@@ -87,6 +90,27 @@ impl Runtime {
     /// The engine, for embedder access beyond script evaluation (defining globals, etc.).
     pub fn engine(&mut self) -> &mut Engine {
         &mut self.engine
+    }
+
+    /// Run `path` as a CommonJS program entry (`require.main === module`, with `__dirname`/
+    /// `__filename`/`require` in scope), then loop to quiescence. `Err` is the rendered
+    /// uncaught error. This is what the CLI uses for `lumen-cli file.js`.
+    pub fn run_main(&mut self, path: &str) -> Result<(), String> {
+        let global = self.engine.global_this();
+        let run_main = self
+            .engine
+            .ctx()
+            .get_member(&global, "__runMain")
+            .map_err(|_| "node runtime not installed".to_string())?;
+        let result = self.engine.call_function(
+            &run_main,
+            Value::Undefined,
+            &[Value::from_string(path.to_string())],
+        );
+        self.run_to_completion();
+        result
+            .map(|_| ())
+            .map_err(|e| describe_error(self.engine.ctx(), &e))
     }
 
     /// Evaluate a script, then run the event loop until quiescent — timers fired, spawned
