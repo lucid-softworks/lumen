@@ -60,11 +60,17 @@ fn main() {
     if let Some(code) = eval_source {
         run_source(&mut runtime, &code);
     } else if let Some(path) = file {
-        // Run as a CommonJS main module (require/module/__dirname in scope), like `node file`.
         if !std::path::Path::new(&path).is_file() {
             die(2, &format!("cannot read {path}: not a file"));
         }
-        if let Err(e) = runtime.run_main(&path) {
+        // ESM vs CommonJS like Node: .mjs -> module, .cjs -> commonjs, .js -> the nearest
+        // package.json "type". A module runs through the import graph; CJS as `require.main`.
+        let result = if is_esm_entry(&path) {
+            runtime.run_module(&path)
+        } else {
+            runtime.run_main(&path)
+        };
+        if let Err(e) = result {
             die(1, &format!("Uncaught {e}"));
         }
     } else if force_repl || std::io::stdin().is_terminal() {
@@ -96,6 +102,44 @@ fn run_source(runtime: &mut Runtime, src: &str) {
         }
         Err(e) => die(1, &format!("SyntaxError: {} (line {})", e.message, e.line)),
     }
+}
+
+/// Node's entry-point module-kind rule: `.mjs` is always ESM, `.cjs` always CommonJS, and
+/// `.js` (or anything else) follows the nearest `package.json` `"type": "module"`.
+fn is_esm_entry(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    match p.extension().and_then(|e| e.to_str()) {
+        Some("mjs") => true,
+        Some("cjs") => false,
+        _ => nearest_package_type_is_module(p),
+    }
+}
+
+fn nearest_package_type_is_module(file: &std::path::Path) -> bool {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        let pkg = d.join("package.json");
+        if pkg.is_file() {
+            return std::fs::read_to_string(&pkg)
+                .ok()
+                .and_then(|t| json_type_field(&t))
+                .as_deref()
+                == Some("module");
+        }
+        dir = d.parent();
+    }
+    false
+}
+
+/// Minimal scan for `"type": "..."` — the workspace ships no JSON crate.
+fn json_type_field(json: &str) -> Option<String> {
+    let mut rest = &json[json.find("\"type\"")? + 6..];
+    rest = rest
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
+    rest.find('"').map(|end| rest[..end].to_string())
 }
 
 fn die(code: i32, message: &str) -> ! {

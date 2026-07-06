@@ -51,12 +51,18 @@ On top of that:
   implemented on std alone and no third-party crate is permitted, so `https` URLs reject with
   a clear error; plain `http` works.
 
+- **Modules — both CommonJS and ESM.** `lumen-cli` picks the module kind the way Node does:
+  `.mjs` is ESM, `.cjs` is CommonJS, `.js` follows the nearest `package.json` `"type"`. ES
+  modules run through the engine's real module graph (linking, top-level `await`); `import`
+  specifiers resolve against disk and `node_modules`, `node:` builtins are importable
+  (named imports included), and CommonJS packages interop by default export. CommonJS files
+  run as the program entry with `require.main === module`.
+
 - **`node:` compatibility** (`lumen-node`) — a CommonJS `require` with `node_modules`
   resolution and the module wrapper, `package.json` `main`/`exports`, the `node:path`/
   `node:os`/`node:fs` builtins, and `Buffer`, so packages written against the `node:` surface
   run. See the checklist at the top of `crates/lumen-node/src/lib.rs` for the deferred pieces
-  (subpath-pattern exports, ESM `import` of `node:`, native addons). `lumen-cli file.js` runs
-  a file as the program entry with `require.main === module`.
+  (subpath-pattern exports, native addons).
 
 - **REPL + CLI** (`lumen-repl`, `lumen-cli`) — an interactive shell with a persistent realm,
   parser-driven incomplete-input detection (multi-line continuation), top-level `await`, and
