@@ -593,6 +593,140 @@ fn web_fetch_roundtrip_over_local_http() {
     assert_eq!(out.lines(), ["200 true yes", "true 42"]);
 }
 
+// ---- WinterTC Minimum Common API conformance ----
+//
+// The tracked score for the WinterTC "Minimum Common API" global surface. `SUPPORTED` are the
+// interfaces implemented today; `NOT_YET` are the remaining ones. The test asserts every SUPPORTED
+// global is present AND every NOT_YET global is absent — so implementing an interface fails the
+// test until its name is moved across, keeping the score honest. Total = the full spec surface.
+const WINTERTC_SUPPORTED: &[&str] = &[
+    "globalThis",
+    "queueMicrotask",
+    "structuredClone",
+    "atob",
+    "btoa",
+    "fetch",
+    "console",
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    "Event",
+    "EventTarget",
+    "CustomEvent",
+    "DOMException",
+    "AbortController",
+    "AbortSignal",
+    "TextEncoder",
+    "TextDecoder",
+    "URL",
+    "URLSearchParams",
+    "Headers",
+    "Request",
+    "Response",
+    "ReadableStream",
+    "crypto",
+    "performance",
+    "navigator",
+];
+const WINTERTC_NOT_YET: &[&str] = &[
+    "self",
+    "TextEncoderStream",
+    "TextDecoderStream",
+    "URLPattern",
+    "FormData",
+    "Blob",
+    "File",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamBYOBReader",
+    "ReadableStreamDefaultController",
+    "ReadableByteStreamController",
+    "ReadableStreamBYOBRequest",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+    "WritableStreamDefaultController",
+    "TransformStream",
+    "TransformStreamDefaultController",
+    "ByteLengthQueuingStrategy",
+    "CountQueuingStrategy",
+    "CompressionStream",
+    "DecompressionStream",
+    "Crypto",
+    "SubtleCrypto",
+    "Performance",
+    "WebAssembly",
+];
+
+#[test]
+fn wintertc_minimum_common_api() {
+    let (mut rt, out, _err) = test_runtime();
+    let all = [WINTERTC_SUPPORTED, WINTERTC_NOT_YET].concat().join(",");
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"{{
+                const names = "{all}".split(",");
+                const present = names.filter((n) => typeof globalThis[n] !== "undefined");
+                console.log("PRESENT:" + present.join(","));
+            }}"#,
+        ),
+    );
+    let line = out.lines().into_iter().next().unwrap_or_default();
+    let present: std::collections::HashSet<&str> = line
+        .strip_prefix("PRESENT:")
+        .unwrap_or("")
+        .split(',')
+        .collect();
+
+    let missing_supported: Vec<&str> = WINTERTC_SUPPORTED
+        .iter()
+        .copied()
+        .filter(|n| !present.contains(n))
+        .collect();
+    assert!(
+        missing_supported.is_empty(),
+        "WinterTC regression — these SUPPORTED globals went missing: {missing_supported:?}"
+    );
+    let unexpected: Vec<&str> = WINTERTC_NOT_YET
+        .iter()
+        .copied()
+        .filter(|n| present.contains(n))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "WinterTC globals now present but still listed NOT_YET — move them to SUPPORTED: {unexpected:?}"
+    );
+
+    let total = WINTERTC_SUPPORTED.len() + WINTERTC_NOT_YET.len();
+    println!(
+        "WinterTC Minimum Common API: {}/{} globals implemented",
+        WINTERTC_SUPPORTED.len(),
+        total
+    );
+}
+
+#[test]
+fn wintertc_functional_smoke() {
+    // Presence is not correctness: exercise the core interfaces end-to-end.
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const ok = [];
+        ok.push(JSON.stringify(structuredClone({a:[1,2]})) === '{"a":[1,2]}');
+        ok.push(new TextDecoder().decode(new TextEncoder().encode("héllo")) === "héllo");
+        ok.push(new URL("http://x/y?a=1").searchParams.get("a") === "1");
+        ok.push(atob(btoa("hi")) === "hi");
+        ok.push(new AbortController().signal.aborted === false);
+        ok.push(/^[0-9a-f-]{36}$/.test(crypto.randomUUID()));
+        ok.push(typeof performance.now() === "number");
+        ok.push(new Headers({a:"1"}).get("a") === "1");
+        console.log(ok.every(Boolean) ? "ALL_OK" : "FAIL:" + ok.join(","));
+        "#,
+    );
+    assert_eq!(out.lines(), ["ALL_OK"]);
+}
+
 // Cold-boot cost breakdown (realm intrinsics + per-extension install), for tracking the
 // startup floor. `#[ignore]`d (timing, not correctness):
 //   cargo test -p lumen-runtime perf_boot_breakdown --release -- --ignored --nocapture
