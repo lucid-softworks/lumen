@@ -1675,6 +1675,112 @@ impl Interp {
         }
     }
 
+    /// `obj.name` read with a per-site inline cache (bytecode `GetProp`). The cache holds the
+    /// `entries` slot where `name` was last found on some object at this site; the fast path checks
+    /// that slot still holds `name` as an own, non-accessor data property and returns its value —
+    /// no hash, no prototype walk. Anything else (accessor, prototype/absent, exotic receiver,
+    /// active proxy/namespace/typed-array side tables) falls through to full `[[Get]]`.
+    pub(crate) fn get_prop_ic(
+        &mut self,
+        base: &Value,
+        name: &str,
+        cache: &std::cell::Cell<u32>,
+    ) -> Result<Value, Abrupt> {
+        if let Value::Obj(o) = base {
+            if let Some(v) = self.try_ic_get(o, name, cache) {
+                return Ok(v);
+            }
+        }
+        self.get_member(base, name)
+    }
+
+    /// The `GetProp` inline-cache fast path; `None` means "not cacheable here, take the slow path".
+    fn try_ic_get(&self, o: &Gc, name: &str, cache: &std::cell::Cell<u32>) -> Option<Value> {
+        let b = o.borrow();
+        if !matches!(b.exotic, Exotic::None) {
+            return None; // arrays, wrappers, arguments, … have non-ordinary reads
+        }
+        if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
+            return None; // this object is a proxy / namespace / typed array / deferred namespace
+        }
+        // Cache hit: the cached slot still holds `name` as an own data property.
+        let cslot = cache.get() as usize;
+        if let Some((k, p)) = b.props.entry_at(cslot) {
+            if !p.accessor && &**k == name {
+                return Some(p.value.clone());
+            }
+        }
+        // Miss: look the own property up once and record its slot for next time.
+        let slot = b.props.slot_of(name)?;
+        let (_, p) = b.props.entry_at(slot).unwrap();
+        if p.accessor {
+            return None; // getter — must run through [[Get]]
+        }
+        let v = p.value.clone();
+        cache.set(slot as u32);
+        Some(v)
+    }
+
+    /// `obj.name = v` write with a per-site inline cache (bytecode `SetProp`/`SetPropDrop`). The
+    /// fast path overwrites an existing own writable data property (OrdinarySet's winning case,
+    /// correct regardless of the prototype chain); everything else defers to full `[[Set]]`.
+    pub(crate) fn set_prop_ic(
+        &mut self,
+        base: &Value,
+        name: &str,
+        v: Value,
+        cache: &std::cell::Cell<u32>,
+    ) -> Result<(), Abrupt> {
+        if let Value::Obj(o) = base {
+            if self.try_ic_set(o, name, &v, cache) {
+                return Ok(());
+            }
+        }
+        self.set_member(base, name, v)
+    }
+
+    /// The `SetProp` inline-cache fast path; `false` means "take the slow path".
+    fn try_ic_set(&self, o: &Gc, name: &str, v: &Value, cache: &std::cell::Cell<u32>) -> bool {
+        let mut b = o.borrow_mut();
+        if !matches!(b.exotic, Exotic::None) {
+            return false;
+        }
+        if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
+            return false;
+        }
+        let cslot = cache.get() as usize;
+        if let Some((k, p)) = b.props.entry_at(cslot) {
+            if !p.accessor && p.writable && &**k == name {
+                let slot = cslot;
+                b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
+                return true;
+            }
+        }
+        match b.props.slot_of(name) {
+            Some(slot) => {
+                let p = &b.props.entry_at(slot).unwrap().1;
+                if p.accessor || !p.writable {
+                    return false; // setter, or non-writable (strict-throw) — slow path
+                }
+                b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
+                cache.set(slot as u32);
+                true
+            }
+            None => false, // create / inherited setter — slow path
+        }
+    }
+
+    /// Whether object `ptr` reads/writes like an ordinary object — i.e. it is not registered in any
+    /// of the exotic side tables (proxy, module namespace, typed array, deferred namespace). Cheap:
+    /// each empty table is skipped without hashing, which is the common case in a hot loop.
+    #[inline]
+    fn ordinary_get_ptr(&self, ptr: usize) -> bool {
+        (self.proxies.is_empty() || !self.proxies.contains_key(&ptr))
+            && (self.typed_arrays.is_empty() || !self.typed_arrays.contains_key(&ptr))
+            && (self.module_ns.is_empty() || !self.module_ns.contains_key(&ptr))
+            && (self.deferred_ns.is_empty() || !self.deferred_ns.contains_key(&ptr))
+    }
+
     /// [[Get]](P, Receiver): like [`get_member`] but with an explicit `receiver` — the `this` a
     /// getter is invoked with, the proxy `get` trap's Receiver argument, and what a forwarded
     /// `[[Get]]` carries through a proxy target chain.

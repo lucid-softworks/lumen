@@ -464,6 +464,23 @@ impl Props {
     pub(crate) fn contains(&self, key: &str) -> bool {
         self.index.contains_key(key)
     }
+    /// The `entries` slot for `key`, or `None`. Backs the bytecode property inline cache: a hit
+    /// records the slot so the next access can skip the hash (see `Interp::try_ic_get`).
+    #[inline]
+    pub(crate) fn slot_of(&self, key: &str) -> Option<usize> {
+        self.index.get(key).copied()
+    }
+    /// The (key, property) at `slot`, or `None` if out of range. The caller re-checks the key —
+    /// slots shift on `remove`, so a cached slot is only trusted after the key matches.
+    #[inline]
+    pub(crate) fn entry_at(&self, slot: usize) -> Option<&(Rc<str>, Property)> {
+        self.entries.get(slot)
+    }
+    /// Mutable [`entry_at`], for the property write inline cache.
+    #[inline]
+    pub(crate) fn entry_at_mut(&mut self, slot: usize) -> Option<&mut (Rc<str>, Property)> {
+        self.entries.get_mut(slot)
+    }
     /// Drop every property (used by the GC to break a garbage object's reference cycles).
     pub(crate) fn clear(&mut self) {
         self.entries.clear();

@@ -1941,6 +1941,37 @@ fn async_tail_return_survives_leaked_tco() {
 }
 
 #[test]
+fn bytecode_property_inline_cache() {
+    // Exercise the GetProp/SetProp inline caches under the bytecode tier: repeated access at one
+    // site across same- and different-shaped objects (slot revalidation), accessor shadowing (must
+    // run the getter, not read a raw slot), own-shadows-proto + delete falling back to the proto,
+    // and writes through the SetProp cache.
+    let mut e = Engine::new();
+    e.interp.tier = crate::bytecode::Tier::Bytecode;
+    e.interp.tier_threshold = 0; // compile on first call so the caches are exercised
+    let src = r#"
+      function readXY(o){ return o.x + "," + o.y; }
+      let a = "";
+      for (let i=0;i<5;i++) a += readXY({ x: i, y: i*2 }) + ";"; // monomorphic hits
+      a += readXY({ z: 9, y: 100, x: 200 }) + ";";                // different slots -> revalidate
+      a += readXY({ x: 1, get y(){ return 42; } }) + ";";          // accessor -> run getter
+      const proto = { x: "PX" };
+      const obj = Object.create(proto); obj.x = "OWN";
+      function readX(o){ return o.x; }
+      let b = readX(obj); delete obj.x; b += "," + readX(obj);      // own, then proto after delete
+      function bump(o){ o.n = o.n + 1; return o.n; }
+      const c1 = { n: 10 }, c2 = { n: 20 };
+      let w = bump(c1) + "," + bump(c2) + "," + bump(c1);          // SetProp cache across objects
+      a + "|" + b + "|" + w;
+    "#;
+    let got = match e.eval(src, false).expect("parse") {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    };
+    assert_eq!(got, "0,0;1,2;2,4;3,6;4,8;200,100;1,42;|OWN,PX|11,21,12");
+}
+
+#[test]
 fn array_species() {
     assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
     assert_eq!(run("[1,2,3,4].filter(x=>x%2===0).join(',')"), "2,4");

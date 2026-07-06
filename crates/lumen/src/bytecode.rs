@@ -60,10 +60,13 @@ pub enum Op {
     LoadName(u32),
     StoreName(u32),
     LoadThis,
-    GetProp(u32),
-    SetProp(u32),
+    /// `obj.name`. First operand is the name index; second is the per-site inline-cache index into
+    /// `Chunk::caches` (see `Interp::get_prop_ic`).
+    GetProp(u32, u32),
+    /// `obj.name = v`. Operands: name index, inline-cache index.
+    SetProp(u32, u32),
     /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
-    SetPropDrop(u32),
+    SetPropDrop(u32, u32),
     GetElem,
     SetElem,
     /// `obj[k] = v` in statement position: stores without leaving `v` on the stack.
@@ -135,6 +138,11 @@ pub struct Chunk {
     /// hoisting overwrites same-named params; replicated bug-for-bug — it is the oracle).
     var_force_resets: Vec<u16>,
     uses_this: bool,
+    /// One inline-cache slot per property-access op (`GetProp`/`SetProp`/`SetPropDrop`), holding the
+    /// `entries` slot last seen for that site (`u32::MAX` = empty). The `Chunk` is shared across
+    /// calls via `Rc`, so these persist. `Cell` is fine: the VM runs one thread at a time (coroutine
+    /// ping-pong), like the rest of the engine's shared-`Rc` state.
+    caches: Vec<std::cell::Cell<u32>>,
 }
 
 impl std::fmt::Debug for Chunk {
@@ -222,6 +230,7 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         n_params: c.n_params,
         var_force_resets: c.var_force_resets,
         uses_this: c.uses_this,
+        caches: c.caches,
     }))
 }
 
@@ -237,6 +246,7 @@ struct Compiler {
     var_force_resets: Vec<u16>,
     loops: Vec<LoopCtx>,
     uses_this: bool,
+    caches: Vec<std::cell::Cell<u32>>,
 }
 
 #[derive(Default)]
@@ -253,6 +263,11 @@ impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
         self.ops.push(op);
         self.ops.len() - 1
+    }
+    /// Reserve a fresh inline-cache slot (starts empty) for a property-access op.
+    fn new_cache(&mut self) -> u32 {
+        self.caches.push(std::cell::Cell::new(u32::MAX));
+        (self.caches.len() - 1) as u32
     }
     fn fresh_slot(&mut self, name: &str) -> u16 {
         let slot = self.slot_names.len() as u16;
@@ -655,7 +670,8 @@ impl Compiler {
                 self.expr(obj)?;
                 self.expr(value)?;
                 let i = self.name_idx(prop);
-                self.emit(Op::SetPropDrop(i));
+                let c = self.new_cache();
+                self.emit(Op::SetPropDrop(i, c));
                 Ok(true)
             }
             Expr::Index {
@@ -727,7 +743,8 @@ impl Compiler {
             } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                 self.expr(obj)?;
                 let i = self.name_idx(prop);
-                self.emit(Op::GetProp(i));
+                let c = self.new_cache();
+                self.emit(Op::GetProp(i, c));
                 Ok(())
             }
             Expr::Index {
@@ -1014,7 +1031,8 @@ impl Compiler {
                 self.expr(obj)?;
                 self.expr(value)?;
                 let i = self.name_idx(prop);
-                self.emit(Op::SetProp(i));
+                let c = self.new_cache();
+                self.emit(Op::SetProp(i, c));
                 Ok(())
             }
             Expr::Index {
@@ -1184,21 +1202,21 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 i.assign_free_name(&chunk.names[n as usize], v, env)?;
             }
             Op::LoadThis => stack.push(this_val.clone()),
-            Op::GetProp(n) => {
+            Op::GetProp(n, c) => {
                 let obj = pop!();
-                let v = i.get_member(&obj, &chunk.names[n as usize])?;
+                let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 stack.push(v);
             }
-            Op::SetProp(n) => {
+            Op::SetProp(n, c) => {
                 let v = pop!();
                 let obj = pop!();
-                i.set_member(&obj, &chunk.names[n as usize], v.clone())?;
+                i.set_prop_ic(&obj, &chunk.names[n as usize], v.clone(), &chunk.caches[c as usize])?;
                 stack.push(v);
             }
-            Op::SetPropDrop(n) => {
+            Op::SetPropDrop(n, c) => {
                 let v = pop!();
                 let obj = pop!();
-                i.set_member(&obj, &chunk.names[n as usize], v)?;
+                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
             }
             Op::GetElem => {
                 let key = pop!();
