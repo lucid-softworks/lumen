@@ -787,6 +787,63 @@ fn esm_resolves_node_modules_packages() {
 }
 
 #[test]
+fn esm_prefers_exports_import_over_cjs_main() {
+    // A package shaped like hono: `main` is a CJS build, but `type:module` + the exports `import`
+    // condition point at an ESM build with real named exports. The bare import must resolve the
+    // ESM entry (named `Hono` works), not fall through to `main` (CJS, default-only).
+    use std::fs;
+    let dir = TempDir::new("esm-exports");
+    let root = dir.0.clone();
+    let pkg = root.join("node_modules").join("dual");
+    fs::create_dir_all(pkg.join("dist").join("cjs")).unwrap();
+    fs::write(
+        pkg.join("package.json"),
+        r#"{
+            "name": "dual",
+            "main": "dist/cjs/index.js",
+            "type": "module",
+            "module": "dist/index.js",
+            "exports": { ".": {
+                "import": "./dist/index.js",
+                "require": "./dist/cjs/index.js"
+            } }
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        pkg.join("dist").join("index.js"),
+        "export class Widget { hi() { return 'esm'; } }\nexport const kind = 'named';",
+    )
+    .unwrap();
+    // If resolution wrongly picked this CJS build, loading it as ESM would fail (`module` is not
+    // defined) or expose no named `Widget`.
+    fs::write(
+        pkg.join("dist").join("cjs").join("index.js"),
+        "module.exports = { Widget: null, kind: 'cjs' };",
+    )
+    .unwrap();
+    // A bare *subpath* import of a `.js` file must inherit the package's `type:module`.
+    fs::write(
+        pkg.join("dist").join("named.js"),
+        "export const sub = 'subpath-esm';",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import { Widget, kind } from "dual";
+        import { sub } from "dual/dist/named.js";
+        console.log(new Widget().hi(), kind, sub);
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("runs");
+    assert_eq!(out.lines(), ["esm named subpath-esm"]);
+}
+
+#[test]
 fn esm_top_level_await_on_timer_settles() {
     use std::fs;
     let dir = TempDir::new("esm-tla");

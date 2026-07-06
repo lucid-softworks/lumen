@@ -104,23 +104,41 @@ fn resolve_node_modules(name: &str, start: &Path) -> Option<(PathBuf, bool)> {
             dir = d.parent();
             continue;
         }
-        let pkg_dir = d.join("node_modules").join(name);
-        if pkg_dir.is_dir() {
-            let esm = package_is_esm(&pkg_dir);
-            if let Some(f) = resolve_directory(&pkg_dir) {
-                let esm = esm || f.extension().is_some_and(|e| e == "mjs");
+        // `type:module` lives on the package root, so a bare subpath (`pkg/sub.js`) inherits it
+        // too rather than defaulting to CJS.
+        let esm_pkg = package_is_esm(&package_dir(d, name));
+        let target = d.join("node_modules").join(name);
+        if target.is_dir() {
+            if let Some(f) = resolve_directory(&target) {
+                let esm = esm_pkg || f.extension().is_some_and(|e| e == "mjs");
                 return Some((f, esm));
             }
         }
         // A bare specifier can also point straight at a file (`pkg/sub.js`).
-        let direct = d.join("node_modules").join(name);
-        if let Some(f) = resolve_file(&direct) {
-            let esm = f.extension().is_some_and(|e| e == "mjs");
+        if let Some(f) = resolve_file(&target) {
+            let esm = esm_pkg || f.extension().is_some_and(|e| e == "mjs");
             return Some((f, esm));
         }
         dir = d.parent();
     }
     None
+}
+
+/// The package root for a bare specifier under `<parent>/node_modules`: the first path segment,
+/// or the first two for a scoped `@scope/name`.
+fn package_dir(parent: &Path, name: &str) -> PathBuf {
+    let mut parts = name.split('/');
+    let mut pkg = String::new();
+    if let Some(first) = parts.next() {
+        pkg.push_str(first);
+        if first.starts_with('@') {
+            if let Some(scope_name) = parts.next() {
+                pkg.push('/');
+                pkg.push_str(scope_name);
+            }
+        }
+    }
+    parent.join("node_modules").join(pkg)
 }
 
 fn package_is_esm(pkg_dir: &Path) -> bool {
@@ -160,12 +178,33 @@ fn cjs_wrapper(abs_path: &str) -> String {
     )
 }
 
-/// `package.json` `exports` (import/default condition) or `main`.
+/// The ESM entry from `package.json`: the `exports` `import`/`default` condition, else the
+/// `module` field, else `main`. A zero-dep scan of a practical `exports` subset — a bare string,
+/// or the first `import`/`default` string condition (covers the common `"."` object shape). Real
+/// subpath-pattern `exports` are still deferred.
 fn pkg_entry(pkg_json: &str) -> Option<String> {
-    if let Some(exports) = json_string_field(pkg_json, "module") {
-        return Some(exports);
+    if let Some(entry) = exports_entry(pkg_json) {
+        return Some(entry);
+    }
+    if let Some(module) = json_string_field(pkg_json, "module") {
+        return Some(module);
     }
     json_string_field(pkg_json, "main")
+}
+
+/// The `exports` field's ESM target: a bare `"exports": "./x.js"` string, or the first
+/// `import`/`default` string condition inside its object form.
+fn exports_entry(pkg_json: &str) -> Option<String> {
+    let start = pkg_json.find("\"exports\"")?;
+    let after = pkg_json[start + "\"exports\"".len()..].trim_start();
+    let after = after.strip_prefix(':')?.trim_start();
+    if after.starts_with('"') {
+        return parse_string(after);
+    }
+    // Object form: prefer the `import` condition, then `default`.
+    ["import", "default"]
+        .into_iter()
+        .find_map(|cond| json_string_field(after, cond))
 }
 
 /// Lexically resolve `.`/`..` without touching the filesystem (the target may not exist yet).
@@ -183,14 +222,28 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-/// A minimal JSON scan for a top-level `"field": "value"` string — enough for the one or two
-/// `package.json` keys we read, without a JSON dependency (the workspace is zero-dep).
+/// A minimal JSON scan for a `"field": "value"` string — enough for the few `package.json` keys
+/// we read, without a JSON dependency (the workspace is zero-dep). Matches the field as a *key*
+/// (a `"field"` followed by `:`), so it skips occurrences of the same text used as a value — e.g.
+/// the `"module"` in `"type": "module"` is not mistaken for a `"module"` key.
 fn json_string_field(json: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
-    let mut rest = &json[json.find(&needle)? + needle.len()..];
-    rest = rest.trim_start();
-    rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
+    let mut from = 0;
+    while let Some(pos) = json[from..].find(&needle) {
+        let after = json[from + pos + needle.len()..].trim_start();
+        if let Some(value) = after.strip_prefix(':') {
+            // A key: return its string value (`None` if the value isn't a string).
+            return parse_string(value);
+        }
+        // Matched the text as a value or substring; keep looking for the real key.
+        from += pos + needle.len();
+    }
+    None
+}
+
+/// Parse a JSON string literal from `s` (leading whitespace allowed, then the opening `"`).
+fn parse_string(s: &str) -> Option<String> {
+    let rest = s.trim_start().strip_prefix('"')?;
     let mut out = String::new();
     let mut chars = rest.chars();
     while let Some(c) = chars.next() {
@@ -233,6 +286,58 @@ mod tests {
             Some("lib/i.js")
         );
         assert_eq!(json_string_field(r#"{"a":1}"#, "type"), None);
+    }
+
+    #[test]
+    fn json_field_matches_key_not_value() {
+        // `"module"` appears first as the *value* of `"type"`, then as a real key. The scan must
+        // return the key's value, not choke on the value occurrence (the hono package.json shape).
+        let pkg = r#"{ "main": "dist/cjs/index.js", "type": "module", "module": "dist/index.js" }"#;
+        assert_eq!(json_string_field(pkg, "module").as_deref(), Some("dist/index.js"));
+        assert_eq!(json_string_field(pkg, "type").as_deref(), Some("module"));
+    }
+
+    #[test]
+    fn pkg_entry_prefers_exports_import_condition() {
+        // hono-shaped: `main` is CJS, but the ESM entry lives under exports' `import` condition.
+        let pkg = r#"{
+            "main": "dist/cjs/index.js",
+            "type": "module",
+            "module": "dist/index.js",
+            "exports": { ".": {
+                "types": "./dist/types/index.d.ts",
+                "import": "./dist/index.js",
+                "require": "./dist/cjs/index.js"
+            } }
+        }"#;
+        assert_eq!(pkg_entry(pkg).as_deref(), Some("./dist/index.js"));
+    }
+
+    #[test]
+    fn pkg_entry_exports_string_then_module_then_main() {
+        assert_eq!(
+            pkg_entry(r#"{ "exports": "./e.js", "main": "./m.js" }"#).as_deref(),
+            Some("./e.js")
+        );
+        assert_eq!(
+            pkg_entry(r#"{ "module": "./mod.js", "main": "./m.js" }"#).as_deref(),
+            Some("./mod.js")
+        );
+        assert_eq!(pkg_entry(r#"{ "main": "./m.js" }"#).as_deref(), Some("./m.js"));
+    }
+
+    #[test]
+    fn package_dir_handles_plain_and_scoped_subpaths() {
+        let root = Path::new("/app");
+        assert_eq!(package_dir(root, "hono"), PathBuf::from("/app/node_modules/hono"));
+        assert_eq!(
+            package_dir(root, "hono/dist/index.js"),
+            PathBuf::from("/app/node_modules/hono")
+        );
+        assert_eq!(
+            package_dir(root, "@scope/pkg/sub.js"),
+            PathBuf::from("/app/node_modules/@scope/pkg")
+        );
     }
 
     #[test]
