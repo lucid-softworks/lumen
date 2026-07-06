@@ -634,14 +634,14 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "Performance",
     "navigator",
     "self",
+    "Blob",
+    "File",
+    "FormData",
 ];
 const WINTERTC_NOT_YET: &[&str] = &[
     "TextEncoderStream",
     "TextDecoderStream",
     "URLPattern",
-    "FormData",
-    "Blob",
-    "File",
     "ReadableStreamBYOBReader",
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",

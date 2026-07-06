@@ -73,14 +73,31 @@ const kBodyStream = Symbol("bodyStream");
 // never sends — a `new Request(url, { body: new ReadableStream() })` just to probe support.
 const kSourceStream = Symbol("bodySourceStream");
 
-// Set `owner`'s body from a BodyInit. A ReadableStream is stored, not drained (see kSourceStream);
-// everything else is encoded to bytes eagerly.
+// Set `owner`'s body from a BodyInit, and (per spec) a default Content-Type when the body implies
+// one and none is already set. A ReadableStream is stored, not drained (see kSourceStream).
 function initBody(owner, body) {
+  let contentType;
   if (body instanceof ReadableStream) {
     owner[kSourceStream] = body;
     owner._bodyBytes = undefined;
+  } else if (body instanceof Blob) {
+    owner._bodyBytes = body[kBlobBytes].slice();
+    if (body.type) contentType = body.type;
+  } else if (body instanceof FormData) {
+    const encoded = encodeFormData(body);
+    owner._bodyBytes = encoded.bytes;
+    contentType = encoded.contentType;
+  } else if (typeof body === "string") {
+    owner._bodyBytes = new TextEncoder().encode(body);
+    contentType = "text/plain;charset=UTF-8";
+  } else if (body instanceof URLSearchParams) {
+    owner._bodyBytes = new TextEncoder().encode(body.toString());
+    contentType = "application/x-www-form-urlencoded;charset=UTF-8";
   } else {
     owner._bodyBytes = toBodyBytes(body);
+  }
+  if (contentType && owner.headers && !owner.headers.has("content-type")) {
+    owner.headers.set("content-type", contentType);
   }
 }
 
@@ -97,6 +114,24 @@ function bodyMixin(proto) {
   };
   proto.bytes = async function () {
     return this._consume();
+  };
+  proto.blob = async function () {
+    const bytes = await this._consume();
+    const type = (this.headers && this.headers.get("content-type")) || "";
+    return new Blob([bytes], { type });
+  };
+  proto.formData = async function () {
+    const ct = (this.headers && this.headers.get("content-type")) || "";
+    if (ct.startsWith("application/x-www-form-urlencoded")) {
+      const form = new FormData();
+      for (const [k, v] of new URLSearchParams(await this.text())) form.append(k, v);
+      return form;
+    }
+    const m = /boundary=([^;]+)/i.exec(ct);
+    if (ct.startsWith("multipart/form-data") && m) {
+      return decodeMultipart(await this._consume(), m[1].trim().replace(/^"|"$/g, ""));
+    }
+    throw new TypeError(`formData(): unsupported content-type '${ct}'`);
   };
   proto._consume = async function () {
     if (this[kConsumed]) throw new TypeError("body already consumed");
