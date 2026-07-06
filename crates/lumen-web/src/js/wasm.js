@@ -1,11 +1,13 @@
 // The WebAssembly JS API over the native __wasm ops (decoder + interpreter in Rust). Modules and
 // instances live Rust-side by integer id; these classes are thin handles.
 //
-// Limitation: `Memory.buffer` for *exported* memory is a fresh snapshot each access (lumen can't
-// share an ArrayBuffer's storage with the Rust interpreter). Reading results after a call works;
-// writing into wasm memory from JS via `memory.buffer` does not — modules that need host-written
-// input should export a function that takes the data, or allocate inside wasm. Imported memory/
-// table are not yet supported (define+export them instead).
+// Memory is kept coherent by syncing the JS `Memory.buffer` with the interpreter's Rust-side bytes
+// at call boundaries (JS writes pushed in before a call, wasm writes pulled out after) — see the
+// Memory class. This stands in for a live shared ArrayBuffer (which lumen's embed API can't
+// provide) and is correct as long as wasm memory only changes during calls. Imported memory and
+// globals are supported; imported *tables* are not (their funcrefs would reference another
+// instance's functions, which this single-instance model doesn't represent) — define and export
+// the table instead. No SIMD/threads/GC.
 
 class CompileError extends Error {
   constructor(m) {
@@ -61,29 +63,59 @@ class Module {
   }
 }
 
+// A linear memory. `.buffer` is a persistent ArrayBuffer; when the memory is bound to an instance
+// it is synced with the interpreter's Rust-side bytes at call boundaries (see buildExports) — JS
+// writes are pushed in before a call and wasm's writes pulled back out after. (lumen can't share an
+// ArrayBuffer's backing store with Rust, so this boundary sync stands in for a live shared buffer;
+// between calls, wasm memory doesn't change, so JS sees a consistent view.)
 class Memory {
   constructor(descriptor) {
-    if (descriptor && descriptor.__instanceId !== undefined) {
-      this._instId = descriptor.__instanceId; // exported memory (snapshot-backed)
+    this._instId = descriptor && descriptor.__instanceId !== undefined ? descriptor.__instanceId : null;
+    this._maximum = descriptor && descriptor.maximum;
+    if (this._instId !== null) {
+      this._buf = null;
+      this._view = null;
+      this._syncFromRust();
     } else {
       const initial = (descriptor && descriptor.initial) || 0;
-      this._maximum = descriptor && descriptor.maximum;
-      this._standalone = new ArrayBuffer(initial * 65536);
+      this._buf = new ArrayBuffer(initial * 65536);
+      this._view = new Uint8Array(this._buf);
     }
   }
   get buffer() {
-    if (this._standalone) return this._standalone;
-    return __wasm.memBytes(this._instId).buffer;
+    return this._buf;
+  }
+  // Bind a standalone memory (created via `new WebAssembly.Memory`) to the instance importing it.
+  _bindInstance(instId) {
+    this._instId = instId;
+    this._syncFromRust();
+  }
+  _syncToRust() {
+    if (this._instId !== null && this._view) __wasm.memWrite(this._instId, 0, this._view);
+  }
+  _syncFromRust() {
+    if (this._instId === null) return;
+    const bytes = __wasm.memBytes(this._instId);
+    if (!this._buf || this._buf.byteLength !== bytes.byteLength) {
+      this._buf = bytes.buffer; // size changed (grow detaches the old buffer, per spec)
+      this._view = new Uint8Array(this._buf);
+    } else {
+      this._view.set(bytes); // same size: copy in place, preserving buffer identity
+    }
   }
   grow(delta) {
-    if (this._standalone) {
-      const oldPages = this._standalone.byteLength / 65536;
-      const next = new ArrayBuffer((oldPages + delta) * 65536);
-      new Uint8Array(next).set(new Uint8Array(this._standalone));
-      this._standalone = next;
-      return oldPages;
+    if (this._instId !== null) {
+      const prev = __wasm.memGrow(this._instId, delta);
+      if (prev < 0) throw new RangeError("WebAssembly.Memory.grow() failed");
+      this._syncFromRust();
+      return prev;
     }
-    throw new RuntimeError("grow() on exported memory is not supported from JS");
+    const oldPages = this._buf.byteLength / 65536;
+    const next = new ArrayBuffer((oldPages + delta) * 65536);
+    new Uint8Array(next).set(this._view);
+    this._buf = next;
+    this._view = new Uint8Array(next);
+    return oldPages;
   }
 }
 
@@ -126,25 +158,33 @@ class Table {
   }
 }
 
-function buildExports(instId, exportsMeta) {
+function buildExports(instId, exportsMeta, importedMemory) {
   const exports = {};
+  // The instance's memory object (imported, or created here for an exported memory). Function
+  // wrappers sync it around each call so JS and wasm see each other's writes.
+  let memory = importedMemory || null;
+  for (const e of exportsMeta) {
+    if (e.kind === "memory") {
+      if (!memory) memory = new Memory({ __instanceId: instId });
+      exports[e.name] = memory;
+    }
+  }
   for (const e of exportsMeta) {
     if (e.kind === "function") {
       const index = e.index;
       exports[e.name] = (...args) => {
+        if (memory) memory._syncToRust();
         let r;
         try {
           r = __wasm.call(instId, index, args);
         } catch (err) {
           throw wrapWasmError(err);
         }
+        if (memory) memory._syncFromRust();
         return r.length === 0 ? undefined : r.length === 1 ? r[0] : r;
       };
-    } else if (e.kind === "memory") {
-      exports[e.name] = new Memory({ __instanceId: instId });
     } else if (e.kind === "global") {
-      const g = new Global({ mutable: false }, __wasm.globalGet(instId, e.index));
-      exports[e.name] = g;
+      exports[e.name] = new Global({ mutable: false }, __wasm.globalGet(instId, e.index));
     } else if (e.kind === "table") {
       exports[e.name] = new Table({ initial: 0 });
     }
@@ -152,17 +192,37 @@ function buildExports(instId, exportsMeta) {
   return exports;
 }
 
+// Resolve the JS import object into the flat, module-order array the native op consumes.
+function resolveImports(module, importObject) {
+  const io = importObject || {};
+  let memory = null;
+  const resolved = Module.imports(module).map((imp) => {
+    const ns = io[imp.module] || {};
+    const v = ns[imp.name];
+    if (imp.kind === "function") return { fn: v };
+    if (imp.kind === "memory") {
+      memory = v;
+      return { bytes: v && v._view ? v._view : new Uint8Array(0) };
+    }
+    if (imp.kind === "global") return { value: v instanceof Global ? v.value : v };
+    return {}; // table (rejected by the op) / unknown
+  });
+  return { resolved, memory };
+}
+
 class Instance {
   constructor(module, importObject) {
     if (!(module instanceof Module)) throw new TypeError("WebAssembly.Instance expects a Module");
+    const { resolved, memory } = resolveImports(module, importObject);
     let res;
     try {
-      res = __wasm.instantiate(module._id, importObject || {});
+      res = __wasm.instantiate(module._id, resolved);
     } catch (e) {
       throw wrapWasmError(e);
     }
     this._id = res.id;
-    this.exports = buildExports(res.id, res.exports);
+    if (memory) memory._bindInstance(res.id);
+    this.exports = buildExports(res.id, res.exports, memory);
   }
 }
 

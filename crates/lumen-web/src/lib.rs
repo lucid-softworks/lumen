@@ -98,6 +98,7 @@ pub fn extension() -> Extension {
                     "call" (3) => wasm_ops::op_call,
                     "memBytes" (1) => wasm_ops::op_mem_bytes,
                     "memWrite" (3) => wasm_ops::op_mem_write,
+                    "memGrow" (2) => wasm_ops::op_mem_grow,
                     "globalGet" (2) => wasm_ops::op_global_get,
                 ],
             ),

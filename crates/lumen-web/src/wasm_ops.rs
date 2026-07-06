@@ -173,33 +173,44 @@ pub(crate) fn op_module_imports(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result
     Ok(ctx.make_array(items))
 }
 
-/// `(moduleId, importsObj) -> { id, exports: [{name, kind, index}] }`.
+/// `(moduleId, resolvedImports) -> { id, exports: [{name, kind, index}] }`. `resolvedImports` is a
+/// flat array (in module-import order) built by the JS glue: `{fn}` for functions, `{bytes}` for
+/// memory, `{value}` for globals.
 pub(crate) fn op_instantiate(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let module_id = a.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
-    let imports_obj = a.get(1).cloned().unwrap_or(Value::Undefined);
+    let resolved_arr = a.get(1).cloned().unwrap_or(Value::Undefined);
     let module = module_of(ctx, module_id)?;
 
     let mut resolved = wasm::ResolvedImports::default();
     let mut import_values: Vec<Value> = Vec::new();
-    for imp in &module.imports {
-        let ns = ctx.get_member(&imports_obj, &imp.module).unwrap_or(Value::Undefined);
-        let val = ctx.get_member(&ns, &imp.name).unwrap_or(Value::Undefined);
+    for (i, imp) in module.imports.iter().enumerate() {
+        let entry = ctx.get_member(&resolved_arr, &i.to_string()).unwrap_or(Value::Undefined);
         match &imp.kind {
             wasm::ImportKind::Func(tyidx) => {
-                if !val.is_callable() {
+                let f = ctx.get_member(&entry, "fn").unwrap_or(Value::Undefined);
+                if !f.is_callable() {
                     return Err(ctx.make_error("Error", format!("LinkError: import {}.{} is not a function", imp.module, imp.name)));
                 }
                 let id = import_values.len();
-                import_values.push(val);
+                import_values.push(f);
                 resolved.funcs.push((id, module.types[*tyidx as usize].clone()));
             }
             wasm::ImportKind::Global(gt) => {
-                // Accept a WebAssembly.Global (has .value) or a bare number.
-                let raw = ctx.get_member(&val, "value").ok().filter(|v| !matches!(v, Value::Undefined)).unwrap_or(val);
+                let raw = ctx.get_member(&entry, "value").unwrap_or(Value::Undefined);
                 resolved.globals.push((js_to_val(ctx, &raw, gt.val), *gt));
             }
-            wasm::ImportKind::Memory(_) | wasm::ImportKind::Table(_) => {
-                return Err(ctx.make_error("Error", "LinkError: imported memory/table not supported yet (define and export them instead)"));
+            wasm::ImportKind::Memory(limits) => {
+                let bytes_v = ctx.get_member(&entry, "bytes").unwrap_or(Value::Undefined);
+                let bytes = ctx.typed_array_bytes(&bytes_v).ok_or_else(|| {
+                    ctx.make_error("Error", format!("LinkError: import {}.{} is not a Memory", imp.module, imp.name))
+                })?;
+                resolved.memory = Some((bytes, limits.max));
+            }
+            wasm::ImportKind::Table(_) => {
+                return Err(ctx.make_error(
+                    "Error",
+                    "LinkError: imported tables are not supported (cross-instance funcrefs are not modeled); define and export the table instead",
+                ));
             }
         }
     }
@@ -307,6 +318,17 @@ pub(crate) fn op_mem_write(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Valu
             Ok(Value::Undefined)
         }
         Err(_) => Err(ctx.make_error("Error", "wasm: unknown instance")),
+    }
+}
+
+/// `(instanceId, deltaPages) -> previousPages` (or -1 on failure). Grows the instance's memory.
+pub(crate) fn op_mem_grow(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let inst_id = a.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    let delta = a.get(1).and_then(Value::as_num_opt).unwrap_or(0.0) as i32;
+    let store = ctx.host_mut::<WasmStore>().expect("store");
+    match store.instances.get_mut(&inst_id) {
+        Some(e) => Ok(Value::Num(e.instance.mem_grow(delta) as f64)),
+        None => Err(ctx.make_error("Error", "wasm: unknown instance")),
     }
 }
 

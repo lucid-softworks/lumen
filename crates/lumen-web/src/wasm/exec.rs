@@ -502,7 +502,7 @@ impl Instance {
         }
     }
 
-    fn mem_grow(&mut self, delta: i32) -> i32 {
+    pub fn mem_grow(&mut self, delta: i32) -> i32 {
         if delta < 0 {
             return -1;
         }
