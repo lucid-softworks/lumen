@@ -11,10 +11,12 @@
 //!   default-export wrapper (`.cjs` bridges through the global CommonJS `require`).
 //! - bare package -> the `node_modules` walk; an ESM entry (`.mjs`, or `package.json`
 //!   `type:module` / `exports` import condition / `module`) loads as real ESM, else it's
-//!   default-only CJS interop via `require`.
+//!   default-only CJS interop via `require`. A bare subpath (`hono/logger`) resolves as a
+//!   literal file first, then via the package's `exports` map (`"./logger"` -> its
+//!   `import`/`default` target).
 //!
 //! Deferred (documented, not silently wrong): named imports from a CommonJS *package* (Node
-//! uses source static-analysis we don't), subpath-pattern `exports`, import maps.
+//! uses source static-analysis we don't), subpath-*pattern* `exports` (`"./*"`), import maps.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -119,6 +121,25 @@ fn resolve_node_modules(name: &str, start: &Path) -> Option<(PathBuf, bool)> {
             let esm = esm_pkg || f.extension().is_some_and(|e| e == "mjs");
             return Some((f, esm));
         }
+        // A subpath that isn't a literal file may be mapped by the package's `exports`
+        // (`hono/logger` -> `"./logger": { "import": "./dist/middleware/logger/index.js" }`).
+        // Only the common non-pattern case; pattern subpaths (`"./*"`) stay deferred.
+        if let Some(subpath) = package_subpath(name) {
+            let pkg_dir = package_dir(d, name);
+            if let Some(entry) = std::fs::read_to_string(pkg_dir.join("package.json"))
+                .ok()
+                .and_then(|t| exports_subpath(&t, &subpath))
+            {
+                let mapped = normalize(&pkg_dir.join(&entry));
+                if let Some(f) =
+                    resolve_file(&mapped).or_else(|| resolve_file(&mapped.join("index")))
+                {
+                    // Resolved through the `import`/`default` condition, which names the ES
+                    // module build regardless of the file's extension.
+                    return Some((f, true));
+                }
+            }
+        }
         dir = d.parent();
     }
     None
@@ -202,6 +223,37 @@ fn exports_entry(pkg_json: &str) -> Option<String> {
         return parse_string(after);
     }
     // Object form: prefer the `import` condition, then `default`.
+    ["import", "default"]
+        .into_iter()
+        .find_map(|cond| json_string_field(after, cond))
+}
+
+/// The subpath of a bare specifier, if any: `hono/logger` -> `logger`, `@sc/pkg/a/b` -> `a/b`,
+/// and `hono` / `@sc/pkg` (bare package roots) -> `None`.
+fn package_subpath(name: &str) -> Option<String> {
+    let mut parts = if name.starts_with('@') {
+        name.splitn(3, '/')
+    } else {
+        name.splitn(2, '/')
+    };
+    parts.next()?; // package (or scope)
+    if name.starts_with('@') {
+        parts.next()?; // scoped name
+    }
+    parts.next().map(str::to_string)
+}
+
+/// The `exports` target for one subpath key (`"./logger"`): its bare string, or the first
+/// `import`/`default` string condition of its object form. Non-pattern keys only.
+fn exports_subpath(pkg_json: &str, subpath: &str) -> Option<String> {
+    let start = pkg_json.find("\"exports\"")?;
+    let region = &pkg_json[start..];
+    let key = format!("\"./{subpath}\"");
+    let after = region[region.find(&key)? + key.len()..].trim_start();
+    let after = after.strip_prefix(':')?.trim_start();
+    if after.starts_with('"') {
+        return parse_string(after);
+    }
     ["import", "default"]
         .into_iter()
         .find_map(|cond| json_string_field(after, cond))
@@ -324,6 +376,38 @@ mod tests {
             Some("./mod.js")
         );
         assert_eq!(pkg_entry(r#"{ "main": "./m.js" }"#).as_deref(), Some("./m.js"));
+    }
+
+    #[test]
+    fn package_subpath_splits_plain_and_scoped() {
+        assert_eq!(package_subpath("hono"), None);
+        assert_eq!(package_subpath("hono/logger").as_deref(), Some("logger"));
+        assert_eq!(package_subpath("hono/dist/x.js").as_deref(), Some("dist/x.js"));
+        assert_eq!(package_subpath("@scope/pkg"), None);
+        assert_eq!(package_subpath("@scope/pkg/sub").as_deref(), Some("sub"));
+    }
+
+    #[test]
+    fn exports_subpath_reads_condition_and_string_forms() {
+        // hono-shaped middleware subpath: an object with an `import` condition.
+        let pkg = r#"{ "exports": {
+            ".": { "import": "./dist/index.js" },
+            "./logger": {
+                "types": "./dist/types/middleware/logger/index.d.ts",
+                "import": "./dist/middleware/logger/index.js",
+                "require": "./dist/cjs/middleware/logger/index.js"
+            }
+        } }"#;
+        assert_eq!(
+            exports_subpath(pkg, "logger").as_deref(),
+            Some("./dist/middleware/logger/index.js")
+        );
+        assert_eq!(exports_subpath(pkg, "cors"), None);
+        // Bare-string subpath form.
+        assert_eq!(
+            exports_subpath(r#"{ "exports": { "./x": "./lib/x.js" } }"#, "x").as_deref(),
+            Some("./lib/x.js")
+        );
     }
 
     #[test]
