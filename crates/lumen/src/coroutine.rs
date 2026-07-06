@@ -94,10 +94,43 @@ pub fn in_async_gen() -> bool {
     ASYNC_GEN.with(|c| c.get())
 }
 
-/// The driver side of one coroutine, stored on the generator object in `Interp.generators`. The
-/// worker thread it runs on is pooled, so there is no per-coroutine `JoinHandle` to keep — a
-/// finished worker returns itself to the idle pool (see [`worker_loop`]).
-pub struct Coroutine {
+/// The driver side of one coroutine, stored on the generator object in `Interp.generators`. Either
+/// an OS-thread-backed coroutine (generators, and async bodies the bytecode compiler declined) or a
+/// bytecode [`VmCoro`](crate::bytecode::VmCoro) (async bodies that compile) — both drive the same
+/// way, so `drive_async`/`drive_generator` are agnostic.
+pub enum Coroutine {
+    Thread(ThreadCoro),
+    Vm(crate::bytecode::VmCoro),
+}
+
+impl Coroutine {
+    #[inline]
+    pub(crate) fn resume(&mut self, i: &mut Interp, signal: Resume) -> Suspend {
+        match self {
+            Coroutine::Thread(c) => c.resume(i, signal),
+            Coroutine::Vm(c) => c.resume(i, signal),
+        }
+    }
+    /// Whether the body has finished (further resumes are no-ops).
+    #[inline]
+    pub fn done(&self) -> bool {
+        match self {
+            Coroutine::Thread(c) => c.done,
+            Coroutine::Vm(c) => c.done,
+        }
+    }
+    /// Whether the first resume has happened (distinguishes suspendedStart from a suspended yield).
+    #[inline]
+    pub fn started(&self) -> bool {
+        match self {
+            Coroutine::Thread(c) => c.started,
+            Coroutine::Vm(c) => c.started,
+        }
+    }
+}
+
+/// An OS-thread-backed coroutine (a pooled worker runs the body; see [`spawn_coroutine`]).
+pub struct ThreadCoro {
     resume_tx: Sender<Resume>,
     suspend_rx: Receiver<Suspend>,
     /// Set once the body has finished (Done/Throw); further resumes are no-ops.
@@ -106,7 +139,7 @@ pub struct Coroutine {
     pub started: bool,
 }
 
-impl Coroutine {
+impl ThreadCoro {
     /// Hand control to the generator and block until it next parks or finishes. Saves/restores the
     /// interpreter's scalar execution context (`strict`, recursion `depth`, tail-call eligibility
     /// `tco_ok`) across the handoff so the driver and the body don't clobber each other's. `tco_ok`
@@ -281,10 +314,10 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<C
     worker.send(job).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::Other, "coroutine worker unavailable")
     })?;
-    Ok(Coroutine {
+    Ok(Coroutine::Thread(ThreadCoro {
         resume_tx,
         suspend_rx,
         done: false,
         started: false,
-    })
+    }))
 }

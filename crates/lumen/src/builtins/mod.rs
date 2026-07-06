@@ -15740,7 +15740,7 @@ fn drive_generator(
         Some(c) => c,
         None => return Err(i.make_error("TypeError", "Generator method called on a non-generator")),
     };
-    if coro.done {
+    if coro.done() {
         i.generators.insert(key, coro);
         return match signal {
             Resume::Throw(e) => Err(e),
@@ -15892,7 +15892,7 @@ pub(crate) fn async_gen_return_fulfil(
     };
     let (r, x) = (arg(a, 1), arg(a, 2));
     if let Some(mut coro) = i.generators.remove(&key) {
-        if !coro.done {
+        if !coro.done() {
             let _ = coro.resume(i, crate::coroutine::Resume::Return(x.clone()));
         }
         i.generators.insert(key, coro);
@@ -15913,7 +15913,7 @@ pub(crate) fn async_gen_return_reject(
     };
     let (r, e) = (arg(a, 1), arg(a, 2));
     if let Some(mut coro) = i.generators.remove(&key) {
-        if !coro.done {
+        if !coro.done() {
             let _ = coro.resume(i, crate::coroutine::Resume::Throw(e.clone()));
         }
         i.generators.insert(key, coro);

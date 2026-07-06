@@ -1972,6 +1972,35 @@ fn bytecode_property_inline_cache() {
 }
 
 #[test]
+fn bytecode_async_vm() {
+    // Async bodies compile to the bytecode VM and suspend at `await` without an OS-thread
+    // coroutine. Checks the awaited value flows back, `await` in a loop accumulates, the return
+    // value is delivered, and `await` still yields a microtask tick (ordering "123", not "132").
+    let mut e = Engine::new();
+    e.interp.tier = crate::bytecode::Tier::Bytecode;
+    e.interp.tier_threshold = 0; // compile every function so the VM async path is taken
+    let src = r#"
+      var out = "";
+      async function add(a, b){ return a + await Promise.resolve(b); }
+      async function chain(){ let s = 0; for (let i=0;i<4;i++) s += await add(i, 10); return s; }
+      const order = [];
+      async function stepper(){ order.push(1); await 0; order.push(3); }
+      async function main(){
+        const c = await chain();          // 10+11+12+13 = 46
+        const p = stepper(); order.push(2); await p;
+        out = c + "|" + order.join("");
+      }
+      main();
+    "#;
+    e.eval(src, false).expect("parse");
+    let got = match e.eval("out", false).expect("parse") {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    };
+    assert_eq!(got, "46|123");
+}
+
+#[test]
 fn array_species() {
     assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
     assert_eq!(run("[1,2,3,4].filter(x=>x%2===0).join(',')"), "2,4");

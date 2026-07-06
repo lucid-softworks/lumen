@@ -3874,7 +3874,7 @@ impl Interp {
                 self.reject_promise(&promise, reason);
                 return Ok(promise);
             }
-            let r = self.run_async(func, &body, param_seed);
+            let r = self.run_async(func, &body, param_seed, args);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             self.in_field_init_code = saved_field_init;
@@ -4104,12 +4104,76 @@ impl Interp {
     /// Start an async function: spawn its coroutine, return a promise that settles when the body
     /// finishes. Each `await` parks the coroutine; a microtask resumes it once the awaited value
     /// settles.
+    /// The compiled chunk for an async function if it should run on the bytecode VM: the bytecode
+    /// tier is on and the body has been called past the tier threshold and fits the VM subset.
+    /// Mirrors the sync-call tiering in `call_inner`.
+    fn async_vm_chunk(&self, func: &Rc<Function>) -> Option<Rc<crate::bytecode::Chunk>> {
+        if !matches!(self.tier, crate::bytecode::Tier::Bytecode) {
+            return None;
+        }
+        if func.code.get().is_none() {
+            let n = func.calls.get().saturating_add(1);
+            func.calls.set(n);
+            if n > self.tier_threshold {
+                let _ = func.code.set(crate::bytecode::compile(func));
+            }
+        }
+        match func.code.get() {
+            Some(Some(chunk)) => Some(chunk.clone()),
+            _ => None,
+        }
+    }
+
     fn run_async(
         &mut self,
         func: &Rc<Function>,
         scope: &Env,
         param_seed: Option<Env>,
+        args: &[Value],
     ) -> Result<Value, Abrupt> {
+        // Fast path: an async body that compiles runs on the bytecode VM, suspending at each `await`
+        // without an OS-thread coroutine (see `bytecode::VmCoro`). Params seed straight into slots
+        // from `args`; the activation scope is only the root for free-name resolution.
+        let coro = if let Some(chunk) = self.async_vm_chunk(func) {
+            let this_val = if chunk.uses_this() {
+                self.get_var("this", scope)?
+            } else {
+                Value::Undefined
+            };
+            crate::coroutine::Coroutine::Vm(crate::bytecode::VmCoro::new(
+                chunk,
+                scope.clone(),
+                this_val,
+                args,
+            ))
+        } else {
+            self.spawn_async_thread(func, scope, param_seed)?
+        };
+        let promise = self.new_promise();
+        if let Value::Obj(o) = &promise {
+            self.gc_pin(o);
+            self.generators.insert(Rc::as_ptr(o) as usize, coro);
+        }
+        let key = match &promise {
+            Value::Obj(o) => Rc::as_ptr(o) as usize,
+            _ => unreachable!(),
+        };
+        self.drive_async(
+            key,
+            promise.clone(),
+            crate::coroutine::Resume::Next(Value::Undefined),
+        );
+        Ok(promise)
+    }
+
+    /// The tree-walker fallback for an async body that did not compile: run it on a pooled OS-thread
+    /// coroutine.
+    fn spawn_async_thread(
+        &mut self,
+        func: &Rc<Function>,
+        scope: &Env,
+        param_seed: Option<Env>,
+    ) -> Result<crate::coroutine::Coroutine, Abrupt> {
         let func = func.clone();
         let scope = scope.clone();
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
@@ -4161,29 +4225,12 @@ impl Interp {
             outcome
         });
         let ptr = self as *mut Interp;
-        let coro = match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body)) {
-            Ok(c) => c,
-            Err(_) => {
-                return Err(Abrupt::Throw(
-                    self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG),
-                ))
-            }
-        };
-        let promise = self.new_promise();
-        if let Value::Obj(o) = &promise {
-            self.gc_pin(o);
-            self.generators.insert(Rc::as_ptr(o) as usize, coro);
+        match crate::coroutine::spawn_coroutine(ptr, crate::coroutine::SendBody(body)) {
+            Ok(c) => Ok(c),
+            Err(_) => Err(Abrupt::Throw(
+                self.make_error("Error", crate::coroutine::UNSUPPORTED_MSG),
+            )),
         }
-        let key = match &promise {
-            Value::Obj(o) => Rc::as_ptr(o) as usize,
-            _ => unreachable!(),
-        };
-        self.drive_async(
-            key,
-            promise.clone(),
-            crate::coroutine::Resume::Next(Value::Undefined),
-        );
-        Ok(promise)
     }
 
     /// Resume an async coroutine and react to how it parks: an `await` (Yield) attaches a microtask
@@ -4272,7 +4319,7 @@ impl Interp {
                 return;
             }
         };
-        if coro.done {
+        if coro.done() {
             self.generators.insert(key, coro);
             match signal {
                 Resume::Throw(e) => {
@@ -4292,7 +4339,7 @@ impl Interp {
         }
         // suspendedStart: a return() before the first next() awaits its value without ever
         // running the body.
-        if !coro.started {
+        if !coro.started() {
             if let Resume::Return(v) = signal {
                 self.generators.insert(key, coro);
                 return self.async_gen_await_return(key, r, v);

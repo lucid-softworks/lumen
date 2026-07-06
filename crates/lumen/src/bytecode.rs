@@ -122,6 +122,9 @@ pub enum Op {
     Throw,
     Return,
     ReturnUndef,
+    /// `await expr`: suspend the async body, handing the popped operand to the driver; on resume the
+    /// settled value is pushed back (or a rejection is thrown). Only emitted for async functions.
+    Await,
 }
 
 pub struct Chunk {
@@ -143,6 +146,13 @@ pub struct Chunk {
     /// calls via `Rc`, so these persist. `Cell` is fine: the VM runs one thread at a time (coroutine
     /// ping-pong), like the rest of the engine's shared-`Rc` state.
     caches: Vec<std::cell::Cell<u32>>,
+}
+
+impl Chunk {
+    /// Whether the body reads `this` (so the driver seeds it from the activation scope).
+    pub fn uses_this(&self) -> bool {
+        self.uses_this
+    }
 }
 
 impl std::fmt::Debug for Chunk {
@@ -167,7 +177,10 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     if func.is_arrow && scan & SCAN_THIS != 0 {
         return None;
     }
-    if func.is_generator || func.is_async {
+    // Generators still run in the tree-walker (their `.return()`/`.throw()` injection and yield*
+    // delegation are not modeled here). Async functions compile: `await` lowers to `Op::Await`,
+    // which suspends the `VmCoro` that drives this body.
+    if func.is_generator {
         return None;
     }
     // A named function expression binds its own name inside the body — an env-side binding the
@@ -846,6 +859,11 @@ impl Compiler {
                 }
                 Ok(())
             }
+            Expr::Await(arg) => {
+                self.expr(arg)?;
+                self.emit(Op::Await);
+                Ok(())
+            }
             Expr::Update { op, prefix, arg } => {
                 let Expr::Ident(name) = &**arg else {
                     return Err(Bail);
@@ -1078,8 +1096,16 @@ impl Compiler {
 // VM
 // ---------------------------------------------------------------------------------------------
 
+/// How one run of the VM ended: the body returned a value, suspended at an `await` (async bodies
+/// only — see [`VmCoro`]), or — carried as `Err(Abrupt::Throw)` — threw.
+pub enum VmStep {
+    Done(Value),
+    Await(Value),
+}
+
 /// Execute a compiled function body. `env` is the activation environment (used only as the root
-/// for free-name resolution); parameters are seeded straight into slots.
+/// for free-name resolution); parameters are seeded straight into slots. Synchronous bodies only —
+/// an async body runs through [`VmCoro`], which drives [`run_vm`] and can suspend it.
 pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<Value, Abrupt> {
     let mut slots: Vec<Value> = vec![Value::Undefined; chunk.n_slots];
     for (k, a) in args.iter().take(chunk.n_params).enumerate() {
@@ -1095,14 +1121,33 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
     };
     let mut stack: Vec<Value> = Vec::with_capacity(16);
     let mut pc = 0usize;
+    match run_vm(i, chunk, env, &mut slots, &mut stack, &mut pc, &this_val)? {
+        VmStep::Done(v) => Ok(v),
+        VmStep::Await(_) => unreachable!("a synchronous bytecode function cannot await"),
+    }
+}
+
+/// Run from `*pc` until the body returns (`Done`), suspends at an `await` (`Await`, async bodies
+/// only), or throws (`Err(Abrupt::Throw)`). Operates on borrowed state so an async [`VmCoro`] can
+/// save it at a suspension and restore it on resume.
+#[allow(clippy::too_many_arguments)]
+fn run_vm(
+    i: &mut Interp,
+    chunk: &Chunk,
+    env: &Env,
+    slots: &mut Vec<Value>,
+    stack: &mut Vec<Value>,
+    pc: &mut usize,
+    this_val: &Value,
+) -> Result<VmStep, Abrupt> {
     macro_rules! pop {
         () => {
             stack.pop().expect("vm stack underflow")
         };
     }
     loop {
-        let op = chunk.ops[pc];
-        pc += 1;
+        let op = chunk.ops[*pc];
+        *pc += 1;
         match op {
             Op::Const(k) => stack.push(chunk.consts[k as usize].clone()),
             Op::Undef => stack.push(Value::Undefined),
@@ -1303,16 +1348,16 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 stack.push(obj);
                 stack.push(m);
             }
-            Op::Add => bin_num(i, &mut stack, "+", |a, b| a + b)?,
-            Op::Sub => bin_num(i, &mut stack, "-", |a, b| a - b)?,
-            Op::Mul => bin_num(i, &mut stack, "*", |a, b| a * b)?,
-            Op::Div => bin_num(i, &mut stack, "/", |a, b| a / b)?,
-            Op::Mod => bin_num(i, &mut stack, "%", crate::eval::js_mod)?,
-            Op::BitAnd => bin_i32(i, &mut stack, "&", |a, b| a & b)?,
-            Op::BitOr => bin_i32(i, &mut stack, "|", |a, b| a | b)?,
-            Op::BitXor => bin_i32(i, &mut stack, "^", |a, b| a ^ b)?,
-            Op::Shl => bin_i32(i, &mut stack, "<<", |a, b| a.wrapping_shl(b as u32 & 31))?,
-            Op::Shr => bin_i32(i, &mut stack, ">>", |a, b| a >> (b as u32 & 31))?,
+            Op::Add => bin_num(i, &mut *stack, "+", |a, b| a + b)?,
+            Op::Sub => bin_num(i, &mut *stack, "-", |a, b| a - b)?,
+            Op::Mul => bin_num(i, &mut *stack, "*", |a, b| a * b)?,
+            Op::Div => bin_num(i, &mut *stack, "/", |a, b| a / b)?,
+            Op::Mod => bin_num(i, &mut *stack, "%", crate::eval::js_mod)?,
+            Op::BitAnd => bin_i32(i, &mut *stack, "&", |a, b| a & b)?,
+            Op::BitOr => bin_i32(i, &mut *stack, "|", |a, b| a | b)?,
+            Op::BitXor => bin_i32(i, &mut *stack, "^", |a, b| a ^ b)?,
+            Op::Shl => bin_i32(i, &mut *stack, "<<", |a, b| a.wrapping_shl(b as u32 & 31))?,
+            Op::Shr => bin_i32(i, &mut *stack, ">>", |a, b| a >> (b as u32 & 31))?,
             Op::UShr => {
                 let b = pop!();
                 let a = pop!();
@@ -1325,14 +1370,14 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                     stack.push(v);
                 }
             }
-            Op::Lt => bin_cmp(i, &mut stack, "<", |a, b| a < b)?,
-            Op::Gt => bin_cmp(i, &mut stack, ">", |a, b| a > b)?,
-            Op::Le => bin_cmp(i, &mut stack, "<=", |a, b| a <= b)?,
-            Op::Ge => bin_cmp(i, &mut stack, ">=", |a, b| a >= b)?,
-            Op::EqEq => bin_cmp(i, &mut stack, "==", |a, b| a == b)?,
-            Op::NotEq => bin_cmp(i, &mut stack, "!=", |a, b| a != b)?,
-            Op::StrictEq => bin_cmp(i, &mut stack, "===", |a, b| a == b)?,
-            Op::StrictNotEq => bin_cmp(i, &mut stack, "!==", |a, b| a != b)?,
+            Op::Lt => bin_cmp(i, &mut *stack, "<", |a, b| a < b)?,
+            Op::Gt => bin_cmp(i, &mut *stack, ">", |a, b| a > b)?,
+            Op::Le => bin_cmp(i, &mut *stack, "<=", |a, b| a <= b)?,
+            Op::Ge => bin_cmp(i, &mut *stack, ">=", |a, b| a >= b)?,
+            Op::EqEq => bin_cmp(i, &mut *stack, "==", |a, b| a == b)?,
+            Op::NotEq => bin_cmp(i, &mut *stack, "!=", |a, b| a != b)?,
+            Op::StrictEq => bin_cmp(i, &mut *stack, "===", |a, b| a == b)?,
+            Op::StrictNotEq => bin_cmp(i, &mut *stack, "!==", |a, b| a != b)?,
             Op::GenBin(n) => {
                 let b = pop!();
                 let a = pop!();
@@ -1382,21 +1427,21 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 pop!();
                 stack.push(Value::Undefined);
             }
-            Op::Jump(t) => pc = t as usize,
+            Op::Jump(t) => *pc = t as usize,
             Op::JumpIfFalse(t) => {
                 let a = pop!();
                 if !i.to_boolean(&a) {
-                    pc = t as usize;
+                    *pc = t as usize;
                 }
             }
             Op::JumpIfFalsePeek(t) => {
                 if !i.to_boolean(stack.last().expect("vm stack underflow")) {
-                    pc = t as usize;
+                    *pc = t as usize;
                 }
             }
             Op::JumpIfTruePeek(t) => {
                 if i.to_boolean(stack.last().expect("vm stack underflow")) {
-                    pc = t as usize;
+                    *pc = t as usize;
                 }
             }
             Op::JumpIfNotNullishPeek(t) => {
@@ -1404,7 +1449,7 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                     stack.last().expect("vm stack underflow"),
                     Value::Undefined | Value::Null
                 ) {
-                    pc = t as usize;
+                    *pc = t as usize;
                 }
             }
             Op::Call(argc) => {
@@ -1452,8 +1497,103 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let v = pop!();
                 return Err(Abrupt::Throw(v));
             }
-            Op::Return => return Ok(pop!()),
-            Op::ReturnUndef => return Ok(Value::Undefined),
+            Op::Return => return Ok(VmStep::Done(pop!())),
+            Op::ReturnUndef => return Ok(VmStep::Done(Value::Undefined)),
+            Op::Await => return Ok(VmStep::Await(pop!())),
+        }
+    }
+}
+
+/// An async function body running on the bytecode VM, suspendable at each `await` without an OS
+/// thread. It presents the same `resume(&mut Interp, Resume) -> Suspend` shape as the thread-backed
+/// coroutine, so the promise driver (`Interp::drive_async`) treats both uniformly — the only cost
+/// per await is now a couple of `Vec` swaps instead of a thread handoff.
+pub struct VmCoro {
+    chunk: Rc<Chunk>,
+    env: Env,
+    this_val: Value,
+    slots: Vec<Value>,
+    stack: Vec<Value>,
+    pc: usize,
+    pub done: bool,
+    pub started: bool,
+}
+
+impl VmCoro {
+    /// Build an async coroutine for `chunk` with params seeded from `args`, parked before its first
+    /// step (run on the first `resume`).
+    pub fn new(chunk: Rc<Chunk>, env: Env, this_val: Value, args: &[Value]) -> VmCoro {
+        let mut slots = vec![Value::Undefined; chunk.n_slots];
+        for (k, a) in args.iter().take(chunk.n_params).enumerate() {
+            slots[k] = a.clone();
+        }
+        for &s in &chunk.var_force_resets {
+            slots[s as usize] = Value::Undefined;
+        }
+        VmCoro {
+            chunk,
+            env,
+            this_val,
+            slots,
+            stack: Vec::with_capacity(16),
+            pc: 0,
+            done: false,
+            started: false,
+        }
+    }
+
+    /// Drive one step: run to the next `await` (`Suspend::Await`), to completion (`Done`), or to an
+    /// uncaught throw (`Throw`). `Resume::Throw` rejects immediately — a compiled async body has no
+    /// `try`/`catch`/`finally`/`using` (all of which bail from `compile`), so a rejected await just
+    /// escapes the function.
+    pub fn resume(
+        &mut self,
+        i: &mut Interp,
+        signal: crate::coroutine::Resume,
+    ) -> crate::coroutine::Suspend {
+        use crate::coroutine::{Resume, Suspend};
+        if self.done {
+            return Suspend::Done(Value::Undefined);
+        }
+        match signal {
+            Resume::Next(v) => {
+                if self.started {
+                    self.stack.push(v); // the settled value of the await we parked at
+                }
+            }
+            Resume::Throw(e) => {
+                self.done = true;
+                return Suspend::Throw(e);
+            }
+            Resume::Return(v) => {
+                self.done = true;
+                return Suspend::Done(v);
+            }
+        }
+        self.started = true;
+        match run_vm(
+            i,
+            &self.chunk,
+            &self.env,
+            &mut self.slots,
+            &mut self.stack,
+            &mut self.pc,
+            &self.this_val,
+        ) {
+            Ok(VmStep::Await(a)) => Suspend::Await(a),
+            Ok(VmStep::Done(v)) => {
+                self.done = true;
+                Suspend::Done(v)
+            }
+            Err(Abrupt::Throw(e)) => {
+                self.done = true;
+                Suspend::Throw(e)
+            }
+            // Return/Break/Continue can't escape a function body; treat defensively as completion.
+            Err(_) => {
+                self.done = true;
+                Suspend::Done(Value::Undefined)
+            }
         }
     }
 }
