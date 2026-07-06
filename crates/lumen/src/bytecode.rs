@@ -29,6 +29,19 @@ pub enum Tier {
     Bytecode,
 }
 
+/// Which update `UpdateLocal` performs, and the value it leaves on the stack: `Pre*` push the
+/// updated value, `Post*` push the original (coerced) value, `*Discard` push nothing (the update
+/// is a statement or a `for` update — its value is unobservable).
+#[derive(Clone, Copy, Debug)]
+pub enum UpdKind {
+    PreInc,
+    PreDec,
+    PostInc,
+    PostDec,
+    IncDiscard,
+    DecDiscard,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Op {
     Const(u32),
@@ -37,6 +50,11 @@ pub enum Op {
     Pop,
     LoadLocal(u16),
     StoreLocal(u16),
+    /// `++`/`--` on a local slot, done in place (no LoadLocal/Plus/Add dance). Applies ToNumeric
+    /// so a BigInt slot stays a BigInt — the `Plus`-based lowering this replaces was ToNumber and
+    /// wrongly threw on BigInt. The `UpdKind` says increment vs decrement and which value (old,
+    /// new, or none in statement position) to leave on the stack.
+    UpdateLocal(u16, UpdKind),
     /// Put the slot into its temporal dead zone (block entry for `let`/`const`).
     Tdz(u16),
     LoadName(u32),
@@ -44,8 +62,12 @@ pub enum Op {
     LoadThis,
     GetProp(u32),
     SetProp(u32),
+    /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
+    SetPropDrop(u32),
     GetElem,
     SetElem,
+    /// `obj[k] = v` in statement position: stores without leaving `v` on the stack.
+    SetElemDrop,
     /// `obj.name` as a call target: pops obj, pushes obj then the method (get runs before args).
     GetMethod(u32),
     /// `obj[k]` as a call target: pops k and obj, pushes obj then the method.
@@ -320,11 +342,7 @@ impl Compiler {
 
     fn stmt(&mut self, s: &Stmt) -> CResult {
         match s {
-            Stmt::Expr(e) => {
-                self.expr(e)?;
-                self.emit(Op::Pop);
-                Ok(())
-            }
+            Stmt::Expr(e) => self.expr_stmt(e),
             Stmt::Empty | Stmt::Debugger => Ok(()),
             Stmt::VarDecl { kind, decls } => {
                 if matches!(kind, DeclKind::Using | DeclKind::AwaitUsing) {
@@ -505,8 +523,7 @@ impl Compiler {
                 }
             }
             Some(ForInit::Expr(e)) => {
-                self.expr(e)?;
-                self.emit(Op::Pop);
+                self.expr_stmt(e)?;
             }
             None => {}
         }
@@ -530,8 +547,7 @@ impl Compiler {
             }
         }
         if let Some(u) = update {
-            self.expr(u)?;
-            self.emit(Op::Pop);
+            self.expr_stmt(u)?;
         }
         self.emit(Op::Jump(start as u32));
         if let Some(jf) = jf {
@@ -541,6 +557,120 @@ impl Compiler {
             self.patch(b);
         }
         Ok(())
+    }
+
+    /// Compile an expression whose value is discarded (an expression statement, or a `for`
+    /// header's init / update). Assignments and `++`/`--` to a local drop their producing `Dup`
+    /// (and the trailing `Pop`); everything else falls back to `expr` + `Pop`. Semantically
+    /// identical to `self.expr(e)?; self.emit(Op::Pop)` — the only difference is the unobservable
+    /// result value.
+    fn expr_stmt(&mut self, e: &Expr) -> CResult {
+        match e {
+            Expr::Paren(inner) => return self.expr_stmt(inner),
+            // A comma expression as a statement: every operand is evaluated for effect only.
+            Expr::Seq(exprs) => {
+                for ex in exprs {
+                    self.expr_stmt(ex)?;
+                }
+                return Ok(());
+            }
+            Expr::Update { op, arg, .. } => {
+                if let Expr::Ident(name) = &**arg {
+                    if let Some((slot, is_const)) = self.lookup(name) {
+                        if !is_const {
+                            let kind = match *op {
+                                "++" => UpdKind::IncDiscard,
+                                "--" => UpdKind::DecDiscard,
+                                _ => return Err(Bail),
+                            };
+                            self.emit(Op::UpdateLocal(slot, kind));
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            Expr::Assign { op, target, value } => {
+                return self.assign_discard(op, target, value);
+            }
+            _ => {}
+        }
+        self.expr(e)?;
+        self.emit(Op::Pop);
+        Ok(())
+    }
+
+    /// Compile a discarded assignment: the fast `Dup`-free lowering when the target is a plain
+    /// local / free name / `obj.x` / `obj[k]`, otherwise the generic value-producing `assign`
+    /// followed by `Pop` (identical to `self.expr(assign)?; Pop`).
+    fn assign_discard(&mut self, op: &str, target: &Expr, value: &Expr) -> CResult {
+        if self.try_assign_discard(op, target, value)? {
+            return Ok(());
+        }
+        self.assign(op, target, value)?;
+        self.emit(Op::Pop);
+        Ok(())
+    }
+
+    /// Fast lowering for a discarded assignment (no `Dup`, no trailing `Pop`). Returns `Ok(true)`
+    /// when it emitted the assignment, `Ok(false)` to defer to the generic `assign` + `Pop` path
+    /// (which handles — or itself bails on — the forms not covered here). Any `Bail` from a
+    /// compiled sub-expression propagates: the generic path would bail identically.
+    fn try_assign_discard(&mut self, op: &str, target: &Expr, value: &Expr) -> Result<bool, Bail> {
+        // Logical-assignment short-circuits; leave it to the generic path (which bails).
+        if matches!(op, "&&=" | "||=" | "??=") {
+            return Ok(false);
+        }
+        match target {
+            Expr::Ident(name) => match self.lookup(name) {
+                Some((slot, is_const)) => {
+                    if is_const {
+                        return Ok(false);
+                    }
+                    if op == "=" {
+                        self.expr(value)?;
+                    } else {
+                        self.emit(Op::LoadLocal(slot));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
+                    }
+                    self.emit(Op::StoreLocal(slot));
+                    Ok(true)
+                }
+                None => {
+                    if op != "=" {
+                        return Ok(false);
+                    }
+                    // StoreName already consumes the value without re-pushing it.
+                    self.expr(value)?;
+                    let i = self.name_idx(name);
+                    self.emit(Op::StoreName(i));
+                    Ok(true)
+                }
+            },
+            Expr::Member {
+                obj,
+                prop,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') && op == "=" => {
+                self.expr(obj)?;
+                self.expr(value)?;
+                let i = self.name_idx(prop);
+                self.emit(Op::SetPropDrop(i));
+                Ok(true)
+            }
+            Expr::Index {
+                obj,
+                index,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) && op == "=" => {
+                self.expr(obj)?;
+                self.expr(index)?;
+                self.expr(value)?;
+                self.emit(Op::SetElemDrop);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn expr(&mut self, e: &Expr) -> CResult {
@@ -709,23 +839,14 @@ impl Compiler {
                 if is_const {
                     return Err(Bail);
                 }
-                // old = ToNumber-ish via the VM's Update semantics: LoadLocal, Plus (ToNumber
-                // with BigInt bail at runtime is handled by Plus's fallback), then adjust.
-                self.emit(Op::LoadLocal(slot));
-                self.emit(Op::Plus);
-                if *prefix {
-                    let one = self.const_idx(Value::Num(1.0));
-                    self.emit(Op::Const(one));
-                    self.emit(if *op == "++" { Op::Add } else { Op::Sub });
-                    self.emit(Op::Dup);
-                    self.emit(Op::StoreLocal(slot));
-                } else {
-                    self.emit(Op::Dup);
-                    let one = self.const_idx(Value::Num(1.0));
-                    self.emit(Op::Const(one));
-                    self.emit(if *op == "++" { Op::Add } else { Op::Sub });
-                    self.emit(Op::StoreLocal(slot));
-                }
+                let kind = match (*op, *prefix) {
+                    ("++", true) => UpdKind::PreInc,
+                    ("--", true) => UpdKind::PreDec,
+                    ("++", false) => UpdKind::PostInc,
+                    ("--", false) => UpdKind::PostDec,
+                    _ => return Err(Bail),
+                };
+                self.emit(Op::UpdateLocal(slot, kind));
                 Ok(())
             }
             Expr::Assign { op, target, value } => self.assign(op, target, value),
@@ -988,6 +1109,71 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 stack.push(v);
             }
             Op::StoreLocal(s) => slots[s as usize] = pop!(),
+            Op::UpdateLocal(s, kind) => {
+                let idx = s as usize;
+                match &slots[idx] {
+                    // Reading a slot still in its TDZ is the same ReferenceError as LoadLocal.
+                    Value::Empty => {
+                        return Err(i.throw(
+                            "ReferenceError",
+                            format!(
+                                "cannot access '{}' before initialization",
+                                chunk.slot_names[idx]
+                            ),
+                        ));
+                    }
+                    // Fast path: a numeric slot updates in place.
+                    Value::Num(n) => {
+                        let old = *n;
+                        let new = match kind {
+                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => old + 1.0,
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => old - 1.0,
+                        };
+                        slots[idx] = Value::Num(new);
+                        match kind {
+                            UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
+                            UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::Num(old)),
+                            UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                        }
+                    }
+                    // BigInt updates stay BigInt (ToNumeric, not ToNumber) — never coerced to a
+                    // Number and never thrown on like unary `+` would.
+                    Value::BigInt(n) => {
+                        let old = n.clone();
+                        let one = crate::bigint::JsBigInt::from_u64(1);
+                        let new = match kind {
+                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => old.add(&one),
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => old.sub(&one),
+                        };
+                        slots[idx] = Value::BigInt(new.clone());
+                        match kind {
+                            UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::BigInt(new)),
+                            UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::BigInt(old)),
+                            UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                        }
+                    }
+                    // Anything else: ToNumber (may run user `valueOf`), then a Number update. The
+                    // post value is the *coerced* number, matching the tree-walker's `eval_update`.
+                    _ => {
+                        let old = slots[idx].clone();
+                        let coerced = i.to_number(&old)?;
+                        let new = match kind {
+                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => {
+                                coerced + 1.0
+                            }
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => {
+                                coerced - 1.0
+                            }
+                        };
+                        slots[idx] = Value::Num(new);
+                        match kind {
+                            UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
+                            UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::Num(coerced)),
+                            UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                        }
+                    }
+                }
+            }
             Op::Tdz(s) => slots[s as usize] = Value::Empty,
             Op::LoadName(n) => {
                 let v = i.get_var(&chunk.names[n as usize], env)?;
@@ -1008,6 +1194,11 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let obj = pop!();
                 i.set_member(&obj, &chunk.names[n as usize], v.clone())?;
                 stack.push(v);
+            }
+            Op::SetPropDrop(n) => {
+                let v = pop!();
+                let obj = pop!();
+                i.set_member(&obj, &chunk.names[n as usize], v)?;
             }
             Op::GetElem => {
                 let key = pop!();
@@ -1047,6 +1238,23 @@ pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<V
                 let k = i.to_property_key(&key)?;
                 i.set_member(&obj, &k, v.clone())?;
                 stack.push(v);
+            }
+            Op::SetElemDrop => {
+                let v = pop!();
+                let key = pop!();
+                let obj = pop!();
+                if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                    match i.fast_set_elem(o, *n, v) {
+                        Ok(()) => continue,
+                        Err(back) => {
+                            let k = i.to_property_key(&key)?;
+                            i.set_member(&obj, &k, back)?;
+                            continue;
+                        }
+                    }
+                }
+                let k = i.to_property_key(&key)?;
+                i.set_member(&obj, &k, v)?;
             }
             Op::GetMethod(n) => {
                 let obj = pop!();
