@@ -1,0 +1,11 @@
+{
+  "name": "express-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A real-world Express app on the lumen runtime",
+  "dependencies": {
+    "express": "^4.21.2",
+    "morgan": "^1.10.0",
+    "cors": "^2.8.5"
+  }
+}

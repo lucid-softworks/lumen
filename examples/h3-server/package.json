@@ -1,0 +1,1 @@
+{ "name": "h3-server", "version": "1.0.0", "private": true, "dependencies": { "h3": "^1.13.0" } }
