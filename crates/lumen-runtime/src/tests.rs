@@ -646,9 +646,9 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "CountQueuingStrategy",
     "TextEncoderStream",
     "TextDecoderStream",
+    "URLPattern",
 ];
 const WINTERTC_NOT_YET: &[&str] = &[
-    "URLPattern",
     "ReadableStreamBYOBReader",
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",
