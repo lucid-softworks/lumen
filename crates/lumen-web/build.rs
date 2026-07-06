@@ -18,6 +18,7 @@ const JS_FILES: &[&str] = &[
     "encoding.js",
     "url.js",
     "streams.js",
+    "writable.js",
     "blob.js",
     "fetch.js",
     "server.js",

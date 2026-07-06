@@ -166,6 +166,63 @@ class ReadableStream {
     }
     return Promise.resolve(undefined);
   }
+  async pipeTo(dest, options = {}) {
+    const reader = this.getReader();
+    const writer = dest.getWriter();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        await writer.write(value);
+      }
+      if (!options.preventClose) await writer.close();
+    } catch (e) {
+      if (!options.preventAbort) await writer.abort(e).catch(() => {});
+      throw e;
+    } finally {
+      reader.releaseLock();
+      writer.releaseLock();
+    }
+  }
+  pipeThrough(transform, options = {}) {
+    if (!transform || !transform.writable || !transform.readable) {
+      throw new TypeError("pipeThrough expects { readable, writable }");
+    }
+    // Pump into the writable side; hand back the readable side immediately.
+    this.pipeTo(transform.writable, options).catch(() => {});
+    return transform.readable;
+  }
+  // Split into two independent streams. Both share one underlying reader; a chunk read for one
+  // branch is buffered for the other (default streams share chunk references, per spec).
+  tee() {
+    const reader = this.getReader();
+    const pending = [[], []];
+    let ended = false;
+    const readOne = async (branch) => {
+      if (pending[branch].length) return { value: pending[branch].shift(), done: false };
+      if (ended) return { value: undefined, done: true };
+      const r = await reader.read();
+      if (r.done) {
+        ended = true;
+        return { value: undefined, done: true };
+      }
+      pending[1 - branch].push(r.value);
+      return { value: r.value, done: false };
+    };
+    const branch = (i) =>
+      new ReadableStream({
+        async pull(controller) {
+          try {
+            const r = await readOne(i);
+            if (r.done) controller.close();
+            else controller.enqueue(r.value);
+          } catch (e) {
+            controller.error(e);
+          }
+        },
+      });
+    return [branch(0), branch(1)];
+  }
   values(options = {}) {
     const reader = this.getReader();
     const preventCancel = !!(options && options.preventCancel);

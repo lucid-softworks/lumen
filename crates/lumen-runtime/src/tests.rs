@@ -637,14 +637,6 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "Blob",
     "File",
     "FormData",
-];
-const WINTERTC_NOT_YET: &[&str] = &[
-    "TextEncoderStream",
-    "TextDecoderStream",
-    "URLPattern",
-    "ReadableStreamBYOBReader",
-    "ReadableByteStreamController",
-    "ReadableStreamBYOBRequest",
     "WritableStream",
     "WritableStreamDefaultWriter",
     "WritableStreamDefaultController",
@@ -652,6 +644,14 @@ const WINTERTC_NOT_YET: &[&str] = &[
     "TransformStreamDefaultController",
     "ByteLengthQueuingStrategy",
     "CountQueuingStrategy",
+    "TextEncoderStream",
+    "TextDecoderStream",
+];
+const WINTERTC_NOT_YET: &[&str] = &[
+    "URLPattern",
+    "ReadableStreamBYOBReader",
+    "ReadableByteStreamController",
+    "ReadableStreamBYOBRequest",
     "CompressionStream",
     "DecompressionStream",
     "WebAssembly",
