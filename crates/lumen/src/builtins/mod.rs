@@ -13708,7 +13708,7 @@ fn array_some_every(
     let cb_this = arg(args, 1);
     let ov = Value::Obj(o.clone());
     for k in 0..len {
-        if !i.has_property(&o, &k.to_string()) {
+        if !ab(i.js_has_property(&ov, &k.to_string()))? {
             continue; // skip holes
         }
         let v = ab(i.get_member(&ov, &k.to_string()))?;

@@ -3710,6 +3710,39 @@ fn array_isarray_proxy() {
     assert_eq!(run("Array.isArray({})"), "false");
 }
 #[test]
+fn array_iteration_proxy_receiver() {
+    // Regression (issue #6): every/some must run [[HasProperty]] through the proxy's traps, not
+    // peek at the proxy object's own (empty) property table — otherwise every index reads as a hole
+    // and the callback never fires.
+    assert_eq!(
+        run(
+            "var calls=0; var p=new Proxy({length:2,0:'a',1:'b'},{get(o,k){return o[k];}});\
+             Array.prototype.every.call(p,function(){calls++;return true;});\
+             Array.prototype.some.call(p,function(){calls++;return false;});\
+             calls"
+        ),
+        "4"
+    );
+    // The `has` trap participates in the hole check: reporting an index absent skips it.
+    assert_eq!(
+        run(
+            "var calls=0; var p=new Proxy({length:3,0:1,1:2,2:3},{has(o,k){return k!=='1';}});\
+             Array.prototype.forEach.call(p,function(){calls++;});\
+             calls"
+        ),
+        "2"
+    );
+    // every short-circuits false and some short-circuits true, both through proxy reads.
+    assert_eq!(
+        run("var p=new Proxy({length:3,0:2,1:4,2:5},{}); Array.prototype.every.call(p,x=>x%2===0)"),
+        "false"
+    );
+    assert_eq!(
+        run("var p=new Proxy({length:3,0:1,1:3,2:4},{}); Array.prototype.some.call(p,x=>x%2===0)"),
+        "true"
+    );
+}
+#[test]
 fn arraybuffer_length_validation() {
     assert!(
         matches!(Engine::new().eval("new ArrayBuffer(-1)", false), Ok(Completion::Throw{ref name,..}) if name=="RangeError")
