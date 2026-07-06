@@ -2298,25 +2298,6 @@ impl Interp {
         }
     }
 
-    pub(crate) fn has_property(&self, obj: &Gc, key: &str) -> bool {
-        // A TypedArray's [[HasProperty]] resolves integer-index slots itself and never consults the
-        // prototype for a canonical-numeric key (valid index → present; otherwise absent).
-        if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)).copied() {
-            match self.ta_index_kind(&info, key) {
-                TaIndex::Element(_) => return true,
-                TaIndex::Exotic => return false,
-                TaIndex::Ordinary => {}
-            }
-        }
-        let mut cur = Some(obj.clone());
-        while let Some(o) = cur {
-            if o.borrow().props.contains(key) {
-                return true;
-            }
-            cur = o.borrow().proto.clone();
-        }
-        false
-    }
 
     // ----- expressions ------------------------------------------------------------------------
 
