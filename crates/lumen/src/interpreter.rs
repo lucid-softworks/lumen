@@ -3929,6 +3929,11 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
+            // A coroutine body runs outside `Interp::call`'s tail-call trampoline, so its top-level
+            // `return f(...)` are never proper tail calls; force `tco_ok` off before each statement
+            // (it can leak back to `true` across a `yield`/`await` resume) so a return here can't be
+            // parked as a pending tail call that nothing runs. See the note in `run_async`.
+            let saved_tco = std::mem::replace(&mut i.tco_ok, false);
             let mut pn = param_bound_names(&func.params);
             if !func.is_arrow {
                 pn.push("arguments".to_string());
@@ -3946,6 +3951,7 @@ impl Interp {
             }
             let mut result: Result<Value, Abrupt> = Ok(Value::Undefined);
             for stmt in &func.body {
+                i.tco_ok = false;
                 match i.exec_stmt(stmt, &scope) {
                     Ok(_) => {}
                     Err(e) => {
@@ -3966,6 +3972,7 @@ impl Interp {
             };
             i.in_async_gen_body = saved_agb;
             i.strict = saved_strict;
+            i.tco_ok = saved_tco;
             outcome
         });
         let ptr = self as *mut Interp;
@@ -4002,6 +4009,13 @@ impl Interp {
         let body: Box<dyn FnOnce(&mut Interp) -> crate::coroutine::Suspend> = Box::new(move |i| {
             let saved_strict = i.strict;
             i.strict = func.is_strict;
+            // A coroutine body runs outside `Interp::call`'s tail-call trampoline, so none of its
+            // top-level `return f(...)` are proper tail calls: parking one as a pending tail call
+            // would leave nothing to run it and resolve the body to `undefined`. `tco_ok` can leak
+            // back to `true` across an `await`/resume (it is ambient interpreter state), so force it
+            // off before *each* statement rather than just once — a `return` reads `tco_ok` at its
+            // very start, so this makes the body's own returns take the ordinary path.
+            let saved_tco = std::mem::replace(&mut i.tco_ok, false);
             let mut pn = param_bound_names(&func.params);
             if !func.is_arrow {
                 pn.push("arguments".to_string());
@@ -4017,6 +4031,7 @@ impl Interp {
             }
             let mut result: Result<Value, Abrupt> = Ok(Value::Undefined);
             for stmt in &func.body {
+                i.tco_ok = false;
                 match i.exec_stmt(stmt, &scope) {
                     Ok(_) => {}
                     Err(e) => {
@@ -4036,6 +4051,7 @@ impl Interp {
                 Err(_) => crate::coroutine::Suspend::Done(Value::Undefined),
             };
             i.strict = saved_strict;
+            i.tco_ok = saved_tco;
             outcome
         });
         let ptr = self as *mut Interp;

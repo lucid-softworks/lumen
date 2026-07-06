@@ -101,18 +101,22 @@ pub struct Coroutine {
 
 impl Coroutine {
     /// Hand control to the generator and block until it next parks or finishes. Saves/restores the
-    /// interpreter's scalar execution context (`strict`, recursion `depth`) across the handoff so the
-    /// driver and the body don't clobber each other's.
+    /// interpreter's scalar execution context (`strict`, recursion `depth`, tail-call eligibility
+    /// `tco_ok`) across the handoff so the driver and the body don't clobber each other's. `tco_ok`
+    /// matters because a coroutine body executes outside `Interp::call`'s tail-call trampoline: if a
+    /// leaked `tco_ok == true` reached an `async`/generator body, its `return f(...)` would be parked
+    /// as a pending tail call that nothing ever runs, and the body would resolve to `undefined`.
     pub(crate) fn resume(&mut self, i: &mut Interp, signal: Resume) -> Suspend {
         if self.done {
             return Suspend::Done(Value::Undefined);
         }
         self.started = true;
-        let (saved_strict, saved_depth) = (i.strict, i.depth);
+        let (saved_strict, saved_depth, saved_tco) = (i.strict, i.depth, i.tco_ok);
         let _ = self.resume_tx.send(signal);
         let s = self.suspend_rx.recv();
         i.strict = saved_strict;
         i.depth = saved_depth;
+        i.tco_ok = saved_tco;
         match s {
             Ok(s) => {
                 if matches!(s, Suspend::Done(_) | Suspend::Throw(_)) {
@@ -132,7 +136,7 @@ impl Coroutine {
 /// Park the running coroutine, hand `msg` (a `Yield` or `Await`) to the driver, and block until
 /// resumed. Restores the body's scalar context (which the driver mutated while it ran).
 fn park(i: &mut Interp, msg: Suspend) -> Resume {
-    let (gen_strict, gen_depth) = (i.strict, i.depth);
+    let (gen_strict, gen_depth, gen_tco) = (i.strict, i.depth, i.tco_ok);
     let resumed = YIELDER.with(|y| {
         let b = y.borrow();
         let yl = b.as_ref().expect("suspend outside a coroutine");
@@ -143,6 +147,7 @@ fn park(i: &mut Interp, msg: Suspend) -> Resume {
         Ok(r) => {
             i.strict = gen_strict;
             i.depth = gen_depth;
+            i.tco_ok = gen_tco;
             r
         }
         // `recv` errors only when the driver's `resume_tx` was dropped — i.e. the `Coroutine` (and

@@ -1901,6 +1901,45 @@ fn promise_combinators_async() {
         "9"
     );
 }
+/// A test-only native that flips the interpreter's tail-call-eligibility flag on. It stands in
+/// for the promise-reaction machinery, which can leave `tco_ok == true` ambient while a coroutine
+/// body is running.
+fn leak_tco(
+    i: &mut crate::interpreter::Interp,
+    _this: crate::value::Value,
+    _args: &[crate::value::Value],
+) -> Result<crate::value::Value, crate::value::Value> {
+    i.tco_ok = true;
+    Ok(crate::value::Value::Undefined)
+}
+
+#[test]
+fn async_tail_return_survives_leaked_tco() {
+    // Regression: a coroutine (async/generator) body runs outside `Interp::call`'s tail-call
+    // trampoline, so a top-level `return f(...)` there must NOT be treated as a proper tail call —
+    // it would be parked as a pending tail call that nothing runs, resolving the async function to
+    // `undefined`. `tco_ok` is ambient state a promise reaction can leave set to `true`, so the
+    // body forces it off before each statement. Here `__leakTco()` reproduces that leaked state
+    // after an `await`, and the following tail-call `return` must still yield its real value.
+    let mut e = Engine::new();
+    let global = e.interp.global.clone();
+    e.interp.def_method(&global, "__leakTco", 0, leak_tco);
+    e.eval(
+        "function id(x){ return x; }\n\
+         var out = 'unset';\n\
+         (async () => { await null; __leakTco(); return id('kept'); })().then((v) => { out = v; });",
+        false,
+    )
+    .expect("parse");
+    assert_eq!(
+        match e.eval("out", false).expect("parse") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        },
+        "kept"
+    );
+}
+
 #[test]
 fn array_species() {
     assert_eq!(run("[1,2,3].map(x=>x*2).join(',')"), "2,4,6");
