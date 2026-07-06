@@ -1,0 +1,17 @@
+# node: compatibility: a CommonJS require() with node_modules resolution, the node:path/os/fs
+# builtins, and Buffer — so npm packages written for CommonJS run on lumen. The module system,
+# path, Buffer, and the node:fs shim are pure-JS glue (js_init); Rust backs only the host
+# probes (fs is-file/is-dir/read, OS info) that JS can't do. Std-only.
+[package]
+name = "lumen-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lumen-host = { path = "../lumen-host" }
+
+[lints]
+workspace = true
