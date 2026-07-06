@@ -46,9 +46,28 @@ impl Value {
     pub fn from_string(s: String) -> Value {
         Value::Str(Rc::from(s.as_str()))
     }
+    /// A BigInt from an `i64` (for the embedder's 64-bit integer bridge, e.g. wasm i64).
+    pub fn bigint_from_i64(v: i64) -> Value {
+        Value::BigInt(crate::bigint::JsBigInt::from(v))
+    }
+    /// Read a BigInt as an `i64` (wrapping past ±2^63), for the embedder's 64-bit bridge. `None`
+    /// when the value isn't a BigInt.
+    pub fn bigint_as_i64(&self) -> Option<i64> {
+        match self {
+            Value::BigInt(b) => Some(b.to_i128_wrapping() as i64),
+            _ => None,
+        }
+    }
     pub fn as_obj(&self) -> Option<&Gc> {
         match self {
             Value::Obj(o) => Some(o),
+            _ => None,
+        }
+    }
+    /// The number, if this is a `Number` (an embedder convenience for reading op arguments).
+    pub fn as_num_opt(&self) -> Option<f64> {
+        match self {
+            Value::Num(n) => Some(*n),
             _ => None,
         }
     }
