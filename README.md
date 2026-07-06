@@ -51,6 +51,13 @@ On top of that:
   implemented on std alone and no third-party crate is permitted, so `https` URLs reject with
   a clear error; plain `http` works.
 
+- **`node:` compatibility** (`lumen-node`) — a CommonJS `require` with `node_modules`
+  resolution and the module wrapper, `package.json` `main`/`exports`, the `node:path`/
+  `node:os`/`node:fs` builtins, and `Buffer`, so packages written against the `node:` surface
+  run. See the checklist at the top of `crates/lumen-node/src/lib.rs` for the deferred pieces
+  (subpath-pattern exports, ESM `import` of `node:`, native addons). `lumen-cli file.js` runs
+  a file as the program entry with `require.main === module`.
+
 - **REPL + CLI** (`lumen-repl`, `lumen-cli`) — an interactive shell with a persistent realm,
   parser-driven incomplete-input detection (multi-line continuation), top-level `await`, and
   loop-to-quiescence so timers and awaited promises settle before the next prompt. Line
@@ -65,6 +72,7 @@ lumen-host     substrate: OpState, ResourceTable, Extension, the thread-pool/cal
 lumen-timers   setTimeout/setInterval/queueMicrotask/setImmediate
 lumen-fs       filesystem (sync + async)
 lumen-web      WinterTC Minimum Common API (Event, URL, crypto, fetch, …)
+lumen-node     node: compatibility (require, node:path/os/fs, Buffer)
 lumen-runtime  the event loop; assembles the op crates; console + process
 lumen-repl     interactive shell
 lumen-cli      node/deno-style entrypoint
