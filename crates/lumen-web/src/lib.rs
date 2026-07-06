@@ -43,7 +43,10 @@ pub fn extension() -> Extension {
         name: "web",
         globals: &[],
         namespaces: &[
-            ("performance", ops!["now" (0) => op_perf_now]),
+            (
+                "__perf",
+                ops!["now" (0) => op_perf_now, "timeOrigin" (0) => op_time_origin],
+            ),
             (
                 "__encoding",
                 ops!["encode" (1) => op_encode, "decode" (2) => op_decode],
@@ -86,17 +89,40 @@ const JS_GLUE_SNAPSHOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/web_gl
 
 #[derive(Default)]
 struct WebState {
-    /// `performance.now()`'s zero point (set at install = runtime construction).
+    /// `performance.now()`'s monotonic zero point and the wall-clock time (`timeOrigin`, Unix ms)
+    /// captured at the same instant — set together on first access.
     start: Option<Instant>,
+    time_origin_ms: f64,
     /// Cached `/dev/urandom` handle (macOS/Linux; the only randomness std can reach without
     /// syscalls or crates).
     urandom: Option<RefCell<File>>,
 }
 
+impl WebState {
+    /// The monotonic clock's zero point, initializing it (and the paired `timeOrigin`) on first use.
+    fn clock_start(&mut self) -> Instant {
+        if self.start.is_none() {
+            self.start = Some(Instant::now());
+            self.time_origin_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+        }
+        self.start.unwrap()
+    }
+}
+
 fn op_perf_now(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
     let state = ctx.host_mut::<WebState>().expect("web state installed");
-    let start = *state.start.get_or_insert_with(Instant::now);
+    let start = state.clock_start();
     Ok(Value::Num(start.elapsed().as_secs_f64() * 1000.0))
+}
+
+/// `performance.timeOrigin`: Unix-epoch milliseconds at the monotonic clock's zero point.
+fn op_time_origin(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let state = ctx.host_mut::<WebState>().expect("web state installed");
+    state.clock_start();
+    Ok(Value::Num(state.time_origin_ms))
 }
 
 // ---- encoding ----

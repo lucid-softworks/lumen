@@ -190,3 +190,5 @@ class ReadableStream {
 ReadableStream.prototype[Symbol.asyncIterator] = ReadableStream.prototype.values;
 
 globalThis.ReadableStream = ReadableStream;
+globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
