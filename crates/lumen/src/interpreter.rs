@@ -5171,6 +5171,15 @@ fn collect_hoist_stmt(stmt: &Stmt, out: &mut Vec<HoistOp>) {
             collect_hoist_stmt(body, out);
         }
         Stmt::ForInOf { body, .. } => collect_hoist_stmt(body, out),
+        // A switch is a single block scope, but `var`s in its case bodies still hoist to the
+        // enclosing function/script (only lexical bindings are switch-block-scoped).
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for s in &case.body {
+                    collect_hoist_stmt(s, out);
+                }
+            }
+        }
         Stmt::Try {
             block,
             handler,
