@@ -9015,6 +9015,33 @@ fn collator_three_level_compare() {
 }
 
 #[test]
+fn cldr_unit_patterns_correct_ids() {
+    // Regression (issue #7): the CLDR table matched unit ids by bare suffix and picked up
+    // unrelated compound units — `second` -> acceleration-meter-per-square-second,
+    // `centimeter` -> area-square-centimeter, `minute` -> angle-arc-minute, etc.
+    let unit = |u: &str, disp: &str| {
+        run(&format!(
+            "new Intl.NumberFormat('en',{{style:'unit',unit:'{u}',unitDisplay:'{disp}'}}).format(5)"
+        ))
+    };
+    assert_eq!(unit("second", "long"), "5 seconds");
+    assert_eq!(unit("second", "short"), "5 sec");
+    assert_eq!(unit("meter", "long"), "5 meters");
+    assert_eq!(unit("meter", "short"), "5 m");
+    assert_eq!(unit("centimeter", "long"), "5 centimeters");
+    assert_eq!(unit("minute", "long"), "5 minutes");
+    assert_eq!(unit("mile", "long"), "5 miles");
+    assert_eq!(unit("liter", "long"), "5 liters");
+    assert_eq!(unit("gallon", "long"), "5 gallons");
+    // Genuine compound speed units still resolve.
+    assert_eq!(unit("kilometer-per-hour", "long"), "5 kilometers per hour");
+    // DurationFormat composes the same corrected patterns.
+    assert_eq!(
+        run("new Intl.DurationFormat('en',{style:'long'}).format({hours:1,minutes:46,seconds:40})"),
+        "1 hour, 46 minutes, 40 seconds"
+    );
+}
+#[test]
 fn numberformat_exact_decimal_inputs() {
     // A BigInt beyond 2^53 keeps its exact digits.
     assert_eq!(
