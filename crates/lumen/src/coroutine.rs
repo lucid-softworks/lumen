@@ -1,22 +1,28 @@
 //! Stackful coroutines for generators (and async functions), built on OS threads.
 //!
 //! lumen is a tree-walking interpreter, so suspending a generator mid-body means parking its native
-//! call stack. Each generator gets its own OS thread; control is handed back and forth with a pair of
-//! channels in strict ping-pong — exactly one of {driver, generator thread} runs at any instant, the
-//! other parked in `recv`. The shared [`Interp`] is therefore never touched concurrently, which is
-//! why shuttling a `*mut Interp` across the thread boundary (see [`InterpPtr`]) is sound in practice.
+//! call stack. Each live coroutine runs on an OS thread; control is handed back and forth with a
+//! pair of channels in strict ping-pong — exactly one of {driver, coroutine thread} runs at any
+//! instant, the other parked in `recv`. The shared [`Interp`] is therefore never touched
+//! concurrently, which is why shuttling a `*mut Interp` across the thread boundary (see
+//! [`InterpPtr`]) is sound in practice.
 //!
-//! The running generator's channels live in a thread-local [`YIELDER`], so a `yield` buried deep in
-//! eval finds the right channel and nested generators (each on their own thread) need no extra
+//! Worker threads are **pooled**: spawning a fresh thread per async call / generator was ~30µs
+//! (measured), dominating async cost, so finished workers return to an idle pool and are handed the
+//! next coroutine instead. The pool grows to the high-water mark of concurrently *live* coroutines
+//! and is reused across calls; only the ~6µs per-suspend channel handoff remains.
+//!
+//! The running coroutine's channels live in a thread-local [`YIELDER`], so a `yield` buried deep in
+//! eval finds the right channel and nested coroutines (each on their own worker) need no extra
 //! bookkeeping — every thread reads its own thread-local.
 //!
-//! Address stability: a generator never outlives the `Engine` that owns the interpreter, and that
-//! `Engine` is not moved between the `eval` calls that create and drive the generator, so the
+//! Address stability: a coroutine never outlives the `Engine` that owns the interpreter, and that
+//! `Engine` is not moved between the `eval` calls that create and drive the coroutine, so the
 //! captured pointer stays valid for the coroutine's whole life.
 
 use std::cell::RefCell;
-use std::sync::mpsc::{Receiver, Sender};
-use std::thread::JoinHandle;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
 
 use crate::interpreter::Interp;
 use crate::value::Value;
@@ -88,7 +94,9 @@ pub fn in_async_gen() -> bool {
     ASYNC_GEN.with(|c| c.get())
 }
 
-/// The driver side of one generator, stored on the generator object in `Interp.generators`.
+/// The driver side of one coroutine, stored on the generator object in `Interp.generators`. The
+/// worker thread it runs on is pooled, so there is no per-coroutine `JoinHandle` to keep — a
+/// finished worker returns itself to the idle pool (see [`worker_loop`]).
 pub struct Coroutine {
     resume_tx: Sender<Resume>,
     suspend_rx: Receiver<Suspend>,
@@ -96,7 +104,6 @@ pub struct Coroutine {
     pub done: bool,
     /// Set on the first resume — distinguishes "suspendedStart" from a suspended yield.
     pub started: bool,
-    _handle: JoinHandle<()>,
 }
 
 impl Coroutine {
@@ -178,49 +185,106 @@ pub fn coroutine_await(i: &mut Interp, value: Value) -> Resume {
 pub const UNSUPPORTED_MSG: &str =
     "generators and async functions require OS threads, which this WebAssembly build does not have";
 
-/// Spawn a generator coroutine over `body`, parked until its first [`Coroutine::resume`].
-/// `Err` when the platform cannot spawn threads (wasm32).
-pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<Coroutine> {
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel::<Resume>();
-    let (suspend_tx, suspend_rx) = std::sync::mpsc::channel::<Suspend>();
-    let ptr = InterpPtr(interp);
-    let handle = std::thread::Builder::new()
+/// One unit of work for a pooled worker: the interpreter pointer, the body to run, and this
+/// coroutine's channel ends. All fields are `Send` (via the `unsafe impl`s above / channel `Send`),
+/// so `Job` is `Send`; moving the captured `Rc`s to the worker is sound for the same ping-pong
+/// reason `spawn` was — the driver stops touching them the instant it sends.
+struct Job {
+    ptr: InterpPtr,
+    body: SendBody,
+    resume_rx: Receiver<Resume>,
+    suspend_tx: Sender<Suspend>,
+}
+
+/// Idle worker threads waiting for their next coroutine. Guarded by a plain `Mutex`: under the
+/// strict ping-pong exactly one thread touches the interpreter at a time, so contention is
+/// near-zero (a worker only pushes itself back *after* handing its final value to the driver).
+static IDLE: Mutex<Vec<Sender<Job>>> = Mutex::new(Vec::new());
+
+/// Grab an idle worker, or start a new one. `Err` when the platform cannot spawn threads (wasm32).
+fn get_worker() -> std::io::Result<Sender<Job>> {
+    if let Some(tx) = IDLE.lock().unwrap().pop() {
+        return Ok(tx);
+    }
+    let (job_tx, job_rx) = channel::<Job>();
+    let self_tx = job_tx.clone();
+    std::thread::Builder::new()
         // Generous stack: the tree-walker recurses up to MAX_EVAL_DEPTH (1500) frames.
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            // Capture the whole Send wrappers (not their inner non-Send fields — Rust 2021 would
-            // otherwise disjoint-capture `ptr.0` / `body.0` and reject the closure as non-Send).
-            let ptr = ptr;
-            let body = body;
-            let SendBody(body) = body;
-            YIELDER.with(|y| {
-                *y.borrow_mut() = Some(Yielder {
-                    suspend_tx,
-                    resume_rx,
-                })
-            });
-            // Park until the first next()/return()/throw(); the body doesn't run before then.
-            let first = YIELDER.with(|y| y.borrow().as_ref().unwrap().resume_rx.recv());
-            let outcome = match first {
-                Err(_) => return, // dropped before first drive
-                Ok(Resume::Next(_)) => {
-                    let interp = unsafe { &mut *ptr.0 };
-                    body(interp)
-                }
-                Ok(Resume::Return(v)) => Suspend::Done(v),
-                Ok(Resume::Throw(e)) => Suspend::Throw(e),
-            };
-            YIELDER.with(|y| {
-                if let Some(yl) = y.borrow().as_ref() {
-                    let _ = yl.suspend_tx.send(outcome);
-                }
-            });
-        })?;
+        .spawn(move || worker_loop(job_rx, self_tx))?;
+    Ok(job_tx)
+}
+
+/// A pooled worker: run one coroutine to completion, return to the idle pool, repeat. A worker that
+/// parks forever (its `Engine` was torn down while it was suspended; see `park`) simply never comes
+/// back — the same leak-at-teardown as the pre-pool one-thread-per-coroutine design.
+fn worker_loop(job_rx: Receiver<Job>, self_tx: Sender<Job>) {
+    while let Ok(job) = job_rx.recv() {
+        run_job(job);
+        IDLE.lock().unwrap().push(self_tx.clone());
+    }
+}
+
+/// Set up this thread's coroutine TLS, run the body from its first drive to completion, and hand
+/// the outcome to the driver. Resets the per-thread coroutine state a reused worker would otherwise
+/// inherit from its previous job.
+fn run_job(job: Job) {
+    let Job {
+        ptr,
+        body,
+        resume_rx,
+        suspend_tx,
+    } = job;
+    let SendBody(body) = body;
+    // A plain async body never sets ASYNC_GEN, so it must not inherit a previous async-generator
+    // job's `true`.
+    ASYNC_GEN.with(|c| c.set(false));
+    YIELDER.with(|y| {
+        *y.borrow_mut() = Some(Yielder {
+            suspend_tx: suspend_tx.clone(),
+            resume_rx,
+        })
+    });
+    // Park until the first next()/return()/throw(); the body doesn't run before then.
+    let first = YIELDER.with(|y| y.borrow().as_ref().unwrap().resume_rx.recv());
+    let outcome = match first {
+        Err(_) => {
+            YIELDER.with(|y| *y.borrow_mut() = None);
+            return; // dropped before first drive
+        }
+        Ok(Resume::Next(_)) => {
+            let interp = unsafe { &mut *ptr.0 };
+            body(interp)
+        }
+        Ok(Resume::Return(v)) => Suspend::Done(v),
+        Ok(Resume::Throw(e)) => Suspend::Throw(e),
+    };
+    let _ = suspend_tx.send(outcome);
+    // Clear the TLS so the next job starts clean and `in_coroutine()` reads false between jobs.
+    YIELDER.with(|y| *y.borrow_mut() = None);
+}
+
+/// Spawn a coroutine over `body` on a pooled worker, parked until its first [`Coroutine::resume`].
+/// `Err` when the platform cannot spawn threads (wasm32).
+pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<Coroutine> {
+    let (resume_tx, resume_rx) = channel::<Resume>();
+    let (suspend_tx, suspend_rx) = channel::<Suspend>();
+    let worker = get_worker()?;
+    let job = Job {
+        ptr: InterpPtr(interp),
+        body,
+        resume_rx,
+        suspend_tx,
+    };
+    // The worker is idle in `job_rx.recv()`; hand it this coroutine. A send failure means the worker
+    // vanished — surface it like a failed spawn rather than wedging.
+    worker.send(job).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::Other, "coroutine worker unavailable")
+    })?;
     Ok(Coroutine {
         resume_tx,
         suspend_rx,
         done: false,
         started: false,
-        _handle: handle,
     })
 }
