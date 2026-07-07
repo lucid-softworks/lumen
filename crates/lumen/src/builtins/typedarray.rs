@@ -1544,6 +1544,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     let obj = Object::new(proto);
     let p = Rc::as_ptr(&obj) as usize;
     i.gc_pin(&obj);
+    i.inline_ic_safe.set(false);
     i.typed_arrays.insert(
         p,
         TaInfo {

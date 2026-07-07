@@ -744,6 +744,7 @@ impl Interp {
             );
         }
         ns.borrow_mut().extensible = false;
+        self.inline_ic_safe.set(false);
         self.module_ns.insert(Rc::as_ptr(ns) as usize, live);
         Ok(())
     }
@@ -779,6 +780,7 @@ impl Interp {
             dst.extensible = false;
         }
         if let Some(live) = self.module_ns.get(&(Rc::as_ptr(base_o) as usize)).cloned() {
+            self.inline_ic_safe.set(false);
             self.module_ns.insert(Rc::as_ptr(&dns) as usize, live);
         }
         self.deferred_ns
@@ -833,6 +835,7 @@ impl Interp {
                         if let Some(live) =
                             self.module_ns.get(&(Rc::as_ptr(base_o) as usize)).cloned()
                         {
+                            self.inline_ic_safe.set(false);
                             self.module_ns.insert(Rc::as_ptr(&stub) as usize, live);
                         }
                     }

@@ -4858,6 +4858,7 @@ impl Interp {
                             self.map_data.insert(dp, v);
                         }
                         if let Some(v) = self.typed_arrays.remove(&sp) {
+                            self.inline_ic_safe.set(false);
                             self.typed_arrays.insert(dp, v);
                         }
                         // The TypedArray's `buffer` slot lives in a parallel side table keyed by the

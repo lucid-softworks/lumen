@@ -45,13 +45,23 @@ pub enum Tier {
 /// too. Deeper hits, exotics (arrays), and shape misses fall back to the key-checked walk.
 ///
 /// [object shapes]: crate::value::Props::shape
+///
+/// `repr(C)` with this field order gives the JIT's inline templates fixed byte offsets to read
+/// the live cache from machine code: recv_shape@0, holder_shape@4, slot@8, depth@12.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct IcState {
-    pub depth: u8,
-    pub slot: u32,
     pub recv_shape: u32,
     pub holder_shape: u32,
+    pub slot: u32,
+    pub depth: u8,
 }
+
+/// Byte offsets into an [`IcState`] `Cell`, for the JIT inline templates.
+pub const IC_OFF_RECV_SHAPE: u32 = 0;
+pub const IC_OFF_HOLDER_SHAPE: u32 = 4;
+pub const IC_OFF_SLOT: u32 = 8;
+pub const IC_OFF_DEPTH: u32 = 12;
 
 pub const IC_EMPTY: u8 = u8::MAX;
 /// Deepest prototype hop the IC will record; hotter sites deeper than this stay on the slow path.
@@ -59,10 +69,10 @@ pub const IC_MAX_DEPTH: u8 = 4;
 
 impl IcState {
     pub const EMPTY: IcState = IcState {
-        depth: IC_EMPTY,
-        slot: 0,
         recv_shape: 0,
         holder_shape: 0,
+        slot: 0,
+        depth: IC_EMPTY,
     };
 }
 
@@ -3270,6 +3280,14 @@ fn bin_cmp(
 impl Chunk {
     pub(crate) fn jit_ops(&self) -> &[Op] {
         &self.ops
+    }
+    /// The stable address of inline-cache site `idx`'s `Cell<IcState>`. The `caches` `Vec` is
+    /// fixed once compilation finishes (never reallocated), and the `Chunk` outlives its own JIT
+    /// code, so the JIT bakes this address as an immediate to read the live cache from machine
+    /// code. `None` if the emitter cannot use it (the address must be reachable — always is here).
+    pub(crate) fn jit_cache_ptr(&self, idx: u32) -> usize {
+        self.caches.as_ptr() as usize
+            + idx as usize * std::mem::size_of::<std::cell::Cell<IcState>>()
     }
     pub(crate) fn jit_frame(&self) -> (usize, usize) {
         (self.n_params, self.n_slots)

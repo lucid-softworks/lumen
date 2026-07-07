@@ -558,6 +558,15 @@ pub struct Interp {
     /// Recycled (slots, operand stack) buffers for bytecode-VM activations, so a hot call tree
     /// doesn't allocate two `Vec`s per call (see `bytecode::run`).
     pub(crate) vm_pool: Vec<(Vec<Value>, Vec<Value>)>,
+    /// Object-graph byte offsets the JIT's inline property-cache templates bake in (measured once;
+    /// see [`crate::value::jit_layout`]). Lazily computed on first JIT compile.
+    pub(crate) jit_layout: std::cell::OnceCell<crate::value::JitLayout>,
+    /// Whether the JIT's inline property caches are safe to run: they can't cheaply check the
+    /// exotic side tables (proxy / typed-array / module namespace / deferred namespace) from
+    /// machine code, so this flag latches *false* the first time any object is registered in one,
+    /// and the inline templates then fall through to the checked helper forever after. Monotonic
+    /// (never re-enabled), so it can only cost the inline speedup, never correctness.
+    pub(crate) inline_ic_safe: std::cell::Cell<bool>,
     /// Recently prepared regex subjects keyed by string identity (the held `Rc` pins the
     /// pointer), so repeated exec/replace/split over one subject reuses its element vector.
     pub(crate) re_texts: Vec<(Rc<str>, bool, Rc<crate::regex::ReText>)>,
@@ -1097,6 +1106,8 @@ impl Interp {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             vm_pool: Vec::new(),
+            jit_layout: std::cell::OnceCell::new(),
+            inline_ic_safe: std::cell::Cell::new(true),
             re_texts: Vec::new(),
             regexp_last: None,
             map_data: Default::default(),
@@ -4129,7 +4140,11 @@ impl Interp {
                 let mut jit_code = None;
                 if matches!(self.tier, crate::bytecode::Tier::Jit) {
                     if chunk.jit.get().is_none() {
-                        let _ = chunk.jit.set(crate::jit::compile(&chunk).map(std::rc::Rc::new));
+                        let layout = *self
+                            .jit_layout
+                            .get_or_init(|| crate::value::jit_layout(&self.object_proto));
+                        let _ =
+                            chunk.jit.set(crate::jit::compile(&chunk, &layout).map(std::rc::Rc::new));
                     }
                     if let Some(Some(code)) = chunk.jit.get() {
                         jit_code = Some(code.clone());

@@ -84,6 +84,9 @@ pub struct JitCtx {
     pub final_sp: *mut Value,
     /// [24] Local slots base (the inline LoadLocal/StoreLocal templates index off this).
     pub slots: *mut Value,
+    /// [32] Points at `Interp::inline_ic_safe` (a `Cell<bool>` byte): the inline property-cache
+    /// templates read it live and fall to the helper when it is 0.
+    pub inline_ic_safe: *const u8,
     // ---- Rust-only fields ----
     pub interp: *mut Interp,
     pub chunk: *const Chunk,
@@ -112,6 +115,8 @@ pub const N_HELPERS: usize = 6;
 const C_EQ: u32 = 0;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const C_NE: u32 = 1;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+const C_LO: u32 = 3;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const C_MI: u32 = 4;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -298,6 +303,24 @@ mod asm {
         pub fn stur(&mut self, rt: u32, rn: u32, simm9: i32) {
             self.emit(0xF800_0000 | (((simm9 as u32) & 0x1FF) << 12) | (rn << 5) | rt);
         }
+        /// ldr wt, [xn, #imm] (32-bit, unsigned scaled by 4)
+        pub fn ldr_w_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
+            debug_assert!(imm_bytes % 4 == 0 && imm_bytes / 4 < 4096);
+            self.emit(0xB940_0000 | ((imm_bytes / 4) << 10) | (rn << 5) | rt);
+        }
+        /// madd xd, xn, xm, xa  (xd = xn*xm + xa)
+        pub fn madd(&mut self, rd: u32, rn: u32, rm: u32, ra: u32) {
+            self.emit(0x9B00_0000 | (rm << 16) | (ra << 10) | (rn << 5) | rd);
+        }
+        /// cmp wn, wm  (SUBS wzr, wn, wm)
+        pub fn cmp_reg_w(&mut self, rn: u32, rm: u32) {
+            self.emit(0x6B00_001F | (rm << 16) | (rn << 5));
+        }
+        /// cmp xn, #imm12
+        pub fn cmp_imm_x(&mut self, rn: u32, imm: u32) {
+            debug_assert!(imm < 4096);
+            self.emit(0xF100_001F | (imm << 10) | (rn << 5));
+        }
         /// ldur dt, [xn, #simm9]
         pub fn ldur_d(&mut self, rt: u32, rn: u32, simm9: i32) {
             self.emit(0xFC40_0000 | (((simm9 as u32) & 0x1FF) << 12) | (rn << 5) | rt);
@@ -387,7 +410,7 @@ mod asm {
 /// Compile `chunk` to machine code, or `None` when unsupported (non-macOS/ARM64, async bodies,
 /// or an op stream whose stack depths don't line up — a compiler bug caught defensively).
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub fn compile(chunk: &Chunk) -> Option<JitCode> {
+pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCode> {
     use crate::bytecode::{Op, UpdKind};
 
     let ops = chunk.jit_ops();
@@ -481,6 +504,20 @@ pub fn compile(chunk: &Chunk) -> Option<JitCode> {
                 emit_exec(&mut a, pc as u32, l_unwind);
             }
             Op::Await => unreachable!("async chunks are rejected above"),
+            // ---- inline property cache: own-property read (`this.x`) ----
+            Op::GetProp(_, cache) if fast & 256 != 0 && get_prop_inlinable(layout) => {
+                emit_get_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+            }
+            // ---- inline property cache: method load (`obj.m(...)`) ----
+            Op::GetMethod(_, cache) if fast & 512 != 0 && get_method_inlinable(layout) => {
+                emit_get_method_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                );
+            }
             // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 24) ----
             Op::Add | Op::Sub | Op::Mul | Op::Div if fast & 1 != 0 => {
                 let f_op = match op {
@@ -701,8 +738,227 @@ pub fn compile(chunk: &Chunk) -> Option<JitCode> {
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-pub fn compile(_chunk: &Chunk) -> Option<JitCode> {
+pub fn compile(_chunk: &Chunk, _layout: &crate::value::JitLayout) -> Option<JitCode> {
     None
+}
+
+/// Whether `layout` is usable for the inline GetProp template: valid (probed std layouts hold)
+/// and every offset it bakes fits its instruction's immediate range.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
+    let sh = layout.obj_props + layout.props_shape;
+    let en = layout.obj_props + layout.props_entries;
+    layout.valid
+        && layout.refcell_value < 4096
+        && layout.obj_exotic < 4096
+        && sh % 4 == 0
+        && sh / 4 < 4096
+        && en % 8 == 0
+        && en / 8 < 4096
+        && layout.entry_accessor < 4096
+        && layout.entry_value + 16 < 256
+        && layout.rc_strong_back < 256
+        && layout.entry_size < 0x1_0000
+}
+
+/// Inline own-property read (`this.x`): validate the receiver by shape and load the value in
+/// machine code, taking the checked helper on any mismatch. Every guard branches to `slow`
+/// *before* the template writes any state, so the fallback re-runs the op cleanly. Handles only
+/// a `depth == 0` hit on a non-exotic ordinary object whose receiver is not the last reference
+/// (so the pop-drop can't free) and whose value is trivially copyable (tag ≤ 4, no refcount);
+/// everything else — methods, refcounted values, proxies (via the live `inline_ic_safe` flag) —
+/// falls through.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_get_prop_inline(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    cache_ptr: usize,
+    pc: u32,
+    l_unwind: usize,
+) {
+    use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
+    let rc_back = layout.rc_strong_back as i32;
+    let rcv = layout.refcell_value as u32;
+    let ex = layout.obj_exotic as u32;
+    let sh = (layout.obj_props + layout.props_shape) as u32;
+    let en = (layout.obj_props + layout.props_entries) as u32;
+    let ev = layout.entry_value as i32;
+    let ea = layout.entry_accessor as u32;
+    let es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+
+    let slow = a.new_label();
+    let done = a.new_label();
+    // 0. inline caches globally safe? (no proxy/typed-array/namespace exists)
+    a.ldr_imm(9, 19, 32); // ctx.inline_ic_safe pointer
+    a.ldrb_imm(9, 9, 0);
+    a.cbz(9, false, slow);
+    // 1. receiver must be an Obj (tag 8)
+    a.ldurb(9, 20, -24);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldur(10, 20, -16); // rc_ptr (Value payload)
+    // 2. receiver refcount > 1 (so the pop-drop below never frees)
+    a.ldur(9, 10, -rc_back);
+    a.cmp_imm_x(9, 1);
+    a.b_cond(C_LS, slow);
+    // 3. cache: depth must be 0, load slot + cached receiver shape
+    a.mov_imm64(12, cache_ptr as u64);
+    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+    a.cbnz(9, false, slow);
+    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+    a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
+    // 4. object base; exotic must be None
+    a.add_imm(11, 10, rcv);
+    a.ldrb_imm(9, 11, ex);
+    a.cmp_imm_w(9, none_tag);
+    a.b_cond(C_NE, slow);
+    // 5. shape id matches
+    a.ldr_w_imm(9, 11, sh);
+    a.cmp_reg_w(9, 14);
+    a.b_cond(C_NE, slow);
+    // 6. entry base = entries data ptr + slot*entry_size
+    a.ldr_imm(15, 11, en);
+    a.mov_imm64(16, es);
+    a.madd(15, 13, 16, 15);
+    // 7. not an accessor
+    a.ldrb_imm(9, 15, ea);
+    a.cbnz(9, false, slow);
+    // 8. value tag: a BigInt (5) is a compound payload — leave it to the helper. Everything else
+    //    is either trivially copyable (≤4) or a single Rc pointer at value+8 (Str/Sym/Obj, 6..8).
+    a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
+    a.cmp_imm_w(9, 5);
+    a.b_cond(C_EQ, slow);
+    // --- commit: everything validated; from here only writes ---
+    // load the 24-byte value (x9/tag untouched)
+    a.ldur(12, 15, ev);
+    a.ldur(13, 15, ev + 8); // payload word (the Rc pointer for tags 6..8)
+    a.ldur(14, 15, ev + 16);
+    // clone: a refcounted value (tag ≥ 6) needs its strong count bumped (payload − rc_back)
+    let nobump = a.new_label();
+    a.cmp_imm_w(9, 6);
+    a.b_cond(C_LO, nobump);
+    a.ldur(16, 13, -rc_back);
+    a.add_imm(16, 16, 1);
+    a.stur(16, 13, -rc_back);
+    a.bind(nobump);
+    // drop the receiver (strong was > 1: decrement, no free). If the value IS the receiver the
+    // bump above already balanced this.
+    a.ldur(9, 10, -rc_back);
+    a.sub_imm(9, 9, 1);
+    a.stur(9, 10, -rc_back);
+    // overwrite the receiver slot with the value (pop obj + push value = same depth)
+    a.stur(12, 20, -24);
+    a.stur(13, 20, -16);
+    a.stur(14, 20, -8);
+    a.b(done);
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    a.bind(done);
+}
+
+/// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
+/// one prototype hop).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
+    get_prop_inlinable(layout) && layout.obj_proto < 4096
+}
+
+/// Inline method load (`obj.method(...)` → `GetMethod`): the receiver stays on the stack (it is
+/// re-pushed as `this`), and the method — found one prototype hop up (`depth == 1`) — is loaded
+/// and pushed above it. Validates the receiver *and* holder by shape; re-follows the live proto
+/// so a proto swap misses. Only a non-exotic ordinary receiver with a non-exotic ordinary
+/// immediate prototype holding a non-BigInt method at the cached slot inlines; anything else
+/// falls to the helper. No receiver refcount change (it is neither dropped nor cloned — the same
+/// stack Value serves as both operands); the method is cloned (bumped).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_get_method_inline(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    cache_ptr: usize,
+    pc: u32,
+    l_unwind: usize,
+) {
+    use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
+    let rc_back = layout.rc_strong_back as i32;
+    let rcv = layout.refcell_value as u32;
+    let ex = layout.obj_exotic as u32;
+    let pr = layout.obj_proto as u32;
+    let sh = (layout.obj_props + layout.props_shape) as u32;
+    let en = (layout.obj_props + layout.props_entries) as u32;
+    let ev = layout.entry_value as i32;
+    let ea = layout.entry_accessor as u32;
+    let es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+
+    let slow = a.new_label();
+    let done = a.new_label();
+    // 0. inline caches globally safe?
+    a.ldr_imm(9, 19, 32);
+    a.ldrb_imm(9, 9, 0);
+    a.cbz(9, false, slow);
+    // 1. receiver is an Obj
+    a.ldurb(9, 20, -24);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldur(10, 20, -16); // receiver rc_ptr
+    // 2. cache: depth must be 1; load slot, recv & holder shapes
+    a.mov_imm64(12, cache_ptr as u64);
+    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+    a.cmp_imm_w(9, 1);
+    a.b_cond(C_NE, slow);
+    a.ldr_w_imm(13, 12, IC_OFF_SLOT); // slot
+    // 3. receiver object: exotic None, shape == recv_shape
+    a.add_imm(11, 10, rcv);
+    a.ldrb_imm(9, 11, ex);
+    a.cmp_imm_w(9, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldr_w_imm(9, 11, sh);
+    a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
+    a.cmp_reg_w(9, 16);
+    a.b_cond(C_NE, slow);
+    // 4. follow proto (Option<Gc> niche: pointer or 0)
+    a.ldr_imm(10, 11, pr); // proto rc_ptr (reuse x10 — receiver rc no longer needed)
+    a.cbz(10, true, slow); // null proto → slow
+    // 5. holder object: exotic None, shape == holder_shape
+    a.add_imm(11, 10, rcv);
+    a.ldrb_imm(9, 11, ex);
+    a.cmp_imm_w(9, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldr_w_imm(9, 11, sh);
+    a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+    a.cmp_reg_w(9, 16);
+    a.b_cond(C_NE, slow);
+    // 6. entry base = holder.entries + slot*entry_size
+    a.ldr_imm(15, 11, en);
+    a.mov_imm64(16, es);
+    a.madd(15, 13, 16, 15);
+    // 7. not an accessor
+    a.ldrb_imm(9, 15, ea);
+    a.cbnz(9, false, slow);
+    // 8. method tag: BigInt (5) → helper
+    a.ldurb(9, 15, ev);
+    a.cmp_imm_w(9, 5);
+    a.b_cond(C_EQ, slow);
+    // --- commit: receiver stays at [-24]; push the method above it ---
+    a.ldur(12, 15, ev);
+    a.ldur(13, 15, ev + 8); // payload (Rc pointer for tags 6..8; methods are Obj)
+    a.ldur(14, 15, ev + 16);
+    let nobump = a.new_label();
+    a.cmp_imm_w(9, 6);
+    a.b_cond(C_LO, nobump);
+    a.ldur(16, 13, -rc_back);
+    a.add_imm(16, 16, 1);
+    a.stur(16, 13, -rc_back);
+    a.bind(nobump);
+    a.stur(12, 20, 0);
+    a.stur(13, 20, 8);
+    a.stur(14, 20, 16);
+    a.add_imm(20, 20, 24); // pushed the method
+    a.b(done);
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    a.bind(done);
 }
 
 /// The generic per-op helper call: `jit_exec(ctx, pc, sp)` → (new sp, threw?). The sp is taken
@@ -832,6 +1088,7 @@ pub fn run(
         env,
         this_val,
         slots: slots.as_mut_ptr(),
+        inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
         n_slots,
         handlers: Vec::new(),
         code_base: code.mem,

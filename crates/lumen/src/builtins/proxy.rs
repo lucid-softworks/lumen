@@ -21,6 +21,7 @@ fn make_proxy(i: &mut Interp, target: Value, handler: Value) -> Result<Value, Va
     }
     let p = Rc::as_ptr(&obj) as usize;
     i.gc_pin(&obj);
+    i.inline_ic_safe.set(false);
     i.proxies.insert(p, (target, handler));
     Ok(Value::Obj(obj))
 }
@@ -31,6 +32,7 @@ fn revoke_proxy(i: &mut Interp, _this: Value, a: &[Value]) -> Result<Value, Valu
         // Keep the entry but null the handler, so the object stays a (revoked) Proxy and every
         // operation throws a TypeError rather than silently acting like a plain object.
         if let Some((target, _)) = i.proxies.get(&ptr).cloned() {
+            i.inline_ic_safe.set(false);
             i.proxies.insert(ptr, (target, Value::Null));
         }
     }
