@@ -1089,6 +1089,7 @@ impl Interp {
             module_ns: Default::default(),
             tier: match std::env::var("LUMEN_TIER").as_deref() {
                 Ok("bytecode") => crate::bytecode::Tier::Bytecode,
+                Ok("jit") => crate::bytecode::Tier::Jit,
                 _ => crate::bytecode::Tier::Interp,
             },
             tier_threshold: std::env::var("LUMEN_TIER_THRESHOLD")
@@ -4045,7 +4046,7 @@ impl Interp {
         // saved/cleared `new_target`/`constructing`. One divergence: no `lazy` args stash, so
         // legacy `f.arguments` reflection during an active VM frame reads null (the VM's
         // slot-based locals never aliased it faithfully anyway).
-        if matches!(self.tier, crate::bytecode::Tier::Bytecode)
+        if !matches!(self.tier, crate::bytecode::Tier::Interp)
             && !func.is_generator
             && !func.is_async
             && (!is_construct || !self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize)))
@@ -4101,7 +4102,21 @@ impl Interp {
                     self.in_field_init_code = false;
                     self.in_async_gen_body = false;
                 }
-                let r = crate::bytecode::run(self, &chunk, &closure, this_val, args);
+                // Machine-code tier: compile once (None = unsupported — async or platform),
+                // then run the JIT body; otherwise the bytecode VM.
+                let mut jit_code = None;
+                if matches!(self.tier, crate::bytecode::Tier::Jit) {
+                    if chunk.jit.get().is_none() {
+                        let _ = chunk.jit.set(crate::jit::compile(&chunk).map(std::rc::Rc::new));
+                    }
+                    if let Some(Some(code)) = chunk.jit.get() {
+                        jit_code = Some(code.clone());
+                    }
+                }
+                let r = match jit_code {
+                    Some(code) => crate::jit::run(self, &chunk, &code, &closure, this_val, args),
+                    None => crate::bytecode::run(self, &chunk, &closure, this_val, args),
+                };
                 self.strict = saved_strict;
                 self.tco_ok = saved_tco;
                 self.in_field_init_code = saved_field_init;
@@ -4512,7 +4527,7 @@ impl Interp {
     /// tier is on and the body has been called past the tier threshold and fits the VM subset.
     /// Mirrors the sync-call tiering in `call_inner`.
     fn async_vm_chunk(&self, func: &Rc<Function>) -> Option<Rc<crate::bytecode::Chunk>> {
-        if !matches!(self.tier, crate::bytecode::Tier::Bytecode) {
+        if matches!(self.tier, crate::bytecode::Tier::Interp) {
             return None;
         }
         if func.code.get().is_none() {

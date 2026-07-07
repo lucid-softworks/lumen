@@ -18,23 +18,28 @@ pub type NativeFn = fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 /// an N-API C callback together with its `void*` and module handle.
 pub type NativeClosure = dyn Fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 
+/// The engine value. `repr(u8)` with fixed discriminants gives it a *defined* layout — tag byte
+/// at offset 0, payload at offset 8 — which the JIT's inline fast paths read directly (see
+/// `jit::layout` for the compile-time assertions). Tags 0..=4 are the trivially-copyable
+/// variants (no refcount): the JIT may memcpy exactly those.
 #[derive(Clone, Default)]
+#[repr(u8)]
 pub enum Value {
     #[default]
-    Undefined,
+    Undefined = 0,
     /// The spec's EMPTY completion marker: produced only by *statement* evaluation (declarations
     /// and other value-less statements) so completion values thread per UpdateEmpty. Never a JS
     /// value — every engine boundary converts it to `Undefined` before a value escapes.
-    Empty,
-    Null,
-    Bool(bool),
-    Num(f64),
+    Empty = 1,
+    Null = 2,
+    Bool(bool) = 3,
+    Num(f64) = 4,
     /// BigInt, approximated with `i128` (exact within ±2^127; tests beyond that range fail rather
     /// than implementing arbitrary precision).
-    BigInt(crate::bigint::JsBigInt),
-    Str(Rc<str>),
-    Sym(Rc<SymbolData>),
-    Obj(Gc),
+    BigInt(crate::bigint::JsBigInt) = 5,
+    Str(Rc<str>) = 6,
+    Sym(Rc<SymbolData>) = 7,
+    Obj(Gc) = 8,
 }
 
 /// A unique Symbol. Identity is the `id` (every `Symbol()` call gets a fresh one); `description` is

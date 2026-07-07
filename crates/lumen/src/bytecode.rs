@@ -22,11 +22,13 @@ use crate::ast::*;
 use crate::interpreter::{Abrupt, Env, Interp};
 use crate::value::Value;
 
-/// Execution tier. `Interp` must not touch any codegen path at all.
+/// Execution tier. `Interp` must not touch any codegen path at all; `Jit` compiles eligible
+/// chunks to ARM64 machine code (macOS/Apple Silicon), falling back to the bytecode VM.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tier {
     Interp,
     Bytecode,
+    Jit,
 }
 
 /// Per-site property inline-cache state. `depth == IC_EMPTY` means the site has not cached yet.
@@ -228,6 +230,9 @@ pub struct Chunk {
     /// `Chunk` is shared across calls via `Rc`, so these persist. `Cell` is fine: the VM runs one
     /// thread at a time (coroutine ping-pong), like the rest of the engine's shared-`Rc` state.
     caches: Vec<std::cell::Cell<IcState>>,
+    /// Machine-code tier state: the compile result once attempted (`None` inside = the chunk
+    /// cannot JIT — async, or an unsupported platform — and runs on the bytecode VM forever).
+    pub(crate) jit: std::cell::OnceCell<Option<Rc<crate::jit::JitCode>>>,
 }
 
 impl Chunk {
@@ -1160,6 +1165,7 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         cap_inits: c.cap_inits,
         env_this: c.env_this,
         caches: c.caches,
+        jit: std::cell::OnceCell::new(),
     }))
 }
 
@@ -3131,28 +3137,28 @@ impl VmCoro {
 }
 
 /// Shared `++`/`--` tail for property/element updates: ToNumeric the old value, write old±1 back
-/// through `set`, and push old / new / nothing per `kind`. Post variants push the *coerced* old
-/// value, matching the oracle's `eval_update`; a BigInt stays a BigInt.
-fn step_and_store(
+/// through `set`, and return the value to leave on the stack — old / new / nothing per `kind`.
+/// Post variants yield the *coerced* old value, matching the oracle's `eval_update`; a BigInt
+/// stays a BigInt.
+fn step_value(
     i: &mut Interp,
-    stack: &mut Vec<Value>,
     kind: UpdKind,
     old: Value,
     set: impl FnOnce(&mut Interp, Value) -> Result<(), Abrupt>,
-) -> Result<(), Abrupt> {
+) -> Result<Option<Value>, Abrupt> {
     let inc = matches!(
         kind,
         UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard
     );
-    match old {
+    Ok(match old {
         Value::BigInt(n) => {
             let one = crate::bigint::JsBigInt::from_u64(1);
             let new = if inc { n.add(&one) } else { n.sub(&one) };
             set(i, Value::BigInt(new.clone()))?;
             match kind {
-                UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::BigInt(new)),
-                UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::BigInt(n)),
-                UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                UpdKind::PreInc | UpdKind::PreDec => Some(Value::BigInt(new)),
+                UpdKind::PostInc | UpdKind::PostDec => Some(Value::BigInt(n)),
+                UpdKind::IncDiscard | UpdKind::DecDiscard => None,
             }
         }
         other => {
@@ -3163,11 +3169,24 @@ fn step_and_store(
             let new = if inc { oldn + 1.0 } else { oldn - 1.0 };
             set(i, Value::Num(new))?;
             match kind {
-                UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
-                UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::Num(oldn)),
-                UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                UpdKind::PreInc | UpdKind::PreDec => Some(Value::Num(new)),
+                UpdKind::PostInc | UpdKind::PostDec => Some(Value::Num(oldn)),
+                UpdKind::IncDiscard | UpdKind::DecDiscard => None,
             }
         }
+    })
+}
+
+/// [`step_value`] pushing its result onto the VM's operand stack.
+fn step_and_store(
+    i: &mut Interp,
+    stack: &mut Vec<Value>,
+    kind: UpdKind,
+    old: Value,
+    set: impl FnOnce(&mut Interp, Value) -> Result<(), Abrupt>,
+) -> Result<(), Abrupt> {
+    if let Some(v) = step_value(i, kind, old, set)? {
+        stack.push(v);
     }
     Ok(())
 }
@@ -3226,4 +3245,750 @@ fn bin_cmp(
     let v = i.binary(op, a, b)?;
     stack.push(v);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// JIT support: Chunk accessors and the runtime helpers the machine-code templates call.
+// The generic executor `jit_exec` runs exactly ONE op against a raw operand-stack pointer; the
+// templates bake the op index in as an immediate and keep the stack top in a register. Control
+// flow never reaches here — jumps, returns and try bookkeeping are real branches in the JIT.
+// ---------------------------------------------------------------------------------------------
+
+impl Chunk {
+    pub(crate) fn jit_ops(&self) -> &[Op] {
+        &self.ops
+    }
+    pub(crate) fn jit_frame(&self) -> (usize, usize) {
+        (self.n_params, self.n_slots)
+    }
+    pub(crate) fn jit_var_force_resets(&self) -> &[u16] {
+        &self.var_force_resets
+    }
+    /// Whether const `k` is a trivially-copyable value the JIT may materialize inline.
+    pub(crate) fn jit_const_copyable(&self, k: u32) -> bool {
+        matches!(
+            self.consts[k as usize],
+            Value::Undefined | Value::Null | Value::Bool(_) | Value::Num(_)
+        )
+    }
+    /// The first 16 bytes of a copyable const as two words, for inline materialization.
+    /// repr(u8) puts each payload at its own alignment: Bool's byte sits in word0 at offset 1,
+    /// Num's f64 fills word1 (offset 8).
+    pub(crate) fn jit_const_bits(&self, k: u32) -> (u64, u64) {
+        match &self.consts[k as usize] {
+            Value::Undefined => (0, 0),
+            Value::Null => (2, 0),
+            Value::Bool(b) => (3 | ((*b as u64) << 8), 0),
+            Value::Num(n) => (4, n.to_bits()),
+            _ => unreachable!("non-copyable const in jit_const_bits"),
+        }
+    }
+    pub(crate) fn jit_make_run_env(
+        &self,
+        i: &Interp,
+        env: &Env,
+        this_val: &Value,
+        args: &[Value],
+    ) -> Env {
+        self.make_run_env(i, env, this_val, args)
+    }
+    /// (pops, pushes) of the op at `pc`, for the static stack-depth analysis. `None` = an op the
+    /// JIT can't account for (which refuses compilation).
+    pub(crate) fn jit_stack_effect(&self, pc: usize) -> Option<(usize, usize)> {
+        let upd = |k: &UpdKind| match k {
+            UpdKind::IncDiscard | UpdKind::DecDiscard => 0,
+            _ => 1,
+        };
+        Some(match &self.ops[pc] {
+            Op::Const(_)
+            | Op::Undef
+            | Op::LoadLocal(_)
+            | Op::LoadCap(_)
+            | Op::LoadName(_)
+            | Op::LoadThis
+            | Op::MakeClosure(..) => (0, 1),
+            Op::Dup => (1, 2),
+            Op::Dup2 => (2, 4),
+            Op::Pop
+            | Op::StoreLocal(_)
+            | Op::StoreCap(_)
+            | Op::StoreCapInit(_)
+            | Op::StoreName(_) => (1, 0),
+            Op::UpdateLocal(_, k) | Op::UpdateCap(_, k) => (0, upd(k)),
+            Op::UpdateProp(_, _, k) => (1, upd(k)),
+            Op::UpdateElem(k) => (2, upd(k)),
+            Op::Tdz(_) => (0, 0),
+            Op::GetProp(..) => (1, 1),
+            Op::SetProp(..) => (2, 1),
+            Op::SetPropDrop(..) => (2, 0),
+            Op::GetElem => (2, 1),
+            Op::SetElem => (3, 1),
+            Op::SetElemDrop => (3, 0),
+            Op::ToPropKey => (2, 2),
+            Op::GetMethod(..) => (1, 2),
+            Op::GetMethodElem => (2, 2),
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::UShr
+            | Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::EqEq
+            | Op::NotEq
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::GenBin(_) => (2, 1),
+            Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void => (1, 1),
+            Op::Jump(_) => (0, 0),
+            Op::JumpIfFalse(_) => (1, 0),
+            Op::JumpIfFalsePeek(_) | Op::JumpIfTruePeek(_) | Op::JumpIfNotNullishPeek(_) => (1, 1),
+            Op::Call(argc) => (*argc as usize + 1, 1),
+            Op::LoadNameForCall(_) => (0, 2),
+            Op::CallWithThis(argc) => (*argc as usize + 2, 1),
+            Op::New(argc) => (*argc as usize + 1, 1),
+            Op::MakeArray(n) => (*n as usize, 1),
+            Op::MakeObject(_, count) => (*count as usize, 1),
+            Op::Throw | Op::Return => (1, 0),
+            Op::ReturnUndef => (0, 0),
+            Op::Await => (1, 1),
+            Op::PushHandler(_) | Op::PopHandler => (0, 0),
+        })
+    }
+}
+
+/// Execute the single (non-control-flow) op at `pc` against the raw operand stack `sp`. Returns
+/// the updated stack top (reflecting any operands consumed *even on a throw* — the unwinder's
+/// cleanup must never re-drop moved-out slots) plus a flag: 1 = threw (stored in `ctx.error`).
+///
+/// # Safety
+/// Called from JIT code with `ctx` pointing at the live `JitCtx` for this activation and `sp`
+/// inside its stack buffer, whose capacity covers the chunk's statically-computed maximum depth.
+pub(crate) unsafe extern "C" fn jit_exec(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    match jit_exec_inner(ctx, pc, &mut sp) {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+unsafe fn jit_exec_inner(
+    ctx: &mut crate::jit::JitCtx,
+    pc: u32,
+    sp: &mut *mut Value,
+) -> Result<(), Abrupt> {
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    let env = &ctx.env;
+    let slots = std::slice::from_raw_parts_mut(ctx.slots, ctx.n_slots);
+    macro_rules! pop {
+        () => {{
+            *sp = sp.sub(1);
+            sp.read()
+        }};
+    }
+    macro_rules! push {
+        ($v:expr) => {{
+            sp.write($v);
+            *sp = sp.add(1);
+        }};
+    }
+    match chunk.ops[pc as usize] {
+        Op::Const(k) => push!(chunk.consts[k as usize].clone()),
+        Op::Undef => push!(Value::Undefined),
+        Op::Dup => {
+            let t = (*sp.sub(1)).clone();
+            push!(t);
+        }
+        Op::Pop => {
+            pop!();
+        }
+        Op::Dup2 => {
+            let a = (*sp.sub(2)).clone();
+            let b = (*sp.sub(1)).clone();
+            push!(a);
+            push!(b);
+        }
+        Op::LoadLocal(s) => {
+            let v = slots[s as usize].clone();
+            if matches!(v, Value::Empty) {
+                return Err(i.throw(
+                    "ReferenceError",
+                    format!(
+                        "cannot access '{}' before initialization",
+                        chunk.slot_names[s as usize]
+                    ),
+                ));
+            }
+            push!(v);
+        }
+        Op::StoreLocal(s) => slots[s as usize] = pop!(),
+        Op::UpdateLocal(s, kind) => {
+            let idx = s as usize;
+            if matches!(slots[idx], Value::Empty) {
+                return Err(i.throw(
+                    "ReferenceError",
+                    format!(
+                        "cannot access '{}' before initialization",
+                        chunk.slot_names[idx]
+                    ),
+                ));
+            }
+            let old = slots[idx].clone();
+            if let Some(v) = step_value(i, kind, old, |_, v| {
+                slots[idx] = v;
+                Ok(())
+            })? {
+                push!(v);
+            }
+        }
+        Op::Tdz(s) => slots[s as usize] = Value::Empty,
+        Op::LoadCap(n) => {
+            let name = &chunk.names[n as usize];
+            let b = env.borrow();
+            let bd = b.vars.get(&**name).expect("captured binding missing");
+            if !bd.initialized {
+                let msg = format!("cannot access '{name}' before initialization");
+                drop(b);
+                return Err(i.throw("ReferenceError", msg));
+            }
+            let v = bd.value.clone();
+            drop(b);
+            push!(v);
+        }
+        Op::StoreCap(n) => {
+            let name = &chunk.names[n as usize];
+            let v = pop!();
+            let mut b = env.borrow_mut();
+            let bd = b.vars.get_mut(&**name).expect("captured binding missing");
+            if !bd.initialized {
+                let msg = format!("cannot access '{name}' before initialization");
+                drop(b);
+                return Err(i.throw("ReferenceError", msg));
+            }
+            bd.value = v;
+        }
+        Op::StoreCapInit(n) => {
+            let name = &chunk.names[n as usize];
+            let v = pop!();
+            let mut b = env.borrow_mut();
+            let bd = b.vars.get_mut(&**name).expect("captured binding missing");
+            bd.value = v;
+            bd.initialized = true;
+        }
+        Op::UpdateCap(n, kind) => {
+            let name = &chunk.names[n as usize];
+            let old = {
+                let b = env.borrow();
+                let bd = b.vars.get(&**name).expect("captured binding missing");
+                if !bd.initialized {
+                    let msg = format!("cannot access '{name}' before initialization");
+                    drop(b);
+                    return Err(i.throw("ReferenceError", msg));
+                }
+                bd.value.clone()
+            };
+            if let Some(v) = step_value(i, kind, old, |_, v| {
+                if let Some(bd) = env.borrow_mut().vars.get_mut(&**name) {
+                    bd.value = v;
+                }
+                Ok(())
+            })? {
+                push!(v);
+            }
+        }
+        Op::MakeClosure(fidx, name_n) => {
+            let v = i.make_function(chunk.funcs[fidx as usize].clone(), env.clone());
+            if name_n != u32::MAX {
+                i.set_fn_name(&v, &chunk.names[name_n as usize]);
+            }
+            push!(v);
+        }
+        Op::LoadName(n) => {
+            let v = i.get_var(&chunk.names[n as usize], env)?;
+            push!(v);
+        }
+        Op::StoreName(n) => {
+            let v = pop!();
+            i.assign_free_name(&chunk.names[n as usize], v, env)?;
+        }
+        Op::LoadThis => push!(ctx.this_val.clone()),
+        Op::GetProp(n, c) => {
+            let obj = pop!();
+            let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+            push!(v);
+        }
+        Op::SetProp(n, c) => {
+            let v = pop!();
+            let obj = pop!();
+            i.set_prop_ic(&obj, &chunk.names[n as usize], v.clone(), &chunk.caches[c as usize])?;
+            push!(v);
+        }
+        Op::SetPropDrop(n, c) => {
+            let v = pop!();
+            let obj = pop!();
+            i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+        }
+        Op::GetElem => {
+            let key = pop!();
+            let obj = pop!();
+            if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                if let Some(v) = i.fast_get_elem(o, *n) {
+                    push!(v);
+                    return Ok(());
+                }
+            }
+            if matches!(obj, Value::Undefined | Value::Null) {
+                return Err(i.throw("TypeError", "cannot read property of null or undefined"));
+            }
+            let k = i.to_property_key(&key)?;
+            let v = i.get_member(&obj, &k)?;
+            push!(v);
+        }
+        Op::SetElem => {
+            let v = pop!();
+            let key = pop!();
+            let obj = pop!();
+            if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                let ret = v.clone();
+                match i.fast_set_elem(o, *n, v) {
+                    Ok(()) => {
+                        push!(ret);
+                        return Ok(());
+                    }
+                    Err(back) => {
+                        let k = i.to_property_key(&key)?;
+                        i.set_member(&obj, &k, back)?;
+                        push!(ret);
+                        return Ok(());
+                    }
+                }
+            }
+            let k = i.to_property_key(&key)?;
+            i.set_member(&obj, &k, v.clone())?;
+            push!(v);
+        }
+        Op::SetElemDrop => {
+            let v = pop!();
+            let key = pop!();
+            let obj = pop!();
+            if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                match i.fast_set_elem(o, *n, v) {
+                    Ok(()) => return Ok(()),
+                    Err(back) => {
+                        let k = i.to_property_key(&key)?;
+                        i.set_member(&obj, &k, back)?;
+                        return Ok(());
+                    }
+                }
+            }
+            let k = i.to_property_key(&key)?;
+            i.set_member(&obj, &k, v)?;
+        }
+        Op::UpdateProp(n, c, kind) => {
+            let obj = pop!();
+            let name = &chunk.names[n as usize];
+            let cache = &chunk.caches[c as usize];
+            let old = i.get_prop_ic(&obj, name, cache)?;
+            if let Some(v) = step_value(i, kind, old, |i, v| i.set_prop_ic(&obj, name, v, cache))? {
+                push!(v);
+            }
+        }
+        Op::UpdateElem(kind) => {
+            let key = pop!();
+            let obj = pop!();
+            if let (Value::Obj(o), Value::Num(nk)) = (&obj, &key) {
+                if let Some(Value::Num(old)) = i.fast_get_elem(o, *nk) {
+                    let new = match kind {
+                        UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => old + 1.0,
+                        UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => old - 1.0,
+                    };
+                    if i.fast_set_elem(o, *nk, Value::Num(new)).is_ok() {
+                        match kind {
+                            UpdKind::PreInc | UpdKind::PreDec => push!(Value::Num(new)),
+                            UpdKind::PostInc | UpdKind::PostDec => push!(Value::Num(old)),
+                            UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            if matches!(obj, Value::Undefined | Value::Null) {
+                return Err(i.throw("TypeError", "cannot read property of null or undefined"));
+            }
+            let k = i.to_property_key(&key)?;
+            let old = i.get_member(&obj, &k)?;
+            if let Some(v) = step_value(i, kind, old, |i, v| i.set_member(&obj, &k, v))? {
+                push!(v);
+            }
+        }
+        Op::ToPropKey => {
+            match &*sp.sub(1) {
+                Value::Num(_) | Value::Str(_) => {}
+                _ => {
+                    let key = pop!();
+                    if matches!(&*sp.sub(1), Value::Undefined | Value::Null) {
+                        return Err(
+                            i.throw("TypeError", "cannot access property of null or undefined")
+                        );
+                    }
+                    let k = i.to_property_key(&key)?;
+                    push!(Value::str(k));
+                }
+            }
+        }
+        Op::GetMethod(n, c) => {
+            let obj = pop!();
+            let m = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+            push!(obj);
+            push!(m);
+        }
+        Op::GetMethodElem => {
+            let key = pop!();
+            let obj = pop!();
+            let m = if let (Value::Obj(o), Value::Num(n)) = (&obj, &key) {
+                match i.fast_get_elem(o, *n) {
+                    Some(v) => v,
+                    None => {
+                        let k = i.to_property_key(&key)?;
+                        i.get_member(&obj, &k)?
+                    }
+                }
+            } else {
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    return Err(i.throw("TypeError", "cannot read property of null or undefined"));
+                }
+                let k = i.to_property_key(&key)?;
+                i.get_member(&obj, &k)?
+            };
+            push!(obj);
+            push!(m);
+        }
+        Op::Add => jit_bin_num(i, sp, "+", |a, b| a + b)?,
+        Op::Sub => jit_bin_num(i, sp, "-", |a, b| a - b)?,
+        Op::Mul => jit_bin_num(i, sp, "*", |a, b| a * b)?,
+        Op::Div => jit_bin_num(i, sp, "/", |a, b| a / b)?,
+        Op::Mod => jit_bin_num(i, sp, "%", crate::eval::js_mod)?,
+        Op::BitAnd => jit_bin_i32(i, sp, "&", |a, b| a & b)?,
+        Op::BitOr => jit_bin_i32(i, sp, "|", |a, b| a | b)?,
+        Op::BitXor => jit_bin_i32(i, sp, "^", |a, b| a ^ b)?,
+        Op::Shl => jit_bin_i32(i, sp, "<<", |a, b| a.wrapping_shl(b as u32 & 31))?,
+        Op::Shr => jit_bin_i32(i, sp, ">>", |a, b| a >> (b as u32 & 31))?,
+        Op::UShr => {
+            let b = pop!();
+            let a = pop!();
+            if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+                let r =
+                    (crate::eval::to_int32(*x) as u32) >> (crate::eval::to_int32(*y) as u32 & 31);
+                push!(Value::Num(r as f64));
+            } else {
+                let v = i.binary(">>>", a, b)?;
+                push!(v);
+            }
+        }
+        Op::Lt => jit_bin_cmp(i, sp, "<", |a, b| a < b)?,
+        Op::Gt => jit_bin_cmp(i, sp, ">", |a, b| a > b)?,
+        Op::Le => jit_bin_cmp(i, sp, "<=", |a, b| a <= b)?,
+        Op::Ge => jit_bin_cmp(i, sp, ">=", |a, b| a >= b)?,
+        Op::EqEq => jit_bin_cmp(i, sp, "==", |a, b| a == b)?,
+        Op::NotEq => jit_bin_cmp(i, sp, "!=", |a, b| a != b)?,
+        Op::StrictEq => jit_bin_cmp(i, sp, "===", |a, b| a == b)?,
+        Op::StrictNotEq => jit_bin_cmp(i, sp, "!==", |a, b| a != b)?,
+        Op::GenBin(n) => {
+            let b = pop!();
+            let a = pop!();
+            let v = i.binary(&chunk.names[n as usize], a, b)?;
+            push!(v);
+        }
+        Op::Neg => {
+            let a = pop!();
+            match a {
+                Value::Num(n) => push!(Value::Num(-n)),
+                other => {
+                    let v = i.eval_unary_vm("-", other)?;
+                    push!(v);
+                }
+            }
+        }
+        Op::Plus => {
+            let a = pop!();
+            match a {
+                Value::Num(n) => push!(Value::Num(n)),
+                other => {
+                    let v = i.eval_unary_vm("+", other)?;
+                    push!(v);
+                }
+            }
+        }
+        Op::Not => {
+            let a = pop!();
+            let b = !i.to_boolean(&a);
+            push!(Value::Bool(b));
+        }
+        Op::BitNot => {
+            let a = pop!();
+            match a {
+                Value::Num(n) => push!(Value::Num(!crate::eval::to_int32(n) as f64)),
+                other => {
+                    let v = i.eval_unary_vm("~", other)?;
+                    push!(v);
+                }
+            }
+        }
+        Op::Typeof => {
+            let a = pop!();
+            let v = i.eval_unary_vm("typeof", a)?;
+            push!(v);
+        }
+        Op::Void => {
+            pop!();
+            push!(Value::Undefined);
+        }
+        Op::Call(argc) => {
+            let argc = argc as usize;
+            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let callee = (*sp.sub(argc + 1)).clone();
+            let v = i.call(callee, Value::Undefined, args)?;
+            *sp = jit_consume(*sp, argc + 1);
+            push!(v);
+        }
+        Op::LoadNameForCall(n) => {
+            let (callee, with_this) = i.get_var_with(&chunk.names[n as usize], env)?;
+            push!(with_this.unwrap_or(Value::Undefined));
+            push!(callee);
+        }
+        Op::CallWithThis(argc) => {
+            let argc = argc as usize;
+            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let m = (*sp.sub(argc + 1)).clone();
+            let this = (*sp.sub(argc + 2)).clone();
+            let v = i.call(m, this, args)?;
+            *sp = jit_consume(*sp, argc + 2);
+            push!(v);
+        }
+        Op::New(argc) => {
+            let argc = argc as usize;
+            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let callee = (*sp.sub(argc + 1)).clone();
+            let v = i.construct(callee, args)?;
+            *sp = jit_consume(*sp, argc + 1);
+            push!(v);
+        }
+        Op::MakeArray(n) => {
+            let n = n as usize;
+            let mut items = Vec::with_capacity(n);
+            let base = sp.sub(n);
+            for k in 0..n {
+                items.push(base.add(k).read());
+            }
+            *sp = base;
+            push!(i.make_array(items));
+        }
+        Op::MakeObject(start, count) => {
+            let count = count as usize;
+            let mut values = Vec::with_capacity(count);
+            let base = sp.sub(count);
+            for k in 0..count {
+                values.push(base.add(k).read());
+            }
+            *sp = base;
+            let v = i.make_plain_object_vm(
+                &chunk.names[start as usize..start as usize + count],
+                values,
+            );
+            push!(v);
+        }
+        Op::Throw => {
+            let v = pop!();
+            return Err(Abrupt::Throw(v));
+        }
+        Op::Jump(_)
+        | Op::JumpIfFalse(_)
+        | Op::JumpIfFalsePeek(_)
+        | Op::JumpIfTruePeek(_)
+        | Op::JumpIfNotNullishPeek(_)
+        | Op::Return
+        | Op::ReturnUndef
+        | Op::Await
+        | Op::PushHandler(_)
+        | Op::PopHandler => unreachable!("control-flow op reached jit_exec"),
+    }
+    Ok(())
+}
+
+/// Drop `n` consumed operands below `sp` (post-call cleanup) and return the new top.
+unsafe fn jit_consume(sp: *mut Value, n: usize) -> *mut Value {
+    let base = sp.sub(n);
+    for k in 0..n {
+        std::ptr::drop_in_place(base.add(k));
+    }
+    base
+}
+
+unsafe fn jit_bin_num(
+    i: &mut Interp,
+    sp: &mut *mut Value,
+    op: &'static str,
+    f: impl Fn(f64, f64) -> f64,
+) -> Result<(), Abrupt> {
+    *sp = sp.sub(1);
+    let b = sp.read();
+    *sp = sp.sub(1);
+    let a = sp.read();
+    let v = if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+        Value::Num(f(*x, *y))
+    } else {
+        i.binary(op, a, b)?
+    };
+    sp.write(v);
+    *sp = sp.add(1);
+    Ok(())
+}
+
+unsafe fn jit_bin_i32(
+    i: &mut Interp,
+    sp: &mut *mut Value,
+    op: &'static str,
+    f: impl Fn(i32, i32) -> i32,
+) -> Result<(), Abrupt> {
+    *sp = sp.sub(1);
+    let b = sp.read();
+    *sp = sp.sub(1);
+    let a = sp.read();
+    let v = if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+        Value::Num(f(crate::eval::to_int32(*x), crate::eval::to_int32(*y)) as f64)
+    } else {
+        i.binary(op, a, b)?
+    };
+    sp.write(v);
+    *sp = sp.add(1);
+    Ok(())
+}
+
+unsafe fn jit_bin_cmp(
+    i: &mut Interp,
+    sp: &mut *mut Value,
+    op: &'static str,
+    f: impl Fn(f64, f64) -> bool,
+) -> Result<(), Abrupt> {
+    *sp = sp.sub(1);
+    let b = sp.read();
+    *sp = sp.sub(1);
+    let a = sp.read();
+    let v = if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+        Value::Bool(f(*x, *y))
+    } else {
+        i.binary(op, a, b)?
+    };
+    sp.write(v);
+    *sp = sp.add(1);
+    Ok(())
+}
+
+/// Conditional-branch helper: evaluates the branch predicate per `mode` (see `jit::COND_*`),
+/// returning the new sp and the flag. `to_boolean` cannot throw, so sp is never null here.
+pub(crate) unsafe extern "C" fn jit_cond(
+    ctx: *mut crate::jit::JitCtx,
+    mode: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    let i = &mut *ctx.interp;
+    let flag = match mode {
+        crate::jit::COND_POP_TRUTHY => {
+            sp = sp.sub(1);
+            let v = sp.read();
+            i.to_boolean(&v) as u64
+        }
+        crate::jit::COND_PEEK_TRUTHY => i.to_boolean(&*sp.sub(1)) as u64,
+        _ => !matches!(&*sp.sub(1), Value::Undefined | Value::Null) as u64,
+    };
+    crate::jit::SpFlag { sp, flag }
+}
+
+/// Return helper: mode 1 pops the return value into `ctx.ret`; mode 0 returns undefined.
+pub(crate) unsafe extern "C" fn jit_return(
+    ctx: *mut crate::jit::JitCtx,
+    mode: u32,
+    mut sp: *mut Value,
+) -> *mut Value {
+    let ctx = &mut *ctx;
+    ctx.ret = if mode == 1 {
+        sp = sp.sub(1);
+        sp.read()
+    } else {
+        Value::Undefined
+    };
+    sp
+}
+
+pub(crate) unsafe extern "C" fn jit_push_handler(
+    ctx: *mut crate::jit::JitCtx,
+    catch_pc: u32,
+    sp: *mut Value,
+) -> *mut Value {
+    let ctx = &mut *ctx;
+    let depth = sp.offset_from(ctx.stack_base) as usize;
+    ctx.handlers.push((catch_pc, depth));
+    sp
+}
+
+pub(crate) unsafe extern "C" fn jit_pop_handler(
+    ctx: *mut crate::jit::JitCtx,
+    _imm: u32,
+    sp: *mut Value,
+) -> *mut Value {
+    (*ctx).handlers.pop();
+    sp
+}
+
+/// Throw routing: land on the innermost `try` handler (returning its code address and the
+/// unwound sp with the exception pushed), or (0, sp) to leave the function throwing.
+pub(crate) unsafe extern "C" fn jit_unwind(
+    ctx: *mut crate::jit::JitCtx,
+    _imm: u32,
+    sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    // Only thrown completions are catchable; anything else propagates out.
+    if !matches!(ctx.error, Some(Abrupt::Throw(_))) {
+        return crate::jit::SpFlag { sp: std::ptr::null_mut(), flag: sp as u64 };
+    }
+    match ctx.handlers.pop() {
+        None => crate::jit::SpFlag { sp: std::ptr::null_mut(), flag: sp as u64 },
+        Some((catch_pc, depth)) => {
+            let target = ctx.stack_base.add(depth);
+            // Drop operands above the handler's depth.
+            let mut p = target;
+            while p < sp {
+                std::ptr::drop_in_place(p);
+                p = p.add(1);
+            }
+            let Some(Abrupt::Throw(exc)) = ctx.error.take() else {
+                unreachable!()
+            };
+            target.write(exc);
+            let addr = ctx.code_base as usize
+                + *ctx.pc_offsets.add(catch_pc as usize) as usize;
+            crate::jit::SpFlag {
+                sp: addr as *mut Value,
+                flag: target.add(1) as u64,
+            }
+        }
+    }
 }

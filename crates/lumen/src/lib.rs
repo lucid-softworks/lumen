@@ -32,6 +32,7 @@ mod fasthash;
 mod host;
 mod interpreter;
 mod intl;
+mod jit;
 mod jstr;
 mod lexer;
 mod modules;

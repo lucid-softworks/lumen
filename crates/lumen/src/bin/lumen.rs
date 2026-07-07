@@ -1,5 +1,5 @@
 //! Minimal shell: evaluate JS files in one engine, printing console output as it appears.
-//! Usage: lumen [--module] [--tier=interp|bytecode] [--tier-threshold=N] [file.js ...]
+//! Usage: lumen [--module] [--tier=interp|bytecode|jit] [--tier-threshold=N] [file.js ...]
 //!
 //! With no files, reads from stdin: an interactive REPL when stdin is a terminal (one realm
 //! for the whole session, incomplete input continues on the next line), otherwise the whole
@@ -30,9 +30,10 @@ fn main() {
             } else if let Some(t) = a.strip_prefix("--tier=") {
                 tier = Some(match t {
                     "bytecode" => lumen::bytecode::Tier::Bytecode,
+                    "jit" => lumen::bytecode::Tier::Jit,
                     "interp" => lumen::bytecode::Tier::Interp,
                     other => {
-                        eprintln!("error: unknown tier '{other}' (interp|bytecode)");
+                        eprintln!("error: unknown tier '{other}' (interp|bytecode|jit)");
                         std::process::exit(2);
                     }
                 });
