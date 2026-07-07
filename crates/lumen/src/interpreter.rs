@@ -158,6 +158,16 @@ pub struct FnFrame {
     pub lazy: Option<(Rc<crate::ast::Function>, Rc<[Value]>, Env)>,
 }
 
+/// Raw state of the last successful regex match, deferred for the legacy `RegExp.$1` statics.
+/// `ctor` is the %RegExp% constructor the statics belong to (the realm active at match time).
+pub(crate) struct RegexpLastMatch {
+    pub ctor: Gc,
+    pub input: Rc<str>,
+    pub text: Rc<crate::regex::ReText>,
+    pub caps: Vec<Option<(usize, usize)>>,
+    pub ngroups: usize,
+}
+
 pub struct Scope {
     pub vars: crate::fasthash::FastMap<String, Binding>,
     pub parent: Option<Env>,
@@ -548,6 +558,13 @@ pub struct Interp {
     /// Recycled (slots, operand stack) buffers for bytecode-VM activations, so a hot call tree
     /// doesn't allocate two `Vec`s per call (see `bytecode::run`).
     pub(crate) vm_pool: Vec<(Vec<Value>, Vec<Value>)>,
+    /// Recently prepared regex subjects keyed by string identity (the held `Rc` pins the
+    /// pointer), so repeated exec/replace/split over one subject reuses its element vector.
+    pub(crate) re_texts: Vec<(Rc<str>, bool, Rc<crate::regex::ReText>)>,
+    /// The last successful `exec` match, kept raw for the legacy `RegExp.$1`-style statics:
+    /// the 14 strings materialize into the constructor's hidden props only when an accessor
+    /// actually reads them (see `builtins::flush_regexp_legacy`), not on every match.
+    pub(crate) regexp_last: Option<RegexpLastMatch>,
     /// Live interpreter recursion depth (expression eval + calls). Bounded by [`MAX_EVAL_DEPTH`]
     /// so runaway recursion throws a RangeError instead of overflowing the native stack.
     pub(crate) depth: u32,
@@ -1079,6 +1096,8 @@ impl Interp {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             vm_pool: Vec::new(),
+            re_texts: Vec::new(),
+            regexp_last: None,
             map_data: Default::default(),
             extra_protos: Default::default(),
             array_buffers: Default::default(),
@@ -1574,8 +1593,8 @@ impl Interp {
         let len = items.len();
         {
             let mut b = obj.borrow_mut();
-            for (i, v) in items.into_iter().enumerate() {
-                b.props.insert(i.to_string(), Property::plain(v));
+            for v in items {
+                b.props.push_dense(Property::plain(v));
             }
             b.props.insert(
                 "length",
@@ -1901,10 +1920,30 @@ impl Interp {
         name: &str,
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Result<Value, Abrupt> {
-        if let Value::Obj(o) = base {
-            if let Some(v) = self.try_ic_get(o, name, cache) {
-                return Ok(v);
+        match base {
+            Value::Obj(o) => {
+                if let Some(v) = self.try_ic_get(o, name, cache) {
+                    return Ok(v);
+                }
             }
+            // Primitive receivers: named non-index reads (`"x".replace`, `(1).toFixed`) resolve
+            // on the wrapper prototype chain — cache that walk too. `length` and numeric keys
+            // have primitive-specific handling in get_member; symbols get description handling.
+            Value::Str(_) | Value::Num(_) | Value::Bool(_)
+                if name != "length"
+                    && name != "description"
+                    && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) =>
+            {
+                let proto = match base {
+                    Value::Str(_) => self.string_proto.clone(),
+                    Value::Num(_) => self.number_proto.clone(),
+                    _ => self.boolean_proto.clone(),
+                };
+                if let Some(v) = self.try_ic_get(&proto, name, cache) {
+                    return Ok(v);
+                }
+            }
+            _ => {}
         }
         self.get_member(base, name)
     }
@@ -2859,36 +2898,32 @@ impl Interp {
             let new_len = n as usize;
             let old_len = self.array_length(obj);
             if new_len < old_len {
-                // Delete out-of-range indices from the top down, stopping at a non-configurable one
-                // (ArraySetLength). Collect + sort descending so the scan is O(n log n), never O(n²).
-                let mut indices: Vec<usize> = obj
+                // ArraySetLength deletes out-of-range indices from the top down, stopping at a
+                // non-configurable one. Equivalent bulk form: everything above the *highest*
+                // non-configurable out-of-range index (all necessarily configurable) is removed
+                // in one O(n) compaction; length settles just past the blocker (strict throws).
+                let blocker: Option<usize> = obj
                     .borrow()
                     .props
-                    .keys()
                     .iter()
-                    .filter_map(|k| {
+                    .filter(|(_, p)| !p.configurable)
+                    .filter_map(|(k, _)| {
                         // Only array-index keys (canonical, < 2^32-1) participate in truncation;
                         // "4294967296" and friends are ordinary properties.
                         crate::value::canonical_index(k).map(|n| n as usize)
                     })
                     .filter(|&idx| idx >= new_len)
-                    .collect();
-                indices.sort_unstable_by(|a, b| b.cmp(a));
-                for idx in indices {
-                    let configurable = obj
-                        .borrow()
-                        .props
-                        .get(&idx.to_string())
-                        .map(|p| p.configurable)
-                        .unwrap_or(true);
-                    if configurable {
-                        obj.borrow_mut().props.remove(&idx.to_string());
-                    } else {
-                        // length settles just past the blocking element; a strict assignment throws.
-                        obj.borrow_mut().props.insert(
+                    .max();
+                match blocker {
+                    None => obj.borrow_mut().props.remove_indices_from(new_len),
+                    Some(b) => {
+                        let mut ob = obj.borrow_mut();
+                        ob.props.remove_indices_from(b + 1);
+                        ob.props.insert(
                             "length",
-                            Property::data(Value::Num((idx + 1) as f64), true, false, false),
+                            Property::data(Value::Num((b + 1) as f64), true, false, false),
                         );
+                        drop(ob);
                         if self.strict {
                             return Err(self.throw(
                                 "TypeError",
@@ -3077,6 +3112,27 @@ impl Interp {
     /// Pin `o` for the lifetime of its side-table entries (see `gc_pins`).
     pub(crate) fn gc_pin(&mut self, o: &Gc) {
         self.gc_pins.insert(Rc::as_ptr(o) as usize, o.clone());
+    }
+
+    /// A regex-ready view of `s`, cached by string identity: repeated exec/replace/split over the
+    /// same subject (the common shape of both real code and the regexp benchmarks) skips the
+    /// O(len) element-vector rebuild. Strings are immutable, and each entry holds its `Rc` so the
+    /// pointer can't be reused by a new allocation while cached.
+    pub(crate) fn re_text(&mut self, unicode: bool, s: &Rc<str>) -> Rc<crate::regex::ReText> {
+        let key = s.as_ptr();
+        if let Some((_, _, t)) = self
+            .re_texts
+            .iter()
+            .find(|(k, u, _)| k.as_ptr() == key && *u == unicode)
+        {
+            return t.clone();
+        }
+        let t = Rc::new(crate::regex::ReText::new_rc(unicode, s));
+        if self.re_texts.len() >= 4 {
+            self.re_texts.remove(0);
+        }
+        self.re_texts.push((s.clone(), unicode, t.clone()));
+        t
     }
 
     /// The object references *to other heap objects* held directly by `o` (proto, property

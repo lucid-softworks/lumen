@@ -16,6 +16,12 @@ const STEP_LIMIT: u64 = 2_000_000;
 pub struct Regex {
     prog: Vec<Inst>,
     nmarks: usize,
+    /// Start-position prescan derived from the program (see [`first_filter`]): lets the scan
+    /// skip positions that cannot begin a match instead of running the backtracker at each.
+    first: FirstFilter,
+    /// [`FirstFilter::Atoms`] baked into a byte-indexed table (elements < 256): the scan loop
+    /// becomes one load per position.
+    first_lut: Option<Box<[bool; 256]>>,
     pub unicode: bool,
     pub ngroups: usize,
     pub source: String,
@@ -80,6 +86,66 @@ enum Rep {
     Char(u32),
     Any,
     Class(Rc<CharClass>),
+}
+
+/// What the compiled program says about how a match can begin.
+enum FirstFilter {
+    /// No usable information — the scan tries every position.
+    None,
+    /// Every path first asserts `^` in non-multiline mode: a match can only begin at position 0,
+    /// so one attempt decides the whole scan.
+    Anchored,
+    /// Every path begins by consuming one element matching one of these atoms; positions whose
+    /// element matches none can be skipped without entering the backtracker. The predicate is a
+    /// superset of what the matcher accepts, so a pass is never wrong — only a reject is binding.
+    Atoms(Vec<Rep>),
+}
+
+/// Compute the [`FirstFilter`] by ε-walking the program from its entry: through saves, jumps,
+/// splits, capture clears and marks, collecting the first thing each path does. Anything not
+/// modelled (assertions other than a uniform leading `^`, backrefs, lookarounds, inline flags,
+/// or an ε-reachable `Match` — an empty-matchable pattern) disables the filter.
+fn first_filter(prog: &[Inst], multiline: bool) -> FirstFilter {
+    let mut atoms: Vec<Rep> = Vec::new();
+    let mut asserts = 0usize;
+    let mut stack = vec![0usize];
+    let mut seen = vec![false; prog.len()];
+    while let Some(pc) = stack.pop() {
+        if seen[pc] {
+            continue;
+        }
+        seen[pc] = true;
+        match &prog[pc] {
+            Inst::Save(_) | Inst::ClearCaps(..) | Inst::SetMark(_) => stack.push(pc + 1),
+            Inst::Jmp(t) => stack.push(*t),
+            Inst::Split(a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            Inst::Char(c) => atoms.push(Rep::Char(*c)),
+            Inst::Any => atoms.push(Rep::Any),
+            Inst::Class(cc) => atoms.push(Rep::Class(cc.clone())),
+            Inst::Many { rep, min, .. } => {
+                atoms.push(rep.clone());
+                if *min == 0 {
+                    stack.push(pc + 1); // may consume nothing — the next inst also "begins" a path
+                }
+            }
+            Inst::AssertStart => asserts += 1,
+            _ => return FirstFilter::None,
+        }
+    }
+    if asserts > 0 {
+        if atoms.is_empty() && !multiline {
+            FirstFilter::Anchored
+        } else {
+            FirstFilter::None
+        }
+    } else if !atoms.is_empty() {
+        FirstFilter::Atoms(atoms)
+    } else {
+        FirstFilter::None
+    }
 }
 
 #[derive(Default, Clone)]
@@ -389,19 +455,33 @@ fn elem_of_cp(cp: u32) -> char {
 /// unicode mode for BMP-only subjects); otherwise `unit_of.len() == elems.len() + 1` with the last
 /// entry the total unit length. JS-visible indices (lastIndex, match.index) are unit offsets.
 pub struct ReText {
+    /// Wide elements — EMPTY for an ASCII subject, which matches over `ascii_src`'s bytes
+    /// directly (see `Regex::exec_text`) with no per-element materialization at all.
     pub elems: Vec<u32>,
     pub unit_of: Option<Vec<usize>>,
+    /// Element count (== `ascii_src` byte length for ASCII, else `elems.len()`).
+    n_elems: usize,
     unicode: bool,
+    /// The source string when it is pure ASCII (element index == byte index): matching runs
+    /// over its bytes and `slice` copies straight out of it.
+    ascii_src: Option<Rc<str>>,
 }
 
 impl ReText {
-    pub fn new(unicode: bool, s: &str) -> ReText {
+    /// Prepare `s` for matching, keeping the caller's `Rc` for zero-copy ASCII slicing.
+    pub fn new_rc(unicode: bool, s: &Rc<str>) -> ReText {
+        Self::build(unicode, s, Some(s.clone()))
+    }
+
+    fn build(unicode: bool, s: &str, src: Option<Rc<str>>) -> ReText {
         // ASCII: elements are the bytes, and element index == unit offset in both modes.
         if s.is_ascii() {
             return ReText {
-                elems: s.as_bytes().iter().map(|&b| b as u32).collect(),
+                elems: Vec::new(),
                 unit_of: None,
+                n_elems: s.len(),
                 unicode,
+                ascii_src: Some(src.unwrap_or_else(|| Rc::from(s))),
             };
         }
         if unicode {
@@ -409,9 +489,11 @@ impl ReText {
             if cps.iter().all(|&cp| cp < 0x10000) {
                 // BMP-only: one unit per element.
                 return ReText {
+                    n_elems: cps.len(),
                     elems: cps,
                     unit_of: None,
                     unicode,
+                    ascii_src: None,
                 };
             }
             let mut unit_of = Vec::with_capacity(cps.len() + 1);
@@ -422,16 +504,20 @@ impl ReText {
             }
             unit_of.push(u);
             ReText {
+                n_elems: cps.len(),
                 elems: cps,
                 unit_of: Some(unit_of),
                 unicode,
+                ascii_src: None,
             }
         } else {
             let units = crate::jstr::units(s);
             ReText {
+                n_elems: units.len(),
                 elems: units.iter().map(|&u| u as u32).collect(),
                 unit_of: None,
                 unicode,
+                ascii_src: None,
             }
         }
     }
@@ -439,9 +525,9 @@ impl ReText {
     /// The element index containing unit offset `u` (== len when `u` is at/past the end).
     pub fn elem_at_unit(&self, u: usize) -> usize {
         match &self.unit_of {
-            None => u.min(self.elems.len()),
+            None => u.min(self.n_elems),
             Some(unit_of) => match unit_of.binary_search(&u) {
-                Ok(k) => k.min(self.elems.len()),
+                Ok(k) => k.min(self.n_elems),
                 Err(k) => k - 1,
             },
         }
@@ -450,18 +536,22 @@ impl ReText {
     /// The unit offset of element `e`.
     pub fn unit_index(&self, e: usize) -> usize {
         match &self.unit_of {
-            None => e.min(self.elems.len()),
-            Some(unit_of) => unit_of[e.min(self.elems.len())],
+            None => e.min(self.n_elems),
+            Some(unit_of) => unit_of[e.min(self.n_elems)],
         }
     }
 
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
-        self.elems.len()
+        self.n_elems
     }
 
     /// The canonical string for elements `a..b` (surrogate halves recombine).
     pub fn slice(&self, a: usize, b: usize) -> String {
+        // ASCII subject: element index == byte index — copy straight from the source.
+        if let Some(src) = &self.ascii_src {
+            return src[a..b].to_string();
+        }
         let elems = &self.elems[a..b];
         // ASCII fast path: elements are the bytes.
         if elems.iter().all(|&e| e < 0x80) {
@@ -581,9 +671,12 @@ impl Regex {
         prog.push(Inst::Match);
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
-        Ok(Regex {
+        let first = first_filter(&prog, flags.contains('m'));
+        let mut re = Regex {
             unicode,
             nmarks,
+            first,
+            first_lut: None,
             prog,
             ngroups: p.ngroups,
             source: if pattern.is_empty() {
@@ -598,27 +691,131 @@ impl Regex {
             dotall: flags.contains('s'),
             sticky: flags.contains('y'),
             names: p.names,
+        };
+        let lut = if let FirstFilter::Atoms(atoms) = &re.first {
+            let mut lut = Box::new([false; 256]);
+            for (c, slot) in lut.iter_mut().enumerate() {
+                *slot = re.first_matches(atoms, c as u32);
+            }
+            Some(lut)
+        } else {
+            None
+        };
+        re.first_lut = lut;
+        Ok(re)
+    }
+
+    /// Whether a match could begin with element `c` — the [`FirstFilter::Atoms`] predicate.
+    /// Deliberately a superset of what the matcher accepts (e.g. `Any` only excludes `\n`), so a
+    /// pass costs a wasted attempt at worst; only a reject skips work.
+    fn first_matches(&self, atoms: &[Rep], c: u32) -> bool {
+        let unicode = self.unicode || self.flags.contains('v');
+        atoms.iter().any(|rep| match rep {
+            Rep::Char(ch) => {
+                *ch == c
+                    || (self.ignore_case && {
+                        match (char::from_u32(c), char::from_u32(*ch)) {
+                            (Some(x), Some(y)) => {
+                                if unicode {
+                                    fold_canon(x as u32) == fold_canon(y as u32)
+                                } else {
+                                    canonicalize_legacy(x) == canonicalize_legacy(y)
+                                }
+                            }
+                            _ => false,
+                        }
+                    })
+            }
+            Rep::Any => self.dotall || c != '\n' as u32,
+            Rep::Class(cc) => cc.matches(c, self.ignore_case, unicode),
         })
     }
 
-    /// Try to match, scanning forward from `start` (unless sticky/`y`, which requires a match at
-    /// exactly `start`). Returns capture spans: index 0 is the whole match, then one per group.
-    pub fn exec_at(&self, input: &[u32], start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+    /// Try to match against a prepared subject, scanning forward from `start` (unless sticky/`y`,
+    /// which requires a match at exactly `start`). An ASCII subject matches directly over its
+    /// bytes; anything else over the element vector. Returns capture spans: index 0 is the whole
+    /// match, then one per group.
+    pub fn exec_text(
+        &self,
+        text: &ReText,
+        start: usize,
+    ) -> Option<Vec<Option<(usize, usize)>>> {
+        match &text.ascii_src {
+            Some(s) => self.exec_impl(s.as_bytes(), start),
+            None => self.exec_impl(&text.elems[..], start),
+        }
+    }
+
+    fn exec_impl<I: ReInput>(&self, input: I, start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+        if start > input.len() {
+            return None;
+        }
+        // One matcher for the whole scan, its working buffers recycled across `exec` calls via a
+        // thread-local (the engine is single-threaded per Interp).
+        let mut scratch = MATCH_SCRATCH
+            .with(|s| s.borrow_mut().take())
+            .unwrap_or_default();
+        scratch.caps.clear();
+        scratch.caps.resize(2 * (self.ngroups + 1), None);
+        scratch.marks.clear();
+        scratch.marks.resize(self.nmarks, None);
+        scratch.flags.clear();
+        scratch
+            .flags
+            .push((self.ignore_case, self.multiline, self.dotall));
+        let mut m = Matcher {
+            input,
+            caps: scratch.caps,
+            marks: scratch.marks,
+            steps: 0,
+            depth: 0,
+            back: false,
+            flags: scratch.flags,
+            unicode: self.flags.contains('u') || self.flags.contains('v'),
+        };
         let mut from = start;
-        loop {
+        let result = 'scan: loop {
             if from > input.len() {
-                return None;
+                break 'scan None;
             }
-            let mut m = Matcher {
-                input,
-                caps: vec![None; 2 * (self.ngroups + 1)],
-                marks: vec![None; self.nmarks],
-                steps: 0,
-                depth: 0,
-                back: false,
-                flags: vec![(self.ignore_case, self.multiline, self.dotall)],
-                unicode: self.flags.contains('u') || self.flags.contains('v'),
-            };
+            // Prescan: skip positions that cannot begin a match. Sticky regexes get exactly one
+            // attempt at `start`, so the filter only ever saves that single attempt for them.
+            if !self.sticky {
+                match &self.first {
+                    FirstFilter::Anchored => {
+                        // `^` (non-multiline) can only match at position 0: one attempt at
+                        // `from` decides the scan (any later position fails the assert too).
+                        if from > 0 {
+                            break 'scan None;
+                        }
+                    }
+                    FirstFilter::Atoms(atoms) => {
+                        // Every path consumes an element first: find the next viable one. Small
+                        // elements go through the precomputed table (one load per position).
+                        let len = input.len();
+                        loop {
+                            if from >= len {
+                                break 'scan None;
+                            }
+                            let c = input.at(from);
+                            let viable = match &self.first_lut {
+                                Some(lut) if (c as usize) < 256 => lut[c as usize],
+                                _ => self.first_matches(atoms, c),
+                            };
+                            if viable {
+                                break;
+                            }
+                            from += 1;
+                        }
+                    }
+                    FirstFilter::None => {}
+                }
+            }
+            m.caps.fill(None);
+            m.marks.fill(None);
+            m.flags.truncate(1);
+            m.steps = 0;
+            m.depth = 0;
             if m.run(&self.prog, 0, from) {
                 let mut out = Vec::with_capacity(self.ngroups + 1);
                 for g in 0..=self.ngroups {
@@ -628,14 +825,35 @@ impl Regex {
                         _ => None,
                     });
                 }
-                return Some(out);
+                break 'scan Some(out);
             }
             if self.sticky {
-                return None;
+                break 'scan None;
             }
             from += 1;
-        }
+        };
+        MATCH_SCRATCH.with(|s| {
+            *s.borrow_mut() = Some(MatchScratch {
+                caps: m.caps,
+                marks: m.marks,
+                flags: m.flags,
+            });
+        });
+        result
     }
+}
+
+/// Recycled matcher working buffers (see `Regex::exec_at`).
+#[derive(Default)]
+struct MatchScratch {
+    caps: Vec<Option<usize>>,
+    marks: Vec<Option<usize>>,
+    flags: Vec<(bool, bool, bool)>,
+}
+
+thread_local! {
+    static MATCH_SCRATCH: std::cell::RefCell<Option<MatchScratch>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2030,8 +2248,38 @@ fn clone_class(cc: &CharClass) -> CharClass {
 /// native stack on big inputs.
 const MAX_MATCH_DEPTH: u32 = 3000;
 
-struct Matcher<'a> {
-    input: &'a [u32],
+/// The matcher's view of a subject: element `i` as a code point / code unit. Monomorphized for
+/// bytes (an ASCII subject — the common case, matched with no `Vec<u32>` materialization at all)
+/// and for wide elements (anything non-ASCII).
+pub trait ReInput: Copy {
+    fn len(&self) -> usize;
+    fn at(&self, i: usize) -> u32;
+}
+
+impl ReInput for &[u8] {
+    #[inline(always)]
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+    #[inline(always)]
+    fn at(&self, i: usize) -> u32 {
+        self[i] as u32
+    }
+}
+
+impl ReInput for &[u32] {
+    #[inline(always)]
+    fn len(&self) -> usize {
+        <[u32]>::len(self)
+    }
+    #[inline(always)]
+    fn at(&self, i: usize) -> u32 {
+        self[i]
+    }
+}
+
+struct Matcher<I: ReInput> {
+    input: I,
     caps: Vec<Option<usize>>,
     marks: Vec<Option<usize>>,
     steps: u64,
@@ -2046,7 +2294,7 @@ struct Matcher<'a> {
     unicode: bool,
 }
 
-impl Matcher<'_> {
+impl<I: ReInput> Matcher<I> {
     fn icase(&self) -> bool {
         self.flags.last().unwrap().0
     }
@@ -2079,12 +2327,12 @@ impl Matcher<'_> {
     fn step(&self, pos: usize) -> Option<(u32, usize)> {
         if self.back {
             if pos > 0 {
-                Some((self.input[pos - 1], pos - 1))
+                Some((self.input.at(pos - 1), pos - 1))
             } else {
                 None
             }
         } else if pos < self.input.len() {
-            Some((self.input[pos], pos + 1))
+            Some((self.input.at(pos), pos + 1))
         } else {
             None
         }
@@ -2094,13 +2342,13 @@ impl Matcher<'_> {
     fn backref_step(&mut self, prog: &[Inst], pc: usize, pos: usize, text: &[u32]) -> bool {
         let n = text.len();
         if self.back {
-            if pos >= n && (0..n).all(|i| self.eqc_uu(self.input[pos - n + i], text[i])) {
+            if pos >= n && (0..n).all(|i| self.eqc_uu(self.input.at(pos - n + i), text[i])) {
                 self.run(prog, pc + 1, pos - n)
             } else {
                 false
             }
         } else if pos + n <= self.input.len()
-            && (0..n).all(|i| self.eqc_uu(self.input[pos + i], text[i]))
+            && (0..n).all(|i| self.eqc_uu(self.input.at(pos + i), text[i]))
         {
             self.run(prog, pc + 1, pos + n)
         } else {
@@ -2195,7 +2443,7 @@ impl Matcher<'_> {
                 };
                 let idx = |k: usize| if self.back { pos - 1 - k } else { pos + k };
                 let mut avail = 0;
-                while avail < cap && avail < room && self.rep_matches(rep, self.input[idx(avail)]) {
+                while avail < cap && avail < room && self.rep_matches(rep, self.input.at(idx(avail))) {
                     avail += 1;
                 }
                 if avail < min {
@@ -2254,18 +2502,18 @@ impl Matcher<'_> {
             Inst::Jmp(t) => self.run(prog, *t, pos),
             Inst::AssertStart => {
                 let ok =
-                    pos == 0 || (self.multiline() && is_line_terminator_u32(self.input[pos - 1]));
+                    pos == 0 || (self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)));
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::AssertEnd => {
                 let ok = pos == self.input.len()
-                    || (self.multiline() && is_line_terminator_u32(self.input[pos]));
+                    || (self.multiline() && is_line_terminator_u32(self.input.at(pos)));
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::WordBoundary(want) => {
                 let (icase, unicode) = (self.icase(), self.unicode);
-                let before = pos > 0 && is_word_ic(self.input[pos - 1], icase, unicode);
-                let after = pos < self.input.len() && is_word_ic(self.input[pos], icase, unicode);
+                let before = pos > 0 && is_word_ic(self.input.at(pos - 1), icase, unicode);
+                let after = pos < self.input.len() && is_word_ic(self.input.at(pos), icase, unicode);
                 let boundary = before != after;
                 (boundary == *want) && self.run(prog, pc + 1, pos)
             }
@@ -2277,7 +2525,7 @@ impl Matcher<'_> {
                 match (self.caps[2 * g], self.caps[2 * g + 1]) {
                     (Some(a), Some(b)) => {
                         let (a, b) = (a.min(b), a.max(b));
-                        let text: Vec<u32> = self.input[a..b].to_vec();
+                        let text: Vec<u32> = (a..b).map(|i| self.input.at(i)).collect();
                         self.backref_step(prog, pc, pos, &text)
                     }
                     _ => self.run(prog, pc + 1, pos), // unset group matches empty
@@ -2295,7 +2543,7 @@ impl Matcher<'_> {
                     Some(g) => {
                         let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
                         let (a, b) = (a.min(b), a.max(b));
-                        let text: Vec<u32> = self.input[a..b].to_vec();
+                        let text: Vec<u32> = (a..b).map(|i| self.input.at(i)).collect();
                         self.backref_step(prog, pc, pos, &text)
                     }
                 }

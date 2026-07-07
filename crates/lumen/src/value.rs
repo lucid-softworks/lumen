@@ -422,6 +422,21 @@ pub struct Props {
 /// `elems` hole marker (also caps how many entries dense slots can address).
 const NO_SLOT: u32 = u32::MAX;
 
+thread_local! {
+    /// Interned key strings for small array indices — every dense array element key "0".."63"
+    /// shares one allocation per thread instead of allocating per element.
+    static INDEX_KEYS: Vec<Rc<str>> = (0..64).map(|i| Rc::from(i.to_string().as_str())).collect();
+}
+
+/// The property key for array index `n`, interned for small `n`.
+pub(crate) fn index_key(n: usize) -> Rc<str> {
+    if n < 64 {
+        INDEX_KEYS.with(|k| k[n].clone())
+    } else {
+        Rc::from(n.to_string().as_str())
+    }
+}
+
 impl Default for Props {
     fn default() -> Self {
         Self::new()
@@ -516,6 +531,18 @@ impl Props {
         self.index.clear();
         self.elems.clear();
     }
+    /// Append the next dense element while *building a fresh array in order* (element index ==
+    /// entry slot == dense slot): skips the canonical-index parse and, for small indices, the
+    /// key-string allocation. Only valid on a Props whose entries so far are exactly the dense
+    /// elements 0..len.
+    pub(crate) fn push_dense(&mut self, prop: Property) {
+        let slot = self.entries.len();
+        let key = index_key(slot);
+        self.index.insert(key.clone(), slot);
+        self.entries.push((key, prop));
+        self.elems.push(slot as u32);
+    }
+
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
         if let Some(i) = self.index.get(&key) {
@@ -527,6 +554,28 @@ impl Props {
             self.note_inserted(slot);
         }
     }
+    /// Remove every canonical-index key `>= from` in one pass — array truncation
+    /// (`arr.length = n`). Entries compact and the lookup/dense maps rebuild once: O(n) total,
+    /// where the per-key [`Props::remove`] loop it replaces was O(n) *per key*.
+    pub(crate) fn remove_indices_from(&mut self, from: usize) {
+        let keep = |k: &str| match canonical_index(k) {
+            Some(n) => (n as usize) < from,
+            None => true,
+        };
+        if self.entries.iter().all(|(k, _)| keep(k)) {
+            return;
+        }
+        self.entries.retain(|(k, _)| keep(k));
+        self.index.clear();
+        for (j, (k, _)) in self.entries.iter().enumerate() {
+            self.index.insert(k.clone(), j);
+        }
+        self.elems.clear();
+        for slot in 0..self.entries.len() {
+            self.note_inserted(slot);
+        }
+    }
+
     pub(crate) fn remove(&mut self, key: &str) -> bool {
         if let Some(i) = self.index.remove(key) {
             self.entries.remove(i);

@@ -55,6 +55,21 @@ pub(crate) fn regexp_realm_proto(i: &mut Interp, nt: &Value) -> Result<Option<Gc
 /// Set(O, P, V, true): perform [[Set]] and throw a TypeError if it returns false, matching the
 /// spec's `Set(..., Throw=true)` used by Array mutators regardless of the surrounding strict mode.
 fn set_throw(i: &mut Interp, base: &Value, key: &str, value: Value) -> Result<(), Value> {
+    // Overwriting an existing own writable data property (the shape of every hot builtin write,
+    // e.g. a RegExp's `lastIndex` after each exec) needs none of the [[Set]] machinery.
+    if let Value::Obj(o) = base {
+        if matches!(o.borrow().exotic, crate::value::Exotic::None)
+            && i.ordinary_get_ptr(Rc::as_ptr(o) as usize)
+        {
+            let mut b = o.borrow_mut();
+            if let Some(p) = b.props.get_mut(key) {
+                if !p.accessor && p.writable {
+                    p.value = value;
+                    return Ok(());
+                }
+            }
+        }
+    }
     let ok = ab(i.set_member_recv(base, key, value, base.clone()))?;
     if !ok {
         return Err(i.make_error(
@@ -1825,11 +1840,10 @@ fn regex_find_all(
     re: &crate::regex::Regex,
     text: &crate::regex::ReText,
 ) -> Vec<Vec<Option<(usize, usize)>>> {
-    let chars = &text.elems;
     let mut out = Vec::new();
     let mut pos = 0;
-    while pos <= chars.len() {
-        match re.exec_at(chars, pos) {
+    while pos <= text.len() {
+        match re.exec_text(text, pos) {
             None => break,
             Some(caps) => {
                 let (a, b) = caps[0].unwrap();
@@ -1864,8 +1878,24 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     let input = ab(i.to_string(&arg(args, 0)))?;
     // lastIndex is read (and length-coerced) unconditionally; it only *steers* the match when
     // the regexp is global or sticky. Its valueOf can recompile the regexp (`compile()`), so the
-    // matcher slot is only sampled afterwards.
-    let li = ab(i.get_member(&this, "lastIndex"))?;
+    // matcher slot is only sampled afterwards. Reading an own non-accessor `lastIndex` (its
+    // invariable shape — it is non-configurable) skips the [[Get]] machinery.
+    let li = {
+        let own = match &this {
+            Value::Obj(o) => {
+                let b = o.borrow();
+                b.props
+                    .get("lastIndex")
+                    .filter(|p| !p.accessor)
+                    .map(|p| p.value.clone())
+            }
+            _ => None,
+        };
+        match own {
+            Some(v) => v,
+            None => ab(i.get_member(&this, "lastIndex"))?,
+        }
+    };
     let read_units = to_length_val(i, &li)?;
     let re = i
         .regexps
@@ -1873,7 +1903,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         .cloned()
         .ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
     // Elements are code units (non-unicode) or code points (u/v); JS-visible indices are units.
-    let text = crate::regex::ReText::new(re.unicode, &input);
+    let text = i.re_text(re.unicode, &input);
     let use_last = re.global || re.sticky;
     let last_units = if use_last { read_units } else { 0 };
     if last_units > text.unit_index(text.len()) {
@@ -1883,7 +1913,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         return Ok(Value::Null);
     }
     let last = text.elem_at_unit(last_units);
-    match re.exec_at(&text.elems, last) {
+    match re.exec_text(&text, last) {
         None => {
             if use_last {
                 set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
@@ -1992,24 +2022,49 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
 }
 
 /// Refresh the %RegExp% constructor's legacy static state after a successful RegExpBuiltinExec.
+/// Record a successful match for the legacy `RegExp.$1`-style statics — deferred: the 14 strings
+/// (including full left/right-context copies of the subject) only materialize when one of the
+/// accessors actually reads them (`flush_regexp_legacy`). A pending match for a *different*
+/// realm's constructor flushes first so its statics aren't lost.
 fn update_regexp_legacy_statics(
     i: &mut Interp,
     re: &crate::regex::Regex,
     caps: &[Option<(usize, usize)>],
-    text: &crate::regex::ReText,
+    text: &Rc<crate::regex::ReText>,
     input: &Rc<str>,
 ) {
     let ctor = match i.extra_protos.get("%RegExpCtor%") {
         Some(c) => c.clone(),
         None => return,
     };
+    if let Some(prev) = &i.regexp_last {
+        if !Rc::ptr_eq(&prev.ctor, &ctor) {
+            flush_regexp_legacy(i);
+        }
+    }
+    i.regexp_last = Some(crate::interpreter::RegexpLastMatch {
+        ctor,
+        input: input.clone(),
+        text: text.clone(),
+        caps: caps.to_vec(),
+        ngroups: re.ngroups,
+    });
+}
+
+/// Materialize the pending legacy-statics match (if any) into its constructor's hidden props.
+/// Called by the `RegExp.$1`/`lastMatch`/… accessors before they read.
+pub(super) fn flush_regexp_legacy(i: &mut Interp) {
+    let Some(m) = i.regexp_last.take() else {
+        return;
+    };
+    let (caps, text, ctor) = (&m.caps, &m.text, &m.ctor);
     let put = |k: &'static str, v: String| {
         ctor.borrow_mut()
             .props
             .insert(k, Property::data(Value::from_string(v), true, false, false));
     };
     let (start, end) = caps[0].unwrap();
-    put("__legacy_input", input.to_string());
+    put("__legacy_input", m.input.to_string());
     put("__legacy_lastMatch", text.slice(start, end));
     put("__legacy_leftContext", text.slice(0, start));
     put("__legacy_rightContext", text.slice(end, text.len()));
@@ -2022,8 +2077,8 @@ fn update_regexp_legacy_statics(
     };
     put(
         "__legacy_lastParen",
-        if re.ngroups >= 1 {
-            cap_str(re.ngroups)
+        if m.ngroups >= 1 {
+            cap_str(m.ngroups)
         } else {
             String::new()
         },
@@ -8232,7 +8287,7 @@ fn install_string(it: &mut Interp) {
         if let Value::Obj(o) = &arg(args, 0) {
             if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
                 let re = i.regexps[&(Rc::as_ptr(o) as usize)].clone();
-                let text = crate::regex::ReText::new(re.unicode, &s);
+                let text = i.re_text(re.unicode, &s);
                 let mut parts = Vec::new();
                 let mut last = 0;
                 'outer: for caps in regex_find_all(&re, &text) {

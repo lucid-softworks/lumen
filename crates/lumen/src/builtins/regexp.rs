@@ -397,6 +397,8 @@ fn regexp_legacy_brand(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
 
 fn regexp_legacy_get(i: &mut Interp, this: &Value, slot: &str) -> Result<Value, Value> {
     let c = regexp_legacy_brand(i, this)?;
+    // Materialize the deferred last-match state (if any) before reading.
+    super::flush_regexp_legacy(i);
     let v = c.borrow().props.get(slot).map(|p| p.value.clone());
     Ok(v.unwrap_or_else(|| Value::str("")))
 }
@@ -427,6 +429,8 @@ fn lg_set_input(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
     regexp_legacy_brand(i, &this)?;
     let v = ab(i.to_string(&arg(a, 0)))?;
     let c = regexp_legacy_brand(i, &this)?;
+    // Materialize any deferred match first so this write isn't later clobbered by its flush.
+    super::flush_regexp_legacy(i);
     c.borrow_mut().props.insert(
         "__legacy_input",
         Property::data(Value::Str(v), true, false, false),
