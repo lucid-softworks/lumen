@@ -92,6 +92,18 @@ lumen-cli      node/deno-style entrypoint
 The dependency graph is a strict DAG — `lumen ← lumen-host ← {op crates} ← lumen-runtime ←
 lumen-repl ← lumen-cli` — so each op crate can be worked on in isolation.
 
+## Install
+
+Grab a prebuilt runtime for your platform (macOS arm64, Linux x86_64/arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lucid-softworks/lumen/main/scripts/install.sh | bash
+```
+
+It installs the `lumen` CLI to `~/.lumen/bin` from the rolling `nightly` release
+(`LUMEN_INSTALL` and `LUMEN_RELEASE` override the location and tag). Other platforms build from
+source — see below.
+
 ## Usage
 
 Run scripts / open a REPL through the runtime:
