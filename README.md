@@ -71,10 +71,14 @@ On top of that:
 
   **Native addons** load too: `require('./addon.node')` dlopens the compiled library and runs its
   N-API registration, resolving the addon's `napi_*` symbols against the lumen executable — the
-  same mechanism the `node` binary uses. A core slice of N-API is implemented from scratch (values,
-  properties, functions, callbacks, errors, handle scopes); the loader reaches `dlopen`/`dlsym`
-  through raw `extern "C"` declarations, so no third-party crate is added. See
-  `examples/native-addon`.
+  same mechanism the `node` binary uses. The N-API surface is implemented from scratch (values,
+  properties, functions, callbacks, errors, references, object wrap, classes, promises, buffers,
+  typed arrays, async work); the loader reaches `dlopen`/`dlsym` through raw `extern "C"`
+  declarations, so no third-party crate is added. See `examples/native-addon`.
+
+  **`vite build` runs on lumen** (`examples/vite-app`): a full Vite production build, bundling
+  through Rollup's native N-API addon, transforming with esbuild's service subprocess, over
+  ESM↔CommonJS interop and the `node:` surface — building `dist/` and exiting cleanly.
 
 - **REPL + CLI** (`lumen-repl`, `lumen-cli`) — an interactive shell with a persistent realm,
   parser-driven incomplete-input detection (multi-line continuation), top-level `await`, and
