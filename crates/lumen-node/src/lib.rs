@@ -23,6 +23,9 @@ use std::path::Path;
 use lumen_host::{ops, Ctx, Extension, Value};
 
 mod child;
+// The N-API `.node` loader consumes `DynLib::path` (diagnostics); allow until that stage lands.
+#[allow(dead_code)]
+mod dylib;
 
 pub fn extension() -> Extension {
     Extension {
