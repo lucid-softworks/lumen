@@ -1455,6 +1455,115 @@ impl Interp {
         })
     }
 
+    // ----- embed helpers for host addons (N-API) ---------------------------------------------
+
+    /// A stable identity for an object value (its heap address), or `None` for a non-object.
+    /// Used by host addons to key per-object native state (`napi_wrap`) and to implement `===`
+    /// on objects without exposing the object handle.
+    pub fn object_addr(&self, v: &Value) -> Option<usize> {
+        v.as_obj().map(|o| Rc::as_ptr(o) as usize)
+    }
+
+    /// `Object.getPrototypeOf(v)` — the value's `[[Prototype]]` (`null` when there is none).
+    pub fn prototype_of(&self, v: &Value) -> Value {
+        match v.as_obj().and_then(|o| o.borrow().proto.clone()) {
+            Some(p) => Value::Obj(p),
+            None => Value::Null,
+        }
+    }
+
+    /// Whether `v` is an Error object (has the error exotic on itself or anywhere up its
+    /// prototype chain — so subclass instances count too).
+    pub fn is_error_value(&self, v: &Value) -> bool {
+        let mut cur = v.as_obj().cloned();
+        while let Some(o) = cur {
+            if matches!(o.borrow().exotic, Exotic::Error(_)) {
+                return true;
+            }
+            cur = o.borrow().proto.clone();
+        }
+        false
+    }
+
+    /// The `===` (SameValueNonNumeric / strict-equality) predicate, for host addons.
+    pub fn values_strict_equal(&self, a: &Value, b: &Value) -> bool {
+        self.strict_equals(a, b)
+    }
+
+    /// Whether the current native call is a construct (`new`) — a native constructor uses this to
+    /// build its instance only under `new`.
+    pub fn is_constructing(&self) -> bool {
+        self.constructing
+    }
+
+    /// A fresh object with an explicit `[[Prototype]]` (`null` → no prototype). For host addons
+    /// creating instances with a class's prototype.
+    pub fn new_object_with_proto(&self, proto: &Value) -> Value {
+        Value::Obj(Object::new(proto.as_obj().cloned()))
+    }
+
+    /// Mark a native function as a constructor and wire up its `prototype`/`constructor` link, so
+    /// `new ctor()` is legal and instances inherit from `proto`. Both links are non-enumerable,
+    /// as for a JS `class`.
+    pub fn set_constructor_prototype(&self, ctor: &Value, proto: &Value) {
+        if let Some(c) = ctor.as_obj() {
+            c.borrow_mut().is_constructor = true;
+            c.borrow_mut()
+                .props
+                .insert("prototype", Property::data(proto.clone(), false, false, false));
+        }
+        if let Some(p) = proto.as_obj() {
+            p.borrow_mut()
+                .props
+                .insert("constructor", Property::data(ctor.clone(), true, false, true));
+        }
+    }
+
+    /// Define an accessor (getter/setter) property on `target`. For host addons registering class
+    /// accessors (`napi_define_class` with getter/setter descriptors).
+    pub fn define_accessor_value(
+        &self,
+        target: &Value,
+        name: &str,
+        get: Option<Value>,
+        set: Option<Value>,
+        enumerable: bool,
+    ) {
+        if let Some(o) = target.as_obj() {
+            o.borrow_mut().props.insert(
+                name,
+                Property { value: Value::Undefined, get, set, accessor: true, writable: false, enumerable, configurable: true },
+            );
+        }
+    }
+
+    /// A TypedArray's `(napi element-type code, byte length, data pointer)`, or `None` for a
+    /// non-typed-array. The pointer aliases the live backing store; it is valid until the buffer
+    /// is resized or detached. For `napi_get_typedarray_info`.
+    pub fn typed_array_raw(&mut self, v: &Value) -> Option<(u8, usize, *mut u8)> {
+        let obj = v.as_obj()?;
+        let info = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)).copied()?;
+        let len = self.ta_len(&info)?;
+        let (code, elem) = match info.kind {
+            crate::value::TaKind::I8 => (0u8, 1usize),
+            crate::value::TaKind::U8 => (1, 1),
+            crate::value::TaKind::U8Clamped => (2, 1),
+            crate::value::TaKind::I16 => (3, 2),
+            crate::value::TaKind::U16 => (4, 2),
+            crate::value::TaKind::I32 => (5, 4),
+            crate::value::TaKind::U32 => (6, 4),
+            crate::value::TaKind::F32 => (7, 4),
+            crate::value::TaKind::F64 => (8, 8),
+            crate::value::TaKind::I64 => (9, 8),
+            crate::value::TaKind::U64 => (10, 8),
+            crate::value::TaKind::F16 => (1, 2), // no N-API code for float16; report bytes
+        };
+        let byte_len = len * elem;
+        let buf = self.array_buffers.get_mut(&info.buffer)?;
+        let ptr = unsafe { buf.as_mut_ptr().add(info.offset) };
+        Some((code, byte_len, ptr))
+    }
+
     pub fn make_array(&self, items: Vec<Value>) -> Value {
         let obj = Object::new(Some(self.array_proto.clone()));
         obj.borrow_mut().exotic = Exotic::Array;
@@ -1582,6 +1691,13 @@ impl Interp {
     /// shape a [`NativeFn`] returns, for native fns that call back into JS.
     pub fn invoke(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Value> {
         self.call(callee, this, args).map_err(abrupt_value)
+    }
+
+    /// [`construct`](Interp::construct) with an abrupt completion lowered to the thrown value —
+    /// the embed-friendly `new callee(...args)` (used by N-API's `napi_new_instance` /
+    /// `napi_create_promise`).
+    pub fn construct_value(&mut self, callee: Value, args: &[Value]) -> Result<Value, Value> {
+        self.construct(callee, args).map_err(abrupt_value)
     }
 
     /// ToNumber with the abrupt completion lowered to the thrown value (see [`invoke`]).
