@@ -102,3 +102,5 @@ nodeFs.promises = {
 };
 
 __builtins.set("fs", nodeFs);
+// `node:fs/promises` is the promises API as its own module.
+__builtins.set("fs/promises", nodeFs.promises);

@@ -1,6 +1,20 @@
 // Small node: builtins the Express stack pulls in. Each is the practical subset its consumers
 // use, not a full implementation; gaps throw clearly rather than silently misbehaving.
 
+// ---- node:perf_hooks --------------------------------------------------------------------------
+// The web `performance` global, plus a no-op PerformanceObserver (lumen has no entry buffer).
+__builtins.set("perf_hooks", {
+  performance: globalThis.performance,
+  PerformanceObserver: class PerformanceObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  },
+  PerformanceEntry: class PerformanceEntry {},
+  monitorEventLoopDelay: () => ({ enable() {}, disable() {}, percentile: () => 0, reset() {} }),
+});
+
 // ---- node:querystring -------------------------------------------------------------------------
 // Classic (non-percent-strict) parse/stringify. `qs`/body-parser can use `querystring` for simple
 // bodies; Express's default query parser is `qs` (its own package), so this is the fallback path.
