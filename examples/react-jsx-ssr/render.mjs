@@ -1,8 +1,9 @@
-// Run a JSX or TypeScript-JSX (.tsx) React component on lumen. The engine parses JavaScript, not
-// JSX/TS, so we transpile the source first with esbuild (which itself runs on lumen), then execute
-// the plain-JS result. esbuild's `tsx` loader both strips TypeScript types and lowers JSX to
-// React.createElement calls; the `import React`/`import { renderToString }` bindings are left as
-// ESM imports and resolve against node_modules like any other module.
+// Run a TypeScript-JSX (.tsx) React component on lumen. Plain .jsx runs natively — just
+// `lumen-cli app.jsx` — because the runtime lowers JSX itself. TypeScript *type* stripping is not
+// built in, though, so a .tsx file is transpiled with esbuild first (which itself runs on lumen).
+// esbuild's `tsx` loader strips the types and lowers JSX to React.createElement calls; the
+// `import React`/`import { renderToString }` bindings stay ESM imports and resolve against
+// node_modules like any other module.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
