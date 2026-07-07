@@ -129,8 +129,12 @@ pub const COND_PEEK_TRUTHY: u32 = 1;
 pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 
 // The inline fast paths read Value directly: repr(u8) tag byte at offset 0, payload at
-// offset 8, 24 bytes total. Tags 0..=4 (Undefined/Empty/Null/Bool/Num) are trivially copyable.
+// offset 8, 24 bytes total on 64-bit. Tags 0..=4 (Undefined/Empty/Null/Bool/Num) are trivially
+// copyable. Only the JIT (aarch64-macos) depends on this, so the layout is only asserted there —
+// on a 32-bit target (wasm) `Value` is smaller and the JIT does not exist.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
 
 /// Two-register return for helpers that produce (new sp, flag) — x0/x1 under the C ABI.
