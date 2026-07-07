@@ -1,0 +1,1 @@
+{ "name": "vite-app", "version": "1.0.0", "private": true, "type": "module", "devDependencies": { "vite": "^5.4.10" } }
