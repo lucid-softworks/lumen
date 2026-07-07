@@ -417,6 +417,13 @@ impl Property {
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
     index: crate::fasthash::FastMap<Rc<str>, usize>,
+    /// Object shape (hidden class): the id encoding this map's ordered key sequence (see
+    /// [`ShapeTable`]). Two `Props` share an id exactly when they added the same keys in the same
+    /// order, so an inline cache that recorded (shape, slot) from one object can trust that slot
+    /// on any other object of the same shape — without a key compare. Bumped to a child on
+    /// new-key insert, to a fresh unique on a structural removal. Only consulted for non-exotic
+    /// objects (arrays keep the key-compare path — same shape can mean different element counts).
+    shape: u32,
     /// Dense element map: `elems[n]` is the `entries` slot of canonical-index key `n`, or
     /// `NO_SLOT`. Maintained for a (near-)contiguous prefix from 0 — a canonical key far past the
     /// dense frontier lives only in `index` (see `note_inserted`). This is what makes `a[i]`
@@ -426,6 +433,57 @@ pub struct Props {
 
 /// `elems` hole marker (also caps how many entries dense slots can address).
 const NO_SLOT: u32 = u32::MAX;
+
+/// The empty-object shape: every `Props` starts here and all empty objects share it, so adding
+/// the same first key to two of them lands on the same child shape.
+const SHAPE_EMPTY: u32 = 0;
+
+/// The object-shape (hidden-class) transition tree. A shape id encodes an *ordered sequence of
+/// property keys* — two `Props` share an id exactly when they added the same keys in the same
+/// order (attributes are NOT encoded; the inline cache re-checks accessor/writable at the slot).
+/// `transitions[(parent, key)] = child` is memoized, so structurally-identical objects converge
+/// on one id — which is what makes a shared per-site cache's shape compare meaningful (the flaw
+/// that sank the earlier per-object version counter). A structural *removal* can't be a tree
+/// transition (it doesn't extend the key sequence), so it mints a fresh unique id that no cache
+/// ever holds — forcing a re-derive.
+struct ShapeTable {
+    transitions: crate::fasthash::FastMap<(u32, Rc<str>), u32>,
+    next: u32,
+}
+
+thread_local! {
+    static SHAPES: RefCell<ShapeTable> = RefCell::new(ShapeTable {
+        transitions: Default::default(),
+        next: 1, // 0 is SHAPE_EMPTY
+    });
+}
+
+impl ShapeTable {
+    fn fresh(&mut self) -> u32 {
+        let id = self.next;
+        // Wrap past 0 (SHAPE_EMPTY must stay the empty object's id alone).
+        self.next = self.next.checked_add(1).filter(|&n| n != 0).unwrap_or(1);
+        id
+    }
+}
+
+/// The child shape reached by adding `key` to shape `parent` (memoized so it is shared).
+fn shape_transition(parent: u32, key: &Rc<str>) -> u32 {
+    SHAPES.with(|t| {
+        let mut t = t.borrow_mut();
+        if let Some(&c) = t.transitions.get(&(parent, key.clone())) {
+            return c;
+        }
+        let child = t.fresh();
+        t.transitions.insert((parent, key.clone()), child);
+        child
+    })
+}
+
+/// A fresh unique shape id (a structural removal / deopt — no cache should still match).
+fn shape_fresh() -> u32 {
+    SHAPES.with(|t| t.borrow_mut().fresh())
+}
 
 /// Entry count up to which a `Props` runs without a hash index (linear-scan lookups, no hash
 /// allocation or rehash on insert). Most objects — instance fields, cons cells, literals — stay
@@ -471,10 +529,16 @@ impl Props {
         Props {
             entries: Vec::new(),
             index: Default::default(),
+            shape: SHAPE_EMPTY,
             elems: Vec::new(),
         }
     }
 
+    /// This map's shape id — the inline cache's structural validation token (see the `shape` field).
+    #[inline]
+    pub(crate) fn shape(&self) -> u32 {
+        self.shape
+    }
 
     /// The own property for canonical index `n`, without hashing. `None` only means "not in the
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
@@ -570,6 +634,7 @@ impl Props {
         self.entries.clear();
         self.index.clear();
         self.elems.clear();
+        self.shape = shape_fresh();
     }
     /// Append the next dense element while *building a fresh array in order* (element index ==
     /// entry slot == dense slot): skips the canonical-index parse and, for small indices, the
@@ -600,6 +665,8 @@ impl Props {
                 self.build_index();
                 self.index.insert(key.clone(), slot);
             }
+            // Extending the key sequence transitions to the (shared, memoized) child shape.
+            self.shape = shape_transition(self.shape, &key);
             self.entries.push((key, prop));
             self.note_inserted(slot);
         }
@@ -624,6 +691,8 @@ impl Props {
         for slot in 0..self.entries.len() {
             self.note_inserted(slot);
         }
+        // A removal shifts slots: it can't be a tree transition, so deopt to a fresh unique id.
+        self.shape = shape_fresh();
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
@@ -631,6 +700,7 @@ impl Props {
             return false;
         };
         self.entries.remove(i);
+        self.shape = shape_fresh(); // slots shifted — deopt (see remove_indices_from)
         if !self.index.is_empty() {
             self.index.remove(key);
             // Re-index everything after the removed slot.

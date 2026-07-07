@@ -37,10 +37,20 @@ pub enum Tier {
 /// holder had *no* own property of that name. A hit re-validates all of that (each hop plain and
 /// missing `name`, the holder's cached slot still keyed `name`), so a stale cache — including a
 /// *different* object reaching this shared per-site cache — can only cost time, never correctness.
+///
+/// `recv_shape` / `holder_shape` are the receiver's and holder's [object shapes] at cache time.
+/// For a `depth == 0` or `depth == 1` hit on non-exotic objects they turn validation into shape-
+/// id compares (no per-hop key/hash checks): shapes are shared across structurally-identical
+/// objects, so matching one recorded from object A on object B guarantees B's `slot` maps `name`
+/// too. Deeper hits, exotics (arrays), and shape misses fall back to the key-checked walk.
+///
+/// [object shapes]: crate::value::Props::shape
 #[derive(Clone, Copy)]
 pub struct IcState {
     pub depth: u8,
     pub slot: u32,
+    pub recv_shape: u32,
+    pub holder_shape: u32,
 }
 
 pub const IC_EMPTY: u8 = u8::MAX;
@@ -51,6 +61,8 @@ impl IcState {
     pub const EMPTY: IcState = IcState {
         depth: IC_EMPTY,
         slot: 0,
+        recv_shape: 0,
+        holder_shape: 0,
     };
 }
 

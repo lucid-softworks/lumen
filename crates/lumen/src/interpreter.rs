@@ -1973,41 +1973,49 @@ impl Interp {
         use crate::bytecode::{IcState, IC_EMPTY, IC_MAX_DEPTH};
         type ObjCell = std::cell::RefCell<Object>;
         let head = Rc::as_ptr(o);
-        // Hit path: hop `depth` prototypes (each must be plain and lack an own `name`), then
-        // key-compare the holder's cached slot.
         let st = cache.get();
-        if st.depth != IC_EMPTY {
-            let mut cur: *const ObjCell = head;
-            let mut valid = true;
+        // Shape fast path: a `depth == 0` (own) or `depth == 1` (immediate-prototype, e.g. a
+        // method) hit on non-exotic ordinary objects validates by shape-id compares alone — no
+        // per-hop key or hash checks. Shapes are shared across structurally-identical objects, so
+        // an id recorded from one instance validates the same slot on any sibling instance. The
+        // proto is re-followed live and the holder's shape re-checked, so a proto swap or holder
+        // mutation is caught. Arrays / deeper chains / misses drop to the re-derive walk below.
+        if st.depth <= 1 && st.depth != IC_EMPTY {
             unsafe {
-                for _ in 0..st.depth {
-                    let b = (*cur).borrow();
-                    if !self.ic_plain_ptr(cur as usize, &b) || b.props.contains(name) {
-                        valid = false;
-                        break;
-                    }
-                    match b.proto.as_ref() {
-                        Some(p) => cur = Rc::as_ptr(p),
-                        None => {
-                            valid = false;
-                            break;
-                        }
-                    }
-                }
-                if valid {
-                    let b = (*cur).borrow();
-                    if self.ic_plain_ptr(cur as usize, &b) {
-                        if let Some((k, p)) = b.props.entry_at(st.slot as usize) {
-                            if !p.accessor && &**k == name {
+                let rb = (*head).borrow();
+                if matches!(rb.exotic, Exotic::None)
+                    && self.ordinary_get_ptr(head as usize)
+                    && rb.props.shape() == st.recv_shape
+                {
+                    if st.depth == 0 {
+                        if let Some((_, p)) = rb.props.entry_at(st.slot as usize) {
+                            if !p.accessor {
                                 return Some(p.value.clone());
+                            }
+                        }
+                    } else if let Some(pr) = rb.proto.as_ref() {
+                        let hp = Rc::as_ptr(pr);
+                        drop(rb); // holder is a different object; release the receiver borrow
+                        let hb = (*hp).borrow();
+                        if matches!(hb.exotic, Exotic::None)
+                            && self.ordinary_get_ptr(hp as usize)
+                            && hb.props.shape() == st.holder_shape
+                        {
+                            if let Some((_, p)) = hb.props.entry_at(st.slot as usize) {
+                                if !p.accessor {
+                                    return Some(p.value.clone());
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        // Miss: walk the chain once ourselves; on a plain data hit within reach, record
-        // (depth, slot). Any non-plain level or an accessor defers to full [[Get]].
+        // Re-derive: walk the chain by raw pointer (every object is kept alive transitively by
+        // `o`, nothing mutates during the read). On a plain data hit within reach record
+        // (depth, slot, receiver shape, holder shape); a non-plain level or accessor defers to
+        // full `[[Get]]`.
+        let recv_shape = unsafe { (*head).borrow().props.shape() };
         let mut cur: *const ObjCell = head;
         unsafe {
             for depth in 0..=IC_MAX_DEPTH {
@@ -2024,6 +2032,8 @@ impl Interp {
                     cache.set(IcState {
                         depth,
                         slot: slot as u32,
+                        recv_shape,
+                        holder_shape: b.props.shape(),
                     });
                     return Some(v);
                 }
@@ -2072,9 +2082,12 @@ impl Interp {
             return false;
         }
         let st = cache.get();
-        if st.depth == 0 {
-            if let Some((k, p)) = b.props.entry_at(st.slot as usize) {
-                if !p.accessor && p.writable && &**k == name {
+        // Shape fast path (own writable data property): a shape match means `slot` still maps
+        // `name`; skip the key compare. `accessor`/`writable` are re-checked (an in-place
+        // defineProperty could have flipped them without changing the shape).
+        if st.depth == 0 && b.props.shape() == st.recv_shape {
+            if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
+                if !p.accessor && p.writable {
                     b.props.entry_at_mut(st.slot as usize).unwrap().1.value = v.clone();
                     return true;
                 }
@@ -2086,10 +2099,13 @@ impl Interp {
                 if p.accessor || !p.writable {
                     return false; // setter, or non-writable (strict-throw) — slow path
                 }
+                let shape = b.props.shape();
                 b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
                 cache.set(crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,
+                    recv_shape: shape,
+                    holder_shape: shape,
                 });
                 true
             }
