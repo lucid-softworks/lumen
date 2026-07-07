@@ -256,7 +256,7 @@ impl Runtime {
         let timers_pending = state
             .get::<lumen_timers::Timers>()
             .is_some_and(|t| t.has_pending());
-        let tasks_pending = state.get::<TaskRegistry>().is_some_and(|r| !r.is_empty());
+        let tasks_pending = state.get::<TaskRegistry>().is_some_and(|r| r.has_ref_pending());
         !callbacks_queued && !timers_pending && !tasks_pending
     }
 

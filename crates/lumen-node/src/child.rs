@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use lumen_host::{ops, CompletionSender, Ctx, OpDecl, TaskRegistry, Value};
+use lumen_host::{ops, CompletionSender, Ctx, OpDecl, TaskId, TaskRegistry, Value};
 
 /// A readable child stream (stdout or stderr), boxed to a common type.
 type ReadStream = Arc<Mutex<Option<Box<dyn Read + Send>>>>;
@@ -22,6 +22,11 @@ struct ChildProc {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: ReadStream,
     stderr: ReadStream,
+    /// `child.unref()` was called — its pending reads/waits must not keep the loop alive.
+    unref: bool,
+    /// Task ids of this child's in-flight reads/waits, so `unref()` can retroactively mark the
+    /// ones registered before it was called (esbuild issues a read + wait, *then* unrefs).
+    pending_tasks: Vec<TaskId>,
 }
 
 #[derive(Default)]
@@ -35,6 +40,8 @@ pub const CHILD_OPS: &[OpDecl] = ops![
     "read" (4) => op_read,
     "write" (4) => op_write,
     "wait" (3) => op_wait,
+    "unref" (1) => op_unref,
+    "ref" (1) => op_ref,
     "kill" (2) => op_kill,
     "closeStdin" (1) => op_close_stdin,
     "execSync" (4) => op_exec_sync,
@@ -130,6 +137,8 @@ fn op_spawn(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         stdout: Arc::new(Mutex::new(stdout)),
         stderr: Arc::new(Mutex::new(stderr)),
         child: Arc::new(Mutex::new(child)),
+        unref: false,
+        pending_tasks: Vec::new(),
     };
     let reg = ctx.host_mut::<ChildRegistry>().expect("child registry installed");
     let id = reg.next;
@@ -166,16 +175,22 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     let which = args.get(1).and_then(Value::as_num_opt).unwrap_or(1.0) as u32;
     let (resolve, reject) = take_resolve_reject(ctx, args.get(2), args.get(3))?;
 
-    let handle = ctx
+    let (handle, unref) = ctx
         .host_mut::<ChildRegistry>()
         .and_then(|r| r.procs.get(&child_id))
-        .map(|p| if which == 2 { p.stderr.clone() } else { p.stdout.clone() })
+        .map(|p| {
+            let h = if which == 2 { p.stderr.clone() } else { p.stdout.clone() };
+            (h, p.unref)
+        })
         .ok_or_else(|| ctx.make_error("Error", "child: unknown process"))?;
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_read);
+    let reg = ctx.host_mut::<TaskRegistry>().expect("registry");
+    let id = reg.register(resolve, Some(reject), decode_read);
+    // The task inherits the child's current ref state; `child.ref()`/`unref()` can toggle it later.
+    if unref {
+        reg.set_unref(id);
+    }
+    track_child_task(ctx, child_id, id);
     completions(ctx).run_blocking(id, move || {
         let mut guard = handle.lock().expect("stream lock");
         let result: Result<Vec<u8>, String> = match guard.as_mut() {
@@ -245,16 +260,18 @@ fn decode_ok(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Ve
 fn op_wait(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     let child_id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
     let (resolve, reject) = take_resolve_reject(ctx, args.get(1), args.get(2))?;
-    let handle = ctx
+    let (handle, unref) = ctx
         .host_mut::<ChildRegistry>()
         .and_then(|r| r.procs.get(&child_id))
-        .map(|p| p.child.clone())
+        .map(|p| (p.child.clone(), p.unref))
         .ok_or_else(|| ctx.make_error("Error", "child: unknown process"))?;
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_exit);
+    let reg = ctx.host_mut::<TaskRegistry>().expect("registry");
+    let id = reg.register(resolve, Some(reject), decode_exit);
+    if unref {
+        reg.set_unref(id);
+    }
+    track_child_task(ctx, child_id, id);
     completions(ctx).run_blocking(id, move || {
         // Poll try_wait(), releasing the child lock between checks, so `kill()` can acquire it (a
         // blocking wait() would hold the lock for the child's whole life and deadlock kill).
@@ -279,6 +296,53 @@ fn decode_exit(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
         Ok(None) => Ok(vec![Value::Null]), // terminated by signal
         Err(e) => Err(ctx.make_error("Error", e)),
     }
+}
+
+/// Remember a child's in-flight task so `unref()` can mark it later (see [`ChildProc::pending_tasks`]).
+fn track_child_task(ctx: &mut Ctx, child_id: u32, task: TaskId) {
+    if let Some(p) = ctx
+        .host_mut::<ChildRegistry>()
+        .and_then(|r| r.procs.get_mut(&child_id))
+    {
+        p.pending_tasks.push(task);
+    }
+}
+
+/// Set the child's ref state and apply it to every in-flight read/wait. esbuild toggles this per
+/// request (`refCount`): the persistent service child is unref'd while idle so it doesn't block
+/// exit, and ref'd during a transform so the loop waits for the response.
+fn set_child_ref(ctx: &mut Ctx, child_id: u32, unref: bool) {
+    let pending = ctx
+        .host_mut::<ChildRegistry>()
+        .and_then(|r| r.procs.get_mut(&child_id))
+        .map(|p| {
+            p.unref = unref;
+            p.pending_tasks.clone()
+        })
+        .unwrap_or_default();
+    if let Some(reg) = ctx.host_mut::<TaskRegistry>() {
+        for id in pending {
+            if unref {
+                reg.set_unref(id);
+            } else {
+                reg.set_ref(id);
+            }
+        }
+    }
+}
+
+/// `(childId)` — `child.unref()`.
+fn op_unref(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let child_id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    set_child_ref(ctx, child_id, true);
+    Ok(Value::Undefined)
+}
+
+/// `(childId)` — `child.ref()`.
+fn op_ref(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let child_id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    set_child_ref(ctx, child_id, false);
+    Ok(Value::Undefined)
 }
 
 fn op_kill(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {

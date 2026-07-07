@@ -82,8 +82,15 @@ class ChildProcess extends EventEmitter {
     this.killed = true;
     return __child.kill(this._id, typeof signal === "number" ? signal : 0);
   }
-  ref() {}
-  unref() {}
+  ref() {
+    __child.ref(this._id);
+  }
+  unref() {
+    // Detach from the event loop's keep-alive count (Node semantics), so a long-lived service
+    // child (esbuild) doesn't block process exit once the main work is done. esbuild toggles
+    // ref/unref per request, so both must be real.
+    __child.unref(this._id);
+  }
 }
 
 function spawn(command, args, options) {

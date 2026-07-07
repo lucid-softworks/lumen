@@ -290,6 +290,9 @@ pub struct TaskEntry {
     pub on_ok: Value,
     pub on_err: Option<Value>,
     pub decode: TaskDecoder,
+    /// An `unref`'d task still settles when it completes, but does not by itself keep the event
+    /// loop alive (Node's `child.unref()` — e.g. esbuild's persistent service child).
+    pub unref: bool,
 }
 
 impl TaskRegistry {
@@ -303,6 +306,7 @@ impl TaskRegistry {
                 on_ok,
                 on_err,
                 decode,
+                unref: false,
             },
         );
         id
@@ -311,8 +315,25 @@ impl TaskRegistry {
     pub fn take(&mut self, id: TaskId) -> Option<TaskEntry> {
         self.map.remove(&id)
     }
+    /// Mark a pending task as `unref`'d (see [`TaskEntry::unref`]).
+    pub fn set_unref(&mut self, id: TaskId) {
+        if let Some(e) = self.map.get_mut(&id) {
+            e.unref = true;
+        }
+    }
+    /// Re-`ref` a pending task so it keeps the loop alive again (Node's `handle.ref()`).
+    pub fn set_ref(&mut self, id: TaskId) {
+        if let Some(e) = self.map.get_mut(&id) {
+            e.unref = false;
+        }
+    }
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+    /// Whether any *ref*'d (loop-keeping) task is pending. Unref'd tasks are ignored — they
+    /// settle if they complete but must not hold the process open.
+    pub fn has_ref_pending(&self) -> bool {
+        self.map.values().any(|e| !e.unref)
     }
 }
 
