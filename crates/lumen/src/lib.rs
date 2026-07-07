@@ -292,7 +292,9 @@ pub mod embed {
     pub use crate::interpreter::Interp as Ctx;
     /// JS values. Matching/constructing the primitive variants is supported API; object
     /// internals stay opaque — an object handle is only usable through [`Ctx`] methods.
-    pub use crate::value::{NativeFn, Value};
+    /// A data-carrying native callable, unlike the bare-`fn` [`NativeFn`]. Register one with
+    /// [`Ctx::new_native_fn`] when the host function must capture state (N-API callbacks).
+    pub use crate::value::{NativeClosure, NativeFn, Value};
 }
 
 /// Embedder methods (`feature = "embed"`). Native functions registered here are bare `fn`

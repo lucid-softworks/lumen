@@ -1468,6 +1468,51 @@ impl Interp {
         Value::Obj(Object::new(proto))
     }
 
+    /// Invoke a native callable (bare `fn` or data-carrying closure) — the shared body for the
+    /// call/construct/super dispatch paths.
+    pub(crate) fn dispatch_native(&mut self, call: &Callable, this: Value, args: &[Value]) -> Result<Value, Value> {
+        match call {
+            Callable::Native(f) => f(self, this, args),
+            Callable::NativeData(f) => {
+                let f = f.clone();
+                f(self, this, args)
+            }
+            _ => unreachable!("dispatch_native on a non-native callable"),
+        }
+    }
+
+    /// A function `Value` backed by a data-carrying native closure — the embedder API for host
+    /// functions that must capture state (N-API callbacks carrying a C fn pointer + `void*`).
+    pub fn new_native_fn(
+        &self,
+        name: &str,
+        len: usize,
+        f: std::rc::Rc<crate::value::NativeClosure>,
+    ) -> Value {
+        Value::Obj(self.make_native_closure(name, len, f))
+    }
+
+    /// A function object backed by a data-carrying native closure (see [`NativeClosure`]). Like
+    /// [`make_native`], but the callable can capture host state (used for N-API functions).
+    pub fn make_native_closure(
+        &self,
+        name: &str,
+        len: usize,
+        f: std::rc::Rc<crate::value::NativeClosure>,
+    ) -> Gc {
+        let obj = Object::new(Some(self.function_proto.clone()));
+        {
+            let mut b = obj.borrow_mut();
+            b.call = Callable::NativeData(f);
+            b.props.insert("length", Property::data(Value::Num(len as f64), false, false, true));
+            b.props.insert(
+                "name",
+                Property::data(Value::from_string(name.to_string()), false, false, true),
+            );
+        }
+        obj
+    }
+
     pub fn make_native(&self, name: &str, len: usize, f: NativeFn) -> Gc {
         let obj = Object::new(Some(self.function_proto.clone()));
         {
@@ -3247,7 +3292,9 @@ impl Interp {
         }
         let r = match call {
             Callable::None => Err(self.throw("TypeError", "value is not a function")),
-            Callable::Native(f) => f(self, this, args).map_err(Abrupt::Throw),
+            Callable::Native(_) | Callable::NativeData(_) => {
+                self.dispatch_native(&call, this, args).map_err(Abrupt::Throw)
+            }
             Callable::User(func, env) => {
                 // A class constructor cannot be [[Call]]ed.
                 if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
@@ -3284,7 +3331,7 @@ impl Interp {
                                 Callable::User(..) => "user",
                                 Callable::WrappedShadow { .. } => "wshadow",
                                 Callable::WrappedCross { .. } => "wcross",
-                                Callable::Native(_) => "native",
+                                Callable::Native(_) | Callable::NativeData(_) => "native",
                                 _ => "other",
                             },
                             _ => "nonobj",
@@ -4675,7 +4722,7 @@ impl Interp {
         }
         let call = obj.borrow().call.clone();
         match call {
-            Callable::Native(f) => {
+            Callable::Native(_) | Callable::NativeData(_) => {
                 // A native non-constructor (a method, global function, Math fn) has no own
                 // `prototype` property; only real built-in constructors do. Reject `new` on the rest.
                 let constructable =
@@ -4692,7 +4739,7 @@ impl Interp {
                 let saved_nt = self.new_target.clone();
                 self.constructing = true;
                 self.new_target = new_target;
-                let r = f(self, Value::Undefined, args).map_err(Abrupt::Throw);
+                let r = self.dispatch_native(&call, Value::Undefined, args).map_err(Abrupt::Throw);
                 self.constructing = saved;
                 self.new_target = saved_nt;
                 r

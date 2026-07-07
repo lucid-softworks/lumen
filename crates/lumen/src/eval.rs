@@ -4800,12 +4800,12 @@ impl Interp {
                 self.super_call_ok = saved_super;
                 r
             }
-            Callable::Native(f) => {
+            Callable::Native(_) | Callable::NativeData(_) => {
                 // Native parent (e.g. Error/Map): a super() call is a construct, so set the flag for
                 // constructors that require `new`. Run it, then graft its own props onto `this`.
                 let saved = self.constructing;
                 self.constructing = true;
-                let made = f(self, this.clone(), args).map_err(Abrupt::Throw);
+                let made = self.dispatch_native(&call, this.clone(), args).map_err(Abrupt::Throw);
                 self.constructing = saved;
                 let made = made?;
                 if let (Value::Obj(src), Value::Obj(dst)) = (&made, this) {
@@ -6500,7 +6500,7 @@ impl Interp {
         let b = o.borrow();
         match &b.call {
             Callable::User(f, _) => !(f.is_arrow || f.is_method || f.is_generator || f.is_async),
-            Callable::Native(_) => {
+            Callable::Native(_) | Callable::NativeData(_) => {
                 b.is_constructor
                     || b.props
                         .get("prototype")

@@ -13,6 +13,11 @@ pub type Gc = Rc<RefCell<Object>>;
 /// so a plain `Result<Value, Value>` (Err = the thrown value) is the whole contract.
 pub type NativeFn = fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
 
+/// A native function that carries captured state, unlike the bare-`fn` [`NativeFn`]. The embedder
+/// uses this to wrap host callbacks that need associated data a function pointer can't hold — e.g.
+/// an N-API C callback together with its `void*` and module handle.
+pub type NativeClosure = dyn Fn(&mut Interp, Value, &[Value]) -> Result<Value, Value>;
+
 #[derive(Clone, Default)]
 pub enum Value {
     #[default]
@@ -99,6 +104,8 @@ impl Value {
 pub enum Callable {
     None,
     Native(NativeFn),
+    /// A native function carrying captured state (see [`NativeClosure`]).
+    NativeData(std::rc::Rc<NativeClosure>),
     /// An interpreted function: its AST plus the lexical environment it closed over.
     User(Rc<Function>, Env),
     /// The result of `Function.prototype.bind`.
