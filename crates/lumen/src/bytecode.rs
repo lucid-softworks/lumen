@@ -34,8 +34,9 @@ pub enum Tier {
 /// Per-site property inline-cache state. `depth == IC_EMPTY` means the site has not cached yet.
 /// Otherwise the property was last found as an own, non-accessor data property of the object
 /// `depth` prototype hops above the receiver, at `entries` slot `slot` — and every hop below the
-/// holder had *no* own property of that name. A hit re-validates all of that (each hop is a hash
-/// lookup, the holder a key compare), so a stale cache can only cost time, never correctness.
+/// holder had *no* own property of that name. A hit re-validates all of that (each hop plain and
+/// missing `name`, the holder's cached slot still keyed `name`), so a stale cache — including a
+/// *different* object reaching this shared per-site cache — can only cost time, never correctness.
 #[derive(Clone, Copy)]
 pub struct IcState {
     pub depth: u8,

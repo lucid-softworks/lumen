@@ -1949,17 +1949,21 @@ impl Interp {
         self.get_member(base, name)
     }
 
-    /// Whether `o` reads like an ordinary object for IC purposes. `Exotic::Array` is allowed:
-    /// array *named* reads are ordinary (`length` is a real stored property); everything else
-    /// exotic (string wrappers, arguments, …) and anything in a side table (proxy, namespace,
-    /// typed array) is not.
+    /// Whether object pointer `ptr` (holding `b`) reads like an ordinary object for IC purposes.
+    /// `Exotic::Array` is allowed: array *named* reads are ordinary (`length` is a real stored
+    /// property); everything else exotic (string wrappers, arguments, …) and anything in a side
+    /// table (proxy, namespace, typed array) is not.
     #[inline]
-    fn ic_plain(&self, o: &Gc, b: &Object) -> bool {
-        matches!(b.exotic, Exotic::None | Exotic::Array)
-            && self.ordinary_get_ptr(Rc::as_ptr(o) as usize)
+    fn ic_plain_ptr(&self, ptr: usize, b: &Object) -> bool {
+        matches!(b.exotic, Exotic::None | Exotic::Array) && self.ordinary_get_ptr(ptr)
     }
 
     /// The `GetProp`/`GetMethod` inline-cache fast path; `None` means "take the slow path".
+    ///
+    /// The prototype chain is walked by raw pointer with no `Gc` clones: every object on it is
+    /// transitively kept alive by `o` (which the caller holds) for the duration of this call, and
+    /// nothing mutates the chain here, so the pointers stay valid — this removes a refcount
+    /// bump+drop per hop on every property access.
     fn try_ic_get(
         &self,
         o: &Gc,
@@ -1967,36 +1971,36 @@ impl Interp {
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Option<Value> {
         use crate::bytecode::{IcState, IC_EMPTY, IC_MAX_DEPTH};
+        type ObjCell = std::cell::RefCell<Object>;
+        let head = Rc::as_ptr(o);
         // Hit path: hop `depth` prototypes (each must be plain and lack an own `name`), then
         // key-compare the holder's cached slot.
         let st = cache.get();
         if st.depth != IC_EMPTY {
-            let mut cur = o.clone();
+            let mut cur: *const ObjCell = head;
             let mut valid = true;
-            for _ in 0..st.depth {
-                let next = {
-                    let b = cur.borrow();
-                    if !self.ic_plain(&cur, &b) || b.props.contains(name) {
-                        valid = false;
-                        None
-                    } else {
-                        b.proto.clone()
-                    }
-                };
-                match next {
-                    Some(p) if valid => cur = p,
-                    _ => {
+            unsafe {
+                for _ in 0..st.depth {
+                    let b = (*cur).borrow();
+                    if !self.ic_plain_ptr(cur as usize, &b) || b.props.contains(name) {
                         valid = false;
                         break;
                     }
+                    match b.proto.as_ref() {
+                        Some(p) => cur = Rc::as_ptr(p),
+                        None => {
+                            valid = false;
+                            break;
+                        }
+                    }
                 }
-            }
-            if valid {
-                let b = cur.borrow();
-                if self.ic_plain(&cur, &b) {
-                    if let Some((k, p)) = b.props.entry_at(st.slot as usize) {
-                        if !p.accessor && &**k == name {
-                            return Some(p.value.clone());
+                if valid {
+                    let b = (*cur).borrow();
+                    if self.ic_plain_ptr(cur as usize, &b) {
+                        if let Some((k, p)) = b.props.entry_at(st.slot as usize) {
+                            if !p.accessor && &**k == name {
+                                return Some(p.value.clone());
+                            }
                         }
                     }
                 }
@@ -2004,11 +2008,11 @@ impl Interp {
         }
         // Miss: walk the chain once ourselves; on a plain data hit within reach, record
         // (depth, slot). Any non-plain level or an accessor defers to full [[Get]].
-        let mut cur = o.clone();
-        for depth in 0..=IC_MAX_DEPTH {
-            let next = {
-                let b = cur.borrow();
-                if !self.ic_plain(&cur, &b) {
+        let mut cur: *const ObjCell = head;
+        unsafe {
+            for depth in 0..=IC_MAX_DEPTH {
+                let b = (*cur).borrow();
+                if !self.ic_plain_ptr(cur as usize, &b) {
                     return None;
                 }
                 if let Some(slot) = b.props.slot_of(name) {
@@ -2023,9 +2027,11 @@ impl Interp {
                     });
                     return Some(v);
                 }
-                b.proto.clone()
-            };
-            cur = next?; // chain ended: absent property — slow path returns undefined
+                match b.proto.as_ref() {
+                    Some(p) => cur = Rc::as_ptr(p),
+                    None => return None, // chain ended: absent property — slow path
+                }
+            }
         }
         None
     }

@@ -475,6 +475,7 @@ impl Props {
         }
     }
 
+
     /// The own property for canonical index `n`, without hashing. `None` only means "not in the
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
     #[inline]
