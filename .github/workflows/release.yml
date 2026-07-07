@@ -1,8 +1,9 @@
 name: Release
 
 # Pushing a version tag (e.g. v0.1.0 — release-plz creates these when the release PR merges) builds
-# the `lumen` CLI in release mode for each supported platform and publishes a GitHub release with
-# the binaries attached, named by target triple (lumen-<target-triple>).
+# lumen in release mode for each supported platform and publishes a GitHub release with the binaries
+# attached, named by target triple: lumen-<target-triple> (the bare engine shell) and
+# lumen-cli-<target-triple> (the Node/Deno-style runtime users run programs with).
 #
 # Also dispatchable at a tag ref: tags created with the default GITHUB_TOKEN (release-plz's) do not
 # fire `push` events, so release-plz.yml dispatches this workflow explicitly after tagging.
@@ -31,11 +32,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p lumen --bin lumen
+      - run: cargo build --release -p lumen-cli --bin lumen-cli
       - run: cp target/release/lumen lumen-${{ matrix.target }}
+      - run: cp target/release/lumen-cli lumen-cli-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: lumen-${{ matrix.target }}
           path: lumen-${{ matrix.target }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-cli-${{ matrix.target }}
+          path: lumen-cli-${{ matrix.target }}
           if-no-files-found: error
 
   publish:

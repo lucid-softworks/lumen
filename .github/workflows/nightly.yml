@@ -1,10 +1,12 @@
 name: Nightly
 
-# Builds the `lumen` CLI in release mode for each supported platform and publishes the binaries to
-# a rolling `nightly` prerelease (the tag is recreated on every run). External consumers — e.g. the
-# test262.fyi engine harness — download per-platform assets from
-#   https://github.com/lucid-softworks/lumen/releases/download/nightly/lumen-<target-triple>
-# and read the built commit from the release's target_commitish.
+# Builds lumen in release mode for each supported platform and publishes the binaries to a rolling
+# `nightly` prerelease (the tag is recreated on every run). Two binaries per platform:
+#   lumen-<target-triple>      — the bare engine shell (realm intrinsics only; the test262.fyi
+#                                harness downloads this and reads the commit from target_commitish)
+#   lumen-cli-<target-triple>  — the Node/Deno-style runtime (event loop, fetch, node: compat, …)
+#                                that users grab to actually run programs
+# from https://github.com/lucid-softworks/lumen/releases/download/nightly/<asset>.
 on:
   schedule:
     - cron: '0 3 * * *'
@@ -30,11 +32,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p lumen --bin lumen
+      - run: cargo build --release -p lumen-cli --bin lumen-cli
       - run: cp target/release/lumen lumen-${{ matrix.target }}
+      - run: cp target/release/lumen-cli lumen-cli-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: lumen-${{ matrix.target }}
           path: lumen-${{ matrix.target }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-cli-${{ matrix.target }}
+          path: lumen-cli-${{ matrix.target }}
           if-no-files-found: error
 
   publish:
