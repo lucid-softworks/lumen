@@ -2479,10 +2479,15 @@ impl Interp {
                                 }
                             }
                         }
+                        // Capture the importing module's `import.meta` lexically (the
+                        // `%importmeta%` binding), so the referrer is correct even when this
+                        // `import()` runs from an async continuation after `await`.
+                        let referrer = self.peek_binding("%importmeta%", env);
                         Ok(self.dynamic_import(
                             &s,
                             attr_type.as_deref(),
                             matches!(phase, ImportPhase::Defer),
+                            referrer,
                         ))
                     }
                 }

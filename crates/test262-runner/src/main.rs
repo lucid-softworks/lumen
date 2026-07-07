@@ -816,6 +816,9 @@ fn run_one_inner(path: &Path, harness: &Harness) -> Outcome {
 fn engine_for(path: &Path) -> Engine {
     let mut engine = Engine::new();
     engine.set_module_loader(|spec: &str, referrer: &str| {
+        // A dynamic import's referrer is `import.meta.url`, a `file://` URL; the rest are path
+        // keys. Reduce to a path either way.
+        let referrer = referrer.strip_prefix("file://").unwrap_or(referrer);
         let base = Path::new(referrer).parent()?;
         let resolved = normalize_path(&base.join(spec));
         // Read raw bytes and decode latin-1 style (byte == char), so binary modules imported
@@ -903,6 +906,8 @@ fn run_module(path: &Path, src: &str, harness: &Harness, fm: &Frontmatter) -> Ou
     // and "a.js" must be one module, not two evaluations).
     let key = normalize_path(path).to_string_lossy().into_owned();
     let loader = |spec: &str, referrer: &str| -> Option<(String, String)> {
+        // A dynamic import's referrer is the `file://` `import.meta.url`; static keys are paths.
+        let referrer = referrer.strip_prefix("file://").unwrap_or(referrer);
         let base = Path::new(referrer).parent()?;
         let resolved = normalize_path(&base.join(spec));
         // Raw bytes, decoded latin-1 style when not UTF-8 (binary `type: "bytes"` modules).

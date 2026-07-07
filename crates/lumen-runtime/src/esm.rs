@@ -41,10 +41,18 @@ fn resolve(specifier: &str, referrer: &str, builtins: &BuiltinModules) -> Option
         return Some((format!("node:{bare}"), src.clone()));
     }
 
+    // A dynamic import's referrer is `import.meta.url`, a `file://` URL — reduce it (and a
+    // `file://` specifier) to a plain path for the filesystem resolver.
+    let referrer = referrer.strip_prefix("file://").unwrap_or(referrer);
+    let specifier = specifier.strip_prefix("file://").unwrap_or(specifier);
+
     if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
         let base = Path::new(referrer).parent()?.join(specifier);
         let file = resolve_file_or_dir(&normalize(&base))?;
-        return load_as_module(&file, false);
+        // A relative `.js` file is CommonJS unless its nearest package.json is `type: module` —
+        // Node's own rule. (A misresolved-as-ESM CJS file would expose no named exports.)
+        let cjs = !file_is_esm(&file);
+        return load_as_module(&file, cjs);
     }
 
     // Bare package name.
@@ -106,19 +114,18 @@ fn resolve_node_modules(name: &str, start: &Path) -> Option<(PathBuf, bool)> {
             dir = d.parent();
             continue;
         }
-        // `type:module` lives on the package root, so a bare subpath (`pkg/sub.js`) inherits it
-        // too rather than defaulting to CJS.
-        let esm_pkg = package_is_esm(&package_dir(d, name));
         let target = d.join("node_modules").join(name);
         if target.is_dir() {
             if let Some(f) = resolve_directory(&target) {
-                let esm = esm_pkg || f.extension().is_some_and(|e| e == "mjs");
+                // The resolved file's own nearest package.json decides ESM-ness — a package can
+                // ship an ESM build under `dist/es/` with its own `{"type":"module"}`.
+                let esm = file_is_esm(&f);
                 return Some((f, esm));
             }
         }
         // A bare specifier can also point straight at a file (`pkg/sub.js`).
         if let Some(f) = resolve_file(&target) {
-            let esm = esm_pkg || f.extension().is_some_and(|e| e == "mjs");
+            let esm = file_is_esm(&f);
             return Some((f, esm));
         }
         // A subpath that isn't a literal file may be mapped by the package's `exports`
@@ -181,8 +188,10 @@ fn load_as_module(file: &Path, cjs_default: bool) -> Option<(String, String)> {
             let text = std::fs::read_to_string(file).ok()?;
             Some((key, format!("export default {text};")))
         }
-        "cjs" => Some((key.clone(), cjs_wrapper(&key))),
-        _ if cjs_default => Some((key.clone(), cjs_wrapper(&key))),
+        // `.mjs` is always ESM regardless of package type; `.cjs` is always CommonJS.
+        "mjs" => Some((key.clone(), std::fs::read_to_string(file).ok()?)),
+        "cjs" => Some((key.clone(), cjs_wrapper(&key, source_of(file)))),
+        _ if cjs_default => Some((key.clone(), cjs_wrapper(&key, source_of(file)))),
         _ => {
             let text = std::fs::read_to_string(file).ok()?;
             Some((key, text))
@@ -190,12 +199,244 @@ fn load_as_module(file: &Path, cjs_default: bool) -> Option<(String, String)> {
     }
 }
 
-/// A synthetic ESM module whose default export is `require(path)`'s result — the standard
-/// CJS-in-ESM interop (default only; named CJS exports aren't statically analyzed).
-fn cjs_wrapper(abs_path: &str) -> String {
-    format!(
+/// Whether a resolved file loads as ESM: `.mjs` always, `.cjs` never, and `.js` per the nearest
+/// enclosing `package.json` `"type"` (absent ⇒ CommonJS, Node's default).
+fn file_is_esm(file: &Path) -> bool {
+    match file.extension().and_then(|e| e.to_str()) {
+        Some("mjs") => true,
+        Some("cjs") => false,
+        _ => {
+            let mut dir = file.parent();
+            while let Some(d) = dir {
+                if d.join("package.json").is_file() {
+                    return package_is_esm(d);
+                }
+                dir = d.parent();
+            }
+            false
+        }
+    }
+}
+
+/// Read a file's source (empty on failure — the wrapper still yields a working default export).
+fn source_of(file: &Path) -> String {
+    std::fs::read_to_string(file).unwrap_or_default()
+}
+
+/// A synthetic ESM module bridging a CommonJS file: `require(path)`'s result is the default
+/// export, and each export name statically discovered in the source becomes a live named export.
+/// This is the cjs-module-lexer interop that lets `import { x } from './cjs-file'` link.
+fn cjs_wrapper(abs_path: &str, source: String) -> String {
+    let mut out = format!(
         "const __m = globalThis.require({});\nexport default __m;\n",
         js_string(abs_path)
+    );
+    for name in scan_cjs_exports(&source) {
+        // `export const NAME = __m["NAME"];` — a live binding onto the CJS export (undefined if
+        // the static scan over-approximated, which is harmless).
+        out.push_str(&format!(
+            "export const {name} = __m[{}];\n",
+            js_string(&name)
+        ));
+    }
+    out
+}
+
+/// Statically discover a CommonJS module's export names — the cjs-module-lexer heuristic. Handles
+/// the two dominant shapes: direct assignment (`exports.X =` / `module.exports.X =`) and the
+/// `Object.defineProperty(exports, "X", …)` that transpiled ESM emits. A miss just means a name
+/// isn't re-exported (same as before); a false positive is a harmless `undefined` export.
+fn scan_cjs_exports(src: &str) -> Vec<String> {
+    let bytes = src.as_bytes();
+    let mut names: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // `exports.NAME =` and `module.exports.NAME =` (the `module.` prefix is subsumed).
+    for (i, _) in src.match_indices("exports.") {
+        let start = i + "exports.".len();
+        let name = read_ident(bytes, start);
+        if !name.is_empty() && next_is_assignment(bytes, start + name.len()) {
+            add_export(&mut names, &mut seen, &name);
+        }
+    }
+
+    // `Object.defineProperty(exports, "NAME", …)` — the transpiler pattern.
+    for (i, _) in src.match_indices("defineProperty(") {
+        let rest = &src[i + "defineProperty(".len()..];
+        let rest = rest.trim_start();
+        let rest = rest
+            .strip_prefix("module.exports")
+            .or_else(|| rest.strip_prefix("exports"));
+        if let Some(rest) = rest {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix(',') {
+                if let Some(name) = leading_string_literal(rest.trim_start()) {
+                    add_export(&mut names, &mut seen, &name);
+                }
+            }
+        }
+    }
+
+    // `module.exports = { a, b: … }` — including the `0 && (module.exports = { … })` hint that
+    // bundlers (esbuild, tsc) emit specifically for CJS export lexers.
+    for (i, _) in src.match_indices("module.exports") {
+        let rest = src[i + "module.exports".len()..].trim_start();
+        if let Some(rest) = rest.strip_prefix('=') {
+            if let Some(rest) = rest.trim_start().strip_prefix('{') {
+                for key in object_key_list(rest) {
+                    add_export(&mut names, &mut seen, &key);
+                }
+            }
+        }
+    }
+
+    // `__export(target, { name: () => name, … })` — the esbuild/tsc re-export helper.
+    for (i, _) in src.match_indices("__export(") {
+        let rest = &src[i + "__export(".len()..];
+        if let Some(comma) = rest.find(',') {
+            if let Some(obj) = rest[comma + 1..].trim_start().strip_prefix('{') {
+                for key in object_key_list(obj) {
+                    add_export(&mut names, &mut seen, &key);
+                }
+            }
+        }
+    }
+
+    names
+}
+
+/// The top-level keys of an object literal, given the text just past its opening `{`. Handles
+/// shorthand (`{ a, b }`), `key:` pairs, string keys, and nested braces/brackets/parens/strings.
+fn object_key_list(after_brace: &str) -> Vec<String> {
+    let b = after_brace.as_bytes();
+    let mut keys = Vec::new();
+    let mut depth = 1usize; // already inside the outer `{`
+    let mut expect_key = true;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'{' | b'[' | b'(' => {
+                depth += 1;
+                expect_key = false;
+                i += 1;
+            }
+            b'}' | b']' | b')' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b'"' | b'\'' | b'`' => {
+                let quote = c;
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j] != quote {
+                    if b[j] == b'\\' {
+                        j += 1;
+                    }
+                    j += 1;
+                }
+                if expect_key && depth == 1 {
+                    keys.push(String::from_utf8_lossy(&b[start..j.min(b.len())]).into_owned());
+                    expect_key = false;
+                }
+                i = j + 1;
+            }
+            b',' if depth == 1 => {
+                expect_key = true;
+                i += 1;
+            }
+            b':' if depth == 1 => {
+                expect_key = false;
+                i += 1;
+            }
+            _ => {
+                if expect_key && depth == 1 && (c.is_ascii_alphabetic() || c == b'_' || c == b'$') {
+                    let name = read_ident(b, i);
+                    i += name.len();
+                    keys.push(name);
+                    expect_key = false;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn add_export(names: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, name: &str) {
+    if is_export_ident(name) && seen.insert(name.to_string()) {
+        names.push(name.to_string());
+    }
+}
+
+/// Read a JS identifier starting at `pos`.
+fn read_ident(bytes: &[u8], pos: usize) -> String {
+    let mut end = pos;
+    while end < bytes.len() {
+        let c = bytes[end];
+        let ok = c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+        if !ok {
+            break;
+        }
+        end += 1;
+    }
+    String::from_utf8_lossy(&bytes[pos..end]).into_owned()
+}
+
+/// Whether the next non-space token at `pos` is a plain `=` (assignment) rather than `==`/`=>`.
+fn next_is_assignment(bytes: &[u8], mut pos: usize) -> bool {
+    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+        pos += 1;
+    }
+    pos < bytes.len()
+        && bytes[pos] == b'='
+        && bytes.get(pos + 1) != Some(&b'=')
+        && bytes.get(pos + 1) != Some(&b'>')
+}
+
+/// The contents of a leading `"…"`/`'…'` string literal (no escapes handled — export names are
+/// plain identifiers in practice).
+fn leading_string_literal(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let quote = *bytes.first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let rest = &s[1..];
+    let end = rest.find(quote as char)?;
+    Some(rest[..end].to_string())
+}
+
+/// A valid, non-reserved identifier usable as an `export const` name (excludes `default` and
+/// the transpiler marker `__esModule`).
+fn is_export_ident(name: &str) -> bool {
+    if name.is_empty() || name == "default" || name == "__esModule" {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return false;
+    }
+    !is_reserved_word(name)
+}
+
+/// ES reserved words that cannot be `export const` binding names.
+fn is_reserved_word(name: &str) -> bool {
+    matches!(
+        name,
+        "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default"
+            | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally"
+            | "for" | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null"
+            | "return" | "super" | "switch" | "this" | "throw" | "true" | "try" | "typeof"
+            | "var" | "void" | "while" | "with" | "yield" | "let" | "static" | "await"
     )
 }
 

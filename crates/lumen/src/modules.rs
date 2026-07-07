@@ -404,17 +404,42 @@ impl Interp {
         };
         match loader(specifier, referrer) {
             Some(pair) => Ok(pair),
-            None => Err(self.throw("TypeError", format!("module not found: {specifier}"))),
+            None => Err(self.throw(
+                "TypeError",
+                format!("module not found: {specifier} (imported from {referrer})"),
+            )),
         }
     }
 
-    /// Build a module's `import.meta` object (`{ url }`, extensible, no prototype).
+    /// Build a module's `import.meta` object (`{ url, filename?, dirname? }`, extensible, no
+    /// prototype). For a file-backed module the `url` is a `file://` URL (as Node's is, so
+    /// `new URL(rel, import.meta.url)` resolves), and `filename`/`dirname` (Node 20.11+) are the
+    /// plain paths.
     fn build_import_meta(&mut self, key: &str) -> Value {
         let meta = Object::new(None);
-        meta.borrow_mut().props.insert(
-            "url",
-            Property::data(Value::from_string(key.to_string()), true, true, true),
-        );
+        let is_path = key.starts_with('/');
+        let url = if is_path {
+            format!("file://{key}")
+        } else {
+            key.to_string()
+        };
+        {
+            let mut b = meta.borrow_mut();
+            b.props
+                .insert("url", Property::data(Value::from_string(url), true, true, true));
+            if is_path {
+                b.props.insert(
+                    "filename",
+                    Property::data(Value::from_string(key.to_string()), true, true, true),
+                );
+                let dir = std::path::Path::new(key)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                b.props
+                    .insert("dirname", Property::data(Value::from_string(dir), true, true, true));
+            }
+        }
         Value::Obj(meta)
     }
 
@@ -518,7 +543,7 @@ impl Interp {
             )),
             Resolution::NotFound => Err(self.throw(
                 "SyntaxError",
-                format!("the requested module does not provide an export named '{name}'"),
+                format!("the requested module '{dep}' does not provide an export named '{name}'"),
             )),
         }
     }
@@ -1386,10 +1411,15 @@ impl Interp {
         specifier: &str,
         attr_type: Option<&str>,
         defer: bool,
+        referrer: Option<Value>,
     ) -> Value {
         let promise = self.new_promise();
-        let referrer = match &self.import_meta {
-            Some(m) => match self.get_member(&m.clone(), "url") {
+        // The referrer is the importing module's `import.meta.url`. Prefer the value captured
+        // lexically at the call site (passed in) — it survives `await`, unlike `self.import_meta`,
+        // which is only set during a module's synchronous body.
+        let meta = referrer.or_else(|| self.import_meta.clone());
+        let referrer = match meta {
+            Some(m) => match self.get_member(&m, "url") {
                 Ok(Value::Str(s)) => s.to_string(),
                 _ => self.import_base.clone(),
             },
