@@ -287,12 +287,23 @@ __builtins.set("tty", {
   zlib.unzipSync = zlib.gunzipSync;
   zlib.unzip = zlib.gunzip;
   zlib.createUnzip = zlib.createGunzip;
-  const brotliUnsupported = () => {
-    throw new Error("node:zlib Brotli is not supported in lumen");
+  // Brotli is not implemented (a from-scratch Brotli codec, with its 120 KB static dictionary, is
+  // a large detour; gzip covers the common case). The functions exist — so `promisify(brotli…)`
+  // and feature detection work — but reject/throw when actually invoked, rather than silently
+  // producing wrong bytes.
+  const brotliError = () => new Error("node:zlib Brotli is not supported in lumen");
+  const brotliThrow = () => {
+    throw brotliError();
   };
-  zlib.createBrotliCompress = brotliUnsupported;
-  zlib.createBrotliDecompress = brotliUnsupported;
-  zlib.brotliCompressSync = brotliUnsupported;
-  zlib.brotliDecompressSync = brotliUnsupported;
+  const brotliAsync = (input, opts, cb) => {
+    if (typeof opts === "function") cb = opts;
+    queueMicrotask(() => cb(brotliError()));
+  };
+  zlib.createBrotliCompress = brotliThrow;
+  zlib.createBrotliDecompress = brotliThrow;
+  zlib.brotliCompressSync = brotliThrow;
+  zlib.brotliDecompressSync = brotliThrow;
+  zlib.brotliCompress = brotliAsync;
+  zlib.brotliDecompress = brotliAsync;
   __builtins.set("zlib", zlib);
 }

@@ -179,6 +179,9 @@ const crypto = {
   randomBytes,
   randomFillSync: (buf) => (webCrypto.getRandomValues(buf), buf),
   randomUUID: () => webCrypto.randomUUID(),
+  // Node's crypto module mirrors the WebCrypto surface at top level.
+  getRandomValues: (arr) => webCrypto.getRandomValues(arr),
+  subtle: webCrypto.subtle,
   getHashes: () => ["sha1", "sha256"],
   constants: {},
   webcrypto: webCrypto,

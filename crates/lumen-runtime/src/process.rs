@@ -113,7 +113,14 @@ pub(crate) fn install_data_props(engine: &mut Engine) {
     let _ = ctx.set_member(&process, "platform", Value::str(platform));
 
     let _ = ctx.set_member(&process, "pid", Value::Num(std::process::id() as f64));
-    let _ = ctx.set_member(&process, "arch", Value::str(std::env::consts::ARCH));
+    // Node's architecture names, not Rust's (native addons resolve their platform binary by these).
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        other => other,
+    };
+    let _ = ctx.set_member(&process, "arch", Value::str(arch));
 }
 
 /// `(chunk)` — write raw bytes to stdout (no trailing newline, unlike `console.log`). A typed

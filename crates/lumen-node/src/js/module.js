@@ -190,7 +190,9 @@ const cwdRequire = makeRequire(process.cwd(), null);
 globalThis.require = cwdRequire;
 
 function createRequire(fromPath) {
-  const p = String(fromPath);
+  // Node accepts a path or a file: URL (string or URL object), e.g. createRequire(import.meta.url).
+  let p = typeof fromPath === "object" && fromPath ? fromPath.href || String(fromPath) : String(fromPath);
+  if (p.startsWith("file://")) p = p.slice(7).replace(/^\/([A-Za-z]:)/, "$1");
   const dir = __node.isDir(p) ? p : path.dirname(p);
   return makeRequire(dir, null);
 }
@@ -206,14 +208,24 @@ globalThis.__runMain = runMain;
 // ESM source per builtin here — where Object.keys works — and the loader ferries the strings.
 globalThis.__esmBuiltin = (name) => __builtins.get(name);
 
+// `process` is populated (env/argv/…) by the runtime *after* this glue runs, so enumerating its
+// keys here would miss them. Emit a fixed superset of its named exports instead; each reads the
+// live `process` object at import time (missing ones are harmless `undefined`).
+const PROCESS_EXPORTS = [
+  "env", "argv", "argv0", "execArgv", "execPath", "platform", "arch", "pid", "ppid",
+  "version", "versions", "cwd", "chdir", "exit", "exitCode", "nextTick", "hrtime",
+  "stdout", "stderr", "stdin", "title", "on", "once", "off", "emit", "emitWarning",
+  "memoryUsage", "uptime", "features", "release", "config", "kill", "umask",
+  "allowedNodeEnvironmentFlags", "setSourceMapsEnabled",
+];
+
 function makeBuiltinEsmSource(name) {
   const m = __builtins.get(name);
   let src = `const __m = globalThis.__esmBuiltin(${JSON.stringify(name)});\nexport default __m;\n`;
-  if (m && (typeof m === "object" || typeof m === "function")) {
-    for (const k of Object.keys(m)) {
-      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) && k !== "default") {
-        src += `export const ${k} = __m[${JSON.stringify(k)}];\n`;
-      }
+  const keys = name === "process" ? PROCESS_EXPORTS : m && (typeof m === "object" || typeof m === "function") ? Object.keys(m) : [];
+  for (const k of keys) {
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) && k !== "default") {
+      src += `export const ${k} = __m[${JSON.stringify(k)}];\n`;
     }
   }
   return src;
@@ -224,7 +236,9 @@ const __BUILTIN_NAMES = [
   "buffer", "path", "os", "fs", "module",
   "events", "util", "crypto", "querystring", "url", "net", "assert",
   "string_decoder", "tty", "async_hooks", "zlib", "stream", "http", "https",
-  "perf_hooks", "fs/promises", "child_process",
+  "perf_hooks", "fs/promises", "child_process", "dns", "dns/promises",
+  "v8", "inspector", "inspector/promises", "worker_threads", "readline",
+  "readline/promises", "test", "tls", "process",
 ];
 const __esmBuiltinSources = {};
 for (const name of __BUILTIN_NAMES) {
