@@ -197,6 +197,7 @@ impl Runtime {
             // Run everything already runnable. Each JS entry is followed by a microtask
             // checkpoint, matching the "after every macrotask" model.
             self.engine.run_microtasks();
+            self.report_unhandled_rejections();
             loop {
                 let mut progressed = false;
                 for (cb, args) in self.take_queued_callbacks() {
@@ -296,6 +297,7 @@ impl Runtime {
             },
         }
         self.engine.run_microtasks();
+        self.report_unhandled_rejections();
     }
 
     /// One JS callback entry: call, report an uncaught throw, then the microtask checkpoint.
@@ -304,6 +306,7 @@ impl Runtime {
             self.report_uncaught(&e);
         }
         self.engine.run_microtasks();
+        self.report_unhandled_rejections();
     }
 
     /// An exception escaped a loop-fired callback. Node prints and keeps the loop alive (we
@@ -311,6 +314,15 @@ impl Runtime {
     fn report_uncaught(&mut self, error: &Value) {
         let text = console::describe_error(self.engine.ctx(), error);
         console::write_err_line(self.engine.ctx(), format!("Uncaught {text}"));
+    }
+
+    /// Report promises rejected without a handler (Node prints `Uncaught (in promise) …`). Called
+    /// after each microtask checkpoint; a rejection handled in the same checkpoint won't appear.
+    fn report_unhandled_rejections(&mut self) {
+        for reason in self.engine.take_unhandled_rejections() {
+            let text = console::describe_error(self.engine.ctx(), &reason);
+            console::write_err_line(self.engine.ctx(), format!("Uncaught (in promise) {text}"));
+        }
     }
 }
 

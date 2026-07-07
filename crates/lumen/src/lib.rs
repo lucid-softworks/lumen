@@ -375,6 +375,19 @@ impl Engine {
         self.interp.drain_microtasks();
     }
 
+    /// Drain and return the reasons of promises rejected without a handler (after a microtask
+    /// checkpoint, these are genuine unhandled rejections). The runtime reports them; the bare
+    /// engine ignores them, so test262 semantics are unaffected.
+    pub fn take_unhandled_rejections(&mut self) -> Vec<embed::Value> {
+        if self.interp.unhandled_rejections.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.interp.unhandled_rejections)
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect()
+    }
+
     /// Whether promise-reaction jobs are queued (the loop uses this to decide when a turn is
     /// really over).
     pub fn has_pending_jobs(&self) -> bool {

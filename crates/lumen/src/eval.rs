@@ -3407,6 +3407,11 @@ impl Interp {
             }
             _ => return,
         };
+        // A rejection with no reactions attached yet is (so far) unhandled — track it. A later
+        // `.then`/`.catch` clears it (see `promise_then_into`).
+        if !fulfilled && reactions.is_empty() {
+            self.unhandled_rejections.insert(ptr, value.clone());
+        }
         for (on_f, on_r, result) in reactions {
             let handler = if fulfilled { on_f } else { on_r };
             self.microtasks.push_back(Job {
@@ -3439,6 +3444,8 @@ impl Interp {
             _ => return,
         };
         let status = self.promises.get(&ptr).map(|s| s.status).unwrap_or(0);
+        // Attaching a handler marks the rejection handled (HostPromiseRejectionTracker "handle").
+        self.unhandled_rejections.remove(&ptr);
         match status {
             0 => {
                 if let Some(s) = self.promises.get_mut(&ptr) {

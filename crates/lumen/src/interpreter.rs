@@ -650,6 +650,10 @@ pub struct Interp {
     pub(crate) realms: crate::fasthash::FastMap<usize, RealmState>,
     /// Promise state keyed by the promise object's pointer.
     pub(crate) promises: crate::fasthash::FastMap<usize, PromiseState>,
+    /// Rejected promises with no handler attached at rejection time (ptr -> reason). Removed when a
+    /// handler is later attached; whatever remains after a microtask checkpoint is a genuine
+    /// unhandled rejection the embedder can report (see [`Engine::take_unhandled_rejections`]).
+    pub(crate) unhandled_rejections: crate::fasthash::FastMap<usize, Value>,
     /// Temporal object internal slots, keyed by the object's pointer.
     pub(crate) temporal: crate::fasthash::FastMap<usize, crate::temporal::Temporal>,
     /// The calendar id of a Temporal date-bearing object (default "iso8601"), keyed by object ptr.
@@ -1095,6 +1099,7 @@ impl Interp {
             ctor_caller_realm: None,
             realms: Default::default(),
             promises: Default::default(),
+            unhandled_rejections: Default::default(),
             temporal: Default::default(),
             temporal_cal: Default::default(),
             microtasks: std::collections::VecDeque::new(),
