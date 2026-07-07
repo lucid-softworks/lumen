@@ -1802,11 +1802,11 @@ impl Interp {
             let mut b = obj.borrow_mut();
             b.call = Callable::User(func, env);
             b.props.insert(
-                "length",
+                crate::value::fn_key(0), // "length"
                 Property::data(Value::Num(arity as f64), false, false, true),
             );
             b.props.insert(
-                "name",
+                crate::value::fn_key(1), // "name"
                 Property::data(Value::from_string(name), false, false, true),
             );
         }
@@ -1825,13 +1825,13 @@ impl Interp {
             let proto = Object::new(proto_parent);
             // A generator's `.prototype` has no own `constructor` (the methods live on the intrinsic).
             if !is_generator {
-                proto
-                    .borrow_mut()
-                    .props
-                    .insert("constructor", Property::builtin(Value::Obj(obj.clone())));
+                proto.borrow_mut().props.insert(
+                    crate::value::fn_key(3), // "constructor"
+                    Property::builtin(Value::Obj(obj.clone())),
+                );
             }
             obj.borrow_mut().props.insert(
-                "prototype",
+                crate::value::fn_key(2), // "prototype"
                 Property::data(Value::Obj(proto), true, false, false),
             );
         }
@@ -3196,7 +3196,7 @@ impl Interp {
         // Scopes are graph nodes too: a closure's captured environment references objects (its
         // bindings) and vice versa (`Callable::User`), so cycles routinely pass through them.
         let scopes = scope_snapshot();
-        let sidx: HashMap<usize, usize> = scopes
+        let sidx: crate::fasthash::FastMap<usize, usize> = scopes
             .iter()
             .enumerate()
             .map(|(k, e)| (Rc::as_ptr(e) as usize, k))
@@ -3562,8 +3562,11 @@ impl Interp {
                 self.dispatch_native(&call, this, args).map_err(Abrupt::Throw)
             }
             Callable::User(func, env) => {
-                // A class constructor cannot be [[Call]]ed.
-                if self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize)) {
+                // A class constructor cannot be [[Call]]ed. (Empty-map guard: this runs on every
+                // single call, and most programs define no classes.)
+                if !self.class_info.is_empty()
+                    && self.class_info.contains_key(&(Rc::as_ptr(&obj) as usize))
+                {
                     return Err(self.throw(
                         "TypeError",
                         "Class constructor cannot be invoked without 'new'",

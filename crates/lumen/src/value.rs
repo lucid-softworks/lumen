@@ -422,10 +422,23 @@ pub struct Props {
 /// `elems` hole marker (also caps how many entries dense slots can address).
 const NO_SLOT: u32 = u32::MAX;
 
+/// Entry count up to which a `Props` runs without a hash index (linear-scan lookups, no hash
+/// allocation or rehash on insert). Most objects — instance fields, cons cells, literals — stay
+/// under it for their whole life.
+const INDEX_THRESHOLD: usize = 8;
+
 thread_local! {
     /// Interned key strings for small array indices — every dense array element key "0".."63"
     /// shares one allocation per thread instead of allocating per element.
     static INDEX_KEYS: Vec<Rc<str>> = (0..64).map(|i| Rc::from(i.to_string().as_str())).collect();
+    /// Interned keys for the properties every function object carries — closure creation in a
+    /// hot loop would otherwise allocate each key string per closure.
+    static FN_KEYS: [Rc<str>; 4] = [
+        Rc::from("length"),
+        Rc::from("name"),
+        Rc::from("prototype"),
+        Rc::from("constructor"),
+    ];
 }
 
 /// The property key for array index `n`, interned for small `n`.
@@ -435,6 +448,11 @@ pub(crate) fn index_key(n: usize) -> Rc<str> {
     } else {
         Rc::from(n.to_string().as_str())
     }
+}
+
+/// Interned `"length"` / `"name"` / `"prototype"` / `"constructor"` keys (see `FN_KEYS`).
+pub(crate) fn fn_key(i: usize) -> Rc<str> {
+    FN_KEYS.with(|k| k[i].clone())
 }
 
 impl Default for Props {
@@ -495,24 +513,40 @@ impl Props {
             }
         }
     }
+    /// The entry slot for `key`. Small maps (≤ [`INDEX_THRESHOLD`] entries — most objects) have
+    /// no hash index at all: lookup is a short linear scan and inserts never hash or rehash.
+    /// The index is built once when a map grows past the threshold and is authoritative from
+    /// then on (an emptied-but-once-large map keeps using it).
+    #[inline]
+    fn find(&self, key: &str) -> Option<usize> {
+        if self.index.is_empty() {
+            return self.entries.iter().position(|(k, _)| &**k == key);
+        }
+        self.index.get(key).copied()
+    }
+    /// Build the hash index for every current entry (crossing the small-map threshold).
+    fn build_index(&mut self) {
+        for (j, (k, _)) in self.entries.iter().enumerate() {
+            self.index.insert(k.clone(), j);
+        }
+    }
     pub(crate) fn get(&self, key: &str) -> Option<&Property> {
-        self.index.get(key).map(|i| &self.entries[*i].1)
+        self.find(key).map(|i| &self.entries[i].1)
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
-        if let Some(i) = self.index.get(key) {
-            Some(&mut self.entries[*i].1)
-        } else {
-            None
+        match self.find(key) {
+            Some(i) => Some(&mut self.entries[i].1),
+            None => None,
         }
     }
     pub(crate) fn contains(&self, key: &str) -> bool {
-        self.index.contains_key(key)
+        self.find(key).is_some()
     }
     /// The `entries` slot for `key`, or `None`. Backs the bytecode property inline cache: a hit
-    /// records the slot so the next access can skip the hash (see `Interp::try_ic_get`).
+    /// records the slot so the next access can skip the lookup (see `Interp::try_ic_get`).
     #[inline]
     pub(crate) fn slot_of(&self, key: &str) -> Option<usize> {
-        self.index.get(key).copied()
+        self.find(key)
     }
     /// The (key, property) at `slot`, or `None` if out of range. The caller re-checks the key —
     /// slots shift on `remove`, so a cached slot is only trusted after the key matches.
@@ -538,18 +572,28 @@ impl Props {
     pub(crate) fn push_dense(&mut self, prop: Property) {
         let slot = self.entries.len();
         let key = index_key(slot);
-        self.index.insert(key.clone(), slot);
+        if !self.index.is_empty() {
+            self.index.insert(key.clone(), slot);
+        } else if slot + 1 > INDEX_THRESHOLD {
+            self.build_index();
+            self.index.insert(key.clone(), slot);
+        }
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
     }
 
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
-        if let Some(i) = self.index.get(&key) {
-            self.entries[*i].1 = prop;
+        if let Some(i) = self.find(&key) {
+            self.entries[i].1 = prop;
         } else {
             let slot = self.entries.len();
-            self.index.insert(key.clone(), slot);
+            if !self.index.is_empty() {
+                self.index.insert(key.clone(), slot);
+            } else if slot + 1 > INDEX_THRESHOLD {
+                self.build_index();
+                self.index.insert(key.clone(), slot);
+            }
             self.entries.push((key, prop));
             self.note_inserted(slot);
         }
@@ -567,8 +611,8 @@ impl Props {
         }
         self.entries.retain(|(k, _)| keep(k));
         self.index.clear();
-        for (j, (k, _)) in self.entries.iter().enumerate() {
-            self.index.insert(k.clone(), j);
+        if self.entries.len() > INDEX_THRESHOLD {
+            self.build_index();
         }
         self.elems.clear();
         for slot in 0..self.entries.len() {
@@ -577,27 +621,29 @@ impl Props {
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
-        if let Some(i) = self.index.remove(key) {
-            self.entries.remove(i);
+        let Some(i) = self.find(key) else {
+            return false;
+        };
+        self.entries.remove(i);
+        if !self.index.is_empty() {
+            self.index.remove(key);
             // Re-index everything after the removed slot.
             for (j, (k, _)) in self.entries.iter().enumerate().skip(i) {
                 self.index.insert(k.clone(), j);
             }
-            // Dense slots shift down past the removed entry; the removed key's own slot holes.
-            for e in self.elems.iter_mut() {
-                if *e == NO_SLOT {
-                    continue;
-                }
-                match (*e as usize).cmp(&i) {
-                    std::cmp::Ordering::Equal => *e = NO_SLOT,
-                    std::cmp::Ordering::Greater => *e -= 1,
-                    std::cmp::Ordering::Less => {}
-                }
-            }
-            true
-        } else {
-            false
         }
+        // Dense slots shift down past the removed entry; the removed key's own slot holes.
+        for e in self.elems.iter_mut() {
+            if *e == NO_SLOT {
+                continue;
+            }
+            match (*e as usize).cmp(&i) {
+                std::cmp::Ordering::Equal => *e = NO_SLOT,
+                std::cmp::Ordering::Greater => *e -= 1,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        true
     }
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
