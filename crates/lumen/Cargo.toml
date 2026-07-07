@@ -16,6 +16,20 @@ license.workspace = true
 # hooks) used by the lumen-host/lumen-runtime crates. Off by default: everything under it is a
 # public-API commitment on a published crate, gated until it stabilizes with those crates.
 embed = []
+# Exposes internal compilation stages (`lumen::bench_api`) for the `internals` benchmark. Not a
+# stability commitment — for measurement only.
+bench = []
 
 [lints]
 workspace = true
+
+# Std-only benchmark harness (see benches/support/harness.rs) — no third-party bench crate.
+[[bench]]
+name = "engine"
+harness = false
+
+# Internal-stage benchmarks (lexer/parser/snapshot). Needs the `bench` feature for `bench_api`.
+[[bench]]
+name = "internals"
+harness = false
+required-features = ["bench"]

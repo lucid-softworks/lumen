@@ -64,6 +64,17 @@ mod value;
 use interpreter::Interp;
 use value::Value;
 
+/// Internal-stage entry points, exposed only for benchmarking (`bench` feature). These reach past
+/// the stable public API to time individual compilation stages (lex → parse → snapshot encode →
+/// decode) — the breakdown behind cold-boot cost. Not a stability commitment; do not depend on it.
+#[cfg(feature = "bench")]
+pub mod bench_api {
+    pub use crate::ast::Stmt;
+    pub use crate::lexer::tokenize;
+    pub use crate::parser::{parse_module, parse_script};
+    pub use crate::snapshot::{decode, encode};
+}
+
 /// Host wall-clock override: milliseconds since the Unix epoch. Targets without a usable
 /// `SystemTime` (wasm32-unknown-unknown) install one at startup; when unset, `Date`/`Temporal.Now`
 /// fall back to `SystemTime`.
