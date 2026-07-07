@@ -67,7 +67,14 @@ On top of that:
   resolution and the module wrapper, `package.json` `main`/`exports`, the `node:path`/
   `node:os`/`node:fs` builtins, and `Buffer`, so packages written against the `node:` surface
   run. See the checklist at the top of `crates/lumen-node/src/lib.rs` for the deferred pieces
-  (subpath-pattern exports, native addons).
+  (subpath-pattern exports, the full N-API surface).
+
+  **Native addons** load too: `require('./addon.node')` dlopens the compiled library and runs its
+  N-API registration, resolving the addon's `napi_*` symbols against the lumen executable — the
+  same mechanism the `node` binary uses. A core slice of N-API is implemented from scratch (values,
+  properties, functions, callbacks, errors, handle scopes); the loader reaches `dlopen`/`dlsym`
+  through raw `extern "C"` declarations, so no third-party crate is added. See
+  `examples/native-addon`.
 
 - **REPL + CLI** (`lumen-repl`, `lumen-cli`) — an interactive shell with a persistent realm,
   parser-driven incomplete-input detection (multi-line continuation), top-level `await`, and

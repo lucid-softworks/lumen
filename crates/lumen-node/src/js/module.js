@@ -10,7 +10,7 @@ const path = __builtins.get("path");
 const CORE = new Set([...__builtins.keys()]);
 const cache = new Map(); // resolved filename -> module
 
-const EXTENSIONS = [".js", ".json", ".cjs"];
+const EXTENSIONS = [".js", ".json", ".cjs", ".node"];
 
 function isCoreSpecifier(spec) {
   const bare = spec.startsWith("node:") ? spec.slice(5) : spec;
@@ -116,6 +116,14 @@ function loadModule(filename, parent) {
   };
   cache.set(filename, module);
   if (parent) parent.children.push(module);
+
+  // A native addon: dlopen the `.node` file and run its N-API registration. The returned
+  // exports become module.exports, exactly as Node does for compiled addons.
+  if (filename.endsWith(".node")) {
+    module.exports = __node.loadNativeAddon(filename);
+    module.loaded = true;
+    return module;
+  }
 
   const source = __node.readText(filename);
   if (filename.endsWith(".json")) {

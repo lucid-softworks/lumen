@@ -1432,6 +1432,29 @@ impl Interp {
         Object::new(Some(self.object_proto.clone()))
     }
 
+    /// The global object (`globalThis`) as a value — for embedders that must expose it
+    /// (N-API's `napi_get_global`).
+    pub fn global_this(&self) -> Value {
+        Value::Obj(self.global.clone())
+    }
+
+    /// [[Get]] for embedders: like [`Self::get_member`] but surfaces a thrown value rather than
+    /// the crate-internal `Abrupt` completion, so op crates can propagate it as `Err(Value)`.
+    pub fn member_get(&mut self, base: &Value, key: &str) -> Result<Value, Value> {
+        self.get_member(base, key).map_err(|a| match a {
+            Abrupt::Throw(v) => v,
+            _ => self.make_error("Error", "unexpected non-throw completion during property get"),
+        })
+    }
+
+    /// [[Set]] for embedders (see [`Self::member_get`]).
+    pub fn member_set(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Value> {
+        self.set_member(base, key, value).map_err(|a| match a {
+            Abrupt::Throw(v) => v,
+            _ => self.make_error("Error", "unexpected non-throw completion during property set"),
+        })
+    }
+
     pub fn make_array(&self, items: Vec<Value>) -> Value {
         let obj = Object::new(Some(self.array_proto.clone()));
         obj.borrow_mut().exotic = Exotic::Array;

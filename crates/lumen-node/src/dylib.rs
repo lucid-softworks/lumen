@@ -28,8 +28,6 @@ const RTLD_NOW: c_int = 2;
 /// engine, which is exactly where addon code runs.
 pub struct DynLib {
     handle: *mut c_void,
-    /// Kept for diagnostics (error messages), not used for resolution.
-    path: String,
 }
 
 impl DynLib {
@@ -42,7 +40,7 @@ impl DynLib {
         if handle.is_null() {
             return Err(last_error().unwrap_or_else(|| format!("dlopen failed for '{path}'")));
         }
-        Ok(DynLib { handle, path: path.to_string() })
+        Ok(DynLib { handle })
     }
 
     /// Resolve a symbol to its raw address. Returns `None` when the symbol is absent.
@@ -57,11 +55,6 @@ impl DynLib {
             return None;
         }
         Some(sym)
-    }
-
-    /// The path this library was opened from (for diagnostics).
-    pub fn path(&self) -> &str {
-        &self.path
     }
 }
 

@@ -15,17 +15,18 @@
 //! - [x] `Buffer` (from/alloc/concat, utf8·hex·base64·latin1·ascii, slice/write/compare, the
 //!   common read/write-int accessors) — [ ] every codec + accessor variant
 //! - [x] `global`, `__dirname`/`__filename` (per module)
-//! - [ ] ESM `import` of `node:` specifiers (this is the CommonJS surface); `require('esm')`;
-//!   native addons
+//! - [x] native addons: `require('./x.node')` dlopens the library and runs its N-API
+//!   registration (see `napi.rs` for the implemented `napi_*` surface and `dylib.rs` for the
+//!   dependency-free loader) — [ ] the full ~150-function N-API, references, threadsafe funcs
+//! - [ ] ESM `import` of `node:` specifiers (this is the CommonJS surface); `require('esm')`
 
 use std::path::Path;
 
 use lumen_host::{ops, Ctx, Extension, Value};
 
 mod child;
-// The N-API `.node` loader consumes `DynLib::path` (diagnostics); allow until that stage lands.
-#[allow(dead_code)]
 mod dylib;
+mod napi;
 
 pub fn extension() -> Extension {
     Extension {
@@ -40,6 +41,7 @@ pub fn extension() -> Extension {
                     "readText" (1) => op_read_text,
                     "readBytes" (1) => op_read_bytes,
                     "realpath" (1) => op_realpath,
+                    "loadNativeAddon" (1) => napi::op_load_addon,
                 ],
             ),
             (
