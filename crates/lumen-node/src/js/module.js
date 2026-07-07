@@ -216,7 +216,7 @@ const __BUILTIN_NAMES = [
   "buffer", "path", "os", "fs", "module",
   "events", "util", "crypto", "querystring", "url", "net", "assert",
   "string_decoder", "tty", "async_hooks", "zlib", "stream", "http", "https",
-  "perf_hooks", "fs/promises",
+  "perf_hooks", "fs/promises", "child_process",
 ];
 const __esmBuiltinSources = {};
 for (const name of __BUILTIN_NAMES) {

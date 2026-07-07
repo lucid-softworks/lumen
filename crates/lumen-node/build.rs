@@ -29,6 +29,7 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "shims.js", wrap: true },
     GlueFile { name: "stream.js", wrap: true },
     GlueFile { name: "http.js", wrap: true },
+    GlueFile { name: "child_process.js", wrap: true },
     GlueFile { name: "module.js", wrap: false },
 ];
 

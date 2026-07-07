@@ -19,7 +19,8 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use lumen_host::{
-    install, CallbackQueue, Engine, TaskCompletion, TaskDecoder, TaskRegistry, ThreadPool, Value,
+    install, CallbackQueue, CompletionSender, Engine, TaskCompletion, TaskDecoder, TaskRegistry,
+    ThreadPool, Value,
 };
 
 mod console;
@@ -49,10 +50,13 @@ impl Runtime {
     /// `process`, `queueMicrotask`.
     pub fn new() -> Runtime {
         let (tx, rx) = mpsc::channel();
-        let pool = ThreadPool::new(POOL_SIZE, tx);
+        let pool = ThreadPool::new(POOL_SIZE, tx.clone());
         let mut engine = Engine::new();
         // Substrate first: fs's js_init runs during install and its ops need these.
         engine.ctx().op_state().put(pool.handle());
+        // Dedicated-thread completions for unbounded-blocking work (child stdio) that must not
+        // occupy a shared pool worker.
+        engine.ctx().op_state().put(CompletionSender::new(tx));
         engine.ctx().op_state().put(TaskRegistry::default());
         install(
             &mut engine,

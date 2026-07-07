@@ -383,8 +383,7 @@ impl Engine {
             return Vec::new();
         }
         std::mem::take(&mut self.interp.unhandled_rejections)
-            .into_iter()
-            .map(|(_, reason)| reason)
+            .into_values()
             .collect()
     }
 

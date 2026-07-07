@@ -22,6 +22,8 @@ use std::path::Path;
 
 use lumen_host::{ops, Ctx, Extension, Value};
 
+mod child;
+
 pub fn extension() -> Extension {
     Extension {
         name: "node",
@@ -55,8 +57,9 @@ pub fn extension() -> Extension {
                     "gunzip" (1) => op_zlib_gunzip,
                 ],
             ),
+            ("__child", child::CHILD_OPS),
         ],
-        state_init: None,
+        state_init: Some(|state: &mut lumen_host::OpState| state.put(child::ChildRegistry::default())),
         js_init: Some(JS_GLUE),
         js_init_snapshot: Some(JS_GLUE_SNAPSHOT),
     }

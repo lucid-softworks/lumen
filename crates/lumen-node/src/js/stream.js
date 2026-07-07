@@ -144,7 +144,9 @@ function maybeEmitEnd(stream) {
 class Writable extends Stream {
   constructor(opts = {}) {
     super();
-    this._writableState = { ended: false, finished: false, destroyed: false, corked: 0 };
+    // `tail` serializes _write calls so writes complete in order and end() can wait for them
+    // (an async _write — e.g. a subprocess stdin write — must finish before _final closes it).
+    this._writableState = { ended: false, finished: false, destroyed: false, corked: 0, tail: Promise.resolve() };
     this.writable = true;
     if (typeof opts.write === "function") this._write = opts.write;
     if (typeof opts.final === "function") this._final = opts.final;
@@ -153,31 +155,38 @@ class Writable extends Stream {
 
   write(chunk, encoding, cb) {
     if (typeof encoding === "function") { cb = encoding; encoding = null; }
-    if (this._writableState.ended) {
+    const state = this._writableState;
+    if (state.ended) {
       const err = new Error("write after end");
       if (cb) queueMicrotask(() => cb(err)); else this.emit("error", err);
       return false;
     }
-    this._write(chunk, encoding, (err) => {
-      if (err) this.emit("error", err);
-      else if (cb) cb();
-    });
+    state.tail = state.tail.then(
+      () =>
+        new Promise((resolve) => {
+          this._write(chunk, encoding, (err) => {
+            if (err) this.emit("error", err);
+            if (cb) cb(err);
+            resolve();
+          });
+        }),
+    );
     return true;
   }
 
   end(chunk, encoding, cb) {
     if (typeof chunk === "function") { cb = chunk; chunk = null; }
     else if (typeof encoding === "function") { cb = encoding; encoding = null; }
-    const finish = () => {
-      const state = this._writableState;
+    const state = this._writableState;
+    if (chunk != null) this.write(chunk, encoding);
+    state.ended = true;
+    // Wait for all queued writes to drain, then run _final (e.g. close the child's stdin).
+    state.tail.then(() => {
       if (state.finished) return;
-      state.ended = true;
       const done = () => { state.finished = true; if (cb) cb(); this.emit("finish"); };
       if (this._final) this._final((err) => { if (err) this.emit("error", err); else done(); });
       else done();
-    };
-    if (chunk != null) this.write(chunk, encoding, finish);
-    else finish();
+    });
     return this;
   }
 

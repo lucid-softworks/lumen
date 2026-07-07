@@ -241,6 +241,35 @@ impl SpawnHandle {
     }
 }
 
+/// Sends [`TaskCompletion`]s straight to the loop from a *dedicated* thread, bypassing the fixed
+/// [`ThreadPool`]. For work that blocks for an unbounded time — a subprocess's stdout read, waiting
+/// on a child to exit — where occupying a shared pool worker for the whole duration would starve
+/// everything else. The runtime stores one in [`OpState`]. `run_blocking` spawns a fresh thread per
+/// call; blocked threads cost only memory, not a pool slot.
+#[derive(Clone)]
+pub struct CompletionSender {
+    tx: mpsc::Sender<TaskCompletion>,
+}
+
+impl CompletionSender {
+    pub fn new(tx: mpsc::Sender<TaskCompletion>) -> CompletionSender {
+        CompletionSender { tx }
+    }
+    /// Run `work` on a new dedicated thread; its result comes back to the loop as a
+    /// [`TaskCompletion`] tagged with `id` (settled through the [`TaskRegistry`], like pool work).
+    pub fn run_blocking(
+        &self,
+        id: TaskId,
+        work: impl FnOnce() -> Box<dyn Any + Send> + Send + 'static,
+    ) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = work();
+            let _ = tx.send(TaskCompletion { task: id, result });
+        });
+    }
+}
+
 /// Turns a completed task's `Send` payload back into JS callback arguments, on the loop
 /// thread. `Err` is a JS value to report as an uncaught exception (later: a rejection).
 pub type TaskDecoder = fn(&mut Ctx, Box<dyn Any + Send>) -> Result<Vec<Value>, Value>;
