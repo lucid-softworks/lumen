@@ -111,6 +111,9 @@ fn is_esm_entry(path: &str) -> bool {
     match p.extension().and_then(|e| e.to_str()) {
         Some("mjs") => true,
         Some("cjs") => false,
+        // JSX files use ESM imports (`import React …`); run them through the module graph so the
+        // runtime's `.jsx` transpile hook applies.
+        Some("jsx") => true,
         _ => nearest_package_type_is_module(p),
     }
 }

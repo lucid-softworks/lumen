@@ -1,0 +1,13 @@
+{
+  "name": "react-jsx-ssr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  }
+}

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// generated in JS where the export names are known, and ferried here as plain strings.
 pub struct BuiltinModules(pub HashMap<String, String>);
 
-const EXTENSIONS: [&str; 4] = [".mjs", ".js", ".json", ".cjs"];
+const EXTENSIONS: [&str; 5] = [".mjs", ".js", ".jsx", ".json", ".cjs"];
 
 /// Build the loader closure `eval_module` wants. It owns everything (`'static`); the engine
 /// caches results by the canonical key we return, so returning a stable realpath per file is
@@ -190,6 +190,12 @@ fn load_as_module(file: &Path, cjs_default: bool) -> Option<(String, String)> {
         }
         // `.mjs` is always ESM regardless of package type; `.cjs` is always CommonJS.
         "mjs" => Some((key.clone(), std::fs::read_to_string(file).ok()?)),
+        // `.jsx` is JSX-over-ESM: transpile to plain JS, then load as a module.
+        "jsx" => {
+            let text = std::fs::read_to_string(file).ok()?;
+            let js = crate::jsx::transform(&text).unwrap_or(text);
+            Some((key, js))
+        }
         "cjs" => Some((key.clone(), cjs_wrapper(&key, source_of(file)))),
         _ if cjs_default => Some((key.clone(), cjs_wrapper(&key, source_of(file)))),
         _ => {
@@ -231,13 +237,87 @@ fn cjs_wrapper(abs_path: &str, source: String) -> String {
         "const __m = globalThis.require({});\nexport default __m;\n",
         js_string(abs_path)
     );
-    for name in scan_cjs_exports(&source) {
+    let mut names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_cjs_exports(&source, Path::new(abs_path), 0, &mut names, &mut seen);
+    for name in names {
         // `export const NAME = __m["NAME"];` — a live binding onto the CJS export (undefined if
         // the static scan over-approximated, which is harmless).
         out.push_str(&format!(
             "export const {name} = __m[{}];\n",
             js_string(&name)
         ));
+    }
+    out
+}
+
+/// Discover a CJS module's export names, following `module.exports = require('./x')` /
+/// `Object.assign(module.exports, require('./x'))` re-exports transitively (bounded depth) — the
+/// pattern that indirection files like `react-dom/server.js` use. `file` is the module being
+/// scanned, so relative re-export targets can be resolved and read.
+fn collect_cjs_exports(
+    src: &str,
+    file: &Path,
+    depth: u32,
+    names: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for name in scan_cjs_exports(src) {
+        add_export(names, seen, &name);
+    }
+    if depth >= 4 {
+        return; // guard against cycles / pathological chains
+    }
+    for spec in reexport_requires(src) {
+        if !spec.starts_with('.') {
+            continue; // only follow relative re-exports (a bare package is its own module)
+        }
+        if let Some(target) = file.parent().and_then(|d| resolve_relative_cjs(&d.join(&spec))) {
+            if let Ok(sub) = std::fs::read_to_string(&target) {
+                collect_cjs_exports(&sub, &target, depth + 1, names, seen);
+            }
+        }
+    }
+}
+
+/// Resolve a relative `require` target to a file (exact, then `.js`/`.cjs`/`.json` *appended*,
+/// then `index.js`), for re-export following. Extensions are appended, not substituted, so
+/// `require('./server.node')` resolves to `server.node.js` rather than `server.js`.
+fn resolve_relative_cjs(base: &Path) -> Option<PathBuf> {
+    let base = normalize(base);
+    if base.is_file() {
+        return Some(base);
+    }
+    for ext in [".js", ".cjs", ".json"] {
+        let mut s = base.as_os_str().to_os_string();
+        s.push(ext);
+        let cand = PathBuf::from(s);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    let index = base.join("index.js");
+    index.is_file().then_some(index)
+}
+
+/// The relative specifiers a module re-exports wholesale: `module.exports = require('X')` and
+/// `Object.assign(module.exports, require('X'))`.
+fn reexport_requires(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, _) in src.match_indices("require(") {
+        // Look back for a `module.exports =` or `Object.assign(module.exports,` just before.
+        let before = src[..i].trim_end();
+        let is_reexport = before.ends_with("module.exports =")
+            || before.ends_with("module.exports=")
+            || before.ends_with("Object.assign(module.exports,")
+            || before.ends_with("Object.assign(exports,");
+        if !is_reexport {
+            continue;
+        }
+        let after = &src[i + "require(".len()..];
+        if let Some(spec) = leading_string_literal(after.trim_start()) {
+            out.push(spec);
+        }
     }
     out
 }

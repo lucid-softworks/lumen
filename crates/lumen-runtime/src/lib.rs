@@ -25,6 +25,7 @@ use lumen_host::{
 
 mod console;
 mod esm;
+mod jsx;
 mod process;
 
 pub use console::{describe_error, render_value, ConsoleOut};
@@ -124,6 +125,12 @@ impl Runtime {
     pub fn run_module(&mut self, path: &str) -> Result<(), String> {
         let source =
             std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        // A `.jsx` entry is lowered to plain JS before the engine parses it.
+        let source = if path.ends_with(".jsx") {
+            jsx::transform(&source).map_err(|e| format!("JSX transform failed for {path}: {e}"))?
+        } else {
+            source
+        };
         let key = std::fs::canonicalize(path)
             .unwrap_or_else(|_| std::path::PathBuf::from(path))
             .to_string_lossy()
