@@ -29,6 +29,28 @@ pub enum Tier {
     Bytecode,
 }
 
+/// Per-site property inline-cache state. `depth == IC_EMPTY` means the site has not cached yet.
+/// Otherwise the property was last found as an own, non-accessor data property of the object
+/// `depth` prototype hops above the receiver, at `entries` slot `slot` — and every hop below the
+/// holder had *no* own property of that name. A hit re-validates all of that (each hop is a hash
+/// lookup, the holder a key compare), so a stale cache can only cost time, never correctness.
+#[derive(Clone, Copy)]
+pub struct IcState {
+    pub depth: u8,
+    pub slot: u32,
+}
+
+pub const IC_EMPTY: u8 = u8::MAX;
+/// Deepest prototype hop the IC will record; hotter sites deeper than this stay on the slow path.
+pub const IC_MAX_DEPTH: u8 = 4;
+
+impl IcState {
+    pub const EMPTY: IcState = IcState {
+        depth: IC_EMPTY,
+        slot: 0,
+    };
+}
+
 /// Which update `UpdateLocal` performs, and the value it leaves on the stack: `Pre*` push the
 /// updated value, `Post*` push the original (coerced) value, `*Discard` push nothing (the update
 /// is a statement or a `for` update — its value is unobservable).
@@ -50,6 +72,19 @@ pub enum Op {
     Pop,
     LoadLocal(u16),
     StoreLocal(u16),
+    /// Read a captured local from the activation environment (TDZ-checked). The operand indexes
+    /// `names`; the activation env holds exactly the captured bindings, so this is one hash hit.
+    LoadCap(u32),
+    /// Write a captured local (TDZ-checked: assignment before a lexical's initialization throws).
+    StoreCap(u32),
+    /// Initialize a captured lexical (`let`/`const` declaration): sets the value and clears TDZ.
+    StoreCapInit(u32),
+    /// `++`/`--` on a captured local, in place (the env-homed `UpdateLocal`).
+    UpdateCap(u32, UpdKind),
+    /// Create a closure over the current environment from `Chunk::funcs[fidx]`. The second
+    /// operand names an anonymous function expression per NamedEvaluation (`names` index, or
+    /// `u32::MAX` for none).
+    MakeClosure(u32, u32),
     /// `++`/`--` on a local slot, done in place (no LoadLocal/Plus/Add dance). Applies ToNumeric
     /// so a BigInt slot stays a BigInt — the `Plus`-based lowering this replaces was ToNumber and
     /// wrongly threw on BigInt. The `UpdKind` says increment vs decrement and which value (old,
@@ -71,8 +106,23 @@ pub enum Op {
     SetElem,
     /// `obj[k] = v` in statement position: stores without leaving `v` on the stack.
     SetElemDrop,
+    /// `obj.name++` / `--obj.name` as one op: pops obj, reads via the site IC, ToNumeric, ±1,
+    /// writes back via the IC, pushes old / new / nothing per `UpdKind`.
+    UpdateProp(u32, u32, UpdKind),
+    /// `obj[k]++` / `--obj[k]`: pops k and obj, coerces the key at most once (matching the
+    /// oracle's cached-Reference semantics), read-modify-write, pushes per `UpdKind`.
+    UpdateElem(UpdKind),
+    /// Compound `obj[k] op= v` support: coerce the top of stack to a property key *now* when the
+    /// coercion could be observable (an object's valueOf/toString), so the following GetElem +
+    /// SetElem pair can't run it twice. Num/Str keys stay raw — their later coercion is
+    /// side-effect-free and deterministic, and keeping numbers numeric preserves the dense-array
+    /// fast path. Checks the base (one below top) for null/undefined first, like `ref_prop_key`.
+    ToPropKey,
+    /// Duplicate the top two stack values (for compound `obj[k] op= v`).
+    Dup2,
     /// `obj.name` as a call target: pops obj, pushes obj then the method (get runs before args).
-    GetMethod(u32),
+    /// Operands: name index, inline-cache index (methods live on prototypes — the IC walks hops).
+    GetMethod(u32, u32),
     /// `obj[k]` as a call target: pops k and obj, pushes obj then the method.
     GetMethodElem,
     Add,
@@ -140,6 +190,18 @@ struct Handler {
     stack_depth: usize,
 }
 
+/// How one captured binding seeds into the activation environment at entry (in order).
+pub(crate) enum CapInit {
+    /// A captured parameter: seed from argument `k`.
+    Param(u16, Rc<str>),
+    /// A captured function-scoped `var`: undefined, unless already bound (a same-named param).
+    Var(Rc<str>),
+    /// A hoisted function declaration: a closure over the activation itself (self-recursion).
+    Fn(u16, Rc<str>),
+    /// A captured top-level lexical: inserted uninitialized (TDZ); bool = `const`.
+    Lexical(Rc<str>, bool),
+}
+
 pub struct Chunk {
     // (fields below; Debug is manual — `consts` holds engine Values)
     ops: Vec<Op>,
@@ -154,23 +216,819 @@ pub struct Chunk {
     /// hoisting overwrites same-named params; replicated bug-for-bug — it is the oracle).
     var_force_resets: Vec<u16>,
     uses_this: bool,
-    /// One inline-cache slot per property-access op (`GetProp`/`SetProp`/`SetPropDrop`), holding the
-    /// `entries` slot last seen for that site (`u32::MAX` = empty). The `Chunk` is shared across
-    /// calls via `Rc`, so these persist. `Cell` is fine: the VM runs one thread at a time (coroutine
-    /// ping-pong), like the rest of the engine's shared-`Rc` state.
-    caches: Vec<std::cell::Cell<u32>>,
+    /// Inner function templates for `MakeClosure`.
+    funcs: Vec<Rc<Function>>,
+    /// Captured bindings to seed into a fresh activation env at entry; empty = no activation
+    /// needed (closures, if any, capture the definition env directly).
+    cap_inits: Vec<CapInit>,
+    /// An inner arrow chain reads the outer `this`: the activation carries a `this` binding.
+    env_this: bool,
+    /// One inline-cache slot per property-access op (`GetProp`/`SetProp`/`SetPropDrop`/`GetMethod`),
+    /// holding the (prototype depth, `entries` slot) last seen for that site (see [`IcState`]). The
+    /// `Chunk` is shared across calls via `Rc`, so these persist. `Cell` is fine: the VM runs one
+    /// thread at a time (coroutine ping-pong), like the rest of the engine's shared-`Rc` state.
+    caches: Vec<std::cell::Cell<IcState>>,
 }
 
 impl Chunk {
-    /// Whether the body reads `this` (so the driver seeds it from the activation scope).
+    /// Whether the body (or an inner arrow chain) reads `this`, so the caller must bind it.
     pub fn uses_this(&self) -> bool {
-        self.uses_this
+        self.uses_this || self.env_this
+    }
+    /// Whether calls need a real activation environment (captured locals / lexical `this`).
+    fn needs_env(&self) -> bool {
+        !self.cap_inits.is_empty() || self.env_this
+    }
+
+    /// Build the activation environment for one call: a fresh scope under `env` holding exactly
+    /// the captured bindings (and `this` when an inner arrow chain reads it). Free names and
+    /// `MakeClosure` environments route through it. Returns `env` untouched when nothing is
+    /// captured — closures then capture the definition env directly, which resolves identically
+    /// because none of their free names are outer locals.
+    fn make_run_env(&self, i: &Interp, env: &Env, this_val: &Value, args: &[Value]) -> Env {
+        if !self.needs_env() {
+            return env.clone();
+        }
+        let act = crate::interpreter::new_var_scope(Some(env.clone()));
+        // Function-declaration closures capture the activation itself, so they are created after
+        // the borrow below is released.
+        let mut fns: Vec<(u16, Rc<str>)> = Vec::new();
+        {
+            let mut b = act.borrow_mut();
+            for ci in &self.cap_inits {
+                match ci {
+                    CapInit::Param(k, name) => {
+                        b.vars.insert(
+                            name.to_string(),
+                            crate::interpreter::Binding {
+                                value: args.get(*k as usize).cloned().unwrap_or(Value::Undefined),
+                                mutable: true,
+                                strict_immutable: false,
+                                initialized: true,
+                                import_ref: None,
+                                deletable: false,
+                            },
+                        );
+                    }
+                    CapInit::Var(name) => {
+                        if !b.vars.contains_key(&**name) {
+                            b.vars.insert(
+                                name.to_string(),
+                                crate::interpreter::Binding {
+                                    value: Value::Undefined,
+                                    mutable: true,
+                                    strict_immutable: false,
+                                    initialized: true,
+                                    import_ref: None,
+                                    deletable: false,
+                                },
+                            );
+                        }
+                    }
+                    CapInit::Fn(fidx, name) => fns.push((*fidx, name.clone())),
+                    CapInit::Lexical(name, is_const) => {
+                        b.vars.insert(
+                            name.to_string(),
+                            crate::interpreter::Binding {
+                                value: Value::Undefined,
+                                mutable: !is_const,
+                                strict_immutable: *is_const,
+                                initialized: false,
+                                import_ref: None,
+                                deletable: false,
+                            },
+                        );
+                    }
+                }
+            }
+            if self.env_this {
+                b.vars.insert(
+                    "this".to_string(),
+                    crate::interpreter::Binding {
+                        value: this_val.clone(),
+                        mutable: false,
+                        strict_immutable: true,
+                        initialized: true,
+                        import_ref: None,
+                        deletable: false,
+                    },
+                );
+            }
+        }
+        for (fidx, name) in fns {
+            let v = i.make_function(self.funcs[fidx as usize].clone(), act.clone());
+            act.borrow_mut().vars.insert(
+                name.to_string(),
+                crate::interpreter::Binding {
+                    value: v,
+                    mutable: true,
+                    strict_immutable: false,
+                    initialized: true,
+                    import_ref: None,
+                    deletable: false,
+                },
+            );
+        }
+        act
     }
 }
 
 impl std::fmt::Debug for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Chunk({} ops, {} slots)", self.ops.len(), self.n_slots)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Capture analysis
+// ---------------------------------------------------------------------------------------------
+
+/// Which names the body's *inner functions* can resolve to the outer function's locals — the set
+/// that must live in a real activation environment instead of VM slots. Also whether any inner
+/// arrow chain reads the outer `this`.
+///
+/// Soundness rule: a name wrongly treated as local to an inner function would silently resolve
+/// past the activation to the wrong binding, so everything not fully understood returns `None`
+/// (direct eval, `with`, sloppy block function declarations, module syntax, …) and the caller
+/// bails to the tree-walker.
+struct CaptureScan {
+    /// Declared-name scopes, innermost last, each tagged with the function-nesting depth it
+    /// belongs to (0 = the function being compiled).
+    scopes: Vec<(std::collections::HashSet<String>, u32)>,
+    fn_depth: u32,
+    /// Names resolving from depth > 0 to a depth-0 scope.
+    captured: std::collections::HashSet<String>,
+    /// Names declared by a depth-0 scope that is NOT the function's top scope (block lexicals,
+    /// for-head lexicals, catch params). If one of these is captured, the per-block binding
+    /// freshness slots can't express — the caller bails.
+    depth0_inner_decls: std::collections::HashSet<String>,
+    /// Whether `this` is read from an inner arrow chain rooted at the outer function.
+    env_this: bool,
+    /// Arrow-ness of each enclosing function on the current path (index 0 = the outer function).
+    arrow_path: Vec<bool>,
+}
+
+/// Collect every binding a `Pattern` introduces.
+fn pat_idents(p: &Pattern, out: &mut std::collections::HashSet<String>) {
+    match p {
+        Pattern::Ident(n) => {
+            out.insert(n.clone());
+        }
+        Pattern::Array(elems) => {
+            for e in elems {
+                match e {
+                    ArrayPatElem::Hole => {}
+                    ArrayPatElem::Elem { pattern, .. } => pat_idents(pattern, out),
+                    ArrayPatElem::Rest(p) => pat_idents(p, out),
+                }
+            }
+        }
+        Pattern::Object(o) => {
+            for pr in &o.props {
+                pat_idents(&pr.value, out);
+            }
+            if let Some(r) = &o.rest {
+                out.insert(r.clone());
+            }
+        }
+        Pattern::Member(_) => {}
+    }
+}
+
+/// Collect the function-scoped `var` names (and direct top-level function-declaration names) of a
+/// body: recurses through blocks/loops/switch/try but never into nested functions or classes.
+/// `top` distinguishes direct body statements (whose FuncDecls hoist) from block-level ones.
+/// Returns false on a construct whose hoisting we don't model (sloppy Annex B block functions).
+fn hoisted_vars(stmts: &[Stmt], top: bool, strict: bool, out: &mut std::collections::HashSet<String>) -> bool {
+    for s in stmts {
+        if !hoisted_vars_stmt(s, top, strict, out) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hoisted_vars_stmt(s: &Stmt, top: bool, strict: bool, out: &mut std::collections::HashSet<String>) -> bool {
+    match s {
+        Stmt::VarDecl {
+            kind: DeclKind::Var,
+            decls,
+        } => {
+            for (p, _) in decls {
+                pat_idents(p, out);
+            }
+            true
+        }
+        Stmt::FuncDecl(f) => {
+            if top {
+                if let Some(n) = &f.name {
+                    out.insert(n.clone());
+                }
+                true
+            } else {
+                // Block-level function declaration: strict = block-scoped lexical (handled by the
+                // block scope in the walker); sloppy = Annex B promotion we don't model — bail.
+                strict
+            }
+        }
+        Stmt::Block(b) => hoisted_vars(b, false, strict, out),
+        Stmt::If { cons, alt, .. } => {
+            hoisted_vars_stmt(cons, false, strict, out)
+                && alt
+                    .as_deref()
+                    .map(|a| hoisted_vars_stmt(a, false, strict, out))
+                    .unwrap_or(true)
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Labeled { body, .. } => {
+            hoisted_vars_stmt(body, false, strict, out)
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(ForInit::VarDecl {
+                kind: DeclKind::Var,
+                decls,
+            }) = init.as_deref()
+            {
+                for (p, _) in decls {
+                    pat_idents(p, out);
+                }
+            }
+            hoisted_vars_stmt(body, false, strict, out)
+        }
+        Stmt::ForInOf {
+            decl, left, body, ..
+        } => {
+            if matches!(decl, Some(DeclKind::Var)) {
+                pat_idents(left, out);
+            }
+            hoisted_vars_stmt(body, false, strict, out)
+        }
+        Stmt::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            hoisted_vars(block, false, strict, out)
+                && handler
+                    .as_ref()
+                    .map(|(_, b)| hoisted_vars(b, false, strict, out))
+                    .unwrap_or(true)
+                && finalizer
+                    .as_ref()
+                    .map(|b| hoisted_vars(b, false, strict, out))
+                    .unwrap_or(true)
+        }
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .all(|c| hoisted_vars(&c.body, false, strict, out)),
+        _ => true,
+    }
+}
+
+impl CaptureScan {
+    /// Analyze `func`, returning (captured names, inner-arrow-reads-this) or `None` to bail.
+    fn run(func: &Function) -> Option<(std::collections::HashSet<String>, bool)> {
+        let mut sc = CaptureScan {
+            scopes: Vec::new(),
+            fn_depth: 0,
+            captured: Default::default(),
+            depth0_inner_decls: Default::default(),
+            env_this: false,
+            arrow_path: vec![func.is_arrow],
+        };
+        sc.fn_body(func)?;
+        // A captured name declared by an inner depth-0 scope needs per-block freshness.
+        if sc.captured.iter().any(|n| sc.depth0_inner_decls.contains(n)) {
+            return None;
+        }
+        Some((sc.captured, sc.env_this))
+    }
+
+    fn push_scope(&mut self, names: std::collections::HashSet<String>) {
+        if self.fn_depth == 0 && !self.scopes.is_empty() {
+            for n in &names {
+                self.depth0_inner_decls.insert(n.clone());
+            }
+        }
+        self.scopes.push((names, self.fn_depth));
+    }
+
+    /// Walk a whole function: params + hoisted vars + top-level lexicals in one scope, then body.
+    fn fn_body(&mut self, func: &Function) -> Option<()> {
+        let mut names = std::collections::HashSet::new();
+        for p in &func.params {
+            pat_idents(&p.pattern, &mut names);
+        }
+        if !func.is_arrow {
+            names.insert("arguments".to_string());
+        }
+        if func.is_fn_expr {
+            if let Some(n) = &func.name {
+                names.insert(n.clone());
+            }
+        }
+        if !hoisted_vars(&func.body, true, func.is_strict, &mut names) {
+            return None;
+        }
+        self.declare_lexicals(&func.body, &mut names);
+        self.push_scope(names);
+        // Parameter defaults evaluate in the function scope.
+        for p in &func.params {
+            if let Some(d) = &p.default {
+                self.expr(d)?;
+            }
+        }
+        for s in &func.body {
+            self.stmt(s)?;
+        }
+        self.scopes.pop();
+        Some(())
+    }
+
+    /// Add a statement list's block-scoped declarations (let/const/class, strict block functions).
+    fn declare_lexicals(&self, stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for s in stmts {
+            match s {
+                Stmt::VarDecl {
+                    kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
+                    decls,
+                } => {
+                    for (p, _) in decls {
+                        pat_idents(p, out);
+                    }
+                }
+                Stmt::ClassDecl(c) => {
+                    if let Some(n) = &c.name {
+                        out.insert(n.clone());
+                    }
+                }
+                Stmt::FuncDecl(f) => {
+                    // Only reached for *block-level* declarations (top-level ones are in the
+                    // hoisted set); strict mode makes them block lexicals. (Sloppy already bailed
+                    // in hoisted_vars.)
+                    if let Some(n) = &f.name {
+                        out.insert(n.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn block(&mut self, stmts: &[Stmt]) -> Option<()> {
+        let mut names = std::collections::HashSet::new();
+        self.declare_lexicals(stmts, &mut names);
+        self.push_scope(names);
+        for s in stmts {
+            self.stmt(s)?;
+        }
+        self.scopes.pop();
+        Some(())
+    }
+
+    fn reference(&mut self, name: &str) {
+        for (scope, depth) in self.scopes.iter().rev() {
+            if scope.contains(name) {
+                if *depth == 0 && self.fn_depth > 0 {
+                    self.captured.insert(name.to_string());
+                }
+                return;
+            }
+        }
+        // Unresolved: a global/free name of the whole compilation — nothing to capture.
+    }
+
+    /// Walk a pattern in *assignment* position (destructuring assignment): idents are references.
+    fn pat_targets(&mut self, p: &Pattern) -> Option<()> {
+        match p {
+            Pattern::Ident(n) => {
+                self.reference(n);
+                Some(())
+            }
+            Pattern::Array(elems) => {
+                for e in elems {
+                    match e {
+                        ArrayPatElem::Hole => {}
+                        ArrayPatElem::Elem { pattern, default } => {
+                            self.pat_targets(pattern)?;
+                            if let Some(d) = default {
+                                self.expr(d)?;
+                            }
+                        }
+                        ArrayPatElem::Rest(p) => self.pat_targets(p)?,
+                    }
+                }
+                Some(())
+            }
+            Pattern::Object(o) => {
+                for pr in &o.props {
+                    if let PropKey::Computed(k) = &pr.key {
+                        self.expr(k)?;
+                    }
+                    self.pat_targets(&pr.value)?;
+                    if let Some(d) = &pr.default {
+                        self.expr(d)?;
+                    }
+                }
+                if let Some(r) = &o.rest {
+                    self.reference(r);
+                }
+                Some(())
+            }
+            Pattern::Member(e) => self.expr(e),
+        }
+    }
+
+    /// Walk the expressions inside a *declaration* pattern (defaults, computed keys); the idents
+    /// themselves were declared by the enclosing scope construction.
+    fn pat_decl_exprs(&mut self, p: &Pattern) -> Option<()> {
+        match p {
+            Pattern::Ident(_) => Some(()),
+            Pattern::Array(elems) => {
+                for e in elems {
+                    match e {
+                        ArrayPatElem::Hole => {}
+                        ArrayPatElem::Elem { pattern, default } => {
+                            self.pat_decl_exprs(pattern)?;
+                            if let Some(d) = default {
+                                self.expr(d)?;
+                            }
+                        }
+                        ArrayPatElem::Rest(p) => self.pat_decl_exprs(p)?,
+                    }
+                }
+                Some(())
+            }
+            Pattern::Object(o) => {
+                for pr in &o.props {
+                    if let PropKey::Computed(k) = &pr.key {
+                        self.expr(k)?;
+                    }
+                    self.pat_decl_exprs(&pr.value)?;
+                    if let Some(d) = &pr.default {
+                        self.expr(d)?;
+                    }
+                }
+                Some(())
+            }
+            Pattern::Member(e) => self.expr(e),
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) -> Option<()> {
+        match s {
+            Stmt::Expr(e) | Stmt::Throw(e) => self.expr(e),
+            Stmt::VarDecl { decls, .. } => {
+                for (p, init) in decls {
+                    self.pat_decl_exprs(p)?;
+                    if let Some(e) = init {
+                        self.expr(e)?;
+                    }
+                }
+                Some(())
+            }
+            Stmt::FuncDecl(f) => self.inner_fn(f),
+            Stmt::Return(e) => {
+                if let Some(e) = e {
+                    self.expr(e)?;
+                }
+                Some(())
+            }
+            Stmt::If { test, cons, alt } => {
+                self.expr(test)?;
+                self.stmt(cons)?;
+                if let Some(a) = alt {
+                    self.stmt(a)?;
+                }
+                Some(())
+            }
+            Stmt::Block(b) => self.block(b),
+            Stmt::While { test, body } => {
+                self.expr(test)?;
+                self.stmt(body)
+            }
+            Stmt::DoWhile { body, test } => {
+                self.stmt(body)?;
+                self.expr(test)
+            }
+            Stmt::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                let mut names = std::collections::HashSet::new();
+                if let Some(ForInit::VarDecl {
+                    kind: DeclKind::Let | DeclKind::Const,
+                    decls,
+                }) = init.as_deref()
+                {
+                    for (p, _) in decls {
+                        pat_idents(p, &mut names);
+                    }
+                }
+                self.push_scope(names);
+                let r = (|| {
+                    match init.as_deref() {
+                        Some(ForInit::VarDecl { decls, .. }) => {
+                            for (p, e) in decls {
+                                self.pat_decl_exprs(p)?;
+                                if let Some(e) = e {
+                                    self.expr(e)?;
+                                }
+                            }
+                        }
+                        Some(ForInit::Expr(e)) => self.expr(e)?,
+                        None => {}
+                    }
+                    if let Some(t) = test {
+                        self.expr(t)?;
+                    }
+                    if let Some(u) = update {
+                        self.expr(u)?;
+                    }
+                    self.stmt(body)
+                })();
+                self.scopes.pop();
+                r
+            }
+            Stmt::ForInOf {
+                decl,
+                left,
+                right,
+                body,
+                ..
+            } => {
+                self.expr(right)?;
+                let mut names = std::collections::HashSet::new();
+                match decl {
+                    Some(DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing) => {
+                        pat_idents(left, &mut names);
+                    }
+                    Some(DeclKind::Var) => {} // already in the hoisted set
+                    None => {}
+                }
+                self.push_scope(names);
+                let r = (|| {
+                    if decl.is_none() {
+                        self.pat_targets(left)?;
+                    } else {
+                        self.pat_decl_exprs(left)?;
+                    }
+                    self.stmt(body)
+                })();
+                self.scopes.pop();
+                r
+            }
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Empty | Stmt::Debugger => Some(()),
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.block(block)?;
+                if let Some((param, body)) = handler {
+                    let mut names = std::collections::HashSet::new();
+                    if let Some(p) = param {
+                        pat_idents(p, &mut names);
+                    }
+                    self.declare_lexicals(body, &mut names);
+                    self.push_scope(names);
+                    let r = (|| {
+                        if let Some(p) = param {
+                            self.pat_decl_exprs(p)?;
+                        }
+                        for s in body {
+                            self.stmt(s)?;
+                        }
+                        Some(())
+                    })();
+                    self.scopes.pop();
+                    r?;
+                }
+                if let Some(f) = finalizer {
+                    self.block(f)?;
+                }
+                Some(())
+            }
+            Stmt::Switch { disc, cases } => {
+                self.expr(disc)?;
+                let mut names = std::collections::HashSet::new();
+                for c in cases {
+                    self.declare_lexicals(&c.body, &mut names);
+                }
+                self.push_scope(names);
+                let r = (|| {
+                    for c in cases {
+                        if let Some(t) = &c.test {
+                            self.expr(t)?;
+                        }
+                        for s in &c.body {
+                            self.stmt(s)?;
+                        }
+                    }
+                    Some(())
+                })();
+                self.scopes.pop();
+                r
+            }
+            Stmt::Labeled { body, .. } => self.stmt(body),
+            Stmt::ClassDecl(c) => self.class(c),
+            // `with`, modules, and anything else unrecognized: unanalyzable.
+            _ => None,
+        }
+    }
+
+    /// Enter an inner function (declaration, expression, method, accessor…).
+    fn inner_fn(&mut self, f: &Function) -> Option<()> {
+        self.fn_depth += 1;
+        self.arrow_path.push(f.is_arrow);
+        let r = self.fn_body(f);
+        self.arrow_path.pop();
+        self.fn_depth -= 1;
+        r
+    }
+
+    fn class(&mut self, c: &Class) -> Option<()> {
+        // Heritage, decorators, and computed keys evaluate at definition time (current depth);
+        // method bodies / field initializers / static blocks run later (inner-function depth).
+        for d in &c.decorators {
+            self.expr(d)?;
+        }
+        if let Some(sc) = &c.superclass {
+            self.expr(sc)?;
+        }
+        let mut names = std::collections::HashSet::new();
+        if let Some(n) = &c.name {
+            names.insert(n.clone());
+        }
+        self.push_scope(names);
+        let r = (|| {
+            for m in &c.members {
+                for d in &m.decorators {
+                    self.expr(d)?;
+                }
+                if let PropKey::Computed(k) = &m.key {
+                    self.expr(k)?;
+                }
+                if let Some(f) = &m.func {
+                    self.inner_fn(f)?;
+                }
+                if let Some(v) = &m.value {
+                    // Field initializers run in an implicit method with its own `this` (the
+                    // instance) — inner depth, and NOT part of any outer arrow chain.
+                    self.fn_depth += 1;
+                    self.arrow_path.push(false);
+                    let r = self.expr(v);
+                    self.arrow_path.pop();
+                    self.fn_depth -= 1;
+                    r?;
+                }
+            }
+            Some(())
+        })();
+        self.scopes.pop();
+        r
+    }
+
+    fn expr(&mut self, e: &Expr) -> Option<()> {
+        match e {
+            Expr::Num(_)
+            | Expr::BigInt(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Null
+            | Expr::Undefined
+            | Expr::Regex { .. }
+            | Expr::Super
+            | Expr::NewTarget
+            | Expr::ImportMeta => Some(()),
+            Expr::This => {
+                // `this` read through an unbroken arrow chain from the outer function observes
+                // the outer `this` — the activation must carry it.
+                if self.fn_depth > 0 && self.arrow_path[1..].iter().all(|a| *a) {
+                    self.env_this = true;
+                }
+                Some(())
+            }
+            Expr::Ident(n) => {
+                self.reference(n);
+                Some(())
+            }
+            Expr::Paren(i) | Expr::ToStr(i) | Expr::Await(i) | Expr::OptionalChain(i) => {
+                self.expr(i)
+            }
+            Expr::Array(elems) => {
+                for el in elems {
+                    match el {
+                        ArrayElem::Item(e) | ArrayElem::Spread(e) => self.expr(e)?,
+                        ArrayElem::Hole => {}
+                    }
+                }
+                Some(())
+            }
+            Expr::Object(props) => {
+                for p in props {
+                    match p {
+                        PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
+                            if let PropKey::Computed(k) = key {
+                                self.expr(k)?;
+                            }
+                            self.expr(value)?;
+                        }
+                        PropDef::Method { key, func }
+                        | PropDef::Getter { key, func }
+                        | PropDef::Setter { key, func } => {
+                            if let PropKey::Computed(k) = key {
+                                self.expr(k)?;
+                            }
+                            self.inner_fn(func)?;
+                        }
+                        PropDef::Spread(e) | PropDef::Proto(e) => self.expr(e)?,
+                    }
+                }
+                Some(())
+            }
+            Expr::Func(f) => self.inner_fn(f),
+            Expr::Class(c) => self.class(c),
+            Expr::Yield { arg, .. } => {
+                if let Some(a) = arg {
+                    self.expr(a)?;
+                }
+                Some(())
+            }
+            Expr::Unary { arg, .. } | Expr::Update { arg, .. } => self.expr(arg),
+            Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
+                self.expr(left)?;
+                self.expr(right)
+            }
+            Expr::Assign { target, value, .. } => {
+                // A destructuring assignment target is a pattern of references.
+                match &**target {
+                    Expr::Array(_) | Expr::Object(_) => {
+                        // Reinterpreting the literal as a pattern is the parser's job; walking it
+                        // as an expression visits the same identifiers (Cover handles defaults).
+                        self.expr(target)?;
+                    }
+                    t => self.expr(t)?,
+                }
+                self.expr(value)
+            }
+            Expr::Cond { test, cons, alt } => {
+                self.expr(test)?;
+                self.expr(cons)?;
+                self.expr(alt)
+            }
+            Expr::Call { callee, args, .. } => {
+                // Direct eval inside any nested function could name arbitrary outer locals.
+                if matches!(&**callee, Expr::Ident(n) if n == "eval") {
+                    return None;
+                }
+                self.expr(callee)?;
+                for a in args {
+                    match a {
+                        ArrayElem::Item(e) | ArrayElem::Spread(e) => self.expr(e)?,
+                        ArrayElem::Hole => {}
+                    }
+                }
+                Some(())
+            }
+            Expr::New { callee, args } => {
+                self.expr(callee)?;
+                for a in args {
+                    match a {
+                        ArrayElem::Item(e) | ArrayElem::Spread(e) => self.expr(e)?,
+                        ArrayElem::Hole => {}
+                    }
+                }
+                Some(())
+            }
+            Expr::Member { obj, .. } => self.expr(obj),
+            Expr::Index { obj, index, .. } => {
+                self.expr(obj)?;
+                self.expr(index)
+            }
+            Expr::Seq(es) => {
+                for e in es {
+                    self.expr(e)?;
+                }
+                Some(())
+            }
+            Expr::TaggedTemplate { tag, subs, .. } => {
+                self.expr(tag)?;
+                for s in subs {
+                    self.expr(s)?;
+                }
+                Some(())
+            }
+            Expr::PrivateIn { obj, .. } => self.expr(obj),
+            Expr::ImportCall { spec, options, .. } => {
+                self.expr(spec)?;
+                if let Some(o) = options {
+                    self.expr(o)?;
+                }
+                Some(())
+            }
+        }
     }
 }
 
@@ -201,10 +1059,18 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     if func.is_fn_expr && func.name.is_some() {
         return None;
     }
-    let mut c = Compiler::default();
-    // Parameters: plain identifiers only, one slot each (a sloppy duplicate name resolves to the
-    // later parameter, matching the env behavior where the later insert wins).
-    for p in &func.params {
+    // Capture analysis: which locals inner functions can name (they live in a real activation
+    // env), and whether an inner arrow chain reads `this`. `None` = unanalyzable — bail.
+    let (captured, env_this) = CaptureScan::run(func)?;
+
+    let mut c = Compiler {
+        env_this,
+        ..Compiler::default()
+    };
+    // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
+    // resolves to the later parameter, matching the env behavior where the later insert wins).
+    // A captured parameter keeps its positional slot (dead) but homes in the activation env.
+    for (k, p) in func.params.iter().enumerate() {
         if p.default.is_some() || p.rest {
             return None;
         }
@@ -212,19 +1078,32 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
             return None;
         };
         let slot = c.fresh_slot(name);
-        c.scope_bind(name, slot, false);
+        if captured.contains(name) {
+            c.cap_inits.push(CapInit::Param(k as u16, Rc::from(name.as_str())));
+            c.env_bind(name, false);
+        } else {
+            c.scope_bind(name, slot, false);
+        }
     }
     c.n_params = func.params.len();
-    // Function-scoped `var`s (and the oracle's for-head reset quirk) from the shared hoist plan.
+    // Function-scoped `var`s and hoisted function declarations from the shared hoist plan.
     for op in crate::interpreter::collect_hoist_ops(&func.body, func.is_strict, &[]) {
         match op {
             HoistOp::Var(name) => {
-                if c.lookup(&name).is_none() {
+                if captured.contains(&name) {
+                    if !c.env_has(&name) {
+                        c.cap_inits.push(CapInit::Var(Rc::from(name.as_str())));
+                        c.env_bind(&name, false);
+                    }
+                } else if c.lookup(&name).is_none() {
                     let slot = c.fresh_slot(&name);
                     c.scope_bind(&name, slot, false);
                 }
             }
             HoistOp::VarForce(name) => {
+                if captured.contains(&name) {
+                    return None; // for-head reset of a captured param — stay in the oracle
+                }
                 let slot = match c.lookup(&name) {
                     Some((s, _)) => s,
                     None => {
@@ -237,12 +1116,33 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
                     c.var_force_resets.push(slot);
                 }
             }
-            // Inner function declarations (and Annex B promotions) mean closures — bail.
-            HoistOp::Fn(..) | HoistOp::AnnexB(..) => return None,
+            HoistOp::Fn(name, f) => {
+                let fidx = c.funcs.len() as u16;
+                c.funcs.push(f.clone());
+                if captured.contains(&name) {
+                    c.cap_inits.push(CapInit::Fn(fidx, Rc::from(name.as_str())));
+                    c.env_bind(&name, false);
+                } else {
+                    let slot = match c.lookup(&name) {
+                        Some((s, _)) => s,
+                        None => {
+                            let s = c.fresh_slot(&name);
+                            c.scope_bind(&name, s, false);
+                            s
+                        }
+                    };
+                    // Created at entry, in hoist order, closing over the activation.
+                    c.emit(Op::MakeClosure(fidx as u32, u32::MAX));
+                    c.emit(Op::StoreLocal(slot));
+                }
+            }
+            // Annex B promotions have declaration-time sync the VM doesn't model — bail.
+            HoistOp::AnnexB(..) => return None,
         }
     }
-    // Body-level lexicals get TDZ slots.
-    c.declare_block_lexicals(&func.body).ok()?;
+    // Body-level lexicals: captured ones home in the activation (inserted in TDZ by
+    // make_run_env), the rest get TDZ slots.
+    c.declare_body_lexicals(&func.body, &captured).ok()?;
     for stmt in &func.body {
         c.stmt(stmt).ok()?;
     }
@@ -256,6 +1156,9 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         n_params: c.n_params,
         var_force_resets: c.var_force_resets,
         uses_this: c.uses_this,
+        funcs: c.funcs,
+        cap_inits: c.cap_inits,
+        env_this: c.env_this,
         caches: c.caches,
     }))
 }
@@ -275,7 +1178,19 @@ struct Compiler {
     /// loop's `LoopCtx` (drained when that loop pushes its context).
     pending_labels: Vec<String>,
     uses_this: bool,
-    caches: Vec<std::cell::Cell<u32>>,
+    caches: Vec<std::cell::Cell<IcState>>,
+    /// Captured (env-homed) function-scope-wide names → is_const. Slot scopes shadow these.
+    env_names: std::collections::HashMap<String, bool>,
+    funcs: Vec<Rc<Function>>,
+    cap_inits: Vec<CapInit>,
+    env_this: bool,
+}
+
+/// Where a name resolves inside the compiled body.
+enum Home {
+    Slot(u16, bool),
+    /// Captured: lives in the activation env; bool = is_const.
+    Env(bool),
 }
 
 #[derive(Default)]
@@ -285,6 +1200,9 @@ struct LoopCtx {
     /// Labels naming this loop (usually zero or one; `a: b: for(…)` stacks several). A labelled
     /// `break`/`continue` searches the loop stack for the ctx carrying its target label.
     labels: Vec<String>,
+    /// A `switch` context: an unlabelled `break` targets it, but `continue` skips past it to the
+    /// innermost enclosing loop.
+    is_switch: bool,
 }
 
 /// Compilation bail: the construct is outside the v0 subset.
@@ -298,7 +1216,7 @@ impl Compiler {
     }
     /// Reserve a fresh inline-cache slot (starts empty) for a property-access op.
     fn new_cache(&mut self) -> u32 {
-        self.caches.push(std::cell::Cell::new(u32::MAX));
+        self.caches.push(std::cell::Cell::new(IcState::EMPTY));
         (self.caches.len() - 1) as u32
     }
     fn fresh_slot(&mut self, name: &str) -> u16 {
@@ -325,6 +1243,20 @@ impl Compiler {
         }
         None
     }
+    fn env_bind(&mut self, name: &str, is_const: bool) {
+        self.env_names.insert(name.to_string(), is_const);
+    }
+    fn env_has(&self, name: &str) -> bool {
+        self.env_names.contains_key(name)
+    }
+    /// Resolve a local: innermost slot scope first (block lexicals shadow captured names — a
+    /// captured block lexical bails compile, so every env name is function-scope-wide).
+    fn home(&self, name: &str) -> Option<Home> {
+        if let Some((slot, k)) = self.lookup(name) {
+            return Some(Home::Slot(slot, k));
+        }
+        self.env_names.get(name).map(|k| Home::Env(*k))
+    }
     fn const_idx(&mut self, v: Value) -> u32 {
         self.consts.push(v);
         (self.consts.len() - 1) as u32
@@ -346,6 +1278,48 @@ impl Compiler {
             | Op::JumpIfNotNullishPeek(t) => *t = target,
             _ => unreachable!("patching a non-jump"),
         }
+    }
+
+    /// Declare the function body's top-level `let`/`const`: captured ones home in the activation
+    /// env (inserted in TDZ by `make_run_env`), the rest get TDZ slots. Function declarations
+    /// were already handled by the hoist plan; classes and `using` bail.
+    fn declare_body_lexicals(
+        &mut self,
+        stmts: &[Stmt],
+        captured: &std::collections::HashSet<String>,
+    ) -> CResult {
+        for s in stmts {
+            match s {
+                Stmt::VarDecl {
+                    kind: kind @ (DeclKind::Let | DeclKind::Const),
+                    decls,
+                } => {
+                    for (pat, _) in decls {
+                        let Pattern::Ident(name) = pat else {
+                            return Err(Bail);
+                        };
+                        let is_const = matches!(kind, DeclKind::Const);
+                        if captured.contains(name) {
+                            self.cap_inits
+                                .push(CapInit::Lexical(Rc::from(name.as_str()), is_const));
+                            self.env_bind(name, is_const);
+                        } else {
+                            let slot = self.fresh_slot(name);
+                            self.scope_bind(name, slot, is_const);
+                            self.emit(Op::Tdz(slot));
+                        }
+                    }
+                }
+                Stmt::VarDecl {
+                    kind: DeclKind::Using | DeclKind::AwaitUsing,
+                    ..
+                }
+                | Stmt::ClassDecl(_) => return Err(Bail),
+                Stmt::FuncDecl(_) => {} // hoisted — created at entry
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Declare a statement list's `let`/`const` as TDZ slots (block entry).
@@ -391,6 +1365,9 @@ impl Compiler {
         match s {
             Stmt::Expr(e) => self.expr_stmt(e),
             Stmt::Empty | Stmt::Debugger => Ok(()),
+            // Top-level function declarations were hoisted (created at entry); block-level ones
+            // never reach here (declare_block_lexicals bails first).
+            Stmt::FuncDecl(_) => Ok(()),
             Stmt::VarDecl { kind, decls } => {
                 if matches!(kind, DeclKind::Using | DeclKind::AwaitUsing) {
                     return Err(Bail);
@@ -399,9 +1376,9 @@ impl Compiler {
                     let Pattern::Ident(name) = pat else {
                         return Err(Bail);
                     };
-                    let (slot, _) = self.lookup(name).ok_or(Bail)?;
+                    let home = self.home(name).ok_or(Bail)?;
                     match init {
-                        Some(e) => self.expr(e)?,
+                        Some(e) => self.named_expr(e, name)?,
                         // `var x;` leaves an existing binding alone; `let x;` initializes.
                         None => {
                             if matches!(kind, DeclKind::Var) {
@@ -410,7 +1387,21 @@ impl Compiler {
                             self.emit(Op::Undef);
                         }
                     }
-                    self.emit(Op::StoreLocal(slot));
+                    match home {
+                        Home::Slot(slot, _) => {
+                            self.emit(Op::StoreLocal(slot));
+                        }
+                        Home::Env(_) => {
+                            let n = self.name_idx(name);
+                            // A lexical declaration initializes (clearing TDZ); a `var` writes an
+                            // already-initialized binding.
+                            if matches!(kind, DeclKind::Var) {
+                                self.emit(Op::StoreCap(n));
+                            } else {
+                                self.emit(Op::StoreCapInit(n));
+                            }
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -521,7 +1512,14 @@ impl Compiler {
             }
             Stmt::Continue(None) => {
                 let j = self.emit(Op::Jump(0));
-                self.loops.last_mut().ok_or(Bail)?.continues.push(j);
+                // `continue` skips switch contexts: it targets the innermost enclosing *loop*.
+                self.loops
+                    .iter_mut()
+                    .rev()
+                    .find(|c| !c.is_switch)
+                    .ok_or(Bail)?
+                    .continues
+                    .push(j);
                 Ok(())
             }
             // Labelled break/continue: jump to the loop on the stack that carries the target label.
@@ -534,18 +1532,107 @@ impl Compiler {
             }
             Stmt::Continue(Some(name)) => {
                 let j = self.emit(Op::Jump(0));
-                self.labeled_loop_mut(name).ok_or(Bail)?.continues.push(j);
+                // A labelled continue must target a loop — a label on a switch is only a break
+                // target (the parser rejects `continue` to it; not-found bails to the oracle).
+                self.loops
+                    .iter_mut()
+                    .rev()
+                    .find(|c| !c.is_switch && c.labels.iter().any(|l| l == name))
+                    .ok_or(Bail)?
+                    .continues
+                    .push(j);
                 Ok(())
             }
-            // A label naming a loop attaches to that loop's context; stacked labels (`a: b: for`)
-            // accumulate through the recursion. A label on any other statement bails.
+            // A label naming a loop or switch attaches to that context; stacked labels
+            // (`a: b: for`) accumulate through the recursion. A label on any other statement bails.
             Stmt::Labeled { label, body } => match &**body {
-                Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::Labeled { .. } => {
+                Stmt::While { .. }
+                | Stmt::DoWhile { .. }
+                | Stmt::For { .. }
+                | Stmt::Switch { .. }
+                | Stmt::Labeled { .. } => {
                     self.pending_labels.push(label.clone());
                     self.stmt(body)
                 }
                 _ => Err(Bail),
             },
+            // `switch`: the discriminant lands in a hidden slot; case tests run in source order
+            // (exactly the oracle's two-phase evaluation), then bodies are laid out contiguously
+            // so fall-through is just falling through. Any lexical/class/function declaration
+            // directly in a case body bails — the oracle gives all cases one shared block scope
+            // whose TDZ interleavings slots don't model.
+            Stmt::Switch { disc, cases } => {
+                for case in cases {
+                    for s in &case.body {
+                        match s {
+                            Stmt::VarDecl {
+                                kind:
+                                    DeclKind::Let
+                                    | DeclKind::Const
+                                    | DeclKind::Using
+                                    | DeclKind::AwaitUsing,
+                                ..
+                            }
+                            | Stmt::ClassDecl(_)
+                            | Stmt::FuncDecl(_) => return Err(Bail),
+                            _ => {}
+                        }
+                    }
+                }
+                self.expr(disc)?;
+                let tmp = self.fresh_slot("%switch%");
+                self.emit(Op::StoreLocal(tmp));
+                // Phase 1: the test chain. Each match jumps to its (not yet emitted) body.
+                let mut body_jumps: Vec<(usize, usize)> = Vec::new();
+                for (ci, case) in cases.iter().enumerate() {
+                    if let Some(test) = &case.test {
+                        self.emit(Op::LoadLocal(tmp));
+                        self.expr(test)?;
+                        self.emit(Op::StrictEq);
+                        let jf = self.emit(Op::JumpIfFalse(0));
+                        let jb = self.emit(Op::Jump(0));
+                        body_jumps.push((ci, jb));
+                        self.patch(jf);
+                    }
+                }
+                let jdefault = self.emit(Op::Jump(0));
+                self.loops.push(LoopCtx {
+                    labels: std::mem::take(&mut self.pending_labels),
+                    is_switch: true,
+                    ..LoopCtx::default()
+                });
+                // Phase 2: bodies, contiguous and in source order.
+                let mut body_starts = vec![0usize; cases.len()];
+                let mut r = Ok(());
+                'bodies: for (ci, case) in cases.iter().enumerate() {
+                    body_starts[ci] = self.ops.len();
+                    for s in &case.body {
+                        r = self.stmt(s);
+                        if r.is_err() {
+                            break 'bodies;
+                        }
+                    }
+                }
+                let ctx = self.loops.pop().unwrap();
+                r?;
+                for (ci, at) in body_jumps {
+                    match &mut self.ops[at] {
+                        Op::Jump(t) => *t = body_starts[ci] as u32,
+                        _ => unreachable!(),
+                    }
+                }
+                match cases.iter().position(|c| c.test.is_none()) {
+                    Some(di) => match &mut self.ops[jdefault] {
+                        Op::Jump(t) => *t = body_starts[di] as u32,
+                        _ => unreachable!(),
+                    },
+                    None => self.patch(jdefault),
+                }
+                for b in ctx.breaks {
+                    self.patch(b);
+                }
+                Ok(())
+            }
             // `try { ... } catch (e?) { ... }` — no `finally` (bails), catch param an ident or none.
             // On a throw in the try region the VM unwinds to `catch_pc` with the exception pushed.
             Stmt::Try {
@@ -712,19 +1799,12 @@ impl Compiler {
                 return Ok(());
             }
             Expr::Update { op, arg, .. } => {
-                if let Expr::Ident(name) = &**arg {
-                    if let Some((slot, is_const)) = self.lookup(name) {
-                        if !is_const {
-                            let kind = match *op {
-                                "++" => UpdKind::IncDiscard,
-                                "--" => UpdKind::DecDiscard,
-                                _ => return Err(Bail),
-                            };
-                            self.emit(Op::UpdateLocal(slot, kind));
-                            return Ok(());
-                        }
-                    }
-                }
+                let kind = match *op {
+                    "++" => UpdKind::IncDiscard,
+                    "--" => UpdKind::DecDiscard,
+                    _ => return Err(Bail),
+                };
+                return self.update_target(arg, kind);
             }
             Expr::Assign { op, target, value } => {
                 return self.assign_discard(op, target, value);
@@ -758,13 +1838,13 @@ impl Compiler {
             return Ok(false);
         }
         match target {
-            Expr::Ident(name) => match self.lookup(name) {
-                Some((slot, is_const)) => {
+            Expr::Ident(name) => match self.home(name) {
+                Some(Home::Slot(slot, is_const)) => {
                     if is_const {
                         return Ok(false);
                     }
                     if op == "=" {
-                        self.expr(value)?;
+                        self.named_expr(value, name)?;
                     } else {
                         self.emit(Op::LoadLocal(slot));
                         self.expr(value)?;
@@ -773,12 +1853,27 @@ impl Compiler {
                     self.emit(Op::StoreLocal(slot));
                     Ok(true)
                 }
+                Some(Home::Env(is_const)) => {
+                    if is_const {
+                        return Ok(false); // runtime TypeError — the oracle's business
+                    }
+                    let n = self.name_idx(name);
+                    if op == "=" {
+                        self.named_expr(value, name)?;
+                    } else {
+                        self.emit(Op::LoadCap(n));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
+                    }
+                    self.emit(Op::StoreCap(n));
+                    Ok(true)
+                }
                 None => {
                     if op != "=" {
                         return Ok(false);
                     }
                     // StoreName already consumes the value without re-pushing it.
-                    self.expr(value)?;
+                    self.named_expr(value, name)?;
                     let i = self.name_idx(name);
                     self.emit(Op::StoreName(i));
                     Ok(true)
@@ -788,10 +1883,18 @@ impl Compiler {
                 obj,
                 prop,
                 optional: false,
-            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') && op == "=" => {
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                 self.expr(obj)?;
-                self.expr(value)?;
                 let i = self.name_idx(prop);
+                if op == "=" {
+                    self.expr(value)?;
+                } else {
+                    self.emit(Op::Dup);
+                    let cg = self.new_cache();
+                    self.emit(Op::GetProp(i, cg));
+                    self.expr(value)?;
+                    self.emit_compound(op)?;
+                }
                 let c = self.new_cache();
                 self.emit(Op::SetPropDrop(i, c));
                 Ok(true)
@@ -800,10 +1903,18 @@ impl Compiler {
                 obj,
                 index,
                 optional: false,
-            } if !matches!(**obj, Expr::Super) && op == "=" => {
+            } if !matches!(**obj, Expr::Super) => {
                 self.expr(obj)?;
                 self.expr(index)?;
-                self.expr(value)?;
+                if op == "=" {
+                    self.expr(value)?;
+                } else {
+                    self.emit(Op::ToPropKey);
+                    self.emit(Op::Dup2);
+                    self.emit(Op::GetElem);
+                    self.expr(value)?;
+                    self.emit_compound(op)?;
+                }
                 self.emit(Op::SetElemDrop);
                 Ok(true)
             }
@@ -811,8 +1922,33 @@ impl Compiler {
         }
     }
 
+    /// Emit a closure over the current environment; `name` applies NamedEvaluation to an
+    /// anonymous function expression (`var f = function(){}` → `f.name === "f"`).
+    fn emit_closure(&mut self, f: &Rc<Function>, name: Option<&str>) {
+        let fidx = self.funcs.len() as u32;
+        self.funcs.push(f.clone());
+        let name_idx = match name {
+            Some(n) if f.name.is_none() && !f.is_method => self.name_idx(n),
+            _ => u32::MAX,
+        };
+        self.emit(Op::MakeClosure(fidx, name_idx));
+    }
+
+    /// Compile a value expression in a naming position (declaration/assignment to `name`).
+    fn named_expr(&mut self, e: &Expr, name: &str) -> CResult {
+        if let Expr::Func(f) = e {
+            self.emit_closure(f, Some(name));
+            return Ok(());
+        }
+        self.expr(e)
+    }
+
     fn expr(&mut self, e: &Expr) -> CResult {
         match e {
+            Expr::Func(f) => {
+                self.emit_closure(f, None);
+                Ok(())
+            }
             Expr::Num(n) => {
                 let i = self.const_idx(Value::Num(*n));
                 self.emit(Op::Const(i));
@@ -833,12 +1969,27 @@ impl Compiler {
                 self.emit(Op::Const(i));
                 Ok(())
             }
+            Expr::Undefined => {
+                self.emit(Op::Undef);
+                Ok(())
+            }
+            Expr::BigInt(n) => {
+                let i = self.const_idx(Value::BigInt(n.clone()));
+                self.emit(Op::Const(i));
+                Ok(())
+            }
             Expr::Ident(name) => {
-                match self.lookup(name) {
-                    Some((slot, _)) => self.emit(Op::LoadLocal(slot)),
+                match self.home(name) {
+                    Some(Home::Slot(slot, _)) => {
+                        self.emit(Op::LoadLocal(slot));
+                    }
+                    Some(Home::Env(_)) => {
+                        let i = self.name_idx(name);
+                        self.emit(Op::LoadCap(i));
+                    }
                     None => {
                         let i = self.name_idx(name);
-                        self.emit(Op::LoadName(i))
+                        self.emit(Op::LoadName(i));
                     }
                 };
                 Ok(())
@@ -958,7 +2109,7 @@ impl Compiler {
                     "typeof" => {
                         // `typeof freeName` must not throw on unresolved names — that path
                         // stays in the oracle.
-                        if matches!(&**arg, Expr::Ident(n) if self.lookup(n).is_none()) {
+                        if matches!(&**arg, Expr::Ident(n) if self.home(n).is_none()) {
                             return Err(Bail);
                         }
                         self.expr(arg)?;
@@ -974,15 +2125,6 @@ impl Compiler {
                 Ok(())
             }
             Expr::Update { op, prefix, arg } => {
-                let Expr::Ident(name) = &**arg else {
-                    return Err(Bail);
-                };
-                let Some((slot, is_const)) = self.lookup(name) else {
-                    return Err(Bail);
-                };
-                if is_const {
-                    return Err(Bail);
-                }
                 let kind = match (*op, *prefix) {
                     ("++", true) => UpdKind::PreInc,
                     ("--", true) => UpdKind::PreDec,
@@ -990,8 +2132,7 @@ impl Compiler {
                     ("--", false) => UpdKind::PostDec,
                     _ => return Err(Bail),
                 };
-                self.emit(Op::UpdateLocal(slot, kind));
-                Ok(())
+                self.update_target(arg, kind)
             }
             Expr::Assign { op, target, value } => self.assign(op, target, value),
             Expr::Call {
@@ -1011,7 +2152,8 @@ impl Compiler {
                     } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                         self.expr(obj)?;
                         let i = self.name_idx(prop);
-                        self.emit(Op::GetMethod(i));
+                        let c = self.new_cache();
+                        self.emit(Op::GetMethod(i, c));
                         for a in args {
                             let ArrayElem::Item(a) = a else {
                                 return Err(Bail);
@@ -1037,7 +2179,7 @@ impl Compiler {
                         self.emit(Op::CallWithThis(args.len() as u16));
                     }
                     Expr::Super => return Err(Bail),
-                    Expr::Ident(name) if self.lookup(name).is_none() => {
+                    Expr::Ident(name) if self.home(name).is_none() => {
                         // Free-name callee: resolved before the arguments (spec order), and a
                         // `with (obj) f()` hit supplies obj as `this`.
                         let i = self.name_idx(name);
@@ -1101,8 +2243,9 @@ impl Compiler {
                     if k == "__proto__" || k.starts_with('#') {
                         return Err(Bail);
                     }
+                    // NamedEvaluation: `{ m: function(){} }` names the anonymous function "m".
+                    self.named_expr(value, &k)?;
                     keys.push(k);
-                    self.expr(value)?;
                     count += 1;
                 }
                 // Keys go into `names` only after every value is compiled — value expressions
@@ -1118,18 +2261,62 @@ impl Compiler {
         }
     }
 
+    /// `++`/`--` on a local slot, `obj.name`, or `obj[k]`; `kind` carries pre/post/discard.
+    fn update_target(&mut self, arg: &Expr, kind: UpdKind) -> CResult {
+        match arg {
+            Expr::Paren(inner) => self.update_target(inner, kind),
+            Expr::Ident(name) => {
+                match self.home(name) {
+                    Some(Home::Slot(slot, false)) => {
+                        self.emit(Op::UpdateLocal(slot, kind));
+                        Ok(())
+                    }
+                    Some(Home::Env(false)) => {
+                        let n = self.name_idx(name);
+                        self.emit(Op::UpdateCap(n, kind));
+                        Ok(())
+                    }
+                    // Const targets and free names (global counters) stay in the oracle.
+                    _ => Err(Bail),
+                }
+            }
+            Expr::Member {
+                obj,
+                prop,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
+                self.expr(obj)?;
+                let i = self.name_idx(prop);
+                let c = self.new_cache();
+                self.emit(Op::UpdateProp(i, c, kind));
+                Ok(())
+            }
+            Expr::Index {
+                obj,
+                index,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) => {
+                self.expr(obj)?;
+                self.expr(index)?;
+                self.emit(Op::UpdateElem(kind));
+                Ok(())
+            }
+            _ => Err(Bail),
+        }
+    }
+
     fn assign(&mut self, op: &str, target: &Expr, value: &Expr) -> CResult {
         if matches!(op, "&&=" | "||=" | "??=") {
             return Err(Bail);
         }
         match target {
-            Expr::Ident(name) => match self.lookup(name) {
-                Some((slot, is_const)) => {
+            Expr::Ident(name) => match self.home(name) {
+                Some(Home::Slot(slot, is_const)) => {
                     if is_const {
                         return Err(Bail);
                     }
                     if op == "=" {
-                        self.expr(value)?;
+                        self.named_expr(value, name)?;
                     } else {
                         self.emit(Op::LoadLocal(slot));
                         self.expr(value)?;
@@ -1139,11 +2326,27 @@ impl Compiler {
                     self.emit(Op::StoreLocal(slot));
                     Ok(())
                 }
+                Some(Home::Env(is_const)) => {
+                    if is_const {
+                        return Err(Bail);
+                    }
+                    let n = self.name_idx(name);
+                    if op == "=" {
+                        self.named_expr(value, name)?;
+                    } else {
+                        self.emit(Op::LoadCap(n));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
+                    }
+                    self.emit(Op::Dup);
+                    self.emit(Op::StoreCap(n));
+                    Ok(())
+                }
                 None => {
                     if op != "=" {
                         return Err(Bail);
                     }
-                    self.expr(value)?;
+                    self.named_expr(value, name)?;
                     self.emit(Op::Dup);
                     let i = self.name_idx(name);
                     self.emit(Op::StoreName(i));
@@ -1154,10 +2357,19 @@ impl Compiler {
                 obj,
                 prop,
                 optional: false,
-            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') && op == "=" => {
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                 self.expr(obj)?;
-                self.expr(value)?;
                 let i = self.name_idx(prop);
+                if op == "=" {
+                    self.expr(value)?;
+                } else {
+                    // Compound: base evaluated once (Dup), get before the RHS — Reference order.
+                    self.emit(Op::Dup);
+                    let cg = self.new_cache();
+                    self.emit(Op::GetProp(i, cg));
+                    self.expr(value)?;
+                    self.emit_compound(op)?;
+                }
                 let c = self.new_cache();
                 self.emit(Op::SetProp(i, c));
                 Ok(())
@@ -1166,10 +2378,19 @@ impl Compiler {
                 obj,
                 index,
                 optional: false,
-            } if !matches!(**obj, Expr::Super) && op == "=" => {
+            } if !matches!(**obj, Expr::Super) => {
                 self.expr(obj)?;
                 self.expr(index)?;
-                self.expr(value)?;
+                if op == "=" {
+                    self.expr(value)?;
+                } else {
+                    // Compound: coerce a side-effecting key once, then read-modify-write.
+                    self.emit(Op::ToPropKey);
+                    self.emit(Op::Dup2);
+                    self.emit(Op::GetElem);
+                    self.expr(value)?;
+                    self.emit_compound(op)?;
+                }
                 self.emit(Op::SetElem);
                 Ok(())
             }
@@ -1212,28 +2433,42 @@ pub enum VmStep {
     Await(Value),
 }
 
-/// Execute a compiled function body. `env` is the activation environment (used only as the root
-/// for free-name resolution); parameters are seeded straight into slots. Synchronous bodies only —
-/// an async body runs through [`VmCoro`], which drives [`run_vm`] and can suspend it.
-pub fn run(i: &mut Interp, chunk: &Chunk, env: &Env, args: &[Value]) -> Result<Value, Abrupt> {
-    let mut slots: Vec<Value> = vec![Value::Undefined; chunk.n_slots];
-    for (k, a) in args.iter().take(chunk.n_params).enumerate() {
-        slots[k] = a.clone();
-    }
+/// Execute a compiled function body. `env` is the root for free-name resolution — the *definition*
+/// environment when called leanly (see `Interp::call_user_inner`), since a compiled body has no
+/// observable activation. Parameters seed straight into slots; `this_val` is the already-bound
+/// `this` (computed only when the body reads it). Synchronous bodies only — an async body runs
+/// through [`VmCoro`], which drives [`run_vm`] and can suspend it.
+///
+/// The slot and operand-stack buffers come from a per-interpreter pool ([`Interp::vm_pool`]) so a
+/// hot call tree does not allocate two `Vec`s per call.
+pub fn run(
+    i: &mut Interp,
+    chunk: &Chunk,
+    env: &Env,
+    this_val: Value,
+    args: &[Value],
+) -> Result<Value, Abrupt> {
+    // Captured locals (and a lexically-read `this`) live in a per-call activation env; slots
+    // hold everything else. No captures → the definition env is used directly.
+    let env = chunk.make_run_env(i, env, &this_val, args);
+    let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
+    let seed = chunk.n_params.min(args.len());
+    slots.extend_from_slice(&args[..seed]);
+    slots.resize(chunk.n_slots, Value::Undefined);
     for &s in &chunk.var_force_resets {
         slots[s as usize] = Value::Undefined;
     }
-    let this_val = if chunk.uses_this {
-        i.get_var("this", env)?
-    } else {
-        Value::Undefined
-    };
-    let mut stack: Vec<Value> = Vec::with_capacity(16);
     let mut pc = 0usize;
     let mut handlers: Vec<Handler> = Vec::new();
-    match drive_vm(
-        i, chunk, env, &mut slots, &mut stack, &mut pc, &this_val, &mut handlers, None,
-    )? {
+    let r = drive_vm(
+        i, chunk, &env, &mut slots, &mut stack, &mut pc, &this_val, &mut handlers, None,
+    );
+    slots.clear();
+    stack.clear();
+    if i.vm_pool.len() < 64 {
+        i.vm_pool.push((slots, stack));
+    }
+    match r? {
         VmStep::Done(v) => Ok(v),
         VmStep::Await(_) => unreachable!("a synchronous bytecode function cannot await"),
     }
@@ -1284,7 +2519,7 @@ fn run_vm(
     i: &mut Interp,
     chunk: &Chunk,
     env: &Env,
-    slots: &mut Vec<Value>,
+    slots: &mut [Value],
     stack: &mut Vec<Value>,
     pc: &mut usize,
     this_val: &Value,
@@ -1388,6 +2623,65 @@ fn run_vm(
                 }
             }
             Op::Tdz(s) => slots[s as usize] = Value::Empty,
+            Op::LoadCap(n) => {
+                let name = &chunk.names[n as usize];
+                let b = env.borrow();
+                let bd = b.vars.get(&**name).expect("captured binding missing");
+                if !bd.initialized {
+                    let msg = format!("cannot access '{name}' before initialization");
+                    drop(b);
+                    return Err(i.throw("ReferenceError", msg));
+                }
+                let v = bd.value.clone();
+                drop(b);
+                stack.push(v);
+            }
+            Op::StoreCap(n) => {
+                let name = &chunk.names[n as usize];
+                let v = pop!();
+                let mut b = env.borrow_mut();
+                let bd = b.vars.get_mut(&**name).expect("captured binding missing");
+                if !bd.initialized {
+                    let msg = format!("cannot access '{name}' before initialization");
+                    drop(b);
+                    return Err(i.throw("ReferenceError", msg));
+                }
+                bd.value = v;
+            }
+            Op::StoreCapInit(n) => {
+                let name = &chunk.names[n as usize];
+                let v = pop!();
+                let mut b = env.borrow_mut();
+                let bd = b.vars.get_mut(&**name).expect("captured binding missing");
+                bd.value = v;
+                bd.initialized = true;
+            }
+            Op::UpdateCap(n, kind) => {
+                let name = &chunk.names[n as usize];
+                let old = {
+                    let b = env.borrow();
+                    let bd = b.vars.get(&**name).expect("captured binding missing");
+                    if !bd.initialized {
+                        let msg = format!("cannot access '{name}' before initialization");
+                        drop(b);
+                        return Err(i.throw("ReferenceError", msg));
+                    }
+                    bd.value.clone()
+                };
+                step_and_store(i, stack, kind, old, |_, v| {
+                    if let Some(bd) = env.borrow_mut().vars.get_mut(&**name) {
+                        bd.value = v;
+                    }
+                    Ok(())
+                })?;
+            }
+            Op::MakeClosure(fidx, name_n) => {
+                let v = i.make_function(chunk.funcs[fidx as usize].clone(), env.clone());
+                if name_n != u32::MAX {
+                    i.set_fn_name(&v, &chunk.names[name_n as usize]);
+                }
+                stack.push(v);
+            }
             Op::LoadName(n) => {
                 let v = i.get_var(&chunk.names[n as usize], env)?;
                 stack.push(v);
@@ -1469,9 +2763,77 @@ fn run_vm(
                 let k = i.to_property_key(&key)?;
                 i.set_member(&obj, &k, v)?;
             }
-            Op::GetMethod(n) => {
+            Op::UpdateProp(n, c, kind) => {
                 let obj = pop!();
-                let m = i.get_member(&obj, &chunk.names[n as usize])?;
+                let name = &chunk.names[n as usize];
+                let cache = &chunk.caches[c as usize];
+                let old = i.get_prop_ic(&obj, name, cache)?;
+                step_and_store(i, stack, kind, old, |i, v| {
+                    i.set_prop_ic(&obj, name, v, cache)
+                })?;
+            }
+            Op::UpdateElem(kind) => {
+                let key = pop!();
+                let obj = pop!();
+                // Dense-element fast path: numeric key on a plain array/object.
+                if let (Value::Obj(o), Value::Num(nk)) = (&obj, &key) {
+                    if let Some(Value::Num(old)) = i.fast_get_elem(o, *nk) {
+                        let new = match kind {
+                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => old + 1.0,
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => old - 1.0,
+                        };
+                        if i.fast_set_elem(o, *nk, Value::Num(new)).is_ok() {
+                            match kind {
+                                UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
+                                UpdKind::PostInc | UpdKind::PostDec => {
+                                    stack.push(Value::Num(old))
+                                }
+                                UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // General path: nullish check, one ToPropertyKey, [[Get]], ToNumeric, [[Set]] —
+                // the oracle's Reference order exactly.
+                if matches!(obj, Value::Undefined | Value::Null) {
+                    return Err(i.throw("TypeError", "cannot read property of null or undefined"));
+                }
+                let k = i.to_property_key(&key)?;
+                let old = i.get_member(&obj, &k)?;
+                step_and_store(i, stack, kind, old, |i, v| i.set_member(&obj, &k, v))?;
+            }
+            Op::ToPropKey => {
+                match stack.last().expect("vm stack underflow") {
+                    // Side-effect-free and deterministic to coerce later; numbers stay numeric
+                    // so GetElem/SetElem keep their dense fast path.
+                    Value::Num(_) | Value::Str(_) => {}
+                    _ => {
+                        let key = pop!();
+                        if matches!(
+                            stack.last().expect("vm stack underflow"),
+                            Value::Undefined | Value::Null
+                        ) {
+                            return Err(i.throw(
+                                "TypeError",
+                                "cannot access property of null or undefined",
+                            ));
+                        }
+                        let k = i.to_property_key(&key)?;
+                        stack.push(Value::str(k));
+                    }
+                }
+            }
+            Op::Dup2 => {
+                let len = stack.len();
+                let a = stack[len - 2].clone();
+                let b = stack[len - 1].clone();
+                stack.push(a);
+                stack.push(b);
+            }
+            Op::GetMethod(n, c) => {
+                let obj = pop!();
+                let m = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 stack.push(obj);
                 stack.push(m);
             }
@@ -1602,11 +2964,15 @@ fn run_vm(
                     *pc = t as usize;
                 }
             }
+            // Calls pass the argument window as a slice of the operand stack — no per-call `Vec`.
+            // The callee/receiver slots below the window are cloned out first, then the whole
+            // region is truncated away after the call. On a throw the stack is left long, which is
+            // fine: the handler unwind (or function exit) truncates it.
             Op::Call(argc) => {
                 let at = stack.len() - argc as usize;
-                let args: Vec<Value> = stack.split_off(at);
-                let callee = pop!();
-                let v = i.call(callee, Value::Undefined, &args)?;
+                let callee = stack[at - 1].clone();
+                let v = i.call(callee, Value::Undefined, &stack[at..])?;
+                stack.truncate(at - 1);
                 stack.push(v);
             }
             Op::LoadNameForCall(n) => {
@@ -1616,17 +2982,17 @@ fn run_vm(
             }
             Op::CallWithThis(argc) => {
                 let at = stack.len() - argc as usize;
-                let args: Vec<Value> = stack.split_off(at);
-                let m = pop!();
-                let this = pop!();
-                let v = i.call(m, this, &args)?;
+                let m = stack[at - 1].clone();
+                let this = stack[at - 2].clone();
+                let v = i.call(m, this, &stack[at..])?;
+                stack.truncate(at - 2);
                 stack.push(v);
             }
             Op::New(argc) => {
                 let at = stack.len() - argc as usize;
-                let args: Vec<Value> = stack.split_off(at);
-                let callee = pop!();
-                let v = i.construct(callee, &args)?;
+                let callee = stack[at - 1].clone();
+                let v = i.construct(callee, &stack[at..])?;
+                stack.truncate(at - 1);
                 stack.push(v);
             }
             Op::MakeArray(n) => {
@@ -1682,7 +3048,8 @@ pub struct VmCoro {
 impl VmCoro {
     /// Build an async coroutine for `chunk` with params seeded from `args`, parked before its first
     /// step (run on the first `resume`).
-    pub fn new(chunk: Rc<Chunk>, env: Env, this_val: Value, args: &[Value]) -> VmCoro {
+    pub fn new(i: &Interp, chunk: Rc<Chunk>, env: Env, this_val: Value, args: &[Value]) -> VmCoro {
+        let env = chunk.make_run_env(i, &env, &this_val, args);
         let mut slots = vec![Value::Undefined; chunk.n_slots];
         for (k, a) in args.iter().take(chunk.n_params).enumerate() {
             slots[k] = a.clone();
@@ -1761,6 +3128,48 @@ impl VmCoro {
             }
         }
     }
+}
+
+/// Shared `++`/`--` tail for property/element updates: ToNumeric the old value, write old±1 back
+/// through `set`, and push old / new / nothing per `kind`. Post variants push the *coerced* old
+/// value, matching the oracle's `eval_update`; a BigInt stays a BigInt.
+fn step_and_store(
+    i: &mut Interp,
+    stack: &mut Vec<Value>,
+    kind: UpdKind,
+    old: Value,
+    set: impl FnOnce(&mut Interp, Value) -> Result<(), Abrupt>,
+) -> Result<(), Abrupt> {
+    let inc = matches!(
+        kind,
+        UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard
+    );
+    match old {
+        Value::BigInt(n) => {
+            let one = crate::bigint::JsBigInt::from_u64(1);
+            let new = if inc { n.add(&one) } else { n.sub(&one) };
+            set(i, Value::BigInt(new.clone()))?;
+            match kind {
+                UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::BigInt(new)),
+                UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::BigInt(n)),
+                UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+            }
+        }
+        other => {
+            let oldn = match other {
+                Value::Num(n) => n,
+                other => i.to_number(&other)?,
+            };
+            let new = if inc { oldn + 1.0 } else { oldn - 1.0 };
+            set(i, Value::Num(new))?;
+            match kind {
+                UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
+                UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::Num(oldn)),
+                UpdKind::IncDiscard | UpdKind::DecDiscard => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 #[inline]

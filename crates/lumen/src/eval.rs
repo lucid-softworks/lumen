@@ -1877,6 +1877,20 @@ impl Interp {
             }
             cur = parent;
         }
+        // Fast path: an own data property of an ordinary global (the overwhelmingly common
+        // resolution for builtins and script-level bindings) — one hash lookup, no trap walk.
+        if self.ordinary_get_ptr(Rc::as_ptr(&self.global) as usize) {
+            let b = self.global.borrow();
+            if matches!(b.exotic, crate::value::Exotic::None) {
+                if let Some(p) = b.props.get(name) {
+                    if !p.accessor {
+                        let v = p.value.clone();
+                        drop(b);
+                        return Ok((v, None));
+                    }
+                }
+            }
+        }
         // Fall back to a property of the global object (where builtins live). The lookup is the
         // full trap-aware [[HasProperty]]: the global's prototype may be (or contain) a proxy.
         let g = Value::Obj(self.global.clone());
