@@ -2,6 +2,8 @@
 set -euo pipefail
 
 if [ -d /usr/bin ]; then
+  # Prefer coreutils from Git Bash/MSYS when the test is launched from another
+  # Windows shell; mktemp/rm/grep semantics are part of what this script tests.
   PATH="/usr/bin:/bin:$PATH"
   export PATH
 fi
@@ -14,6 +16,7 @@ TMP="$TMP_ROOT/$$"
 FAKE_WTB="$TMP/web-tooling-benchmark"
 FAKE_BIN="$TMP/bin"
 CARGO_LOG="$TMP/cargo.log"
+NPX_LOG="$TMP/npx.log"
 LUMEN_LOG="$TMP/lumen.args"
 STDERR_LOG="$TMP/stderr.log"
 # The lumen stub lives in the test's own tmp dir and is passed via LUMEN_BIN, so
@@ -84,11 +87,18 @@ cleanup() {
 }
 
 reset_logs() {
-  rm -f "$CARGO_LOG" "$LUMEN_LOG" "$TMP/stdout.log" "$STDERR_LOG"
+  rm -f "$CARGO_LOG" "$NPX_LOG" "$LUMEN_LOG" "$TMP/stdout.log" "$STDERR_LOG"
 }
 
 setup_stubs() {
+  local fake_bin_abs tmp_abs
   mkdir -p "$TMP_ROOT" "$FAKE_BIN"
+  tmp_abs="$(cd "$TMP" && pwd)"
+  CARGO_LOG="$tmp_abs/cargo.log"
+  NPX_LOG="$tmp_abs/npx.log"
+  LUMEN_LOG="$tmp_abs/lumen.args"
+  STDERR_LOG="$tmp_abs/stderr.log"
+  fake_bin_abs="$(cd "$FAKE_BIN" && pwd)"
 
   cat > "$FAKE_BIN/cargo" <<'SH'
 #!/usr/bin/env bash
@@ -97,6 +107,17 @@ exit 0
 SH
   chmod +x "$FAKE_BIN/cargo"
 
+  cat > "$FAKE_BIN/npx" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NPX_LOG"
+if [ "$1" = "webpack" ]; then
+  mkdir -p dist
+  printf '%s\n' 'fake selected web tooling cli bundle' > dist/cli.js
+fi
+exit 0
+SH
+  chmod +x "$FAKE_BIN/npx"
+
   cat > "$LUMEN_STUB" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$LUMEN_LOG"
@@ -104,13 +125,14 @@ if [ -n "${LUMEN_STUB_OUTPUT:-}" ]; then
   printf '%s\n' "$LUMEN_STUB_OUTPUT"
 else
   printf '%s\n' 'babel: 1234.5 runs/s'
+  printf '%s\n' 'Geometric mean: 1234.5'
 fi
 exit "${LUMEN_STUB_EXIT:-0}"
 SH
   chmod +x "$LUMEN_STUB"
 
-  export CARGO_LOG LUMEN_LOG
-  export PATH="$FAKE_BIN:$PATH"
+  export CARGO_LOG NPX_LOG LUMEN_LOG
+  export PATH="$fake_bin_abs:$PATH"
 }
 
 write_fake_wtb() {
@@ -187,18 +209,47 @@ test_lumen_bin_skips_build() {
   assert_no_cargo_log
 }
 
-test_args_forwarded_including_only_babel() {
+test_only_rebuilds_selected_bundle_without_forwarding_args() {
   reset_logs
   write_fake_wtb
 
   env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
-    "$SCRIPT" --only babel --extra-flag value > "$TMP/stdout.log"
+    "$SCRIPT" --only babel > "$TMP/stdout.log"
 
-  assert_file_equals "$LUMEN_LOG" "$FAKE_WTB/dist/cli.js
---only
-babel
---extra-flag
-value"
+  assert_file_equals "$NPX_LOG" "webpack --env.only=babel"
+  assert_file_equals "$LUMEN_LOG" "$FAKE_WTB/dist/cli.js"
+  assert_contains "$TMP/stdout.log" "Building Web Tooling Benchmark bundle for: babel"
+}
+
+test_only_equals_rebuilds_selected_bundle() {
+  reset_logs
+  write_fake_wtb
+
+  env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
+    "$SCRIPT" --only=terser > "$TMP/stdout.log"
+
+  assert_file_equals "$NPX_LOG" "webpack --env.only=terser"
+  assert_file_equals "$LUMEN_LOG" "$FAKE_WTB/dist/cli.js"
+}
+
+test_unsupported_args_fail_before_lumen_runs() {
+  write_fake_wtb
+  run_expect_failure env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
+    "$SCRIPT" --extra-flag value
+
+  assert_contains "$STDERR_LOG" "error: unsupported argument: --extra-flag"
+  assert_contains "$STDERR_LOG" "use --only <benchmark>"
+  if [ -f "$LUMEN_LOG" ]; then
+    fail "lumen should not run when script arguments are invalid"
+  fi
+}
+
+test_only_requires_name() {
+  write_fake_wtb
+  run_expect_failure env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
+    "$SCRIPT" --only
+
+  assert_contains "$STDERR_LOG" "error: --only requires a benchmark name."
 }
 
 test_exception_in_output_fails_even_on_zero_exit() {
@@ -222,11 +273,20 @@ test_benign_error_word_in_output_succeeds() {
   write_fake_wtb
 
   env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
-    LUMEN_STUB_OUTPUT='reported 0 Error: warnings' "$SCRIPT" > "$TMP/stdout.log" 2> "$STDERR_LOG" \
+    LUMEN_STUB_OUTPUT=$'reported 0 Error: warnings\nGeometric mean: 1.0' \
+    "$SCRIPT" > "$TMP/stdout.log" 2> "$STDERR_LOG" \
     || fail "benign Error: output should not fail"
 
   assert_contains "$TMP/stdout.log" "reported 0 Error: warnings"
   assert_not_contains "$STDERR_LOG" "error: Web Tooling Benchmark reported a failure."
+}
+
+test_missing_geometric_mean_fails_even_on_zero_exit() {
+  write_fake_wtb
+  run_expect_failure env WEB_TOOLING_BENCHMARK_DIR="$FAKE_WTB" LUMEN_BIN="$LUMEN_STUB" \
+    LUMEN_STUB_OUTPUT='babel: 1234.5 runs/s' "$SCRIPT"
+
+  assert_contains "$STDERR_LOG" "error: Web Tooling Benchmark did not report a Geometric mean success marker."
 }
 
 test_hints_reference_selected_path_not_default() {
@@ -252,9 +312,13 @@ test_missing_bundle_fails_before_build
 test_default_path_is_usable
 test_override_env_honored
 test_lumen_bin_skips_build
-test_args_forwarded_including_only_babel
+test_only_rebuilds_selected_bundle_without_forwarding_args
+test_only_equals_rebuilds_selected_bundle
+test_unsupported_args_fail_before_lumen_runs
+test_only_requires_name
 test_exception_in_output_fails_even_on_zero_exit
 test_benign_error_word_in_output_succeeds
+test_missing_geometric_mean_fails_even_on_zero_exit
 test_hints_reference_selected_path_not_default
 
 echo "ok - run-web-tooling"

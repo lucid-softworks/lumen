@@ -1,0 +1,6 @@
+# The tree-walking interpreter can recurse deeply on large real-world bundles
+# such as V8's Web Tooling Benchmark. Windows/MSVC binaries otherwise get the
+# platform's 1 MiB default main stack and can overflow before the benchmark
+# finishes. Keep this in project config so local and CI release builds agree.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:16777216"]

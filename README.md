@@ -195,13 +195,15 @@ scripts/run-octane.sh richards crypto    # selected benchmarks
 git clone https://github.com/v8/web-tooling-benchmark ../web-tooling-benchmark   # one-time: checkout
 (cd ../web-tooling-benchmark && npm install)                                     # one-time: build dist/cli.js
 scripts/run-web-tooling.sh                    # full suite (babel, terser, acorn, etc.)
-scripts/run-web-tooling.sh --only babel       # selected benchmark
+scripts/run-web-tooling.sh --only babel       # rebuild dist/cli.js for one selected benchmark
 WEB_TOOLING_BENCHMARK_DIR=/path/to/web-tooling-benchmark scripts/run-web-tooling.sh --only terser
 ```
 
 Octane is expected at `../octane` by default; set `OCTANE=/path/to/octane` to override.
 
 Web Tooling Benchmark is expected at `../web-tooling-benchmark` by default;
-set `WEB_TOOLING_BENCHMARK_DIR=/path/to/web-tooling-benchmark` to override.
-Arguments after the script name (e.g. `--only <benchmark>`) are passed
-through unchanged to the upstream benchmark's own CLI.
+set `WEB_TOOLING_BENCHMARK_DIR=/path/to/web-tooling-benchmark` to override. The
+upstream CLI bundle does not support runtime benchmark selection; `--only <name>`
+rebuilds `dist/cli.js` in that checkout with webpack's build-time selector
+(`npx webpack --env.only=<name>`) before running lumen. The full suite is a
+many-hours run on current lumen builds; prefer `--only <name>` while iterating.
