@@ -25,6 +25,7 @@ const JS_FILES: &[&str] = &[
     "blob.js",
     "fetch.js",
     "websocket.js",
+    "eventsource.js",
     "server.js",
     "crypto.js",
     "platform.js",

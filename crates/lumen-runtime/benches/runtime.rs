@@ -101,6 +101,27 @@ fn main() {
         });
     }
 
+    // EventSource: connect, receive the canned event batch, close — one connection per iteration
+    // against a long-lived event-stream server (measures handshake + SSE line parsing + dispatch).
+    {
+        let port = lumen_web::sse_testing::spawn(lumen_web::sse_testing::Mode::Events, 1_000_000);
+        let src: &'static str = Box::leak(
+            r#"(() => new Promise((resolve) => {
+                const es = new EventSource("http://127.0.0.1:{PORT}/");
+                let n = 0;
+                es.onmessage = () => { n++; };
+                es.addEventListener("tick", () => { n++; });
+                es.onerror = () => { es.close(); resolve(n); };
+            }))()"#
+                .replace("{PORT}", &port.to_string())
+                .into_boxed_str(),
+        );
+        let mut rt = Runtime::new();
+        b.run("eventsource: connect + parse 3-event stream + close", || {
+            black_box(rt.eval(src).expect("sse bench parses"));
+        });
+    }
+
     let mut rt = Runtime::new();
     let mut bench_js = |b: &mut Bench, name: &str, src: &'static str| {
         b.run(name, || {

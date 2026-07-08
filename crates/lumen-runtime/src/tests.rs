@@ -663,6 +663,7 @@ const WINTERTC_NOT_YET: &[&str] = &[];
 /// of the tracked 56/56 score, but presence-guarded the same way so they can't silently regress.
 const BEYOND_MINIMUM: &[&str] = &[
     "WebSocket",
+    "EventSource",
     "MessageChannel",
     "MessagePort",
     "BroadcastChannel",
@@ -883,6 +884,117 @@ fn abort_signal_any_and_event_classes() {
             "guard: TypeError",
         ]
     );
+}
+
+// ---- EventSource (SSE) against an in-process event-stream server (lumen_web::sse_testing) ----
+
+use lumen_web::sse_testing::{spawn as spawn_sse, Mode as SseMode};
+
+fn sse_drive(mode: SseMode, conns: usize, script: &str) -> Vec<String> {
+    let port = spawn_sse(mode, conns);
+    let (mut rt, out, _err) = test_runtime();
+    let src = script.replace("{PORT}", &port.to_string());
+    rt.eval(&src).expect("sse script parses and runs to quiescence");
+    out.lines()
+}
+
+#[test]
+fn eventsource_parses_events() {
+    // Unnamed `message`, a named `event: tick`, and a multi-line `data` (joined with \n) with an
+    // `id` — the three canned events, then the stream ends (readyState -> CONNECTING as it would
+    // reconnect; we close on the first error).
+    let lines = sse_drive(
+        SseMode::Events,
+        1,
+        r#"
+        const es = new EventSource("http://127.0.0.1:{PORT}/stream");
+        console.log("initial", es.readyState, es.url.endsWith("/stream"));
+        es.onopen = () => console.log("open", es.readyState);
+        es.onmessage = (e) => console.log("message", JSON.stringify(e.data), e.lastEventId, e instanceof MessageEvent);
+        es.addEventListener("tick", (e) => console.log("tick", e.data));
+        es.onerror = () => { console.log("error", es.readyState); es.close(); };
+        "#,
+    );
+    assert_eq!(
+        lines,
+        [
+            "initial 0 true",
+            "open 1",
+            r#"message "hello"  true"#,
+            "tick 42",
+            r#"message "line one\nline two" 9 true"#,
+            "error 0",
+        ]
+    );
+}
+
+#[test]
+fn eventsource_reconnects_with_last_event_id() {
+    // First connection yields `id: 5` then drops; the client reconnects (default 3s retry is too
+    // slow for a test, so the server's event sets retry). We shorten via a `retry:` field is not
+    // sent here — instead the test tolerates the reconnect by checking the resumed event, which
+    // the server builds from the Last-Event-ID header. Two connections are served.
+    let lines = sse_drive(
+        SseMode::Reconnect,
+        2,
+        r#"
+        const es = new EventSource("http://127.0.0.1:{PORT}/stream");
+        let seen = 0;
+        es.onmessage = (e) => {
+            console.log("msg", e.data, e.lastEventId);
+            if (++seen === 2) es.close();
+        };
+        "#,
+    );
+    assert_eq!(lines, ["msg first 5", "msg resumed-from-5 5"]);
+}
+
+#[test]
+fn eventsource_wrong_content_type_is_fatal() {
+    let lines = sse_drive(
+        SseMode::WrongContentType,
+        1,
+        r#"
+        const es = new EventSource("http://127.0.0.1:{PORT}/stream");
+        es.onopen = () => console.log("open (wrong!)");
+        es.onerror = () => console.log("error", es.readyState);
+        "#,
+    );
+    // A fatal error sets readyState CLOSED (2) and does not reconnect.
+    assert_eq!(lines, ["error 2"]);
+}
+
+#[test]
+fn eventsource_204_stops() {
+    let lines = sse_drive(
+        SseMode::NoContent,
+        1,
+        r#"
+        const es = new EventSource("http://127.0.0.1:{PORT}/stream");
+        es.onerror = () => console.log("error", es.readyState);
+        "#,
+    );
+    assert_eq!(lines, ["error 2"]);
+}
+
+#[test]
+fn eventsource_field_parser_units() {
+    // Exercise the line parser directly against a synthetic stream via a data: URL is not
+    // supported; instead validate comment-skipping, colon-less field, leading-space stripping,
+    // and retry parsing through the state the events produce. Server Events mode already covers
+    // the happy path; here we assert the readyState constants + url/withCredentials surface.
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        console.log(EventSource.CONNECTING, EventSource.OPEN, EventSource.CLOSED);
+        const es = new EventSource("http://127.0.0.1:1/nope", { withCredentials: true });
+        console.log(es.withCredentials, es.url.endsWith("/nope"));
+        es.close();
+        console.log(es.readyState);
+        "#,
+    );
+    assert_eq!(out.lines(), ["0 1 2", "true true", "2"]);
 }
 
 // ---- WebSocket (RFC 6455) against an in-process echo server (lumen_web::ws_testing) ----

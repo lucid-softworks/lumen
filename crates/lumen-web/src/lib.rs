@@ -37,12 +37,16 @@ mod http;
 mod server;
 mod sha1;
 mod sha256;
+mod sse;
 mod url;
 mod websocket;
 
 /// WebSocket protocol internals — a from-scratch RFC 6455 codec. `websocket::testing` exposes a
 /// minimal echo server other crates' tests and benchmarks drive the client against.
 pub use websocket::testing as ws_testing;
+
+/// SSE transport internals — `sse::testing` exposes a canned event-stream server for tests.
+pub use sse::testing as sse_testing;
 // The decoder parses the whole binary format; the MVP interpreter doesn't consume every field yet
 // (reserved value-type data, mutability flags, etc.), and a few opcode matches read cleaner as
 // explicit lists than ranges.
@@ -91,6 +95,13 @@ pub fn extension() -> Extension {
                 ],
             ),
             (
+                "__sse",
+                ops![
+                    "connect" (3) => sse::op_sse_connect,
+                    "close" (1) => sse::op_sse_close,
+                ],
+            ),
+            (
                 "__compress",
                 ops![
                     "deflate" (1) => op_deflate,
@@ -128,6 +139,7 @@ pub fn extension() -> Extension {
             state.put(WebState::default());
             state.put(server::ServerRegistry::default());
             state.put(websocket::WsRegistry::default());
+            state.put(sse::SseRegistry::default());
             state.put(wasm_ops::WasmStore::default());
         }),
         js_init: Some(JS_GLUE),
