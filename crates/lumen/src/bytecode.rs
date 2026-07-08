@@ -183,6 +183,11 @@ pub struct CallIc {
     pub global_env: usize,
     /// The callee's strictness (feeds the frame record and the `this` binding).
     pub strict: bool,
+    /// `Chunk::uses_this()` at fill time (set-once state): skips the `this` binding entirely.
+    pub uses_this: bool,
+    /// `Chunk::jit_frame()` at fill time: the callee frame shape without touching the chunk.
+    pub n_params: u16,
+    pub n_slots: u16,
 }
 
 impl CallIc {
@@ -193,6 +198,9 @@ impl CallIc {
         code: std::ptr::null(),
         global_env: 0,
         strict: false,
+        uses_this: false,
+        n_params: 0,
+        n_slots: 0,
     };
 }
 
@@ -4307,6 +4315,10 @@ impl Chunk {
     pub(crate) fn jit_ops(&self) -> &[Op] {
         &self.ops
     }
+    /// Leading slot names, for debug identification of a chunk (`LUMEN_JIT_DUMP`).
+    pub(crate) fn jit_slot_names(&self) -> &[Rc<str>] {
+        &self.slot_names
+    }
     /// The interned name a property op refers to (the emitter gates array-receiver inlining on
     /// whether it could be an element key).
     pub(crate) fn jit_name(&self, n: u32) -> &str {
@@ -4577,8 +4589,113 @@ pub(crate) unsafe extern "C" fn jit_exec(
     mut sp: *mut Value,
 ) -> crate::jit::SpFlag {
     let ctx = &mut *ctx;
-    // Debug: `LUMEN_JIT_OPSTAT=1` tallies which ops still reach the generic helper (the JIT's
-    // slow path) and prints the top offenders at process exit.
+    jit_opstat(ctx, pc);
+    match jit_exec_inner(ctx, pc, &mut sp) {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+/// Dedicated helper for `Op::Call` / `Op::CallWithThis` sites — the same contract as
+/// [`jit_exec`], minus the full op dispatch (calls dominate helper traffic in call-heavy code,
+/// so the two arms get a two-way decode of their own).
+pub(crate) unsafe extern "C" fn jit_call(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    jit_opstat(ctx, pc);
+    match jit_call_inner(ctx, pc, &mut sp) {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+unsafe fn jit_call_inner(
+    ctx: &mut crate::jit::JitCtx,
+    pc: u32,
+    sp: &mut *mut Value,
+) -> Result<(), Abrupt> {
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    macro_rules! push {
+        ($v:expr) => {{
+            sp.write($v);
+            *sp = sp.add(1);
+        }};
+    }
+    let (argc, c, with_this) = match chunk.ops[pc as usize] {
+        Op::CallWithThis(argc, c) => (argc as usize, c, true),
+        Op::Call(argc, c) => (argc as usize, c, false),
+        _ => unreachable!("jit_call emitted only for call ops"),
+    };
+    let args_ptr = sp.sub(argc);
+    // See the Op::Call arm of `jit_exec_inner` for the ownership story: on Some the arguments
+    // and the `this` slot were MOVED into the callee.
+    let mut undef = std::mem::ManuallyDrop::new(Value::Undefined);
+    let this_slot: *const Value = if with_this {
+        sp.sub(argc + 2)
+    } else {
+        &raw mut *undef as *const Value
+    };
+    let mut r =
+        i.call_jit_cached(&chunk.call_caches[c as usize], &*sp.sub(argc + 1), this_slot, args_ptr, argc);
+    if r.is_none() {
+        r = i.call_jit_fast(
+            &*sp.sub(argc + 1),
+            this_slot,
+            args_ptr,
+            argc,
+            Some((&chunk.call_caches[c as usize], &chunk.call_pins)),
+        );
+    }
+    if let Some(r) = r {
+        *sp = args_ptr.sub(1);
+        // Drop the callee/method slot. It is virtually always a function object with other
+        // live references, so peel that case into a bare refcount decrement instead of the
+        // outlined generic Value drop.
+        match sp.read() {
+            Value::Obj(o) => {
+                if Rc::strong_count(&o) > 1 {
+                    unsafe { Rc::decrement_strong_count(Rc::into_raw(o)) };
+                } else {
+                    drop(o);
+                }
+            }
+            other => drop(other),
+        }
+        if with_this {
+            *sp = sp.sub(1); // `this` was consumed by the callee
+        }
+        let v = r?;
+        push!(v);
+        return Ok(());
+    }
+    let args = std::slice::from_raw_parts(args_ptr, argc);
+    let callee = (*sp.sub(argc + 1)).clone();
+    let this = if with_this {
+        (*sp.sub(argc + 2)).clone()
+    } else {
+        Value::Undefined
+    };
+    let v = i.call(callee, this, args)?;
+    *sp = jit_consume(*sp, argc + 1 + with_this as usize);
+    push!(v);
+    Ok(())
+}
+
+/// Debug: `LUMEN_JIT_OPSTAT=1` tallies which ops still reach a helper (the JIT's slow path) and
+/// prints the top offenders at process exit. Always-inlined so the disabled case is a single
+/// predictable branch inside the helper.
+#[inline(always)]
+unsafe fn jit_opstat(ctx: &mut crate::jit::JitCtx, pc: u32) {
     {
         static OPSTAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *OPSTAT.get_or_init(|| std::env::var_os("LUMEN_JIT_OPSTAT").is_some()) {
@@ -4607,13 +4724,6 @@ pub(crate) unsafe extern "C" fn jit_exec(
                 name = format!("{name} @ fn({}) pc{}", params.join(","), pc);
             }
             let _ = COUNTS.try_with(|c| *c.borrow_mut().0.entry(name).or_insert(0) += 1);
-        }
-    }
-    match jit_exec_inner(ctx, pc, &mut sp) {
-        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
-        Err(ab) => {
-            ctx.error = Some(ab);
-            crate::jit::SpFlag { sp, flag: 1 }
         }
     }
 }
@@ -5239,7 +5349,12 @@ unsafe fn jit_exec_inner(
 unsafe fn jit_consume(sp: *mut Value, n: usize) -> *mut Value {
     let base = sp.sub(n);
     for k in 0..n {
-        std::ptr::drop_in_place(base.add(k));
+        // Tag peek: trivially-copyable tags (repr(u8) discriminants 0..=4) skip the outlined
+        // drop — operands are overwhelmingly numbers.
+        let p = base.add(k);
+        if *(p as *const u8) >= 5 {
+            std::ptr::drop_in_place(p);
+        }
     }
     base
 }

@@ -4634,12 +4634,16 @@ impl Interp {
         let Value::Obj(o) = callee else { return None };
         let key = Rc::as_ptr(o) as usize;
         let genv = Rc::as_ptr(&self.global_env) as usize;
+        // Probe the identity fields through the Cell without copying whole entries; only the
+        // hit is copied out (nothing re-entrant runs between the probe and the copy).
         let mut hit = None;
         for e in &site.entries {
-            let c = e.get();
-            if c.callee == key && c.global_env == genv {
-                hit = Some(c);
-                break;
+            let p = e.as_ptr();
+            unsafe {
+                if (*p).callee == key && (*p).global_env == genv {
+                    hit = Some(*p);
+                    break;
+                }
             }
         }
         let ic = hit?;
@@ -4682,9 +4686,10 @@ impl Interp {
         };
         let chunk = unsafe { &*ic.chunk };
         let code = unsafe { &*ic.code };
-        // OrdinaryCallBindThis on the moved `this` (bind_compiled_this, inlined over `ic.strict`).
+        // OrdinaryCallBindThis on the moved `this` (bind_compiled_this, inlined over `ic.strict`
+        // and the fill-time `uses_this`).
         let this_read = unsafe { this_slot.read() };
-        let this_val = if !chunk.uses_this() {
+        let this_val = if !ic.uses_this {
             drop(this_read);
             Value::Undefined
         } else if ic.strict {
@@ -4697,7 +4702,16 @@ impl Interp {
             }
         };
         let mut r = unsafe {
-            crate::jit::run_moved(self, chunk, code, &env as *const Env, this_val, args, argc)
+            crate::jit::run_moved(
+                self,
+                chunk,
+                code,
+                &env as *const Env,
+                this_val,
+                args,
+                argc,
+                (ic.n_params as usize, ic.n_slots as usize),
+            )
         };
         self.fn_frames.pop();
         self.constructing = saved_ctor;
@@ -4810,14 +4824,20 @@ impl Interp {
                     let genv = self.global_env.clone();
                     self.global_env_pins.push(genv);
                 }
-                cs.fill(crate::bytecode::CallIc {
-                    callee: key,
-                    env: Rc::as_ptr(&env),
-                    chunk: chunk as *const Rc<crate::bytecode::Chunk>,
-                    code: Rc::as_ptr(code),
-                    global_env: Rc::as_ptr(&self.global_env) as usize,
-                    strict: func.is_strict,
-                });
+                let (n_params, n_slots) = chunk.jit_frame();
+                if n_params <= u16::MAX as usize && n_slots <= u16::MAX as usize {
+                    cs.fill(crate::bytecode::CallIc {
+                        callee: key,
+                        env: Rc::as_ptr(&env),
+                        chunk: chunk as *const Rc<crate::bytecode::Chunk>,
+                        code: Rc::as_ptr(code),
+                        global_env: Rc::as_ptr(&self.global_env) as usize,
+                        strict: func.is_strict,
+                        uses_this: chunk.uses_this(),
+                        n_params: n_params as u16,
+                        n_slots: n_slots as u16,
+                    });
+                }
             }
         }
         // --- committed: from here the arguments and `*this_slot` are ours ---
@@ -4854,7 +4874,16 @@ impl Interp {
         });
         let this_val = self.bind_compiled_this(&func, chunk, unsafe { this_slot.read() }, false);
         let mut r = unsafe {
-            crate::jit::run_moved(self, chunk, code, &env as *const Env, this_val, args, argc)
+            crate::jit::run_moved(
+                self,
+                chunk,
+                code,
+                &env as *const Env,
+                this_val,
+                args,
+                argc,
+                chunk.jit_frame(),
+            )
         };
         self.fn_frames.pop();
         self.constructing = saved_ctor;
