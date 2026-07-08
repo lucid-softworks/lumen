@@ -110,6 +110,19 @@ pub struct JitCtx {
     pub ret: Value,
 }
 
+/// The helper function table the emitted code indexes (see `JitCtx::helpers`); built once per
+/// `Interp` (`Interp::jit_helpers`) so calls don't re-materialize it.
+pub(crate) fn helper_table() -> [usize; N_HELPERS] {
+    [
+        crate::bytecode::jit_exec as *const () as usize,
+        crate::bytecode::jit_cond as *const () as usize,
+        crate::bytecode::jit_return as *const () as usize,
+        crate::bytecode::jit_push_handler as *const () as usize,
+        crate::bytecode::jit_pop_handler as *const () as usize,
+        crate::bytecode::jit_unwind as *const () as usize,
+    ]
+}
+
 /// Helper table indices (multiplied by 8 in the emitted `ldr`).
 pub const H_EXEC: usize = 0;
 pub const H_COND: usize = 1;
@@ -2279,6 +2292,14 @@ fn emit_chain(
     // i64 range, so a ToInt32 conversion is a bare fcvtzs with no round-trip guard.
     let mut vregs: Vec<(u32, bool)> = Vec::new();
     let mut free: Vec<u32> = vec![15, 14, 13, 12, 11, 10, 9, 8];
+    // Receiver cache: (slot byte offset → x-register holding the validated Object base). The
+    // chain fast path calls no helpers, so between element ops nothing can change the slot's
+    // tag, the object's exotic status, or the ic-safe flag — the first access per receiver
+    // validates and later ones just reuse the base. Invalidation: an in-chain Store/Update to
+    // the slot drops its entry; LoadName clobbers all scratch registers, so it flushes.
+    let mut rcache: Vec<(u32, u32)> = Vec::new();
+    let mut rfree: Vec<u32> = vec![17, 16];
+    let mut ic_safe_done = false;
     // (chain index, bail label, virtual stack *before* the op) — slow paths follow the fast body.
     let mut bails: Vec<(usize, usize, Vec<(u32, bool)>)> = Vec::new();
 
@@ -2314,6 +2335,10 @@ fn emit_chain(
                 vregs.push((rd, false));
             }
             ChainOp::Update(off, kind) => {
+                if let Some(k) = rcache.iter().position(|c| c.0 == off) {
+                    let (_, breg) = rcache.remove(k);
+                    rfree.push(breg);
+                }
                 a.ldrb_imm(9, 22, off);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, guard!());
@@ -2356,28 +2381,39 @@ fn emit_chain(
                     (0, false)
                 };
                 let (dk, _) = vregs.pop().expect("chain vstack");
-                // inline caches globally safe?
-                a.ldr_imm(9, 19, 32);
-                a.ldrb_imm(9, 9, 0);
-                a.cbz(9, false, guard!());
-                // receiver slot holds an Obj
-                a.ldrb_imm(9, 22, xoff);
-                a.cmp_imm_w(9, 8);
-                a.b_cond(C_NE, guard!());
                 // key is exactly a u32
                 a.fcvtzu_w_d(9, dk);
                 a.ucvtf_d_w(0, 9);
                 a.fcmp(dk, 0);
                 a.b_cond(C_NE, guard!());
-                a.ldr_imm(10, 22, xoff + 8);
-                a.add_imm(11, 10, rcv);
-                a.ldrb_imm(12, 11, ex);
-                let ex_ok = a.new_label();
-                a.cmp_imm_w(12, none_tag);
-                a.b_cond(C_EQ, ex_ok);
-                a.cmp_imm_w(12, arr_tag);
-                a.b_cond(C_NE, guard!());
-                a.bind(ex_ok);
+                match rcache.iter().find(|c| c.0 == xoff) {
+                    Some(&(_, breg)) => a.mov(11, breg),
+                    None => {
+                        // First access to this receiver in the chain: validate once.
+                        if !ic_safe_done {
+                            a.ldr_imm(10, 19, 32); // inline caches globally safe?
+                            a.ldrb_imm(10, 10, 0);
+                            a.cbz(10, false, guard!());
+                            ic_safe_done = true;
+                        }
+                        a.ldrb_imm(10, 22, xoff); // slot holds an Obj
+                        a.cmp_imm_w(10, 8);
+                        a.b_cond(C_NE, guard!());
+                        a.ldr_imm(10, 22, xoff + 8);
+                        a.add_imm(11, 10, rcv);
+                        a.ldrb_imm(12, 11, ex);
+                        let ex_ok = a.new_label();
+                        a.cmp_imm_w(12, none_tag);
+                        a.b_cond(C_EQ, ex_ok);
+                        a.cmp_imm_w(12, arr_tag);
+                        a.b_cond(C_NE, guard!());
+                        a.bind(ex_ok);
+                        if let Some(breg) = rfree.pop() {
+                            a.mov(breg, 11);
+                            rcache.push((xoff, breg));
+                        }
+                    }
+                }
                 a.ldr_imm(12, 11, ell);
                 a.cmp_reg_x(9, 12);
                 a.b_cond(C_HS, guard!());
@@ -2387,8 +2423,8 @@ fn emit_chain(
                 a.cmn_imm_w(13, 1);
                 a.b_cond(C_EQ, guard!());
                 a.ldr_imm(15, 11, en);
-                a.mov_imm64(16, es);
-                a.madd(15, 13, 16, 15);
+                a.movz(9, es as u32, 0); // entry stride (< 65536; the key index in x9 is dead)
+                a.madd(15, 13, 9, 15);
                 a.ldrb_imm(9, 15, ea);
                 a.cbnz(9, false, guard!());
                 if is_set {
@@ -2481,6 +2517,10 @@ fn emit_chain(
                 vregs[top].1 = false;
             }
             ChainOp::Store(off) => {
+                if let Some(k) = rcache.iter().position(|c| c.0 == off) {
+                    let (_, breg) = rcache.remove(k);
+                    rfree.push(breg);
+                }
                 let (dv, _) = vregs.pop().expect("chain vstack");
                 // old slot value: trivially droppable, refcounted-and-shared (inline dec), or bail
                 a.ldrb_imm(9, 22, off);
@@ -2514,6 +2554,10 @@ fn emit_chain(
             }
             ChainOp::KeyNop => {}
             ChainOp::LoadName(cache_ptr) => {
+                // The validator clobbers x9-x17: every cached receiver base dies with it.
+                for (_, breg) in rcache.drain(..) {
+                    rfree.push(breg);
+                }
                 // Shared cache validation (scope or global mode) leaves x14 → the Value.
                 emit_name_ic_value_ptr(a, layout, cache_ptr, guard!());
                 a.ldurb(9, 14, 0);
@@ -2680,18 +2724,10 @@ pub fn run(
     stack.clear();
     stack.reserve(code.max_stack);
 
-    let helpers: [usize; N_HELPERS] = [
-        crate::bytecode::jit_exec as *const () as usize,
-        crate::bytecode::jit_cond as *const () as usize,
-        crate::bytecode::jit_return as *const () as usize,
-        crate::bytecode::jit_push_handler as *const () as usize,
-        crate::bytecode::jit_pop_handler as *const () as usize,
-        crate::bytecode::jit_unwind as *const () as usize,
-    ];
     let stack_base = stack.as_mut_ptr();
     let env_raw = Rc::as_ptr(&env) as *const u8;
     let mut ctx = JitCtx {
-        helpers: helpers.as_ptr(),
+        helpers: i.jit_helpers.as_ptr(),
         stack_base,
         final_sp: stack_base,
         env_raw,
@@ -2776,18 +2812,10 @@ pub(crate) unsafe fn run_moved(
     stack.clear();
     stack.reserve(code.max_stack);
 
-    let helpers: [usize; N_HELPERS] = [
-        crate::bytecode::jit_exec as *const () as usize,
-        crate::bytecode::jit_cond as *const () as usize,
-        crate::bytecode::jit_return as *const () as usize,
-        crate::bytecode::jit_push_handler as *const () as usize,
-        crate::bytecode::jit_pop_handler as *const () as usize,
-        crate::bytecode::jit_unwind as *const () as usize,
-    ];
     let stack_base = stack.as_mut_ptr();
     let env_raw = Rc::as_ptr(&env) as *const u8;
     let mut ctx = JitCtx {
-        helpers: helpers.as_ptr(),
+        helpers: i.jit_helpers.as_ptr(),
         stack_base,
         final_sp: stack_base,
         env_raw,

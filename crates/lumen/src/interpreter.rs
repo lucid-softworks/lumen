@@ -612,6 +612,9 @@ pub struct Interp {
     /// Recycled (slots, operand stack) buffers for bytecode-VM activations, so a hot call tree
     /// doesn't allocate two `Vec`s per call (see `bytecode::run`).
     pub(crate) vm_pool: Vec<(Vec<Value>, Vec<Value>)>,
+    /// The JIT's helper function table, built once (a stable address the machine code indexes
+    /// through x21) instead of re-materialized on every call.
+    pub(crate) jit_helpers: [usize; crate::jit::N_HELPERS],
     /// Object-graph byte offsets the JIT's inline property-cache templates bake in (measured once;
     /// see [`crate::value::jit_layout`]). Lazily computed on first JIT compile.
     pub(crate) jit_layout: std::cell::OnceCell<crate::value::JitLayout>,
@@ -1160,6 +1163,7 @@ impl Interp {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             vm_pool: Vec::new(),
+            jit_helpers: crate::jit::helper_table(),
             jit_layout: std::cell::OnceCell::new(),
             inline_ic_safe: std::cell::Cell::new(true),
             re_texts: Vec::new(),
