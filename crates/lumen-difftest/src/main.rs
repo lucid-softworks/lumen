@@ -126,7 +126,11 @@ fn run_tier(src: &str, tier: Tier) -> Outcome {
 }
 
 fn diverges(src: &str) -> bool {
-    run_tier(src, Tier::Interp) != run_tier(src, Tier::Bytecode)
+    let oracle = run_tier(src, Tier::Interp);
+    // The tree-walker is the reference: both compiled tiers must match it (Jit exercises the
+    // machine-code templates + register chains on aarch64-macos and degrades to the bytecode VM
+    // elsewhere — still a valid, if redundant, comparison).
+    oracle != run_tier(src, Tier::Bytecode) || oracle != run_tier(src, Tier::Jit)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -385,10 +389,10 @@ fn dispatch() {
         Some("--one") => {
             // Debug: run a single seed in a single tier (which=interp|bytecode).
             let s: u64 = args[1].parse().unwrap();
-            let tier = if args.get(2).map(String::as_str) == Some("bytecode") {
-                Tier::Bytecode
-            } else {
-                Tier::Interp
+            let tier = match args.get(2).map(String::as_str) {
+                Some("bytecode") => Tier::Bytecode,
+                Some("jit") => Tier::Jit,
+                _ => Tier::Interp,
             };
             let o = run_tier(&generate(s), tier);
             eprintln!("{o:?}");
@@ -554,6 +558,7 @@ fn fuzz_parent(args: Vec<String>) {
                 eprintln!("--- minimized ({} lines) ---", min.lines().count());
                 eprintln!("interp:   {:?}", run_tier(&min, Tier::Interp));
                 eprintln!("bytecode: {:?}", run_tier(&min, Tier::Bytecode));
+                eprintln!("jit:      {:?}", run_tier(&min, Tier::Jit));
                 eprintln!("saved {}", path.display());
                 let _ = std::fs::remove_file(&tmp);
                 std::process::exit(1);

@@ -83,13 +83,21 @@ pub const IC_MAX_DEPTH: u8 = 4;
 /// In-place binding writes don't bump the generation, so a hit reads the *live* value and the
 /// live `initialized` flag through the pointer — both exactly what the slow path would see.
 ///
+/// A second mode covers *globals* (`Math`, a script-level `var`, a top-level function): when the
+/// chunk's env IS the global scope (no intermediate scopes to guard), a resolution that missed
+/// the scope and landed on an own data property of the ordinary global object caches
+/// `(env|1, shape<<32|slot, gen)` — the low bit of `env` tags the mode (scope pointers are
+/// ≥8-aligned). A hit revalidates the scope generation (no shadowing binding appeared) and the
+/// global object's shape (same ordered key layout ⇒ the slot still maps this name), then
+/// re-checks `accessor` at the slot (attributes are not part of the shape).
+///
 /// `repr(C)` with this field order gives the JIT template fixed offsets: env@0, binding@8, gen@16.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct NameIc {
-    /// `Rc::as_ptr` of the scope at cache time (0 = empty).
+    /// `Rc::as_ptr` of the scope at cache time (0 = empty; low bit set = global-object mode).
     pub env: usize,
-    /// The resolved `&Binding` within that scope's map.
+    /// Scope mode: the resolved `&Binding` within that scope's map. Global mode: shape<<32|slot.
     pub binding: usize,
     pub gen: u32,
     pub _pad: u32,
@@ -175,14 +183,15 @@ pub enum Op {
     SetElem,
     /// `obj[k] = v` in statement position: stores without leaving `v` on the stack.
     SetElemDrop,
-    /// `x[k]` where `x` is a *parameter* slot: fused LoadLocal+GetElem — the receiver never
-    /// crosses the operand stack (no clone/drop refcount churn). Reads the slot at exec time,
-    /// which is only sound because the emitter proves the key expression cannot reassign the
-    /// base local (see `Compiler::fused_elem_slot`) and a parameter is never in TDZ.
+    /// `x[k]` where `x` is a never-TDZ local slot (param or `var`): fused LoadLocal+GetElem —
+    /// the receiver never crosses the operand stack (no clone/drop refcount churn). Reads the
+    /// slot at exec time, which is only sound because the emitter proves the key expression
+    /// cannot reassign the base local (see `Compiler::fused_elem_slot`) and the slot can never
+    /// TDZ-throw.
     GetElemLocal(u16),
-    /// `x[k] = v` with `x` a parameter slot (see [`Op::GetElemLocal`]), keeping `v` on the stack.
+    /// `x[k] = v` with `x` a never-TDZ local slot (see [`Op::GetElemLocal`]), keeping `v`.
     SetElemLocal(u16),
-    /// `x[k] = v` in statement position with `x` a parameter slot.
+    /// `x[k] = v` in statement position with `x` a never-TDZ local slot.
     SetElemLocalDrop(u16),
     /// `obj.name++` / `--obj.name` as one op: pops obj, reads via the site IC, ToNumeric, ±1,
     /// writes back via the IC, pushes old / new / nothing per `UpdKind`.
@@ -196,6 +205,9 @@ pub enum Op {
     /// side-effect-free and deterministic, and keeping numbers numeric preserves the dense-array
     /// fast path. Checks the base (one below top) for null/undefined first, like `ref_prop_key`.
     ToPropKey,
+    /// [`Op::ToPropKey`] for the slot-fused compound form: the base is read from the local slot
+    /// (never on the stack), keys already Num/Str pass through untouched.
+    ToPropKeyLocal(u16),
     /// Duplicate the top two stack values (for compound `obj[k] op= v`).
     Dup2,
     /// `obj.name` as a call target: pops obj, pushes obj then the method (get runs before args).
@@ -1271,6 +1283,10 @@ struct Compiler {
     uses_this: bool,
     caches: Vec<std::cell::Cell<IcState>>,
     name_caches: Vec<std::cell::Cell<NameIc>>,
+    /// Slots that ever enter a temporal dead zone (an `Op::Tdz` was emitted for them). The fused
+    /// element ops defer the base-slot read past key/value evaluation, which is only
+    /// order-unobservable when the base can never TDZ-throw — params and `var`s qualify.
+    tdz_slots: std::collections::HashSet<u16>,
     /// Captured (env-homed) function-scope-wide names → is_const. Slot scopes shadow these.
     env_names: std::collections::HashMap<String, bool>,
     funcs: Vec<Rc<Function>>,
@@ -1376,18 +1392,19 @@ impl Compiler {
         self.name_caches.push(std::cell::Cell::new(NameIc::EMPTY));
         (self.name_caches.len() - 1) as u32
     }
-    /// The parameter slot for a fused element access (`x[k]` → `GetElemLocal`), or `None` to use
+    /// The local slot for a fused element access (`x[k]` → `GetElemLocal`), or `None` to use
     /// the generic ops. Fusing defers the base-local read past the key/value evaluation, so it
-    /// requires: the base is an Ident homed in a *parameter* slot (never TDZ — no early throw to
-    /// reorder), and no `deps` expression can reassign that local (calls can't — slot locals are
-    /// unobservable outside the function; only an explicit assignment/update in the key/value
-    /// expressions themselves could, and `no_assign_to` rejects those).
+    /// requires: the base is an Ident homed in a slot that can never be in TDZ (a param or a
+    /// `var` — no early throw to reorder; see `tdz_slots`), and no `deps` expression can
+    /// reassign that local (calls can't — slot locals are unobservable outside the function;
+    /// only an explicit assignment/update in the key/value expressions themselves could, and
+    /// `no_assign_to` rejects those).
     fn fused_elem_slot(&self, obj: &Expr, deps: &[&Expr]) -> Option<u16> {
         let Expr::Ident(name) = obj else { return None };
         let Some(Home::Slot(slot, _)) = self.home(name) else {
             return None;
         };
-        if (slot as usize) >= self.n_params {
+        if self.tdz_slots.contains(&slot) {
             return None;
         }
         if deps.iter().all(|d| no_assign_to(d, name)) {
@@ -1483,7 +1500,8 @@ impl Compiler {
                         } else {
                             let slot = self.fresh_slot(name);
                             self.scope_bind(name, slot, is_const);
-                            self.emit(Op::Tdz(slot));
+                            self.tdz_slots.insert(slot);
+                        self.emit(Op::Tdz(slot));
                         }
                     }
                 }
@@ -1523,6 +1541,7 @@ impl Compiler {
                                 }
                             ),
                         );
+                        self.tdz_slots.insert(slot);
                         self.emit(Op::Tdz(slot));
                     }
                 }
@@ -1898,6 +1917,7 @@ impl Compiler {
                         };
                         let slot = self.fresh_slot(name);
                         self.scope_bind(name, slot, matches!(kind, DeclKind::Const));
+                        self.tdz_slots.insert(slot);
                         self.emit(Op::Tdz(slot));
                     }
                 }
@@ -2081,13 +2101,21 @@ impl Compiler {
                 index,
                 optional: false,
             } if !matches!(**obj, Expr::Super) => {
-                if op == "=" {
-                    if let Some(slot) = self.fused_elem_slot(obj, &[index.as_ref(), value]) {
-                        self.expr(index)?;
+                if let Some(slot) = self.fused_elem_slot(obj, &[index.as_ref(), value]) {
+                    self.expr(index)?;
+                    if op == "=" {
                         self.expr(value)?;
-                        self.emit(Op::SetElemLocalDrop(slot));
-                        return Ok(true);
+                    } else {
+                        // Compound: coerce a side-effecting key once (Num keys pass raw), then
+                        // read-modify-write against the slot base — one Dup, no receiver churn.
+                        self.emit(Op::ToPropKeyLocal(slot));
+                        self.emit(Op::Dup);
+                        self.emit(Op::GetElemLocal(slot));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
                     }
+                    self.emit(Op::SetElemLocalDrop(slot));
+                    return Ok(true);
                 }
                 self.expr(obj)?;
                 self.expr(index)?;
@@ -2571,13 +2599,19 @@ impl Compiler {
                 index,
                 optional: false,
             } if !matches!(**obj, Expr::Super) => {
-                if op == "=" {
-                    if let Some(slot) = self.fused_elem_slot(obj, &[index.as_ref(), value]) {
-                        self.expr(index)?;
+                if let Some(slot) = self.fused_elem_slot(obj, &[index.as_ref(), value]) {
+                    self.expr(index)?;
+                    if op == "=" {
                         self.expr(value)?;
-                        self.emit(Op::SetElemLocal(slot));
-                        return Ok(());
+                    } else {
+                        self.emit(Op::ToPropKeyLocal(slot));
+                        self.emit(Op::Dup);
+                        self.emit(Op::GetElemLocal(slot));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
                     }
+                    self.emit(Op::SetElemLocal(slot));
+                    return Ok(());
                 }
                 self.expr(obj)?;
                 self.expr(index)?;
@@ -3041,6 +3075,22 @@ fn run_vm(
                 let old = i.get_member(&obj, &k)?;
                 step_and_store(i, stack, kind, old, |i, v| i.set_member(&obj, &k, v))?;
             }
+            Op::ToPropKeyLocal(s) => {
+                match stack.last().expect("vm stack underflow") {
+                    Value::Num(_) | Value::Str(_) => {}
+                    _ => {
+                        let key = pop!();
+                        if matches!(slots[s as usize], Value::Undefined | Value::Null) {
+                            return Err(i.throw(
+                                "TypeError",
+                                "cannot access property of null or undefined",
+                            ));
+                        }
+                        let k = i.to_property_key(&key)?;
+                        stack.push(Value::str(k));
+                    }
+                }
+            }
             Op::ToPropKey => {
                 match stack.last().expect("vm stack underflow") {
                     // Side-effect-free and deterministic to coerce later; numbers stay numeric
@@ -3216,7 +3266,8 @@ fn run_vm(
             Op::LoadNameForCall(n, c) => {
                 // A depth-0 cache hit/fill can't have come through a `with` object: `this` is
                 // undefined. Only the full walk can produce a with-object receiver.
-                if let Some(v) = chunk.name_ic_hit(env, c).or_else(|| chunk.name_ic_fill(env, n, c))
+                if let Some(v) =
+                    chunk.name_ic_hit(i, env, c).or_else(|| chunk.name_ic_fill(i, env, n, c))
                 {
                     stack.push(Value::Undefined);
                     stack.push(v);
@@ -3516,62 +3567,117 @@ impl Chunk {
     /// generation compare, and a value clone. `None` = miss (including TDZ — the slow path
     /// throws the proper error).
     #[inline]
-    fn name_ic_hit(&self, env: &Env, c: u32) -> Option<Value> {
+    fn name_ic_hit(&self, i: &Interp, env: &Env, c: u32) -> Option<Value> {
         let ic = self.name_caches[c as usize].get();
-        if ic.env == 0 || ic.env != Rc::as_ptr(env) as usize {
-            return None;
+        let raw = Rc::as_ptr(env) as usize;
+        if ic.env == raw {
+            let b = env.borrow();
+            if b.vars.generation() != ic.gen {
+                return None;
+            }
+            // The unchanged generation proves the map is structurally untouched since the fill:
+            // the pointer is live and the resolution unchanged (see NameIc). The value and TDZ
+            // flag are read live — in-place writes flow through.
+            let bd = unsafe { &*(ic.binding as *const crate::interpreter::Binding) };
+            return if bd.initialized {
+                Some(bd.value.clone())
+            } else {
+                None
+            };
         }
-        let b = env.borrow();
-        if b.vars.generation() != ic.gen {
-            return None;
+        if ic.env == raw | 1 {
+            // Global-object mode (see NameIc): scope still empty of this name (generation),
+            // global layout unchanged (shape) → the cached slot is still the resolution.
+            if env.borrow().vars.generation() != ic.gen {
+                return None;
+            }
+            let g = i.global.borrow();
+            if !matches!(g.exotic, crate::value::Exotic::None)
+                || g.props.shape() != (ic.binding >> 32) as u32
+            {
+                return None;
+            }
+            let (_, p) = g.props.entry_at(ic.binding as u32 as usize)?;
+            if p.accessor {
+                return None;
+            }
+            return Some(p.value.clone());
         }
-        // The unchanged generation proves the map is structurally untouched since the fill: the
-        // pointer is live and the resolution unchanged (see NameIc). The value and TDZ flag are
-        // read live — in-place writes flow through.
-        let bd = unsafe { &*(ic.binding as *const crate::interpreter::Binding) };
-        if bd.initialized {
-            Some(bd.value.clone())
-        } else {
-            None
-        }
+        None
     }
     /// Depth-0 cache fill: the name resolves directly in `env` as a plain initialized binding —
-    /// no `with` object on the scope, no live import redirect. Returns the value on success;
-    /// `None` = not depth-0-cacheable (the caller runs the interpreter's full walk, uncached).
-    fn name_ic_fill(&self, env: &Env, n: u32, c: u32) -> Option<Value> {
-        let b = env.borrow();
-        if b.with_obj.is_some() {
+    /// no `with` object on the scope, no live import redirect. When `env` *is* the global scope
+    /// and misses, an own data property of the ordinary global object fills the global mode
+    /// instead. Returns the value on success; `None` = not cacheable at this site (the caller
+    /// runs the interpreter's full walk, uncached).
+    fn name_ic_fill(&self, i: &Interp, env: &Env, n: u32, c: u32) -> Option<Value> {
+        {
+            let b = env.borrow();
+            if b.with_obj.is_some() {
+                return None;
+            }
+            if let Some(bd) = b.vars.get(&*self.names[n as usize]) {
+                if !bd.initialized || bd.import_ref.is_some() {
+                    return None;
+                }
+                let v = bd.value.clone();
+                self.name_caches[c as usize].set(NameIc {
+                    env: Rc::as_ptr(env) as usize,
+                    binding: bd as *const _ as usize,
+                    gen: b.vars.generation(),
+                    _pad: 0,
+                });
+                drop(b);
+                // Pin the scope allocation so the raw `env` compare stays ABA-safe.
+                self.name_pins.borrow_mut()[c as usize] = Some(Rc::downgrade(env));
+                return Some(v);
+            }
+        }
+        // Global mode: only when there are no intermediate scopes whose later mutation could
+        // re-route the name — i.e. the chunk runs directly under the global scope.
+        if !Rc::ptr_eq(env, &i.global_env)
+            || !i.ordinary_get_ptr(Rc::as_ptr(&i.global) as usize)
+        {
             return None;
         }
-        let bd = b.vars.get(&*self.names[n as usize])?;
-        if !bd.initialized || bd.import_ref.is_some() {
+        let g = i.global.borrow();
+        if !matches!(g.exotic, crate::value::Exotic::None) {
             return None;
         }
-        let v = bd.value.clone();
+        let slot = g.props.slot_of(&self.names[n as usize])?;
+        let (_, p) = g.props.entry_at(slot)?;
+        if p.accessor {
+            return None;
+        }
+        let v = p.value.clone();
         self.name_caches[c as usize].set(NameIc {
-            env: Rc::as_ptr(env) as usize,
-            binding: bd as *const _ as usize,
-            gen: b.vars.generation(),
+            env: Rc::as_ptr(env) as usize | 1,
+            binding: ((g.props.shape() as usize) << 32) | slot,
+            gen: env.borrow().vars.generation(),
             _pad: 0,
         });
-        drop(b);
-        // Pin the scope allocation so the raw `env` compare stays ABA-safe.
+        drop(g);
         self.name_pins.borrow_mut()[c as usize] = Some(Rc::downgrade(env));
         Some(v)
     }
     /// Cached free-name read: hit, else depth-0 refill, else the interpreter's full walk
     /// (deeper resolutions, `with`, module imports, TDZ, globals — uncached every time).
     fn load_name_ic(&self, i: &mut Interp, env: &Env, n: u32, c: u32) -> Result<Value, Abrupt> {
-        if let Some(v) = self.name_ic_hit(env, c) {
+        if let Some(v) = self.name_ic_hit(i, env, c) {
             return Ok(v);
         }
-        if let Some(v) = self.name_ic_fill(env, n, c) {
+        if let Some(v) = self.name_ic_fill(i, env, n, c) {
             return Ok(v);
         }
         i.get_var(&self.names[n as usize], env)
     }
     pub(crate) fn jit_frame(&self) -> (usize, usize) {
         (self.n_params, self.n_slots)
+    }
+    /// Whether calls run without an activation environment (nothing captured, no lexical
+    /// `this`) — the precondition for the JIT→JIT fast call's moved-argument entry.
+    pub(crate) fn jit_no_activation(&self) -> bool {
+        !self.needs_env()
     }
     pub(crate) fn jit_var_force_resets(&self) -> &[u16] {
         &self.var_force_resets
@@ -3647,6 +3753,7 @@ impl Chunk {
             Op::SetElemLocal(_) => (2, 1),
             Op::SetElemLocalDrop(_) => (2, 0),
             Op::ToPropKey => (2, 2),
+            Op::ToPropKeyLocal(_) => (1, 1),
             Op::GetMethod(..) => (1, 2),
             Op::GetMethodElem => (2, 2),
             Op::Add
@@ -3700,6 +3807,38 @@ pub(crate) unsafe extern "C" fn jit_exec(
     mut sp: *mut Value,
 ) -> crate::jit::SpFlag {
     let ctx = &mut *ctx;
+    // Debug: `LUMEN_JIT_OPSTAT=1` tallies which ops still reach the generic helper (the JIT's
+    // slow path) and prints the top offenders at process exit.
+    {
+        static OPSTAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OPSTAT.get_or_init(|| std::env::var_os("LUMEN_JIT_OPSTAT").is_some()) {
+            struct OpstatDump(crate::fasthash::FastMap<String, u64>);
+            impl Drop for OpstatDump {
+                fn drop(&mut self) {
+                    let mut v: Vec<_> = self.0.iter().collect();
+                    v.sort_by(|a, b| b.1.cmp(a.1));
+                    for (op, n) in v.iter().take(24) {
+                        eprintln!("[jit-opstat] {n:>12}  {op}");
+                    }
+                }
+            }
+            thread_local! {
+                static COUNTS: std::cell::RefCell<OpstatDump> =
+                    std::cell::RefCell::new(OpstatDump(Default::default()));
+            }
+            let chunk = &*ctx.chunk;
+            let op = format!("{:?}", chunk.ops[pc as usize]);
+            // Collapse operand differences so sites aggregate by opcode; `=2` adds the function
+            // (identified by its leading slot names) and pc for pinpointing bail sites.
+            let mut name = op.split(['(', ' ']).next().unwrap_or(&op).to_string();
+            if std::env::var("LUMEN_JIT_OPSTAT").as_deref() == Ok("2") {
+                let params: Vec<&str> =
+                    chunk.slot_names.iter().take(3).map(|s| &**s).collect();
+                name = format!("{name} @ fn({}) pc{}", params.join(","), pc);
+            }
+            let _ = COUNTS.try_with(|c| *c.borrow_mut().0.entry(name).or_insert(0) += 1);
+        }
+    }
     match jit_exec_inner(ctx, pc, &mut sp) {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
         Err(ab) => {
@@ -4012,6 +4151,21 @@ unsafe fn jit_exec_inner(
                 }
             }
         }
+        Op::ToPropKeyLocal(s) => {
+            match &*sp.sub(1) {
+                Value::Num(_) | Value::Str(_) => {}
+                _ => {
+                    let key = pop!();
+                    if matches!(slots[s as usize], Value::Undefined | Value::Null) {
+                        return Err(
+                            i.throw("TypeError", "cannot access property of null or undefined")
+                        );
+                    }
+                    let k = i.to_property_key(&key)?;
+                    push!(Value::str(k));
+                }
+            }
+        }
         Op::GetMethod(n, c) => {
             let obj = pop!();
             let m = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
@@ -4121,7 +4275,20 @@ unsafe fn jit_exec_inner(
         }
         Op::Call(argc) => {
             let argc = argc as usize;
-            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let args_ptr = sp.sub(argc);
+            // JIT→JIT fast call: on Some the arguments were MOVED into the callee — rewind the
+            // stack past them without dropping, then drop only the callee slot.
+            let undef = Value::Undefined;
+            if let Some(r) =
+                i.call_jit_fast(&*sp.sub(argc + 1), &undef as *const Value, args_ptr, argc)
+            {
+                *sp = args_ptr.sub(1);
+                std::ptr::drop_in_place(*sp); // the callee
+                let v = r?;
+                push!(v);
+                return Ok(());
+            }
+            let args = std::slice::from_raw_parts(args_ptr, argc);
             let callee = (*sp.sub(argc + 1)).clone();
             let v = i.call(callee, Value::Undefined, args)?;
             *sp = jit_consume(*sp, argc + 1);
@@ -4129,7 +4296,9 @@ unsafe fn jit_exec_inner(
         }
         Op::LoadNameForCall(n, c) => {
             // A depth-0 cache hit/fill can't have come through a `with` object (see the VM arm).
-            if let Some(v) = chunk.name_ic_hit(env, c).or_else(|| chunk.name_ic_fill(env, n, c)) {
+            if let Some(v) =
+                chunk.name_ic_hit(i, env, c).or_else(|| chunk.name_ic_fill(i, env, n, c))
+            {
                 push!(Value::Undefined);
                 push!(v);
             } else {
@@ -4140,7 +4309,19 @@ unsafe fn jit_exec_inner(
         }
         Op::CallWithThis(argc) => {
             let argc = argc as usize;
-            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let args_ptr = sp.sub(argc);
+            if let Some(r) =
+                i.call_jit_fast(&*sp.sub(argc + 1), sp.sub(argc + 2), args_ptr, argc)
+            {
+                *sp = args_ptr.sub(1);
+                std::ptr::drop_in_place(*sp); // the method
+                *sp = sp.sub(1);
+                std::ptr::drop_in_place(*sp); // `this`
+                let v = r?;
+                push!(v);
+                return Ok(());
+            }
+            let args = std::slice::from_raw_parts(args_ptr, argc);
             let m = (*sp.sub(argc + 1)).clone();
             let this = (*sp.sub(argc + 2)).clone();
             let v = i.call(m, this, args)?;

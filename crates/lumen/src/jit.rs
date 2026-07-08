@@ -90,6 +90,12 @@ pub struct JitCtx {
     /// [40] `Rc::as_ptr` of the activation env — what the inline LoadName template compares
     /// against the per-site name cache (see `bytecode::NameIc`).
     pub env_raw: *const u8,
+    /// [48] Points at `this_val` below (set after construction): the inline LoadThis template
+    /// copies the 24-byte Value and bumps its refcount from machine code.
+    pub this_raw: *const Value,
+    /// [56] The current realm's global `Object` (through the Rc and RefCell): the LoadName
+    /// templates' global-mode path validates the cached shape/slot against it.
+    pub global_body: *const u8,
     // ---- Rust-only fields ----
     pub interp: *mut Interp,
     pub chunk: *const Chunk,
@@ -418,6 +424,10 @@ mod asm {
         pub fn fneg(&mut self, rd: u32, rn: u32) {
             self.emit(0x1E61_4000 | (rn << 5) | rd);
         }
+        /// fmov dd, dn
+        pub fn fmov_d_d(&mut self, rd: u32, rn: u32) {
+            self.emit(0x1E60_4000 | (rn << 5) | rd);
+        }
         /// stp dt1, dt2, [sp, #imm] (SIMD&FP 64-bit, signed offset)
         pub fn stp_d_off(&mut self, rt1: u32, rt2: u32, imm_bytes: i32) {
             let imm7 = ((imm_bytes / 8) & 0x7f) as u32;
@@ -454,6 +464,15 @@ mod asm {
         /// cmp xn, xm (SUBS xzr, xn, xm)
         pub fn cmp_reg_x(&mut self, rn: u32, rm: u32) {
             self.emit(0xEB00_001F | (rm << 16) | (rn << 5));
+        }
+        /// lsr xd, xn, #shift (UBFM xd, xn, #shift, #63)
+        pub fn lsr_imm(&mut self, rd: u32, rn: u32, shift: u32) {
+            debug_assert!(shift < 64);
+            self.emit(0xD340_FC00 | (shift << 16) | (rn << 5) | rd);
+        }
+        /// mov wd, wm (ORR wd, wzr, wm — zero-extends into the x register)
+        pub fn mov_w(&mut self, rd: u32, rm: u32) {
+            self.emit(0x2A00_03E0 | (rm << 16) | rd);
         }
         /// cmn wn, #imm12 (ADDS wzr, wn, #imm — `cmn wn, #1` tests for 0xFFFF_FFFF)
         pub fn cmn_imm_w(&mut self, rn: u32, imm: u32) {
@@ -708,6 +727,75 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             // ---- inline property cache: own-property read (`this.x`) ----
             Op::GetProp(_, cache) if fast & 256 != 0 && get_prop_inlinable(layout) => {
                 emit_get_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+            }
+            Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
+                // A Num or Str key passes through untouched (the overwhelmingly common case);
+                // anything else — real coercion plus the nullish-base check — takes the helper.
+                let slow = a.new_label();
+                let done = a.new_label();
+                a.ldurb(9, 20, -24);
+                a.cmp_imm_w(9, 4);
+                a.b_cond(C_EQ, done);
+                a.cmp_imm_w(9, 6);
+                a.b_cond(C_EQ, done);
+                a.b(slow);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
+            Op::Dup if fast & 64 != 0 && rc_ok => {
+                // Copy the top value; refcounted payloads bump inline, BigInt takes the helper.
+                let slow = a.new_label();
+                let done = a.new_label();
+                a.ldurb(9, 20, -24);
+                a.cmp_imm_w(9, 5);
+                a.b_cond(C_EQ, slow);
+                a.ldur(10, 20, -24);
+                a.ldur(11, 20, -16);
+                a.ldur(12, 20, -8);
+                a.stur(10, 20, 0);
+                a.stur(11, 20, 8);
+                a.stur(12, 20, 16);
+                let nobump = a.new_label();
+                a.cmp_imm_w(9, 6);
+                a.b_cond(C_LO, nobump);
+                a.ldur(13, 11, rc_strong);
+                a.add_imm(13, 13, 1);
+                a.stur(13, 11, rc_strong);
+                a.bind(nobump);
+                a.add_imm(20, 20, 24);
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
+            Op::LoadThis if fast & 32768 != 0 && rc_ok => {
+                // Copy ctx.this_val (24 bytes) and bump its refcount inline; only a BigInt
+                // `this` (impossible in practice, but be safe) takes the helper.
+                let slow = a.new_label();
+                let done = a.new_label();
+                a.ldr_imm(9, 19, 48); // ctx.this_raw
+                a.ldrb_imm(10, 9, 0);
+                a.cmp_imm_w(10, 5);
+                a.b_cond(C_EQ, slow);
+                a.ldr_imm(11, 9, 0);
+                a.ldr_imm(12, 9, 8);
+                a.ldr_imm(13, 9, 16);
+                a.stur(11, 20, 0);
+                a.stur(12, 20, 8);
+                a.stur(13, 20, 16);
+                let nobump = a.new_label();
+                a.cmp_imm_w(10, 6);
+                a.b_cond(C_LO, nobump);
+                a.ldur(14, 12, rc_strong);
+                a.add_imm(14, 14, 1);
+                a.stur(14, 12, rc_strong);
+                a.bind(nobump);
+                a.add_imm(20, 20, 24);
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
             }
             // ---- inline free-name cache (`width` in a hot loop body) ----
             Op::LoadName(_, cache) if fast & 8192 != 0 && load_name_inlinable(layout) => {
@@ -1323,11 +1411,14 @@ fn emit_get_method_inline(
 /// instruction's immediate range.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
-    layout.valid
+    // The global-mode path additionally bakes the property-IC offsets (shape/entries/accessor),
+    // so it shares that gate.
+    get_prop_inlinable(layout)
         && layout.rc_strong_off < 256
         && layout.scope_gen % 4 == 0
         && layout.scope_gen / 4 < 4096
         && layout.binding_value + 16 < 256
+        && layout.binding_value < 4096
         && layout.binding_init < 4096
 }
 
@@ -1344,36 +1435,18 @@ fn emit_load_name_inline(
     pc: u32,
     l_unwind: usize,
 ) {
-    use crate::bytecode::{NAME_IC_OFF_BINDING, NAME_IC_OFF_ENV, NAME_IC_OFF_GEN};
     let strong = layout.rc_strong_off as i32;
-    let sg = layout.scope_gen as u32;
-    let bv = layout.binding_value as i32;
-    let bi = layout.binding_init as u32;
-
     let slow = a.new_label();
     let done = a.new_label();
-    a.mov_imm64(12, cache_ptr as u64);
-    // 1. same activation env as cache time (0 = empty cache, never matches a live pointer)
-    a.ldr_imm(9, 19, 40); // ctx.env_raw
-    a.ldr_imm(10, 12, NAME_IC_OFF_ENV);
-    a.cmp_reg_x(9, 10);
-    a.b_cond(C_NE, slow);
-    // 2. scope binding-map generation unchanged (no structural mutation since the fill)
-    a.ldr_w_imm(11, 9, sg);
-    a.ldr_w_imm(13, 12, NAME_IC_OFF_GEN);
-    a.cmp_reg_w(11, 13);
-    a.b_cond(C_NE, slow);
-    // 3. binding: initialized (TDZ), value not a BigInt
-    a.ldr_imm(14, 12, NAME_IC_OFF_BINDING);
-    a.ldrb_imm(9, 14, bi);
-    a.cbz(9, false, slow);
-    a.ldurb(9, 14, bv);
+    // Validate the cache and leave a pointer to the resolved Value in x14 (either mode).
+    emit_name_ic_value_ptr(a, layout, cache_ptr, slow);
+    // Value not a BigInt → copy the 24 bytes, bump if refcounted, push.
+    a.ldurb(9, 14, 0);
     a.cmp_imm_w(9, 5);
     a.b_cond(C_EQ, slow);
-    // --- commit: copy the 24-byte value, bump if refcounted, push ---
-    a.ldur(10, 14, bv);
-    a.ldur(11, 14, bv + 8);
-    a.ldur(13, 14, bv + 16);
+    a.ldur(10, 14, 0);
+    a.ldur(11, 14, 8);
+    a.ldur(13, 14, 16);
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, nobump);
@@ -1389,6 +1462,74 @@ fn emit_load_name_inline(
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
     a.bind(done);
+}
+
+/// Shared LoadName cache validation: on success x14 points at the resolved `Value` (the binding's
+/// value in scope mode, the global entry's value in global mode) and execution falls through; any
+/// mismatch branches to `slow`. Clobbers x9-x17.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_name_ic_value_ptr(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    cache_ptr: usize,
+    slow: usize,
+) {
+    use crate::bytecode::{NAME_IC_OFF_BINDING, NAME_IC_OFF_ENV, NAME_IC_OFF_GEN};
+    let sg = layout.scope_gen as u32;
+    let bv = layout.binding_value as u32;
+    let bi = layout.binding_init as u32;
+    let g_ex = layout.obj_exotic as u32;
+    let g_sh = (layout.obj_props + layout.props_shape) as u32;
+    let g_en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
+    let g_ea = layout.entry_accessor as u32;
+    let g_ev = layout.entry_value as u32;
+    let g_es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+
+    a.mov_imm64(12, cache_ptr as u64);
+    a.ldr_imm(9, 19, 40); // ctx.env_raw
+    a.ldr_imm(10, 12, NAME_IC_OFF_ENV);
+    // Scope binding-map generation must be unchanged in both modes (a shadowing binding in the
+    // start scope re-routes a global resolution too).
+    a.ldr_w_imm(11, 9, sg);
+    a.ldr_w_imm(13, 12, NAME_IC_OFF_GEN);
+    a.cmp_reg_w(11, 13);
+    a.b_cond(C_NE, slow);
+    let scope = a.new_label();
+    a.cmp_reg_x(9, 10);
+    a.b_cond(C_EQ, scope);
+    // --- global mode: ic.env == env|1 (env is ≥8-aligned, so +1 sets the tag bit) ---
+    a.add_imm(11, 9, 1);
+    a.cmp_reg_x(11, 10);
+    a.b_cond(C_NE, slow);
+    a.ldr_imm(14, 19, 32); // inline caches globally safe?
+    a.ldrb_imm(14, 14, 0);
+    a.cbz(14, false, slow);
+    a.ldr_imm(14, 19, 56); // the realm's global Object
+    a.ldrb_imm(15, 14, g_ex);
+    a.cmp_imm_w(15, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldr_w_imm(15, 14, g_sh); // live shape vs cached (packed high half)
+    a.ldr_imm(16, 12, NAME_IC_OFF_BINDING);
+    a.lsr_imm(17, 16, 32);
+    a.cmp_reg_w(15, 17);
+    a.b_cond(C_NE, slow);
+    a.mov_w(16, 16); // zero-extend the slot half
+    a.ldr_imm(15, 14, g_en);
+    a.mov_imm64(17, g_es);
+    a.madd(15, 16, 17, 15);
+    a.ldrb_imm(14, 15, g_ea);
+    a.cbnz(14, false, slow);
+    a.add_imm(14, 15, g_ev); // x14 → the entry's Value
+    let have = a.new_label();
+    a.b(have);
+    // --- scope mode: binding initialized (TDZ) ---
+    a.bind(scope);
+    a.ldr_imm(14, 12, NAME_IC_OFF_BINDING);
+    a.ldrb_imm(9, 14, bi);
+    a.cbz(9, false, slow);
+    a.add_imm(14, 14, bv); // x14 → the binding's Value
+    a.bind(have);
 }
 
 /// Same gate as [`get_prop_inlinable`] plus the dense-element (`Props::elems`) and
@@ -1907,10 +2048,18 @@ enum ChainOp {
     SetElem(u32, bool),
     /// fadd/fsub/fmul/fdiv on the two virtual tops (same encoding as [`asm::Asm::f_arith`]).
     Arith(u32),
+    /// Int32 op on the two virtual tops: 0=and 1=or 2=xor 3=shl 4=ushr 5=shr. Operands convert
+    /// via guarded ToInt32 (guard-free when the virtual is known int-valued); the result is a
+    /// known int-valued Num.
+    Bit(u32),
     Neg,
     /// Store the virtual top into a local slot (byte offset).
     Store(u32),
     Pop,
+    /// Duplicate the virtual top (compound element assignment's key copy).
+    Dup,
+    /// `ToPropKeyLocal` on an in-chain key: a proven Num needs no coercion — pure nop.
+    KeyNop,
     /// Cached free-name read that must currently hold a Num (the `NameIc` cell address).
     LoadName(usize),
     /// Terminal fused compare+branch: negated ARM condition + target pc.
@@ -1972,6 +2121,19 @@ fn build_chain(
                 };
                 (ChainOp::Arith(f), 1, 2)
             }
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
+                if vdepth >= 2 =>
+            {
+                let code = match ops[pc] {
+                    Op::BitAnd => 0,
+                    Op::BitOr => 1,
+                    Op::BitXor => 2,
+                    Op::Shl => 3,
+                    Op::UShr => 4,
+                    _ => 5, // Shr
+                };
+                (ChainOp::Bit(code), 1, 2)
+            }
             Op::Neg if vdepth >= 1 => (ChainOp::Neg, 1, 1),
             Op::StoreLocal(s) if in_range(*s) => {
                 if vdepth >= 1 {
@@ -1981,6 +2143,8 @@ fn build_chain(
                 }
             }
             Op::Pop if vdepth >= 1 => (ChainOp::Pop, 0, 1),
+            Op::Dup if vdepth >= 1 => (ChainOp::Dup, 1, 0),
+            Op::ToPropKeyLocal(_) if vdepth >= 1 => (ChainOp::KeyNop, 0, 0),
             Op::LoadName(_, c) if name_ok => {
                 (ChainOp::LoadName(chunk.jit_name_cache_ptr(*c)), 1, 0)
             }
@@ -1999,7 +2163,6 @@ fn build_chain(
                             _ => 0,       // EQ
                         };
                         chain.push((ChainOp::CmpBranch(neg, *t as usize), pc));
-                        pc += 2;
                     }
                     _ => {}
                 }
@@ -2014,10 +2177,73 @@ fn build_chain(
         chain.push((op, pc));
         pc += 1;
     }
+    // Trim trailing pure producers: a Load/Const/LoadName whose value nothing in the chain
+    // consumes would only be spilled back to the stack — zero benefit, and for an *object*
+    // local (an array receiver feeding a non-chain GetElem/SetElem) the Num guard would fail
+    // every execution, sending the whole bail tail through the generic helper. Emitting them
+    // as plain templates instead is both faster and type-agnostic.
+    while matches!(
+        chain.last(),
+        Some((ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_), _))
+    ) {
+        chain.pop();
+    }
+    // Same idea anywhere in the chain: a pure producer whose value nothing in the chain consumes
+    // (a call argument, an array receiver below the real work — `x.am(i, a[i], r, 2*i, 0, 1)`)
+    // would only be spilled — and when the value is an object, its Num guard fails every single
+    // execution, condemning the whole tail to the generic helper. Cut the chain just before the
+    // earliest such producer; the main loop emits it as a plain template and re-attempts a chain
+    // right after it. Iterate: each cut can orphan earlier consumers.
+    loop {
+        let mut sim: Vec<usize> = Vec::new();
+        for (idx, &(op, _)) in chain.iter().enumerate() {
+            let (pops, pushes): (usize, usize) = match op {
+                ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_) => (0, 1),
+                ChainOp::Update(_, k) => (
+                    0,
+                    !matches!(k, UpdKind::IncDiscard | UpdKind::DecDiscard) as usize,
+                ),
+                ChainOp::GetElem(_) => (1, 1),
+                ChainOp::SetElem(_, keep) => (2, keep as usize),
+                ChainOp::Arith(_) | ChainOp::Bit(_) => (2, 1),
+                ChainOp::Neg => (1, 1),
+                ChainOp::Store(_) | ChainOp::Pop => (1, 0),
+                ChainOp::Dup => (0, 1),
+                ChainOp::KeyNop => (0, 0),
+                ChainOp::CmpBranch(..) => (2, 0),
+            };
+            for _ in 0..pops {
+                sim.pop();
+            }
+            for _ in 0..pushes {
+                sim.push(idx);
+            }
+        }
+        let cut = sim
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                matches!(
+                    chain[idx].0,
+                    ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_)
+                )
+            })
+            .min();
+        match cut {
+            Some(idx) => chain.truncate(idx),
+            None => break,
+        }
+        if chain.is_empty() {
+            return None;
+        }
+    }
     if chain.len() < 3 {
         return None;
     }
-    Some((chain, pc - start))
+    let consumed = chain.last().map_or(0, |&(op, p)| {
+        p - start + if matches!(op, ChainOp::CmpBranch(..)) { 2 } else { 1 }
+    });
+    Some((chain, consumed))
 }
 
 /// Emit a numeric register chain (see [`build_chain`]): the virtual operand stack lives in
@@ -2047,22 +2273,21 @@ fn emit_chain(
     let es = layout.entry_size as u64;
     let none_tag = layout.exotic_none_tag as u32;
     let arr_tag = layout.exotic_array_tag as u32;
-    let sg = layout.scope_gen as u32;
-    let bv = layout.binding_value as i32;
-    let bi = layout.binding_init as u32;
 
     let done = a.new_label();
-    let mut vregs: Vec<u32> = Vec::new();
+    // Virtual stack: (d-register, known-int-valued). Int-valued means the f64 is integral and in
+    // i64 range, so a ToInt32 conversion is a bare fcvtzs with no round-trip guard.
+    let mut vregs: Vec<(u32, bool)> = Vec::new();
     let mut free: Vec<u32> = vec![15, 14, 13, 12, 11, 10, 9, 8];
     // (chain index, bail label, virtual stack *before* the op) — slow paths follow the fast body.
-    let mut bails: Vec<(usize, usize, Vec<u32>)> = Vec::new();
+    let mut bails: Vec<(usize, usize, Vec<(u32, bool)>)> = Vec::new();
 
     for (idx, (cop, _pc)) in chain.iter().enumerate() {
         // One bail label per chain op. The snapshot is the virtual stack before the op runs: the
         // emitter pops from `vregs` up front, but every guard fires before the op writes any
         // register or memory, so the snapshot registers still hold the pre-op values at any bail.
         let bail = a.new_label();
-        let pre_op: Vec<u32> = vregs.clone();
+        let pre_op: Vec<(u32, bool)> = vregs.clone();
         let mut used = 0u32;
         macro_rules! guard {
             () => {{
@@ -2075,7 +2300,10 @@ fn emit_chain(
                 let rd = free.pop().expect("chain reg underflow");
                 a.mov_imm64(9, bits);
                 a.fmov_d_x(rd, 9);
-                vregs.push(rd);
+                let f = f64::from_bits(bits);
+                let iv =
+                    f.fract() == 0.0 && (-9.223372036854776e18..9.223372036854776e18).contains(&f);
+                vregs.push((rd, iv));
             }
             ChainOp::Load(off) => {
                 a.ldrb_imm(9, 22, off);
@@ -2083,7 +2311,7 @@ fn emit_chain(
                 a.b_cond(C_NE, guard!());
                 let rd = free.pop().expect("chain reg underflow");
                 a.ldr_d_imm(rd, 22, off + 8);
-                vregs.push(rd);
+                vregs.push((rd, false));
             }
             ChainOp::Update(off, kind) => {
                 a.ldrb_imm(9, 22, off);
@@ -2101,7 +2329,7 @@ fn emit_chain(
                         a.fmov_one(0);
                         a.f_arith(f, rd, rd, 0);
                         a.str_d_imm(rd, 22, off + 8);
-                        vregs.push(rd);
+                        vregs.push((rd, false));
                     }
                     UpdKind::PostInc | UpdKind::PostDec => {
                         let rd = free.pop().expect("chain reg underflow");
@@ -2109,7 +2337,7 @@ fn emit_chain(
                         a.fmov_one(0);
                         a.f_arith(f, 1, rd, 0);
                         a.str_d_imm(1, 22, off + 8);
-                        vregs.push(rd); // the old value is the result
+                        vregs.push((rd, false)); // the old value is the result
                     }
                     UpdKind::IncDiscard | UpdKind::DecDiscard => {
                         a.ldr_d_imm(0, 22, off + 8);
@@ -2122,8 +2350,12 @@ fn emit_chain(
             ChainOp::GetElem(xoff) | ChainOp::SetElem(xoff, _) => {
                 let is_set = matches!(*cop, ChainOp::SetElem(..));
                 let keep = matches!(*cop, ChainOp::SetElem(_, true));
-                let dv = if is_set { vregs.pop().expect("chain vstack") } else { 0 };
-                let dk = vregs.pop().expect("chain vstack");
+                let (dv, viv) = if is_set {
+                    vregs.pop().expect("chain vstack")
+                } else {
+                    (0, false)
+                };
+                let (dk, _) = vregs.pop().expect("chain vstack");
                 // inline caches globally safe?
                 a.ldr_imm(9, 19, 32);
                 a.ldrb_imm(9, 9, 0);
@@ -2188,7 +2420,7 @@ fn emit_chain(
                     a.bind(no_dec);
                     free.push(dk);
                     if keep {
-                        vregs.push(dv); // v stays the virtual result (a Num — no refcounting)
+                        vregs.push((dv, viv)); // v stays the virtual result (a Num — no refcounting)
                     } else {
                         free.push(dv);
                     }
@@ -2198,22 +2430,58 @@ fn emit_chain(
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_NE, guard!());
                     a.ldur_d(dk, 15, ev + 8); // reuse the key's register for the element
-                    vregs.push(dk);
+                    vregs.push((dk, false));
                 }
             }
             ChainOp::Arith(f) => {
-                let rm = vregs.pop().expect("chain vstack");
-                let rn = vregs.pop().expect("chain vstack");
+                let (rm, _) = vregs.pop().expect("chain vstack");
+                let (rn, _) = vregs.pop().expect("chain vstack");
                 a.f_arith(f, rn, rn, rm);
-                vregs.push(rn);
+                vregs.push((rn, false));
+                free.push(rm);
+            }
+            ChainOp::Bit(code) => {
+                let (rm, mi) = vregs.pop().expect("chain vstack");
+                let (rn, ni) = vregs.pop().expect("chain vstack");
+                // ToInt32 each operand: fcvtzs truncates; the low 32 bits are the mod-2^32 wrap.
+                // Known int-valued skips the round-trip guard (the conversion is exact by
+                // construction); otherwise guard like the standalone template.
+                for (src, iv, out) in [(rn, ni, 9u32), (rm, mi, 10u32)] {
+                    a.fcvtzs_x_d(out, src);
+                    if !iv {
+                        a.scvtf_d_x(0, out);
+                        a.frintz(1, src);
+                        a.fcmp(0, 1);
+                        a.b_cond(C_NE, guard!());
+                        a.cmn_imm_x(out, 1);
+                        a.b_cond(6, guard!()); // VS: the +2^63 saturation edge
+                    }
+                }
+                match code {
+                    0 => a.logic_w(0, 11, 9, 10),
+                    1 => a.logic_w(1, 11, 9, 10),
+                    2 => a.logic_w(2, 11, 9, 10),
+                    3 => a.shift_w(0, 11, 9, 10),
+                    4 => a.shift_w(1, 11, 9, 10),
+                    _ => a.shift_w(2, 11, 9, 10),
+                }
+                if code == 4 {
+                    a.ucvtf_d_w(rn, 11); // >>> yields an unsigned 32-bit result
+                } else {
+                    a.scvtf_d_w(rn, 11);
+                }
+                vregs.push((rn, true));
                 free.push(rm);
             }
             ChainOp::Neg => {
-                let rt = *vregs.last().expect("chain vstack");
+                let (rt, _) = *vregs.last().expect("chain vstack");
                 a.fneg(rt, rt);
+                // Clear the int-valued flag: -(-2^63) = +2^63 escapes the guard-free i64 range.
+                let top = vregs.len() - 1;
+                vregs[top].1 = false;
             }
             ChainOp::Store(off) => {
-                let dv = vregs.pop().expect("chain vstack");
+                let (dv, _) = vregs.pop().expect("chain vstack");
                 // old slot value: trivially droppable, refcounted-and-shared (inline dec), or bail
                 a.ldrb_imm(9, 22, off);
                 a.cmp_imm_w(9, 5);
@@ -2235,32 +2503,29 @@ fn emit_chain(
                 free.push(dv);
             }
             ChainOp::Pop => {
-                let r = vregs.pop().expect("chain vstack");
+                let (r, _) = vregs.pop().expect("chain vstack");
                 free.push(r);
             }
+            ChainOp::Dup => {
+                let &(src, iv) = vregs.last().expect("chain vstack");
+                let rd = free.pop().expect("chain reg underflow");
+                a.fmov_d_d(rd, src);
+                vregs.push((rd, iv));
+            }
+            ChainOp::KeyNop => {}
             ChainOp::LoadName(cache_ptr) => {
-                a.mov_imm64(12, cache_ptr as u64);
-                a.ldr_imm(9, 19, 40); // ctx.env_raw
-                a.ldr_imm(10, 12, 0);
-                a.cmp_reg_x(9, 10);
-                a.b_cond(C_NE, guard!());
-                a.ldr_w_imm(11, 9, sg);
-                a.ldr_w_imm(13, 12, 16);
-                a.cmp_reg_w(11, 13);
-                a.b_cond(C_NE, guard!());
-                a.ldr_imm(14, 12, 8);
-                a.ldrb_imm(9, 14, bi);
-                a.cbz(9, false, guard!());
-                a.ldurb(9, 14, bv);
+                // Shared cache validation (scope or global mode) leaves x14 → the Value.
+                emit_name_ic_value_ptr(a, layout, cache_ptr, guard!());
+                a.ldurb(9, 14, 0);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, guard!()); // only a Num can live in a register
                 let rd = free.pop().expect("chain reg underflow");
-                a.ldur_d(rd, 14, bv + 8);
-                vregs.push(rd);
+                a.ldur_d(rd, 14, 8);
+                vregs.push((rd, false));
             }
             ChainOp::CmpBranch(neg, target) => {
-                let rm = vregs.pop().expect("chain vstack");
-                let rn = vregs.pop().expect("chain vstack");
+                let (rm, _) = vregs.pop().expect("chain vstack");
+                let (rn, _) = vregs.pop().expect("chain vstack");
                 a.fcmp(rn, rm);
                 a.b_cond(neg, pc_labels[target]);
                 free.push(rm);
@@ -2272,7 +2537,7 @@ fn emit_chain(
         }
     }
     // Chain finished: spill any remaining virtual values to the real stack, in stack order.
-    for &r in &vregs {
+    for &(r, _) in &vregs {
         a.movz(9, 4, 0);
         a.stur(9, 20, 0);
         a.stur_d(r, 20, 8);
@@ -2283,7 +2548,7 @@ fn emit_chain(
     // ---- bail paths: spill the pre-op virtual stack, then re-run the rest via the helper ----
     for (idx, label, snap) in bails {
         a.bind(label);
-        for &r in &snap {
+        for &(r, _) in &snap {
             a.movz(9, 4, 0);
             a.stur(9, 20, 0);
             a.stur_d(r, 20, 8);
@@ -2430,6 +2695,11 @@ pub fn run(
         stack_base,
         final_sp: stack_base,
         env_raw,
+        this_raw: std::ptr::null(),
+        global_body: {
+            let b = i.global.borrow();
+            &*b as *const crate::value::Object as *const u8
+        },
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
         env,
@@ -2443,9 +2713,105 @@ pub fn run(
         error: None,
         ret: Value::Undefined,
     };
+    ctx.this_raw = &ctx.this_val as *const Value;
     let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
     let ok = entry(&mut ctx);
     // Drop any operands left on the raw stack (a throw can leave temporaries).
+    unsafe {
+        let mut p = ctx.stack_base;
+        while p < ctx.final_sp {
+            std::ptr::drop_in_place(p);
+            p = p.add(1);
+        }
+    }
+    slots.clear();
+    stack.clear();
+    if i.vm_pool.len() < 64 {
+        i.vm_pool.push((slots, stack));
+    }
+    if ok == 1 {
+        Ok(std::mem::take(&mut ctx.ret))
+    } else {
+        Err(ctx
+            .error
+            .take()
+            .unwrap_or_else(|| Abrupt::Throw(Value::Undefined)))
+    }
+}
+
+/// [`run`] for the JIT→JIT fast call: takes ownership of `argc` argument `Value`s at `args`
+/// (moved off the caller's operand stack — the caller must NOT drop them), seeding parameter
+/// slots by move instead of clone and dropping any surplus. Only for chunks with no activation
+/// environment (`Chunk::jit_no_activation`), so the arguments have exactly one consumer.
+///
+/// # Safety
+/// `args..args+argc` must be initialized `Value`s the caller relinquishes entirely.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub(crate) unsafe fn run_moved(
+    i: &mut Interp,
+    chunk: &Rc<Chunk>,
+    code: &JitCode,
+    env: &Env,
+    this_val: Value,
+    args: *mut Value,
+    argc: usize,
+) -> Result<Value, Abrupt> {
+    let env = env.clone();
+    let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
+    let (n_params, n_slots) = chunk.jit_frame();
+    let seed = n_params.min(argc);
+    slots.reserve(n_slots);
+    unsafe {
+        std::ptr::copy_nonoverlapping(args, slots.as_mut_ptr(), seed);
+        slots.set_len(seed);
+        // Surplus arguments were still moved to us: drop them.
+        for k in seed..argc {
+            std::ptr::drop_in_place(args.add(k));
+        }
+    }
+    slots.resize(n_slots, Value::Undefined);
+    for &s in chunk.jit_var_force_resets() {
+        slots[s as usize] = Value::Undefined;
+    }
+    stack.clear();
+    stack.reserve(code.max_stack);
+
+    let helpers: [usize; N_HELPERS] = [
+        crate::bytecode::jit_exec as *const () as usize,
+        crate::bytecode::jit_cond as *const () as usize,
+        crate::bytecode::jit_return as *const () as usize,
+        crate::bytecode::jit_push_handler as *const () as usize,
+        crate::bytecode::jit_pop_handler as *const () as usize,
+        crate::bytecode::jit_unwind as *const () as usize,
+    ];
+    let stack_base = stack.as_mut_ptr();
+    let env_raw = Rc::as_ptr(&env) as *const u8;
+    let mut ctx = JitCtx {
+        helpers: helpers.as_ptr(),
+        stack_base,
+        final_sp: stack_base,
+        env_raw,
+        this_raw: std::ptr::null(),
+        global_body: {
+            let b = i.global.borrow();
+            &*b as *const crate::value::Object as *const u8
+        },
+        interp: i as *mut Interp,
+        chunk: Rc::as_ptr(chunk),
+        env,
+        this_val,
+        slots: slots.as_mut_ptr(),
+        inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
+        n_slots,
+        handlers: Vec::new(),
+        code_base: code.mem,
+        pc_offsets: code.pc_offsets.as_ptr(),
+        error: None,
+        ret: Value::Undefined,
+    };
+    ctx.this_raw = &ctx.this_val as *const Value;
+    let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
+    let ok = entry(&mut ctx);
     unsafe {
         let mut p = ctx.stack_base;
         while p < ctx.final_sp {
@@ -2476,6 +2842,20 @@ pub fn run(
     _env: &Env,
     _this_val: Value,
     _args: &[Value],
+) -> Result<Value, Abrupt> {
+    unreachable!("jit code cannot exist on this platform")
+}
+
+/// See the aarch64-macos definition; without machine code the fast call never commits.
+#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+pub(crate) unsafe fn run_moved(
+    _i: &mut Interp,
+    _chunk: &Rc<Chunk>,
+    _code: &JitCode,
+    _env: &Env,
+    _this_val: Value,
+    _args: *mut Value,
+    _argc: usize,
 ) -> Result<Value, Abrupt> {
     unreachable!("jit code cannot exist on this platform")
 }

@@ -4181,6 +4181,128 @@ impl Interp {
         r
     }
 
+    /// The JIT→JIT fast call (from `bytecode::jit_exec`'s Call/CallWithThis arms): a plain,
+    /// same-realm, already-JIT-compiled user function with no activation environment runs with
+    /// exactly the observable effects of the layered path — recursion depth, gc_check, the
+    /// `FnFrame` for `f.caller` reflection, constructing/new.target save-clear-restore, and the
+    /// proper-tail-call trampoline — but skips the dispatch layers' proxy/realm/eval-marker
+    /// re-checks (guarded up front) and *moves* the `argc` argument `Value`s at `args` into the
+    /// callee's slots instead of clone-here-drop-there.
+    ///
+    /// `None` = not applicable, with NO side effects and the arguments untouched (the caller
+    /// runs the generic path). `Some(r)` = handled; the arguments have been consumed.
+    ///
+    /// # Safety
+    /// `args..args+argc` must be initialized `Value`s the caller relinquishes on `Some`.
+    pub(crate) unsafe fn call_jit_fast(
+        &mut self,
+        callee: &Value,
+        this_slot: *const Value,
+        args: *mut Value,
+        argc: usize,
+    ) -> Option<Result<Value, Abrupt>> {
+        // Any exotic engine state (live proxies, multiple realms with possible cross-realm
+        // callees, legacy fn.caller hooks) takes the generic path. Realms: the callee is
+        // same-realm iff its scope chain roots in the active global env — walk a few hops by
+        // raw pointer (no Rc churn; the chain is kept alive by the callee's env handle).
+        if !self.proxies.is_empty() {
+            return None;
+        }
+        let Value::Obj(o) = callee else { return None };
+        let (func, env) = match &o.borrow().call {
+            Callable::User(f, e) => (f.clone(), e.clone()),
+            _ => return None,
+        };
+        // Arrows inherit new.target lexically (the generic path skips the clear for them).
+        if func.is_arrow {
+            return None;
+        }
+        if !self.realms.is_empty() {
+            type ScopeCell = RefCell<Scope>;
+            let mut cur: *const ScopeCell = Rc::as_ptr(&env);
+            let root_is_active = 'walk: {
+                for _ in 0..8 {
+                    if cur == Rc::as_ptr(&self.global_env) {
+                        break 'walk true;
+                    }
+                    match unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) } {
+                        Some(p) => cur = p,
+                        None => break 'walk false,
+                    }
+                }
+                false
+            };
+            if !root_is_active {
+                return None;
+            }
+        }
+        if !self.class_info.is_empty()
+            && self.class_info.contains_key(&(Rc::as_ptr(o) as usize))
+        {
+            return None;
+        }
+        // Not yet tiered / didn't compile / no machine code → generic (which counts calls up).
+        let chunk = match func.code.get() {
+            Some(Some(c)) => c.clone(),
+            _ => return None,
+        };
+        let code = match chunk.jit.get() {
+            Some(Some(c)) => c.clone(),
+            _ => return None,
+        };
+        if !chunk.jit_no_activation() {
+            return None;
+        }
+        // --- committed: from here the arguments are ours ---
+        self.depth += 1;
+        if self.depth > MAX_EVAL_DEPTH {
+            self.depth -= 1;
+            // Ownership contract: consume the arguments even on the early throw.
+            for k in 0..argc {
+                unsafe { std::ptr::drop_in_place(args.add(k)) };
+            }
+            return Some(Err(self.throw("RangeError", "Maximum call stack size exceeded")));
+        }
+        if let Err(e) = self.gc_check() {
+            self.depth -= 1;
+            for k in 0..argc {
+                unsafe { std::ptr::drop_in_place(args.add(k)) };
+            }
+            return Some(Err(e));
+        }
+        let saved_ctor = std::mem::replace(&mut self.constructing, false);
+        let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
+        self.fn_frames.push(FnFrame {
+            fn_ptr: Rc::as_ptr(o) as usize,
+            fn_obj: Value::Obj(o.clone()),
+            args_obj: Value::Null,
+            strict: func.is_strict,
+            lazy: None,
+        });
+        let this_val =
+            self.bind_compiled_this(&func, &chunk, unsafe { (*this_slot).clone() }, false);
+        let mut r =
+            unsafe { crate::jit::run_moved(self, &chunk, &code, &env, this_val, args, argc) };
+        self.fn_frames.pop();
+        self.constructing = saved_ctor;
+        self.new_target = saved_nt;
+        // Proper-tail-call trampoline, exactly like `call`.
+        while r.is_ok() {
+            match self.pending_tail.take() {
+                Some((f, t, a)) => {
+                    if let Err(e) = self.gc_check() {
+                        r = Err(e);
+                        break;
+                    }
+                    r = self.call_inner(f, t, &a);
+                }
+                None => break,
+            }
+        }
+        self.depth -= 1;
+        Some(r)
+    }
+
     fn call_user_inner(
         &mut self,
         func: &Rc<Function>,

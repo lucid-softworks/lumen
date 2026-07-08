@@ -712,7 +712,13 @@ impl Props {
             let n = n as usize;
             if n < self.elems.len() {
                 self.elems[n] = slot as u32;
-            } else if n <= self.elems.len() + 32 {
+            } else if n <= self.elems.len() + 256 {
+                // The pad tolerates *descending* first-fills (`while (--i >= 0) a[i] = 0`,
+                // `r[i+n] = x[i]` from the top — bignum/matrix code does this constantly): the
+                // first write lands well past the frontier, and a too-small pad would leave the
+                // whole upper range map-only for the array's lifetime, killing every dense fast
+                // path. 256 covers real dense workloads; a truly sparse `a[1e6]` still stays
+                // map-only at ≤1KB of hole slots per object.
                 while self.elems.len() < n {
                     self.elems.push(NO_SLOT);
                 }
