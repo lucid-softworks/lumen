@@ -7,3 +7,4 @@
 # Playground wasm bundle + build stamp (built by wasm-pack in .github/workflows/pages.yml).
 /site/pkg/
 /site/version.json
+examples/ejs/code.js
