@@ -1430,6 +1430,12 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
+            Op::Undef if fast & 128 != 0 => {
+                a.stur(31, 20, 0);
+                a.stur(31, 20, 8);
+                a.stur(31, 20, 16);
+                a.add_imm(20, 20, 24);
+            }
             Op::Const(k) if fast & 128 != 0 && chunk.jit_const_copyable(*k) => {
                 let (word0, word1) = chunk.jit_const_bits(*k);
                 a.mov_imm64(9, word0);
