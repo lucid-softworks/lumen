@@ -2333,7 +2333,7 @@ impl Interp {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::BigInt(n) => Ok(Value::BigInt(n.clone())),
-            Expr::Str(s) => Ok(Value::Str(s.clone())),
+            Expr::Str(s) => Ok(Value::Str(s.clone().into())),
             Expr::ToStr(inner) => {
                 let v = self.eval(inner, env)?;
                 Ok(Value::Str(self.to_string(&v)?))
@@ -4873,6 +4873,7 @@ impl Interp {
                         }
                         if let Some(v) = self.typed_arrays.remove(&sp) {
                             self.inline_ic_safe.set(false);
+                            dst.borrow().ic_plain.set(false);
                             self.typed_arrays.insert(dp, v);
                         }
                         // The TypedArray's `buffer` slot lives in a parallel side table keyed by the
@@ -5203,7 +5204,7 @@ impl Interp {
 
     /// Whether `key` names a non-configurable own property of a string primitive ("length" or an
     /// in-range canonical integer index).
-    fn string_own_key(&self, s: &std::rc::Rc<str>, key: &str) -> bool {
+    fn string_own_key(&self, s: &crate::lstr::LStr, key: &str) -> bool {
         if key == "length" {
             return true;
         }
@@ -6044,7 +6045,11 @@ impl Interp {
                 if ls.len() + rs.len() > MAX_STR_LEN {
                     return Err(self.throw("RangeError", "Invalid string length"));
                 }
-                return Ok(Value::Str(crate::jstr::concat_rc(&ls, &rs)));
+                return Ok(Value::Str(if crate::jstr::needs_join_fixup(&ls, &rs) {
+                    crate::jstr::concat(&ls, &rs).into()
+                } else {
+                    crate::lstr::LStr::concat2(&ls, &rs)
+                }));
             }
             if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&lp, &rp) {
@@ -6352,13 +6357,13 @@ impl Interp {
         Ok(to_int32(n) as u32)
     }
 
-    pub fn to_string(&mut self, v: &Value) -> Result<Rc<str>, Abrupt> {
+    pub fn to_string(&mut self, v: &Value) -> Result<crate::lstr::LStr, Abrupt> {
         Ok(match v {
-            Value::Undefined | Value::Empty => Rc::from("undefined"),
-            Value::Null => Rc::from("null"),
-            Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
-            Value::Num(n) => Rc::from(self.num_to_str(*n).as_str()),
-            Value::BigInt(n) => Rc::from(n.to_string().as_str()),
+            Value::Undefined | Value::Empty => crate::lstr::LStr::from("undefined"),
+            Value::Null => crate::lstr::LStr::from("null"),
+            Value::Bool(b) => crate::lstr::LStr::from(if *b { "true" } else { "false" }),
+            Value::Num(n) => crate::lstr::LStr::from(self.num_to_str(*n).as_str()),
+            Value::BigInt(n) => crate::lstr::LStr::from(n.to_string().as_str()),
             Value::Str(s) => s.clone(),
             Value::Sym(_) => {
                 return Err(self.throw("TypeError", "Cannot convert a Symbol value to a string"))

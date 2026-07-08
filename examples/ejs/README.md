@@ -29,25 +29,27 @@ fresh bundle from upstream instead, see yt-dlp/ejs's own build docs (`rollup` vi
 |---|---:|---|
 | node 22 | 0.44 s | |
 | bun 1.3 | 0.47 s | |
-| qjs (quickjs-ng) | 8.2 s | from issue #12, different machine |
-| **lumen** (`--tier=jit`) | **82 s** | was **55.8 min** before the fixes below |
-| lumen (default tier) | 93 s | the remaining cost is memcpy, so the tiers converge |
+| qjs (quickjs-ng, brew) | 3.4 s | (the 8.2 s in issue #12 was a slower machine) |
+| **lumen** (`--tier=jit`) | **15 s** | was **55.8 min** at the time of issue #12 |
 
-Two engine pathologies accounted for essentially all of the original 55.8 minutes, both
-O(n²) over the player size:
+What the 55.8 minutes was made of, in the order it fell:
 
-1. **Per-call UTF-16 materialization.** lumen stores strings as UTF-8; every
-   `charCodeAt`/`s[i]`/`.length` walked or converted the *whole* string per call —
-   O(n) per character read, O(n²) for meriyah's scanner. Fixed with a pointer-keyed
-   cache of each string's UTF-16 view (ASCII strings index their bytes directly);
-   first access per string is O(n), every one after is O(1). 55.8 min → 2.7 min.
-2. **Double-copy concatenation.** Every `a + b` built a `String` (copy one) and then an
-   `Rc<str>` from it (copy two). The append loop that rebuilds the transformed player
-   copies the accumulated string each step regardless, but halving the bytes moved
-   halved the time. 2.7 min → 82 s.
+1. **Per-call UTF-16 materialization** — every `charCodeAt`/`s[i]`/`.length` walked or
+   converted the *whole* UTF-8 string per call: O(n²) for meriyah's scanner. Fixed with a
+   pointer-keyed cache of each string's UTF-16 view (ASCII indexes bytes directly).
+   55.8 min → 2.7 min.
+2. **Double-copy concatenation** — each `a + b` copied the accumulation twice.
+   2.7 min → 82 s.
+3. **The append loop itself** — `s += x` on immutable exactly-sized strings is inherently
+   O(n²). The engine string is now a thin refcounted buffer *with spare capacity* (`LStr`,
+   the design original QuickJS uses), and the fused `obj.k += v` op appends **in place** when the
+   accumulator is uniquely referenced — astring's `write()` becomes amortized O(1).
+   82 s → 16 s.
+4. **Compiled-tier coverage and inline caches** — object-destructuring declarations and
+   simple parameter defaults now compile (meriyah/astring bail much less), and the inline
+   property caches are guarded by a *per-object* side-table flag instead of a global latch
+   (one `Uint8Array` existing no longer disables every cache in the program). → 15 s.
 
-The remaining gap to node/qjs is the append loop itself: `s += x` with immutable
-`Rc<str>` strings is inherently O(n²) — the same problem the original QuickJS solved by
-appending in place when the string is uniquely referenced and has spare capacity
-(quickjs-ng/quickjs#1002 tracks merging that). That needs a capacity-carrying string
-representation in `Value::Str` and is tracked as follow-up work on issue #12.
+The remaining ~4× to qjs is spread across call overhead (meriyah's mutually recursive
+parse functions), the still-interpreted functions (`?.` optional chains, `for…of`,
+destructured parameters), and AST-node allocation — tracked on issue #12.

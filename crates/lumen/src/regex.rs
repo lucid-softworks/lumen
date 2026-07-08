@@ -469,8 +469,9 @@ pub struct ReText {
 
 impl ReText {
     /// Prepare `s` for matching, keeping the caller's `Rc` for zero-copy ASCII slicing.
-    pub fn new_rc(unicode: bool, s: &Rc<str>) -> ReText {
-        Self::build(unicode, s, Some(s.clone()))
+    pub fn new_rc(unicode: bool, s: &crate::lstr::LStr) -> ReText {
+        // One copy per (subject, mode) cache fill — the re_texts LRU amortizes it.
+        Self::build(unicode, s, Some(Rc::from(s.as_str())))
     }
 
     fn build(unicode: bool, s: &str, src: Option<Rc<str>>) -> ReText {

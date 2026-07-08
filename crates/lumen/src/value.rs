@@ -37,7 +37,7 @@ pub enum Value {
     /// BigInt, approximated with `i128` (exact within ±2^127; tests beyond that range fail rather
     /// than implementing arbitrary precision).
     BigInt(crate::bigint::JsBigInt) = 5,
-    Str(Rc<str>) = 6,
+    Str(crate::lstr::LStr) = 6,
     Sym(Rc<SymbolData>) = 7,
     Obj(Gc) = 8,
 }
@@ -90,6 +90,8 @@ pub struct JitLayout {
     pub exotic_none_tag: u8,
     /// `Exotic::Array`'s discriminant byte (the element templates also accept arrays).
     pub exotic_array_tag: u8,
+    /// `ic_plain` byte within `Object` (the per-receiver "not in an exotic side table" flag).
+    pub obj_ic_plain: usize,
     /// `Rc::as_ptr(env)` → the scope's `VarMap` generation counter (through the `RefCell`).
     pub scope_gen: usize,
     /// `value` within a `Binding` (the LoadName template's 24-byte copy source).
@@ -166,6 +168,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         obj_from_rc,
         rc_strong_off,
         obj_proto: offset_of!(Object, proto),
+        obj_ic_plain: offset_of!(Object, ic_plain),
         obj_props: offset_of!(Object, props),
         obj_exotic: offset_of!(Object, exotic),
         props_shape: offset_of!(Props, shape),
@@ -187,11 +190,11 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
 }
 
 impl Value {
-    pub fn str(s: impl Into<Rc<str>>) -> Value {
+    pub fn str(s: impl Into<crate::lstr::LStr>) -> Value {
         Value::Str(s.into())
     }
     pub fn from_string(s: String) -> Value {
-        Value::Str(Rc::from(s.as_str()))
+        Value::Str(s.into())
     }
     /// A BigInt from an `i64` (for the embedder's 64-bit integer bridge, e.g. wasm i64).
     pub fn bigint_from_i64(v: i64) -> Value {
@@ -292,7 +295,7 @@ pub enum Exotic {
     Array,
     BoolWrap(bool),
     NumWrap(f64),
-    StrWrap(Rc<str>),
+    StrWrap(crate::lstr::LStr),
     SymWrap(Rc<SymbolData>),
     BigIntWrap(crate::bigint::JsBigInt),
     /// An error object. Carries the captured call-stack frames as a preformatted string (the
@@ -312,6 +315,12 @@ pub struct Object {
     pub(crate) extensible: bool,
     pub(crate) call: Callable,
     pub(crate) exotic: Exotic,
+    /// `false` for objects whose behavior lives in an interpreter side table — proxies, typed
+    /// arrays, module namespaces — which the `exotic` tag can't reveal. The JIT's inline
+    /// property/element caches check this byte on the receiver and take the checked helper when
+    /// clear, so ONE proxy existing somewhere no longer disables the caches for every plain
+    /// object in the program (the old global `inline_ic_safe` latch).
+    pub(crate) ic_plain: Cell<bool>,
     /// The construct-time prototype handed to instances (`F.prototype`), cached for `new`.
     pub(crate) is_constructor: bool,
     /// GC scratch: mark bit (reachability) and a count of references from other heap objects.
@@ -328,6 +337,7 @@ impl Object {
             extensible: true,
             call: Callable::None,
             exotic: Exotic::None,
+            ic_plain: Cell::new(true),
             is_constructor: false,
             gc_mark: Cell::new(false),
             gc_internal: Cell::new(0),

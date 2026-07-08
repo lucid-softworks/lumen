@@ -174,7 +174,7 @@ pub(crate) enum StrUnits {
 /// `ctor` is the %RegExp% constructor the statics belong to (the realm active at match time).
 pub(crate) struct RegexpLastMatch {
     pub ctor: Gc,
-    pub input: Rc<str>,
+    pub input: crate::lstr::LStr,
     pub text: Rc<crate::regex::ReText>,
     pub caps: Vec<Option<(usize, usize)>>,
     pub ngroups: usize,
@@ -639,10 +639,10 @@ pub struct Interp {
     /// Recently indexed strings' UTF-16 views, keyed by string identity (the held `Rc` pins the
     /// pointer) — see [`StrUnits`]. Small LRU: the hot case is one big source string being
     /// scanned a unit at a time.
-    pub(crate) str_units: Vec<(Rc<str>, StrUnits)>,
+    pub(crate) str_units: Vec<(crate::lstr::LStr, StrUnits)>,
     /// Recently prepared regex subjects keyed by string identity (the held `Rc` pins the
     /// pointer), so repeated exec/replace/split over one subject reuses its element vector.
-    pub(crate) re_texts: Vec<(Rc<str>, bool, Rc<crate::regex::ReText>)>,
+    pub(crate) re_texts: Vec<(crate::lstr::LStr, bool, Rc<crate::regex::ReText>)>,
     /// The last successful `exec` match, kept raw for the legacy `RegExp.$1`-style statics:
     /// the 14 strings materialize into the constructor's hidden props only when an accessor
     /// actually reads them (see `builtins::flush_regexp_legacy`), not on every match.
@@ -1010,7 +1010,7 @@ impl Interp {
         let string_proto = Object::new(Some(object_proto.clone()));
         let number_proto = Object::new(Some(object_proto.clone()));
         let boolean_proto = Object::new(Some(object_proto.clone()));
-        string_proto.borrow_mut().exotic = Exotic::StrWrap(Rc::from(""));
+        string_proto.borrow_mut().exotic = Exotic::StrWrap("".into());
         number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
         boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
@@ -1136,7 +1136,7 @@ impl Interp {
         let boolean_proto = Object::new(Some(object_proto.clone()));
         // These prototypes are themselves wrapper exotics with default primitive data, so e.g.
         // `Number.prototype.valueOf()` / `Number.prototype == 0` work.
-        string_proto.borrow_mut().exotic = Exotic::StrWrap(Rc::from(""));
+        string_proto.borrow_mut().exotic = Exotic::StrWrap("".into());
         number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
         boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
@@ -1818,7 +1818,7 @@ impl Interp {
 
     /// ToString with the abrupt completion lowered to the thrown value (see [`invoke`]).
     pub fn coerce_string(&mut self, v: &Value) -> Result<Rc<str>, Value> {
-        self.to_string(v).map_err(abrupt_value)
+        self.to_string(v).map(|s| (&s).into()).map_err(abrupt_value)
     }
 
     /// The bytes a TypedArray view covers (`None` when `v` isn't a typed array or its buffer
@@ -2153,6 +2153,58 @@ impl Interp {
     /// The `SetProp` inline-cache fast path; `false` means "take the slow path". Writes cache
     /// own slots only (`depth` 0): an own writable data property wins OrdinarySet regardless of
     /// the prototype chain.
+    /// The fused `obj.k += v` fast path (`bytecode::Op::AppendProp`): when the property still
+    /// holds the exact string the compound read produced (`lval` — nothing replaced it while the
+    /// RHS evaluated), both sides are strings, and the slot is an own writable data property on a
+    /// plain object, append **in place**: taking the value out of the slot and dropping the
+    /// stack copy makes it uniquely referenced, so `LStr::append_in_place` (or a capacity-doubled
+    /// rebuild) applies — the amortized-O(append) accumulator loop, instead of copying the whole
+    /// accumulation per step. `Err(lval)` = not applicable, nothing touched, caller runs the
+    /// generic Add + set.
+    pub(crate) fn append_prop_fast(
+        &mut self,
+        o: &Gc,
+        name: &str,
+        lval: Value,
+        x: &crate::lstr::LStr,
+    ) -> Result<(), Value> {
+        let Value::Str(lv) = &lval else {
+            return Err(lval);
+        };
+        if lv.len() + x.len() > MAX_STR_LEN {
+            return Err(lval); // the generic path raises the RangeError
+        }
+        if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
+            return Err(lval);
+        }
+        let mut b = o.borrow_mut();
+        if !matches!(b.exotic, Exotic::None) {
+            return Err(lval);
+        }
+        let Some(p) = b.props.get_mut(name) else {
+            return Err(lval);
+        };
+        if p.accessor || !p.writable {
+            return Err(lval);
+        }
+        let same = matches!(&p.value, Value::Str(cur) if crate::lstr::LStr::ptr_eq(cur, lv));
+        if !same {
+            return Err(lval);
+        }
+        // Take the slot's handle and release the stack copy: unique unless shared elsewhere
+        // (then the grow-copy path runs once and the rebuilt handle is unique from here on).
+        let mut cur = match std::mem::replace(&mut p.value, Value::Undefined) {
+            Value::Str(s) => s,
+            _ => unreachable!("checked above"),
+        };
+        drop(lval);
+        if !cur.append_in_place(x) {
+            cur = cur.concat_grown(x);
+        }
+        p.value = Value::Str(cur);
+        Ok(())
+    }
+
     fn try_ic_set(
         &self,
         o: &Gc,
@@ -2291,7 +2343,7 @@ impl Interp {
                     return Ok(s
                         .description
                         .clone()
-                        .map(Value::Str)
+                        .map(|k| Value::Str(k.into()))
                         .unwrap_or(Value::Undefined));
                 }
                 let proto = self.symbol_proto.clone();
@@ -3202,7 +3254,7 @@ impl Interp {
     /// every later one O(1) — pointer-compared against a small LRU. Short strings skip the
     /// cache entirely (the O(len) walk is trivial; caching them would just churn the LRU under
     /// code that touches thousands of small strings once each).
-    pub(crate) fn units_of(&mut self, s: &Rc<str>) -> StrUnits {
+    pub(crate) fn units_of(&mut self, s: &crate::lstr::LStr) -> StrUnits {
         if s.len() < 64 {
             return if s.is_ascii() {
                 StrUnits::Ascii
@@ -3210,7 +3262,7 @@ impl Interp {
                 StrUnits::Units(crate::jstr::units(s).into())
             };
         }
-        if let Some(k) = self.str_units.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+        if let Some(k) = self.str_units.iter().position(|(k, _)| crate::lstr::LStr::ptr_eq(k, s)) {
             let hit = self.str_units[k].1.clone();
             // Keep the hot entry last (evictions pop from the front).
             let n = self.str_units.len();
@@ -3230,7 +3282,7 @@ impl Interp {
     }
 
     /// Code unit `idx` of `s`, through the cache. `None` = out of range.
-    pub(crate) fn unit_at(&mut self, s: &Rc<str>, idx: usize) -> Option<u16> {
+    pub(crate) fn unit_at(&mut self, s: &crate::lstr::LStr, idx: usize) -> Option<u16> {
         match self.units_of(s) {
             StrUnits::Ascii => s.as_bytes().get(idx).map(|&b| b as u16),
             StrUnits::Units(u) => u.get(idx).copied(),
@@ -3239,11 +3291,11 @@ impl Interp {
 
     /// The fully materialized unit vector (for range/search operations): an ASCII entry is
     /// promoted in place, so the copy happens once per string, not per call.
-    pub(crate) fn units_full(&mut self, s: &Rc<str>) -> Rc<[u16]> {
+    pub(crate) fn units_full(&mut self, s: &crate::lstr::LStr) -> Rc<[u16]> {
         if s.len() < 64 {
             return crate::jstr::units(s).into();
         }
-        if let Some(k) = self.str_units.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+        if let Some(k) = self.str_units.iter().position(|(k, _)| crate::lstr::LStr::ptr_eq(k, s)) {
             if let StrUnits::Units(u) = &self.str_units[k].1 {
                 return u.clone();
             }
@@ -3260,7 +3312,7 @@ impl Interp {
     }
 
     /// `s.length` (UTF-16 units), through the cache.
-    pub(crate) fn str_len(&mut self, s: &Rc<str>) -> usize {
+    pub(crate) fn str_len(&mut self, s: &crate::lstr::LStr) -> usize {
         match self.units_of(s) {
             StrUnits::Ascii => s.len(),
             StrUnits::Units(u) => u.len(),
@@ -3299,7 +3351,7 @@ impl Interp {
     /// same subject (the common shape of both real code and the regexp benchmarks) skips the
     /// O(len) element-vector rebuild. Strings are immutable, and each entry holds its `Rc` so the
     /// pointer can't be reused by a new allocation while cached.
-    pub(crate) fn re_text(&mut self, unicode: bool, s: &Rc<str>) -> Rc<crate::regex::ReText> {
+    pub(crate) fn re_text(&mut self, unicode: bool, s: &crate::lstr::LStr) -> Rc<crate::regex::ReText> {
         let key = s.as_ptr();
         if let Some((_, _, t)) = self
             .re_texts

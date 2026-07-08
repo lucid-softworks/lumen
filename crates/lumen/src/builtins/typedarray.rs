@@ -1545,6 +1545,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
     let p = Rc::as_ptr(&obj) as usize;
     i.gc_pin(&obj);
     i.inline_ic_safe.set(false);
+    obj.borrow().ic_plain.set(false);
     i.typed_arrays.insert(
         p,
         TaInfo {
@@ -2091,7 +2092,7 @@ fn b64_decode_options(i: &mut Interp, opts: &Value) -> Result<(bool, Rc<str>), V
     let url = b64_option_url(i, opts)?;
     let handling = if let Value::Obj(_) = opts {
         match ab(i.get_member(opts, "lastChunkHandling"))? {
-            Value::Undefined => Rc::from("loose"),
+            Value::Undefined => crate::lstr::LStr::from("loose"),
             Value::Str(s) if matches!(&*s, "loose" | "strict" | "stop-before-partial") => s,
             _ => {
                 return Err(i.make_error(
@@ -2101,9 +2102,9 @@ fn b64_decode_options(i: &mut Interp, opts: &Value) -> Result<(bool, Rc<str>), V
             }
         }
     } else {
-        Rc::from("loose")
+        crate::lstr::LStr::from("loose")
     };
-    Ok((url, handling))
+    Ok((url, (&handling).into()))
 }
 
 pub(super) fn install_uint8_base64(it: &mut Interp) {

@@ -180,6 +180,15 @@ pub enum Op {
     SetProp(u32, u32),
     /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
     SetPropDrop(u32, u32),
+    /// Object-destructuring guard: throws the oracle's TypeError when the value on top of the
+    /// stack (peeked, not popped) is null/undefined — GetProp's own nullish error has a
+    /// different message, and the check must run before any property read.
+    DestructureGuard,
+    /// Statement-position `obj.name += v` (pops v, the compound-read lval, obj): appends IN
+    /// PLACE when the property still holds the exact string the read produced and everything is
+    /// plain (see `Interp::append_prop_fast`); otherwise runs the generic Add + IC store —
+    /// observably identical to the unfused GetProp/Add/SetPropDrop sequence.
+    AppendProp(u32, u32),
     GetElem,
     SetElem,
     /// `obj[k] = v` in statement position: stores without leaving `v` on the stack.
@@ -1171,13 +1180,32 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
     // resolves to the later parameter, matching the env behavior where the later insert wins).
     // A captured parameter keeps its positional slot (dead) but homes in the activation env.
+    let mut defaulted: Vec<(u16, &Expr)> = Vec::new();
     for (k, p) in func.params.iter().enumerate() {
-        if p.default.is_some() || p.rest {
+        if p.rest {
             return None;
         }
         let Pattern::Ident(name) = &p.pattern else {
             return None;
         };
+        if let Some(d) = &p.default {
+            // Lowerable defaults: an uncaptured identifier parameter whose default expression
+            // can't observe this-or-later parameters (see `default_expr_safe`).
+            if captured.contains(name) {
+                return None;
+            }
+            let banned: std::collections::HashSet<&str> = func.params[k..]
+                .iter()
+                .filter_map(|q| match &q.pattern {
+                    Pattern::Ident(n) => Some(n.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !default_expr_safe(d, &banned) {
+                return None;
+            }
+            defaulted.push((k as u16, d));
+        }
         let slot = c.fresh_slot(name);
         if captured.contains(name) {
             c.cap_inits.push(CapInit::Param(k as u16, Rc::from(name.as_str())));
@@ -1187,6 +1215,17 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         }
     }
     c.n_params = func.params.len();
+    // Parameter defaults fill missing/undefined arguments before anything else runs (spec
+    // order: parameter binding precedes var/function hoisting).
+    for (slot, d) in defaulted {
+        c.emit(Op::LoadLocal(slot));
+        c.emit(Op::Undef);
+        c.emit(Op::StrictEq);
+        let jf = c.emit(Op::JumpIfFalse(0));
+        c.expr(d).ok()?;
+        c.emit(Op::StoreLocal(slot));
+        c.patch(jf);
+    }
     // Function-scoped `var`s and hoisted function declarations from the shared hoist plan.
     for op in crate::interpreter::collect_hoist_ops(&func.body, func.is_strict, &[]) {
         match op {
@@ -1214,6 +1253,9 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
                     }
                 };
                 if (slot as usize) < func.params.len() {
+                    if func.params[slot as usize].default.is_some() {
+                        return None; // reset would clobber the default (oracle order differs)
+                    }
                     c.var_force_resets.push(slot);
                 }
             }
@@ -1314,9 +1356,71 @@ struct LoopCtx {
     is_switch: bool,
 }
 
+
+/// Debug (`LUMEN_TIER_LOG=1`): report the AST construct a compile bail came from.
+fn log_bail(what: &str, detail: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("LUMEN_TIER_LOG").is_some()) {
+        eprintln!("[tier] unsupported {what}: {detail}");
+    }
+}
+
 /// Compilation bail: the construct is outside the v0 subset.
 struct Bail;
 type CResult = Result<(), Bail>;
+
+/// Whether a parameter default is in the compiler's lowerable subset: no reference to any
+/// *banned* name (this parameter itself or a later one — the spec's param-scope TDZ would throw
+/// where slots would read a seeded `undefined`), and no nested function/class (whose capture
+/// analysis of a *parameter expression* scope the slot model doesn't carry). Whitelist
+/// recursion: unknown constructs answer false (the function stays on the tree-walker).
+fn default_expr_safe(e: &Expr, banned: &std::collections::HashSet<&str>) -> bool {
+    match e {
+        Expr::Num(_)
+        | Expr::BigInt(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Undefined
+        | Expr::This
+        | Expr::Regex { .. } => true,
+        Expr::Ident(n) => !banned.contains(n.as_str()),
+        Expr::Paren(x) | Expr::ToStr(x) | Expr::Unary { arg: x, .. } => {
+            default_expr_safe(x, banned)
+        }
+        Expr::Update { arg, .. } => default_expr_safe(arg, banned),
+        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
+            default_expr_safe(left, banned) && default_expr_safe(right, banned)
+        }
+        Expr::Cond { test, cons, alt } => {
+            default_expr_safe(test, banned)
+                && default_expr_safe(cons, banned)
+                && default_expr_safe(alt, banned)
+        }
+        Expr::Member { obj, .. } => default_expr_safe(obj, banned),
+        Expr::Index { obj, index, .. } => {
+            default_expr_safe(obj, banned) && default_expr_safe(index, banned)
+        }
+        Expr::Call { callee, args, .. } | Expr::New { callee, args } => {
+            default_expr_safe(callee, banned)
+                && args.iter().all(|a| match a {
+                    ArrayElem::Item(x) | ArrayElem::Spread(x) => default_expr_safe(x, banned),
+                    ArrayElem::Hole => true,
+                })
+        }
+        Expr::Array(elems) => elems.iter().all(|a| match a {
+            ArrayElem::Item(x) | ArrayElem::Spread(x) => default_expr_safe(x, banned),
+            ArrayElem::Hole => true,
+        }),
+        Expr::Object(props) => props.iter().all(|p| match p {
+            PropDef::KeyValue { key, value } => {
+                !matches!(key, PropKey::Computed(_)) && default_expr_safe(value, banned)
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
 
 /// Whether `e` provably cannot reassign the local `name` (for fused element ops, which defer the
 /// base-slot read past this expression's evaluation). Whitelist recursion: any variant not
@@ -1393,6 +1497,86 @@ impl Compiler {
         self.name_caches.push(std::cell::Cell::new(NameIc::EMPTY));
         (self.name_caches.len() - 1) as u32
     }
+    /// Declare every binding a lexical declaration pattern introduces, in source order (slot +
+    /// TDZ each, like the plain-identifier path). Only the destructuring subset the compiler
+    /// can lower is accepted (see `destructure_store`); anything else bails to the tree-walker.
+    fn declare_lexical_pattern(&mut self, pat: &Pattern, is_const: bool) -> CResult {
+        match pat {
+            Pattern::Ident(name) => {
+                let slot = self.fresh_slot(name);
+                self.scope_bind(name, slot, is_const);
+                self.tdz_slots.insert(slot);
+                self.emit(Op::Tdz(slot));
+                Ok(())
+            }
+            Pattern::Object(o) => {
+                if o.rest.is_some() {
+                    return Err(Bail);
+                }
+                for prop in &o.props {
+                    if prop.default.is_some()
+                        || !matches!(&prop.key, PropKey::Ident(_) | PropKey::Str(_))
+                    {
+                        return Err(Bail);
+                    }
+                    self.declare_lexical_pattern(&prop.value, is_const)?;
+                }
+                Ok(())
+            }
+            _ => Err(Bail),
+        }
+    }
+
+    /// Lower a declaration destructuring against the value on the stack (consumed): the
+    /// KeyedBindingInitialization subset with plain (non-computed) keys, no defaults, no rest —
+    /// per property: Dup + GetProp (the oracle's GetV), recursing into nested object patterns.
+    /// The nullish guard throws the oracle's exact TypeError before any read.
+    fn destructure_store(&mut self, pat: &Pattern, kind: DeclKind) -> CResult {
+        match pat {
+            Pattern::Ident(name) => {
+                let home = self.home(name).ok_or(Bail)?;
+                match home {
+                    Home::Slot(slot, _) => {
+                        self.emit(Op::StoreLocal(slot));
+                    }
+                    Home::Env(_) => {
+                        let n = self.name_idx(name);
+                        if matches!(kind, DeclKind::Var) {
+                            self.emit(Op::StoreCap(n));
+                        } else {
+                            self.emit(Op::StoreCapInit(n));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Object(o) => {
+                if o.rest.is_some() {
+                    return Err(Bail);
+                }
+                self.emit(Op::DestructureGuard);
+                for prop in &o.props {
+                    if prop.default.is_some() {
+                        return Err(Bail);
+                    }
+                    let key: String = match &prop.key {
+                        PropKey::Ident(k) => k.clone(),
+                        PropKey::Str(k) => k.to_string(),
+                        _ => return Err(Bail),
+                    };
+                    let ki = self.name_idx(&key);
+                    self.emit(Op::Dup);
+                    let c = self.new_cache();
+                    self.emit(Op::GetProp(ki, c));
+                    self.destructure_store(&prop.value, kind)?;
+                }
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            _ => Err(Bail),
+        }
+    }
+
     /// The local slot for a fused element access (`x[k]` → `GetElemLocal`), or `None` to use
     /// the generic ops. Fusing defers the base-local read past the key/value evaluation, so it
     /// requires: the base is an Ident homed in a slot that can never be in TDZ (a param or a
@@ -1526,24 +1710,15 @@ impl Compiler {
                     kind: DeclKind::Let | DeclKind::Const,
                     decls,
                 } => {
+                    let is_const = matches!(
+                        s,
+                        Stmt::VarDecl {
+                            kind: DeclKind::Const,
+                            ..
+                        }
+                    );
                     for (pat, _) in decls {
-                        let Pattern::Ident(name) = pat else {
-                            return Err(Bail);
-                        };
-                        let slot = self.fresh_slot(name);
-                        self.scope_bind(
-                            name,
-                            slot,
-                            matches!(
-                                s,
-                                Stmt::VarDecl {
-                                    kind: DeclKind::Const,
-                                    ..
-                                }
-                            ),
-                        );
-                        self.tdz_slots.insert(slot);
-                        self.emit(Op::Tdz(slot));
+                        self.declare_lexical_pattern(pat, is_const)?;
                     }
                 }
                 Stmt::VarDecl {
@@ -1571,7 +1746,12 @@ impl Compiler {
                 }
                 for (pat, init) in decls {
                     let Pattern::Ident(name) = pat else {
-                        return Err(Bail);
+                        // Destructuring declaration: evaluate the initializer, then lower the
+                        // pattern against it (a pattern without an initializer is a parse error).
+                        let Some(e) = init else { return Err(Bail) };
+                        self.expr(e)?;
+                        self.destructure_store(pat, *kind)?;
+                        continue;
                     };
                     let home = self.home(name).ok_or(Bail)?;
                     match init {
@@ -1876,7 +2056,10 @@ impl Compiler {
                 self.patch(jmp_after);
                 Ok(())
             }
-            _ => Err(Bail),
+            other => {
+                log_bail("stmt", &format!("{:.60}", format!("{other:?}")));
+                Err(Bail)
+            }
         }
     }
 
@@ -2084,6 +2267,17 @@ impl Compiler {
             } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                 self.expr(obj)?;
                 let i = self.name_idx(prop);
+                if op == "+=" {
+                    // Fused append: same evaluation order (read before RHS), and the op itself
+                    // falls back to the generic Add + store when anything isn't plain strings.
+                    self.emit(Op::Dup);
+                    let cg = self.new_cache();
+                    self.emit(Op::GetProp(i, cg));
+                    self.expr(value)?;
+                    let c = self.new_cache();
+                    self.emit(Op::AppendProp(i, c));
+                    return Ok(true);
+                }
                 if op == "=" {
                     self.expr(value)?;
                 } else {
@@ -2169,7 +2363,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::Str(s) => {
-                let i = self.const_idx(Value::Str(s.clone()));
+                let i = self.const_idx(Value::Str(s.clone().into()));
                 self.emit(Op::Const(i));
                 Ok(())
             }
@@ -2478,7 +2672,10 @@ impl Compiler {
                 self.emit(Op::MakeObject(start, count));
                 Ok(())
             }
-            _ => Err(Bail),
+            other => {
+                log_bail("expr", &format!("{:.60}", format!("{other:?}")));
+                Err(Bail)
+            }
         }
     }
 
@@ -2522,12 +2719,16 @@ impl Compiler {
                 self.emit(Op::UpdateElem(kind));
                 Ok(())
             }
-            _ => Err(Bail),
+            other => {
+                log_bail("expr", &format!("{:.60}", format!("{other:?}")));
+                Err(Bail)
+            }
         }
     }
 
     fn assign(&mut self, op: &str, target: &Expr, value: &Expr) -> CResult {
         if matches!(op, "&&=" | "||=" | "??=") {
+            log_bail("expr", "logical assignment");
             return Err(Bail);
         }
         match target {
@@ -2941,6 +3142,30 @@ fn run_vm(
                 let v = pop!();
                 let obj = pop!();
                 i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+            }
+            Op::DestructureGuard => {
+                if matches!(
+                    stack.last().expect("vm stack underflow"),
+                    Value::Undefined | Value::Null
+                ) {
+                    return Err(i.throw("TypeError", "cannot destructure null or undefined"));
+                }
+            }
+            Op::AppendProp(n, c) => {
+                let v = pop!();
+                let lval = pop!();
+                let obj = pop!();
+                let name = &chunk.names[n as usize];
+                let lval = if let (Value::Str(x), Value::Obj(o)) = (&v, &obj) {
+                    match i.append_prop_fast(o, name, lval, x) {
+                        Ok(()) => continue,
+                        Err(l) => l,
+                    }
+                } else {
+                    lval
+                };
+                let r = i.binary("+", lval, v)?;
+                i.set_prop_ic(&obj, name, r, &chunk.caches[c as usize])?;
             }
             Op::GetElem => {
                 let key = pop!();
@@ -3750,6 +3975,8 @@ impl Chunk {
             Op::GetElem => (2, 1),
             Op::SetElem => (3, 1),
             Op::SetElemDrop => (3, 0),
+            Op::AppendProp(..) => (3, 0),
+            Op::DestructureGuard => (1, 1),
             Op::GetElemLocal(_) => (1, 1),
             Op::SetElemLocal(_) => (2, 1),
             Op::SetElemLocalDrop(_) => (2, 0),
@@ -4005,6 +4232,27 @@ unsafe fn jit_exec_inner(
             let v = pop!();
             let obj = pop!();
             i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+        }
+        Op::DestructureGuard => {
+            if matches!(&*sp.sub(1), Value::Undefined | Value::Null) {
+                return Err(i.throw("TypeError", "cannot destructure null or undefined"));
+            }
+        }
+        Op::AppendProp(n, c) => {
+            let v = pop!();
+            let lval = pop!();
+            let obj = pop!();
+            let name = &chunk.names[n as usize];
+            let lval = if let (Value::Str(x), Value::Obj(o)) = (&v, &obj) {
+                match i.append_prop_fast(o, name, lval, x) {
+                    Ok(()) => return Ok(()),
+                    Err(l) => l,
+                }
+            } else {
+                lval
+            };
+            let r = i.binary("+", lval, v)?;
+            i.set_prop_ic(&obj, name, r, &chunk.caches[c as usize])?;
         }
         Op::GetElem => {
             let key = pop!();

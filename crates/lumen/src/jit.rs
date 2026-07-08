@@ -1210,6 +1210,7 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     layout.valid
         && layout.obj_from_rc < 4096
         && layout.obj_exotic < 4096
+        && layout.obj_ic_plain < 4096
         && sh % 4 == 0
         && sh / 4 < 4096
         && en % 8 == 0
@@ -1246,12 +1247,9 @@ fn emit_get_prop_inline(
     let es = layout.entry_size as u64;
     let none_tag = layout.exotic_none_tag as u32;
 
+    let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 0. inline caches globally safe? (no proxy/typed-array/namespace exists)
-    a.ldr_imm(9, 19, 32); // ctx.inline_ic_safe pointer
-    a.ldrb_imm(9, 9, 0);
-    a.cbz(9, false, slow);
     // 1. receiver must be an Obj (tag 8)
     a.ldurb(9, 20, -24);
     a.cmp_imm_w(9, 8);
@@ -1267,11 +1265,13 @@ fn emit_get_prop_inline(
     a.cbnz(9, false, slow);
     a.ldr_w_imm(13, 12, IC_OFF_SLOT);
     a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
-    // 4. object base; exotic must be None
+    // 4. object base; exotic None, and not a side-table exotic (proxy/typed-array/namespace)
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(9, 11, ex);
     a.cmp_imm_w(9, none_tag);
     a.b_cond(C_NE, slow);
+    a.ldrb_imm(9, 11, plain);
+    a.cbz(9, false, slow);
     // 5. shape id matches
     a.ldr_w_imm(9, 11, sh);
     a.cmp_reg_w(9, 14);
@@ -1350,12 +1350,9 @@ fn emit_get_method_inline(
     let es = layout.entry_size as u64;
     let none_tag = layout.exotic_none_tag as u32;
 
+    let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 0. inline caches globally safe?
-    a.ldr_imm(9, 19, 32);
-    a.ldrb_imm(9, 9, 0);
-    a.cbz(9, false, slow);
     // 1. receiver is an Obj
     a.ldurb(9, 20, -24);
     a.cmp_imm_w(9, 8);
@@ -1367,11 +1364,13 @@ fn emit_get_method_inline(
     a.cmp_imm_w(9, 1);
     a.b_cond(C_NE, slow);
     a.ldr_w_imm(13, 12, IC_OFF_SLOT); // slot
-    // 3. receiver object: exotic None, shape == recv_shape
+    // 3. receiver object: exotic None (and no side-table behavior), shape == recv_shape
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(9, 11, ex);
     a.cmp_imm_w(9, none_tag);
     a.b_cond(C_NE, slow);
+    a.ldrb_imm(9, 11, plain);
+    a.cbz(9, false, slow);
     a.ldr_w_imm(9, 11, sh);
     a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
     a.cmp_reg_w(9, 16);
@@ -1379,11 +1378,13 @@ fn emit_get_method_inline(
     // 4. follow proto (Option<Gc> niche: pointer or 0)
     a.ldr_imm(10, 11, pr); // proto rc_ptr (reuse x10 — receiver rc no longer needed)
     a.cbz(10, true, slow); // null proto → slow
-    // 5. holder object: exotic None, shape == holder_shape
+    // 5. holder object: exotic None (and plain), shape == holder_shape
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(9, 11, ex);
     a.cmp_imm_w(9, none_tag);
     a.b_cond(C_NE, slow);
+    a.ldrb_imm(9, 11, plain);
+    a.cbz(9, false, slow);
     a.ldr_w_imm(9, 11, sh);
     a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
     a.cmp_reg_w(9, 16);
@@ -1515,13 +1516,12 @@ fn emit_name_ic_value_ptr(
     a.add_imm(11, 9, 1);
     a.cmp_reg_x(11, 10);
     a.b_cond(C_NE, slow);
-    a.ldr_imm(14, 19, 32); // inline caches globally safe?
-    a.ldrb_imm(14, 14, 0);
-    a.cbz(14, false, slow);
     a.ldr_imm(14, 19, 56); // the realm's global Object
     a.ldrb_imm(15, 14, g_ex);
     a.cmp_imm_w(15, none_tag);
     a.b_cond(C_NE, slow);
+    a.ldrb_imm(15, 14, layout.obj_ic_plain as u32); // not side-table masked
+    a.cbz(15, false, slow);
     a.ldr_w_imm(15, 14, g_sh); // live shape vs cached (packed high half)
     a.ldr_imm(16, 12, NAME_IC_OFF_BINDING);
     a.lsr_imm(17, 16, 32);
@@ -1584,12 +1584,9 @@ fn emit_get_elem_inline(
     let none_tag = layout.exotic_none_tag as u32;
     let arr_tag = layout.exotic_array_tag as u32;
 
+    let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 0. inline caches globally safe? (no proxy/typed-array/namespace exists)
-    a.ldr_imm(9, 19, 32);
-    a.ldrb_imm(9, 9, 0);
-    a.cbz(9, false, slow);
     // 1. stack: [obj @ -48, key @ -24] — receiver must be Obj, key must be Num
     a.ldurb(9, 20, -48);
     a.cmp_imm_w(9, 8);
@@ -1608,7 +1605,7 @@ fn emit_get_elem_inline(
     a.ldur(11, 10, strong);
     a.cmp_imm_x(11, 1);
     a.b_cond(C_LS, slow);
-    // 4. object base; exotic must be None or Array
+    // 4. object base; exotic must be None or Array, and plain (no side-table behavior)
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(12, 11, ex);
     let ex_ok = a.new_label();
@@ -1617,6 +1614,8 @@ fn emit_get_elem_inline(
     a.cmp_imm_w(12, arr_tag);
     a.b_cond(C_NE, slow);
     a.bind(ex_ok);
+    a.ldrb_imm(12, 11, plain);
+    a.cbz(12, false, slow);
     // 5. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
@@ -1692,12 +1691,9 @@ fn emit_set_elem_inline(
     let none_tag = layout.exotic_none_tag as u32;
     let arr_tag = layout.exotic_array_tag as u32;
 
+    let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 0. inline caches globally safe?
-    a.ldr_imm(9, 19, 32);
-    a.ldrb_imm(9, 9, 0);
-    a.cbz(9, false, slow);
     // 1. stack: [obj @ -72, key @ -48, v @ -24]
     a.ldurb(9, 20, -72);
     a.cmp_imm_w(9, 8);
@@ -1722,7 +1718,7 @@ fn emit_set_elem_inline(
     a.ldur(11, 10, strong);
     a.cmp_imm_x(11, 1);
     a.b_cond(C_LS, slow);
-    // 4. object base; exotic None or Array
+    // 4. object base; exotic None or Array, and plain
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(12, 11, ex);
     let ex_ok = a.new_label();
@@ -1731,6 +1727,8 @@ fn emit_set_elem_inline(
     a.cmp_imm_w(12, arr_tag);
     a.b_cond(C_NE, slow);
     a.bind(ex_ok);
+    a.ldrb_imm(12, 11, plain);
+    a.cbz(12, false, slow);
     // 5. dense bounds
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
@@ -1884,12 +1882,9 @@ fn emit_elem_local_keyed(
     // Stack-keyed layout: Get → [key @ -24]; Set* → [key @ -48, v @ -24].
     let key_off = if get { -24 } else { -48 };
 
+    let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 0. inline caches globally safe? (no proxy/typed-array/namespace exists)
-    a.ldr_imm(9, 19, 32);
-    a.ldrb_imm(9, 9, 0);
-    a.cbz(9, false, slow);
     // 1. slot holds an Obj; key (from its source) is a Num, loaded into d0
     a.ldrb_imm(9, 22, slot_off);
     a.cmp_imm_w(9, 8);
@@ -1923,7 +1918,7 @@ fn emit_elem_local_keyed(
     a.b_cond(C_NE, slow);
     // 3. receiver rc ptr straight from the slot (no strong-count games — nothing drops)
     a.ldr_imm(10, 22, slot_off + 8);
-    // 4. object base; exotic None or Array
+    // 4. object base; exotic None or Array, and plain
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(12, 11, ex);
     let ex_ok = a.new_label();
@@ -1932,6 +1927,8 @@ fn emit_elem_local_keyed(
     a.cmp_imm_w(12, arr_tag);
     a.b_cond(C_NE, slow);
     a.bind(ex_ok);
+    a.ldrb_imm(12, 11, plain);
+    a.cbz(12, false, slow);
     // 5. dense bounds
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
@@ -2286,6 +2283,7 @@ fn emit_chain(
     let es = layout.entry_size as u64;
     let none_tag = layout.exotic_none_tag as u32;
     let arr_tag = layout.exotic_array_tag as u32;
+    let plain = layout.obj_ic_plain as u32;
 
     let done = a.new_label();
     // Virtual stack: (d-register, known-int-valued). Int-valued means the f64 is integral and in
@@ -2299,7 +2297,6 @@ fn emit_chain(
     // the slot drops its entry; LoadName clobbers all scratch registers, so it flushes.
     let mut rcache: Vec<(u32, u32)> = Vec::new();
     let mut rfree: Vec<u32> = vec![17, 16];
-    let mut ic_safe_done = false;
     // (chain index, bail label, virtual stack *before* the op) — slow paths follow the fast body.
     let mut bails: Vec<(usize, usize, Vec<(u32, bool)>)> = Vec::new();
 
@@ -2390,12 +2387,6 @@ fn emit_chain(
                     Some(&(_, breg)) => a.mov(11, breg),
                     None => {
                         // First access to this receiver in the chain: validate once.
-                        if !ic_safe_done {
-                            a.ldr_imm(10, 19, 32); // inline caches globally safe?
-                            a.ldrb_imm(10, 10, 0);
-                            a.cbz(10, false, guard!());
-                            ic_safe_done = true;
-                        }
                         a.ldrb_imm(10, 22, xoff); // slot holds an Obj
                         a.cmp_imm_w(10, 8);
                         a.b_cond(C_NE, guard!());
@@ -2408,6 +2399,8 @@ fn emit_chain(
                         a.cmp_imm_w(12, arr_tag);
                         a.b_cond(C_NE, guard!());
                         a.bind(ex_ok);
+                        a.ldrb_imm(12, 11, plain); // no side-table behavior
+                        a.cbz(12, false, guard!());
                         if let Some(breg) = rfree.pop() {
                             a.mov(breg, 11);
                             rcache.push((xoff, breg));

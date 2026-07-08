@@ -389,7 +389,7 @@ pub(super) fn install_symbol(it: &mut Interp) {
             Value::Undefined => None,
             v => Some(ab(i.to_string(&v))?),
         };
-        Ok(i.new_symbol(desc))
+        Ok(i.new_symbol(desc.map(Into::into)))
     });
     ctor.borrow_mut().props.insert(
         "prototype",

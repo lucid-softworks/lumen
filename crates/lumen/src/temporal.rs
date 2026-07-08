@@ -9873,7 +9873,7 @@ fn install_zoned(it: &mut Interp, ns: &Gc) {
         Ok(Value::str(offset_string(as_zoned(i, &t)?.1)))
     });
     def_getter(it, &proto, "timeZoneId", |i, t, _| {
-        Ok(Value::Str(as_zoned(i, &t)?.2))
+        Ok(Value::Str(as_zoned(i, &t)?.2.into()))
     });
 
     it.def_method(&proto, "toInstant", 0, |i, t, _| {

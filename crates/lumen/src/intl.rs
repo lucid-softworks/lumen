@@ -460,7 +460,7 @@ pub(crate) fn install_service_common(it: &mut Interp, ctor: &Gc, proto: &Gc) {
 #[allow(dead_code)]
 pub(crate) fn tag_of_str(v: &Value) -> Option<Rc<str>> {
     match v {
-        Value::Str(s) => Some(s.clone()),
+        Value::Str(s) => Some(s.clone().into()),
         _ => None,
     }
 }

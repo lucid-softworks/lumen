@@ -34,6 +34,7 @@ mod interpreter;
 mod intl;
 mod jit;
 mod jstr;
+mod lstr;
 mod lexer;
 mod modules;
 mod numbering;

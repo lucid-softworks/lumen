@@ -193,7 +193,7 @@ pub(super) fn install_reflect(it: &mut Interp) {
                     out.push(s);
                 }
             } else {
-                out.push(Value::Str(k));
+                out.push(Value::Str(k.into()));
             }
         }
         Ok(i.make_array(out))
