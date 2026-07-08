@@ -17,6 +17,7 @@ const JS_FILES: &[&str] = &[
     "events.js",
     "messaging.js",
     "encoding.js",
+    "serialize.js",
     "url.js",
     "urlpattern.js",
     "streams.js",

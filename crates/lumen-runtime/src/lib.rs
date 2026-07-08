@@ -16,7 +16,7 @@
 //! threadpool + completions is libuv's own fs strategy and covers everything we host today.
 
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lumen_host::{
     install, CallbackQueue, CompletionSender, Engine, TaskCompletion, TaskDecoder, TaskRegistry,
@@ -27,6 +27,7 @@ mod console;
 mod esm;
 mod jsx;
 mod process;
+mod worker;
 
 pub use console::{describe_error, render_value, ConsoleOut};
 pub use lumen_host::{Completion, Ctx};
@@ -74,6 +75,7 @@ impl Runtime {
                 // Last: node's glue wraps the fs global, Buffer uses TextEncoder (web), and
                 // require() calls process.cwd().
                 lumen_node::extension(),
+                worker::extension(),
             ],
         );
         process::install_data_props(&mut engine);
@@ -232,6 +234,85 @@ impl Runtime {
                 format!("{name}: {message}")
             }),
             Err(e) => Err(format!("SyntaxError: {} (line {})", e.message, e.line)),
+        }
+    }
+
+    /// Evaluate a Worker entry `source` (a module when `is_module`, else a classic script) WITHOUT
+    /// running the loop — the caller arms the message inbox first, then pumps the loop itself so
+    /// the worker stays alive for messages. `base` seeds relative-import resolution. `Err` is the
+    /// rendered load/parse/top-level error.
+    pub fn eval_worker_entry(&mut self, source: &str, base: &str, is_module: bool) -> Result<(), String> {
+        let loader = esm::make_loader(self.builtin_modules());
+        self.engine.set_module_loader_attrs(loader);
+        self.engine.set_import_base(base);
+        let result = if is_module {
+            let loader = esm::make_loader(self.builtin_modules());
+            self.engine.eval_module_attrs(source, base, loader)
+        } else {
+            self.engine.eval(source, false)
+        };
+        // Drain the microtask checkpoint from top-level code, but not the macrotask loop.
+        self.engine.run_microtasks();
+        match result {
+            Ok(Completion::Value(_)) => Ok(()),
+            Ok(Completion::Throw { name, message }) => {
+                Err(if name.is_empty() { message } else { format!("{name}: {message}") })
+            }
+            Err(e) => Err(format!("SyntaxError: {} (line {})", e.message, e.line)),
+        }
+    }
+
+    /// Like [`run_to_completion`](Runtime::run_to_completion), but for a Worker: it does NOT exit
+    /// when idle (the armed message inbox keeps it alive), and it returns promptly when `stop` is
+    /// set — a cooperative terminate that also drops any still-pending timers. The blocking wait
+    /// polls `stop` on a short interval so a `terminate()` from another thread is noticed even
+    /// with no message or timer due.
+    pub fn run_worker_loop(&mut self, stop: &std::sync::atomic::AtomicBool) {
+        use std::sync::atomic::Ordering;
+        let poll = Duration::from_millis(50);
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            self.engine.run_microtasks();
+            self.report_unhandled_rejections();
+            loop {
+                let mut progressed = false;
+                for (cb, args) in self.take_queued_callbacks() {
+                    progressed = true;
+                    self.fire(&cb, &args);
+                }
+                for (cb, args) in self.take_due_timers() {
+                    progressed = true;
+                    self.fire(&cb, &args);
+                }
+                while let Ok(done) = self.completions.try_recv() {
+                    progressed = true;
+                    self.dispatch(done);
+                }
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            if stop.load(Ordering::SeqCst) || self.idle() {
+                return;
+            }
+            let wait = match self.next_timer_deadline() {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if deadline <= now {
+                        continue;
+                    }
+                    (deadline - now).min(poll)
+                }
+                None => poll,
+            };
+            if let Ok(done) = self.completions.recv_timeout(wait) {
+                self.dispatch(done);
+            }
         }
     }
 

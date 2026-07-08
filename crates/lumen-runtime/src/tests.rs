@@ -662,6 +662,7 @@ const WINTERTC_NOT_YET: &[&str] = &[];
 /// Web-platform interfaces the runtime ships *beyond* the WinterTC Minimum Common API. Not part
 /// of the tracked 56/56 score, but presence-guarded the same way so they can't silently regress.
 const BEYOND_MINIMUM: &[&str] = &[
+    "Worker",
     "WebSocket",
     "EventSource",
     "MessageChannel",
@@ -995,6 +996,198 @@ fn eventsource_field_parser_units() {
         "#,
     );
     assert_eq!(out.lines(), ["0 1 2", "true true", "2"]);
+}
+
+// ---- structured-clone wire format (cross-thread serialize/deserialize) ----
+
+#[test]
+fn structured_clone_wire_round_trips() {
+    // The JS wire format (__serializeForClone/__deserializeClone) round-trips the structured-clone
+    // subset, including cycles, shared subgraphs, typed arrays, and DataCloneError. This is what
+    // carries a Worker message across the thread boundary.
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const rt = (v) => __deserializeClone(__serializeForClone(v));
+        console.log("prims", rt(undefined), rt(null), rt(true), rt(-3.5), rt("x\u{1f600}"));
+        console.log("bigint", rt(90071992547409910n) === 90071992547409910n);
+        console.log("nested", JSON.stringify(rt({ a: [1, { b: 2 }], c: "y" })));
+        console.log("date", rt(new Date(123)).getTime());
+        console.log("regexp", String(rt(/a.c/gi)));
+        const m = rt(new Map([["k", 1]])); const s = rt(new Set([1, 2, 2]));
+        console.log("mapset", m.get("k"), [...s].join(","));
+        const ta = rt(new Float64Array([1.5, 2.5]));
+        console.log("typedarray", ta instanceof Float64Array, ta.join(","));
+        const c = { x: 1 }; c.self = c; const rc = rt(c);
+        console.log("cycle", rc.self === rc, rc.x);
+        const shared = { v: 9 }; const g = rt({ a: shared, b: shared });
+        console.log("shared", g.a === g.b);
+        const e = rt(new TypeError("boom")); console.log("error", e.name, e.message);
+        try { rt(Symbol("s")); } catch (ex) { console.log("throws", ex.name); }
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "prims undefined null true -3.5 x\u{1f600}",
+            "bigint true",
+            r#"nested {"a":[1,{"b":2}],"c":"y"}"#,
+            "date 123",
+            "regexp /a.c/gi",
+            "mapset 1 1,2",
+            "typedarray true 1.5,2.5",
+            "cycle true 1",
+            "shared true",
+            "error TypeError boom",
+            "throws DataCloneError",
+        ]
+    );
+}
+
+// ---- Web Workers (realm-per-thread + structured messaging) ----
+
+/// Write worker scripts into a temp dir and drive `main_src` against them; returns stdout lines.
+/// Every case must arrange for the worker(s) to exit (close/terminate) so the loop finishes.
+fn worker_drive(files: &[(&str, &str)], main_src: &str) -> Vec<String> {
+    let dir = TempDir::new("worker");
+    for (name, body) in files {
+        std::fs::write(dir.0.join(name), body).unwrap();
+    }
+    let (mut rt, out, _err) = test_runtime();
+    let src = main_src.replace("{DIR}", &dir.0.to_string_lossy());
+    rt.eval(&src).expect("worker main parses and runs to quiescence");
+    out.lines()
+}
+
+#[test]
+fn worker_message_round_trip_and_structured_clone() {
+    // A structured payload (nested object, array, Date, Map) survives the cross-thread clone in
+    // both directions; the worker computes a reply and then closes itself.
+    let lines = worker_drive(
+        &[(
+            "echo.mjs",
+            r#"
+            onmessage = (e) => {
+                const d = e.data;
+                postMessage({
+                    sum: d.nums.reduce((a, b) => a + b, 0),
+                    ts: d.when.getTime(),
+                    tag: d.meta.get("tag"),
+                });
+                close();
+            };
+            "#,
+        )],
+        r#"
+        const w = new Worker("{DIR}/echo.mjs", { type: "module" });
+        w.onmessage = (e) => console.log("reply", e.data.sum, e.data.ts, e.data.tag);
+        w.postMessage({ nums: [1, 2, 3, 4], when: new Date(1000), meta: new Map([["tag", "hi"]]) });
+        "#,
+    );
+    assert_eq!(lines, ["reply 10 1000 hi"]);
+}
+
+#[test]
+fn worker_bidirectional_conversation() {
+    // Several messages each way, in order; the worker closes after the third.
+    let lines = worker_drive(
+        &[(
+            "counter.mjs",
+            r#"
+            let total = 0;
+            onmessage = (e) => {
+                total += e.data;
+                postMessage(total);
+                if (total >= 6) close();
+            };
+            "#,
+        )],
+        r#"
+        const w = new Worker("{DIR}/counter.mjs", { type: "module" });
+        const send = [1, 2, 3];
+        let i = 0;
+        w.onmessage = (e) => {
+            console.log("running total", e.data);
+            if (i < send.length) w.postMessage(send[i++]);
+        };
+        w.postMessage(send[i++]);
+        "#,
+    );
+    assert_eq!(lines, ["running total 1", "running total 3", "running total 6"]);
+}
+
+#[test]
+fn worker_error_propagates_to_onerror() {
+    let lines = worker_drive(
+        &[(
+            "boom.mjs",
+            r#"onmessage = (e) => { throw new RangeError("bad: " + e.data); };"#,
+        )],
+        r#"
+        const w = new Worker("{DIR}/boom.mjs", { type: "module" });
+        w.onerror = (e) => { console.log("onerror", e.message, e instanceof ErrorEvent); w.terminate(); };
+        w.postMessage(42);
+        "#,
+    );
+    assert_eq!(lines, ["onerror Uncaught RangeError: bad: 42 true"]);
+}
+
+#[test]
+fn worker_terminate_stops_a_running_worker() {
+    // A worker posting on an interval is terminated after 3 messages; no further messages arrive,
+    // and the main loop exits promptly.
+    let lines = worker_drive(
+        &[(
+            "ticker.mjs",
+            r#"
+            let n = 0;
+            setInterval(() => { n++; postMessage(n); }, 3);
+            "#,
+        )],
+        r#"
+        const w = new Worker("{DIR}/ticker.mjs", { type: "module" });
+        let count = 0;
+        w.onmessage = (e) => {
+            count++;
+            if (count === 3) {
+                w.terminate();
+                console.log("terminated at", e.data);
+                setTimeout(() => console.log("no leak"), 60);
+            } else if (count > 3) {
+                console.log("LEAK", e.data);
+            }
+        };
+        "#,
+    );
+    assert_eq!(lines, ["terminated at 3", "no leak"]);
+}
+
+#[test]
+fn worker_load_error_reports() {
+    // A missing worker script surfaces as an error event, not a hang.
+    let lines = worker_drive(
+        &[],
+        r#"
+        const w = new Worker("{DIR}/does-not-exist.mjs", { type: "module" });
+        w.onerror = (e) => { console.log("load-error", e.message.includes("cannot load")); w.terminate(); };
+        "#,
+    );
+    assert_eq!(lines, ["load-error true"]);
+}
+
+#[test]
+fn worker_datacloneerror_on_unserializable() {
+    // Posting a function is a DataCloneError, synchronously, on the sending side.
+    let lines = worker_drive(
+        &[("noop.mjs", "onmessage = () => close();")],
+        r#"
+        const w = new Worker("{DIR}/noop.mjs", { type: "module" });
+        try { w.postMessage(() => 1); } catch (e) { console.log("clone-error", e.name); }
+        w.terminate();
+        "#,
+    );
+    assert_eq!(lines, ["clone-error DataCloneError"]);
 }
 
 // ---- WebSocket (RFC 6455) against an in-process echo server (lumen_web::ws_testing) ----

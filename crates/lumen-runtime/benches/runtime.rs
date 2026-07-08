@@ -79,12 +79,58 @@ const WS_ECHO_ROUND_TRIPS: &str = r#"(() => new Promise((resolve) => {
     ws.onclose = () => resolve(n);
 }))()"#;
 
+/// Structured-clone wire encode+decode of a ~100-node object (the Worker.postMessage cost).
+const CLONE_WIRE_ROUND_TRIP: &str = r#"(() => {
+    const payload = { rows: [], meta: { tag: "bench", when: new Date(0) } };
+    for (let i = 0; i < 20; i++) payload.rows.push({ id: i, name: "row-" + i, vals: [i, i * 2, i * 3] });
+    let n = 0;
+    for (let i = 0; i < 50; i++) n += __deserializeClone(__serializeForClone(payload)).rows.length;
+    return n;
+})()"#;
+
+/// Spawn a worker, exchange 10 messages, terminate — measures thread+realm startup + the bridge.
+const WORKER_SPAWN_ROUND_TRIP: &str = r#"(() => new Promise((resolve) => {
+    const w = new Worker("{SCRIPT}", { type: "module" });
+    let n = 0;
+    w.onmessage = (e) => {
+        if (e.data < 10) w.postMessage(e.data + 1);
+        else { w.terminate(); resolve(e.data); }
+    };
+    w.postMessage(0);
+}))"#;
+
 fn main() {
     let mut b = Bench::new();
 
     b.run("runtime: startup (Runtime::new)", || {
         black_box(Runtime::new());
     });
+
+    // Structured-clone wire format encode+decode (Worker message serialization cost).
+    {
+        let mut rt = Runtime::new();
+        b.run("clone wire: encode+decode 50x ~100-node object", || {
+            black_box(rt.eval(CLONE_WIRE_ROUND_TRIP).expect("clone bench parses"));
+        });
+    }
+
+    // Worker: spawn a realm-per-thread worker, 10 message round trips, terminate — one full worker
+    // lifecycle per iteration.
+    {
+        let dir = std::env::temp_dir().join(format!("lumen-worker-bench-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("inc.mjs");
+        std::fs::write(&script, "onmessage = (e) => postMessage(e.data + 1);").unwrap();
+        let src: &'static str = Box::leak(
+            WORKER_SPAWN_ROUND_TRIP
+                .replace("{SCRIPT}", &script.to_string_lossy())
+                .into_boxed_str(),
+        );
+        let mut rt = Runtime::new();
+        b.run("worker: spawn + 10 round trips + terminate", || {
+            black_box(rt.eval(&format!("({src})()")).expect("worker bench parses"));
+        });
+    }
 
     // WebSocket echo round trips: a long-lived echo server, one socket (connect→20 echoes→close)
     // per iteration through a fresh-per-iteration eval on a persistent runtime.
