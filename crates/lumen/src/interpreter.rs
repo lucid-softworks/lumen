@@ -4036,6 +4036,76 @@ impl Interp {
         ao
     }
 
+    /// OrdinaryCallBindThis for a compiled body, computed only when the body reads `this`. A
+    /// construct's `this` is the fresh instance — bound directly, never coerced; a sloppy plain
+    /// call boxes a primitive / substitutes the global for undefined/null.
+    fn bind_compiled_this(
+        &mut self,
+        func: &Rc<Function>,
+        chunk: &crate::bytecode::Chunk,
+        this: Value,
+        is_construct: bool,
+    ) -> Value {
+        if !chunk.uses_this() {
+            return Value::Undefined;
+        }
+        if func.is_strict || is_construct {
+            return this;
+        }
+        match this {
+            Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
+            other @ Value::Obj(_) => other,
+            prim => crate::builtins::box_primitive_pub(self, prim),
+        }
+    }
+
+    /// Run an already-compiled chunk (JIT or bytecode VM), saving/restoring the per-body engine
+    /// flags (`strict`, `tco_ok`, field-init / async-gen-body markers). Shared by the lean
+    /// [`call_user_inner`] path and the [`call_compiled_fast`] shortcut so they can't diverge.
+    /// `this_val` is already OrdinaryCallBindThis-bound; `new_target`/`constructing`/frame
+    /// bookkeeping is the caller's job.
+    fn run_compiled_chunk(
+        &mut self,
+        func: &Rc<Function>,
+        chunk: &Rc<crate::bytecode::Chunk>,
+        closure: &Env,
+        this_val: Value,
+        args: &[Value],
+        is_construct: bool,
+    ) -> Result<Value, Abrupt> {
+        let saved_strict = std::mem::replace(&mut self.strict, func.is_strict);
+        let saved_tco = std::mem::replace(&mut self.tco_ok, func.is_strict && !is_construct);
+        let saved_field_init = self.in_field_init_code;
+        let saved_agb = self.in_async_gen_body;
+        if !func.is_arrow {
+            self.in_field_init_code = false;
+            self.in_async_gen_body = false;
+        }
+        // Machine-code tier: compile once (None = unsupported — async or platform), then run the
+        // JIT body; otherwise the bytecode VM.
+        let mut jit_code = None;
+        if matches!(self.tier, crate::bytecode::Tier::Jit) {
+            if chunk.jit.get().is_none() {
+                let layout = *self
+                    .jit_layout
+                    .get_or_init(|| crate::value::jit_layout(&self.object_proto));
+                let _ = chunk.jit.set(crate::jit::compile(chunk, &layout).map(std::rc::Rc::new));
+            }
+            if let Some(Some(code)) = chunk.jit.get() {
+                jit_code = Some(code.clone());
+            }
+        }
+        let r = match jit_code {
+            Some(code) => crate::jit::run(self, chunk, &code, closure, this_val, args),
+            None => crate::bytecode::run(self, chunk, closure, this_val, args),
+        };
+        self.strict = saved_strict;
+        self.tco_ok = saved_tco;
+        self.in_field_init_code = saved_field_init;
+        self.in_async_gen_body = saved_agb;
+        r
+    }
+
     pub(crate) fn call_user(
         &mut self,
         func: &Rc<Function>,
@@ -4099,30 +4169,9 @@ impl Interp {
             }
             if let Some(Some(chunk)) = func.code.get() {
                 let chunk = chunk.clone();
-                // OrdinaryCallBindThis, computed only when the body reads `this`. A construct's
-                // `this` is the fresh instance — bound directly, never coerced.
-                let this_val = if chunk.uses_this() {
-                    if func.is_strict || is_construct {
-                        this
-                    } else {
-                        match this {
-                            Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
-                            other @ Value::Obj(_) => other,
-                            prim => crate::builtins::box_primitive_pub(self, prim),
-                        }
-                    }
-                } else {
-                    Value::Undefined
-                };
-                let saved_strict = std::mem::replace(&mut self.strict, func.is_strict);
-                let saved_tco = std::mem::replace(
-                    &mut self.tco_ok,
-                    func.is_strict && !is_construct,
-                );
-                let saved_field_init = self.in_field_init_code;
-                let saved_agb = self.in_async_gen_body;
+                let this_val = self.bind_compiled_this(func, &chunk, this, is_construct);
                 // A construct consumes the pending new.target exactly like the slow path, so a
-                // stale value can never be observed later; restored below with the rest.
+                // stale value can never be observed later; restored after the run.
                 let saved_new_target = if is_construct {
                     Some(std::mem::replace(
                         &mut self.new_target,
@@ -4131,33 +4180,7 @@ impl Interp {
                 } else {
                     None
                 };
-                if !func.is_arrow {
-                    self.in_field_init_code = false;
-                    self.in_async_gen_body = false;
-                }
-                // Machine-code tier: compile once (None = unsupported — async or platform),
-                // then run the JIT body; otherwise the bytecode VM.
-                let mut jit_code = None;
-                if matches!(self.tier, crate::bytecode::Tier::Jit) {
-                    if chunk.jit.get().is_none() {
-                        let layout = *self
-                            .jit_layout
-                            .get_or_init(|| crate::value::jit_layout(&self.object_proto));
-                        let _ =
-                            chunk.jit.set(crate::jit::compile(&chunk, &layout).map(std::rc::Rc::new));
-                    }
-                    if let Some(Some(code)) = chunk.jit.get() {
-                        jit_code = Some(code.clone());
-                    }
-                }
-                let r = match jit_code {
-                    Some(code) => crate::jit::run(self, &chunk, &code, &closure, this_val, args),
-                    None => crate::bytecode::run(self, &chunk, &closure, this_val, args),
-                };
-                self.strict = saved_strict;
-                self.tco_ok = saved_tco;
-                self.in_field_init_code = saved_field_init;
-                self.in_async_gen_body = saved_agb;
+                let r = self.run_compiled_chunk(func, &chunk, &closure, this_val, args, is_construct);
                 if let Some(nt) = saved_new_target {
                     self.new_target = nt;
                 }
