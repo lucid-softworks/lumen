@@ -738,9 +738,13 @@ pub struct Interp {
     /// Full module records (parsed body, environment, resolved export tables, evaluation status),
     /// keyed by canonical specifier. Drives the two-phase Instantiate/Evaluate module linking.
     pub(crate) module_recs: std::collections::HashMap<String, crate::modules::ModuleRec>,
-    /// Host module loader: maps `(specifier, referrer)` → `(canonical_key, source)`.
+    /// Host module loader: `(specifier, referrer, attr_type)` → `(canonical_key, source)`.
+    /// `attr_type` is the import's `with { type: ... }` attribute — an attribute-aware host
+    /// returns RAW file contents for `json`/`text`/`bytes` (binary latin-1-decoded, one char per
+    /// byte) and the engine synthesizes the wrapper module; attribute-blind hosts ignore it.
     #[allow(clippy::type_complexity)]
-    pub(crate) module_loader: Option<Rc<dyn Fn(&str, &str) -> Option<(String, String)>>>,
+    pub(crate) module_loader:
+        Option<Rc<dyn Fn(&str, &str, Option<&str>) -> Option<(String, String)>>>,
     /// Live module-namespace state keyed by the namespace object's pointer: for each exported name,
     /// how to read its current value (a live binding in some module scope, or a static value for a
     /// star-as namespace re-export). Namespace property reads consult this so they stay live.
@@ -1513,12 +1517,27 @@ impl Interp {
     /// Store a JS value into a TypedArray element, coercing per the element type. BigInt arrays
     /// require a BigInt (TypeError otherwise); numeric arrays coerce with ToNumber.
     pub(crate) fn ta_store(&mut self, info: &TaInfo, idx: usize, v: &Value) -> Result<(), Abrupt> {
+        // IntegerIndexedElementSet: the value coerces FIRST (observable, spec order); a write
+        // into an immutable buffer then fails like a non-writable data property — a TypeError in
+        // strict mode, a silent no-op in sloppy.
+        let immutable =
+            !self.immutable_buffers.is_empty() && self.immutable_buffers.contains(&info.buffer);
         if info.kind.is_bigint() {
             let n = self.to_bigint(v)?;
-            self.ta_write_bigint(info, idx, n.to_i128_wrapping());
+            if !immutable {
+                self.ta_write_bigint(info, idx, n.to_i128_wrapping());
+            }
         } else {
             let n = self.to_number(v)?;
-            self.ta_write(info, idx, n);
+            if !immutable {
+                self.ta_write(info, idx, n);
+            }
+        }
+        if immutable && self.strict {
+            return Err(self.throw(
+                "TypeError",
+                "Cannot write to a TypedArray over an immutable ArrayBuffer",
+            ));
         }
         Ok(())
     }

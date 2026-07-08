@@ -113,7 +113,7 @@ fn shadow_import_value(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value
             .clone()
             .ok_or_else(|| i.make_error("TypeError", "no module loader available"))?;
         let base = i.import_base.clone();
-        let (key, src) = loader(&spec, &base)
+        let (key, src) = loader(&spec, &base, None)
             .ok_or_else(|| i.make_error("TypeError", format!("module not found: {spec}")))?;
         let subptr = &mut **i.shadow_realms.get_mut(&ptr).unwrap() as *mut Interp;
         // SAFETY: pinned Box target (see shadow_evaluate).

@@ -9474,3 +9474,78 @@ fn dynamic_import_does_not_preempt_dfs_order() {
         "A,B,dyn"
     );
 }
+
+// ---- import attributes: `with { type: "text" }` (TC39 proposal-import-text, stage 3) ----
+
+#[test]
+fn import_text_modules() {
+    // A text module default-exports the file contents verbatim (CreateTextModule): no parsing,
+    // no execution — importing a .js file as text must NOT run it. The namespace has exactly
+    // `default`, and a dynamic import with the same attribute resolves to the same record
+    // (keyed `path#text`, distinct from any ordinary module of the file).
+    let mut files: std::collections::HashMap<String, String> = Default::default();
+    files.insert("/note.txt".into(), "hello text\nline 2 \u{e9}".into());
+    files.insert(
+        "/mod.js".into(),
+        "globalThis.__executed = true; export default 1;".into(),
+    );
+    files.insert(
+        "/main.js".into(),
+        r#"
+        import note from '/note.txt' with { type: 'text' };
+        import js from '/mod.js' with { type: 'text' };
+        import * as ns from '/note.txt' with { type: 'text' };
+        globalThis.__note = note;
+        globalThis.__js_is_source =
+            js === "globalThis.__executed = true; export default 1;";
+        globalThis.__not_executed = typeof globalThis.__executed === 'undefined';
+        globalThis.__ns =
+            Object.getOwnPropertyNames(ns).join(',') + ':' + (ns.default === note);
+        import('/note.txt', { with: { type: 'text' } }).then(m => {
+            globalThis.__dyn_same = m.default === note;
+        });
+        "#
+        .into(),
+    );
+    let f = files.clone();
+    let mut e = Engine::new();
+    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
+        f.get(spec).map(|s| (spec.to_string(), s.clone()))
+    })
+    .unwrap();
+    let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("{src} threw {name}: {message}"),
+    };
+    assert_eq!(read(&mut e, "globalThis.__note"), "hello text\nline 2 \u{e9}");
+    assert_eq!(read(&mut e, "globalThis.__js_is_source"), "true");
+    assert_eq!(read(&mut e, "globalThis.__not_executed"), "true");
+    assert_eq!(read(&mut e, "globalThis.__ns"), "default:true");
+    assert_eq!(read(&mut e, "globalThis.__dyn_same"), "true");
+}
+
+#[test]
+fn import_text_attribute_reaches_loader() {
+    // The loader receives the `with { type: ... }` attribute, so a host can serve raw contents
+    // for attribute imports while serving executable source for ordinary ones — of the same
+    // specifier, in the same graph.
+    let mut e = Engine::new();
+    e.eval_module_attrs(
+        r#"
+        import ordinary from '/dual.js';
+        import astext from '/dual.js' with { type: 'text' };
+        globalThis.__r = ordinary + ':' + astext;
+        "#,
+        "/main.js",
+        |spec, _r, attr| match (spec, attr) {
+            ("/dual.js", None) => Some((spec.to_string(), "export default 'ran';".to_string())),
+            ("/dual.js", Some("text")) => Some((spec.to_string(), "RAW".to_string())),
+            _ => None,
+        },
+    )
+    .unwrap();
+    match e.eval("globalThis.__r", false).unwrap() {
+        Completion::Value(v) => assert_eq!(v, "ran:RAW"),
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+}

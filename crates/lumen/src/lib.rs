@@ -224,6 +224,20 @@ impl Engine {
         &mut self,
         loader: impl Fn(&str, &str) -> Option<(String, String)> + 'static,
     ) {
+        self.interp.module_loader =
+            Some(std::rc::Rc::new(move |s: &str, r: &str, _a: Option<&str>| loader(s, r)));
+    }
+
+    /// [`Engine::set_module_loader`], with import attributes: the loader also receives the
+    /// import's `with { type: ... }` attribute (`Some("json" | "text" | "bytes")` for the types
+    /// the engine synthesizes). An attribute-aware host returns the RAW file contents for those —
+    /// text/JSON per its own decoding policy, binary latin-1-decoded (one char per byte) — and
+    /// the engine builds the synthetic module (default-exporting the parsed JSON, the string, or
+    /// an immutable-backed `Uint8Array`) keyed separately from any ordinary module of the file.
+    pub fn set_module_loader_attrs(
+        &mut self,
+        loader: impl Fn(&str, &str, Option<&str>) -> Option<(String, String)> + 'static,
+    ) {
         self.interp.module_loader = Some(std::rc::Rc::new(loader));
     }
 
@@ -239,6 +253,17 @@ impl Engine {
         src: &str,
         key: &str,
         loader: impl Fn(&str, &str) -> Option<(String, String)> + 'static,
+    ) -> Result<Completion, ParseError> {
+        self.eval_module_attrs(src, key, move |s, r, _a| loader(s, r))
+    }
+
+    /// [`Engine::eval_module`] with an attribute-aware loader (see
+    /// [`Engine::set_module_loader_attrs`] for the contract).
+    pub fn eval_module_attrs(
+        &mut self,
+        src: &str,
+        key: &str,
+        loader: impl Fn(&str, &str, Option<&str>) -> Option<(String, String)> + 'static,
     ) -> Result<Completion, ParseError> {
         self.interp.module_loader = Some(std::rc::Rc::new(loader));
         let result = self.interp.load_module(key, src);

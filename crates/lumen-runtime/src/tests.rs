@@ -1006,6 +1006,37 @@ fn esm_named_default_json_and_dynamic_import() {
 }
 
 #[test]
+fn esm_import_text_attribute() {
+    // TC39 import-text: `with { type: "text" }` default-exports the file's contents, decoded
+    // as UTF-8 with a leading BOM stripped — for any extension, including a .js file (which
+    // must not execute). Dynamic import with the attribute resolves the same record.
+    use std::fs;
+    let dir = TempDir::new("esm-import-text");
+    let root = dir.0.clone();
+    fs::write(root.join("note.txt"), b"\xef\xbb\xbfHello \xc3\xa9!\n").unwrap();
+    fs::write(root.join("side.js"), "globalThis.__ranSide = true;").unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import note from "./note.txt" with { type: "text" };
+        import source from "./side.js" with { type: "text" };
+        console.log(JSON.stringify(note));
+        console.log(source === "globalThis.__ranSide = true;", typeof globalThis.__ranSide);
+        const dyn = await import("./note.txt", { with: { type: "text" } });
+        console.log(dyn.default === note);
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("module runs");
+    assert_eq!(
+        out.lines(),
+        ["\"Hello \u{e9}!\\n\"", "true undefined", "true"]
+    );
+}
+
+#[test]
 fn esm_imports_node_builtins_named_and_default() {
     use std::fs;
     let dir = TempDir::new("esm-builtin");

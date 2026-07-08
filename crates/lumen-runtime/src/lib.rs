@@ -102,6 +102,13 @@ impl Runtime {
     /// `__filename`/`require` in scope), then loop to quiescence. `Err` is the rendered
     /// uncaught error. This is what the CLI uses for `lumen-cli file.js`.
     pub fn run_main(&mut self, path: &str) -> Result<(), String> {
+        // A CJS script can still dynamic-`import()`: give the engine the ESM loader and resolve
+        // bare relative specifiers against the entry file.
+        let loader = esm::make_loader(self.builtin_modules());
+        self.engine.set_module_loader_attrs(loader);
+        if let Ok(abs) = std::fs::canonicalize(path) {
+            self.engine.set_import_base(&abs.to_string_lossy());
+        }
         let global = self.engine.global_this();
         let run_main = self
             .engine
@@ -136,7 +143,7 @@ impl Runtime {
             .to_string_lossy()
             .into_owned();
         let loader = esm::make_loader(self.builtin_modules());
-        let result = self.engine.eval_module(&source, &key, loader);
+        let result = self.engine.eval_module_attrs(&source, &key, loader);
         self.run_to_completion();
         match result {
             Ok(Completion::Value(_)) => Ok(()),

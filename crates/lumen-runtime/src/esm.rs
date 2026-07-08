@@ -30,11 +30,18 @@ const EXTENSIONS: [&str; 5] = [".mjs", ".js", ".jsx", ".json", ".cjs"];
 /// Build the loader closure `eval_module` wants. It owns everything (`'static`); the engine
 /// caches results by the canonical key we return, so returning a stable realpath per file is
 /// what dedupes shared dependencies.
-pub fn make_loader(builtins: BuiltinModules) -> impl Fn(&str, &str) -> Option<(String, String)> {
-    move |specifier, referrer| resolve(specifier, referrer, &builtins)
+pub fn make_loader(
+    builtins: BuiltinModules,
+) -> impl Fn(&str, &str, Option<&str>) -> Option<(String, String)> {
+    move |specifier, referrer, attr_type| resolve(specifier, referrer, &builtins, attr_type)
 }
 
-fn resolve(specifier: &str, referrer: &str, builtins: &BuiltinModules) -> Option<(String, String)> {
+fn resolve(
+    specifier: &str,
+    referrer: &str,
+    builtins: &BuiltinModules,
+    attr_type: Option<&str>,
+) -> Option<(String, String)> {
     // Builtins: `node:fs` or a bare `fs`/`path`/… name.
     let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
     if let Some(src) = builtins.0.get(&format!("node:{bare}")) {
@@ -45,6 +52,27 @@ fn resolve(specifier: &str, referrer: &str, builtins: &BuiltinModules) -> Option
     // `file://` specifier) to a plain path for the filesystem resolver.
     let referrer = referrer.strip_prefix("file://").unwrap_or(referrer);
     let specifier = specifier.strip_prefix("file://").unwrap_or(specifier);
+
+    // A `with { type: "json" | "text" | "bytes" }` import wants the file's RAW contents — the
+    // engine synthesizes the wrapper module itself. No CJS/ESM classification, no JSX transform:
+    // the attribute defines the module type, whatever the extension says (importing a `.js` file
+    // as text is a spec-tested case).
+    if matches!(attr_type, Some("json" | "text" | "bytes")) {
+        let file = if specifier.starts_with("./")
+            || specifier.starts_with("../")
+            || specifier.starts_with('/')
+        {
+            let base = Path::new(referrer).parent()?.join(specifier);
+            resolve_file_or_dir(&normalize(&base))?
+        } else {
+            resolve_node_modules(specifier, Path::new(referrer).parent()?)?.0
+        };
+        let key = std::fs::canonicalize(&file)
+            .unwrap_or_else(|_| file.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        return Some((key, read_raw(&file, attr_type)?));
+    }
 
     if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
         let base = Path::new(referrer).parent()?.join(specifier);
@@ -59,6 +87,24 @@ fn resolve(specifier: &str, referrer: &str, builtins: &BuiltinModules) -> Option
     let from = Path::new(referrer).parent()?;
     let (file, is_esm_pkg) = resolve_node_modules(specifier, from)?;
     load_as_module(&file, !is_esm_pkg)
+}
+
+/// Read a file for an attribute import. `text`/`json` decode as UTF-8 the way the web platform's
+/// "UTF-8 decode" does — invalid sequences become U+FFFD and a leading BOM is stripped. `bytes`
+/// must round-trip exactly, so non-UTF-8 content is latin-1-decoded (one char per byte; the
+/// engine re-extracts the original bytes when it builds the `Uint8Array`).
+fn read_raw(file: &Path, attr_type: Option<&str>) -> Option<String> {
+    let bytes = std::fs::read(file).ok()?;
+    Some(match attr_type {
+        Some("bytes") => match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        },
+        _ => {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            text.strip_prefix('\u{feff}').map(str::to_owned).unwrap_or(text)
+        }
+    })
 }
 
 /// A resolved file (existing path, extension probe, or directory index/main). `None` if

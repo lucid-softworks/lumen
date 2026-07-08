@@ -182,7 +182,7 @@ impl Interp {
         for stmt in rec.body.iter() {
             let (spec, defers) = match stmt {
                 Stmt::Import(decl) => (
-                    decl.source.to_string(),
+                    dep_map_key(&decl.source, decl.attr_type.as_deref()),
                     !decl.specs.is_empty()
                         && decl
                             .specs
@@ -251,16 +251,19 @@ impl Interp {
             *e = *e && defers;
         }
         for (spec, attr_type) in module_dependency_specifiers(&body) {
-            if resolved.contains_key(&spec) {
+            // The map key carries the attribute: the same specifier imported plainly AND with
+            // `with { type: ... }` is two different dependencies.
+            let map_key = dep_map_key(&spec, attr_type.as_deref());
+            if resolved.contains_key(&map_key) {
                 continue;
             }
             // The host-defined '<module source>' specifier resolves only in the source phase: it
             // gets a ModuleSource object but no module record.
             if spec == "<module source>" {
-                resolved.insert(spec.clone(), spec);
+                resolved.insert(map_key, spec);
                 continue;
             }
-            let (canon, dsrc) = self.fetch_module(&spec, key)?;
+            let (canon, dsrc) = self.fetch_module(&spec, key, attr_type.as_deref())?;
             // A `with { type: ... }` dependency synthesizes a wrapper module (JSON/text/bytes) —
             // keyed separately from any ordinary module of the same file.
             let canon = match attr_type.as_deref() {
@@ -268,7 +271,7 @@ impl Interp {
                 _ => canon,
             };
             let dsrc = typed_module_source(dsrc, attr_type.as_deref());
-            resolved.insert(spec.clone(), canon.clone());
+            resolved.insert(map_key, canon.clone());
             if !dep_keys.contains(&canon) {
                 dep_keys.push(canon.clone());
                 if !self.module_recs.contains_key(&canon) {
@@ -397,12 +400,13 @@ impl Interp {
         &mut self,
         specifier: &str,
         referrer: &str,
+        attr_type: Option<&str>,
     ) -> Result<(String, String), Abrupt> {
         let loader = match &self.module_loader {
             Some(l) => l.clone(),
             None => return Err(self.throw("TypeError", "no module loader configured")),
         };
-        match loader(specifier, referrer) {
+        match loader(specifier, referrer, attr_type) {
             Some(pair) => Ok(pair),
             None => Err(self.throw(
                 "TypeError",
@@ -475,7 +479,8 @@ impl Interp {
     fn link_imports(&mut self, key: &str, body: &[Stmt], env: &Env) -> Result<(), Abrupt> {
         for stmt in body {
             let Stmt::Import(decl) = stmt else { continue };
-            let dep = self.resolved_key(key, &decl.source);
+            let dep =
+                self.resolved_key(key, &dep_map_key(&decl.source, decl.attr_type.as_deref()));
             for spec in &decl.specs {
                 match spec {
                     ImportSpec::Namespace(local) => {
@@ -967,7 +972,7 @@ impl Interp {
         for stmt in body.iter() {
             let (spec, defers) = match stmt {
                 Stmt::Import(decl) => (
-                    decl.source.to_string(),
+                    dep_map_key(&decl.source, decl.attr_type.as_deref()),
                     !decl.specs.is_empty()
                         && decl
                             .specs
@@ -996,7 +1001,7 @@ impl Interp {
         for stmt in body.iter() {
             let (spec, defers) = match stmt {
                 Stmt::Import(decl) => (
-                    decl.source.to_string(),
+                    dep_map_key(&decl.source, decl.attr_type.as_deref()),
                     !decl.specs.is_empty()
                         && decl
                             .specs
@@ -1433,7 +1438,7 @@ impl Interp {
             None => self.import_base.clone(),
         };
         let result = (|| {
-            let (canon, src) = self.fetch_module(specifier, &referrer)?;
+            let (canon, src) = self.fetch_module(specifier, &referrer, attr_type)?;
             let canon = match attr_type {
                 Some(t @ ("json" | "text" | "bytes")) => format!("{canon}#{t}"),
                 _ => canon,
@@ -1558,6 +1563,16 @@ fn same_binding(a: &Resolution, b: &Resolution) -> bool {
         (Resolution::Ns(Value::Obj(o1)), Resolution::Ns(Value::Obj(o2))) => Rc::ptr_eq(o1, o2),
         (Resolution::DeferNs(d1), Resolution::DeferNs(d2)) => d1 == d2,
         _ => false,
+    }
+}
+
+/// The `resolved`-map key for a dependency: the plain specifier, or — for an attribute import
+/// (`with { type: ... }`) — the specifier qualified by the type, so the same file imported both
+/// ways in one module resolves to two distinct records. NUL never appears in real specifiers.
+pub(crate) fn dep_map_key(spec: &str, attr: Option<&str>) -> String {
+    match attr {
+        Some(t @ ("json" | "text" | "bytes")) => format!("{spec}\u{0000}{t}"),
+        _ => spec.to_string(),
     }
 }
 
