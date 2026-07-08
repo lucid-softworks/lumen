@@ -444,6 +444,9 @@ fn js_set_prototype_of(i: &mut Interp, obj: &Value, proto: &Value) -> Result<boo
             None => break,
         };
     }
+    // Any successful prototype swap invalidates every property-creation inline cache: a chain
+    // that was proven clean at fill time may now route through different objects.
+    crate::value::bump_proto_epoch();
     o.borrow_mut().proto = match proto {
         Value::Obj(p) => Some(p.clone()),
         _ => None,
@@ -3995,6 +3998,10 @@ fn define_own_property_ordinary(
     key: &str,
     d: &PartialDesc,
 ) -> Result<bool, Abrupt> {
+    // A defineProperty can rewrite attributes (data → accessor, writable → false) without a
+    // structural change: conservatively invalidate the property-creation inline caches, whose
+    // fill-time chain walks assumed no such shadow could appear (the op is rare).
+    crate::value::bump_proto_epoch();
     let d = d.clone();
     // Module namespace [[DefineOwnProperty]]: a String key is only redefinable to a descriptor that
     // matches the export's fixed shape (writable, enumerable, non-configurable, same value); adding

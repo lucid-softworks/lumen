@@ -99,7 +99,11 @@ pub struct JitCtx {
     // ---- Rust-only fields ----
     pub interp: *mut Interp,
     pub chunk: *const Chunk,
-    pub env: Env,
+    /// The activation env the chunk runs under. A raw pointer: the handle it aliases outlives
+    /// the run — `run` keeps its freshly-made env in a local across the call; `run_moved` points
+    /// at a handle the caller keeps alive (a local clone, or the env inside the callee's
+    /// `Callable::User`, pinned by the callee object on the caller's operand stack).
+    pub env_ref: *const Env,
     pub this_val: Value,
     pub n_slots: usize,
     /// Active `try` regions: (catch pc, operand-stack depth to unwind to).
@@ -151,6 +155,8 @@ const C_LS: u32 = 9;
 const C_GE: u32 = 10;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const C_GT: u32 = 12;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+const C_VS: u32 = 6;
 
 /// Condition-helper modes (the `w1` immediate for `H_COND`).
 pub const COND_POP_TRUTHY: u32 = 0;
@@ -604,6 +610,31 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 continue;
             }
         }
+        // Fused equality + JumpIfFalse: the full inline equality template drives the branch
+        // directly — numbers, nullish, identity, Bool payloads, string length — no intermediate
+        // bool. (The ordered relations below keep their number-only fusion: any other operand
+        // type coerces, which is the helper's job.)
+        if fast & 2 != 0 && eq_inlinable(layout) {
+            if let (
+                Op::StrictEq | Op::StrictNotEq | Op::EqEq | Op::NotEq,
+                Some(Op::JumpIfFalse(t)),
+            ) = (op, ops.get(pc + 1))
+            {
+                if !targeted[pc + 1] {
+                    emit_eq_inline(
+                        &mut a,
+                        layout,
+                        pc as u32,
+                        l_unwind,
+                        matches!(op, Op::StrictEq | Op::StrictNotEq),
+                        matches!(op, Op::NotEq | Op::StrictNotEq),
+                        Some(pc_labels[*t as usize]),
+                    );
+                    skip = 1;
+                    continue;
+                }
+            }
+        }
         // Fused number-compare + JumpIfFalse: fcmp and branch directly on the negated condition
         // (IEEE unordered must jump for the ordered relations and for ==; must fall through for
         // !=) — the intermediate bool never materializes. Types other than two numbers take the
@@ -737,9 +768,22 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 emit_exec(&mut a, pc as u32, l_unwind);
             }
             Op::Await => unreachable!("async chunks are rejected above"),
-            // ---- inline property cache: own-property read (`this.x`) ----
-            Op::GetProp(_, cache) if fast & 256 != 0 && get_prop_inlinable(layout) => {
-                emit_get_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+            // ---- inline property cache: shape-validated read (`this.x`, proto constants) ----
+            Op::GetProp(n, cache) if fast & 256 != 0 && get_method_inlinable(layout) => {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    false,
+                    arr_ok,
+                );
             }
             Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
                 // A Num or Str key passes through untouched (the overwhelmingly common case);
@@ -853,13 +897,20 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::SetKeep);
             }
             // ---- inline property cache: method load (`obj.m(...)`) ----
-            Op::GetMethod(_, cache) if fast & 512 != 0 && get_method_inlinable(layout) => {
-                emit_get_method_inline(
+            Op::GetMethod(n, cache) if fast & 512 != 0 && get_method_inlinable(layout) => {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
                     pc as u32,
                     l_unwind,
+                    true,
+                    arr_ok,
                 );
             }
             // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 24) ----
@@ -940,6 +991,37 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
+            }
+            Op::StrictEq | Op::StrictNotEq | Op::EqEq | Op::NotEq
+                if fast & 2 != 0 && eq_inlinable(layout) =>
+            {
+                emit_eq_inline(
+                    &mut a,
+                    layout,
+                    pc as u32,
+                    l_unwind,
+                    matches!(op, Op::StrictEq | Op::StrictNotEq),
+                    matches!(op, Op::NotEq | Op::StrictNotEq),
+                    None,
+                );
+            }
+            Op::Not if fast & 131072 != 0 && eq_inlinable(layout) => {
+                emit_not_inline(&mut a, layout, pc as u32, l_unwind);
+            }
+            Op::SetPropDrop(_, cache) if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) => {
+                emit_set_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+            }
+            Op::UpdateProp(_, cache, kind)
+                if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
+            {
+                emit_update_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    *kind,
+                    pc as u32,
+                    l_unwind,
+                );
             }
             Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
             | Op::NotEq
@@ -1207,6 +1289,7 @@ pub fn compile(_chunk: &Chunk, _layout: &crate::value::JitLayout) -> Option<JitC
 fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let sh = layout.obj_props + layout.props_shape;
     let en = layout.obj_props + layout.props_entries + layout.vec_ptr_off;
+    let enl = layout.obj_props + layout.props_entries + layout.vec_len_off;
     layout.valid
         && layout.obj_from_rc < 4096
         && layout.obj_exotic < 4096
@@ -1215,21 +1298,323 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && sh / 4 < 4096
         && en.is_multiple_of(8)
         && en / 8 < 4096
+        && enl.is_multiple_of(8)
+        && enl / 8 < 4096
         && layout.entry_accessor < 4096
         && layout.entry_value + 16 < 256
         && layout.rc_strong_off < 256
         && layout.entry_size < 0x1_0000
 }
 
-/// Inline own-property read (`this.x`): validate the receiver by shape and load the value in
-/// machine code, taking the checked helper on any mismatch. Every guard branches to `slow`
-/// *before* the template writes any state, so the fallback re-runs the op cleanly. Handles only
-/// a `depth == 0` hit on a non-exotic ordinary object whose receiver is not the last reference
-/// (so the pop-drop can't free) and whose value is trivially copyable (tag ≤ 4, no refcount);
-/// everything else — methods, refcounted values, proxies (via the live `inline_ic_safe` flag) —
-/// falls through.
+/// Inline shape-validated property load, unified over `GetProp` (`method == false`: pop the
+/// receiver, push the value in its slot) and `GetMethod` (`method == true`: the receiver stays —
+/// it is re-used as `this` — and the method pushes above it), and over IC depths 0..=2:
+/// the value may live on the receiver itself, its prototype, or two hops up (a subclass
+/// hierarchy). Every hop re-follows the live proto pointer and re-validates exotic-None +
+/// `ic_plain` + shape — a shape match on a non-holder hop proves it still lacks the name (see
+/// [`crate::bytecode::IcState`]); depth 2 additionally requires the recorded `mid_shape`
+/// (`mid_ok`). Every guard branches to `slow` before any state is written, so the fallback
+/// re-runs the op cleanly. A BigInt value (compound payload), an accessor, any guard miss, or a
+/// last-reference receiver (whose pop-drop would free) falls to the checked helper.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-fn emit_get_prop_inline(
+fn emit_prop_load_inline(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    cache_ptr: usize,
+    pc: u32,
+    l_unwind: usize,
+    method: bool,
+    // Whether an `Exotic::Array` receiver may shape-validate: true when the site's (compile-time)
+    // name cannot be an element key — element inserts don't transition an array's shape, but
+    // element keys are all canonical indices, so a name that doesn't start with a digit cannot
+    // collide with one. Prototype hops stay `Exotic::None`-only.
+    arr_ok: bool,
+) {
+    use crate::bytecode::{
+        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_RECV_SHAPE,
+        IC_OFF_SLOT,
+    };
+    let strong = layout.rc_strong_off as i32;
+    let rcv = layout.obj_from_rc as u32;
+    let ex = layout.obj_exotic as u32;
+    let pr = layout.obj_proto as u32;
+    let sh = (layout.obj_props + layout.props_shape) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
+    let en_len = (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32;
+    let ev = layout.entry_value as i32;
+    let ea = layout.entry_accessor as u32;
+    let es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+
+    let plain = layout.obj_ic_plain as u32;
+    let slow = a.new_label();
+    let done = a.new_label();
+    let d1 = a.new_label();
+    let load = a.new_label();
+    // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
+    //    receiver drop (GetProp) — hop walking uses x17.
+    a.ldurb(9, 20, -24);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldur(10, 20, -16);
+    if !method {
+        // receiver refcount > 1 (so the pop-drop below never frees)
+        a.ldur(9, 10, strong);
+        a.cmp_imm_x(9, 1);
+        a.b_cond(C_LS, slow);
+    }
+    // 2. cache: depth + slot
+    a.mov_imm64(12, cache_ptr as u64);
+    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+    // 3. receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
+    //    Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE, not
+    //    slot positions, because element entries occupy slots without transitioning the shape),
+    //    plain, shape == recv_shape; x11 = receiver object base
+    a.add_imm(11, 10, rcv);
+    a.ldrb_imm(14, 11, ex);
+    if arr_ok {
+        let ex_ok = a.new_label();
+        a.cmp_imm_w(14, none_tag);
+        a.b_cond(C_EQ, ex_ok);
+        a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+        a.b_cond(C_NE, slow);
+        a.cbz(9, false, slow); // Array receiver must not be the holder (w9 = depth)
+        a.bind(ex_ok);
+    } else {
+        a.cmp_imm_w(14, none_tag);
+        a.b_cond(C_NE, slow);
+    }
+    a.ldrb_imm(14, 11, plain);
+    a.cbz(14, false, slow);
+    a.ldr_w_imm(14, 11, sh);
+    a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
+    a.cmp_reg_w(14, 16);
+    a.b_cond(C_NE, slow);
+    // 4. depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall into d1.
+    a.cbz(9, false, load);
+    a.cmp_imm_w(9, 1);
+    a.b_cond(C_EQ, d1);
+    a.cmp_imm_w(9, 2);
+    a.b_cond(C_NE, slow);
+    a.ldrb_imm(14, 12, IC_OFF_MID_OK);
+    a.cbz(14, false, slow);
+    // depth-2 mid hop: follow the live proto, validate against mid_shape
+    a.ldr_imm(17, 11, pr); // Option<Gc> niche: pointer or 0
+    a.cbz(17, true, slow);
+    a.add_imm(11, 17, rcv);
+    a.ldrb_imm(14, 11, ex);
+    a.cmp_imm_w(14, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldrb_imm(14, 11, plain);
+    a.cbz(14, false, slow);
+    a.ldr_w_imm(14, 11, sh);
+    a.ldr_w_imm(16, 12, IC_OFF_MID_SHAPE);
+    a.cmp_reg_w(14, 16);
+    a.b_cond(C_NE, slow);
+    // 5. holder hop (depth 1 entry point; depth 2 falls through): validate holder_shape
+    a.bind(d1);
+    a.ldr_imm(17, 11, pr);
+    a.cbz(17, true, slow);
+    a.add_imm(11, 17, rcv);
+    a.ldrb_imm(14, 11, ex);
+    a.cmp_imm_w(14, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldrb_imm(14, 11, plain);
+    a.cbz(14, false, slow);
+    a.ldr_w_imm(14, 11, sh);
+    a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+    a.cmp_reg_w(14, 16);
+    a.b_cond(C_NE, slow);
+    // 6. x11 = holder base: bounds-check the cached slot against the live entries length
+    //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
+    //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;
+    //    data property; non-BigInt
+    a.bind(load);
+    a.ldr_imm(16, 11, en_len);
+    a.cmp_reg_x(13, 16);
+    a.b_cond(C_HS, slow);
+    a.ldr_imm(15, 11, en);
+    a.mov_imm64(16, es);
+    a.madd(15, 13, 16, 15);
+    a.ldrb_imm(9, 15, ea);
+    a.cbnz(9, false, slow);
+    a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
+    a.cmp_imm_w(9, 5);
+    a.b_cond(C_EQ, slow);
+    // --- commit: everything validated; from here only writes ---
+    a.ldur(12, 15, ev);
+    a.ldur(13, 15, ev + 8); // payload word (the Rc pointer for tags 6..8)
+    a.ldur(14, 15, ev + 16);
+    // clone: a refcounted value (tag ≥ 6) needs its strong count bumped
+    let nobump = a.new_label();
+    a.cmp_imm_w(9, 6);
+    a.b_cond(C_LO, nobump);
+    a.ldur(16, 13, strong);
+    a.add_imm(16, 16, 1);
+    a.stur(16, 13, strong);
+    a.bind(nobump);
+    if method {
+        // receiver stays at [-24]; push the method above it
+        a.stur(12, 20, 0);
+        a.stur(13, 20, 8);
+        a.stur(14, 20, 16);
+        a.add_imm(20, 20, 24);
+    } else {
+        // drop the receiver (strong was > 1: decrement, no free). If the value IS the receiver
+        // the bump above already balanced this (the count is re-read).
+        a.ldur(9, 10, strong);
+        a.sub_imm(9, 9, 1);
+        a.stur(9, 10, strong);
+        // overwrite the receiver slot with the value (pop obj + push value = same depth)
+        a.stur(12, 20, -24);
+        a.stur(13, 20, -16);
+        a.stur(14, 20, -8);
+    }
+    a.b(done);
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    a.bind(done);
+}
+
+/// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
+/// one prototype hop).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
+    get_prop_inlinable(layout) && layout.obj_proto < 4096
+}
+
+
+/// Same gate as [`get_prop_inlinable`] plus the `writable` byte (the store re-checks it — an
+/// in-place defineProperty can flip attributes without changing the shape).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
+    get_prop_inlinable(layout) && layout.entry_writable < 4096
+}
+
+/// Inline `this.x++` / `--` (`UpdateProp`): the read and the write both target the cached own
+/// data slot — exactly what a depth-0 IC hit on the VM path does (`get_prop_ic` then
+/// `set_prop_ic`) — so a shape-validated receiver whose slot holds a Num updates in place with
+/// one FP add. Anything else (accessor, non-writable, non-Num old value, shape/depth miss,
+/// exotic receiver, last-reference receiver) falls to the checked helper before any state is
+/// written.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_update_prop_inline(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    cache_ptr: usize,
+    kind: UpdKind,
+    pc: u32,
+    l_unwind: usize,
+) {
+    use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
+    let strong = layout.rc_strong_off as i32;
+    let rcv = layout.obj_from_rc as u32;
+    let ex = layout.obj_exotic as u32;
+    let sh = (layout.obj_props + layout.props_shape) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
+    let ev = layout.entry_value as i32;
+    let ea = layout.entry_accessor as u32;
+    let ew = layout.entry_writable as u32;
+    let es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+
+    let plain = layout.obj_ic_plain as u32;
+    let slow = a.new_label();
+    let done = a.new_label();
+    // 1. stack: [obj @ -24] — receiver must be an Obj with refcount > 1
+    a.ldurb(9, 20, -24);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldur(10, 20, -16);
+    a.ldur(9, 10, strong);
+    a.cmp_imm_x(9, 1);
+    a.b_cond(C_LS, slow);
+    // 2. cache: depth 0, slot + shape
+    a.mov_imm64(12, cache_ptr as u64);
+    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+    a.cbnz(9, false, slow);
+    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+    a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
+    // 3. ordinary receiver, shape match
+    a.add_imm(11, 10, rcv);
+    a.ldrb_imm(9, 11, ex);
+    a.cmp_imm_w(9, none_tag);
+    a.b_cond(C_NE, slow);
+    a.ldrb_imm(9, 11, plain);
+    a.cbz(9, false, slow);
+    a.ldr_w_imm(9, 11, sh);
+    a.cmp_reg_w(9, 14);
+    a.b_cond(C_NE, slow);
+    // 4. bounds-check the cached slot, then entry: data property, writable, holding a Num
+    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.cmp_reg_x(13, 16);
+    a.b_cond(C_HS, slow);
+    a.ldr_imm(15, 11, en);
+    a.mov_imm64(16, es);
+    a.madd(15, 13, 16, 15);
+    a.ldrb_imm(9, 15, ea);
+    a.cbnz(9, false, slow);
+    a.ldrb_imm(9, 15, ew);
+    a.cbz(9, false, slow);
+    a.ldurb(9, 15, ev);
+    a.cmp_imm_w(9, 4);
+    a.b_cond(C_NE, slow);
+    // --- commit: d0 = old, d2 = old ± 1, written in place ---
+    a.ldur_d(0, 15, ev + 8);
+    a.fmov_one(1);
+    let dec = matches!(kind, UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard);
+    a.f_arith(if dec { 1 } else { 0 }, 2, 0, 1);
+    a.stur_d(2, 15, ev + 8);
+    // drop the receiver (strong was > 1)
+    a.ldur(9, 10, strong);
+    a.sub_imm(9, 9, 1);
+    a.stur(9, 10, strong);
+    // result per kind: Pre* push the new value, Post* the old, *Discard nothing.
+    match kind {
+        UpdKind::PreInc | UpdKind::PreDec => {
+            a.movz(9, 4, 0);
+            a.stur(9, 20, -24);
+            a.stur_d(2, 20, -16);
+        }
+        UpdKind::PostInc | UpdKind::PostDec => {
+            a.movz(9, 4, 0);
+            a.stur(9, 20, -24);
+            a.stur_d(0, 20, -16);
+        }
+        UpdKind::IncDiscard | UpdKind::DecDiscard => {
+            a.sub_imm(20, 20, 24);
+        }
+    }
+    a.b(done);
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    a.bind(done);
+}
+
+/// Gate for the inline equality / Not templates: the Obj arms read the receiver's `ic_plain`
+/// byte, so those offsets must fit their instructions' immediate ranges.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
+    layout.valid
+        && layout.rc_strong_off < 256
+        && layout.obj_from_rc < 4096
+        && layout.obj_ic_plain < 4096
+        && crate::lstr::LEN_OFF.is_multiple_of(4)
+        && crate::lstr::LEN_OFF / 4 < 4096
+}
+
+/// Inline own-property store (`this.x = v`, statement position → `SetPropDrop`): the machine-code
+/// mirror of `Interp::try_ic_set`'s shape fast path. Validates the receiver by shape (a match
+/// proves the cached slot still maps this name), re-checks `accessor`/`writable`, then *moves*
+/// the 24-byte value off the operand stack into the slot — a pure value overwrite never changes
+/// the shape, so no cache invalidation is needed. The old value drops inline (strong-- when
+/// refcounted and not the last reference); a BigInt old value (compound drop), a last-reference
+/// old value or receiver, an accessor/non-writable slot, a shape or depth miss, and any exotic
+/// receiver all fall to the checked helper. Every guard branches to `slow` before any state is
+/// written, so the fallback re-runs the op cleanly.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_set_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
     cache_ptr: usize,
@@ -1244,22 +1629,24 @@ fn emit_get_prop_inline(
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
+    let ew = layout.entry_writable as u32;
     let es = layout.entry_size as u64;
     let none_tag = layout.exotic_none_tag as u32;
 
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. receiver must be an Obj (tag 8)
-    a.ldurb(9, 20, -24);
+    // 1. stack: [obj @ -48, v @ -24] — receiver must be an Obj (tag 8)
+    a.ldurb(9, 20, -48);
     a.cmp_imm_w(9, 8);
     a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -16); // rc_ptr (Value payload)
+    a.ldur(10, 20, -40); // receiver rc_ptr
     // 2. receiver refcount > 1 (so the pop-drop below never frees)
     a.ldur(9, 10, strong);
     a.cmp_imm_x(9, 1);
     a.b_cond(C_LS, slow);
-    // 3. cache: depth must be 0, load slot + cached receiver shape
+    // 3. cache: depth must be 0 (own writable data property wins OrdinarySet regardless of the
+    //    prototype chain); load slot + cached receiver shape
     a.mov_imm64(12, cache_ptr as u64);
     a.ldrb_imm(9, 12, IC_OFF_DEPTH);
     a.cbnz(9, false, slow);
@@ -1276,145 +1663,403 @@ fn emit_get_prop_inline(
     a.ldr_w_imm(9, 11, sh);
     a.cmp_reg_w(9, 14);
     a.b_cond(C_NE, slow);
-    // 6. entry base = entries data ptr + slot*entry_size
+    // 6. bounds-check the cached slot, then entry base = entries data ptr + slot*entry_size
+    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.cmp_reg_x(13, 16);
+    a.b_cond(C_HS, slow);
     a.ldr_imm(15, 11, en);
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
-    // 7. not an accessor
+    // 7. data property, writable
     a.ldrb_imm(9, 15, ea);
     a.cbnz(9, false, slow);
-    // 8. value tag: a BigInt (5) is a compound payload — leave it to the helper. Everything else
-    //    is either trivially copyable (≤4) or a single Rc pointer at value+8 (Str/Sym/Obj, 6..8).
-    a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
+    a.ldrb_imm(9, 15, ew);
+    a.cbz(9, false, slow);
+    // 8. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
+    //    BigInt or a last reference → helper. An old value that IS the receiver (`o.x === o`)
+    //    also bails: its dec and the receiver dec below hit the same counter, and the two
+    //    independent strong > 1 guards would let the pair scribble it to 0 without running the
+    //    destructor. w9 = old tag, x12 = old payload, x14 = old strong.
+    a.ldurb(9, 15, ev);
     a.cmp_imm_w(9, 5);
     a.b_cond(C_EQ, slow);
-    // --- commit: everything validated; from here only writes ---
-    // load the 24-byte value (x9/tag untouched)
-    a.ldur(12, 15, ev);
-    a.ldur(13, 15, ev + 8); // payload word (the Rc pointer for tags 6..8)
-    a.ldur(14, 15, ev + 16);
-    // clone: a refcounted value (tag ≥ 6) needs its strong count bumped (payload + strong)
-    let nobump = a.new_label();
+    let old_plain = a.new_label();
     a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, nobump);
-    a.ldur(16, 13, strong);
-    a.add_imm(16, 16, 1);
-    a.stur(16, 13, strong);
-    a.bind(nobump);
-    // drop the receiver (strong was > 1: decrement, no free). If the value IS the receiver the
-    // bump above already balanced this.
+    a.b_cond(C_LO, old_plain);
+    a.ldur(12, 15, ev + 8);
+    a.cmp_reg_x(12, 10);
+    a.b_cond(C_EQ, slow);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow);
+    a.bind(old_plain);
+    // --- commit: everything validated; from here only writes ---
+    // move v into the entry (24 bytes; a refcounted payload moves, not clones)
+    a.ldur(13, 20, -24);
+    a.ldur(16, 20, -16);
+    a.ldur(17, 20, -8);
+    a.stur(13, 15, ev);
+    a.stur(16, 15, ev + 8);
+    a.stur(17, 15, ev + 16);
+    // drop the old value (refcounted: strong was > 1, so this never frees)
+    let no_old_dec = a.new_label();
+    a.cmp_imm_w(9, 6);
+    a.b_cond(C_LO, no_old_dec);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 12, strong);
+    a.bind(no_old_dec);
+    // drop the receiver (strong was > 1)
     a.ldur(9, 10, strong);
     a.sub_imm(9, 9, 1);
     a.stur(9, 10, strong);
-    // overwrite the receiver slot with the value (pop obj + push value = same depth)
-    a.stur(12, 20, -24);
-    a.stur(13, 20, -16);
-    a.stur(14, 20, -8);
+    // pop both operands, push nothing
+    a.sub_imm(20, 20, 48);
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
     a.bind(done);
 }
 
-/// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
-/// one prototype hop).
+/// Inline equality (`==` / `!=` / `===` / `!==`): every case the helper would resolve *without
+/// coercion or content compares*, in machine code. Both-number pairs FCMP (IEEE: unordered is
+/// unequal); loose nullish operands resolve by the other side's tag; same-tag Bools compare
+/// payloads; same-tag Sym/Obj compare identity; same-tag Strs compare identity, then length (a
+/// length mismatch is a definitive "not equal"; equal lengths fall to the helper's content
+/// compare); strict different-tag pairs are unequal outright. Everything else — BigInt, coercing
+/// mixed-type pairs, a refcounted operand that is a last reference (its drop runs a real
+/// destructor), a loose nullish-vs-object compare on a non-ordinary object (`ic_plain` off —
+/// which includes the `[[IsHTMLDDA]]` object) — takes the helper. Every guard branches to `slow`
+/// before any state is written. With `branch`, the result drives a fused `JumpIfFalse` directly
+/// (no Bool materializes); otherwise the Bool pushes in place of the operands.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
-    get_prop_inlinable(layout) && layout.obj_proto < 4096
-}
-
-/// Inline method load (`obj.method(...)` → `GetMethod`): the receiver stays on the stack (it is
-/// re-pushed as `this`), and the method — found one prototype hop up (`depth == 1`) — is loaded
-/// and pushed above it. Validates the receiver *and* holder by shape; re-follows the live proto
-/// so a proto swap misses. Only a non-exotic ordinary receiver with a non-exotic ordinary
-/// immediate prototype holding a non-BigInt method at the cached slot inlines; anything else
-/// falls to the helper. No receiver refcount change (it is neither dropped nor cloned — the same
-/// stack Value serves as both operands); the method is cloned (bumped).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-fn emit_get_method_inline(
+fn emit_eq_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
-    cache_ptr: usize,
     pc: u32,
     l_unwind: usize,
+    strict: bool,
+    negate: bool,
+    branch: Option<usize>,
 ) {
-    use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
     let strong = layout.rc_strong_off as i32;
-    let rcv = layout.obj_from_rc as u32;
-    let ex = layout.obj_exotic as u32;
-    let pr = layout.obj_proto as u32;
-    let sh = (layout.obj_props + layout.props_shape) as u32;
-    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
-    let ev = layout.entry_value as i32;
-    let ea = layout.entry_accessor as u32;
-    let es = layout.entry_size as u64;
-    let none_tag = layout.exotic_none_tag as u32;
-
-    let plain = layout.obj_ic_plain as u32;
+    let len_off = crate::lstr::LEN_OFF as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. receiver is an Obj
-    a.ldurb(9, 20, -24);
-    a.cmp_imm_w(9, 8);
-    a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -16); // receiver rc_ptr
-    // 2. cache: depth must be 1; load slot, recv & holder shapes
-    a.mov_imm64(12, cache_ptr as u64);
-    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
-    a.cmp_imm_w(9, 1);
-    a.b_cond(C_NE, slow);
-    a.ldr_w_imm(13, 12, IC_OFF_SLOT); // slot
-    // 3. receiver object: exotic None (and no side-table behavior), shape == recv_shape
-    a.add_imm(11, 10, rcv);
-    a.ldrb_imm(9, 11, ex);
-    a.cmp_imm_w(9, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(9, 11, plain);
-    a.cbz(9, false, slow);
-    a.ldr_w_imm(9, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
-    a.cmp_reg_w(9, 16);
-    a.b_cond(C_NE, slow);
-    // 4. follow proto (Option<Gc> niche: pointer or 0)
-    a.ldr_imm(10, 11, pr); // proto rc_ptr (reuse x10 — receiver rc no longer needed)
-    a.cbz(10, true, slow); // null proto → slow
-    // 5. holder object: exotic None (and plain), shape == holder_shape
-    a.add_imm(11, 10, rcv);
-    a.ldrb_imm(9, 11, ex);
-    a.cmp_imm_w(9, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(9, 11, plain);
-    a.cbz(9, false, slow);
-    a.ldr_w_imm(9, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
-    a.cmp_reg_w(9, 16);
-    a.b_cond(C_NE, slow);
-    // 6. entry base = holder.entries + slot*entry_size
-    a.ldr_imm(15, 11, en);
-    a.mov_imm64(16, es);
-    a.madd(15, 13, 16, 15);
-    // 7. not an accessor
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
-    // 8. method tag: BigInt (5) → helper
-    a.ldurb(9, 15, ev);
-    a.cmp_imm_w(9, 5);
-    a.b_cond(C_EQ, slow);
-    // --- commit: receiver stays at [-24]; push the method above it ---
-    a.ldur(12, 15, ev);
-    a.ldur(13, 15, ev + 8); // payload (Rc pointer for tags 6..8; methods are Obj)
-    a.ldur(14, 15, ev + 16);
-    let nobump = a.new_label();
+    let l_num = a.new_label();
+    let l_sametag = a.new_label();
+    let l_bool = a.new_label();
+    let l_str = a.new_label();
+    let l_ptr = a.new_label();
+    let l_ptr_same = a.new_label();
+    let l_true = a.new_label();
+    let l_false = a.new_label();
+    let l_have = a.new_label();
+    // stack: [a @ -48, b @ -24]; w9 = tag_a, w10 = tag_b
+    a.ldurb(9, 20, -48);
+    a.ldurb(10, 20, -24);
+    let l_notnum = a.new_label();
+    a.cmp_imm_w(9, 4);
+    a.b_cond(C_NE, l_notnum);
+    a.cmp_imm_w(10, 4);
+    a.b_cond(C_EQ, l_num);
+    a.bind(l_notnum);
+    if !strict {
+        // Loose nullish: undefined/null equal each other and nothing else (helper handles the
+        // IsHTMLDDA exception via the inline_ic_safe gate below).
+        let la_null = a.new_label();
+        let lb_null = a.new_label();
+        a.cmp_imm_w(9, 0);
+        a.b_cond(C_EQ, la_null);
+        a.cmp_imm_w(9, 2);
+        a.b_cond(C_EQ, la_null);
+        a.cmp_imm_w(10, 0);
+        a.b_cond(C_EQ, lb_null);
+        a.cmp_imm_w(10, 2);
+        a.b_cond(C_EQ, lb_null);
+        a.b(l_sametag);
+        // a is nullish: equal iff b is nullish; otherwise false, dropping a refcounted b.
+        a.bind(la_null);
+        a.cmp_imm_w(10, 0);
+        a.b_cond(C_EQ, l_true);
+        a.cmp_imm_w(10, 2);
+        a.b_cond(C_EQ, l_true);
+        a.cmp_imm_w(10, 5);
+        a.b_cond(C_EQ, slow); // BigInt → helper
+        a.cmp_imm_w(10, 6);
+        a.b_cond(C_LO, l_false); // Bool/Num: no drop needed
+        a.ldur(13, 20, -16);
+        let la_drop = a.new_label();
+        a.cmp_imm_w(10, 8);
+        a.b_cond(C_NE, la_drop);
+        // nullish == Obj is only false for an ordinary object (ic_plain rules out IsHTMLDDA)
+        a.add_imm(11, 13, layout.obj_from_rc as u32);
+        a.ldrb_imm(11, 11, layout.obj_ic_plain as u32);
+        a.cbz(11, false, slow);
+        a.bind(la_drop);
+        a.ldur(14, 13, strong);
+        a.cmp_imm_x(14, 1);
+        a.b_cond(C_LS, slow);
+        a.sub_imm(14, 14, 1);
+        a.stur(14, 13, strong);
+        a.b(l_false);
+        // b is nullish (a is not): false, dropping a refcounted a.
+        a.bind(lb_null);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, slow);
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, l_false);
+        a.ldur(12, 20, -40);
+        let lb_drop = a.new_label();
+        a.cmp_imm_w(9, 8);
+        a.b_cond(C_NE, lb_drop);
+        a.add_imm(11, 12, layout.obj_from_rc as u32);
+        a.ldrb_imm(11, 11, layout.obj_ic_plain as u32);
+        a.cbz(11, false, slow);
+        a.bind(lb_drop);
+        a.ldur(14, 12, strong);
+        a.cmp_imm_x(14, 1);
+        a.b_cond(C_LS, slow);
+        a.sub_imm(14, 14, 1);
+        a.stur(14, 12, strong);
+        a.b(l_false);
+    }
+    a.bind(l_sametag);
+    let l_diff = a.new_label();
+    a.cmp_reg_w(9, 10);
+    a.b_cond(C_NE, if strict { l_diff } else { slow });
+    if strict {
+        // Same-tag undefined/null are equal (loose routed them above).
+        a.cmp_imm_w(9, 2);
+        a.b_cond(C_LS, l_true);
+    }
+    a.cmp_imm_w(9, 3);
+    a.b_cond(C_EQ, l_bool);
     a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, nobump);
-    a.ldur(16, 13, strong);
-    a.add_imm(16, 16, 1);
-    a.stur(16, 13, strong);
-    a.bind(nobump);
-    a.stur(12, 20, 0);
-    a.stur(13, 20, 8);
-    a.stur(14, 20, 16);
-    a.add_imm(20, 20, 24); // pushed the method
+    a.b_cond(C_EQ, l_str);
+    a.cmp_imm_w(9, 7);
+    a.b_cond(C_HS, l_ptr); // Sym/Obj: identity
+    a.b(slow); // BigInt
+    a.bind(l_bool);
+    a.ldurb(12, 20, -47);
+    a.ldurb(13, 20, -23);
+    a.cmp_reg_w(12, 13);
+    a.cset_w(11, C_EQ);
+    a.b(l_have);
+    // Sym/Obj identity: same pointer → equal (dec by 2; both stack handles die), different →
+    // unequal (dec each; both guarded > 1 first so neither dec frees).
+    a.bind(l_ptr);
+    a.ldur(12, 20, -40);
+    a.ldur(13, 20, -16);
+    a.cmp_reg_x(12, 13);
+    a.b_cond(C_EQ, l_ptr_same);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow);
+    a.ldur(15, 13, strong);
+    a.cmp_imm_x(15, 1);
+    a.b_cond(C_LS, slow);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 12, strong);
+    a.sub_imm(15, 15, 1);
+    a.stur(15, 13, strong);
+    a.b(l_false);
+    a.bind(l_ptr_same);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 2);
+    a.b_cond(C_LS, slow); // dec by 2 must not reach 0 (that drop runs a destructor)
+    a.sub_imm(14, 14, 2);
+    a.stur(14, 12, strong);
+    a.b(l_true);
+    // Str: identity → equal; different lengths → unequal; same length → helper (content).
+    a.bind(l_str);
+    a.ldur(12, 20, -40);
+    a.ldur(13, 20, -16);
+    a.cmp_reg_x(12, 13);
+    a.b_cond(C_EQ, l_ptr_same);
+    a.ldr_w_imm(14, 12, len_off);
+    a.ldr_w_imm(15, 13, len_off);
+    a.cmp_reg_w(14, 15);
+    a.b_cond(C_EQ, slow);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow);
+    a.ldur(15, 13, strong);
+    a.cmp_imm_x(15, 1);
+    a.b_cond(C_LS, slow);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 12, strong);
+    a.sub_imm(15, 15, 1);
+    a.stur(15, 13, strong);
+    a.b(l_false);
+    if strict {
+        // Different tags (both-number already peeled off): strictly unequal. Guard BOTH drops
+        // before either dec so the slow fallback re-runs the op against untouched state.
+        a.bind(l_diff);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, slow);
+        a.cmp_imm_w(10, 5);
+        a.b_cond(C_EQ, slow);
+        let ga = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, ga);
+        a.ldur(12, 20, -40);
+        a.ldur(14, 12, strong);
+        a.cmp_imm_x(14, 1);
+        a.b_cond(C_LS, slow);
+        a.bind(ga);
+        let gb = a.new_label();
+        a.cmp_imm_w(10, 6);
+        a.b_cond(C_LO, gb);
+        a.ldur(13, 20, -16);
+        a.ldur(15, 13, strong);
+        a.cmp_imm_x(15, 1);
+        a.b_cond(C_LS, slow);
+        a.bind(gb);
+        let da = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, da);
+        a.sub_imm(14, 14, 1);
+        a.stur(14, 12, strong);
+        a.bind(da);
+        let db = a.new_label();
+        a.cmp_imm_w(10, 6);
+        a.b_cond(C_LO, db);
+        a.sub_imm(15, 15, 1);
+        a.stur(15, 13, strong);
+        a.bind(db);
+        a.b(l_false);
+    }
+    a.bind(l_num);
+    a.ldur_d(0, 20, -40);
+    a.ldur_d(1, 20, -16);
+    if let Some(target) = branch {
+        // Straight-line fused numeric compare — branch on the negated condition, matching the
+        // ordered-relation fusion (IEEE unordered must jump for == and fall through for !=).
+        a.sub_imm(20, 20, 48);
+        a.fcmp(0, 1);
+        a.b_cond(if negate { C_EQ } else { C_NE }, target);
+        a.b(done);
+    } else {
+        a.fcmp(0, 1);
+        a.cset_w(11, C_EQ); // unordered (NaN) → 0: correctly unequal
+        a.b(l_have);
+    }
+    a.bind(l_true);
+    a.movz(11, 1, 0);
+    a.b(l_have);
+    a.bind(l_false);
+    a.movz(11, 0, 0);
+    a.bind(l_have);
+    a.sub_imm(20, 20, 48);
+    match branch {
+        Some(target) => {
+            // JumpIfFalse jumps when `eq ^ negate` is 0 — fold the negate into branch polarity.
+            if negate {
+                a.cbnz(11, false, target);
+            } else {
+                a.cbz(11, false, target);
+            }
+            a.b(done);
+        }
+        None => {
+            if negate {
+                a.movz(12, 1, 0);
+                a.logic_w(2, 11, 11, 12); // eor: flip the pushed bool
+            }
+            a.movz(10, 3, 0); // Bool tag word (payload byte 1 patched below)
+            a.stur(10, 20, 0);
+            a.sturb(11, 20, 1);
+            a.add_imm(20, 20, 24);
+            a.b(done);
+        }
+    }
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    if let Some(target) = branch {
+        // Unfused fallback: generic compare (pushes a bool), then pop-and-branch.
+        emit_cond(a, COND_POP_TRUTHY, l_unwind);
+        a.cbz(1, false, target);
+    }
+    a.bind(done);
+}
+
+/// Inline `!x` (ToBoolean + negate): Bool flips its payload; a Number is falsy iff ±0 or NaN;
+/// undefined/null are falsy; a Str is falsy iff empty (length read through the header); Sym/Obj
+/// are truthy — except a possible `[[IsHTMLDDA]]` object, so the Obj arm requires the
+/// receiver's `ic_plain` byte. BigInt and any refcounted operand that is a last reference take
+/// the helper. Guards all branch to `slow` before any state is written.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, l_unwind: usize) {
+    let strong = layout.rc_strong_off as i32;
+    let len_off = crate::lstr::LEN_OFF as u32;
+    let slow = a.new_label();
+    let done = a.new_label();
+    let l_bool = a.new_label();
+    let l_num = a.new_label();
+    let l_str = a.new_label();
+    let l_objsym = a.new_label();
+    let l_true = a.new_label();
+    let l_have = a.new_label();
+    a.ldurb(9, 20, -24);
+    a.cmp_imm_w(9, 2);
+    a.b_cond(C_LS, l_true); // undefined/null → !falsy = true
+    a.cmp_imm_w(9, 3);
+    a.b_cond(C_EQ, l_bool);
+    a.cmp_imm_w(9, 4);
+    a.b_cond(C_EQ, l_num);
+    a.cmp_imm_w(9, 6);
+    a.b_cond(C_EQ, l_str);
+    a.cmp_imm_w(9, 7);
+    a.b_cond(C_HS, l_objsym);
+    a.b(slow); // BigInt
+    a.bind(l_bool);
+    a.ldurb(11, 20, -23);
+    a.movz(12, 1, 0);
+    a.logic_w(2, 11, 11, 12); // eor: flip
+    a.b(l_have);
+    a.bind(l_num);
+    a.ldur_d(0, 20, -16);
+    a.movz(12, 0, 0);
+    a.fmov_d_x(1, 12); // d1 = +0.0
+    a.fcmp(0, 1);
+    a.cset_w(11, C_EQ); // ±0 → falsy
+    a.cset_w(12, C_VS); // NaN (unordered) → falsy
+    a.logic_w(1, 11, 11, 12); // orr
+    a.b(l_have);
+    a.bind(l_str);
+    a.ldur(12, 20, -16);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow); // last reference: the drop runs a destructor
+    a.ldr_w_imm(11, 12, len_off);
+    a.cmp_imm_w(11, 0);
+    a.cset_w(11, C_EQ); // empty → falsy
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 12, strong);
+    a.b(l_have);
+    a.bind(l_objsym);
+    a.ldur(12, 20, -16);
+    let os_drop = a.new_label();
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, os_drop);
+    // an Obj is only reliably truthy when it is ordinary (ic_plain rules out IsHTMLDDA)
+    a.add_imm(11, 12, layout.obj_from_rc as u32);
+    a.ldrb_imm(11, 11, layout.obj_ic_plain as u32);
+    a.cbz(11, false, slow);
+    a.bind(os_drop);
+    a.ldur(14, 12, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 12, strong);
+    a.movz(11, 0, 0);
+    a.b(l_have);
+    a.bind(l_true);
+    a.movz(11, 1, 0);
+    a.bind(l_have);
+    a.movz(10, 3, 0);
+    a.stur(10, 20, -24);
+    a.sturb(11, 20, -23);
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
@@ -1749,7 +2394,9 @@ fn emit_set_elem_inline(
     a.ldrb_imm(9, 15, ew);
     a.cbz(9, false, slow);
     // 9. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
-    //    BigInt or a last reference → helper. w9 = old tag, x12 = old payload, both live below.
+    //    BigInt or a last reference → helper. An old value that IS the receiver (`a[0] === a`)
+    //    also bails: its dec plus the receiver dec below would take the shared counter to 0
+    //    without running the destructor. w9 = old tag, x12 = old payload, both live below.
     a.ldurb(9, 15, ev);
     a.cmp_imm_w(9, 5);
     a.b_cond(C_EQ, slow);
@@ -1757,6 +2404,8 @@ fn emit_set_elem_inline(
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, old_plain);
     a.ldur(12, 15, ev + 8);
+    a.cmp_reg_x(12, 10);
+    a.b_cond(C_EQ, slow);
     a.ldur(13, 12, strong);
     a.cmp_imm_x(13, 1);
     a.b_cond(C_LS, slow);
@@ -2731,7 +3380,7 @@ pub fn run(
         },
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
-        env,
+        env_ref: &env as *const Env,
         this_val,
         slots: slots.as_mut_ptr(),
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
@@ -2745,6 +3394,7 @@ pub fn run(
     ctx.this_raw = &ctx.this_val as *const Value;
     let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
     let ok = entry(&mut ctx);
+    drop(env); // the env handle must outlive the run (ctx.env_ref aliases it)
     // Drop any operands left on the raw stack (a throw can leave temporaries).
     unsafe {
         let mut p = ctx.stack_base;
@@ -2768,45 +3418,70 @@ pub fn run(
     }
 }
 
+/// The per-frame buffer size (in `Value`s) of [`Interp::frame_pool`]: slots + operand stack of a
+/// JIT fast-call frame carve one fixed raw buffer, so frame setup is a freelist pop + pointer
+/// math instead of `Vec` bookkeeping. Frames that need more fall back to the pooled-`Vec` path.
+pub(crate) const FRAME_BUF: usize = 256;
+
 /// [`run`] for the JIT→JIT fast call: takes ownership of `argc` argument `Value`s at `args`
 /// (moved off the caller's operand stack — the caller must NOT drop them), seeding parameter
 /// slots by move instead of clone and dropping any surplus. Only for chunks with no activation
 /// environment (`Chunk::jit_no_activation`), so the arguments have exactly one consumer.
+/// `env` is borrowed raw: the caller keeps the aliased handle alive across the run.
 ///
 /// # Safety
-/// `args..args+argc` must be initialized `Value`s the caller relinquishes entirely.
+/// `args..args+argc` must be initialized `Value`s the caller relinquishes entirely; `*env` must
+/// outlive the run.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub(crate) unsafe fn run_moved(
     i: &mut Interp,
     chunk: &Rc<Chunk>,
     code: &JitCode,
-    env: &Env,
+    env: *const Env,
     this_val: Value,
     args: *mut Value,
     argc: usize,
 ) -> Result<Value, Abrupt> {
-    let env = env.clone();
-    let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
     let (n_params, n_slots) = chunk.jit_frame();
     let seed = n_params.min(argc);
-    slots.reserve(n_slots);
+    // Frame memory: one fixed-size raw buffer from the freelist ([slots | operand stack]);
+    // oversized frames use the legacy pooled-Vec pair. The buffer is a plain allocation (not a
+    // bump arena), so parked coroutines holding frames on other threads can't be aliased.
+    let mut legacy: Option<(Vec<Value>, Vec<Value>)> = None;
+    let (slots_ptr, stack_base) = if n_slots + code.max_stack <= FRAME_BUF {
+        let buf = i.frame_pool.pop().unwrap_or_else(|| {
+            let b: Box<[std::mem::MaybeUninit<Value>]> = Box::new_uninit_slice(FRAME_BUF);
+            std::ptr::NonNull::new(Box::into_raw(b) as *mut Value).unwrap()
+        });
+        (buf.as_ptr(), unsafe { buf.as_ptr().add(n_slots) })
+    } else {
+        let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
+        slots.reserve(n_slots);
+        stack.clear();
+        stack.reserve(code.max_stack);
+        let p = (slots.as_mut_ptr(), stack.as_mut_ptr());
+        legacy = Some((slots, stack));
+        p
+    };
     unsafe {
-        std::ptr::copy_nonoverlapping(args, slots.as_mut_ptr(), seed);
-        slots.set_len(seed);
+        std::ptr::copy_nonoverlapping(args, slots_ptr, seed);
         // Surplus arguments were still moved to us: drop them.
         for k in seed..argc {
             std::ptr::drop_in_place(args.add(k));
         }
+        for k in seed..n_slots {
+            slots_ptr.add(k).write(Value::Undefined);
+        }
+        for &s in chunk.jit_var_force_resets() {
+            let s = s as usize;
+            if s < seed {
+                std::ptr::drop_in_place(slots_ptr.add(s));
+                slots_ptr.add(s).write(Value::Undefined);
+            }
+        }
     }
-    slots.resize(n_slots, Value::Undefined);
-    for &s in chunk.jit_var_force_resets() {
-        slots[s as usize] = Value::Undefined;
-    }
-    stack.clear();
-    stack.reserve(code.max_stack);
 
-    let stack_base = stack.as_mut_ptr();
-    let env_raw = Rc::as_ptr(&env) as *const u8;
+    let env_raw = Rc::as_ptr(unsafe { &*env }) as *const u8;
     let mut ctx = JitCtx {
         helpers: i.jit_helpers.as_ptr(),
         stack_base,
@@ -2819,9 +3494,9 @@ pub(crate) unsafe fn run_moved(
         },
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
-        env,
+        env_ref: env,
         this_val,
-        slots: slots.as_mut_ptr(),
+        slots: slots_ptr,
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
         n_slots,
         handlers: Vec::new(),
@@ -2839,11 +3514,32 @@ pub(crate) unsafe fn run_moved(
             std::ptr::drop_in_place(p);
             p = p.add(1);
         }
+        // Drop the frame's local slots (initialized Values throughout the run).
+        for k in 0..n_slots {
+            std::ptr::drop_in_place(slots_ptr.add(k));
+        }
     }
-    slots.clear();
-    stack.clear();
-    if i.vm_pool.len() < 64 {
-        i.vm_pool.push((slots, stack));
+    match legacy {
+        None => {
+            let buf = unsafe { std::ptr::NonNull::new_unchecked(slots_ptr) };
+            if i.frame_pool.len() < 64 {
+                i.frame_pool.push(buf);
+            } else {
+                unsafe {
+                    drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                        slots_ptr as *mut std::mem::MaybeUninit<Value>,
+                        FRAME_BUF,
+                    )));
+                }
+            }
+        }
+        Some((mut slots, stack)) => {
+            // The values were dropped above; the Vec must not double-drop them.
+            unsafe { slots.set_len(0) };
+            if i.vm_pool.len() < 64 {
+                i.vm_pool.push((slots, stack));
+            }
+        }
     }
     if ok == 1 {
         Ok(std::mem::take(&mut ctx.ret))
@@ -2873,7 +3569,7 @@ pub(crate) unsafe fn run_moved(
     _i: &mut Interp,
     _chunk: &Rc<Chunk>,
     _code: &JitCode,
-    _env: &Env,
+    _env: *const Env,
     _this_val: Value,
     _args: *mut Value,
     _argc: usize,

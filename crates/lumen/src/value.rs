@@ -564,6 +564,11 @@ impl Property {
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
     index: crate::fasthash::FastMap<Rc<str>, usize>,
+    /// This object serves (or once served) as some object's prototype: structural changes to it
+    /// bump the global [`proto_epoch`], invalidating every property-*creation* inline cache
+    /// (their fill-time chain walks proved "no hop shadows this name" — see
+    /// [`crate::bytecode::IC_CREATE`]). Set by the creation-IC fill walk itself, one-way.
+    proto_flag: std::cell::Cell<bool>,
     /// Object shape (hidden class): the id encoding this map's ordered key sequence (see
     /// [`ShapeTable`]). Two `Props` share an id exactly when they added the same keys in the same
     /// order, so an inline cache that recorded (shape, slot) from one object can trust that slot
@@ -585,6 +590,32 @@ const NO_SLOT: u32 = u32::MAX;
 /// the same first key to two of them lands on the same child shape.
 const SHAPE_EMPTY: u32 = 0;
 
+/// The property-creation epoch (see [`Props::proto_flag`]): bumped whenever a marked prototype
+/// mutates structurally, any `[[SetPrototypeOf]]` succeeds, or a `defineProperty` rewrites
+/// attributes — every event that could shadow a creation IC's "the chain has no setter /
+/// non-writable / own copy of this name" proof. Process-global and atomic, NOT thread-local:
+/// generator/async bodies run JS on pooled worker threads sharing the same `Interp` (one thread
+/// at a time via channel handoff, which also orders these accesses), so a bump from a worker
+/// must be visible to caches validated on the main thread. Starts at 1; saturates at `u32::MAX`,
+/// which no cache hit accepts — after ~4e9 invalidations the creation ICs simply turn off
+/// instead of ABA-cycling.
+static PROTO_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// The current creation-IC epoch. `u32::MAX` = permanently invalidated (see [`PROTO_EPOCH`]).
+#[inline]
+pub(crate) fn proto_epoch() -> u32 {
+    PROTO_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Invalidate every property-creation inline cache (see [`PROTO_EPOCH`]).
+pub(crate) fn bump_proto_epoch() {
+    let _ = PROTO_EPOCH.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |v| Some(v.saturating_add(1)),
+    );
+}
+
 /// The object-shape (hidden-class) transition tree. A shape id encodes an *ordered sequence of
 /// property keys* — two `Props` share an id exactly when they added the same keys in the same
 /// order (attributes are NOT encoded; the inline cache re-checks accessor/writable at the slot).
@@ -596,20 +627,37 @@ const SHAPE_EMPTY: u32 = 0;
 struct ShapeTable {
     transitions: crate::fasthash::FastMap<(u32, Rc<str>), u32>,
     next: u32,
+    /// This thread's id-range base (see `SHAPE_ORDINAL`).
+    base: u32,
 }
 
+/// Allocates each thread's shape-id range. The table itself is thread-local (its `Rc<str>` keys
+/// can't cross threads), but generator/async bodies run JS on pooled *worker* threads sharing
+/// the same `Interp` and object graph — so ids minted on different threads flow through the same
+/// inline caches and MUST NOT collide. Each thread takes a disjoint `ordinal << 24` range
+/// (16.7M shapes per thread; the coroutine pool keeps the thread count small — past 256 threads
+/// ordinals recycle, restoring the pre-partitioning collision odds rather than failing).
+static SHAPE_ORDINAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 thread_local! {
-    static SHAPES: RefCell<ShapeTable> = RefCell::new(ShapeTable {
-        transitions: Default::default(),
-        next: 1, // 0 is SHAPE_EMPTY
+    static SHAPES: RefCell<ShapeTable> = RefCell::new({
+        let ord = SHAPE_ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xFF;
+        let base = ord << 24;
+        ShapeTable {
+            transitions: Default::default(),
+            next: base | 1, // low id 0 is skipped everywhere (SHAPE_EMPTY is the global 0)
+            base,
+        }
     });
 }
 
 impl ShapeTable {
     fn fresh(&mut self) -> u32 {
         let id = self.next;
-        // Wrap past 0 (SHAPE_EMPTY must stay the empty object's id alone).
-        self.next = self.next.checked_add(1).filter(|&n| n != 0).unwrap_or(1);
+        // Wrap within this thread's 24-bit range, skipping low-word 0 (SHAPE_EMPTY must stay
+        // the empty object's id alone).
+        let low = (id.wrapping_add(1)) & 0x00FF_FFFF;
+        self.next = self.base | if low == 0 { 1 } else { low };
         id
     }
 }
@@ -678,6 +726,22 @@ impl Props {
             index: Default::default(),
             shape: SHAPE_EMPTY,
             elems: Vec::new(),
+            proto_flag: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Mark this object as a live prototype (see `proto_flag`).
+    #[inline]
+    pub(crate) fn mark_proto(&self) {
+        self.proto_flag.set(true);
+    }
+
+    /// Bump the creation-IC epoch if this object is a marked prototype (called by every
+    /// structural mutation).
+    #[inline]
+    fn note_structural(&self) {
+        if self.proto_flag.get() {
+            bump_proto_epoch();
         }
     }
 
@@ -784,6 +848,7 @@ impl Props {
     }
     /// Drop every property (used by the GC to break a garbage object's reference cycles).
     pub(crate) fn clear(&mut self) {
+        self.note_structural();
         self.entries.clear();
         self.index.clear();
         self.elems.clear();
@@ -806,11 +871,30 @@ impl Props {
         self.elems.push(slot as u32);
     }
 
+    /// Insert a key *known to be absent* (the caller shape-validated the map), landing on a
+    /// *known* child shape: skips both the existence scan and the transition-table lookup that
+    /// [`Props::insert`] pays. `new_shape` must be the memoized `shape_transition(shape, key)`
+    /// result recorded when this (shape, key) pair was first inserted the slow way.
+    pub(crate) fn append_new(&mut self, key: Rc<str>, prop: Property, new_shape: u32) {
+        self.note_structural();
+        let slot = self.entries.len();
+        if !self.index.is_empty() {
+            self.index.insert(key.clone(), slot);
+        } else if slot + 1 > INDEX_THRESHOLD {
+            self.build_index();
+            self.index.insert(key.clone(), slot);
+        }
+        self.shape = new_shape;
+        self.entries.push((key, prop));
+        self.note_inserted(slot);
+    }
+
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
         if let Some(i) = self.find(&key) {
             self.entries[i].1 = prop;
         } else {
+            self.note_structural();
             let slot = self.entries.len();
             if !self.index.is_empty() {
                 self.index.insert(key.clone(), slot);
@@ -835,6 +919,7 @@ impl Props {
         if self.entries.iter().all(|(k, _)| keep(k)) {
             return;
         }
+        self.note_structural();
         self.entries.retain(|(k, _)| keep(k));
         self.index.clear();
         if self.entries.len() > INDEX_THRESHOLD {
@@ -852,6 +937,7 @@ impl Props {
         let Some(i) = self.find(key) else {
             return false;
         };
+        self.note_structural();
         self.entries.remove(i);
         self.shape = shape_fresh(); // slots shifted — deopt (see remove_indices_from)
         if !self.index.is_empty() {

@@ -36,6 +36,10 @@ pub struct LStr {
 
 const HDR: usize = std::mem::size_of::<Header>();
 
+/// Byte offset of the length within the header — the JIT's inline equality/truthiness templates
+/// read `len` from machine code through the stored pointer (the strong count stays at offset 0).
+pub(crate) const LEN_OFF: usize = std::mem::offset_of!(Header, len);
+
 fn layout(cap: u32) -> Layout {
     Layout::from_size_align(HDR + cap as usize, std::mem::align_of::<Header>())
         .expect("string too large")

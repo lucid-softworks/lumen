@@ -137,7 +137,15 @@ pub struct ThreadCoro {
     pub done: bool,
     /// Set on the first resume — distinguishes "suspendedStart" from a suspended yield.
     pub started: bool,
+    /// Frame-ownership tag: `FnFrame`s pushed while this coroutine's body runs carry this id
+    /// (via `Interp::cur_coro`), so a worker-thread panic can evict exactly the dead body's
+    /// frames — they may be interleaved with the driver's own frames across suspensions, so a
+    /// watermark truncate cannot find them.
+    pub(crate) id: u32,
 }
+
+/// Allocates [`ThreadCoro::id`]s; 0 is reserved for "not in a coroutine body" (the main driver).
+static CORO_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 impl ThreadCoro {
     /// Hand control to the generator and block until it next parks or finishes. Saves/restores the
@@ -152,8 +160,10 @@ impl ThreadCoro {
         }
         self.started = true;
         let (saved_strict, saved_depth, saved_tco) = (i.strict, i.depth, i.tco_ok);
+        let saved_coro = std::mem::replace(&mut i.cur_coro, self.id);
         let _ = self.resume_tx.send(signal);
         let s = self.suspend_rx.recv();
+        i.cur_coro = saved_coro;
         i.strict = saved_strict;
         i.depth = saved_depth;
         i.tco_ok = saved_tco;
@@ -164,8 +174,15 @@ impl ThreadCoro {
                 }
                 s
             }
-            // The worker died (panicked) — treat as a finished generator.
+            // The worker died (panicked) — treat as a finished generator. Its unwind skipped the
+            // straight-line `fn_frames.pop()`s of any calls the body had in flight — across ALL
+            // its resumes, whose frames may be interleaved with the driver's — while dropping
+            // their callee handles, so those frames' `fn_ptr`s no longer point at live objects
+            // (see `FnFrame::fn_ptr`). Evict exactly this body's frames by ownership tag before
+            // anything (an error's `capture_stack`, `f.caller` reflection) reconstructs a handle
+            // through one.
             Err(_) => {
+                i.fn_frames.retain(|f| f.coro != self.id);
                 self.done = true;
                 Suspend::Done(Value::Undefined)
             }
@@ -315,6 +332,7 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<C
         std::io::Error::other("coroutine worker unavailable")
     })?;
     Ok(Coroutine::Thread(ThreadCoro {
+        id: CORO_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         resume_tx,
         suspend_rx,
         done: false,

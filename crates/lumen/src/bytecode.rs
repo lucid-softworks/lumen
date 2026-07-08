@@ -47,7 +47,8 @@ pub enum Tier {
 /// [object shapes]: crate::value::Props::shape
 ///
 /// `repr(C)` with this field order gives the JIT's inline templates fixed byte offsets to read
-/// the live cache from machine code: recv_shape@0, holder_shape@4, slot@8, depth@12.
+/// the live cache from machine code: recv_shape@0, holder_shape@4, slot@8, depth@12, mid_ok@13,
+/// mid_shape@16.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IcState {
@@ -55,6 +56,12 @@ pub struct IcState {
     pub holder_shape: u32,
     pub slot: u32,
     pub depth: u8,
+    /// Whether `mid_shape` was recorded (a `depth == 2` fill whose intermediate hop was a plain
+    /// ordinary object). Needed as a flag because shape id 0 is a real shape (the empty object).
+    pub mid_ok: u8,
+    /// The intermediate (depth-1) hop's shape for a `depth == 2` hit: a match proves that hop
+    /// still lacks the name, making the two-hop shape fast path sound.
+    pub mid_shape: u32,
 }
 
 /// Byte offsets into an [`IcState`] `Cell`, for the JIT inline templates.
@@ -62,10 +69,21 @@ pub const IC_OFF_RECV_SHAPE: u32 = 0;
 pub const IC_OFF_HOLDER_SHAPE: u32 = 4;
 pub const IC_OFF_SLOT: u32 = 8;
 pub const IC_OFF_DEPTH: u32 = 12;
+pub const IC_OFF_MID_OK: u32 = 13;
+pub const IC_OFF_MID_SHAPE: u32 = 16;
 
 pub const IC_EMPTY: u8 = u8::MAX;
 /// Deepest prototype hop the IC will record; hotter sites deeper than this stay on the slow path.
 pub const IC_MAX_DEPTH: u8 = 4;
+/// `IcState::depth` marker for a property-*creation* cache (constructor `this.x = v` on a fresh
+/// shape): `recv_shape` is the shape BEFORE the insert and `mid_shape` holds the
+/// [`crate::value::proto_epoch`] at fill. A hit requires the same shape, the same receiver
+/// prototype *identity* (pinned per-site in `Interp::creation_pins` — same shape does NOT imply
+/// same proto), an unchanged epoch (no marked prototype mutated, no proto swap, no defineProperty
+/// anywhere), a live `extensible` receiver, and a non-index name (guaranteed at fill): together
+/// they re-prove the fill-time chain walk ("no hop has an own copy / setter / non-writable shadow
+/// of this name"), so the insert can skip the whole `OrdinarySet` walk.
+pub const IC_CREATE: u8 = 0xFD;
 
 /// Per-site free-name inline-cache state (`LoadName` / `LoadNameForCall`): the last successful
 /// *depth-0* resolution — the name was found directly in the scope the chunk runs under (`env`),
@@ -124,7 +142,88 @@ impl IcState {
         holder_shape: 0,
         slot: 0,
         depth: IC_EMPTY,
+        mid_ok: 0,
+        mid_shape: 0,
     };
+}
+
+/// Per-site call cache (`Op::Call` / `Op::CallWithThis`): the last callee that took the JIT→JIT
+/// fast call at this site, keyed by object identity. `callee` is the callee object's stored `Rc`
+/// pointer; a `Weak` pin in [`Chunk::call_pins`] keeps that ADDRESS from ever being recycled, so
+/// a live `Value::Obj` whose payload equals `callee` proves it is the *same, still-alive* object
+/// — and therefore that everything recorded at fill time still holds: its `call` field is the
+/// same `Callable::User` (a live function's `call` is never reassigned; the one upgrade site
+/// only converts `Callable::None`), which pins the `Function`, its env, its compiled chunk
+/// (`Function::code` is set once) and machine code (`Chunk::jit` is set once). A hit therefore
+/// skips the borrow + dispatch checks and reads everything through raw pointers with a single
+/// refcount bump (the env handle the frame needs).
+///
+/// The fill happens only after [`crate::interpreter::Interp::call_jit_fast`] passed its full
+/// guard set (plain same-realm user fn, not an arrow / class ctor / proxy, compiled, machine
+/// code, no activation env), so a hit replays exactly that committed path. The same-realm proof
+/// is carried by `global_env`: the fill's env-root walk was relative to the then-active global
+/// scope, whose address is compared raw on every hit (and strong-pinned in
+/// `Interp::global_env_pins` so it can never be recycled); a realm switch changes the active
+/// global and makes every cached site miss and revalidate. The blanket proxy/realm gates
+/// `call_jit_fast` re-checks per call are safe to skip on a hit: they exist to keep EXOTIC
+/// callees off the fast path, and identity proves this callee is the same plain user function.
+#[derive(Clone, Copy)]
+pub struct CallIc {
+    /// Stored `Rc` pointer of the callee function object; 0 = empty.
+    pub callee: usize,
+    /// `Rc::as_ptr` of the callee's closure env (a hit reconstructs one owned handle from it).
+    pub env: *const std::cell::RefCell<crate::interpreter::Scope>,
+    /// Address of the `Rc<Chunk>` handle inside the callee's `Function::code` (set-once cell).
+    pub chunk: *const Rc<Chunk>,
+    /// `Rc::as_ptr` of the chunk's machine code.
+    pub code: *const crate::jit::JitCode,
+    /// `Rc::as_ptr` of the active realm's global scope at fill time: the fill's same-realm proof
+    /// (the callee's env-chain root) is relative to it, so a hit requires the active global to be
+    /// unchanged — a realm switch makes every site miss and revalidate through the full path.
+    pub global_env: usize,
+    /// The callee's strictness (feeds the frame record and the `this` binding).
+    pub strict: bool,
+}
+
+impl CallIc {
+    pub const EMPTY: CallIc = CallIc {
+        callee: 0,
+        env: std::ptr::null(),
+        chunk: std::ptr::null(),
+        code: std::ptr::null(),
+        global_env: 0,
+        strict: false,
+    };
+}
+
+/// A call site's cache: 4-way set-associative over callee identity. Method-dispatch sites are
+/// routinely polymorphic (DeltaBlue rotates a handful of `execute` implementations through one
+/// loop), so a single entry thrashes; four entries filled round-robin stabilize any site with up
+/// to four distinct callees.
+pub struct CallSite {
+    pub entries: [std::cell::Cell<CallIc>; 4],
+    /// Round-robin fill cursor.
+    pub next: std::cell::Cell<u8>,
+}
+
+impl CallSite {
+    pub fn empty() -> CallSite {
+        CallSite {
+            entries: [
+                std::cell::Cell::new(CallIc::EMPTY),
+                std::cell::Cell::new(CallIc::EMPTY),
+                std::cell::Cell::new(CallIc::EMPTY),
+                std::cell::Cell::new(CallIc::EMPTY),
+            ],
+            next: std::cell::Cell::new(0),
+        }
+    }
+    /// Record `ic` in the next way (round-robin).
+    pub fn fill(&self, ic: CallIc) {
+        let k = self.next.get() as usize & 3;
+        self.entries[k].set(ic);
+        self.next.set((k as u8 + 1) & 3);
+    }
 }
 
 /// Which update `UpdateLocal` performs, and the value it leaves on the stack: `Pre*` push the
@@ -274,14 +373,16 @@ pub enum Op {
     JumpIfFalsePeek(u32),
     JumpIfTruePeek(u32),
     JumpIfNotNullishPeek(u32),
-    /// Plain call: pops argc args and the callee; `this` is undefined.
-    Call(u16),
+    /// Plain call: pops argc args and the callee; `this` is undefined. Second operand = the
+    /// per-site [`CallIc`] index.
+    Call(u16, u32),
     /// Resolve a free name as a call target *before* the arguments evaluate (spec order):
     /// pushes the `with`-object `this` (or undefined) then the callee, feeding CallWithThis.
     /// Operands: name index, per-site [`NameIc`] index.
     LoadNameForCall(u32, u32),
-    /// Method call: pops argc args, the method, and the receiver pushed by GetMethod*.
-    CallWithThis(u16),
+    /// Method call: pops argc args, the method, and the receiver pushed by GetMethod*. Second
+    /// operand = the per-site [`CallIc`] index.
+    CallWithThis(u16, u32),
     New(u16),
     MakeArray(u16),
     /// Object literal: `count` plain data keys starting at names[start], values on the stack.
@@ -351,6 +452,14 @@ pub struct Chunk {
     /// Weak handles pinning each name cache's scope allocation (parallel to `name_caches`), so
     /// the cached raw `env` pointer can never be recycled into a different scope while cached.
     name_pins: std::cell::RefCell<Vec<Option<std::rc::Weak<std::cell::RefCell<crate::interpreter::Scope>>>>>,
+    /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
+    call_caches: Vec<CallSite>,
+    /// Weak handles pinning every callee address a call cache has ever recorded (see [`CallIc`]),
+    /// keyed by that address — one pin per distinct callee no matter how often sites refill, so a
+    /// megamorphic site can't exhaust the budget for the whole chunk.
+    call_pins: std::cell::RefCell<
+        crate::fasthash::FastMap<usize, std::rc::Weak<std::cell::RefCell<crate::value::Object>>>,
+    >,
     /// Machine-code tier state: the compile result once attempted (`None` inside = the chunk
     /// cannot JIT — async, or an unsupported platform — and runs on the bytecode VM forever).
     pub(crate) jit: std::cell::OnceCell<Option<Rc<crate::jit::JitCode>>>,
@@ -1338,6 +1447,8 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         caches: c.caches,
         name_pins: std::cell::RefCell::new(vec![None; c.name_caches.len()]),
         name_caches: c.name_caches,
+        call_caches: c.call_caches,
+        call_pins: std::cell::RefCell::new(Default::default()),
         jit: std::cell::OnceCell::new(),
     }))
 }
@@ -1359,6 +1470,7 @@ struct Compiler {
     uses_this: bool,
     caches: Vec<std::cell::Cell<IcState>>,
     name_caches: Vec<std::cell::Cell<NameIc>>,
+    call_caches: Vec<CallSite>,
     /// Number of `PushHandler` regions active at the current emission point. `break`/`continue`
     /// jumping out of a `try` block (or a for-of body, which wraps itself in a handler) must
     /// emit a `PopHandler` per region crossed, or the stale handler catches unrelated throws
@@ -1544,6 +1656,11 @@ impl Compiler {
         self.name_caches.push(std::cell::Cell::new(NameIc::EMPTY));
         (self.name_caches.len() - 1) as u32
     }
+    /// Reserve a fresh call-cache slot for a `Call`/`CallWithThis` site.
+    fn new_call_cache(&mut self) -> u32 {
+        self.call_caches.push(CallSite::empty());
+        (self.call_caches.len() - 1) as u32
+    }
     /// Declare every binding a lexical declaration pattern introduces, in source order (slot +
     /// TDZ each, like the plain-identifier path). Only the destructuring subset the compiler
     /// can lower is accepted (see `destructure_store`); anything else bails to the tree-walker.
@@ -1692,7 +1809,8 @@ impl Compiler {
                     };
                     self.expr(a)?;
                 }
-                self.emit(Op::CallWithThis(args.len() as u16));
+                let cc = self.new_call_cache();
+                        self.emit(Op::CallWithThis(args.len() as u16, cc));
                 Ok(())
             }
             // The chain's base (before any `?.` link): an ordinary expression.
@@ -2946,7 +3064,8 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        self.emit(Op::CallWithThis(args.len() as u16));
+                        let cc = self.new_call_cache();
+                        self.emit(Op::CallWithThis(args.len() as u16, cc));
                     }
                     Expr::Index {
                         obj,
@@ -2963,7 +3082,8 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        self.emit(Op::CallWithThis(args.len() as u16));
+                        let cc = self.new_call_cache();
+                        self.emit(Op::CallWithThis(args.len() as u16, cc));
                     }
                     Expr::Super => return Err(Bail),
                     Expr::Ident(name) if self.home(name).is_none() => {
@@ -2979,7 +3099,8 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        self.emit(Op::CallWithThis(args.len() as u16));
+                        let cc = self.new_call_cache();
+                        self.emit(Op::CallWithThis(args.len() as u16, cc));
                     }
                     other => {
                         self.expr(other)?;
@@ -2990,7 +3111,8 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        self.emit(Op::Call(args.len() as u16));
+                        let cc = self.new_call_cache();
+                        self.emit(Op::Call(args.len() as u16, cc));
                     }
                 }
                 Ok(())
@@ -3857,7 +3979,7 @@ fn run_vm(
             // The callee/receiver slots below the window are cloned out first, then the whole
             // region is truncated away after the call. On a throw the stack is left long, which is
             // fine: the handler unwind (or function exit) truncates it.
-            Op::Call(argc) => {
+            Op::Call(argc, _) => {
                 let at = stack.len() - argc as usize;
                 let callee = stack[at - 1].clone();
                 let v = i.call(callee, Value::Undefined, &stack[at..])?;
@@ -3878,7 +4000,7 @@ fn run_vm(
                     stack.push(callee);
                 }
             }
-            Op::CallWithThis(argc) => {
+            Op::CallWithThis(argc, _) => {
                 let at = stack.len() - argc as usize;
                 let m = stack[at - 1].clone();
                 let this = stack[at - 2].clone();
@@ -4185,6 +4307,11 @@ impl Chunk {
     pub(crate) fn jit_ops(&self) -> &[Op] {
         &self.ops
     }
+    /// The interned name a property op refers to (the emitter gates array-receiver inlining on
+    /// whether it could be an element key).
+    pub(crate) fn jit_name(&self, n: u32) -> &str {
+        &self.names[n as usize]
+    }
     /// The stable address of inline-cache site `idx`'s `Cell<IcState>`. The `caches` `Vec` is
     /// fixed once compilation finishes (never reallocated), and the `Chunk` outlives its own JIT
     /// code, so the JIT bakes this address as an immediate to read the live cache from machine
@@ -4423,9 +4550,9 @@ impl Chunk {
             Op::Jump(_) => (0, 0),
             Op::JumpIfFalse(_) => (1, 0),
             Op::JumpIfFalsePeek(_) | Op::JumpIfTruePeek(_) | Op::JumpIfNotNullishPeek(_) => (1, 1),
-            Op::Call(argc) => (*argc as usize + 1, 1),
+            Op::Call(argc, _) => (*argc as usize + 1, 1),
             Op::LoadNameForCall(..) => (0, 2),
-            Op::CallWithThis(argc) => (*argc as usize + 2, 1),
+            Op::CallWithThis(argc, _) => (*argc as usize + 2, 1),
             Op::New(argc) => (*argc as usize + 1, 1),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeObject(_, count) => (*count as usize, 1),
@@ -4498,7 +4625,7 @@ unsafe fn jit_exec_inner(
 ) -> Result<(), Abrupt> {
     let i = &mut *ctx.interp;
     let chunk = &*ctx.chunk;
-    let env = &ctx.env;
+    let env = unsafe { &*ctx.env_ref };
     let slots = std::slice::from_raw_parts_mut(ctx.slots, ctx.n_slots);
     macro_rules! pop {
         () => {{
@@ -4937,15 +5064,33 @@ unsafe fn jit_exec_inner(
             pop!();
             push!(Value::Undefined);
         }
-        Op::Call(argc) => {
+        Op::Call(argc, c) => {
             let argc = argc as usize;
             let args_ptr = sp.sub(argc);
-            // JIT→JIT fast call: on Some the arguments were MOVED into the callee — rewind the
-            // stack past them without dropping, then drop only the callee slot.
-            let undef = Value::Undefined;
-            if let Some(r) =
-                i.call_jit_fast(&*sp.sub(argc + 1), &undef as *const Value, args_ptr, argc)
-            {
+            // JIT→JIT fast call: on Some the arguments and the `this` slot were MOVED into the
+            // callee — rewind the stack past them without dropping, then drop only the callee
+            // slot. The `this` here is a local Undefined in a ManuallyDrop: the callee owns it on
+            // Some (no double drop), and leaking it on None is a no-op (no payload).
+            // The per-site callee cache short-circuits the dispatch guards on an identity hit;
+            // a miss falls into `call_jit_fast`, which refills it.
+            let mut undef = std::mem::ManuallyDrop::new(Value::Undefined);
+            let mut r = i.call_jit_cached(
+                &chunk.call_caches[c as usize],
+                &*sp.sub(argc + 1),
+                &raw mut *undef as *const Value,
+                args_ptr,
+                argc,
+            );
+            if r.is_none() {
+                r = i.call_jit_fast(
+                    &*sp.sub(argc + 1),
+                    &raw mut *undef as *const Value,
+                    args_ptr,
+                    argc,
+                    Some((&chunk.call_caches[c as usize], &chunk.call_pins)),
+                );
+            }
+            if let Some(r) = r {
                 *sp = args_ptr.sub(1);
                 std::ptr::drop_in_place(*sp); // the callee
                 let v = r?;
@@ -4971,16 +5116,29 @@ unsafe fn jit_exec_inner(
                 push!(callee);
             }
         }
-        Op::CallWithThis(argc) => {
+        Op::CallWithThis(argc, c) => {
             let argc = argc as usize;
             let args_ptr = sp.sub(argc);
-            if let Some(r) =
-                i.call_jit_fast(&*sp.sub(argc + 1), sp.sub(argc + 2), args_ptr, argc)
-            {
+            let mut r = i.call_jit_cached(
+                &chunk.call_caches[c as usize],
+                &*sp.sub(argc + 1),
+                sp.sub(argc + 2),
+                args_ptr,
+                argc,
+            );
+            if r.is_none() {
+                r = i.call_jit_fast(
+                    &*sp.sub(argc + 1),
+                    sp.sub(argc + 2),
+                    args_ptr,
+                    argc,
+                    Some((&chunk.call_caches[c as usize], &chunk.call_pins)),
+                );
+            }
+            if let Some(r) = r {
                 *sp = args_ptr.sub(1);
                 std::ptr::drop_in_place(*sp); // the method
-                *sp = sp.sub(1);
-                std::ptr::drop_in_place(*sp); // `this`
+                *sp = sp.sub(1); // `this` was consumed by the callee
                 let v = r?;
                 push!(v);
                 return Ok(());

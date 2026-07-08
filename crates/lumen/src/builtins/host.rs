@@ -30,6 +30,11 @@ fn make_262(it: &mut Interp, realm_global: Option<Value>) -> Value {
             _ => Ok(Value::Null),
         });
         it.htmldda.push(ddda.clone());
+        // An [[IsHTMLDDA]] object is falsy and compares loosely equal to undefined/null; the
+        // JIT's inline Not / loose-equality templates assume neither of an ordinary object, and
+        // gate on the receiver's `ic_plain` byte — clear it so this object always takes the
+        // checked helper.
+        ddda.borrow().ic_plain.set(false);
         set_builtin(&host, "IsHTMLDDA", Value::Obj(ddda));
     }
     it.def_method(&host, "createRealm", 0, |i, _t, _a| {
