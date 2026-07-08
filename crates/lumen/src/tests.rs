@@ -9549,3 +9549,58 @@ fn import_text_attribute_reaches_loader() {
         Completion::Throw { name, message } => panic!("threw {name}: {message}"),
     }
 }
+
+// ---- import attributes: `with { type: "bytes" }` (TC39 proposal-import-bytes) ----
+
+#[test]
+fn import_bytes_modules() {
+    // A bytes module default-exports a `Uint8Array` over an *immutable* buffer, byte-exact for
+    // arbitrary binary content. The loader hands binary over latin-1-decoded (one char per
+    // byte); the engine re-extracts the original bytes. Writes through the view fail like a
+    // non-writable property: TypeError in strict (module) code; resize/transfer throw.
+    let blob: String = [0u8, 1, 0xfe, 0xff, 0x80, 65].iter().map(|&b| b as char).collect();
+    let mut files: std::collections::HashMap<String, String> = Default::default();
+    files.insert("/blob.bin".into(), blob);
+    files.insert(
+        "/main.js".into(),
+        r#"
+        import b from '/blob.bin' with { type: 'bytes' };
+        globalThis.__b = b;
+        globalThis.__shape = [
+            b instanceof Uint8Array,
+            b.length === 6,
+            Array.from(b).join(','),
+            b.buffer.immutable === true,
+        ].join('|');
+        let wrote = 'no-throw';
+        try { b[0] = 9; } catch (e) { wrote = e.constructor.name; }
+        globalThis.__strict_write = wrote + ':' + b[0];
+        let resized = 'no-throw';
+        try { b.buffer.resize(1); } catch (e) { resized = e.constructor.name; }
+        globalThis.__resize = resized;
+        "#
+        .into(),
+    );
+    let f = files.clone();
+    let mut e = Engine::new();
+    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
+        f.get(spec).map(|s| (spec.to_string(), s.clone()))
+    })
+    .unwrap();
+    let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("{src} threw {name}: {message}"),
+    };
+    assert_eq!(read(&mut e, "globalThis.__shape"), "true|true|0,1,254,255,128,65|true");
+    assert_eq!(read(&mut e, "globalThis.__strict_write"), "TypeError:0");
+    assert_eq!(read(&mut e, "globalThis.__resize"), "TypeError");
+    // Sloppy-mode writes over an immutable buffer are a SILENT no-op (spec: the [[Set]] just
+    // returns false), still after the observable value coercion.
+    assert_eq!(
+        read(
+            &mut e,
+            "globalThis.__b[0] = 9; String(globalThis.__b[0]) + ':' + (globalThis.__b[5] = 7, globalThis.__b[5])"
+        ),
+        "0:65"
+    );
+}

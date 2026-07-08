@@ -1037,6 +1037,38 @@ fn esm_import_text_attribute() {
 }
 
 #[test]
+fn esm_import_bytes_attribute() {
+    // TC39 import-bytes: `with { type: "bytes" }` default-exports a Uint8Array over an
+    // immutable buffer, byte-exact for arbitrary binary content (here deliberately invalid
+    // UTF-8). Strict (module) writes throw TypeError and leave the bytes untouched.
+    use std::fs;
+    let dir = TempDir::new("esm-import-bytes");
+    let root = dir.0.clone();
+    fs::write(root.join("blob.bin"), [0u8, 1, 0xfe, 0xff, 0x80, 65]).unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import b from "./blob.bin" with { type: "bytes" };
+        console.log(b instanceof Uint8Array, b.length, Array.from(b).join(","));
+        console.log(b.buffer.immutable);
+        let wrote = "no-throw";
+        try { b[0] = 9; } catch (e) { wrote = e.constructor.name; }
+        console.log(wrote, b[0]);
+        const dyn = await import("./blob.bin", { with: { type: "bytes" } });
+        console.log(dyn.default === b);
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("module runs");
+    assert_eq!(
+        out.lines(),
+        ["true 6 0,1,254,255,128,65", "true", "TypeError 0", "true"]
+    );
+}
+
+#[test]
 fn esm_imports_node_builtins_named_and_default() {
     use std::fs;
     let dir = TempDir::new("esm-builtin");
