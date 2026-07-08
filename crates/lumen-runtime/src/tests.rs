@@ -659,10 +659,23 @@ const WINTERTC_SUPPORTED: &[&str] = &[
 ];
 const WINTERTC_NOT_YET: &[&str] = &[];
 
+/// Web-platform interfaces the runtime ships *beyond* the WinterTC Minimum Common API. Not part
+/// of the tracked 56/56 score, but presence-guarded the same way so they can't silently regress.
+const BEYOND_MINIMUM: &[&str] = &[
+    "WebSocket",
+    "MessageChannel",
+    "MessagePort",
+    "BroadcastChannel",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "PromiseRejectionEvent",
+];
+
 #[test]
 fn wintertc_minimum_common_api() {
     let (mut rt, out, _err) = test_runtime();
-    let all = [WINTERTC_SUPPORTED, WINTERTC_NOT_YET].concat().join(",");
+    let all = [WINTERTC_SUPPORTED, WINTERTC_NOT_YET, BEYOND_MINIMUM].concat().join(",");
     eval_ok(
         &mut rt,
         &format!(
@@ -699,11 +712,22 @@ fn wintertc_minimum_common_api() {
         "WinterTC globals now present but still listed NOT_YET — move them to SUPPORTED: {unexpected:?}"
     );
 
+    let missing_extra: Vec<&str> = BEYOND_MINIMUM
+        .iter()
+        .copied()
+        .filter(|n| !present.contains(n))
+        .collect();
+    assert!(
+        missing_extra.is_empty(),
+        "beyond-minimum web interfaces went missing: {missing_extra:?}"
+    );
+
     let total = WINTERTC_SUPPORTED.len() + WINTERTC_NOT_YET.len();
     println!(
-        "WinterTC Minimum Common API: {}/{} globals implemented",
+        "WinterTC Minimum Common API: {}/{} globals implemented (+{} beyond-minimum interfaces)",
         WINTERTC_SUPPORTED.len(),
-        total
+        total,
+        BEYOND_MINIMUM.len()
     );
 }
 
@@ -858,6 +882,134 @@ fn abort_signal_any_and_event_classes() {
             "prev: r true",
             "guard: TypeError",
         ]
+    );
+}
+
+// ---- WebSocket (RFC 6455) against an in-process echo server (lumen_web::ws_testing) ----
+
+use lumen_web::ws_testing::{spawn_echo, Mode as WsMode};
+
+/// Drive a WebSocket against `mode`'s echo server and return the captured stdout lines.
+fn ws_drive(mode: WsMode, script: &str) -> Vec<String> {
+    let port = spawn_echo(mode, 1);
+    let (mut rt, out, _err) = test_runtime();
+    let src = script.replace("{PORT}", &port.to_string());
+    rt.eval(&src).expect("ws script parses and runs to quiescence");
+    out.lines()
+}
+
+#[test]
+fn websocket_text_and_binary_round_trip() {
+    let lines = ws_drive(
+        WsMode::Echo,
+        r#"
+        const ws = new WebSocket("ws://127.0.0.1:{PORT}/", ["chat", "v2"]);
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => {
+            console.log("open", ws.readyState, ws.protocol);
+            ws.send("hello");
+        };
+        ws.onmessage = (e) => {
+            if (typeof e.data === "string") {
+                console.log("text", e.data, e instanceof MessageEvent, e.origin);
+                ws.send(new Uint8Array([1, 2, 254, 255]));
+            } else {
+                console.log("binary", Array.from(new Uint8Array(e.data)).join(","));
+                ws.close(1000, "done");
+            }
+        };
+        ws.onclose = (e) => console.log("close", e.code, e.reason, e.wasClean, ws.readyState);
+        "#,
+    );
+    let port = lines[0].is_empty();
+    let _ = port;
+    // The message-event origin is the socket URL (host:port varies), so match it structurally.
+    assert_eq!(lines[0], "open 1 chat");
+    assert!(
+        lines[1].starts_with("text hello true ws://127.0.0.1:") && lines[1].ends_with('/'),
+        "message event shape/origin: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "binary 1,2,254,255");
+    assert_eq!(lines[3], "close 1000 done true 3");
+    assert_eq!(lines.len(), 4);
+}
+
+#[test]
+fn websocket_transparent_ping_pong() {
+    // The server pings on connect; the client must answer with a pong transparently (no user
+    // event), which the server then reports back as a text message.
+    let lines = ws_drive(
+        WsMode::PingThenEcho,
+        r#"
+        const ws = new WebSocket("ws://127.0.0.1:{PORT}/");
+        ws.onmessage = (e) => { console.log("msg", e.data); ws.close(); };
+        ws.onclose = () => console.log("closed");
+        "#,
+    );
+    assert_eq!(lines, ["msg pong:marco", "closed"]);
+}
+
+#[test]
+fn websocket_reassembles_fragments() {
+    // A message split across a data frame + two continuation frames arrives whole.
+    let lines = ws_drive(
+        WsMode::FragmentedHello,
+        r#"
+        const ws = new WebSocket("ws://127.0.0.1:{PORT}/");
+        ws.onmessage = (e) => { console.log("got", e.data, e.data.length); ws.close(); };
+        ws.onclose = () => console.log("closed");
+        "#,
+    );
+    assert_eq!(lines, ["got fragment 8", "closed"]);
+}
+
+#[test]
+fn websocket_server_initiated_close() {
+    let lines = ws_drive(
+        WsMode::CloseImmediately,
+        r#"
+        const ws = new WebSocket("ws://127.0.0.1:{PORT}/");
+        ws.onclose = (e) => console.log("close", e.code, e.reason, e.wasClean);
+        ws.onopen = () => console.log("open");
+        "#,
+    );
+    assert_eq!(lines, ["open", "close 4001 going away true"]);
+}
+
+#[test]
+fn websocket_handshake_rejection_is_error_then_close() {
+    // A wrong Sec-WebSocket-Accept fails the connection: an error event, then a 1006 close.
+    let lines = ws_drive(
+        WsMode::BadAccept,
+        r#"
+        const ws = new WebSocket("ws://127.0.0.1:{PORT}/");
+        ws.onerror = () => console.log("error", ws.readyState);
+        ws.onclose = (e) => console.log("close", e.code, e.wasClean);
+        ws.onopen = () => console.log("open (wrong!)");
+        "#,
+    );
+    assert_eq!(lines, ["error 3", "close 1006 false"]);
+}
+
+#[test]
+fn websocket_constructor_validation() {
+    // Bad scheme, fragment, and duplicate subprotocol all throw synchronously (no server needed).
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const bad = (fn) => { try { fn(); console.log("no throw"); } catch (e) { console.log(e.name); } };
+        bad(() => new WebSocket("http://x/"));
+        bad(() => new WebSocket("ws://x/#frag"));
+        bad(() => new WebSocket("ws://x/", ["a", "a"]));
+        bad(() => new WebSocket("ws://x/", ["bad proto"]));
+        console.log(WebSocket.CONNECTING, WebSocket.OPEN, WebSocket.CLOSING, WebSocket.CLOSED);
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        ["SyntaxError", "SyntaxError", "SyntaxError", "SyntaxError", "0 1 2 3"]
     );
 }
 

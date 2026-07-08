@@ -67,12 +67,39 @@ const ABORT_SIGNAL_ANY: &str = r#"(() => {
     return fired;
 })()"#;
 
+/// One WebSocket connect + 20 echo round trips + close, against a shared in-process echo server.
+const WS_ECHO_ROUND_TRIPS: &str = r#"(() => new Promise((resolve) => {
+    const ws = new WebSocket("ws://127.0.0.1:{PORT}/");
+    let n = 0;
+    ws.onopen = () => ws.send("ping-0");
+    ws.onmessage = (e) => {
+        if (++n >= 20) { ws.close(); }
+        else ws.send("ping-" + n);
+    };
+    ws.onclose = () => resolve(n);
+}))()"#;
+
 fn main() {
     let mut b = Bench::new();
 
     b.run("runtime: startup (Runtime::new)", || {
         black_box(Runtime::new());
     });
+
+    // WebSocket echo round trips: a long-lived echo server, one socket (connect→20 echoes→close)
+    // per iteration through a fresh-per-iteration eval on a persistent runtime.
+    {
+        let port = lumen_web::ws_testing::spawn_echo(
+            lumen_web::ws_testing::Mode::Echo,
+            1_000_000,
+        );
+        let src: &'static str =
+            Box::leak(WS_ECHO_ROUND_TRIPS.replace("{PORT}", &port.to_string()).into_boxed_str());
+        let mut rt = Runtime::new();
+        b.run("websocket: connect + 20 echo round trips + close", || {
+            black_box(rt.eval(src).expect("ws bench parses"));
+        });
+    }
 
     let mut rt = Runtime::new();
     let mut bench_js = |b: &mut Bench, name: &str, src: &'static str| {

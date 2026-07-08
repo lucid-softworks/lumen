@@ -35,8 +35,14 @@ use lumen_host::{ops, Ctx, Extension, OpState, SpawnHandle, TaskRegistry, Value}
 
 mod http;
 mod server;
+mod sha1;
 mod sha256;
 mod url;
+mod websocket;
+
+/// WebSocket protocol internals — a from-scratch RFC 6455 codec. `websocket::testing` exposes a
+/// minimal echo server other crates' tests and benchmarks drive the client against.
+pub use websocket::testing as ws_testing;
 // The decoder parses the whole binary format; the MVP interpreter doesn't consume every field yet
 // (reserved value-type data, mutability flags, etc.), and a few opcode matches read cleaner as
 // explicit lists than ranges.
@@ -77,6 +83,14 @@ pub fn extension() -> Extension {
                 ],
             ),
             (
+                "__ws",
+                ops![
+                    "connect" (3) => websocket::op_ws_connect,
+                    "send" (2) => websocket::op_ws_send,
+                    "close" (3) => websocket::op_ws_close,
+                ],
+            ),
+            (
                 "__compress",
                 ops![
                     "deflate" (1) => op_deflate,
@@ -113,6 +127,7 @@ pub fn extension() -> Extension {
         state_init: Some(|state: &mut OpState| {
             state.put(WebState::default());
             state.put(server::ServerRegistry::default());
+            state.put(websocket::WsRegistry::default());
             state.put(wasm_ops::WasmStore::default());
         }),
         js_init: Some(JS_GLUE),
@@ -227,6 +242,12 @@ fn op_url_parse(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Va
 }
 
 // ---- crypto ----
+
+/// `n` cryptographically-random bytes (the WebSocket handshake key needs these, same source as
+/// `crypto.getRandomValues`).
+pub(crate) fn web_random_bytes(ctx: &mut Ctx, n: usize) -> Result<Vec<u8>, Value> {
+    random_bytes(ctx, n)
+}
 
 fn random_bytes(ctx: &mut Ctx, n: usize) -> Result<Vec<u8>, Value> {
     let state = ctx.host_mut::<WebState>().expect("web state installed");
