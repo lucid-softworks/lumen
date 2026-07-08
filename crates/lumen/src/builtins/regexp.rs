@@ -220,7 +220,7 @@ pub(super) fn install_regexp(it: &mut Interp) {
         }
         let s = ab(i.to_string(&arg(a, 0)))?;
         Ok(Value::Bool(!matches!(
-            regexp_exec_abstract(i, &this, s.into())?,
+            regexp_exec_abstract(i, &this, s)?,
             Value::Null
         )))
     });
@@ -494,13 +494,13 @@ fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
     let flags = ab(i.get_member(&this, "flags"))?;
     let flags = ab(i.to_string(&flags))?;
     if !flags.contains('g') {
-        return regexp_exec_abstract(i, &this, s.into());
+        return regexp_exec_abstract(i, &this, s);
     }
     let unicode = flags.contains('u') || flags.contains('v');
     set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
     let mut results: Vec<Value> = Vec::new();
     loop {
-        let result = regexp_exec_abstract(i, &this, s.clone().into())?;
+        let result = regexp_exec_abstract(i, &this, s.clone())?;
         if matches!(result, Value::Null) {
             break;
         }
@@ -527,7 +527,7 @@ fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Valu
     if !same_value(&prev, &Value::Num(0.0)) {
         set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
     }
-    let result = regexp_exec_abstract(i, &this, s.into())?;
+    let result = regexp_exec_abstract(i, &this, s)?;
     let cur = ab(i.get_member(&this, "lastIndex"))?;
     if !same_value(&cur, &prev) {
         set_throw(i, &this, "lastIndex", prev)?;
@@ -561,7 +561,7 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
     // Collect every match (RegExpExec advances lastIndex; empty matches step forward manually).
     let mut results: Vec<Value> = Vec::new();
     loop {
-        let result = regexp_exec_abstract(i, &this, s.clone().into())?;
+        let result = regexp_exec_abstract(i, &this, s.clone())?;
         if matches!(result, Value::Null) {
             break;
         }
@@ -790,7 +790,7 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
         return Ok(i.make_array(out));
     }
     if size == 0 {
-        let z = regexp_exec_abstract(i, &splitter, s.clone().into())?;
+        let z = regexp_exec_abstract(i, &splitter, s.clone())?;
         if !matches!(z, Value::Null) {
             return Ok(i.make_array(out));
         }
@@ -801,7 +801,7 @@ fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value
     let mut q = 0usize;
     while q < size {
         ab(i.set_member(&splitter, "lastIndex", Value::Num(q as f64)))?;
-        let z = regexp_exec_abstract(i, &splitter, s.clone().into())?;
+        let z = regexp_exec_abstract(i, &splitter, s.clone())?;
         if matches!(z, Value::Null) {
             q = advance_string_index(q, &s, unicode);
             continue;

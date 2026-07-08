@@ -1819,7 +1819,7 @@ fn advance_string_index(index: usize, s: &str, unicode: bool) -> usize {
 fn regexp_exec_abstract(i: &mut Interp, r: &Value, s: crate::lstr::LStr) -> Result<Value, Value> {
     let exec = ab(i.get_member(r, "exec"))?;
     if exec.is_callable() {
-        let res = ab(i.call(exec, r.clone(), &[Value::Str(s.into())]))?;
+        let res = ab(i.call(exec, r.clone(), &[Value::Str(s)]))?;
         if !matches!(res, Value::Obj(_) | Value::Null) {
             return Err(i.make_error(
                 "TypeError",
@@ -1831,7 +1831,7 @@ fn regexp_exec_abstract(i: &mut Interp, r: &Value, s: crate::lstr::LStr) -> Resu
     if map_ptr(r).map(|p| i.regexps.contains_key(&p)) != Some(true) {
         return Err(i.make_error("TypeError", "exec called on a non-RegExp object"));
     }
-    regexp_exec(i, r.clone(), &[Value::Str(s.into())])
+    regexp_exec(i, r.clone(), &[Value::Str(s)])
 }
 
 /// Coerce `v` to a RegExp object (returning it unchanged if already one).
@@ -7846,7 +7846,7 @@ fn locale_upper(s: &str, lang: Option<&str>) -> String {
 
 fn this_string(i: &mut Interp, this: &Value) -> Result<crate::lstr::LStr, Value> {
     match this {
-        Value::Str(s) => Ok(s.clone().into()),
+        Value::Str(s) => Ok(s.clone()),
         Value::Obj(o) => match &o.borrow().exotic {
             Exotic::StrWrap(s) => Ok(s.clone()),
             _ => ab(i.to_string(this)),
@@ -7913,7 +7913,7 @@ fn install_string(it: &mut Interp) {
         let f = it.make_native("[Symbol.iterator]", 0, |i, this, _| {
             let s = this_string(i, &this)?;
             let obj = Object::new(i.extra_protos.get("%StringIteratorPrototype%").cloned());
-            set_internal(&obj, "__si_str", Value::Str(s.into()));
+            set_internal(&obj, "__si_str", Value::Str(s));
             set_internal(&obj, "__si_index", Value::Num(0.0));
             Ok(Value::Obj(obj))
         });
@@ -8200,7 +8200,7 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "toWellFormed", 0, |i, this, _| {
         let s = this_string(i, &this)?;
         if !crate::jstr::has_lone_surrogate(&s) {
-            return Ok(Value::Str(s.into()));
+            return Ok(Value::Str(s));
         }
         let fixed: String = s
             .chars()
@@ -8221,7 +8221,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "localeCompare", 1, |i, this, args| {
         // RequireObjectCoercible + ToString this, then delegate to Intl.Collator.
-        let a = Value::Str(this_string(i, &this)?.into());
+        let a = Value::Str(this_string(i, &this)?);
         let b = Value::Str(ab(i.to_string(&arg(args, 0)))?);
         intl_delegate(
             i,
@@ -8233,7 +8233,7 @@ fn install_string(it: &mut Interp) {
         )
     });
     it.def_method(&sp, "toLocaleString", 0, |i, this, _| {
-        Ok(Value::Str(this_string(i, &this)?.into()))
+        Ok(Value::Str(this_string(i, &this)?))
     });
     it.def_method(&sp, "concat", 1, |i, this, args| {
         let mut s = this_string(i, &this)?.to_string();
@@ -8338,7 +8338,7 @@ fn install_string(it: &mut Interp) {
             }
         }
         match sep_str {
-            None => Ok(i.make_array(vec![Value::Str(s.into())])),
+            None => Ok(i.make_array(vec![Value::Str(s)])),
             Some(sep) => {
                 // Splitting on "" yields one piece per UTF-16 code unit (a surrogate pair
                 // becomes its two lone halves).
@@ -8450,7 +8450,7 @@ fn install_string(it: &mut Interp) {
         let rx = ab(i.make_regexp(&pattern, ""))?;
         let key = well_known_key(i, "match").unwrap();
         let matcher = ab(i.get_member(&rx, &key))?;
-        ab(i.call(matcher, rx, &[Value::Str(s.into())]))
+        ab(i.call(matcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "search", 1, |i, this, a| {
         // RequireObjectCoercible(this), then dispatch to an Object regexp's @@search.
@@ -8482,7 +8482,7 @@ fn install_string(it: &mut Interp) {
         let rx = ab(i.make_regexp(&pattern, ""))?;
         let key = well_known_key(i, "search").unwrap();
         let searcher = ab(i.get_member(&rx, &key))?;
-        ab(i.call(searcher, rx, &[Value::Str(s.into())]))
+        ab(i.call(searcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "matchAll", 1, |i, this, a| {
         // RequireObjectCoercible(this).
@@ -8531,7 +8531,7 @@ fn install_string(it: &mut Interp) {
         let rx = ab(i.make_regexp(&pattern, "g"))?;
         let key = well_known_key(i, "matchAll").unwrap();
         let matcher = ab(i.get_member(&rx, &key))?;
-        ab(i.call(matcher, rx, &[Value::Str(s.into())]))
+        ab(i.call(matcher, rx, &[Value::Str(s)]))
     });
     it.def_method(&sp, "replace", 2, |i, this, args| {
         if matches!(this, Value::Undefined | Value::Null) {
@@ -8728,7 +8728,7 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
     let (proto, exotic) = match &v {
         Value::Num(n) => (i.number_proto.clone(), Exotic::NumWrap(*n)),
         Value::Bool(b) => (i.boolean_proto.clone(), Exotic::BoolWrap(*b)),
-        Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone().into())),
+        Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone())),
         Value::Sym(s) => (i.symbol_proto.clone(), Exotic::SymWrap(s.clone())),
         Value::BigInt(n) => match i.extra_protos.get("BigInt").cloned() {
             Some(p) => (p, Exotic::BigIntWrap(n.clone())),
@@ -8826,7 +8826,7 @@ fn string_this_value(i: &mut Interp, this: &Value) -> Result<Value, Value> {
     match this {
         Value::Str(s) => Ok(Value::Str(s.clone())),
         Value::Obj(o) => match &o.borrow().exotic {
-            Exotic::StrWrap(s) => Ok(Value::Str(s.clone().into())),
+            Exotic::StrWrap(s) => Ok(Value::Str(s.clone())),
             _ => Err(i.make_error("TypeError", "not a String object")),
         },
         _ => Err(i.make_error("TypeError", "not a String object")),

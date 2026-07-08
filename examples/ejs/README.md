@@ -30,7 +30,7 @@ fresh bundle from upstream instead, see yt-dlp/ejs's own build docs (`rollup` vi
 | node 22 | 0.44 s | |
 | bun 1.3 | 0.47 s | |
 | qjs (quickjs-ng, brew) | 3.4 s | (the 8.2 s in issue #12 was a slower machine) |
-| **lumen** (`--tier=jit`) | **15 s** | was **55.8 min** at the time of issue #12 |
+| **lumen** (`--tier=jit`) | **8.7 s** | was **55.8 min** at the time of issue #12 |
 
 What the 55.8 minutes was made of, in the order it fell:
 
@@ -45,11 +45,16 @@ What the 55.8 minutes was made of, in the order it fell:
    the design original QuickJS uses), and the fused `obj.k += v` op appends **in place** when the
    accumulator is uniquely referenced — astring's `write()` becomes amortized O(1).
    82 s → 16 s.
-4. **Compiled-tier coverage and inline caches** — object-destructuring declarations and
-   simple parameter defaults now compile (meriyah/astring bail much less), and the inline
-   property caches are guarded by a *per-object* side-table flag instead of a global latch
-   (one `Uint8Array` existing no longer disables every cache in the program). → 15 s.
+4. **Compiled-tier coverage and inline caches** — object-destructuring declarations (at
+   block *and* function-body level), simple parameter defaults, optional chains (`a?.b`,
+   `r?.m(x)`), `for…of` (with exact IteratorClose semantics on break/return/throw), and
+   template literals now compile; and the inline property caches are guarded by a
+   *per-object* side-table flag instead of a global latch (one `Uint8Array` existing no
+   longer disables every cache in the program). meriyah's parser now runs almost entirely
+   on the compiled tiers. → 8.7 s.
 
-The remaining ~4× to qjs is spread across call overhead (meriyah's mutually recursive
-parse functions), the still-interpreted functions (`?.` optional chains, `for…of`,
-destructured parameters), and AST-node allocation — tracked on issue #12.
+(Chasing this also surfaced and fixed a real compiled-tier bug: `break` out of a `try`
+block leaked its handler, silently swallowing unrelated later throws.)
+
+The remaining ~2.5× to qjs is call overhead (meriyah's mutually recursive parse
+functions), AST-node allocation/GC, and refcount churn — tracked on issue #12.

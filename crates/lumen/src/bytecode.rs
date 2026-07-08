@@ -180,6 +180,22 @@ pub enum Op {
     SetProp(u32, u32),
     /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
     SetPropDrop(u32, u32),
+    /// Template-literal substitution: ToString (string hint) on the top of the stack.
+    ToStr,
+    /// `for…of` prologue: pops the iterable, pushes the iterator object then its `next` method
+    /// (GetIterator with the sync hint, via the interpreter's own helper).
+    GetIter,
+    /// One `for…of` step against the iterator/next stored in the two slots: pushes the yielded
+    /// value (or `undefined` at exhaustion) then a has-value bool — a following `JumpIfFalse`
+    /// exits the loop, so the branch reuses existing machinery in both tiers. A `next`/`done`/
+    /// `value` trap throw propagates as-is (the spec skips IteratorClose for step throws).
+    IterStepL(u16, u16),
+    /// IteratorClose on the iterator in the slot, normal-completion mode (close errors
+    /// propagate): emitted where a `break`/`return` legitimately exits a compiled `for…of`.
+    IterCloseL(u16),
+    /// The `for…of` body's catch pad: pops the in-flight exception, closes the slot's iterator
+    /// in throw mode (trap errors swallowed, per spec), and rethrows. Always abrupt.
+    IterAbortL(u16),
     /// Object-destructuring guard: throws the oracle's TypeError when the value on top of the
     /// stack (peeked, not popped) is null/undefined — GetProp's own nullish error has a
     /// different message, and the check must run before any property read.
@@ -1153,25 +1169,32 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     // do not model.
     let scan = func.scan_flags();
     if scan & SCAN_ARGUMENTS != 0 || scan & SCAN_NEW_TARGET != 0 {
+        log_bail("fn", "arguments/new.target");
         return None;
     }
     if func.is_arrow && scan & SCAN_THIS != 0 {
+        log_bail("fn", "arrow reading this");
         return None;
     }
     // Generators still run in the tree-walker (their `.return()`/`.throw()` injection and yield*
     // delegation are not modeled here). Async functions compile: `await` lowers to `Op::Await`,
     // which suspends the `VmCoro` that drives this body.
     if func.is_generator {
+        log_bail("fn", "generator");
         return None;
     }
     // A named function expression binds its own name inside the body — an env-side binding the
     // slot model doesn't carry.
     if func.is_fn_expr && func.name.is_some() {
+        log_bail("fn", "named function expression");
         return None;
     }
     // Capture analysis: which locals inner functions can name (they live in a real activation
     // env), and whether an inner arrow chain reads `this`. `None` = unanalyzable — bail.
-    let (captured, env_this) = CaptureScan::run(func)?;
+    let Some((captured, env_this)) = CaptureScan::run(func) else {
+        log_bail("capture-scan", "unanalyzable body (eval/with/annexB/pattern)");
+        return None;
+    };
 
     let mut c = Compiler {
         env_this,
@@ -1183,15 +1206,18 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     let mut defaulted: Vec<(u16, &Expr)> = Vec::new();
     for (k, p) in func.params.iter().enumerate() {
         if p.rest {
+            log_bail("params", "rest parameter");
             return None;
         }
         let Pattern::Ident(name) = &p.pattern else {
+            log_bail("params", "destructuring parameter");
             return None;
         };
         if let Some(d) = &p.default {
             // Lowerable defaults: an uncaptured identifier parameter whose default expression
             // can't observe this-or-later parameters (see `default_expr_safe`).
             if captured.contains(name) {
+                log_bail("params", "captured defaulted parameter");
                 return None;
             }
             let banned: std::collections::HashSet<&str> = func.params[k..]
@@ -1202,6 +1228,7 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
                 })
                 .collect();
             if !default_expr_safe(d, &banned) {
+                log_bail("params", "unsafe default expression");
                 return None;
             }
             defaulted.push((k as u16, d));
@@ -1285,9 +1312,15 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
     }
     // Body-level lexicals: captured ones home in the activation (inserted in TDZ by
     // make_run_env), the rest get TDZ slots.
-    c.declare_body_lexicals(&func.body, &captured).ok()?;
+    if c.declare_body_lexicals(&func.body, &captured).is_err() {
+        log_bail("body-lexicals", "unsupported declaration form");
+        return None;
+    }
     for stmt in &func.body {
-        c.stmt(stmt).ok()?;
+        if c.stmt(stmt).is_err() {
+            log_bail("stmt-in", &format!("{:.80}", format!("{stmt:?}")));
+            return None;
+        }
     }
     c.emit(Op::ReturnUndef);
     Some(Rc::new(Chunk {
@@ -1326,6 +1359,11 @@ struct Compiler {
     uses_this: bool,
     caches: Vec<std::cell::Cell<IcState>>,
     name_caches: Vec<std::cell::Cell<NameIc>>,
+    /// Number of `PushHandler` regions active at the current emission point. `break`/`continue`
+    /// jumping out of a `try` block (or a for-of body, which wraps itself in a handler) must
+    /// emit a `PopHandler` per region crossed, or the stale handler catches unrelated throws
+    /// later in the frame.
+    try_depth: u32,
     /// Slots that ever enter a temporal dead zone (an `Op::Tdz` was emitted for them). The fused
     /// element ops defer the base-slot read past key/value evaluation, which is only
     /// order-unobservable when the base can never TDZ-throw — params and `var`s qualify.
@@ -1348,6 +1386,15 @@ enum Home {
 struct LoopCtx {
     breaks: Vec<usize>,
     continues: Vec<usize>,
+    /// `Compiler::try_depth` when this context was entered — the reference point for how many
+    /// handler regions a `break`/`continue` targeting this context crosses.
+    entry_try_depth: u32,
+    /// A for-of loop's iterator slot: crossing `break`s close it (`IterCloseL`); its own
+    /// `continue`s don't (the loop keeps iterating).
+    foreach_iter: Option<u16>,
+    /// For a for-of context: `try_depth` just after its per-iteration body handler pushed —
+    /// exits emitted inside the body pop down to here before touching the handler itself.
+    body_try_depth: u32,
     /// Labels naming this loop (usually zero or one; `a: b: for(…)` stacks several). A labelled
     /// `break`/`continue` searches the loop stack for the ctx carrying its target label.
     labels: Vec<String>,
@@ -1577,6 +1624,93 @@ impl Compiler {
         }
     }
 
+    /// Compile an optional chain (`a?.b.c`, `r?.m(args)`): each optional link peeks its base —
+    /// nullish pops what the link would have consumed and jumps to a shared pad that pushes the
+    /// chain's `undefined` result (skipping every later link, key expression, and argument, per
+    /// spec). Non-optional links compile as usual. Supported spine: Member/Index reads and
+    /// Member-callee method calls; anything else (optional `delete`, `?.()` on a plain callee,
+    /// private names, `super`) bails to the tree-walker.
+    fn opt_chain(&mut self, e: &Expr, shorts: &mut Vec<usize>) -> CResult {
+        match e {
+            Expr::Member {
+                obj,
+                prop,
+                optional,
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
+                self.opt_chain(obj, shorts)?;
+                if *optional {
+                    self.opt_link(1, shorts);
+                }
+                let i = self.name_idx(prop);
+                let c = self.new_cache();
+                self.emit(Op::GetProp(i, c));
+                Ok(())
+            }
+            Expr::Index {
+                obj,
+                index,
+                optional,
+            } if !matches!(**obj, Expr::Super) => {
+                self.opt_chain(obj, shorts)?;
+                if *optional {
+                    self.opt_link(1, shorts);
+                }
+                self.expr(index)?;
+                self.emit(Op::GetElem);
+                Ok(())
+            }
+            Expr::Call {
+                callee,
+                args,
+                optional: call_opt,
+            } => {
+                let Expr::Member {
+                    obj,
+                    prop,
+                    optional,
+                } = &**callee
+                else {
+                    return Err(Bail);
+                };
+                if matches!(**obj, Expr::Super) || prop.starts_with('#') {
+                    return Err(Bail);
+                }
+                self.opt_chain(obj, shorts)?;
+                if *optional {
+                    self.opt_link(1, shorts);
+                }
+                let i = self.name_idx(prop);
+                let c = self.new_cache();
+                self.emit(Op::GetMethod(i, c));
+                if *call_opt {
+                    // `a.b?.(args)`: the method value is peeked; nullish drops [obj, method].
+                    self.opt_link(2, shorts);
+                }
+                for a in args {
+                    let ArrayElem::Item(a) = a else {
+                        return Err(Bail);
+                    };
+                    self.expr(a)?;
+                }
+                self.emit(Op::CallWithThis(args.len() as u16));
+                Ok(())
+            }
+            // The chain's base (before any `?.` link): an ordinary expression.
+            other => self.expr(other),
+        }
+    }
+
+    /// One optional link: fall through when the top of stack isn't nullish; otherwise pop the
+    /// `depth` values the rest of the link would consume and jump to the chain's undefined pad.
+    fn opt_link(&mut self, depth: u16, shorts: &mut Vec<usize>) {
+        let cont = self.emit(Op::JumpIfNotNullishPeek(0));
+        for _ in 0..depth {
+            self.emit(Op::Pop);
+        }
+        shorts.push(self.emit(Op::Jump(0)));
+        self.patch(cont);
+    }
+
     /// The local slot for a fused element access (`x[k]` → `GetElemLocal`), or `None` to use
     /// the generic ops. Fusing defers the base-local read past the key/value evaluation, so it
     /// requires: the base is an Ident homed in a slot that can never be in TDZ (a param or a
@@ -1673,11 +1807,22 @@ impl Compiler {
                     kind: kind @ (DeclKind::Let | DeclKind::Const),
                     decls,
                 } => {
+                    let is_const = matches!(kind, DeclKind::Const);
                     for (pat, _) in decls {
-                        let Pattern::Ident(name) = pat else {
-                            return Err(Bail);
-                        };
-                        let is_const = matches!(kind, DeclKind::Const);
+                        // Patterns declare every bound ident; a captured one homes in the
+                        // activation env like the plain-ident path.
+                        let mut names = std::collections::HashSet::new();
+                        pat_idents(pat, &mut names);
+                        if !matches!(pat, Pattern::Ident(_)) {
+                            // The execution lowering only handles the object-pattern subset.
+                            if names.iter().any(|n| captured.contains(n)) {
+                                log_bail("body-lexicals", "captured destructured lexical");
+                                return Err(Bail);
+                            }
+                            self.declare_lexical_pattern(pat, is_const)?;
+                            continue;
+                        }
+                        let Pattern::Ident(name) = pat else { unreachable!() };
                         if captured.contains(name) {
                             self.cap_inits
                                 .push(CapInit::Lexical(Rc::from(name.as_str()), is_const));
@@ -1686,7 +1831,7 @@ impl Compiler {
                             let slot = self.fresh_slot(name);
                             self.scope_bind(name, slot, is_const);
                             self.tdz_slots.insert(slot);
-                        self.emit(Op::Tdz(slot));
+                            self.emit(Op::Tdz(slot));
                         }
                     }
                 }
@@ -1783,15 +1928,33 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Return(arg) => {
+                // A return crossing compiled for-of loops must IteratorClose them (the value
+                // evaluates first, spec order). One level is modeled exactly; more would need
+                // the spec's cascading throw-mode closes — bail to the tree-walker.
+                let fors: Vec<(u16, u32)> = self
+                    .loops
+                    .iter()
+                    .filter_map(|c| c.foreach_iter.map(|it| (it, c.body_try_depth)))
+                    .collect();
+                if fors.len() > 1 {
+                    return Err(Bail);
+                }
                 match arg {
-                    Some(e) => {
-                        self.expr(e)?;
-                        self.emit(Op::Return);
-                    }
+                    Some(e) => self.expr(e)?,
                     None => {
-                        self.emit(Op::ReturnUndef);
+                        self.emit(Op::Undef);
                     }
                 }
+                if let Some(&(iter_s, body_depth)) = fors.first() {
+                    // Pop the regions inside the loop body, its handler, then close — a close
+                    // error propagates to handlers *outside* the loop, replacing the return.
+                    for _ in body_depth..self.try_depth {
+                        self.emit(Op::PopHandler);
+                    }
+                    self.emit(Op::PopHandler);
+                    self.emit(Op::IterCloseL(iter_s));
+                }
+                self.emit(Op::Return);
                 Ok(())
             }
             Stmt::Throw(e) => {
@@ -1883,41 +2046,49 @@ impl Compiler {
                 r
             }
             Stmt::Break(None) => {
+                let idx = self.loops.len().checked_sub(1).ok_or(Bail)?;
+                self.emit_exit_cleanup(idx, false)?;
                 let j = self.emit(Op::Jump(0));
-                self.loops.last_mut().ok_or(Bail)?.breaks.push(j);
+                self.loops[idx].breaks.push(j);
                 Ok(())
             }
             Stmt::Continue(None) => {
-                let j = self.emit(Op::Jump(0));
                 // `continue` skips switch contexts: it targets the innermost enclosing *loop*.
-                self.loops
-                    .iter_mut()
-                    .rev()
-                    .find(|c| !c.is_switch)
-                    .ok_or(Bail)?
-                    .continues
-                    .push(j);
+                let idx = self
+                    .loops
+                    .iter()
+                    .rposition(|c| !c.is_switch)
+                    .ok_or(Bail)?;
+                self.emit_exit_cleanup(idx, true)?;
+                let j = self.emit(Op::Jump(0));
+                self.loops[idx].continues.push(j);
                 Ok(())
             }
             // Labelled break/continue: jump to the loop on the stack that carries the target label.
             // A `break` to a labelled *block* (not a loop) isn't modeled here — no ctx matches, so
             // it bails to the interpreter.
             Stmt::Break(Some(name)) => {
+                let idx = self
+                    .loops
+                    .iter()
+                    .rposition(|c| c.labels.iter().any(|l| l == name))
+                    .ok_or(Bail)?;
+                self.emit_exit_cleanup(idx, false)?;
                 let j = self.emit(Op::Jump(0));
-                self.labeled_loop_mut(name).ok_or(Bail)?.breaks.push(j);
+                self.loops[idx].breaks.push(j);
                 Ok(())
             }
             Stmt::Continue(Some(name)) => {
-                let j = self.emit(Op::Jump(0));
                 // A labelled continue must target a loop — a label on a switch is only a break
                 // target (the parser rejects `continue` to it; not-found bails to the oracle).
-                self.loops
-                    .iter_mut()
-                    .rev()
-                    .find(|c| !c.is_switch && c.labels.iter().any(|l| l == name))
-                    .ok_or(Bail)?
-                    .continues
-                    .push(j);
+                let idx = self
+                    .loops
+                    .iter()
+                    .rposition(|c| !c.is_switch && c.labels.iter().any(|l| l == name))
+                    .ok_or(Bail)?;
+                self.emit_exit_cleanup(idx, true)?;
+                let j = self.emit(Op::Jump(0));
+                self.loops[idx].continues.push(j);
                 Ok(())
             }
             // A label naming a loop or switch attaches to that context; stacked labels
@@ -2018,7 +2189,8 @@ impl Compiler {
                 finalizer,
             } => {
                 if finalizer.is_some() {
-                    return Err(Bail); // `finally` is not modeled in the VM yet
+                    log_bail("stmt", "try/finally");
+                    return Err(Bail);
                 }
                 let Some((param, catch_body)) = handler else {
                     return Err(Bail); // `try`/`finally` with no `catch`
@@ -2027,11 +2199,13 @@ impl Compiler {
                     return Err(Bail); // destructuring catch param
                 }
                 let push = self.emit(Op::PushHandler(0));
+                self.try_depth += 1;
                 self.scopes.push(Vec::new());
                 let tr = self.block_body(block);
                 self.scopes.pop();
                 tr?;
                 self.emit(Op::PopHandler);
+                self.try_depth -= 1;
                 let jmp_after = self.emit(Op::Jump(0));
                 // Catch entry: the exception is on the stack.
                 let catch_pc = self.ops.len() as u32;
@@ -2056,6 +2230,146 @@ impl Compiler {
                 self.patch(jmp_after);
                 Ok(())
             }
+            // `for (x of it)`: the iterator and its `next` live in hidden slots; each step is
+            // IterStepL + JumpIfFalse (existing branch machinery in both tiers); the body runs
+            // under a per-iteration handler whose pad closes the iterator in throw mode and
+            // rethrows. Exhaustion closes nothing (spec); break/return close via
+            // `emit_exit_cleanup` / the Return arm. for-in, `for await`, destructuring bindings
+            // and captured loop variables stay on the tree-walker.
+            Stmt::ForInOf {
+                decl,
+                left,
+                right,
+                of: true,
+                is_await: false,
+                body,
+            } => {
+                let Pattern::Ident(name) = left else {
+                    return Err(Bail);
+                };
+                let labels = std::mem::take(&mut self.pending_labels);
+                // The loop variable: a declaration binds a fresh (uncaptured — else the
+                // per-iteration env freshness matters and we bail) slot scoped to the loop; a
+                // bare identifier assigns an existing binding or a free name. Spec order for a
+                // lexical declaration: the fresh binding exists — in TDZ — while the iterable
+                // expression evaluates (`for (const x of [x])` throws a ReferenceError), so the
+                // scope and Tdz emit BEFORE `right`.
+                self.scopes.push(Vec::new());
+                enum Bind {
+                    Slot(u16),
+                    Cap(u32),
+                    Name(u32),
+                }
+                let bind = match decl {
+                    Some(DeclKind::Using | DeclKind::AwaitUsing) => {
+                        self.scopes.pop();
+                        return Err(Bail);
+                    }
+                    Some(kind) => {
+                        if self.env_names.contains_key(name) || self.captured_name(name) {
+                            self.scopes.pop();
+                            return Err(Bail);
+                        }
+                        let slot = self.fresh_slot(name);
+                        self.scope_bind(name, slot, matches!(kind, DeclKind::Const));
+                        if matches!(kind, DeclKind::Let | DeclKind::Const) {
+                            self.tdz_slots.insert(slot);
+                            self.emit(Op::Tdz(slot));
+                        }
+                        Bind::Slot(slot)
+                    }
+                    None => match self.home(name) {
+                        Some(Home::Slot(slot, is_const)) => {
+                            if is_const {
+                                self.scopes.pop();
+                                return Err(Bail);
+                            }
+                            Bind::Slot(slot)
+                        }
+                        Some(Home::Env(is_const)) => {
+                            if is_const {
+                                self.scopes.pop();
+                                return Err(Bail);
+                            }
+                            Bind::Cap(self.name_idx(name))
+                        }
+                        None => Bind::Name(self.name_idx(name)),
+                    },
+                };
+                let er = self.expr(right);
+                if er.is_err() {
+                    self.scopes.pop();
+                    return er;
+                }
+                let iter_s = self.fresh_slot("%iter%");
+                let next_s = self.fresh_slot("%next%");
+                self.emit(Op::GetIter);
+                self.emit(Op::StoreLocal(next_s));
+                self.emit(Op::StoreLocal(iter_s));
+                self.loops.push(LoopCtx {
+                    labels,
+                    entry_try_depth: self.try_depth,
+                    foreach_iter: Some(iter_s),
+                    ..Default::default()
+                });
+                let loop_head = self.ops.len();
+                self.emit(Op::IterStepL(iter_s, next_s));
+                let jexit = self.emit(Op::JumpIfFalse(0));
+                match bind {
+                    Bind::Slot(slot) => {
+                        self.emit(Op::StoreLocal(slot));
+                    }
+                    Bind::Cap(n) => {
+                        self.emit(Op::StoreCap(n));
+                    }
+                    Bind::Name(n) => {
+                        self.emit(Op::StoreName(n));
+                    }
+                }
+                let push = self.emit(Op::PushHandler(0));
+                self.try_depth += 1;
+                self.loops.last_mut().expect("just pushed").body_try_depth = self.try_depth;
+                let r = self.stmt(body);
+                let ctx = self.loops.pop().expect("just pushed");
+                self.scopes.pop();
+                r?;
+                self.emit(Op::PopHandler);
+                self.try_depth -= 1;
+                // continues re-enter at the step (the loop head re-pushes the body handler —
+                // their cleanup already popped it).
+                for j in ctx.continues {
+                    match &mut self.ops[j] {
+                        Op::Jump(t) => *t = loop_head as u32,
+                        _ => unreachable!("continue is a jump"),
+                    }
+                }
+                self.emit(Op::Jump(0));
+                let jback = self.ops.len() - 1;
+                match &mut self.ops[jback] {
+                    Op::Jump(t) => *t = loop_head as u32,
+                    _ => unreachable!(),
+                }
+                // The body's catch pad: swallow-close + rethrow (always abrupt).
+                let abort_pc = self.ops.len() as u32;
+                match &mut self.ops[push] {
+                    Op::PushHandler(t) => *t = abort_pc,
+                    _ => unreachable!(),
+                }
+                self.emit(Op::IterAbortL(iter_s));
+                // Exhaustion lands here (the step's bool was false): drop the undefined
+                // placeholder the step pushed; no close on a completed iterator.
+                self.patch(jexit);
+                self.emit(Op::Pop);
+                // Breaks jump here too — their cleanup (pop handler + close) ran at the site.
+                let after = self.ops.len() as u32;
+                for j in ctx.breaks {
+                    match &mut self.ops[j] {
+                        Op::Jump(t) => *t = after,
+                        _ => unreachable!("break is a jump"),
+                    }
+                }
+                Ok(())
+            }
             other => {
                 log_bail("stmt", &format!("{:.60}", format!("{other:?}")));
                 Err(Bail)
@@ -2063,13 +2377,51 @@ impl Compiler {
         }
     }
 
-    /// The nearest enclosing loop context labelled `name`, searched innermost-first.
-    fn labeled_loop_mut(&mut self, name: &str) -> Option<&mut LoopCtx> {
-        self.loops
-            .iter_mut()
-            .rev()
-            .find(|c| c.labels.iter().any(|l| l == name))
+    /// Whether `name` is in the function's captured set (env-homed) — a for-of declaration of a
+    /// captured name needs per-iteration environment freshness the slot model doesn't have.
+    fn captured_name(&self, name: &str) -> bool {
+        self.env_names.contains_key(name)
     }
+
+    /// Emit the bookkeeping a `break`/`continue` targeting `self.loops[target]` must run before
+    /// its jump: pop every `try`/for-of-body handler region opened since the target's entry (a
+    /// stale handler would catch unrelated throws later in the frame), and IteratorClose each
+    /// for-of iterator being abandoned — the target's own iterator too for a `break`, but not
+    /// for a `continue` (the loop keeps iterating). Crossing more than one for-of level bails:
+    /// the spec cascades close errors through the *outer* loop's throw-mode close, which this
+    /// flat emission doesn't model (the tree-walker gets it right by unwinding).
+    fn emit_exit_cleanup(&mut self, target: usize, is_continue: bool) -> CResult {
+        // For-of levels whose iterator is abandoned by this jump.
+        let closes: Vec<(usize, u16, u32)> = self
+            .loops
+            .iter()
+            .enumerate()
+            .skip(if is_continue { target + 1 } else { target })
+            .filter_map(|(k, c)| c.foreach_iter.map(|it| (k, it, c.body_try_depth)))
+            .collect();
+        if closes.len() > 1 {
+            return Err(Bail);
+        }
+        let mut depth_now = self.try_depth;
+        if let Some(&(_, iter_s, body_depth)) = closes.last() {
+            // Pop the regions inside the for-of body, then its own body handler, then close.
+            for _ in body_depth..depth_now {
+                self.emit(Op::PopHandler);
+            }
+            self.emit(Op::PopHandler);
+            self.emit(Op::IterCloseL(iter_s));
+            depth_now = body_depth - 1;
+        }
+        // Remaining regions down to the target's entry (plain `try`s between the loops — and for
+        // a continue to a for-of, its own body handler, which the loop head re-pushes).
+        let floor = self.loops[target].entry_try_depth;
+        for _ in floor..depth_now {
+            self.emit(Op::PopHandler);
+        }
+        Ok(())
+    }
+
+
 
     fn block_body(&mut self, body: &[Stmt]) -> CResult {
         self.declare_block_lexicals(body)?;
@@ -2549,6 +2901,25 @@ impl Compiler {
                 self.update_target(arg, kind)
             }
             Expr::Assign { op, target, value } => self.assign(op, target, value),
+            Expr::ToStr(inner) => {
+                self.expr(inner)?;
+                self.emit(Op::ToStr);
+                Ok(())
+            }
+            Expr::OptionalChain(inner) => {
+                let mut shorts = Vec::new();
+                self.opt_chain(inner, &mut shorts)?;
+                if shorts.is_empty() {
+                    return Ok(()); // no optional link actually taken a short path
+                }
+                let done = self.emit(Op::Jump(0));
+                for j in shorts {
+                    self.patch(j);
+                }
+                self.emit(Op::Undef);
+                self.patch(done);
+                Ok(())
+            }
             Expr::Call {
                 callee,
                 args,
@@ -2570,6 +2941,7 @@ impl Compiler {
                         self.emit(Op::GetMethod(i, c));
                         for a in args {
                             let ArrayElem::Item(a) = a else {
+                                log_bail("expr", "spread argument");
                                 return Err(Bail);
                             };
                             self.expr(a)?;
@@ -2586,6 +2958,7 @@ impl Compiler {
                         self.emit(Op::GetMethodElem);
                         for a in args {
                             let ArrayElem::Item(a) = a else {
+                                log_bail("expr", "spread argument");
                                 return Err(Bail);
                             };
                             self.expr(a)?;
@@ -2601,6 +2974,7 @@ impl Compiler {
                         self.emit(Op::LoadNameForCall(i, c));
                         for a in args {
                             let ArrayElem::Item(a) = a else {
+                                log_bail("expr", "spread argument");
                                 return Err(Bail);
                             };
                             self.expr(a)?;
@@ -2611,6 +2985,7 @@ impl Compiler {
                         self.expr(other)?;
                         for a in args {
                             let ArrayElem::Item(a) = a else {
+                                log_bail("expr", "spread argument");
                                 return Err(Bail);
                             };
                             self.expr(a)?;
@@ -3532,6 +3907,41 @@ fn run_vm(
                 );
                 stack.push(v);
             }
+            Op::ToStr => {
+                let v = pop!();
+                let s = i.to_string(&v)?;
+                stack.push(Value::Str(s));
+            }
+            Op::GetIter => {
+                let v = pop!();
+                let (it, nx) = i.get_iterator(&v)?;
+                stack.push(it);
+                stack.push(nx);
+            }
+            Op::IterStepL(is, ns) => {
+                let it = slots[is as usize].clone();
+                let nx = slots[ns as usize].clone();
+                match i.iterator_step(&it, &nx)? {
+                    Some(v) => {
+                        stack.push(v);
+                        stack.push(Value::Bool(true));
+                    }
+                    None => {
+                        stack.push(Value::Undefined);
+                        stack.push(Value::Bool(false));
+                    }
+                }
+            }
+            Op::IterCloseL(s) => {
+                let it = slots[s as usize].clone();
+                i.iterator_close_normal(&it)?;
+            }
+            Op::IterAbortL(s) => {
+                let exc = pop!();
+                let it = slots[s as usize].clone();
+                i.iterator_close(&it);
+                return Err(Abrupt::Throw(exc));
+            }
             Op::Throw => {
                 let v = pop!();
                 return Err(Abrupt::Throw(v));
@@ -3977,6 +4387,11 @@ impl Chunk {
             Op::SetElemDrop => (3, 0),
             Op::AppendProp(..) => (3, 0),
             Op::DestructureGuard => (1, 1),
+            Op::ToStr => (1, 1),
+            Op::GetIter => (1, 2),
+            Op::IterStepL(..) => (0, 2),
+            Op::IterCloseL(_) => (0, 0),
+            Op::IterAbortL(_) => (1, 0),
             Op::GetElemLocal(_) => (1, 1),
             Op::SetElemLocal(_) => (2, 1),
             Op::SetElemLocalDrop(_) => (2, 0),
@@ -4608,6 +5023,41 @@ unsafe fn jit_exec_inner(
                 values,
             );
             push!(v);
+        }
+        Op::ToStr => {
+            let v = pop!();
+            let s = i.to_string(&v)?;
+            push!(Value::Str(s));
+        }
+        Op::GetIter => {
+            let v = pop!();
+            let (it, nx) = i.get_iterator(&v)?;
+            push!(it);
+            push!(nx);
+        }
+        Op::IterStepL(is, ns) => {
+            let it = slots[is as usize].clone();
+            let nx = slots[ns as usize].clone();
+            match i.iterator_step(&it, &nx)? {
+                Some(v) => {
+                    push!(v);
+                    push!(Value::Bool(true));
+                }
+                None => {
+                    push!(Value::Undefined);
+                    push!(Value::Bool(false));
+                }
+            }
+        }
+        Op::IterCloseL(s) => {
+            let it = slots[s as usize].clone();
+            i.iterator_close_normal(&it)?;
+        }
+        Op::IterAbortL(s) => {
+            let exc = pop!();
+            let it = slots[s as usize].clone();
+            i.iterator_close(&it);
+            return Err(Abrupt::Throw(exc));
         }
         Op::Throw => {
             let v = pop!();

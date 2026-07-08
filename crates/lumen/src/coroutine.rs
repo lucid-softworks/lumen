@@ -312,7 +312,7 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<C
     // The worker is idle in `job_rx.recv()`; hand it this coroutine. A send failure means the worker
     // vanished — surface it like a failed spawn rather than wedging.
     worker.send(job).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::Other, "coroutine worker unavailable")
+        std::io::Error::other("coroutine worker unavailable")
     })?;
     Ok(Coroutine::Thread(ThreadCoro {
         resume_tx,

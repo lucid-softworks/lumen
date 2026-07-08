@@ -247,12 +247,12 @@ mod asm {
         }
         /// ldr xd, [xn, #imm] (imm = byte offset, multiple of 8, unsigned)
         pub fn ldr_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
-            debug_assert!(imm_bytes % 8 == 0 && imm_bytes / 8 < 4096);
+            debug_assert!(imm_bytes.is_multiple_of(8) && imm_bytes / 8 < 4096);
             self.emit(0xF940_0000 | ((imm_bytes / 8) << 10) | (rn << 5) | rt);
         }
         /// str xt, [xn, #imm]
         pub fn str_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
-            debug_assert!(imm_bytes % 8 == 0 && imm_bytes / 8 < 4096);
+            debug_assert!(imm_bytes.is_multiple_of(8) && imm_bytes / 8 < 4096);
             self.emit(0xF900_0000 | ((imm_bytes / 8) << 10) | (rn << 5) | rt);
         }
         /// stp xt1, xt2, [sp, #-imm]! (pre-index, imm = positive byte count, multiple of 8)
@@ -329,7 +329,7 @@ mod asm {
         }
         /// ldr wt, [xn, #imm] (32-bit, unsigned scaled by 4)
         pub fn ldr_w_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
-            debug_assert!(imm_bytes % 4 == 0 && imm_bytes / 4 < 4096);
+            debug_assert!(imm_bytes.is_multiple_of(4) && imm_bytes / 4 < 4096);
             self.emit(0xB940_0000 | ((imm_bytes / 4) << 10) | (rn << 5) | rt);
         }
         /// madd xd, xn, xm, xa  (xd = xn*xm + xa)
@@ -355,12 +355,12 @@ mod asm {
         }
         /// ldr dt, [xn, #imm] (scaled)
         pub fn ldr_d_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
-            debug_assert!(imm_bytes % 8 == 0 && imm_bytes / 8 < 4096);
+            debug_assert!(imm_bytes.is_multiple_of(8) && imm_bytes / 8 < 4096);
             self.emit(0xFD40_0000 | ((imm_bytes / 8) << 10) | (rn << 5) | rt);
         }
         /// str dt, [xn, #imm] (scaled)
         pub fn str_d_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
-            debug_assert!(imm_bytes % 8 == 0 && imm_bytes / 8 < 4096);
+            debug_assert!(imm_bytes.is_multiple_of(8) && imm_bytes / 8 < 4096);
             self.emit(0xFD00_0000 | ((imm_bytes / 8) << 10) | (rn << 5) | rt);
         }
         /// add xd, xn, #imm12
@@ -1211,9 +1211,9 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.obj_from_rc < 4096
         && layout.obj_exotic < 4096
         && layout.obj_ic_plain < 4096
-        && sh % 4 == 0
+        && sh.is_multiple_of(4)
         && sh / 4 < 4096
-        && en % 8 == 0
+        && en.is_multiple_of(8)
         && en / 8 < 4096
         && layout.entry_accessor < 4096
         && layout.entry_value + 16 < 256
@@ -1429,7 +1429,7 @@ fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
     // so it shares that gate.
     get_prop_inlinable(layout)
         && layout.rc_strong_off < 256
-        && layout.scope_gen % 4 == 0
+        && layout.scope_gen.is_multiple_of(4)
         && layout.scope_gen / 4 < 4096
         && layout.binding_value + 16 < 256
         && layout.binding_value < 4096
@@ -1552,9 +1552,9 @@ fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elp = layout.obj_props + layout.props_elems + layout.vec_ptr_off;
     let ell = layout.obj_props + layout.props_elems + layout.vec_len_off;
     get_prop_inlinable(layout)
-        && elp % 8 == 0
+        && elp.is_multiple_of(8)
         && elp / 8 < 4096
-        && ell % 8 == 0
+        && ell.is_multiple_of(8)
         && ell / 8 < 4096
         && layout.entry_writable < 4096
 }
@@ -2678,7 +2678,7 @@ fn stack_depths(chunk: &Chunk) -> Option<usize> {
                 work.push((*t as usize, next));
                 work.push((pc + 1, next));
             }
-            Op::Return | Op::ReturnUndef | Op::Throw => {}
+            Op::Return | Op::ReturnUndef | Op::Throw | Op::IterAbortL(_) => {}
             Op::PushHandler(t) => {
                 // The catch entry runs with the exception pushed on the entry depth.
                 work.push((*t as usize, d + 1));
