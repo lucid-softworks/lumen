@@ -757,6 +757,111 @@ fn error_reporting_globals() {
 }
 
 #[test]
+fn message_channel_semantics() {
+    // Channel messaging: data serializes synchronously at postMessage (later mutations are
+    // invisible), delivery queues until the receiving port starts (assigning onmessage starts
+    // it), the receiver gets a CLONE, and the event is a real MessageEvent.
+    let (mut rt, out, _err) = test_runtime();
+    rt.eval(
+        r#"
+        const { port1, port2 } = new MessageChannel();
+        const msg = { n: 1 };
+        port2.postMessage(msg);       // port1 not started yet: queued
+        msg.n = 999;                  // must not be observable (sync serialize)
+        port1.onmessage = (e) => {
+            console.log(e.data.n, e.data !== msg, e instanceof MessageEvent, e.type);
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(out.lines(), ["1 true true message"]);
+}
+
+#[test]
+fn message_port_close_and_guards() {
+    let (mut rt, out, _err) = test_runtime();
+    rt.eval(
+        r#"
+        const { port1, port2 } = new MessageChannel();
+        port1.onmessage = () => console.log("received (wrong: port closed)");
+        port1.close();
+        port2.postMessage("x");       // dropped: peer closed
+        try { new MessagePort(); } catch (e) { console.log("ctor:", e.constructor.name); }
+        setTimeout(() => console.log("done"), 5);
+        "#,
+    )
+    .unwrap();
+    assert_eq!(out.lines(), ["ctor: TypeError", "done"]);
+}
+
+#[test]
+fn broadcast_channel_fanout() {
+    // BroadcastChannel: every same-name channel EXCEPT the sender receives its own clone;
+    // posting on a closed channel is an InvalidStateError DOMException.
+    let (mut rt, out, _err) = test_runtime();
+    rt.eval(
+        r#"
+        const a = new BroadcastChannel("chan");
+        const b = new BroadcastChannel("chan");
+        const c = new BroadcastChannel("chan");
+        const other = new BroadcastChannel("elsewhere");
+        a.onmessage = () => console.log("self (wrong!)");
+        other.onmessage = () => console.log("cross-name (wrong!)");
+        b.onmessage = (e) => { e.data.x++; console.log("b", e.data.x); };
+        c.onmessage = (e) => console.log("c", e.data.x); // b's mutation must not leak here
+        a.postMessage({ x: 7 });
+        setTimeout(() => {
+            c.close();
+            try { c.postMessage(1); } catch (e) { console.log("closed:", e.name); }
+        }, 5);
+        "#,
+    )
+    .unwrap();
+    assert_eq!(out.lines(), ["b 8", "c 7", "closed: InvalidStateError"]);
+}
+
+#[test]
+fn abort_signal_any_and_event_classes() {
+    let (mut rt, out, _err) = test_runtime();
+    rt.eval(
+        r#"
+        // AbortSignal.any: first abort wins; a pre-aborted input short-circuits.
+        const c1 = new AbortController();
+        const c2 = new AbortController();
+        const s = AbortSignal.any([c1.signal, c2.signal]);
+        s.addEventListener("abort", () => console.log("any:", s.reason.message));
+        c1.abort(new Error("first"));
+        c2.abort(new Error("second (must lose)"));
+        console.log("pre:", AbortSignal.any([AbortSignal.abort("done")]).aborted);
+        // Event classes: CloseEvent code is ToUint16; ErrorEvent coerces positions; the
+        // PromiseRejectionEvent init requires a promise.
+        const ce = new CloseEvent("close", { code: 70000, reason: "bye", wasClean: true });
+        console.log("close:", ce.code, ce.reason, ce.wasClean);
+        const ee = new ErrorEvent("error", { message: "m", lineno: 3.7, error: 42 });
+        console.log("errev:", ee.message, ee.lineno, ee.error);
+        const pre = new PromiseRejectionEvent("unhandledrejection", {
+            promise: Promise.resolve(),
+            reason: "r",
+        });
+        console.log("prev:", pre.reason, pre.promise instanceof Promise);
+        try { new PromiseRejectionEvent("x", {}); } catch (e) { console.log("guard:", e.constructor.name); }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        out.lines(),
+        [
+            "any: first",
+            "pre: true",
+            "close: 4464 bye true",
+            "errev: m 3 42",
+            "prev: r true",
+            "guard: TypeError",
+        ]
+    );
+}
+
+#[test]
 fn wintertc_functional_smoke() {
     // Presence is not correctness: exercise the core interfaces end-to-end.
     let (mut rt, out, _err) = test_runtime();

@@ -5,10 +5,13 @@
 #   engine     — running representative JavaScript through Engine::eval, plus startup.
 #   internals  — the compilation pipeline stage by stage (lex → parse → encode → decode),
 #                via the `bench` feature's lumen::bench_api.
+#   runtime    — the assembled runtime's web surface (channel messaging, broadcast fan-out,
+#                error reporting) through Runtime::eval with the loop pumped.
 #
 # Usage:
 #   scripts/run-benches.sh            # both suites
 #   scripts/run-benches.sh engine     # just the engine suite
+#   scripts/run-benches.sh runtime    # just the runtime suite
 #   scripts/run-benches.sh internals  # just the internals suite
 set -euo pipefail
 
@@ -20,9 +23,11 @@ suite="${1:-all}"
 case "$suite" in
   engine)    cargo bench -p lumen --bench engine ;;
   internals) cargo bench -p lumen --features bench --bench internals ;;
+  runtime)   cargo bench -p lumen-runtime --bench runtime ;;
   all)
     cargo bench -p lumen --bench engine
     cargo bench -p lumen --features bench --bench internals
+    cargo bench -p lumen-runtime --bench runtime
     ;;
-  *) echo "unknown suite '$suite' (want: engine | internals | all)" >&2; exit 1 ;;
+  *) echo "unknown suite '$suite' (want: engine | internals | runtime | all)" >&2; exit 1 ;;
 esac

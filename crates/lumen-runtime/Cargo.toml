@@ -19,3 +19,7 @@ lumen-web = { path = "../lumen-web" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "runtime"
+harness = false

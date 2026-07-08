@@ -15,6 +15,7 @@ use std::path::PathBuf;
 const JS_FILES: &[&str] = &[
     "preamble.js",
     "events.js",
+    "messaging.js",
     "encoding.js",
     "url.js",
     "urlpattern.js",
