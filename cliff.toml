@@ -1,0 +1,60 @@
+# git-cliff configuration, used by release-plz to generate CHANGELOGs from Conventional Commits.
+#
+# Why this file exists: the repo also carries a rolling `nightly` tag (see nightly.yml) that points
+# at an old commit. Without an explicit `tag_pattern`, that non-semver tag gets treated as a version
+# boundary, which made release-plz mis-scope a release PR and dump the entire project history into a
+# single new section. Restricting version detection to `v<major>.<minor>.<patch>` tags makes the
+# range between releases deterministic and ignores `nightly` (and any future non-version tags).
+#
+# The body template reproduces release-plz's default "keep a changelog" output (compare links,
+# `*(scope)*` prefixes, grouped by type) so existing CHANGELOG sections stay consistent.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+"""
+body = """
+{% if version %}\
+    {% if previous.version %}\
+        ## [{{ version | trim_start_matches(pat="v") }}](https://github.com/lucid-softworks/lumen/compare/{{ previous.version }}...{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+    {% else %}\
+        ## [{{ version | trim_start_matches(pat="v") }}](https://github.com/lucid-softworks/lumen/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+    {% endif %}\
+{% else %}\
+    ## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}{{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+# Only real release tags (v1.2.3) delimit versions — this is the key line: it makes `nightly` and
+# any other non-semver tag invisible to changelog range detection.
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+protect_breaking_commits = false
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+# Match release-plz's established grouping in this repo: feat → Added, fix → Fixed, everything
+# else → Other (the existing CHANGELOG uses only those three headers). Release-chore and dependency
+# bumps are dropped so a release PR never lists its own "chore(release): …" commit.
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore: release", skip = true },
+  { message = "^chore\\(deps\\)", skip = true },
+  { message = ".*", group = "Other" },
+]
