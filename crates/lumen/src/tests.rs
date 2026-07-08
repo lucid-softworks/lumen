@@ -8304,6 +8304,7 @@ fn uint8array_base64_hex_spec() {
     );
 }
 
+#[cfg(feature = "intl")]
 #[test]
 fn listformat_to_parts_and_temporal_removed_methods() {
     assert_eq!(
@@ -8954,6 +8955,7 @@ fn dynamic_function_coerces_params_before_body() {
         "p,b"
     );
 }
+#[cfg(feature = "intl")]
 #[test]
 fn locale_canonicalization_and_likely_subtags() {
     assert_eq!(run("new Intl.Locale('ces').toString()"), "cs");
@@ -8993,6 +8995,7 @@ fn bigint_relational_compare_is_exact() {
     );
 }
 
+#[cfg(feature = "intl")]
 #[test]
 fn collator_three_level_compare() {
     // Case is a tertiary difference: lowercase sorts first in en.
@@ -9014,6 +9017,7 @@ fn collator_three_level_compare() {
     );
 }
 
+#[cfg(feature = "intl")]
 #[test]
 fn cldr_unit_patterns_correct_ids() {
     // Regression (issue #7): the CLDR table matched unit ids by bare suffix and picked up
@@ -9041,6 +9045,7 @@ fn cldr_unit_patterns_correct_ids() {
         "1 hour, 46 minutes, 40 seconds"
     );
 }
+#[cfg(feature = "intl")]
 #[test]
 fn numberformat_exact_decimal_inputs() {
     // A BigInt beyond 2^53 keeps its exact digits.
@@ -9054,6 +9059,7 @@ fn numberformat_exact_decimal_inputs() {
         "9007200.256743991"
     );
 }
+#[cfg(feature = "intl")]
 #[test]
 fn dtf_chinese_calendar_year_parts() {
     assert_eq!(

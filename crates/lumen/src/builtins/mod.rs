@@ -176,8 +176,50 @@ fn date_all_default(i: &mut Interp, options: &Value) -> Result<Value, Value> {
     Ok(Value::Obj(o))
 }
 
+/// [`intl_delegate`] without ECMA-402: the `toLocale*`/`localeCompare` surface must still exist
+/// (it's ECMA-262), so degrade the way engines built without i18n do — the locale-independent
+/// equivalents. Services with no reasonable 262-only fallback report the missing feature.
+#[cfg(not(feature = "intl"))]
+pub(crate) fn intl_delegate(
+    i: &mut Interp,
+    service: &str,
+    _locales: Value,
+    _options: Value,
+    method: &str,
+    call_args: &[Value],
+) -> Result<Value, Value> {
+    match (service, method) {
+        // String.prototype.localeCompare → code-unit order (the spec's only hard requirement
+        // is a consistent total order over equal/before/after).
+        ("Collator", "compare") => {
+            let a = ab(i.to_string(&arg(call_args, 0)))?;
+            let b = ab(i.to_string(&arg(call_args, 1)))?;
+            Ok(Value::Num(match crate::jstr::cmp_units(&a, &b) {
+                std::cmp::Ordering::Less => -1.0,
+                std::cmp::Ordering::Equal => 0.0,
+                std::cmp::Ordering::Greater => 1.0,
+            }))
+        }
+        // Number/BigInt.prototype.toLocaleString → ToString.
+        ("NumberFormat", "format") => Ok(Value::Str(ab(i.to_string(&arg(call_args, 0)))?)),
+        // Date.prototype.toLocale{,Date,Time}String → the plain toString rendering.
+        ("DateTimeFormat", "format") => {
+            let t = match arg(call_args, 0) {
+                Value::Num(t) => t,
+                other => ab(i.to_number(&other))?,
+            };
+            Ok(Value::from_string(date::date_to_string(t)))
+        }
+        _ => Err(i.make_error(
+            "TypeError",
+            format!("Intl.{service} is unavailable: lumen was built without the `intl` feature"),
+        )),
+    }
+}
+
 /// Construct `Intl.<service>(locales, options)` and invoke `method(args…)` on it. Used to route the
 /// `toLocale*`/`localeCompare` methods through the Intl services now that they exist.
+#[cfg(feature = "intl")]
 pub(crate) fn intl_delegate(
     i: &mut Interp,
     service: &str,
@@ -2167,6 +2209,7 @@ pub fn install(it: &mut Interp) {
     disposable::install_disposable_stack(it);
     shadowrealm::install_shadow_realm(it);
     crate::temporal::install(it);
+    #[cfg(feature = "intl")]
     crate::intl::install(it);
 }
 
@@ -7670,12 +7713,19 @@ fn same_value_zero(a: &Value, b: &Value) -> bool {
 
 /// Canonicalize the locale argument to toLocale{Lower,Upper}Case and return its language subtag
 /// (lowercased), or `None` when no locale was supplied. Invalid locales throw RangeError.
+#[cfg(feature = "intl")]
 fn locale_case_lang(i: &mut Interp, locales: &Value) -> Result<Option<String>, Value> {
     let list = crate::intl::canonicalize_locale_list(i, locales)?;
     Ok(list
         .first()
         .and_then(|l| l.split('-').next())
         .map(|s| s.to_ascii_lowercase()))
+}
+
+/// Without ECMA-402 the locale argument is ignored: default (root) case mapping.
+#[cfg(not(feature = "intl"))]
+fn locale_case_lang(_i: &mut Interp, _locales: &Value) -> Result<Option<String>, Value> {
+    Ok(None)
 }
 
 /// Language-sensitive lowercasing. Turkish/Azeri map the dotted/dotless I pair specially; all other

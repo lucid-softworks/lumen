@@ -12,6 +12,12 @@ license.workspace = true
 [dependencies]
 
 [features]
+default = ["intl"]
+# ECMA-402 (`Intl`) and the CLDR data tables backing it — the single largest contributor to
+# binary size. Disable (`--no-default-features`) for a small build: the `Intl` global is absent
+# and the `toLocale*` methods degrade to their locale-independent forms (like engines built
+# without i18n support).
+intl = []
 # The curated embedder surface (`lumen::embed`: Ctx, host state, define_global, event-loop
 # hooks) used by the lumen-host/lumen-runtime crates. Off by default: everything under it is a
 # public-API commitment on a published crate, gated until it stabilizes with those crates.

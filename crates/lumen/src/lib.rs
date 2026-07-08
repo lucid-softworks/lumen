@@ -31,12 +31,14 @@ mod eval;
 mod fasthash;
 mod host;
 mod interpreter;
+#[cfg(feature = "intl")]
 mod intl;
 mod jit;
 mod jstr;
 mod lstr;
 mod lexer;
 mod modules;
+#[cfg(feature = "intl")]
 mod numbering;
 mod parser;
 mod regex;
@@ -51,10 +53,13 @@ mod tzdata;
 #[rustfmt::skip]
 mod umalqura;
 #[rustfmt::skip]
+#[cfg(feature = "intl")]
 mod cldr_likely;
 #[rustfmt::skip]
+#[cfg(feature = "intl")]
 mod cldr_dates;
 #[rustfmt::skip]
+#[cfg(feature = "intl")]
 mod cldr_units;
 #[rustfmt::skip]
 mod units;

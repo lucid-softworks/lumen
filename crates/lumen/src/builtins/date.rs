@@ -456,7 +456,7 @@ fn parse_iso(s: &str) -> f64 {
     time_clip(adjusted)
 }
 
-fn date_to_string(t: f64) -> String {
+pub(super) fn date_to_string(t: f64) -> String {
     match (date_str_part(t), time_str_part(t)) {
         (Some(d), Some(tm)) => format!("{d} {tm}"),
         _ => "Invalid Date".to_string(),
