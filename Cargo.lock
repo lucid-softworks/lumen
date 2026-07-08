@@ -51,11 +51,11 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "lumen-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen-host",
  "lumen-repl",
@@ -64,28 +64,28 @@ dependencies = [
 
 [[package]]
 name = "lumen-difftest"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-fs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-repl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen-host",
  "lumen-runtime",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen-fs",
  "lumen-host",
@@ -112,14 +112,14 @@ dependencies = [
 
 [[package]]
 name = "lumen-timers"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-wasm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "js-sys",
  "lumen",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-web"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -166,9 +166,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.22"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "slab"
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "test262-runner"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lumen",
 ]
