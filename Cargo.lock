@@ -51,11 +51,11 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "lumen-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen-host",
  "lumen-repl",
@@ -64,28 +64,28 @@ dependencies = [
 
 [[package]]
 name = "lumen-difftest"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-fs"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-host"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-node"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-repl"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen-host",
  "lumen-runtime",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-runtime"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen-fs",
  "lumen-host",
@@ -112,14 +112,14 @@ dependencies = [
 
 [[package]]
 name = "lumen-timers"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-wasm"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "js-sys",
  "lumen",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "test262-runner"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "lumen",
 ]
