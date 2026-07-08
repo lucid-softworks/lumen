@@ -7,14 +7,37 @@ loop and host APIs. Every crate in the workspace is std-only: no `tokio`, `mio`,
 
 ## The engine (`crates/lumen`)
 
-A lexer, parser, and tree-walking interpreter with generators and `async`/`await` running on
-stackful coroutines, full `RegExp` (including `\p{…}` and inline modifiers), typed arrays,
-`Proxy`/`Reflect`, ES modules (top-level await, `import defer`, source phase), `Intl`, and
-`Temporal`. An opt-in bytecode execution tier is under active development alongside the
-reference tree-walker.
+A lexer, parser, and **three execution tiers**:
+
+- a **tree-walking interpreter** — the reference oracle: the spec semantics live here, and
+  every other tier must match it observably (a differential fuzzer, `lumen-difftest`, holds
+  them to that);
+- an opt-in **bytecode VM** — functions compile whole (or not at all — no deoptimization) to
+  a stack machine with slot-homed locals, per-site inline caches for property and free-name
+  access backed by object shapes (hidden classes), and dense-array element fast paths;
+- an **ARM64 template JIT** (macOS/Apple Silicon) — bytecode lowers to real machine code:
+  per-op templates with the interpreter as the shared slow path, inline-cache reads baked
+  into the instruction stream, fused compare-and-branch, exact-`ToInt32` bitops, and numeric
+  *register chains* that keep runs of arithmetic entirely in FP registers. On other
+  platforms the JIT tier degrades to the bytecode VM.
+
+Tier selection: `--tier=interp|bytecode|jit` (interp is the default). Functions tier up
+after a call-count threshold — immediately if the body contains a loop.
+
+The language surface: generators and `async`/`await` running on stackful coroutines (async
+bodies suspend on the bytecode VM itself), full `RegExp` (including `\p{…}` and inline
+modifiers), typed arrays, `Proxy`/`Reflect`, ES modules (top-level await, `import defer`,
+source phase), `Intl`, and `Temporal`.
+
+On dependencies and `unsafe`: the workspace stays std-only — the JIT maps executable memory
+through raw `extern "C"` declarations of `mmap`/`pthread_jit_write_protect_np` rather than
+libc. The interpreter and bytecode VM are safe Rust; `unsafe` is concentrated where machine
+code meets the object graph (the JIT's executable pages and its templates' raw reads — every
+baked offset is *measured at runtime* against the live types and fails closed to the checked
+helper if anything doesn't hold) and in the N-API addon loader's `dlopen` bridge.
 
 **Passes 100% of [tc39/test262](https://github.com/tc39/test262): 53,400/53,400** (including
-annexB, intl402, and staging).
+annexB, intl402, and staging) — on the default tier and under `LUMEN_TIER=jit`.
 
 Extracted from — and used by — the [lucid-softworks/browser](https://github.com/lucid-softworks/browser)
 engine as its JS backend (`backend-lumen`), with full git history.
@@ -98,6 +121,10 @@ lumen-node     node: compatibility (require, node:path/os/fs, Buffer)
 lumen-runtime  the event loop; assembles the op crates; console + process
 lumen-repl     interactive shell
 lumen-cli      node/deno-style entrypoint
+
+test262-runner   conformance harness (parallel workers over ./test262)
+lumen-difftest   differential fuzzer across the three execution tiers
+lumen-wasm       wasm build of the engine
 ```
 
 The dependency graph is a strict DAG — `lumen ← lumen-host ← {op crates} ← lumen-runtime ←
@@ -138,12 +165,23 @@ cargo build --release -p lumen --bin lumen
 ```sh
 scripts/test262-clone.sh    # one-time: clone the suite into ./test262
 scripts/run-test262.sh      # run it (see crates/test262-runner for env knobs)
+LUMEN_TIER=jit scripts/run-test262.sh    # same suite against the compiled tiers
+```
+
+The execution tiers are also held together by a differential fuzzer: every generated program
+runs in all three tiers, which must agree on the completion value, thrown errors, the
+observable side-effect trace, and final global state. Divergences are delta-minimized into a
+regression corpus that replays on every run.
+
+```sh
+cargo run --release -p lumen-difftest -- --count 2000
 ```
 
 ## Benchmarks
 
 ```sh
-scripts/run-v8bench.sh      # classic V8 suite (v8-v7); downloads on first run
+scripts/run-v8bench.sh      # classic V8 suite (v8-v7) on lumen; downloads on first run
+scripts/bench-compare.sh    # same suite on node + bun + lumen, as a markdown table
 
 git clone https://github.com/chromium/octane.git ../octane   # one-time: Octane checkout
 scripts/run-octane.sh                    # full Octane suite
