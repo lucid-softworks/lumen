@@ -2577,7 +2577,32 @@ fn emit_get_elem_inline(
     a.bind(ex_ok);
     a.ldrb_imm(12, 11, plain);
     a.cbz(12, false, slow);
-    // 5. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
+    // 5. mirror read: coherent + hole-free ⇒ bounds + one indexed load of a known Num — no
+    // entry chase, no tag check, no refcount bump. A miss answers classically below.
+    let classic = a.new_label();
+    let mirror_hit = a.new_label();
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    a.ldrb_imm(12, 11, mf);
+    let mask = asm::logical_imm_w(
+        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+    )
+    .unwrap();
+    a.logic_imm_w(0, 12, 12, mask);
+    a.cmp_imm_w(12, (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32);
+    a.b_cond(C_NE, classic);
+    a.ldr_imm(12, 11, ml);
+    a.cmp_reg_x(9, 12);
+    a.b_cond(C_HS, classic);
+    a.ldr_imm(12, 11, mp);
+    a.ldr_d_lsl3(0, 12, 9);
+    a.movz(12, 4, 0);
+    a.fmov_x_d(13, 0);
+    a.movz(14, 0, 0);
+    a.b(mirror_hit); // a Num: skip the refcount-bump block
+    a.bind(classic);
+    // 5b. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
     a.b_cond(C_HS, slow);
@@ -2609,6 +2634,7 @@ fn emit_get_elem_inline(
     a.add_imm(16, 16, 1);
     a.stur(16, 13, strong);
     a.bind(nobump);
+    a.bind(mirror_hit);
     // drop the receiver (strong was > 1; if the value IS the receiver the bump balanced it)
     a.ldur(9, 10, strong);
     a.sub_imm(9, 9, 1);
@@ -3001,7 +3027,33 @@ fn emit_elem_local_keyed(
     a.bind(ex_ok);
     a.ldrb_imm(12, 11, plain);
     a.cbz(12, false, slow);
-    // 5. dense bounds
+    let mirror_hit = a.new_label();
+    let classic = a.new_label();
+    if get {
+        // 5. mirror read: bounds + one indexed load of a known Num (see emit_get_elem_inline).
+        let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+        let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+        let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+        a.ldrb_imm(12, 11, mf);
+        let mask = asm::logical_imm_w(
+            (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+        )
+        .unwrap();
+        a.logic_imm_w(0, 12, 12, mask);
+        a.cmp_imm_w(12, (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32);
+        a.b_cond(C_NE, classic);
+        a.ldr_imm(12, 11, ml);
+        a.cmp_reg_x(9, 12);
+        a.b_cond(C_HS, classic);
+        a.ldr_imm(12, 11, mp);
+        a.ldr_d_lsl3(1, 12, 9);
+        a.movz(12, 4, 0);
+        a.fmov_x_d(13, 1);
+        a.movz(14, 0, 0);
+        a.b(mirror_hit);
+    }
+    a.bind(classic);
+    // 5b. dense bounds
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
     a.b_cond(C_HS, slow);
@@ -3033,6 +3085,7 @@ fn emit_elem_local_keyed(
         a.add_imm(16, 16, 1);
         a.stur(16, 13, strong);
         a.bind(nobump);
+        a.bind(mirror_hit);
         match key {
             KeySrc::Stack => {
                 // pop key, push value → result replaces the key slot
