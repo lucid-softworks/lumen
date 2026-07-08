@@ -98,7 +98,8 @@ pub struct NameIc {
     /// `Rc::as_ptr` of the scope at cache time (0 = empty; low bit set = global-object mode).
     pub env: usize,
     /// Scope mode: the resolved `&Binding` within that scope's map. Global mode: shape<<32|slot.
-    pub binding: usize,
+    /// `u64` (not `usize`) so the packing is well-defined on 32-bit targets (wasm).
+    pub binding: u64,
     pub gen: u32,
     pub _pad: u32,
 }
@@ -3578,7 +3579,7 @@ impl Chunk {
             // The unchanged generation proves the map is structurally untouched since the fill:
             // the pointer is live and the resolution unchanged (see NameIc). The value and TDZ
             // flag are read live — in-place writes flow through.
-            let bd = unsafe { &*(ic.binding as *const crate::interpreter::Binding) };
+            let bd = unsafe { &*(ic.binding as usize as *const crate::interpreter::Binding) };
             return if bd.initialized {
                 Some(bd.value.clone())
             } else {
@@ -3623,7 +3624,7 @@ impl Chunk {
                 let v = bd.value.clone();
                 self.name_caches[c as usize].set(NameIc {
                     env: Rc::as_ptr(env) as usize,
-                    binding: bd as *const _ as usize,
+                    binding: bd as *const _ as usize as u64,
                     gen: b.vars.generation(),
                     _pad: 0,
                 });
@@ -3652,7 +3653,7 @@ impl Chunk {
         let v = p.value.clone();
         self.name_caches[c as usize].set(NameIc {
             env: Rc::as_ptr(env) as usize | 1,
-            binding: ((g.props.shape() as usize) << 32) | slot,
+            binding: ((g.props.shape() as u64) << 32) | slot as u64,
             gen: env.borrow().vars.generation(),
             _pad: 0,
         });
