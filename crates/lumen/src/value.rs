@@ -74,14 +74,28 @@ pub struct JitLayout {
     pub props_entries: usize,
     /// The data-pointer word within a `Vec` (not necessarily offset 0 — RawVec layout is unstable).
     pub vec_ptr_off: usize,
+    /// The length word within a `Vec` (probed like `vec_ptr_off`).
+    pub vec_len_off: usize,
+    /// The `elems` dense-element `Vec<u32>` within `Props`.
+    pub props_elems: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
     pub entry_size: usize,
     /// `Value` within an entry `(Rc<str>, Property)`.
     pub entry_value: usize,
     /// `accessor` bool within an entry.
     pub entry_accessor: usize,
+    /// `writable` bool within an entry.
+    pub entry_writable: usize,
     /// `Exotic::None`'s discriminant byte (the inline path requires an ordinary object).
     pub exotic_none_tag: u8,
+    /// `Exotic::Array`'s discriminant byte (the element templates also accept arrays).
+    pub exotic_array_tag: u8,
+    /// `Rc::as_ptr(env)` → the scope's `VarMap` generation counter (through the `RefCell`).
+    pub scope_gen: usize,
+    /// `value` within a `Binding` (the LoadName template's 24-byte copy source).
+    pub binding_value: usize,
+    /// `initialized` bool within a `Binding` (TDZ check).
+    pub binding_init: usize,
     pub valid: bool,
 }
 
@@ -106,20 +120,48 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
     let strong_ok = unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
 
-    // Vec data-pointer word (RawVec layout is not guaranteed — locate it by value).
-    let mut v: Vec<(Rc<str>, Property)> = Vec::with_capacity(1);
+    // Vec data-pointer and length words (RawVec layout is not guaranteed — locate them by value).
+    // Capacity 3 / length 1 makes the three words distinguishable.
+    let mut v: Vec<(Rc<str>, Property)> = Vec::with_capacity(3);
     v.push((Rc::from("p"), Property::plain(Value::Num(0.0))));
     let vptr = v.as_ptr() as usize;
     let vwords =
         unsafe { std::slice::from_raw_parts(&v as *const Vec<_> as *const usize, std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8) };
     let vec_ptr_off = vwords.iter().position(|&w| w == vptr).map(|i| i * 8);
+    let vec_len_off = vwords.iter().position(|&w| w == 1).map(|i| i * 8);
+    // The element templates index a `Vec<u32>` (`Props::elems`) with the same offsets; verify the
+    // layout really is per-Vec-struct, not per-element-type.
+    let mut v32: Vec<u32> = Vec::with_capacity(3);
+    v32.push(7);
+    let v32ptr = v32.as_ptr() as usize;
+    let v32words = unsafe {
+        std::slice::from_raw_parts(&v32 as *const Vec<u32> as *const usize, std::mem::size_of::<Vec<u32>>() / 8)
+    };
+    let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
+        && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
 
-    // Exotic::None discriminant (Exotic is repr(Rust) but a plain C-like leading unit variant is
-    // discriminant 0; probe to be certain).
+    // Exotic::None / Exotic::Array discriminants (Exotic is repr(Rust); probe to be certain).
     let none = Exotic::None;
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
+    let arr = Exotic::Array;
+    let exotic_array_tag = unsafe { *(&arr as *const Exotic as *const u8) };
 
-    let valid = strong_ok && niche_ok && vec_ptr_off.is_some();
+    // Scope offsets for the inline LoadName template: Rc::as_ptr → RefCell<Scope> value →
+    // Scope.vars → VarMap generation. The RefCell value offset is probed on a live scope.
+    let probe_env = crate::interpreter::new_scope(None);
+    let scope_addr = {
+        let b = probe_env.borrow();
+        &*b as *const crate::interpreter::Scope as usize
+    };
+    let scope_refcell = scope_addr - Rc::as_ptr(&probe_env) as usize;
+    let scope_gen = scope_refcell
+        + offset_of!(crate::interpreter::Scope, vars)
+        + crate::interpreter::VarMap::generation_offset();
+    let binding_value = offset_of!(crate::interpreter::Binding, value);
+    let binding_init = offset_of!(crate::interpreter::Binding, initialized);
+
+    let valid =
+        strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
     JitLayout {
         obj_from_rc,
         rc_strong_off,
@@ -129,10 +171,17 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         props_shape: offset_of!(Props, shape),
         props_entries: offset_of!(Props, entries),
         vec_ptr_off: vec_ptr_off.unwrap_or(0),
+        vec_len_off: vec_len_off.unwrap_or(0),
+        props_elems: offset_of!(Props, elems),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, accessor),
+        entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, writable),
         exotic_none_tag,
+        exotic_array_tag,
+        scope_gen,
+        binding_value,
+        binding_init,
         valid,
     }
 }

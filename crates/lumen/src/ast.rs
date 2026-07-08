@@ -441,6 +441,11 @@ pub const SCAN_DONE: u8 = 1;
 pub const SCAN_ARGUMENTS: u8 = 2;
 pub const SCAN_NEW_TARGET: u8 = 4;
 pub const SCAN_THIS: u8 = 8;
+/// The body itself contains a loop statement (not counting nested functions): the bytecode tier
+/// compiles such functions on their *first* call — a single call can run a million iterations
+/// (a benchmark driver's `while (elapsed < 1000)`), so waiting for a call-count threshold leaves
+/// the hottest code on the tree-walker.
+pub const SCAN_HAS_LOOP: u8 = 16;
 
 impl Function {
     /// What this function's own activation must provide: whether the body (or a nested arrow, or a
@@ -465,7 +470,7 @@ impl Function {
     }
 }
 
-const SCAN_ALL: u8 = SCAN_DONE | SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS;
+const SCAN_ALL: u8 = SCAN_DONE | SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS | SCAN_HAS_LOOP;
 
 fn scan_stmts(body: &[Stmt], flags: &mut u8) {
     for s in body {
@@ -503,6 +508,7 @@ fn scan_stmt(s: &Stmt, flags: &mut u8) {
         }
         Stmt::Block(b) => scan_stmts(b, flags),
         Stmt::While { test, body } | Stmt::DoWhile { body, test } => {
+            *flags |= SCAN_HAS_LOOP;
             scan_expr(test, flags);
             scan_stmt(body, flags);
         }
@@ -512,6 +518,7 @@ fn scan_stmt(s: &Stmt, flags: &mut u8) {
             update,
             body,
         } => {
+            *flags |= SCAN_HAS_LOOP;
             match init.as_deref() {
                 Some(ForInit::VarDecl { kind: _, decls }) => {
                     for (pat, e) in decls {
@@ -540,6 +547,7 @@ fn scan_stmt(s: &Stmt, flags: &mut u8) {
             is_await: _,
             body,
         } => {
+            *flags |= SCAN_HAS_LOOP;
             scan_pattern(left, flags);
             scan_expr(right, flags);
             scan_stmt(body, flags);

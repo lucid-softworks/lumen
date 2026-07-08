@@ -168,8 +168,62 @@ pub(crate) struct RegexpLastMatch {
     pub ngroups: usize,
 }
 
+/// One scope's binding map, wrapping the raw hash map so every *structural* mutation — anything
+/// that can move entries or change what a name resolves to (insert, remove, clear) — bumps a
+/// generation counter. The bytecode tier's per-site name caches hold a raw `&Binding` pointer
+/// plus the generation they resolved it at (see `bytecode::NameIc`): a matching generation
+/// proves the map hasn't changed shape since, so the pointer is still valid *and* still the
+/// right resolution. In-place binding writes (`get_mut`) intentionally don't bump — they can't
+/// move entries, and a cache read-through observes the new value, which is exactly correct.
+/// Reads pass through via `Deref`; mutations only exist as the inherent methods below, so a new
+/// mutation site can't forget the bump (it won't compile).
+#[derive(Default)]
+pub struct VarMap {
+    map: crate::fasthash::FastMap<String, Binding>,
+    generation: std::cell::Cell<u32>,
+}
+
+impl std::ops::Deref for VarMap {
+    type Target = crate::fasthash::FastMap<String, Binding>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl VarMap {
+    /// The structural generation (name-cache validation token).
+    #[inline]
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation.get()
+    }
+    #[inline]
+    fn bump(&self) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+    }
+    pub fn insert(&mut self, k: String, v: Binding) -> Option<Binding> {
+        self.bump();
+        self.map.insert(k, v)
+    }
+    pub fn remove(&mut self, k: &str) -> Option<Binding> {
+        self.bump();
+        self.map.remove(k)
+    }
+    pub fn clear(&mut self) {
+        self.bump();
+        self.map.clear();
+    }
+    /// In-place binding write: entries don't move, so the generation stays (see the type docs).
+    pub fn get_mut(&mut self, k: &str) -> Option<&mut Binding> {
+        self.map.get_mut(k)
+    }
+    /// Byte offset of the generation counter within a `VarMap` (for the JIT's inline template).
+    pub(crate) fn generation_offset() -> usize {
+        std::mem::offset_of!(VarMap, generation)
+    }
+}
+
 pub struct Scope {
-    pub vars: crate::fasthash::FastMap<String, Binding>,
+    pub vars: VarMap,
     pub parent: Option<Env>,
     /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
     pub with_obj: Option<Value>,
@@ -4157,7 +4211,11 @@ impl Interp {
             if func.code.get().is_none() {
                 let n = func.calls.get().saturating_add(1);
                 func.calls.set(n);
-                if n > self.tier_threshold {
+                // A body with a loop compiles on its first call: one call can run a million
+                // iterations, so the call-count threshold would leave it on the tree-walker.
+                if n > self.tier_threshold
+                    || func.scan_flags() & crate::ast::SCAN_HAS_LOOP != 0
+                {
                     let compiled = crate::bytecode::compile(func);
                     if compiled.is_none() && std::env::var_os("LUMEN_TIER_LOG").is_some() {
                         let src = func.source.as_deref().unwrap_or("<no source>");
@@ -4185,6 +4243,18 @@ impl Interp {
                     self.new_target = nt;
                 }
                 return r;
+            }
+        }
+        // Debug: `LUMEN_AST_HOT=1` reports functions whose bodies keep executing on the
+        // tree-walker (each time the per-function call count crosses a power of ten).
+        static AST_HOT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AST_HOT.get_or_init(|| std::env::var_os("LUMEN_AST_HOT").is_some()) {
+            let n = func.calls.get().saturating_add(1);
+            func.calls.set(n);
+            if n >= 1000 && (n == 1000 || n == 10_000 || n == 100_000 || n == 1_000_000) {
+                let name = func.name.as_deref().unwrap_or("<anon>");
+                let src: String = func.source.as_deref().unwrap_or("").chars().take(60).collect();
+                eprintln!("[ast-hot] {name} ×{n}: {}", src.replace('\n', " "));
             }
         }
         // A function with parameter expressions (default values or destructuring with defaults) gets
@@ -4593,7 +4663,8 @@ impl Interp {
         if func.code.get().is_none() {
             let n = func.calls.get().saturating_add(1);
             func.calls.set(n);
-            if n > self.tier_threshold {
+            // Loop-bearing bodies compile on first call, like the sync path.
+            if n > self.tier_threshold || func.scan_flags() & crate::ast::SCAN_HAS_LOOP != 0 {
                 let _ = func.code.set(crate::bytecode::compile(func));
             }
         }
