@@ -22,28 +22,40 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            ext: ''
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            ext: ''
           - os: macos-latest
             target: aarch64-apple-darwin
+            ext: ''
+          # Windows: the JIT tier is aarch64-macOS-only, so the engine runs on its tree-walker /
+          # bytecode VM here; N-API native-addon *loading* uses the Win32 LoadLibrary path.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: '.exe'
     runs-on: ${{ matrix.os }}
+    # bash on every runner (Windows has git-bash) so the copy steps are one form everywhere.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p lumen --bin lumen
       - run: cargo build --release -p lumen-cli --bin lumen-cli
-      - run: cp target/release/lumen lumen-${{ matrix.target }}
-      - run: cp target/release/lumen-cli lumen-cli-${{ matrix.target }}
+      - run: cp target/release/lumen${{ matrix.ext }} lumen-${{ matrix.target }}${{ matrix.ext }}
+      - run: cp target/release/lumen-cli${{ matrix.ext }} lumen-cli-${{ matrix.target }}${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: lumen-${{ matrix.target }}
-          path: lumen-${{ matrix.target }}
+          path: lumen-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: lumen-cli-${{ matrix.target }}
-          path: lumen-cli-${{ matrix.target }}
+          path: lumen-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
   publish:

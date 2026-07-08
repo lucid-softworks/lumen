@@ -161,7 +161,6 @@ fn op_realpath(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Val
 /// Build a Stats-shaped object from real filesystem metadata (the JS glue wraps it with the
 /// `isFile()`/`isDirectory()`/… methods). `kind` lets the glue answer those without re-probing.
 fn stat_object(ctx: &mut Ctx, meta: &std::fs::Metadata) -> Value {
-    use std::os::unix::fs::MetadataExt;
     let ms = |t: std::io::Result<std::time::SystemTime>| -> f64 {
         t.ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -183,20 +182,63 @@ fn stat_object(ctx: &mut Ctx, meta: &std::fs::Metadata) -> Value {
         let _ = ctx.set_member(o, k, Value::Num(v));
     };
     set(&o, "size", meta.len() as f64, ctx);
-    set(&o, "mode", meta.mode() as f64, ctx);
     set(&o, "mtimeMs", ms(meta.modified()), ctx);
     set(&o, "atimeMs", ms(meta.accessed()), ctx);
-    // Unix has no true creation time in `Metadata::created` everywhere; `ctime` is change time.
-    set(&o, "ctimeMs", meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6, ctx);
     set(&o, "birthtimeMs", ms(meta.created()), ctx);
-    set(&o, "ino", meta.ino() as f64, ctx);
-    set(&o, "dev", meta.dev() as f64, ctx);
-    set(&o, "nlink", meta.nlink() as f64, ctx);
-    set(&o, "uid", meta.uid() as f64, ctx);
-    set(&o, "gid", meta.gid() as f64, ctx);
-    set(&o, "rdev", meta.rdev() as f64, ctx);
-    set(&o, "blksize", meta.blksize() as f64, ctx);
-    set(&o, "blocks", meta.blocks() as f64, ctx);
+    // The rest of the Node `Stats` fields are OS-specific. Unix reads them straight from the inode;
+    // Windows has no inode/uid/gid/mode, so — as Node does — we emulate: `mode` from the read-only
+    // attribute + file type, `ino`/`dev` from the file index + volume serial, and 0/defaults for
+    // the POSIX-only fields.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        set(&o, "mode", meta.mode() as f64, ctx);
+        // Unix has no true creation time everywhere; `ctime` is the inode change time.
+        set(&o, "ctimeMs", meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6, ctx);
+        set(&o, "ino", meta.ino() as f64, ctx);
+        set(&o, "dev", meta.dev() as f64, ctx);
+        set(&o, "nlink", meta.nlink() as f64, ctx);
+        set(&o, "uid", meta.uid() as f64, ctx);
+        set(&o, "gid", meta.gid() as f64, ctx);
+        set(&o, "rdev", meta.rdev() as f64, ctx);
+        set(&o, "blksize", meta.blksize() as f64, ctx);
+        set(&o, "blocks", meta.blocks() as f64, ctx);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+        let readonly = meta.file_attributes() & FILE_ATTRIBUTE_READONLY != 0;
+        // POSIX-style mode, matching Node's Windows emulation: type bits | rwx (0o666/0o444 for
+        // files, 0o777/0o555 for directories) with the write bits cleared when read-only.
+        let type_bits = if ft.is_dir() {
+            0o040000
+        } else if ft.is_symlink() {
+            0o120000
+        } else {
+            0o100000
+        };
+        let perm = match (ft.is_dir(), readonly) {
+            (true, false) => 0o777,
+            (true, true) => 0o555,
+            (false, false) => 0o666,
+            (false, true) => 0o444,
+        };
+        set(&o, "mode", (type_bits | perm) as f64, ctx);
+        // Windows has no change time; Node reports the last-write time here.
+        set(&o, "ctimeMs", ms(meta.modified()), ctx);
+        // `ino`/`dev`/`nlink` come from the by-handle info that stable std doesn't expose (the
+        // `windows_by_handle` feature is nightly-only), and lumen takes no `winapi`-style
+        // dependency, so report the neutral defaults rather than call into the Win32 API.
+        set(&o, "ino", 0.0, ctx);
+        set(&o, "dev", 0.0, ctx);
+        set(&o, "nlink", 1.0, ctx);
+        set(&o, "uid", 0.0, ctx);
+        set(&o, "gid", 0.0, ctx);
+        set(&o, "rdev", 0.0, ctx);
+        set(&o, "blksize", 4096.0, ctx);
+        set(&o, "blocks", ((meta.len() + 511) / 512) as f64, ctx);
+    }
     let _ = ctx.set_member(&o, "kind", Value::str(kind));
     o
 }
@@ -330,7 +372,18 @@ fn op_readlink(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Val
 fn op_symlink(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let target = arg_path(ctx, args)?;
     let link = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
-    match std::os::unix::fs::symlink(&target, &link) {
+    // Unix has one symlink call; Windows distinguishes file vs directory links (and needs the
+    // privilege / developer mode to create them), so pick by what the target currently is — the
+    // same heuristic Node uses when its `type` argument is omitted.
+    #[cfg(unix)]
+    let r = std::os::unix::fs::symlink(&target, &link);
+    #[cfg(windows)]
+    let r = if std::fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
+        std::os::windows::fs::symlink_dir(&target, &link)
+    } else {
+        std::os::windows::fs::symlink_file(&target, &link)
+    };
+    match r {
         Ok(()) => Ok(Value::Undefined),
         Err(e) => Err(fs_error(ctx, "symlink", &link, &e)),
     }
@@ -347,10 +400,26 @@ fn op_access(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
 
 /// `chmod(path, mode)`.
 fn op_chmod(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    use std::os::unix::fs::PermissionsExt;
     let p = arg_path(ctx, args)?;
     let mode = args.get(1).and_then(|v| v.as_num_opt()).unwrap_or(0.0) as u32;
-    match std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)) {
+    // Unix applies the full POSIX mode. Windows has no POSIX permissions — the only bit it can
+    // honour (as Node does) is read-only: clear it when the owner-write bit is set, set it
+    // otherwise.
+    #[cfg(unix)]
+    let perms = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(mode)
+    };
+    #[cfg(windows)]
+    let perms = match std::fs::metadata(&p) {
+        Ok(m) => {
+            let mut perms = m.permissions();
+            perms.set_readonly(mode & 0o200 == 0);
+            perms
+        }
+        Err(e) => return Err(fs_error(ctx, "chmod", &p, &e)),
+    };
+    match std::fs::set_permissions(&p, perms) {
         Ok(()) => Ok(Value::Undefined),
         Err(e) => Err(fs_error(ctx, "chmod", &p, &e)),
     }
