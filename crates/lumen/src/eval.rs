@@ -1837,45 +1837,59 @@ impl Interp {
         name: &str,
         env: &Env,
     ) -> Result<(Value, Option<Value>), Abrupt> {
-        let mut cur = Some(env.clone());
-        while let Some(s) = cur {
-            let (with_obj, parent) = {
-                let b = s.borrow();
-                if let Some(binding) = b.vars.get(name) {
-                    if !binding.initialized {
-                        return Err(self.throw(
-                            "ReferenceError",
-                            format!("cannot access '{name}' before initialization"),
-                        ));
-                    }
-                    // A live module import reads through to the exporter's binding.
-                    if let Some((src_env, local)) = &binding.import_ref {
-                        let (src_env, local) = (src_env.clone(), local.clone());
-                        drop(b);
-                        return Ok((self.get_var(&local, &src_env)?, None));
-                    }
-                    return Ok((binding.value.clone(), None));
+        // Walk the scope chain by raw pointer: every scope is transitively kept alive by `env`
+        // (the caller holds it) via the `parent` links, and nothing mutates the chain during a
+        // lookup, so this avoids an `Rc` bump+drop per hop — the dominant cost when a free/global
+        // name misses every intermediate scope. `with`-object scopes take the owned slow path.
+        type ScopeCell = std::cell::RefCell<crate::interpreter::Scope>;
+        let mut cur: *const ScopeCell = Rc::as_ptr(env);
+        loop {
+            let b = unsafe { (*cur).borrow() };
+            if let Some(binding) = b.vars.get(name) {
+                if !binding.initialized {
+                    return Err(self.throw(
+                        "ReferenceError",
+                        format!("cannot access '{name}' before initialization"),
+                    ));
                 }
-                (b.with_obj.clone(), b.parent.clone())
-            };
+                // A live module import reads through to the exporter's binding.
+                if let Some((src_env, local)) = &binding.import_ref {
+                    let (src_env, local) = (src_env.clone(), local.clone());
+                    drop(b);
+                    return Ok((self.get_var(&local, &src_env)?, None));
+                }
+                return Ok((binding.value.clone(), None));
+            }
             // `with (obj)`: resolve against the object's properties if it has the name (the proxy
-            // `has` trap and @@unscopables participate here).
-            if let Some(obj @ Value::Obj(_)) = &with_obj {
-                if self.with_has_binding(obj, name)? {
+            // `has` trap and @@unscopables participate here). Rare — fall to the owned path.
+            if let Some(obj @ Value::Obj(_)) = &b.with_obj {
+                let obj = obj.clone();
+                drop(b);
+                if self.with_has_binding(&obj, name)? {
                     // GetBindingValue re-checks HasProperty (the property may have vanished while
                     // @@unscopables ran): strict code throws, sloppy reads undefined.
-                    if !self.js_has_property(obj, name)? {
+                    if !self.js_has_property(&obj, name)? {
                         if self.strict {
                             return Err(
                                 self.throw("ReferenceError", format!("{name} is not defined"))
                             );
                         }
-                        return Ok((Value::Undefined, Some(obj.clone())));
+                        return Ok((Value::Undefined, Some(obj)));
                     }
-                    return Ok((self.get_member(obj, name)?, Some(obj.clone())));
+                    return Ok((self.get_member(&obj, name)?, Some(obj)));
                 }
+                // `with_has_binding` said no — continue up the chain. Re-borrow to read `parent`.
+                let b = unsafe { (*cur).borrow() };
+                match b.parent.as_ref() {
+                    Some(p) => cur = Rc::as_ptr(p),
+                    None => break,
+                }
+                continue;
             }
-            cur = parent;
+            match b.parent.as_ref() {
+                Some(p) => cur = Rc::as_ptr(p),
+                None => break,
+            }
         }
         // Fast path: an own data property of an ordinary global (the overwhelmingly common
         // resolution for builtins and script-level bindings) — one hash lookup, no trap walk.
