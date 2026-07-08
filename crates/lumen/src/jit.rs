@@ -19,7 +19,9 @@
 
 use std::rc::Rc;
 
-use crate::bytecode::{Chunk, UpdKind};
+use crate::bytecode::Chunk;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+use crate::bytecode::UpdKind;
 use crate::interpreter::{Abrupt, Env, Interp};
 use crate::value::Value;
 
@@ -3521,6 +3523,7 @@ fn emit_chain(
 // to the plain loop if they hold a refcounted value, so every later flush is a plain overwrite.
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 /// What a chain op pushes, precomputed by the planner (see the module comment above).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PushKind {
@@ -3530,6 +3533,7 @@ enum PushKind {
     D { iv: bool },
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 /// Where a loop-touched numeric slot lives during the run.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SlotRes {
@@ -3541,6 +3545,7 @@ enum SlotRes {
     None,
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 #[derive(Debug)]
 struct SlotPlan {
     off: u32,
@@ -3557,6 +3562,7 @@ struct SlotPlan {
     int_checked: bool,
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 struct LoopPlan {
     head: usize,
     jump_pc: usize,
@@ -3579,6 +3585,7 @@ struct LoopPlan {
     conv_reuse: Vec<((usize, u8), u32)>,
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 /// Jump target of a control-flow op, if any.
 fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
     use crate::bytecode::Op;
@@ -3596,12 +3603,14 @@ fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
 /// Integer-range bookkeeping for iv decisions: |v| ≤ 2^exp and integral. 255 = unknown/not
 /// integral. Kept crude on purpose — it only has to prove products/sums of masked values stay
 /// under 2^62.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 #[derive(Clone, Copy)]
 struct NumInfo {
     integral: bool,
     exp: u32,
     neg: bool,
 }
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 impl NumInfo {
     fn unknown() -> NumInfo {
         NumInfo { integral: false, exp: 255, neg: true }
@@ -4572,6 +4581,7 @@ fn plan_loop(
     })
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 /// A virtual value during loop-chain emission.
 #[derive(Clone, Copy)]
 enum LV {
