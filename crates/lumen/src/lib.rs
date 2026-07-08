@@ -424,6 +424,15 @@ impl Engine {
     /// checkpoint, these are genuine unhandled rejections). The runtime reports them; the bare
     /// engine ignores them, so test262 semantics are unaffected.
     pub fn take_unhandled_rejections(&mut self) -> Vec<embed::Value> {
+        self.take_unhandled_rejections_full()
+            .into_iter()
+            .map(|(_promise, reason)| reason)
+            .collect()
+    }
+
+    /// [`Engine::take_unhandled_rejections`], keeping the promise alongside each reason (what a
+    /// global `unhandledrejection` handler receives as `event.promise` / `event.reason`).
+    pub fn take_unhandled_rejections_full(&mut self) -> Vec<(embed::Value, embed::Value)> {
         if self.interp.unhandled_rejections.is_empty() {
             return Vec::new();
         }

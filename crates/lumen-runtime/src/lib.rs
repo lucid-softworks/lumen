@@ -38,6 +38,10 @@ pub struct Runtime {
     engine: Engine,
     pool: ThreadPool,
     completions: mpsc::Receiver<TaskCompletion>,
+    /// The error-reporting shims (see `Runtime::new`): `(error) -> suppressed` for the global
+    /// `onerror` convention and `(promise, reason) -> suppressed` for `onunhandledrejection`.
+    fire_error: Value,
+    fire_rejection: Value,
 }
 
 impl Default for Runtime {
@@ -86,10 +90,85 @@ impl Runtime {
                 false,
             )
             .expect("shim parses");
+        // The HTML error-reporting globals (WinterTC Minimum Common API §5.2): `onerror` /
+        // `onunhandledrejection` global event-handler properties and `reportError`. The fire
+        // helpers return whether the default report is suppressed (`onerror` returning `true`;
+        // `unhandledrejection`'s `event.preventDefault()`); the loop's uncaught/rejection
+        // reporting consults them through handles grabbed (and then unglobaled) below. A throw
+        // inside a handler never re-enters it — the original error still default-reports.
+        engine
+            .eval(
+                r#"
+                globalThis.onerror = null;
+                globalThis.onunhandledrejection = null;
+                globalThis.__lumen_fire_error = function (error) {
+                    const h = globalThis.onerror;
+                    if (typeof h !== 'function') return false;
+                    let message = '';
+                    try {
+                        message =
+                            error instanceof Error
+                                ? `Uncaught ${error.name}: ${error.message}`
+                                : `Uncaught ${String(error)}`;
+                    } catch {}
+                    try {
+                        return h.call(globalThis, message, '', 0, 0, error) === true;
+                    } catch {
+                        return false;
+                    }
+                };
+                globalThis.__lumen_fire_rejection = function (promise, reason) {
+                    const h = globalThis.onunhandledrejection;
+                    if (typeof h !== 'function') return false;
+                    let prevented = false;
+                    const event = {
+                        type: 'unhandledrejection',
+                        promise,
+                        reason,
+                        cancelable: true,
+                        preventDefault() { prevented = true; },
+                        get defaultPrevented() { return prevented; },
+                    };
+                    try {
+                        h.call(globalThis, event);
+                    } catch {}
+                    return prevented;
+                };
+                {
+                    const fire = globalThis.__lumen_fire_error;
+                    const report = console.__reportUncaught;
+                    delete console.__reportUncaught;
+                    globalThis.reportError = function reportError(e) {
+                        if (arguments.length === 0)
+                            throw new TypeError('reportError requires at least 1 argument');
+                        if (!fire(e)) report(e);
+                    };
+                }
+                "#,
+                false,
+            )
+            .expect("error-reporting shim parses");
+        let global = engine.global_this();
+        let fire_error = engine
+            .ctx()
+            .get_member(&global, "__lumen_fire_error")
+            .unwrap_or_else(|_| panic!("error-reporting shim installed"));
+        let fire_rejection = engine
+            .ctx()
+            .get_member(&global, "__lumen_fire_rejection")
+            .unwrap_or_else(|_| panic!("error-reporting shim installed"));
+        engine
+            .eval(
+                "delete globalThis.__lumen_fire_error; delete globalThis.__lumen_fire_rejection;",
+                false,
+            )
+            .expect("shim cleanup");
         Runtime {
             engine,
             pool,
             completions: rx,
+            fire_error,
+            fire_rejection,
         }
     }
 
@@ -330,6 +409,15 @@ impl Runtime {
     /// An exception escaped a loop-fired callback. Node prints and keeps the loop alive (we
     /// don't model `process.on('uncaughtException')`/exit semantics yet).
     fn report_uncaught(&mut self, error: &Value) {
+        // HTML "report an exception": the global `onerror` handler runs first; returning `true`
+        // suppresses the default report.
+        let fire = self.fire_error.clone();
+        if let Ok(Value::Bool(true)) =
+            self.engine
+                .call_function(&fire, Value::Undefined, std::slice::from_ref(error))
+        {
+            return;
+        }
         let text = console::describe_error(self.engine.ctx(), error);
         console::write_err_line(self.engine.ctx(), format!("Uncaught {text}"));
     }
@@ -337,7 +425,16 @@ impl Runtime {
     /// Report promises rejected without a handler (Node prints `Uncaught (in promise) …`). Called
     /// after each microtask checkpoint; a rejection handled in the same checkpoint won't appear.
     fn report_unhandled_rejections(&mut self) {
-        for reason in self.engine.take_unhandled_rejections() {
+        for (promise, reason) in self.engine.take_unhandled_rejections_full() {
+            // The global `onunhandledrejection` handler runs first; `event.preventDefault()`
+            // suppresses the default report.
+            let fire = self.fire_rejection.clone();
+            if let Ok(Value::Bool(true)) =
+                self.engine
+                    .call_function(&fire, Value::Undefined, &[promise, reason.clone()])
+            {
+                continue;
+            }
             let text = console::describe_error(self.engine.ctx(), &reason);
             console::write_err_line(self.engine.ctx(), format!("Uncaught (in promise) {text}"));
         }

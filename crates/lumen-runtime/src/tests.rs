@@ -653,6 +653,9 @@ const WINTERTC_SUPPORTED: &[&str] = &[
     "ReadableByteStreamController",
     "ReadableStreamBYOBRequest",
     "WebAssembly",
+    "reportError",
+    "onerror",
+    "onunhandledrejection",
 ];
 const WINTERTC_NOT_YET: &[&str] = &[];
 
@@ -701,6 +704,55 @@ fn wintertc_minimum_common_api() {
         "WinterTC Minimum Common API: {}/{} globals implemented",
         WINTERTC_SUPPORTED.len(),
         total
+    );
+}
+
+#[test]
+fn error_reporting_globals() {
+    // HTML error reporting (WinterTC §5.2): `reportError` fires the global `onerror` handler
+    // (returning `true` suppresses the default report); an unhandled rejection fires
+    // `onunhandledrejection` whose `event.preventDefault()` suppresses the default line. The
+    // default reports land on the error sink in the loop's `Uncaught …` format.
+    use std::fs;
+    let dir = TempDir::new("error-reporting");
+    let root = dir.0.clone();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        reportError(new TypeError("boom-default"));
+        onerror = (message, source, lineno, colno, error) => {
+            console.log("onerror", message, error.message, source === "" && lineno === 0);
+            return true;
+        };
+        reportError(new RangeError("boom-suppressed"));
+        onerror = null;
+        try { reportError(); } catch (e) { console.log("zero-arg", e.constructor.name); }
+        onunhandledrejection = (event) => {
+            console.log("rejection", event.type, event.reason, event.promise instanceof Promise);
+            event.preventDefault();
+        };
+        Promise.reject("quiet");
+        setTimeout(() => {
+            onunhandledrejection = null;
+            Promise.reject("loud");
+        }, 1);
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("module runs");
+    assert_eq!(
+        out.lines(),
+        [
+            "onerror Uncaught RangeError: boom-suppressed boom-suppressed true",
+            "zero-arg TypeError",
+            "rejection unhandledrejection quiet true",
+        ]
+    );
+    assert_eq!(
+        err.lines(),
+        ["Uncaught TypeError: boom-default", "Uncaught (in promise) loud"]
     );
 }
 

@@ -3443,7 +3443,8 @@ impl Interp {
         // A rejection with no reactions attached yet is (so far) unhandled — track it. A later
         // `.then`/`.catch` clears it (see `promise_then_into`).
         if !fulfilled && reactions.is_empty() {
-            self.unhandled_rejections.insert(ptr, value.clone());
+            self.unhandled_rejections
+                .insert(ptr, (promise.clone(), value.clone()));
         }
         for (on_f, on_r, result) in reactions {
             let handler = if fulfilled { on_f } else { on_r };

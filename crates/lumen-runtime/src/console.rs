@@ -18,6 +18,7 @@ pub(crate) fn extension() -> Extension {
                 "debug" (0) => op_log,
                 "warn" (0) => op_warn,
                 "error" (0) => op_error,
+                "__reportUncaught" (1) => op_report_uncaught,
             ],
         )],
         state_init: Some(|state: &mut OpState| state.put(ConsoleOut::default())),
@@ -86,6 +87,15 @@ fn op_warn(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> 
 
 fn op_error(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     write_line(ctx, args, true)
+}
+
+/// `reportError`'s default report (after the global `onerror` declined to suppress): the same
+/// `Uncaught <error>` line on the error sink that an uncaught loop-callback error produces.
+fn op_report_uncaught(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let e = args.first().cloned().unwrap_or(Value::Undefined);
+    let text = describe_error(ctx, &e);
+    write_err_line(ctx, format!("Uncaught {text}"));
+    Ok(Value::Undefined)
 }
 
 /// [`render`] for hosts above the runtime (the REPL prints results with it).

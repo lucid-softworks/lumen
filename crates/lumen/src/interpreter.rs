@@ -823,7 +823,9 @@ pub struct Interp {
     /// Rejected promises with no handler attached at rejection time (ptr -> reason). Removed when a
     /// handler is later attached; whatever remains after a microtask checkpoint is a genuine
     /// unhandled rejection the embedder can report (see [`Engine::take_unhandled_rejections`]).
-    pub(crate) unhandled_rejections: crate::fasthash::FastMap<usize, Value>,
+    /// Keyed by the promise object's pointer; holds `(promise, reason)` so the runtime can hand
+    /// both to a global `unhandledrejection` handler.
+    pub(crate) unhandled_rejections: crate::fasthash::FastMap<usize, (Value, Value)>,
     /// Temporal object internal slots, keyed by the object's pointer.
     pub(crate) temporal: crate::fasthash::FastMap<usize, crate::temporal::Temporal>,
     /// The calendar id of a Temporal date-bearing object (default "iso8601"), keyed by object ptr.
