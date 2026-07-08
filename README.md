@@ -191,6 +191,17 @@ scripts/bench-compare.sh    # same suite on node + bun + lumen, as a markdown ta
 git clone https://github.com/chromium/octane.git ../octane   # one-time: Octane checkout
 scripts/run-octane.sh                    # full Octane suite
 scripts/run-octane.sh richards crypto    # selected benchmarks
+
+git clone https://github.com/v8/web-tooling-benchmark ../web-tooling-benchmark   # one-time: checkout
+(cd ../web-tooling-benchmark && npm install)                                     # one-time: build dist/cli.js
+scripts/run-web-tooling.sh                    # full suite (babel, terser, acorn, etc.)
+scripts/run-web-tooling.sh --only babel       # selected benchmark
+WEB_TOOLING_BENCHMARK_DIR=/path/to/web-tooling-benchmark scripts/run-web-tooling.sh --only terser
 ```
 
 Octane is expected at `../octane` by default; set `OCTANE=/path/to/octane` to override.
+
+Web Tooling Benchmark is expected at `../web-tooling-benchmark` by default;
+set `WEB_TOOLING_BENCHMARK_DIR=/path/to/web-tooling-benchmark` to override.
+Arguments after the script name (e.g. `--only <benchmark>`) are passed
+through unchanged to the upstream benchmark's own CLI.
