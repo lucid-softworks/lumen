@@ -4757,7 +4757,8 @@ impl Interp {
         if func.code2.get().is_some() {
             return;
         }
-        let plan = crate::bytecode::plan_inlines(chunk, func);
+        let global_env = self.global_env.clone();
+        let plan = crate::bytecode::plan_inlines(chunk, func, &global_env);
         if plan.is_empty() {
             if std::env::var_os("LUMEN_TIER_LOG").is_some() {
                 let src = func.source.as_deref().unwrap_or("<no source>");

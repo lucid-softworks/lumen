@@ -1552,6 +1552,7 @@ pub(crate) fn inline_recompile_at() -> u32 {
 pub(crate) fn plan_inlines(
     chunk: &Chunk,
     caller: &Function,
+    global_env: &crate::interpreter::Env,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
     let mut plan: crate::fasthash::FastMap<u32, InlinePlanEntry> = Default::default();
     let log = std::env::var_os("LUMEN_TIER_LOG").is_some();
@@ -1582,9 +1583,13 @@ pub(crate) fn plan_inlines(
         let Some(weak) = pins.get(&ic.callee) else { skip!(idx, "no pin") };
         let Some(obj) = weak.upgrade() else { skip!(idx, "dead callee") };
         let b = obj.borrow();
-        let crate::value::Callable::User(f, _env) = &b.call else {
+        let crate::value::Callable::User(f, callee_env) = &b.call else {
             continue;
         };
+        // Free names are only spliceable when the callee closes directly over the global
+        // scope: its LoadNames then resolve identically under the caller's chain, provided
+        // the caller doesn't shadow them (checked per-name by the compiler at splice time).
+        let global_closure = Rc::ptr_eq(callee_env, global_env);
         if f.is_arrow || f.is_strict != caller.is_strict {
             skip!(idx, "arrow/strictness");
         }
@@ -1608,18 +1613,27 @@ pub(crate) fn plan_inlines(
             skip!(idx, "callee size/shape");
         }
         // The splice runs under the caller's frame: no handler regions to relocate, no inner
-        // closures, and no free names (they would resolve in the CALLER's scope chain).
+        // closures, no name writes. Free-name READS are allowed for global-closure callees —
+        // the compiler re-resolves them at the splice site and refuses shadowed ones.
         if callee_chunk.ops.iter().any(|op| {
             matches!(
                 op,
-                Op::PushHandler(_)
-                    | Op::MakeClosure(..)
-                    | Op::LoadName(..)
-                    | Op::LoadNameForCall(..)
-                    | Op::StoreName(_)
+                Op::PushHandler(_) | Op::MakeClosure(..) | Op::StoreName(_)
             )
         }) {
-            skip!(idx, "callee ops (handlers/closures/free names)");
+            skip!(idx, "callee ops (handlers/closures/name writes)");
+        }
+        let mut free_names: Vec<Rc<str>> = Vec::new();
+        for op in callee_chunk.ops.iter() {
+            if let Op::LoadName(n, _) | Op::LoadNameForCall(n, _) = op {
+                let name = callee_chunk.names[*n as usize].clone();
+                if !free_names.contains(&name) {
+                    free_names.push(name);
+                }
+            }
+        }
+        if !free_names.is_empty() && !global_closure {
+            skip!(idx, "free names in a non-global closure");
         }
         let uses_this = callee_chunk.uses_this();
         let f = f.clone();
@@ -1631,6 +1645,7 @@ pub(crate) fn plan_inlines(
                 uses_this,
                 f,
                 obj,
+                free_names,
             },
         );
     }
@@ -1691,6 +1706,9 @@ pub struct InlinePlanEntry {
     pub obj: crate::value::Gc,
     pub check_this: bool,
     pub uses_this: bool,
+    /// Free names the callee reads (global-closure callees only): the splice refuses any that
+    /// the caller's scopes shadow, so the inlined LoadNames resolve identically.
+    pub free_names: Vec<Rc<str>>,
 }
 
 /// Where a name resolves inside the compiled body.
@@ -1874,7 +1892,7 @@ impl Compiler {
 
     /// Emit a planned speculative inline for a method call site whose stack already holds
     /// `[this, method, args...]`; anything the splice can't express reverts to the plain call.
-    fn emit_call_with_inline(&mut self, entry: InlinePlanEntry, argc: u16, cc: u32) {
+    fn emit_call_with_inline(&mut self, entry: InlinePlanEntry, argc: u16, cc: u32, has_this: bool) {
         let snap = (
             self.ops.len(),
             self.consts.len(),
@@ -1886,7 +1904,7 @@ impl Compiler {
             self.slot_names.len(),
             self.funcs.len(),
         );
-        if self.try_emit_inline(&entry, argc, cc).is_err() {
+        if self.try_emit_inline(&entry, argc, cc, has_this).is_err() {
             self.ops.truncate(snap.0);
             self.consts.truncate(snap.1);
             self.names.truncate(snap.2);
@@ -1896,14 +1914,37 @@ impl Compiler {
             self.inline_targets.truncate(snap.6);
             self.slot_names.truncate(snap.7);
             self.funcs.truncate(snap.8);
-            self.emit(Op::CallWithThis(argc, cc));
+            if has_this {
+                self.emit(Op::CallWithThis(argc, cc));
+            } else {
+                self.emit(Op::Call(argc, cc));
+            }
         }
     }
 
-    fn try_emit_inline(&mut self, entry: &InlinePlanEntry, argc: u16, cc: u32) -> CResult {
+    fn try_emit_inline(
+        &mut self,
+        entry: &InlinePlanEntry,
+        argc: u16,
+        cc: u32,
+        has_this: bool,
+    ) -> CResult {
         let f = &entry.f;
         if argc > 8 {
             return Err(Bail); // the JIT guard peeks the callee with a ±256-byte unscaled load
+        }
+        // A plain `Call` site has no `this` beneath the callee: a this-using callee would need
+        // the global-or-boxed binding the generic path provides (and the guard's receiver peek
+        // would read past the site's operands).
+        if !has_this && entry.uses_this {
+            return Err(Bail);
+        }
+        // A caller binding (slot or captured) would shadow the callee's global free name —
+        // its inlined LoadName must resolve exactly as it did in the callee's own scope.
+        for name in &entry.free_names {
+            if self.lookup(name).is_some() || self.env_names.contains_key(&**name) {
+                return Err(Bail);
+            }
         }
         // The guard proves the callee is the pinned function (and the receiver an object for a
         // sloppy this-user); a mismatch lands on the plain call after the spliced body.
@@ -1912,7 +1953,7 @@ impl Compiler {
             expected: Rc::as_ptr(&entry.obj) as usize,
             pin: Rc::downgrade(&entry.obj),
             argc,
-            check_this: entry.check_this,
+            check_this: has_this && entry.check_this,
         });
         let guard = self.emit(Op::InlineGuard(t, 0));
 
@@ -1938,7 +1979,9 @@ impl Compiler {
             self.emit(Op::StoreLocal(s));
         }
         self.emit(Op::Pop); // the method (identity proven; the value itself is dead)
-        let this_slot = if entry.uses_this {
+        let this_slot = if !has_this {
+            None // a plain Call site: nothing beneath the callee
+        } else if entry.uses_this {
             let s = self.fresh_slot("(inline this)");
             self.emit(Op::StoreLocal(s));
             Some(s)
@@ -1977,7 +2020,11 @@ impl Compiler {
         // ---- join: fall-through result, guard-mismatch generic call, return jumps ----
         let end = self.emit(Op::Jump(0));
         self.patch(guard);
-        self.emit(Op::CallWithThis(argc, cc));
+        if has_this {
+            self.emit(Op::CallWithThis(argc, cc));
+        } else {
+            self.emit(Op::Call(argc, cc));
+        }
         self.patch(end);
         for j in returns {
             self.patch(j);
@@ -3470,7 +3517,7 @@ impl Compiler {
                         let cc = self.new_call_cache();
                         match plan_hit {
                             Some(entry) => {
-                                self.emit_call_with_inline(entry, args.len() as u16, cc)
+                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
                             }
                             None => {
                                 self.emit(Op::CallWithThis(args.len() as u16, cc));
@@ -3492,8 +3539,20 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
+                        let plan_hit = if self.inline_depth == 0 {
+                            self.inline_plan.get(&self.site_ord).cloned()
+                        } else {
+                            None
+                        };
                         let cc = self.new_call_cache();
-                        self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        match plan_hit {
+                            Some(entry) => {
+                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
+                            }
+                            None => {
+                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                            }
+                        }
                     }
                     Expr::Super => return Err(Bail),
                     Expr::Ident(name) if self.home(name).is_none() => {
@@ -3509,8 +3568,20 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
+                        let plan_hit = if self.inline_depth == 0 {
+                            self.inline_plan.get(&self.site_ord).cloned()
+                        } else {
+                            None
+                        };
                         let cc = self.new_call_cache();
-                        self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        match plan_hit {
+                            Some(entry) => {
+                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
+                            }
+                            None => {
+                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                            }
+                        }
                     }
                     other => {
                         self.expr(other)?;
@@ -3521,8 +3592,20 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
+                        let plan_hit = if self.inline_depth == 0 {
+                            self.inline_plan.get(&self.site_ord).cloned()
+                        } else {
+                            None
+                        };
                         let cc = self.new_call_cache();
-                        self.emit(Op::Call(args.len() as u16, cc));
+                        match plan_hit {
+                            Some(entry) => {
+                                self.emit_call_with_inline(entry, args.len() as u16, cc, false)
+                            }
+                            None => {
+                                self.emit(Op::Call(args.len() as u16, cc));
+                            }
+                        }
                     }
                 }
                 Ok(())
