@@ -7930,7 +7930,7 @@ fn install_string(it: &mut Interp) {
         if idx < 0.0 || !idx.is_finite() {
             return Ok(Value::str(""));
         }
-        Ok(match crate::jstr::UnitIter::new(&s).nth(idx as usize) {
+        Ok(match i.unit_at(&s, idx as usize) {
             Some(u) => Value::from_string(crate::jstr::unit_str(u)),
             None => Value::str(""),
         })
@@ -7942,7 +7942,7 @@ fn install_string(it: &mut Interp) {
         if idx < 0.0 || !idx.is_finite() {
             return Ok(Value::Num(f64::NAN));
         }
-        Ok(match crate::jstr::UnitIter::new(&s).nth(idx as usize) {
+        Ok(match i.unit_at(&s, idx as usize) {
             Some(u) => Value::Num(u as f64),
             None => Value::Num(f64::NAN),
         })
@@ -7950,8 +7950,14 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "indexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars = crate::jstr::units(&s);
-        let nchars = crate::jstr::units(&needle);
+        if let crate::interpreter::StrUnits::Ascii = i.units_of(&s) {
+            // Byte index == unit index; a non-ASCII needle simply can't occur.
+            let pos = str_clamp_pos(i, args.get(1), s.len() as i64)?.min(s.len());
+            let r = s[pos..].find(&*needle).map(|k| (pos + k) as f64);
+            return Ok(Value::Num(r.unwrap_or(-1.0)));
+        }
+        let chars = i.units_full(&s);
+        let nchars = i.units_full(&needle);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
         let nlen = nchars.len();
@@ -7963,8 +7969,8 @@ fn install_string(it: &mut Interp) {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;
         // Optional `position`: search for the last occurrence starting at or before it.
-        let chars = crate::jstr::units(&s);
-        let nchars = crate::jstr::units(&needle);
+        let chars = i.units_full(&s);
+        let nchars = i.units_full(&needle);
         let limit = match arg(args, 1) {
             Value::Undefined => chars.len(),
             v => {
@@ -8018,10 +8024,10 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars = crate::jstr::units(&s);
+        let chars = i.units_full(&s);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
-        let nchars = crate::jstr::units(&needle);
+        let nchars = i.units_full(&needle);
         let found = (pos..=chars.len())
             .any(|k| k + nchars.len() <= chars.len() && chars[k..k + nchars.len()] == nchars[..]);
         Ok(Value::Bool(found))
@@ -8032,10 +8038,10 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars = crate::jstr::units(&s);
+        let chars = i.units_full(&s);
         let len = chars.len() as i64;
         let pos = str_clamp_pos(i, args.get(1), len)?;
-        let nchars = crate::jstr::units(&needle);
+        let nchars = i.units_full(&needle);
         Ok(Value::Bool(
             pos + nchars.len() <= chars.len() && chars[pos..pos + nchars.len()] == nchars[..],
         ))
@@ -8046,21 +8052,34 @@ fn install_string(it: &mut Interp) {
             return Err(i.make_error("TypeError", "argument must not be a regular expression"));
         }
         let needle = ab(i.to_string(&arg(args, 0)))?;
-        let chars = crate::jstr::units(&s);
+        let chars = i.units_full(&s);
         let len = chars.len() as i64;
         // endsWith's optional argument is the END position (default = length).
         let end = match args.get(1) {
             Some(v) if !matches!(v, Value::Undefined) => str_clamp_pos(i, Some(v), len)?,
             _ => len as usize,
         };
-        let nchars = crate::jstr::units(&needle);
+        let nchars = i.units_full(&needle);
         Ok(Value::Bool(
             end >= nchars.len() && chars[end - nchars.len()..end] == nchars[..],
         ))
     });
     it.def_method(&sp, "slice", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars = crate::jstr::units(&s);
+        if let crate::interpreter::StrUnits::Ascii = i.units_of(&s) {
+            let len = s.len() as i64;
+            let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
+            let end = match arg(args, 1) {
+                Value::Undefined => len,
+                v => norm_index(ab(i.to_number(&v))?, len),
+            };
+            return Ok(if start < end {
+                Value::str(&s[start as usize..end as usize])
+            } else {
+                Value::str("")
+            });
+        }
+        let chars = i.units_full(&s);
         let len = chars.len() as i64;
         let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
         let end = match arg(args, 1) {
@@ -8076,7 +8095,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "substring", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars = crate::jstr::units(&s);
+        let chars = i.units_full(&s);
         let len = chars.len() as i64;
         let mut a = (ab(i.to_number(&arg(args, 0)))? as i64).clamp(0, len);
         let mut b = match arg(args, 1) {
@@ -8093,7 +8112,7 @@ fn install_string(it: &mut Interp) {
     // Annex B B.2.3.1 String.prototype.substr(start, length).
     it.def_method(&sp, "substr", 2, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars = crate::jstr::units(&s);
+        let chars = i.units_full(&s);
         let size = chars.len() as i64;
         let n = ab(i.to_number(&arg(args, 0)))?;
         // ToIntegerOrInfinity truncates first, so -0.5 is +0, not a from-the-end index.
@@ -8340,8 +8359,7 @@ fn install_string(it: &mut Interp) {
     });
     it.def_method(&sp, "at", 1, |i, this, args| {
         let s = this_string(i, &this)?;
-        let chars = crate::jstr::units(&s);
-        let len = chars.len() as i64;
+        let len = i.str_len(&s) as i64;
         let mut idx = ab(i.to_number(&arg(args, 0)))? as i64;
         if idx < 0 {
             idx += len;
@@ -8349,7 +8367,10 @@ fn install_string(it: &mut Interp) {
         Ok(if idx < 0 || idx >= len {
             Value::Undefined
         } else {
-            Value::from_string(crate::jstr::unit_str(chars[idx as usize]))
+            match i.unit_at(&s, idx as usize) {
+                Some(u) => Value::from_string(crate::jstr::unit_str(u)),
+                None => Value::Undefined,
+            }
         })
     });
     it.def_method(&sp, "codePointAt", 1, |i, this, args| {
@@ -8360,17 +8381,15 @@ fn install_string(it: &mut Interp) {
             return Ok(Value::Undefined);
         }
         let idx = n as usize;
-        let chars = crate::jstr::units(&s);
-        Ok(match chars.get(idx) {
-            Some(&u)
-                if (0xD800..0xDC00).contains(&u)
-                    && idx + 1 < chars.len()
-                    && (0xDC00..0xE000).contains(&chars[idx + 1]) =>
-            {
-                let c = 0x10000 + ((u as u32 - 0xD800) << 10) + (chars[idx + 1] as u32 - 0xDC00);
-                Value::Num(c as f64)
-            }
-            Some(&u) => Value::Num(u as f64),
+        Ok(match i.unit_at(&s, idx) {
+            Some(u) if (0xD800..0xDC00).contains(&u) => match i.unit_at(&s, idx + 1) {
+                Some(lo) if (0xDC00..0xE000).contains(&lo) => {
+                    let c = 0x10000 + ((u as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00);
+                    Value::Num(c as f64)
+                }
+                _ => Value::Num(u as f64),
+            },
+            Some(u) => Value::Num(u as f64),
             None => Value::Undefined,
         })
     });

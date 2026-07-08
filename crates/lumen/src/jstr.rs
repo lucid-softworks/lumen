@@ -222,6 +222,29 @@ pub fn concat(a: &str, b: &str) -> String {
     out
 }
 
+/// [`concat`] building the result `Rc<str>` allocation directly: one copy of each operand into
+/// the final `Rc` instead of a `String` build followed by a second full copy into `Rc::from` —
+/// string-append loops (`s += x`) copy the whole accumulated string per step, so halving the
+/// bytes moved matters. The smuggled-surrogate join fix-up (rare) takes the two-step path.
+pub fn concat_rc(a: &str, b: &str) -> std::rc::Rc<str> {
+    if let (Some(last), Some(first)) = (a.chars().next_back(), b.chars().next()) {
+        if smuggled_high(last).is_some() && smuggled_low(first).is_some() {
+            return std::rc::Rc::from(concat(a, b).as_str());
+        }
+    }
+    let mut rc = std::rc::Rc::<[u8]>::new_uninit_slice(a.len() + b.len());
+    let m = std::rc::Rc::get_mut(&mut rc).expect("fresh Rc is unique");
+    // write both halves (valid UTF-8 concatenation of two strs)
+    let dst = m.as_mut_ptr() as *mut u8;
+    unsafe {
+        std::ptr::copy_nonoverlapping(a.as_ptr(), dst, a.len());
+        std::ptr::copy_nonoverlapping(b.as_ptr(), dst.add(a.len()), b.len());
+        let init: std::rc::Rc<[u8]> = rc.assume_init();
+        // Rc<[u8]> and Rc<str> share layout; the bytes are valid UTF-8 by construction.
+        std::rc::Rc::from_raw(std::rc::Rc::into_raw(init) as *const str)
+    }
+}
+
 /// Canonicalize any adjacent smuggled high+low surrogate pairs inside `s` (needed after building
 /// a string from independently produced pieces, e.g. `join` or `repeat`).
 pub fn canonicalize(s: &str) -> Option<String> {

@@ -158,6 +158,18 @@ pub struct FnFrame {
     pub lazy: Option<(Rc<crate::ast::Function>, Rc<[Value]>, Env)>,
 }
 
+/// Cached UTF-16 view of one string, keyed by `Rc<str>` identity (see `Interp::str_units`).
+/// JS string semantics are code units but the engine stores UTF-8 `str`; without a cache every
+/// `charCodeAt`/`[i]`/`.length` is O(len) (a full `is_ascii` scan or unit walk), which turns a
+/// scanner loop — a JS parser reading a megabytes-long source one char at a time — into O(n²).
+#[derive(Clone)]
+pub(crate) enum StrUnits {
+    /// Pure ASCII: unit `i` is byte `i` — index the `str` directly.
+    Ascii,
+    /// The materialized code units.
+    Units(Rc<[u16]>),
+}
+
 /// Raw state of the last successful regex match, deferred for the legacy `RegExp.$1` statics.
 /// `ctor` is the %RegExp% constructor the statics belong to (the realm active at match time).
 pub(crate) struct RegexpLastMatch {
@@ -624,6 +636,10 @@ pub struct Interp {
     /// and the inline templates then fall through to the checked helper forever after. Monotonic
     /// (never re-enabled), so it can only cost the inline speedup, never correctness.
     pub(crate) inline_ic_safe: std::cell::Cell<bool>,
+    /// Recently indexed strings' UTF-16 views, keyed by string identity (the held `Rc` pins the
+    /// pointer) — see [`StrUnits`]. Small LRU: the hot case is one big source string being
+    /// scanned a unit at a time.
+    pub(crate) str_units: Vec<(Rc<str>, StrUnits)>,
     /// Recently prepared regex subjects keyed by string identity (the held `Rc` pins the
     /// pointer), so repeated exec/replace/split over one subject reuses its element vector.
     pub(crate) re_texts: Vec<(Rc<str>, bool, Rc<crate::regex::ReText>)>,
@@ -1166,6 +1182,7 @@ impl Interp {
             jit_helpers: crate::jit::helper_table(),
             jit_layout: std::cell::OnceCell::new(),
             inline_ic_safe: std::cell::Cell::new(true),
+            str_units: Vec::new(),
             re_texts: Vec::new(),
             regexp_last: None,
             map_data: Default::default(),
@@ -2245,12 +2262,15 @@ impl Interp {
                 format!("cannot read property '{key}' of {}", type_name(base)),
             )),
             Value::Str(s) => {
-                // `length` and indices are in UTF-16 code units.
+                // `length` and indices are in UTF-16 code units (cached — a scanner loop reads
+                // them per character of a megabytes-long source).
                 if key == "length" {
-                    return Ok(Value::Num(crate::jstr::unit_len(s) as f64));
+                    let s = s.clone();
+                    return Ok(Value::Num(self.str_len(&s) as f64));
                 }
                 if let Ok(i) = key.parse::<usize>() {
-                    return Ok(match crate::jstr::UnitIter::new(s).nth(i) {
+                    let s = s.clone();
+                    return Ok(match self.unit_at(&s, i) {
                         Some(u) => Value::from_string(crate::jstr::unit_str(u)),
                         None => Value::Undefined,
                     });
@@ -2298,10 +2318,10 @@ impl Interp {
                 // String wrapper (`new String(...)`/`Object("...")`): own indexed chars + `length`.
                 if let Exotic::StrWrap(s) = o.borrow().exotic.clone() {
                     if key == "length" {
-                        return Ok(Value::Num(crate::jstr::unit_len(&s) as f64));
+                        return Ok(Value::Num(self.str_len(&s) as f64));
                     }
                     if let Ok(i) = key.parse::<usize>() {
-                        if let Some(u) = crate::jstr::UnitIter::new(&s).nth(i) {
+                        if let Some(u) = self.unit_at(&s, i) {
                             return Ok(Value::from_string(crate::jstr::unit_str(u)));
                         }
                     }
@@ -3178,6 +3198,75 @@ impl Interp {
 
     /// Allocation safe point. When live objects pass the floating threshold, run the cycle
     /// collector; if genuine retention still exceeds `MAX_LIVE`, throw rather than exhaust RAM.
+    /// The cached UTF-16 view of `s` (see [`StrUnits`]): first access per string is O(len),
+    /// every later one O(1) — pointer-compared against a small LRU. Short strings skip the
+    /// cache entirely (the O(len) walk is trivial; caching them would just churn the LRU under
+    /// code that touches thousands of small strings once each).
+    pub(crate) fn units_of(&mut self, s: &Rc<str>) -> StrUnits {
+        if s.len() < 64 {
+            return if s.is_ascii() {
+                StrUnits::Ascii
+            } else {
+                StrUnits::Units(crate::jstr::units(s).into())
+            };
+        }
+        if let Some(k) = self.str_units.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+            let hit = self.str_units[k].1.clone();
+            // Keep the hot entry last (evictions pop from the front).
+            let n = self.str_units.len();
+            self.str_units.swap(k, n - 1);
+            return hit;
+        }
+        let u = if s.is_ascii() {
+            StrUnits::Ascii
+        } else {
+            StrUnits::Units(crate::jstr::units(s).into())
+        };
+        if self.str_units.len() >= 8 {
+            self.str_units.remove(0);
+        }
+        self.str_units.push((s.clone(), u.clone()));
+        u
+    }
+
+    /// Code unit `idx` of `s`, through the cache. `None` = out of range.
+    pub(crate) fn unit_at(&mut self, s: &Rc<str>, idx: usize) -> Option<u16> {
+        match self.units_of(s) {
+            StrUnits::Ascii => s.as_bytes().get(idx).map(|&b| b as u16),
+            StrUnits::Units(u) => u.get(idx).copied(),
+        }
+    }
+
+    /// The fully materialized unit vector (for range/search operations): an ASCII entry is
+    /// promoted in place, so the copy happens once per string, not per call.
+    pub(crate) fn units_full(&mut self, s: &Rc<str>) -> Rc<[u16]> {
+        if s.len() < 64 {
+            return crate::jstr::units(s).into();
+        }
+        if let Some(k) = self.str_units.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+            if let StrUnits::Units(u) = &self.str_units[k].1 {
+                return u.clone();
+            }
+            let u: Rc<[u16]> = crate::jstr::units(s).into();
+            self.str_units[k].1 = StrUnits::Units(u.clone());
+            return u;
+        }
+        let u: Rc<[u16]> = crate::jstr::units(s).into();
+        if self.str_units.len() >= 8 {
+            self.str_units.remove(0);
+        }
+        self.str_units.push((s.clone(), StrUnits::Units(u.clone())));
+        u
+    }
+
+    /// `s.length` (UTF-16 units), through the cache.
+    pub(crate) fn str_len(&mut self, s: &Rc<str>) -> usize {
+        match self.units_of(s) {
+            StrUnits::Ascii => s.len(),
+            StrUnits::Units(u) => u.len(),
+        }
+    }
+
     pub(crate) fn gc_check(&mut self) -> Result<(), Abrupt> {
         // Scope churn is tracked separately: call-heavy code can retire millions of scopes while
         // allocating few objects, and each dead weak registry entry pins its allocation.

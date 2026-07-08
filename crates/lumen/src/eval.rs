@@ -6044,7 +6044,7 @@ impl Interp {
                 if ls.len() + rs.len() > MAX_STR_LEN {
                     return Err(self.throw("RangeError", "Invalid string length"));
                 }
-                return Ok(Value::from_string(crate::jstr::concat(&ls, &rs)));
+                return Ok(Value::Str(crate::jstr::concat_rc(&ls, &rs)));
             }
             if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&lp, &rp) {
