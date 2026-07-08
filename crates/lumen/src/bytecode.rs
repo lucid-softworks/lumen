@@ -5074,6 +5074,60 @@ unsafe fn jit_call_inner(
     let mut r =
         i.call_jit_cached(&chunk.call_caches[c as usize], &*sp.sub(argc + 1), this_slot, args_ptr, argc);
     if r.is_none() {
+        // Plain-native fast call: a bare `fn` callee in a proxy-free single-realm engine skips the
+        // call/call_inner/call_dispatch layering. Replicates the observable effects exactly: depth
+        // guard, amortized gc tick, constructing/new.target save-clear-restore, and the tail-call
+        // drain (a native can't set pending_tail itself, but a defensive drain is nearly free).
+        if i.proxies.is_empty() && i.realms.is_empty() {
+            let callee = &*sp.sub(argc + 1);
+            if let Value::Obj(o) = callee {
+                let nf = match &o.borrow().call {
+                    crate::value::Callable::Native(nf) => Some(*nf),
+                    _ => None,
+                };
+                if let Some(nf) = nf {
+                    i.depth += 1;
+                    if i.depth > crate::interpreter::MAX_EVAL_DEPTH {
+                        i.depth -= 1;
+                        return Err(i.throw("RangeError", "Maximum call stack size exceeded"));
+                    }
+                    if let Err(e) = i.gc_check_amortized() {
+                        i.depth -= 1;
+                        return Err(e);
+                    }
+                    let saved_ctor = std::mem::replace(&mut i.constructing, false);
+                    let saved_nt = std::mem::replace(&mut i.new_target, Value::Undefined);
+                    let this = if with_this {
+                        (*sp.sub(argc + 2)).clone()
+                    } else {
+                        Value::Undefined
+                    };
+                    let args = std::slice::from_raw_parts(args_ptr, argc);
+                    let mut r = nf(i, this, args).map_err(Abrupt::Throw);
+                    i.constructing = saved_ctor;
+                    i.new_target = saved_nt;
+                    while r.is_ok() {
+                        match i.pending_tail.take() {
+                            Some((f, t, a)) => {
+                                if let Err(e) = i.gc_check_amortized() {
+                                    r = Err(e);
+                                    break;
+                                }
+                                r = i.call_inner(f, t, &a);
+                            }
+                            None => break,
+                        }
+                    }
+                    i.depth -= 1;
+                    let v = r?;
+                    *sp = jit_consume(*sp, argc + 1 + with_this as usize);
+                    push!(v);
+                    return Ok(());
+                }
+            }
+        }
+    }
+    if r.is_none() {
         r = i.call_jit_fast(
             &*sp.sub(argc + 1),
             this_slot,

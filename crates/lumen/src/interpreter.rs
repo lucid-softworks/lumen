@@ -2062,6 +2062,10 @@ impl Interp {
             return None;
         }
         let b = o.borrow();
+        // One-load mirror hit (see `Props::mirror`); a miss only means "answer classically".
+        if let Some(f) = b.props.mirror_get(n as u32) {
+            return Some(Value::Num(f));
+        }
         let p = b.props.get_index(n as u32)?;
         if p.accessor {
             return None;
@@ -2081,13 +2085,8 @@ impl Interp {
             return Err(v);
         }
         let mut b = o.borrow_mut();
-        match b.props.get_index_mut(n as u32) {
-            Some(p) if !p.accessor && p.writable => {
-                p.value = v;
-                Ok(())
-            }
-            _ => Err(v),
-        }
+        // Mirror-coherent overwrite (does NOT invalidate the mirror like a raw get_index_mut).
+        b.props.set_index_value(n as u32, v)
     }
 
     /// `obj.name` read with a per-site inline cache (bytecode `GetProp`/`GetMethod`). The cache
@@ -3934,7 +3933,7 @@ impl Interp {
         Ok(None)
     }
 
-    fn call_inner(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
+    pub(crate) fn call_inner(&mut self, callee: Value, this: Value, args: &[Value]) -> Result<Value, Abrupt> {
         // A cross-realm callee runs with its own realm's intrinsics active (so a thrown TypeError,
         // a fresh object's prototype, or a global lookup lands in the right realm).
         if !self.realms.is_empty() {

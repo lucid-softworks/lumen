@@ -553,6 +553,18 @@ mod asm {
             };
             self.emit(bits | (field << 10) | (rn << 5) | rd);
         }
+        /// fmov xd, dn (bit move)
+        pub fn fmov_x_d(&mut self, rd: u32, rn: u32) {
+            self.emit(0x9E66_0000 | (rn << 5) | rd);
+        }
+        /// ldr dt, [xn, xm, lsl #3]
+        pub fn ldr_d_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0xFC60_7800 | (rm << 16) | (rn << 5) | rt);
+        }
+        /// str dt, [xn, xm, lsl #3]
+        pub fn str_d_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0xFC20_7800 | (rm << 16) | (rn << 5) | rt);
+        }
         /// adds wd, wn, #imm12 (sets flags; V on i32 overflow)
         pub fn adds_imm_w(&mut self, rd: u32, rn: u32, imm: u32) {
             debug_assert!(imm < 4096);
@@ -2619,6 +2631,110 @@ fn emit_get_elem_inline(
 /// the stack as the expression result and bumps once. A BigInt old value (compound drop), a
 /// BigInt `v` under `keep` (compound clone), a last-reference old value or receiver, an accessor
 /// or non-writable slot, or any dense miss falls to the checked helper.
+/// Where a mirror store's key index comes from.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+enum MirrorKey {
+    /// Exact u32 already in an x register.
+    U32InReg(u32),
+    /// The key Value's f64 payload at `[x20 + off]` (already validated as an exact u32).
+    StackF64(i32),
+    /// A validated u32 key in a d register.
+    F64InDreg(u32),
+    /// Compile-time constant index.
+    Const(u32),
+}
+
+/// What a mirror store writes.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+enum MirrorVal {
+    /// A Value at `[x20 + off]` (tag at `off`, payload at `off+8`); tag unknown — a non-Num
+    /// invalidates the mirror.
+    Stack(i32),
+    /// A proven-Num f64 in a d register; `bool` = proven exact-i32 (keeps `MIRROR_ALL_I32`).
+    Num(u32, bool),
+}
+
+/// The element-mirror side of a dense element store the caller has already committed to the
+/// entry (see `value::Props::mirror`): keep `mirror[n]` coherent, drop `MIRROR_ALL_I32` for
+/// unproven values, and invalidate outright on a non-Num or the hole sentinel. Bounds are
+/// re-checked against the mirror's own length as corruption insurance (the lockstep invariant
+/// should make it redundant). Clobbers x9, x12, x13 and d1 only.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_mirror_store(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    base: u32,
+    key: MirrorKey,
+    val: MirrorVal,
+) {
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let done = a.new_label();
+    let inval = a.new_label();
+    a.ldrb_imm(13, base, mf);
+    let ok_bit = asm::logical_imm_w(crate::value::MIRROR_OK as u32).unwrap();
+    a.logic_imm_w(0, 12, 13, ok_bit);
+    a.cbz(12, false, done);
+    // Value → d1 (or reuse the proven register).
+    let (dv, proven_num, proven_i32) = match val {
+        MirrorVal::Stack(off) => {
+            a.ldurb(9, 20, off);
+            a.cmp_imm_w(9, 4);
+            a.b_cond(C_NE, inval);
+            a.ldur_d(1, 20, off + 8);
+            (1u32, false, false)
+        }
+        MirrorVal::Num(d, i32_proven) => (d, true, i32_proven),
+    };
+    let _ = proven_num;
+    if !proven_i32 {
+        // MIRROR_ALL_I32 upkeep, flag-first: float-heavy code (flag long cleared) pays two
+        // instructions. No hole-sentinel screen: hole accounting is structural (see
+        // `Props::mirror_sync`), a data value equal to the sentinel bits is just a NaN to JIT
+        // readers, and Rust readers fall back to the authoritative entry.
+        let i32_done = a.new_label();
+        let i32_bit = asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
+        a.logic_imm_w(0, 9, 13, i32_bit);
+        a.cbz(9, false, i32_done);
+        a.fcvtzs_w_d(9, dv);
+        a.scvtf_d_w(1, 9);
+        a.fmov_x_d(9, 1);
+        a.fmov_x_d(12, dv);
+        a.cmp_reg_x(9, 12);
+        a.b_cond(C_EQ, i32_done);
+        let clear = asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
+        a.logic_imm_w(0, 13, 13, clear);
+        a.strb_imm(13, base, mf);
+        a.bind(i32_done);
+    }
+    // Key index → x9.
+    match key {
+        MirrorKey::U32InReg(r) => {
+            if r != 9 {
+                a.mov(9, r);
+            }
+        }
+        MirrorKey::StackF64(off) => {
+            a.ldur_d(0, 20, off);
+            a.fcvtzu_w_d(9, 0);
+        }
+        MirrorKey::F64InDreg(d) => a.fcvtzu_w_d(9, d),
+        MirrorKey::Const(n) => a.mov_imm64(9, n as u64),
+    }
+    // Insurance bounds check, then the store.
+    a.ldr_imm(12, base, ml);
+    a.cmp_reg_x(9, 12);
+    a.b_cond(C_HS, inval);
+    a.ldr_imm(12, base, mp);
+    a.add_shifted(12, 12, 9, 3);
+    a.str_d_imm(dv, 12, 0);
+    a.b(done);
+    a.bind(inval);
+    a.strb_imm(31, base, mf);
+    a.bind(done);
+}
+
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn emit_set_elem_inline(
     a: &mut asm::Asm,
@@ -2730,6 +2846,9 @@ fn emit_set_elem_inline(
     a.sub_imm(13, 13, 1);
     a.stur(13, 12, strong);
     a.bind(no_old_dec);
+    // Keep the element mirror coherent (x9/x12/x13/d0/d1 are dead here; v words in 14/16/17,
+    // bases in 10/11/15 stay live).
+    emit_mirror_store(a, layout, 11, MirrorKey::StackF64(-40), MirrorVal::Stack(-24));
     if keep {
         // v now lives in the slot AND stays on the stack as the result: one bump.
         a.ldurb(9, 20, -24);
@@ -2967,6 +3086,8 @@ fn emit_elem_local_keyed(
         a.sub_imm(13, 13, 1);
         a.stur(13, 12, strong);
         a.bind(no_old_dec);
+        // Element mirror (x9/x12/x13/d1 dead here; the key f64 survives in d0).
+        emit_mirror_store(a, layout, 11, MirrorKey::F64InDreg(0), MirrorVal::Stack(-24));
         if kind == ElemLocalKind::SetKeep {
             // v now lives in the slot AND stays on the stack: one bump, result at the key slot.
             a.ldurb(9, 20, -24);
@@ -3224,6 +3345,9 @@ fn emit_chain(
     pc_labels: &[usize],
     l_unwind: usize,
 ) {
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
@@ -3360,6 +3484,30 @@ fn emit_chain(
                         }
                     }
                 }
+                let mirror_done = a.new_label();
+                let classic = a.new_label();
+                if !is_set {
+                    // Mirror read: coherent + hole-free ⇒ bounds + one indexed load, value
+                    // known Num. Any miss (flags, range) answers classically below.
+                    a.ldrb_imm(12, 11, mf);
+                    let mask = asm::logical_imm_w(
+                        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+                    )
+                    .unwrap();
+                    a.logic_imm_w(0, 12, 12, mask);
+                    a.cmp_imm_w(
+                        12,
+                        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+                    );
+                    a.b_cond(C_NE, classic);
+                    a.ldr_imm(12, 11, ml);
+                    a.cmp_reg_x(9, 12);
+                    a.b_cond(C_HS, classic);
+                    a.ldr_imm(12, 11, mp);
+                    a.ldr_d_lsl3(dk, 12, 9);
+                    a.b(mirror_done);
+                }
+                a.bind(classic);
                 a.ldr_imm(12, 11, ell);
                 a.cmp_reg_x(9, 12);
                 a.b_cond(C_HS, guard!());
@@ -3400,6 +3548,14 @@ fn emit_chain(
                     a.sub_imm(13, 13, 1);
                     a.stur(13, 12, strong);
                     a.bind(no_dec);
+                    // Element mirror: dv is a proven Num; int-ness is unknown in this tier.
+                    emit_mirror_store(
+                        a,
+                        layout,
+                        11,
+                        MirrorKey::F64InDreg(dk),
+                        MirrorVal::Num(dv, false),
+                    );
                     free.push(dk);
                     if keep {
                         vregs.push((dv, viv)); // v stays the virtual result (a Num — no refcounting)
@@ -3412,6 +3568,7 @@ fn emit_chain(
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_NE, guard!());
                     a.ldur_d(dk, 15, ev + 8); // reuse the key's register for the element
+                    a.bind(mirror_done);
                     vregs.push((dk, false));
                 }
             }
@@ -3636,8 +3793,11 @@ struct LoopPlan {
     /// Per chain index: what the op pushes (kind agreement between planner and emitter).
     kinds: Vec<PushKind>,
     slots: Vec<SlotPlan>,
-    /// Receiver slot offsets validated once into x16/x17.
-    receivers: Vec<(u32, u32)>,
+    /// Receiver slots validated once. In mirror mode the cached register holds the raw-f64
+    /// element buffer's data pointer (`Props::mirror`) with the length in `len_reg`, and
+    /// element reads are one indexed load; classic mode caches the object base and walks
+    /// entries per access.
+    receivers: Vec<ReceiverPlan>,
     /// GetElem chain idx → pin register holding its (guarded) result for later reuse.
     elem_retain: Vec<(usize, u32)>,
     /// GetElem chain idx → the retaining chain idx whose pin it copies from.
@@ -3645,9 +3805,26 @@ struct LoopPlan {
     /// Bit (chain idx, operand side) → pin register: retain the guarded ToInt32 result / reuse.
     conv_retain: Vec<((usize, u8), u32)>,
     conv_reuse: Vec<((usize, u8), u32)>,
+    /// Per SetElem chain idx: the stored value is a proven exact-i32 (mirror flag upkeep).
+    setelem_i32: crate::fasthash::FastMap<usize, bool>,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// How a loop-chain receiver is cached (see `LoopPlan::receivers`).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+struct ReceiverPlan {
+    off: u32,
+    /// x16/x17: the validated object base.
+    reg: u32,
+    /// Element accesses go through the raw-f64 mirror (preamble-proven coherent and hole-free;
+    /// the buffer pointer/length load per access — same cache line, far cheaper than the
+    /// entry chase they replace).
+    mirror: bool,
+    /// Any int-typed element read flows from this receiver (preamble then requires
+    /// `MIRROR_ALL_I32`, letting those reads use a bare fcvtzs).
+    int_reads: bool,
+}
+
 /// Jump target of a control-flow op, if any.
 fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
     use crate::bytecode::Op;
@@ -4133,6 +4310,8 @@ fn plan_loop(
     let mut d_peak = 0usize;
     // Bit-operand kinds per (chain idx, side), from the final round (conversion memos below).
     let mut bit_kinds: crate::fasthash::FastMap<(usize, u8), PushKind> = Default::default();
+    // Per SetElem chain idx: stored value proven exact-i32 (final round).
+    let mut setelem_i32: crate::fasthash::FastMap<usize, bool> = Default::default();
     // Loop-head |value| ≤ 2^exp bound per int-resident slot: entry guards prove 31; stores
     // widen it; iterate until stable (or the slot demotes to float residency).
     let mut slot_exp_head: crate::fasthash::FastMap<u32, u32> = Default::default();
@@ -4176,13 +4355,15 @@ fn plan_loop(
         }
         dups.min(1)
     };
-    let mut pin_demoted = false;
+    let mut pins_demoted = 0usize;
+    let pins_wanted = want_pin;
     'budget: loop {
         widened.clear();
         stable = false;
         for _round in 0..64 {
         plan_kinds = vec![PushKind::None; n];
         bit_kinds.clear();
+        setelem_i32.clear();
         // (kind, info) per virtual value; slot state per off.
         let mut vstack: Vec<(PushKind, NumInfo)> = Vec::new();
         let mut slot_iv: crate::fasthash::FastMap<u32, NumInfo> = Default::default();
@@ -4285,6 +4466,12 @@ fn plan_loop(
                 ChainOp::SetElem(_, keep) => {
                     let (vk, vinf) = pop!();
                     pop!();
+                    // Exact-i32 proof for the mirror: an int-kind value bounded to i32 (int
+                    // kinds can never carry -0.0).
+                    setelem_i32.insert(
+                        idx,
+                        matches!(vk, PushKind::I { .. }) && vinf.exp <= 31,
+                    );
                     if keep {
                         push!(vk, vinf);
                     }
@@ -4303,9 +4490,13 @@ fn plan_loop(
                     // mul is exact and equals the f64 result — no guards, 1-cycle latency.
                     let int_side = |k: PushKind, inf: NumInfo| match k {
                         PushKind::I { .. } => true,
-                        PushKind::K(_) => inf.integral && inf.exp <= 52,
+                        // -0.0 is "integral" but has no integer representation: its sign would
+                        // erase through int arithmetic.
+                        PushKind::K(b) => {
+                            inf.integral && inf.exp <= 52 && b != (-0.0f64).to_bits()
+                        }
                         // Proven-integral f64 (entry-checked preload or tracked store): a bare
-                        // fcvtzs is exact.
+                        // fcvtzs is exact (the entry guards reject -0.0).
                         PushKind::D { .. } => inf.integral && inf.exp <= 52,
                         _ => false,
                     };
@@ -4463,11 +4654,12 @@ fn plan_loop(
         if !stable {
             reject!("kind rounds did not converge");
         }
-        // Register budget: demote the least-used I resident and re-simulate when over, and
-        // give up one more resident (once) if an elem-dup pin wants a register.
+        // Register budget: demote the least-used I resident and re-simulate when over; also
+        // give up (a bounded number of) residents so the receiver/memo pins fit — a length
+        // pin turns every element access into one load, worth far more than a counter's home.
         let over = i_peak + i_slots.len() > I_UNIVERSE.len();
-        let pin_squeeze =
-            want_pin > 0 && !pin_demoted && i_peak + i_slots.len() == I_UNIVERSE.len();
+        let pin_squeeze = pins_demoted < pins_wanted
+            && i_peak + i_slots.len() + (pins_wanted - pins_demoted) > I_UNIVERSE.len();
         if over || pin_squeeze {
             let victim = i_slots
                 .iter()
@@ -4482,14 +4674,15 @@ fn plan_loop(
                             if over { "pressure" } else { "pin" }
                         );
                     }
-                    if pin_squeeze {
-                        pin_demoted = true;
+                    if !over {
+                        pins_demoted += 1;
                     }
                     i_slots.retain(|&o| o != v);
                     slot_exp_head.remove(&v);
                     continue 'budget;
                 }
-                None => reject!(format!("i pressure: peak {i_peak}")),
+                None if over => reject!(format!("i pressure: peak {i_peak}")),
+                None => break,
             }
         }
         break;
@@ -4535,11 +4728,19 @@ fn plan_loop(
     // Sanity: kinds recorded for the final residency sets. The last sim round used exactly
     // `i_slots`/all-resident F, matching the assignment above.
 
-    let receivers: Vec<(u32, u32)> = receivers
-        .iter()
-        .enumerate()
-        .map(|(k, &off)| (off, 16 + k as u32))
-        .collect();
+    // Which receivers feed int-typed element reads (their mirror mode also needs ALL_I32).
+    let mut rcv_int: Vec<u32> = Vec::new();
+    {
+        let mut seen = 0usize;
+        for (cop, _) in &chain {
+            if let ChainOp::GetElem(off) = *cop {
+                if elem_int[seen] && !rcv_int.contains(&off) {
+                    rcv_int.push(off);
+                }
+                seen += 1;
+            }
+        }
+    }
 
     // ---- memoization: duplicate element reads and repeated guarded ToInt32 conversions.
     // Node ids are SSA-like (an id never changes value), so a second element read with the same
@@ -4555,6 +4756,16 @@ fn plan_loop(
         .skip(i_peak)
         .collect();
     let mut free_pin_d: Vec<u32> = (next_d..16).collect();
+    let receivers: Vec<ReceiverPlan> = receivers
+        .iter()
+        .enumerate()
+        .map(|(k, &off)| ReceiverPlan {
+            off,
+            reg: 16 + k as u32,
+            mirror: fast & 262144 != 0,
+            int_reads: rcv_int.contains(&off),
+        })
+        .collect();
     let mut elem_retain: Vec<(usize, u32)> = Vec::new();
     let mut elem_reuse: Vec<(usize, usize)> = Vec::new(); // (dup idx, retain idx)
     {
@@ -4641,6 +4852,7 @@ fn plan_loop(
         elem_reuse,
         conv_retain,
         conv_reuse,
+        setelem_i32,
     })
 }
 
@@ -4675,6 +4887,9 @@ fn emit_loop_chain(
     let none_tag = layout.exotic_none_tag as u32;
     let arr_tag = layout.exotic_array_tag as u32;
     let plain = layout.obj_ic_plain as u32;
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
 
     let plain_h = a.new_label();
     let body_l = a.new_label();
@@ -4682,7 +4897,7 @@ fn emit_loop_chain(
     let exit_b = a.new_label();
 
     let slot = |off: u32| plan.slots.iter().find(|s| s.off == off);
-    let rcv_reg = |off: u32| plan.receivers.iter().find(|r| r.0 == off).map(|r| r.1);
+    let rcv_plan = |off: u32| plan.receivers.iter().find(|r| r.off == off);
     // Virgins stored within the condition prefix (they flush even on the entry exit).
     let cond_virgins: Vec<u32> = plan.chain[..plan.cond_len]
         .iter()
@@ -4712,11 +4927,13 @@ fn emit_loop_chain(
             SlotRes::F(d) => {
                 a.ldr_d_imm(d, 22, s.off + 8);
                 if s.int_checked {
-                    // One-time exact-i32 proof; the value stays in its d home and integer
-                    // consumers convert with a bare fcvtzs.
+                    // One-time exact-i32 proof (bit-compare: -0.0 must not pass); the value
+                    // stays in its d home and integer consumers convert with a bare fcvtzs.
                     a.fcvtzs_w_d(9, d);
                     a.scvtf_d_w(1, 9);
-                    a.fcmp(1, d);
+                    a.fmov_x_d(10, 1);
+                    a.fmov_x_d(11, d);
+                    a.cmp_reg_x(10, 11);
                     a.b_cond(C_NE, plain_h);
                 }
             }
@@ -4726,14 +4943,17 @@ fn emit_loop_chain(
                 a.ldr_d_imm(0, 22, s.off + 8);
                 a.fcvtzs_w_d(x, 0);
                 a.scvtf_d_w(1, x);
-                a.fcmp(1, 0);
+                a.fmov_x_d(9, 1);
+                a.fmov_x_d(10, 0);
+                a.cmp_reg_x(9, 10);
                 a.b_cond(C_NE, plain_h);
                 a.sxtw(x, x);
             }
             SlotRes::None => {}
         }
     }
-    for &(off, r) in &plan.receivers {
+    for rp in &plan.receivers {
+        let (off, r) = (rp.off, rp.reg);
         a.ldrb_imm(10, 22, off);
         a.cmp_imm_w(10, 8);
         a.b_cond(C_NE, plain_h);
@@ -4748,6 +4968,19 @@ fn emit_loop_chain(
         a.bind(ex_ok);
         a.ldrb_imm(12, r, plain);
         a.cbz(12, false, plain_h);
+        if rp.mirror {
+            // The element buffer must be coherent, hole-free, and (for int-read receivers)
+            // all-i32: element reads become bounds + one indexed load with no tag check.
+            let mut need = (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32;
+            if rp.int_reads {
+                need |= crate::value::MIRROR_ALL_I32 as u32;
+            }
+            a.ldrb_imm(12, r, mf);
+            let field = asm::logical_imm_w(need).expect("mirror mask encodable");
+            a.logic_imm_w(0, 12, 12, field);
+            a.cmp_imm_w(12, need);
+            a.b_cond(C_NE, plain_h);
+        }
     }
 
     // ---- emission state --------------------------------------------------------------------
@@ -5022,34 +5255,67 @@ fn emit_loop_chain(
                             }
                         } else {
                             key_to_x9!(key);
-                            let r = rcv_reg(xoff).expect("planned receiver");
-                            elem_entry!(r);
-                            a.ldrb_imm(9, 15, ev as u32);
-                            a.cmp_imm_w(9, 4);
-                            a.b_cond(C_NE, guard!());
+                            let rp = rcv_plan(xoff).expect("planned receiver");
                             let pin =
                                 plan.elem_retain.iter().find(|&&(i, _)| i == idx).map(|p| p.1);
-                            if matches!(plan.kinds[idx], PushKind::I { .. }) {
-                                // w-form: the exactness compare-back also proves i32 (the
-                                // planner's range analysis relies on that bound).
-                                a.ldur_d(0, 15, ev + 8);
-                                let xt = free_i.pop().expect("loop i pool");
-                                a.fcvtzs_w_d(xt, 0);
-                                a.scvtf_d_w(1, xt);
-                                a.fcmp(1, 0);
-                                a.b_cond(C_NE, guard!());
-                                a.sxtw(xt, xt);
-                                if let Some(p) = pin {
-                                    a.mov(p, xt);
+                            if rp.mirror {
+                                // Mirror: bounds + one indexed load (ptr/len share a cache
+                                // line off the cached base). Preamble proved coherent +
+                                // hole-free (+ all-i32 for int reads): no tag check, and int
+                                // reads need no exactness guard.
+                                a.ldr_imm(12, rp.reg, ml);
+                                a.cmp_reg_x(9, 12);
+                                a.b_cond(C_HS, guard!());
+                                a.ldr_imm(12, rp.reg, mp);
+                                if matches!(plan.kinds[idx], PushKind::I { .. }) {
+                                    a.ldr_d_lsl3(0, 12, 9);
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.fcvtzs_w_d(xt, 0);
+                                    a.sxtw(xt, xt);
+                                    if let Some(p) = pin {
+                                        a.mov(p, xt);
+                                    }
+                                    vstack.push(LV::I(xt, true));
+                                } else {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.ldr_d_lsl3(dt, 12, 9);
+                                    if let Some(p) = pin {
+                                        a.fmov_d_d(p, dt);
+                                    }
+                                    vstack.push(LV::D(dt, false));
                                 }
-                                vstack.push(LV::I(xt, true));
                             } else {
-                                let dt = free_d.pop().expect("loop d pool");
-                                a.ldur_d(dt, 15, ev + 8);
-                                if let Some(p) = pin {
-                                    a.fmov_d_d(p, dt);
+                                let r = rp.reg;
+                                elem_entry!(r);
+                                a.ldrb_imm(9, 15, ev as u32);
+                                a.cmp_imm_w(9, 4);
+                                a.b_cond(C_NE, guard!());
+                                if matches!(plan.kinds[idx], PushKind::I { .. }) {
+                                    // w-form: the exactness compare-back also proves i32 (the
+                                    // planner's range analysis relies on that bound).
+                                    a.ldur_d(0, 15, ev + 8);
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.fcvtzs_w_d(xt, 0);
+                                    a.scvtf_d_w(1, xt);
+                                    // Bit-compare, not fcmp: IEEE equality would accept -0.0
+                                    // and erase its sign through the int-typed value.
+                                    a.fmov_x_d(9, 1);
+                                    a.fmov_x_d(10, 0);
+                                    a.cmp_reg_x(9, 10);
+                                    a.b_cond(C_NE, guard!());
+                                    a.sxtw(xt, xt);
+                                    if let Some(p) = pin {
+                                        a.mov(p, xt);
+                                    }
+                                    vstack.push(LV::I(xt, true));
+                                } else {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.ldur_d(dt, 15, ev + 8);
+                                    if let Some(p) = pin {
+                                        a.fmov_d_d(p, dt);
+                                    }
+                                    vstack.push(LV::D(dt, false));
                                 }
-                                vstack.push(LV::D(dt, false));
                             }
                         }
                     }
@@ -5066,32 +5332,96 @@ fn emit_loop_chain(
                             }
                         }
                         key_to_x9!(key);
-                        let r = rcv_reg(xoff).expect("planned receiver");
-                        elem_entry!(r);
-                        a.ldrb_imm(9, 15, ew);
-                        a.cbz(9, false, guard!());
-                        a.ldrb_imm(14, 15, ev as u32);
-                        a.cmp_imm_w(14, 5);
-                        a.b_cond(C_EQ, guard!());
-                        let old_plain = a.new_label();
-                        a.cmp_imm_w(14, 6);
-                        a.b_cond(C_LO, old_plain);
-                        a.ldur(12, 15, ev + 8);
-                        a.ldur(13, 12, strong);
-                        a.cmp_imm_x(13, 1);
-                        a.b_cond(C_LS, guard!());
-                        a.bind(old_plain);
-                        a.movz(9, 4, 0);
-                        a.stur(9, 15, ev);
-                        a.stur_d(2, 15, ev + 8);
-                        a.stur(31, 15, ev + 16);
-                        let no_dec = a.new_label();
-                        a.cmp_imm_w(14, 6);
-                        a.b_cond(C_LO, no_dec);
-                        a.ldur(13, 12, strong);
-                        a.sub_imm(13, 13, 1);
-                        a.stur(13, 12, strong);
-                        a.bind(no_dec);
+                        let rp = rcv_plan(xoff).expect("planned receiver");
+                        let r = rp.reg;
+                        let i32_proven =
+                            plan.setelem_i32.get(&idx).copied().unwrap_or(false);
+                        if rp.mirror {
+                            // Mirror invariant (preamble-proven): every mirrored element is a
+                            // plain writable data Num — the accessor/writable/old-value checks
+                            // and the tag write all collapse. A hole (elems NO_SLOT) bails:
+                            // that store would CREATE a property.
+                            a.ldr_imm(12, r, ml);
+                            a.cmp_reg_x(9, 12);
+                            a.b_cond(C_HS, guard!());
+                            a.ldr_imm(12, r, elp);
+                            a.add_shifted(12, 12, 9, 2);
+                            a.ldr_w_imm(13, 12, 0);
+                            a.cmn_imm_w(13, 1);
+                            a.b_cond(C_EQ, guard!());
+                            a.ldr_imm(15, r, en);
+                            a.movz(12, es as u32, 0);
+                            a.madd(15, 13, 12, 15);
+                            a.stur_d(2, 15, ev + 8);
+                            a.ldr_imm(12, r, mp);
+                            a.str_d_lsl3(2, 12, 9);
+                            if !i32_proven {
+                                // MIRROR_ALL_I32 upkeep, flag-first (no sentinel screen —
+                                // hole accounting is structural, see Props::mirror_sync).
+                                let i32_done = a.new_label();
+                                a.ldrb_imm(13, r, mf);
+                                let i32_bit =
+                                    asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32)
+                                        .unwrap();
+                                a.logic_imm_w(0, 12, 13, i32_bit);
+                                a.cbz(12, false, i32_done);
+                                a.fcvtzs_w_d(12, 2);
+                                a.scvtf_d_w(1, 12);
+                                a.fmov_x_d(12, 1);
+                                a.fmov_x_d(14, 2);
+                                a.cmp_reg_x(12, 14);
+                                a.b_cond(C_EQ, i32_done);
+                                let clear = asm::logical_imm_w(
+                                    !(crate::value::MIRROR_ALL_I32 as u32),
+                                )
+                                .unwrap();
+                                a.logic_imm_w(0, 13, 13, clear);
+                                a.strb_imm(13, r, mf);
+                                a.bind(i32_done);
+                            }
+                        } else {
+                            elem_entry!(r);
+                            a.ldrb_imm(9, 15, ew);
+                            a.cbz(9, false, guard!());
+                            a.ldrb_imm(14, 15, ev as u32);
+                            a.cmp_imm_w(14, 5);
+                            a.b_cond(C_EQ, guard!());
+                            let old_plain = a.new_label();
+                            a.cmp_imm_w(14, 6);
+                            a.b_cond(C_LO, old_plain);
+                            a.ldur(12, 15, ev + 8);
+                            a.ldur(13, 12, strong);
+                            a.cmp_imm_x(13, 1);
+                            a.b_cond(C_LS, guard!());
+                            a.bind(old_plain);
+                            a.movz(9, 4, 0);
+                            a.stur(9, 15, ev);
+                            a.stur_d(2, 15, ev + 8);
+                            a.stur(31, 15, ev + 16);
+                            let no_dec = a.new_label();
+                            a.cmp_imm_w(14, 6);
+                            a.b_cond(C_LO, no_dec);
+                            a.ldur(13, 12, strong);
+                            a.sub_imm(13, 13, 1);
+                            a.stur(13, 12, strong);
+                            a.bind(no_dec);
+                            // Element mirror: the value was staged in d2; key registers are
+                            // still intact (operand frees are deferred to op end).
+                            let mkey = match key {
+                                LV::I(x, _) => MirrorKey::U32InReg(x),
+                                LV::D(d, _) => MirrorKey::F64InDreg(d),
+                                // A K key reaching the commit passed the exact-u32 runtime
+                                // check, so the compile-time conversion is exact.
+                                LV::K(bits) => MirrorKey::Const(f64::from_bits(bits) as u32),
+                            };
+                            emit_mirror_store(
+                                a,
+                                layout,
+                                r,
+                                mkey,
+                                MirrorVal::Num(2, i32_proven),
+                            );
+                        }
                         if keep {
                             vstack.push(val);
                         } else {
