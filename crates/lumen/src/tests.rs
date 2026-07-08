@@ -9604,3 +9604,88 @@ fn import_bytes_modules() {
         "0:65"
     );
 }
+
+// ---- import attributes: `with { type: "json" }` (JSON modules) ----
+
+#[test]
+fn import_json_modules() {
+    // A JSON module default-exports the JSON.parse of its source: `__proto__` keys become plain
+    // own data properties (never prototype-setting), the value is mutable (not frozen), the
+    // namespace has exactly `default`, and a plain import of the same specifier is a DIFFERENT
+    // record from the attribute import. Dynamic import with the attribute dedups to the same
+    // record; invalid JSON surfaces as a SyntaxError.
+    let mut files: std::collections::HashMap<String, String> = Default::default();
+    files.insert(
+        "/d.json".into(),
+        r#"{ "answer": 42, "__proto__": { "evil": true }, "arr": [1, 2] }"#.into(),
+    );
+    files.insert("/bad.json".into(), "{ bad".into());
+    files.insert(
+        "/main.js".into(),
+        r#"
+        import data from '/d.json' with { type: 'json' };
+        import * as ns from '/d.json' with { type: 'json' };
+        globalThis.__data = data;
+        globalThis.__value = data.answer + ':' + data.arr.length;
+        globalThis.__proto_safe = [
+            Object.getPrototypeOf(data) === Object.prototype,
+            data.evil === undefined,
+            Object.getOwnPropertyNames(data).includes('__proto__'),
+        ].join('|');
+        data.answer = 43; // JSON module values are ordinary mutable objects
+        globalThis.__mutable = data.answer === 43 && !Object.isFrozen(data);
+        globalThis.__ns = Object.getOwnPropertyNames(ns).join(',') + ':' + (ns.default === data);
+        import('/d.json', { with: { type: 'json' } }).then(m => {
+            globalThis.__dyn_same = m.default === data;
+        });
+        import('/bad.json', { with: { type: 'json' } }).then(
+            () => { globalThis.__bad = 'resolved'; },
+            e => { globalThis.__bad = e.constructor.name; },
+        );
+        "#
+        .into(),
+    );
+    let f = files.clone();
+    let mut e = Engine::new();
+    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
+        f.get(spec).map(|s| (spec.to_string(), s.clone()))
+    })
+    .unwrap();
+    let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("{src} threw {name}: {message}"),
+    };
+    assert_eq!(read(&mut e, "globalThis.__value"), "42:2");
+    assert_eq!(read(&mut e, "globalThis.__proto_safe"), "true|true|true");
+    assert_eq!(read(&mut e, "globalThis.__mutable"), "true");
+    assert_eq!(read(&mut e, "globalThis.__ns"), "default:true");
+    assert_eq!(read(&mut e, "globalThis.__dyn_same"), "true");
+    assert_eq!(read(&mut e, "globalThis.__bad"), "SyntaxError");
+}
+
+#[test]
+fn import_json_attr_distinct_from_plain_import() {
+    // The same specifier imported with and without the attribute resolves two records: the
+    // attribute one is engine-synthesized from raw contents, the plain one is whatever module
+    // the host serves. Order must not matter (regression: the dep map used to key by specifier
+    // alone, collapsing both onto whichever import came first).
+    for flipped in [false, true] {
+        let a = "import j from '/d.json' with { type: 'json' };";
+        let b = "import p from '/d.json';";
+        let (first, second) = if flipped { (b, a) } else { (a, b) };
+        let src = format!("{first}\n{second}\nglobalThis.__r = (j === p) + ':' + j.k + ':' + p.k;");
+        let mut e = Engine::new();
+        e.eval_module_attrs(&src, "/main.js", |spec, _r, attr| match (spec, attr) {
+            ("/d.json", Some("json")) => Some((spec.to_string(), r#"{"k":"raw"}"#.to_string())),
+            ("/d.json", None) => {
+                Some((spec.to_string(), "export default { k: 'module' };".to_string()))
+            }
+            _ => None,
+        })
+        .unwrap();
+        match e.eval("globalThis.__r", false).unwrap() {
+            Completion::Value(v) => assert_eq!(v, "false:raw:module", "flipped={flipped}"),
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        }
+    }
+}

@@ -1069,6 +1069,53 @@ fn esm_import_bytes_attribute() {
 }
 
 #[test]
+fn esm_import_json_attribute() {
+    // JSON modules: `with { type: "json" }` JSON.parses the file for ANY extension; the legacy
+    // attribute-less `.json` import gets the same JSON.parse semantics (`__proto__` becomes a
+    // plain own data property — never prototype-setting) but stays a distinct module record.
+    use std::fs;
+    let dir = TempDir::new("esm-import-json");
+    let root = dir.0.clone();
+    fs::write(
+        root.join("data.json"),
+        r#"{ "answer": 42, "__proto__": { "evil": true } }"#,
+    )
+    .unwrap();
+    fs::write(root.join("data.txt"), r#"{ "fromTxt": true }"#).unwrap();
+    fs::write(root.join("bad.json"), "{ bad").unwrap();
+    fs::write(
+        root.join("app.mjs"),
+        r#"
+        import data from "./data.json" with { type: "json" };
+        import legacy from "./data.json";
+        import txt from "./data.txt" with { type: "json" };
+        console.log(data.answer, txt.fromTxt, data === legacy);
+        const safe = (o) =>
+            Object.getPrototypeOf(o) === Object.prototype &&
+            o.evil === undefined &&
+            Object.getOwnPropertyNames(o).includes("__proto__");
+        console.log(safe(data), safe(legacy));
+        const dyn = await import("./data.json", { with: { type: "json" } });
+        console.log(dyn.default === data);
+        try {
+            await import("./bad.json", { with: { type: "json" } });
+            console.log("bad: resolved");
+        } catch (e) {
+            console.log("bad:", e.constructor.name);
+        }
+        "#,
+    )
+    .unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    rt.run_module(&root.join("app.mjs").to_string_lossy())
+        .expect("module runs");
+    assert_eq!(
+        out.lines(),
+        ["42 true false", "true true", "true", "bad: SyntaxError"]
+    );
+}
+
+#[test]
 fn esm_imports_node_builtins_named_and_default() {
     use std::fs;
     let dir = TempDir::new("esm-builtin");

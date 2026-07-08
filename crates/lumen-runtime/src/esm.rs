@@ -89,6 +89,28 @@ fn resolve(
     load_as_module(&file, !is_esm_pkg)
 }
 
+/// Escape `text` as a JavaScript double-quoted string literal (for synthesized module source).
+fn js_string_literal(text: &str) -> String {
+    let mut lit = String::with_capacity(text.len() + 2);
+    lit.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => lit.push_str("\\\""),
+            '\\' => lit.push_str("\\\\"),
+            '\n' => lit.push_str("\\n"),
+            '\r' => lit.push_str("\\r"),
+            '\u{2028}' => lit.push_str("\\u2028"),
+            '\u{2029}' => lit.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => {
+                lit.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => lit.push(c),
+        }
+    }
+    lit.push('"');
+    lit
+}
+
 /// Read a file for an attribute import. `text`/`json` decode as UTF-8 the way the web platform's
 /// "UTF-8 decode" does — invalid sequences become U+FFFD and a leading BOM is stripped. `bytes`
 /// must round-trip exactly, so non-UTF-8 content is latin-1-decoded (one char per byte; the
@@ -231,8 +253,12 @@ fn load_as_module(file: &Path, cjs_default: bool) -> Option<(String, String)> {
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "json" => {
+            // Route through JSON.parse rather than embedding the text as an expression: an
+            // object literal would give `"__proto__"` keys prototype-SETTING semantics (a
+            // pollution vector), where JSON.parse creates a plain own data property — the same
+            // semantics as a `with { type: "json" }` import.
             let text = std::fs::read_to_string(file).ok()?;
-            Some((key, format!("export default {text};")))
+            Some((key, format!("export default JSON.parse({});", js_string_literal(&text))))
         }
         // `.mjs` is always ESM regardless of package type; `.cjs` is always CommonJS.
         "mjs" => Some((key.clone(), std::fs::read_to_string(file).ok()?)),
