@@ -426,7 +426,6 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
-
     let mut a = asm::Asm::new();
     // One label per bytecode pc (branch/catch targets bind as we emit).
     let pc_labels: Vec<usize> = (0..ops.len()).map(|_| a.new_label()).collect();
@@ -747,9 +746,9 @@ pub fn compile(_chunk: &Chunk, _layout: &crate::value::JitLayout) -> Option<JitC
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let sh = layout.obj_props + layout.props_shape;
-    let en = layout.obj_props + layout.props_entries;
+    let en = layout.obj_props + layout.props_entries + layout.vec_ptr_off;
     layout.valid
-        && layout.refcell_value < 4096
+        && layout.obj_from_rc < 4096
         && layout.obj_exotic < 4096
         && sh % 4 == 0
         && sh / 4 < 4096
@@ -757,7 +756,7 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && en / 8 < 4096
         && layout.entry_accessor < 4096
         && layout.entry_value + 16 < 256
-        && layout.rc_strong_back < 256
+        && layout.rc_strong_off < 256
         && layout.entry_size < 0x1_0000
 }
 
@@ -777,11 +776,11 @@ fn emit_get_prop_inline(
     l_unwind: usize,
 ) {
     use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
-    let rc_back = layout.rc_strong_back as i32;
-    let rcv = layout.refcell_value as u32;
+    let strong = layout.rc_strong_off as i32;
+    let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
     let sh = (layout.obj_props + layout.props_shape) as u32;
-    let en = (layout.obj_props + layout.props_entries) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
     let es = layout.entry_size as u64;
@@ -799,7 +798,7 @@ fn emit_get_prop_inline(
     a.b_cond(C_NE, slow);
     a.ldur(10, 20, -16); // rc_ptr (Value payload)
     // 2. receiver refcount > 1 (so the pop-drop below never frees)
-    a.ldur(9, 10, -rc_back);
+    a.ldur(9, 10, strong);
     a.cmp_imm_x(9, 1);
     a.b_cond(C_LS, slow);
     // 3. cache: depth must be 0, load slot + cached receiver shape
@@ -834,19 +833,19 @@ fn emit_get_prop_inline(
     a.ldur(12, 15, ev);
     a.ldur(13, 15, ev + 8); // payload word (the Rc pointer for tags 6..8)
     a.ldur(14, 15, ev + 16);
-    // clone: a refcounted value (tag ≥ 6) needs its strong count bumped (payload − rc_back)
+    // clone: a refcounted value (tag ≥ 6) needs its strong count bumped (payload + strong)
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, nobump);
-    a.ldur(16, 13, -rc_back);
+    a.ldur(16, 13, strong);
     a.add_imm(16, 16, 1);
-    a.stur(16, 13, -rc_back);
+    a.stur(16, 13, strong);
     a.bind(nobump);
     // drop the receiver (strong was > 1: decrement, no free). If the value IS the receiver the
     // bump above already balanced this.
-    a.ldur(9, 10, -rc_back);
+    a.ldur(9, 10, strong);
     a.sub_imm(9, 9, 1);
-    a.stur(9, 10, -rc_back);
+    a.stur(9, 10, strong);
     // overwrite the receiver slot with the value (pop obj + push value = same depth)
     a.stur(12, 20, -24);
     a.stur(13, 20, -16);
@@ -880,12 +879,12 @@ fn emit_get_method_inline(
     l_unwind: usize,
 ) {
     use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
-    let rc_back = layout.rc_strong_back as i32;
-    let rcv = layout.refcell_value as u32;
+    let strong = layout.rc_strong_off as i32;
+    let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
     let pr = layout.obj_proto as u32;
     let sh = (layout.obj_props + layout.props_shape) as u32;
-    let en = (layout.obj_props + layout.props_entries) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
     let es = layout.entry_size as u64;
@@ -947,9 +946,9 @@ fn emit_get_method_inline(
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, nobump);
-    a.ldur(16, 13, -rc_back);
+    a.ldur(16, 13, strong);
     a.add_imm(16, 16, 1);
-    a.stur(16, 13, -rc_back);
+    a.stur(16, 13, strong);
     a.bind(nobump);
     a.stur(12, 20, 0);
     a.stur(13, 20, 8);

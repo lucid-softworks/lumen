@@ -50,29 +50,36 @@ pub struct SymbolData {
 }
 
 /// Byte offsets the JIT's inline property-cache templates read directly out of the object graph.
-/// Every field is *measured at runtime* against the real types (never hardcoded), and the layout
-/// assumptions that std does not guarantee — `Vec`'s data pointer at offset 0, `Rc`'s strong
-/// count 16 bytes before its data — are probed and reported in `valid`. If `valid` is false the
+/// Every field is *measured at runtime* against the real types (never hardcoded); the std layouts
+/// that aren't guaranteed — where a `Vec`'s data pointer sits, the `RcBox` header size, the
+/// `Option<Gc>` niche — are located by probing and reported in `valid`. If `valid` is false the
 /// JIT emits no inline caches and everything routes through the checked helper, so a future
 /// libstd layout change degrades performance, never correctness.
+///
+/// All offsets are relative to the *stored* `Rc` pointer — the value in a `Value::Obj` payload and
+/// in an `Option<Gc>` (proto) field, which points at the `RcBox` header (`{strong, weak, value}`),
+/// NOT at `Rc::as_ptr` (which is the inner `value`, `rcbox_data` bytes further on). The inline
+/// templates only ever have the stored pointer, so measuring from it is what makes them correct.
 #[derive(Clone, Copy)]
 pub struct JitLayout {
-    /// `Object` within `RefCell<Object>` (i.e. `Rc::as_ptr` → `&Object`).
-    pub refcell_value: usize,
+    /// Stored `Rc` pointer → the `Object` (through the `RcBox` header and the `RefCell` wrapper).
+    pub obj_from_rc: usize,
+    /// Stored `Rc` pointer → the strong count (the `RcBox`'s first field).
+    pub rc_strong_off: usize,
     pub obj_proto: usize,
     pub obj_props: usize,
     pub obj_exotic: usize,
     pub props_shape: usize,
-    /// The `entries` `Vec` within `Props` (its data pointer is the Vec's first word when `valid`).
+    /// The `entries` `Vec` within `Props`.
     pub props_entries: usize,
+    /// The data-pointer word within a `Vec` (not necessarily offset 0 — RawVec layout is unstable).
+    pub vec_ptr_off: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
     pub entry_size: usize,
     /// `Value` within an entry `(Rc<str>, Property)`.
     pub entry_value: usize,
     /// `accessor` bool within an entry.
     pub entry_accessor: usize,
-    /// Bytes from an `Rc<T>`'s data pointer back to its strong count.
-    pub rc_strong_back: usize,
     /// `Exotic::None`'s discriminant byte (the inline path requires an ordinary object).
     pub exotic_none_tag: u8,
     pub valid: bool,
@@ -81,48 +88,52 @@ pub struct JitLayout {
 /// Measure [`JitLayout`] against the live types, probing the non-guaranteed std layouts.
 pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     use std::mem::offset_of;
-    let refcell_base = Rc::as_ptr(sample) as usize;
+    let as_ptr = Rc::as_ptr(sample) as usize; // → the RefCell<Object> (RcBox value field)
     let obj_addr = &*sample.borrow() as *const Object as usize;
-    let refcell_value = obj_addr - refcell_base;
+    let refcell_value = obj_addr - as_ptr;
 
-    // Vec data pointer at offset 0?
+    // The *stored* Rc pointer — what a Value::Obj payload / Option<Gc> holds — is the RcBox base
+    // (strong count at its start), `rcbox_data` bytes before `Rc::as_ptr`. Read it out of an
+    // Option<Gc> (whose Some variant is exactly the raw pointer, None = null via the niche).
+    let some_proto: Option<Gc> = Some(sample.clone());
+    let stored = unsafe { *(&some_proto as *const Option<Gc> as *const usize) };
+    let none_proto: Option<Gc> = None;
+    let none_word = unsafe { *(&none_proto as *const Option<Gc> as *const usize) };
+    let niche_ok = none_word == 0 && as_ptr >= stored;
+    let rcbox_data = as_ptr - stored; // RcBox header (strong+weak) before the value
+    let obj_from_rc = rcbox_data + refcell_value; // stored ptr → Object
+    let rc_strong_off = 0usize; // strong count is the RcBox's first field
+    // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
+    let strong_ok = unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
+
+    // Vec data-pointer word (RawVec layout is not guaranteed — locate it by value).
     let mut v: Vec<(Rc<str>, Property)> = Vec::with_capacity(1);
     v.push((Rc::from("p"), Property::plain(Value::Num(0.0))));
-    let vec_first_word = unsafe { *(&v as *const Vec<_> as *const usize) };
-    let vec_ptr_ok = vec_first_word == v.as_ptr() as usize;
-
-    // Rc strong count 16 bytes before the data pointer?
-    let r = Rc::new(0u64);
-    let vp = Rc::as_ptr(&r) as usize;
-    let rc_strong_back = 16usize;
-    let strong_ok = unsafe { *((vp - rc_strong_back) as *const usize) } == 1;
+    let vptr = v.as_ptr() as usize;
+    let vwords =
+        unsafe { std::slice::from_raw_parts(&v as *const Vec<_> as *const usize, std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8) };
+    let vec_ptr_off = vwords.iter().position(|&w| w == vptr).map(|i| i * 8);
 
     // Exotic::None discriminant (Exotic is repr(Rust) but a plain C-like leading unit variant is
     // discriminant 0; probe to be certain).
     let none = Exotic::None;
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
 
-    // `Option<Gc>` (the `proto` field) null-pointer niche: Some stores `Rc::as_ptr`, None is 0 —
-    // so the GetMethod inline can read the proto as one word and null-check it.
-    let some_proto: Option<Gc> = Some(sample.clone());
-    let some_word = unsafe { *(&some_proto as *const Option<Gc> as *const usize) };
-    let none_proto: Option<Gc> = None;
-    let none_word = unsafe { *(&none_proto as *const Option<Gc> as *const usize) };
-    let proto_niche_ok = some_word == Rc::as_ptr(sample) as usize && none_word == 0;
-
+    let valid = strong_ok && niche_ok && vec_ptr_off.is_some();
     JitLayout {
-        refcell_value,
+        obj_from_rc,
+        rc_strong_off,
         obj_proto: offset_of!(Object, proto),
         obj_props: offset_of!(Object, props),
         obj_exotic: offset_of!(Object, exotic),
         props_shape: offset_of!(Props, shape),
         props_entries: offset_of!(Props, entries),
+        vec_ptr_off: vec_ptr_off.unwrap_or(0),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, accessor),
-        rc_strong_back,
         exotic_none_tag,
-        valid: vec_ptr_ok && strong_ok && proto_niche_ok,
+        valid,
     }
 }
 
