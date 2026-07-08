@@ -188,6 +188,12 @@ pub struct CallIc {
     /// `Chunk::jit_frame()` at fill time: the callee frame shape without touching the chunk.
     pub n_params: u16,
     pub n_slots: u16,
+    /// `Rc::as_ptr` of the callee's `ast::Function` (alive while the callee object is: `call`
+    /// is never reassigned) — the inline-recompile trigger needs the AST.
+    pub func: *const crate::ast::Function,
+    /// [`CALL_IC_EPOCH`] at fill time; a mismatch forces a re-fill (so a fresh second-stage
+    /// compile of the callee replaces the cached chunk/code pointers).
+    pub epoch: u32,
 }
 
 impl CallIc {
@@ -201,8 +207,29 @@ impl CallIc {
         uses_this: false,
         n_params: 0,
         n_slots: 0,
+        func: std::ptr::null(),
+        epoch: 0,
     };
 }
+
+/// A speculative-inline site's guard data: the pinned expected callee plus how the call site's
+/// stack is shaped when the guard runs (`argc` arguments above the callee).
+pub struct InlineTarget {
+    /// Stored `Rc` pointer of the expected callee function object.
+    pub expected: usize,
+    /// Keeps `expected` from ever being recycled (same ABA argument as [`CallIc`]): a live
+    /// `Value::Obj` whose payload equals it therefore IS the same, still-alive function.
+    pub pin: std::rc::Weak<std::cell::RefCell<crate::value::Object>>,
+    pub argc: u16,
+    /// Sloppy callee that reads `this`: the receiver must already be an object (the generic
+    /// path would box a primitive or substitute the global object).
+    pub check_this: bool,
+}
+
+/// Bumped whenever any function gains a second-stage (inlined) compile: every [`CallIc`] fills
+/// with the current value and misses on mismatch, so cached callers re-resolve through
+/// [`crate::interpreter::Interp::call_jit_fast`] and pick up `Function::code2`.
+pub static CALL_IC_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// A call site's cache: 4-way set-associative over callee identity. Method-dispatch sites are
 /// routinely polymorphic (DeltaBlue rotates a handful of `execute` implementations through one
@@ -226,8 +253,16 @@ impl CallSite {
             next: std::cell::Cell::new(0),
         }
     }
-    /// Record `ic` in the next way (round-robin).
+    /// Record `ic`, replacing an existing way for the same callee (epoch or realm refills must
+    /// not fan one callee across ways — the inline planner reads way-count as polymorphism),
+    /// else the next way round-robin.
     pub fn fill(&self, ic: CallIc) {
+        for e in &self.entries {
+            if e.get().callee == ic.callee {
+                e.set(ic);
+                return;
+            }
+        }
         let k = self.next.get() as usize & 3;
         self.entries[k].set(ic);
         self.next.set((k as u8 + 1) & 3);
@@ -391,6 +426,15 @@ pub enum Op {
     /// Method call: pops argc args, the method, and the receiver pushed by GetMethod*. Second
     /// operand = the per-site [`CallIc`] index.
     CallWithThis(u16, u32),
+    /// Speculative-inline guard (see [`plan_inlines`]): with the stack holding
+    /// `[this, callee, arg0..argN]` for the call site, verify the callee is the pinned expected
+    /// function (and, for a sloppy this-using callee, that the receiver is already an object);
+    /// on mismatch jump to the operand (the generic call op). Operands: `Chunk::inline_targets`
+    /// index, jump target.
+    InlineGuard(u32, u32),
+    /// Reset `count` slots starting at `start` to undefined (dropping old values): a spliced
+    /// callee's hoisted vars start fresh on every pass through the site.
+    ResetSlots(u16, u16),
     New(u16),
     MakeArray(u16),
     /// Object literal: `count` plain data keys starting at names[start], values on the stack.
@@ -468,6 +512,12 @@ pub struct Chunk {
     call_pins: std::cell::RefCell<
         crate::fasthash::FastMap<usize, std::rc::Weak<std::cell::RefCell<crate::value::Object>>>,
     >,
+    /// Guard data for speculatively inlined call sites (`Op::InlineGuard` indexes this).
+    inline_targets: Vec<InlineTarget>,
+    /// Machine-code runs of this chunk (the [`plan_inlines`] trigger counts these).
+    pub(crate) jit_runs: std::cell::Cell<u32>,
+    /// Whether the one-shot inline recompile has been attempted for this chunk.
+    pub(crate) inline_attempted: std::cell::Cell<bool>,
     /// Machine-code tier state: the compile result once attempted (`None` inside = the chunk
     /// cannot JIT — async, or an unsupported platform — and runs on the bytecode VM forever).
     pub(crate) jit: std::cell::OnceCell<Option<Rc<crate::jit::JitCode>>>,
@@ -1281,6 +1331,22 @@ impl CaptureScan {
 
 /// Compile `func` whole, or `None` if it uses anything outside the v0 subset.
 pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
+    compile_inner(func, &Default::default())
+}
+
+/// Second-stage compile: same as [`compile`], with hot monomorphic callees from `plan` spliced
+/// inline at their call sites (guarded; see [`plan_inlines`]).
+pub(crate) fn compile_with_inlines(
+    func: &Function,
+    plan: &crate::fasthash::FastMap<u32, InlinePlanEntry>,
+) -> Option<Rc<Chunk>> {
+    compile_inner(func, plan)
+}
+
+fn compile_inner(
+    func: &Function,
+    plan: &crate::fasthash::FastMap<u32, InlinePlanEntry>,
+) -> Option<Rc<Chunk>> {
     // Body facts the scanner already knows: `arguments` / `new.target` are observation channels
     // into the activation that slots do not provide; `this` in an arrow is a free variable we
     // do not model.
@@ -1315,6 +1381,7 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
 
     let mut c = Compiler {
         env_this,
+        inline_plan: plan.clone(),
         ..Compiler::default()
     };
     // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
@@ -1457,8 +1524,117 @@ pub fn compile(func: &Function) -> Option<Rc<Chunk>> {
         name_caches: c.name_caches,
         call_caches: c.call_caches,
         call_pins: std::cell::RefCell::new(Default::default()),
+        inline_targets: c.inline_targets,
+        jit_runs: std::cell::Cell::new(0),
+        inline_attempted: std::cell::Cell::new(false),
         jit: std::cell::OnceCell::new(),
     }))
+}
+
+/// How many machine-code runs of a chunk trigger the one-shot inline recompile
+/// (`LUMEN_INLINE_AT` overrides; 0 disables).
+pub(crate) fn inline_recompile_at() -> u32 {
+    static AT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *AT.get_or_init(|| {
+        std::env::var("LUMEN_INLINE_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100)
+    })
+}
+
+/// Build the speculative-inline plan for a hot chunk: for each monomorphic, filled call site,
+/// the callee qualifies when it is a plain same-strictness function whose compiled body is
+/// small, needs no activation environment, touches no free names, and hides no control-flow
+/// the splice can't reproduce (handlers, closures). The plan keys are the sites' `CallIc`
+/// indices, which equal the second compile's caller-level site ordinals (same AST, same
+/// emission order).
+pub(crate) fn plan_inlines(
+    chunk: &Chunk,
+    caller: &Function,
+) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
+    let mut plan: crate::fasthash::FastMap<u32, InlinePlanEntry> = Default::default();
+    let log = std::env::var_os("LUMEN_TIER_LOG").is_some();
+    macro_rules! skip {
+        ($idx:expr, $why:expr) => {{
+            if log {
+                eprintln!("[tier] inline skip site {}: {}", $idx, $why);
+            }
+            continue;
+        }};
+    }
+    let pins = chunk.call_pins.borrow();
+    for (idx, site) in chunk.call_caches.iter().enumerate() {
+        let mut filled: Vec<CallIc> = site
+            .entries
+            .iter()
+            .map(|e| e.get())
+            .filter(|c| c.callee != 0)
+            .collect();
+        // Monomorphic sites only: one distinct callee (refills may duplicate it across ways).
+        filled.dedup_by_key(|c| c.callee);
+        let [ic] = filled.as_slice() else {
+            if !filled.is_empty() {
+                skip!(idx, "polymorphic");
+            }
+            continue;
+        };
+        let Some(weak) = pins.get(&ic.callee) else { skip!(idx, "no pin") };
+        let Some(obj) = weak.upgrade() else { skip!(idx, "dead callee") };
+        let b = obj.borrow();
+        let crate::value::Callable::User(f, _env) = &b.call else {
+            continue;
+        };
+        if f.is_arrow || f.is_strict != caller.is_strict {
+            skip!(idx, "arrow/strictness");
+        }
+        if f.params.iter().any(|p| {
+            p.rest || p.default.is_some() || !matches!(p.pattern, crate::ast::Pattern::Ident(_))
+        }) {
+            skip!(idx, "param shape");
+        }
+        let Some(Some(callee_chunk)) = f.code.get() else {
+            skip!(idx, "callee not compiled");
+        };
+        if std::ptr::eq(&**callee_chunk, chunk) {
+            skip!(idx, "self-recursion");
+        }
+        if callee_chunk.ops.len() > 96
+            || callee_chunk.n_slots > 32
+            || !callee_chunk.jit_no_activation()
+            || callee_chunk.env_this
+            || ic.n_params > 8
+        {
+            skip!(idx, "callee size/shape");
+        }
+        // The splice runs under the caller's frame: no handler regions to relocate, no inner
+        // closures, and no free names (they would resolve in the CALLER's scope chain).
+        if callee_chunk.ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::PushHandler(_)
+                    | Op::MakeClosure(..)
+                    | Op::LoadName(..)
+                    | Op::LoadNameForCall(..)
+                    | Op::StoreName(_)
+            )
+        }) {
+            skip!(idx, "callee ops (handlers/closures/free names)");
+        }
+        let uses_this = callee_chunk.uses_this();
+        let f = f.clone();
+        drop(b);
+        plan.insert(
+            idx as u32,
+            InlinePlanEntry {
+                check_this: uses_this && !f.is_strict,
+                uses_this,
+                f,
+                obj,
+            },
+        );
+    }
+    plan
 }
 
 #[derive(Default)]
@@ -1493,6 +1669,28 @@ struct Compiler {
     funcs: Vec<Rc<Function>>,
     cap_inits: Vec<CapInit>,
     env_this: bool,
+    /// Speculative-inline plan for this compile (second-stage only): caller-level call-site
+    /// ordinal → the monomorphic callee to splice in. See [`plan_inlines`].
+    inline_plan: crate::fasthash::FastMap<u32, InlinePlanEntry>,
+    /// Caller-level call sites emitted so far (equals the first compile's `CallIc` index for
+    /// the same site: inline bodies don't consult the plan and the source order is identical).
+    site_ord: u32,
+    /// > 0 while compiling a spliced callee body.
+    inline_depth: u32,
+    /// The slot holding the receiver while inlining a `this`-using callee.
+    inline_this: Option<u16>,
+    /// `return` jumps inside the current spliced body, patched to the join point.
+    inline_returns: Vec<usize>,
+    inline_targets: Vec<InlineTarget>,
+}
+
+/// One planned inline: the callee function (AST) and its pinned identity.
+#[derive(Clone)]
+pub struct InlinePlanEntry {
+    pub f: Rc<Function>,
+    pub obj: crate::value::Gc,
+    pub check_this: bool,
+    pub uses_this: bool,
 }
 
 /// Where a name resolves inside the compiled body.
@@ -1666,8 +1864,178 @@ impl Compiler {
     }
     /// Reserve a fresh call-cache slot for a `Call`/`CallWithThis` site.
     fn new_call_cache(&mut self) -> u32 {
+        // Caller-level sites also advance the inline-plan ordinal (see `Compiler::site_ord`).
+        if self.inline_depth == 0 {
+            self.site_ord += 1;
+        }
         self.call_caches.push(CallSite::empty());
         (self.call_caches.len() - 1) as u32
+    }
+
+    /// Emit a planned speculative inline for a method call site whose stack already holds
+    /// `[this, method, args...]`; anything the splice can't express reverts to the plain call.
+    fn emit_call_with_inline(&mut self, entry: InlinePlanEntry, argc: u16, cc: u32) {
+        let snap = (
+            self.ops.len(),
+            self.consts.len(),
+            self.names.len(),
+            self.caches.len(),
+            self.name_caches.len(),
+            self.call_caches.len(),
+            self.inline_targets.len(),
+            self.slot_names.len(),
+            self.funcs.len(),
+        );
+        if self.try_emit_inline(&entry, argc, cc).is_err() {
+            self.ops.truncate(snap.0);
+            self.consts.truncate(snap.1);
+            self.names.truncate(snap.2);
+            self.caches.truncate(snap.3);
+            self.name_caches.truncate(snap.4);
+            self.call_caches.truncate(snap.5);
+            self.inline_targets.truncate(snap.6);
+            self.slot_names.truncate(snap.7);
+            self.funcs.truncate(snap.8);
+            self.emit(Op::CallWithThis(argc, cc));
+        }
+    }
+
+    fn try_emit_inline(&mut self, entry: &InlinePlanEntry, argc: u16, cc: u32) -> CResult {
+        let f = &entry.f;
+        if argc > 8 {
+            return Err(Bail); // the JIT guard peeks the callee with a ±256-byte unscaled load
+        }
+        // The guard proves the callee is the pinned function (and the receiver an object for a
+        // sloppy this-user); a mismatch lands on the plain call after the spliced body.
+        let t = self.inline_targets.len() as u32;
+        self.inline_targets.push(InlineTarget {
+            expected: Rc::as_ptr(&entry.obj) as usize,
+            pin: Rc::downgrade(&entry.obj),
+            argc,
+            check_this: entry.check_this,
+        });
+        let guard = self.emit(Op::InlineGuard(t, 0));
+
+        // ---- bind the callee frame into fresh caller slots ----
+        let n_params = f.params.len();
+        for _ in n_params..argc as usize {
+            self.emit(Op::Pop); // surplus arguments (evaluated; excess drops from the top)
+        }
+        for _ in argc as usize..n_params {
+            self.emit(Op::Undef); // missing arguments
+        }
+        let mut param_slots: Vec<u16> = Vec::with_capacity(n_params);
+        for p in &f.params {
+            let Pattern::Ident(name) = &p.pattern else {
+                return Err(Bail);
+            };
+            if p.default.is_some() || p.rest {
+                return Err(Bail);
+            }
+            param_slots.push(self.fresh_slot(name));
+        }
+        for &s in param_slots.iter().rev() {
+            self.emit(Op::StoreLocal(s));
+        }
+        self.emit(Op::Pop); // the method (identity proven; the value itself is dead)
+        let this_slot = if entry.uses_this {
+            let s = self.fresh_slot("(inline this)");
+            self.emit(Op::StoreLocal(s));
+            Some(s)
+        } else {
+            self.emit(Op::Pop);
+            None
+        };
+
+        // ---- compile the body under the callee's (empty) namespace ----
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_env_names = std::mem::take(&mut self.env_names);
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_labels = std::mem::take(&mut self.pending_labels);
+        let saved_try = std::mem::replace(&mut self.try_depth, 0);
+        let saved_this = std::mem::replace(&mut self.inline_this, this_slot);
+        let saved_returns = std::mem::take(&mut self.inline_returns);
+        self.inline_depth += 1;
+        self.scopes.push(Vec::new());
+        for (k, p) in f.params.iter().enumerate() {
+            let Pattern::Ident(name) = &p.pattern else {
+                unreachable!()
+            };
+            self.scope_bind(name, param_slots[k], false);
+        }
+        let r = self.inline_body(f);
+        self.inline_depth -= 1;
+        let returns = std::mem::replace(&mut self.inline_returns, saved_returns);
+        self.inline_this = saved_this;
+        self.try_depth = saved_try;
+        self.pending_labels = saved_labels;
+        self.loops = saved_loops;
+        self.env_names = saved_env_names;
+        self.scopes = saved_scopes;
+        r?;
+
+        // ---- join: fall-through result, guard-mismatch generic call, return jumps ----
+        let end = self.emit(Op::Jump(0));
+        self.patch(guard);
+        self.emit(Op::CallWithThis(argc, cc));
+        self.patch(end);
+        for j in returns {
+            self.patch(j);
+        }
+        Ok(())
+    }
+
+    /// Compile a spliced callee body: mirrors `compile_inner`'s hoist + lexical + statement
+    /// sequence, with explicit per-execution resets replacing the fresh frame's zeroed slots.
+    fn inline_body(&mut self, f: &Function) -> CResult {
+        // Hoisted vars start undefined on EVERY pass through the site; fused-reset runs are
+        // emitted per contiguous slot range (fresh slots are consecutive, so usually one op).
+        let mut resets: Vec<u16> = Vec::new();
+        for op in crate::interpreter::collect_hoist_ops(&f.body, f.is_strict, &[]) {
+            match op {
+                HoistOp::Var(name) => {
+                    if self.lookup(&name).is_none() {
+                        let slot = self.fresh_slot(&name);
+                        self.scope_bind(&name, slot, false);
+                        resets.push(slot);
+                    }
+                }
+                HoistOp::VarForce(name) => {
+                    let slot = match self.lookup(&name) {
+                        Some((s, _)) => s,
+                        None => {
+                            let s = self.fresh_slot(&name);
+                            self.scope_bind(&name, s, false);
+                            s
+                        }
+                    };
+                    if !resets.contains(&slot) {
+                        resets.push(slot);
+                    }
+                }
+                HoistOp::Fn(..) | HoistOp::AnnexB(..) => return Err(Bail),
+            }
+        }
+        resets.sort_unstable();
+        let mut k = 0;
+        while k < resets.len() {
+            let start = resets[k];
+            let mut count = 1u16;
+            while k + (count as usize) < resets.len()
+                && resets[k + count as usize] == start + count
+            {
+                count += 1;
+            }
+            self.emit(Op::ResetSlots(start, count));
+            k += count as usize;
+        }
+        let empty = std::collections::HashSet::new();
+        self.declare_body_lexicals(&f.body, &empty)?;
+        for stmt in &f.body {
+            self.stmt(stmt)?;
+        }
+        self.emit(Op::Undef); // implicit return value
+        Ok(())
     }
     /// Declare every binding a lexical declaration pattern introduces, in source order (slot +
     /// TDZ each, like the plain-identifier path). Only the destructuring subset the compiler
@@ -1914,7 +2282,8 @@ impl Compiler {
             | Op::JumpIfFalse(t)
             | Op::JumpIfFalsePeek(t)
             | Op::JumpIfTruePeek(t)
-            | Op::JumpIfNotNullishPeek(t) => *t = target,
+            | Op::JumpIfNotNullishPeek(t)
+            | Op::InlineGuard(_, t) => *t = target,
             _ => unreachable!("patching a non-jump"),
         }
     }
@@ -2054,6 +2423,20 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Return(arg) => {
+                // Inside a spliced callee body, `return v` is "leave v on the stack and jump to
+                // the join point" (the plan guarantees no handlers/for-of regions to unwind:
+                // the callee chunk contains no PushHandler).
+                if self.inline_depth > 0 {
+                    match arg {
+                        Some(e) => self.expr(e)?,
+                        None => {
+                            self.emit(Op::Undef);
+                        }
+                    }
+                    let j = self.emit(Op::Jump(0));
+                    self.inline_returns.push(j);
+                    return Ok(());
+                }
                 // A return crossing compiled for-of loops must IteratorClose them (the value
                 // evaluates first, spec order). One level is modeled exactly; more would need
                 // the spec's cascading throw-mode closes — bail to the tree-walker.
@@ -2882,6 +3265,13 @@ impl Compiler {
                 Ok(())
             }
             Expr::This => {
+                // A spliced callee's `this` is the receiver, parked in a caller slot.
+                if let Some(slot) = self.inline_this {
+                    if self.inline_depth > 0 {
+                        self.emit(Op::LoadLocal(slot));
+                        return Ok(());
+                    }
+                }
                 self.uses_this = true;
                 self.emit(Op::LoadThis);
                 Ok(())
@@ -3072,8 +3462,20 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
+                        let plan_hit = if self.inline_depth == 0 {
+                            self.inline_plan.get(&self.site_ord).cloned()
+                        } else {
+                            None
+                        };
                         let cc = self.new_call_cache();
-                        self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        match plan_hit {
+                            Some(entry) => {
+                                self.emit_call_with_inline(entry, args.len() as u16, cc)
+                            }
+                            None => {
+                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                            }
+                        }
                     }
                     Expr::Index {
                         obj,
@@ -3959,6 +4361,24 @@ fn run_vm(
                 stack.push(Value::Undefined);
             }
             Op::Jump(t) => *pc = t as usize,
+            Op::InlineGuard(t, target) => {
+                let it = &chunk.inline_targets[t as usize];
+                let d = it.argc as usize + 1;
+                let callee_ok = matches!(
+                    &stack[stack.len() - d],
+                    Value::Obj(o) if Rc::as_ptr(o) as usize == it.expected
+                );
+                let this_ok =
+                    !it.check_this || matches!(&stack[stack.len() - d - 1], Value::Obj(_));
+                if !(callee_ok && this_ok) {
+                    *pc = target as usize;
+                }
+            }
+            Op::ResetSlots(start, count) => {
+                for k in start as usize..start as usize + count as usize {
+                    slots[k] = Value::Undefined;
+                }
+            }
             Op::JumpIfFalse(t) => {
                 let a = pop!();
                 if !i.to_boolean(&a) {
@@ -4319,6 +4739,10 @@ impl Chunk {
     pub(crate) fn jit_slot_names(&self) -> &[Rc<str>] {
         &self.slot_names
     }
+    /// Guard data for a speculative-inline site (`Op::InlineGuard`'s first operand).
+    pub(crate) fn jit_inline_target(&self, t: u32) -> &InlineTarget {
+        &self.inline_targets[t as usize]
+    }
     /// The interned name a property op refers to (the emitter gates array-receiver inlining on
     /// whether it could be an element key).
     pub(crate) fn jit_name(&self, n: u32) -> &str {
@@ -4560,6 +4984,8 @@ impl Chunk {
             | Op::GenBin(_) => (2, 1),
             Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void => (1, 1),
             Op::Jump(_) => (0, 0),
+            Op::InlineGuard(..) => (0, 0),
+            Op::ResetSlots(..) => (0, 0),
             Op::JumpIfFalse(_) => (1, 0),
             Op::JumpIfFalsePeek(_) | Op::JumpIfTruePeek(_) | Op::JumpIfNotNullishPeek(_) => (1, 1),
             Op::Call(argc, _) => (*argc as usize + 1, 1),
@@ -5331,11 +5757,17 @@ unsafe fn jit_exec_inner(
             let v = pop!();
             return Err(Abrupt::Throw(v));
         }
+        Op::ResetSlots(start, count) => {
+            for k in start as usize..start as usize + count as usize {
+                slots[k] = Value::Undefined;
+            }
+        }
         Op::Jump(_)
         | Op::JumpIfFalse(_)
         | Op::JumpIfFalsePeek(_)
         | Op::JumpIfTruePeek(_)
         | Op::JumpIfNotNullishPeek(_)
+        | Op::InlineGuard(..)
         | Op::Return
         | Op::ReturnUndef
         | Op::Await

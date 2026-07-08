@@ -1135,6 +1135,7 @@ fn dec_function(r: &mut Reader) -> R<Function> {
         hoist: OnceCell::new(),
         calls: Cell::new(0),
         code: OnceCell::new(),
+        code2: OnceCell::new(),
     })
 }
 

@@ -6675,6 +6675,7 @@ fn default_constructor(derived: bool) -> Function {
         hoist: std::cell::OnceCell::new(),
         calls: std::cell::Cell::new(0),
         code: std::cell::OnceCell::new(),
+            code2: std::cell::OnceCell::new(),
         name: None,
         params,
         body,

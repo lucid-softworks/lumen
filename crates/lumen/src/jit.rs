@@ -775,6 +775,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             | Op::JumpIfFalsePeek(t)
             | Op::JumpIfTruePeek(t)
             | Op::JumpIfNotNullishPeek(t)
+            | Op::InlineGuard(_, t)
             | Op::PushHandler(t) => targeted[*t as usize] = true,
             _ => {}
         }
@@ -1424,6 +1425,67 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 a.mov_imm64(9, word1);
                 a.stur(9, 20, 8);
                 a.add_imm(20, 20, 24);
+            }
+            // Fused slot resets (spliced-callee var hoisting): plain tags overwrite in place
+            // with a single byte store; refcounted values (the receiver-array vars of a spliced
+            // bignum kernel, typically) decrement inline while shared. Only a last-reference
+            // drop (or a string-ish tag 5) re-runs the whole (idempotent) op via the helper.
+            Op::ResetSlots(start, count)
+                if rc_ok && (*start as u32 + *count as u32) * 24 < 4096 =>
+            {
+                let slow = a.new_label();
+                let done = a.new_label();
+                for k in *start..*start + *count {
+                    let off = k as u32 * 24;
+                    let plain = a.new_label();
+                    a.ldrb_imm(9, 22, off);
+                    a.cmp_imm_w(9, 5);
+                    a.b_cond(C_LO, plain);
+                    a.b_cond(C_EQ, slow);
+                    a.ldr_imm(10, 22, off + 8);
+                    a.ldur(11, 10, rc_strong);
+                    a.cmp_imm_x(11, 1);
+                    a.b_cond(C_LS, slow);
+                    a.sub_imm(11, 11, 1);
+                    a.stur(11, 10, rc_strong);
+                    a.bind(plain);
+                    a.strb_imm(31, 22, off);
+                }
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
+            // Speculative-inline guard: the callee (argc+1 deep) must be the pinned function —
+            // a tag compare and a pointer compare; mismatch branches to the generic call.
+            Op::InlineGuard(t, target) => {
+                let it = chunk.jit_inline_target(*t);
+                // A Value::Obj payload holds the STORED Rc pointer (the RcBox base), not
+                // `Rc::as_ptr` — read the expected stored word out of an Option<Gc> exactly
+                // like `value::jit_layout` probes it. A dead callee (or an unprobed layout)
+                // degrades to the generic call unconditionally.
+                let stored = it.pin.upgrade().filter(|_| layout.valid).map(|o| {
+                    let some: Option<crate::value::Gc> = Some(o);
+                    unsafe { *(&some as *const Option<crate::value::Gc> as *const usize) }
+                });
+                match stored {
+                    None => a.b(pc_labels[*target as usize]),
+                    Some(s) => {
+                        let dm = (it.argc as i32 + 1) * 24;
+                        a.ldurb(9, 20, -dm);
+                        a.cmp_imm_w(9, 8);
+                        a.b_cond(C_NE, pc_labels[*target as usize]);
+                        a.ldur(9, 20, -dm + 8);
+                        a.mov_imm64(10, s as u64);
+                        a.cmp_reg_x(9, 10);
+                        a.b_cond(C_NE, pc_labels[*target as usize]);
+                        if it.check_this {
+                            a.ldurb(9, 20, -dm - 24);
+                            a.cmp_imm_w(9, 8);
+                            a.b_cond(C_NE, pc_labels[*target as usize]);
+                        }
+                    }
+                }
             }
             // Calls take the dedicated helper: same contract as the generic one, minus the full
             // op dispatch (they dominate helper traffic in call-heavy code).
@@ -3595,6 +3657,7 @@ fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
         | Op::JumpIfFalsePeek(t)
         | Op::JumpIfTruePeek(t)
         | Op::JumpIfNotNullishPeek(t)
+        | Op::InlineGuard(_, t)
         | Op::PushHandler(t) => Some(*t as usize),
         _ => None,
     }
@@ -5439,7 +5502,8 @@ fn stack_depths(chunk: &Chunk) -> Option<usize> {
             Op::JumpIfFalse(t)
             | Op::JumpIfFalsePeek(t)
             | Op::JumpIfTruePeek(t)
-            | Op::JumpIfNotNullishPeek(t) => {
+            | Op::JumpIfNotNullishPeek(t)
+            | Op::InlineGuard(_, t) => {
                 work.push((*t as usize, next));
                 work.push((pc + 1, next));
             }

@@ -4636,17 +4636,28 @@ impl Interp {
         let genv = Rc::as_ptr(&self.global_env) as usize;
         // Probe the identity fields through the Cell without copying whole entries; only the
         // hit is copied out (nothing re-entrant runs between the probe and the copy).
+        let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
         let mut hit = None;
         for e in &site.entries {
             let p = e.as_ptr();
             unsafe {
-                if (*p).callee == key && (*p).global_env == genv {
+                if (*p).callee == key && (*p).global_env == genv && (*p).epoch == epoch {
                     hit = Some(*p);
                     break;
                 }
             }
         }
         let ic = hit?;
+        // Inline-recompile trigger: a chunk that keeps running in machine code gets one shot at
+        // splicing its own hot monomorphic callees (see `bytecode::plan_inlines`).
+        {
+            let chunk_ref = unsafe { &**ic.chunk };
+            let runs = chunk_ref.jit_runs.get().wrapping_add(1);
+            chunk_ref.jit_runs.set(runs);
+            if runs == crate::bytecode::inline_recompile_at() {
+                self.try_inline_recompile(ic.func, chunk_ref);
+            }
+        }
         // --- committed: identical to call_jit_fast's committed path ---
         self.depth += 1;
         if self.depth > MAX_EVAL_DEPTH {
@@ -4733,6 +4744,40 @@ impl Interp {
         Some(r)
     }
 
+    /// One-shot second-stage compile of a hot chunk's function with its monomorphic callees
+    /// spliced inline. On success the new chunk lands in `Function::code2` and the global call-IC
+    /// epoch bumps, so every cached caller re-resolves and picks it up; the old chunk stays
+    /// alive (and correct) beneath any pointers already handed out.
+    fn try_inline_recompile(&mut self, func: *const crate::ast::Function, chunk: &crate::bytecode::Chunk) {
+        if func.is_null() || chunk.inline_attempted.replace(true) {
+            return;
+        }
+        // Alive because the callee object that carried this IC is alive and its `call` field is
+        // never reassigned (the same argument that makes the rest of the IC readable).
+        let func = unsafe { &*func };
+        if func.code2.get().is_some() {
+            return;
+        }
+        let plan = crate::bytecode::plan_inlines(chunk, func);
+        if plan.is_empty() {
+            if std::env::var_os("LUMEN_TIER_LOG").is_some() {
+                let src = func.source.as_deref().unwrap_or("<no source>");
+                let head: String = src.chars().take(60).collect();
+                eprintln!("[tier] inline: empty plan for: {}", head.replace('\n', " "));
+            }
+            return;
+        }
+        if let Some(chunk2) = crate::bytecode::compile_with_inlines(func, &plan) {
+            if std::env::var_os("LUMEN_TIER_LOG").is_some() {
+                let src = func.source.as_deref().unwrap_or("<no source>");
+                let head: String = src.chars().take(60).collect();
+                eprintln!("[tier] inlined {} site(s) into: {}", plan.len(), head.replace('\n', " "));
+            }
+            let _ = func.code2.set(Some(chunk2));
+            crate::bytecode::CALL_IC_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// # Safety
     /// `args..args+argc` and `*this_slot` must be initialized `Value`s the caller relinquishes
     /// on `Some`.
@@ -4792,7 +4837,7 @@ impl Interp {
         // Not yet tiered / didn't compile / no machine code → generic (which counts calls up).
         // The chunk and code stay borrowed through `func` (both OnceCells are set exactly once,
         // and the held `func` clone keeps them alive across the run) — no Rc round-trips.
-        let chunk = match func.code.get() {
+        let chunk = match func.code2.get().or_else(|| func.code.get()) {
             Some(Some(c)) => c,
             _ => return None,
         };
@@ -4836,6 +4881,9 @@ impl Interp {
                         uses_this: chunk.uses_this(),
                         n_params: n_params as u16,
                         n_slots: n_slots as u16,
+                        func: Rc::as_ptr(&func),
+                        epoch: crate::bytecode::CALL_IC_EPOCH
+                            .load(std::sync::atomic::Ordering::Relaxed),
                     });
                 }
             }
@@ -4949,7 +4997,7 @@ impl Interp {
                     let _ = func.code.set(compiled);
                 }
             }
-            if let Some(Some(chunk)) = func.code.get() {
+            if let Some(Some(chunk)) = func.code2.get().or_else(|| func.code.get()) {
                 let chunk = chunk.clone();
                 let this_val = self.bind_compiled_this(func, &chunk, this, is_construct);
                 // A construct consumes the pending new.target exactly like the slow path, so a
@@ -5392,7 +5440,7 @@ impl Interp {
                 let _ = func.code.set(crate::bytecode::compile(func));
             }
         }
-        match func.code.get() {
+        match func.code2.get().or_else(|| func.code.get()) {
             Some(Some(chunk)) => Some(chunk.clone()),
             _ => None,
         }

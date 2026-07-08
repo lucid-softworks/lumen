@@ -9831,3 +9831,110 @@ fn loop_chain_elem_dedup_and_aliasing() {
         "266"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Speculative inlining: hot chunks recompile with monomorphic callees spliced inline behind an
+// identity guard (bytecode::plan_inlines). Drivers loop enough times to cross the recompile
+// trigger; every case must behave exactly like the generic call path.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn inline_deopt_on_method_reassignment() {
+    assert_eq!(
+        run_jit(
+            "function A() {}
+             A.prototype.m = function (x) { return x + 1; };
+             var a = new A();
+             function driver(a, i) { return a.m(i); }
+             var s = 0;
+             for (var i = 0; i < 500; i++) s += driver(a, i);
+             A.prototype.m = function (x) { return x * 1000; };
+             for (var i = 0; i < 10; i++) s += driver(a, i);
+             s"
+        ),
+        "170250"
+    );
+}
+
+#[test]
+fn inline_vars_reset_per_invocation() {
+    assert_eq!(
+        run_jit(
+            "function acc(n) {
+               var t;
+               if (n > 0) t = n;
+               return typeof t;
+             }
+             var o = { acc: acc };
+             function driver(o, n) { return o.acc(n); }
+             for (var i = 0; i < 300; i++) driver(o, 1);
+             driver(o, 1) + ':' + driver(o, 0)"
+        ),
+        "number:undefined"
+    );
+}
+
+#[test]
+fn inline_argc_adjustment_and_returns() {
+    assert_eq!(
+        run_jit(
+            "function f(a, b, c) { return '' + a + b + c; }
+             var o = { f: f };
+             function d2(o) { return o.f(1, 2); }
+             function d5(o) { return o.f(1, 2, 3, 4, 5); }
+             for (var i = 0; i < 300; i++) { d2(o); d5(o); }
+             d2(o) + '|' + d5(o)"
+        ),
+        "12undefined|123"
+    );
+    assert_eq!(
+        run_jit(
+            "function find(arr, x) {
+               for (var i = 0; i < arr.length; i++) {
+                 if (arr[i] === x) return i;
+               }
+               return -1;
+             }
+             var o = { find: find };
+             var arr = [3, 1, 4, 1, 5, 9, 2, 6];
+             function driver(o, x) { return o.find(arr, x); }
+             var s = 0;
+             for (var i = 0; i < 400; i++) s += driver(o, i & 7);
+             s + ':' + driver(o, 9) + ':' + driver(o, 42)"
+        ),
+        "900:5:-1"
+    );
+}
+
+#[test]
+fn inline_sloppy_this_primitive_receiver_deopts() {
+    assert_eq!(
+        run_jit(
+            "function who() { return typeof this; }
+             Number.prototype.who = who;
+             function driver(o) { return o.who(); }
+             var obj = { who: who };
+             for (var i = 0; i < 300; i++) driver(obj);
+             driver(obj) + ':' + driver(5)"
+        ),
+        "object:object"
+    );
+}
+
+#[test]
+fn inline_throw_from_spliced_body() {
+    assert_eq!(
+        run_jit(
+            "function pick(arr, i) { return arr[i].x; }
+             var o = { pick: pick };
+             var arr = [{ x: 1 }, { x: 2 }];
+             function driver(o, i) { return o.pick(arr, i); }
+             var s = 0;
+             for (var i = 0; i < 300; i++) s += driver(o, i & 1);
+             var caught = '';
+             try { driver(o, 7); } catch (e) { caught = e instanceof TypeError; }
+             s + ':' + caught"
+        ),
+        "450:true"
+    );
+}
