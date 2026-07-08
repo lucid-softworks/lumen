@@ -3559,6 +3559,48 @@ fn emit_chain(
                     a.ldr_imm(12, 11, mp);
                     a.ldr_d_lsl3(dk, 12, 9);
                     a.b(mirror_done);
+                } else {
+                    // Mirror-slim store: MIRROR_OK proves every (non-hole) element is a plain
+                    // writable data Num, so the accessor/writable/old-value dance collapses to
+                    // a payload overwrite in the entry plus the mirror word. A hole (elems
+                    // NO_SLOT) would CREATE a property — classic handles it.
+                    a.ldrb_imm(12, 11, mf);
+                    let ok_bit = asm::logical_imm_w(crate::value::MIRROR_OK as u32).unwrap();
+                    a.logic_imm_w(0, 12, 12, ok_bit);
+                    a.cbz(12, false, classic);
+                    a.ldr_imm(12, 11, ml);
+                    a.cmp_reg_x(9, 12);
+                    a.b_cond(C_HS, classic);
+                    a.ldr_imm(12, 11, elp);
+                    a.add_shifted(12, 12, 9, 2);
+                    a.ldr_w_imm(13, 12, 0);
+                    a.cmn_imm_w(13, 1);
+                    a.b_cond(C_EQ, classic);
+                    a.ldr_imm(15, 11, en);
+                    a.movz(14, es as u32, 0);
+                    a.madd(15, 13, 14, 15);
+                    a.stur_d(dv, 15, ev + 8);
+                    a.ldr_imm(12, 11, mp);
+                    a.str_d_lsl3(dv, 12, 9);
+                    // Flag-first ALL_I32 upkeep (dv int-ness is unknown in this tier).
+                    let i32_done = a.new_label();
+                    a.ldrb_imm(13, 11, mf);
+                    let i32_bit =
+                        asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
+                    a.logic_imm_w(0, 12, 13, i32_bit);
+                    a.cbz(12, false, i32_done);
+                    a.fcvtzs_w_d(12, dv);
+                    a.scvtf_d_w(1, 12);
+                    a.fmov_x_d(12, 1);
+                    a.fmov_x_d(14, dv);
+                    a.cmp_reg_x(12, 14);
+                    a.b_cond(C_EQ, i32_done);
+                    let clear =
+                        asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
+                    a.logic_imm_w(0, 13, 13, clear);
+                    a.strb_imm(13, 11, mf);
+                    a.bind(i32_done);
+                    a.b(mirror_done);
                 }
                 a.bind(classic);
                 a.ldr_imm(12, 11, ell);
@@ -3609,6 +3651,7 @@ fn emit_chain(
                         MirrorKey::F64InDreg(dk),
                         MirrorVal::Num(dv, false),
                     );
+                    a.bind(mirror_done);
                     free.push(dk);
                     if keep {
                         vregs.push((dv, viv)); // v stays the virtual result (a Num — no refcounting)
