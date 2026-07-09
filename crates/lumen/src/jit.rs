@@ -6298,12 +6298,23 @@ fn plan_loop(
     }
 
     if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+        let vec_pins: usize = receivers
+            .iter()
+            .map(|r| {
+                [r.mlreg, r.mpreg, r.elpreg, r.enreg]
+                    .iter()
+                    .filter(|p| p.is_some())
+                    .count()
+            })
+            .sum();
         eprintln!(
-            "[jit-loop] head {head}: CHAINED {} ops, {} slots ({} I), {} receivers, memo elem {}r/{}u conv {}r/{}u",
+            "[jit-loop] head {head}: CHAINED {} ops, {} slots ({} I), {} receivers ({} vec pins), {} names, memo elem {}r/{}u conv {}r/{}u",
             chain.len(),
             slots.len(),
             slots.iter().filter(|s| matches!(s.res, SlotRes::I(_))).count(),
             receivers.len(),
+            vec_pins,
+            names.len(),
             elem_retain.len(),
             elem_reuse.len(),
             conv_retain.len(),
