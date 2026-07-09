@@ -5426,7 +5426,8 @@ unsafe fn jit_call_inner(
                     i.new_target = saved_nt;
                     while r.is_ok() {
                         match i.pending_tail.take() {
-                            Some((f, t, a)) => {
+                            Some(bx) => {
+                                let (f, t, a) = *bx;
                                 if let Err(e) = i.gc_check_amortized() {
                                     r = Err(e);
                                     break;

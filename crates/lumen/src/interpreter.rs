@@ -946,7 +946,7 @@ pub struct Interp {
     pub(crate) pending_fn_name: Option<String>,
     /// A pending proper tail call: set by `return f(...)` in a strict ordinary function; the
     /// nearest `Interp::call` frame re-dispatches it (a trampoline), keeping the stack flat.
-    pub(crate) pending_tail: Option<(Value, Value, Vec<Value>)>,
+    pub(crate) pending_tail: Option<Box<(Value, Value, Vec<Value>)>>,
     /// True while executing a body where `return f(...)` is a proper tail call (a strict,
     /// ordinary, non-constructor function).
     pub(crate) tco_ok: bool,
@@ -4135,7 +4135,8 @@ impl Interp {
         // same stack frame, so mutual tail recursion runs in constant stack space.
         while r.is_ok() {
             match self.pending_tail.take() {
-                Some((f, t, a)) => {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
                     if let Err(e) = self.gc_check_amortized() {
                         r = Err(e);
                         break;
@@ -4941,12 +4942,11 @@ impl Interp {
             strict: ic.strict,
             extra: None,
         });
-        // Reconstruct the one owned env handle the frame needs: alive because the callee is
-        // alive and its `call` field (which owns the env) is never reassigned while live.
-        let env = unsafe {
-            Rc::increment_strong_count(ic.env);
-            Rc::from_raw(ic.env)
-        };
+        // Borrow the env without touching its refcount: it stays alive for the whole call
+        // because the callee object (held by the caller's operand stack) owns it through its
+        // `call` field, which is never reassigned while live. ManuallyDrop = a non-owning
+        // `&Env` fabricated from the raw pointer; nothing below moves it out.
+        let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
         let chunk = unsafe { &*ic.chunk };
         let code = unsafe { &*ic.code };
         // OrdinaryCallBindThis on the moved `this` (bind_compiled_this, inlined over `ic.strict`
@@ -4969,7 +4969,7 @@ impl Interp {
                 self,
                 chunk,
                 code,
-                &env as *const Env,
+                &*env as *const Env,
                 this_val,
                 args,
                 argc,
@@ -4982,7 +4982,8 @@ impl Interp {
         // Proper-tail-call trampoline, exactly like `call`.
         while r.is_ok() {
             match self.pending_tail.take() {
-                Some((f, t, a)) => {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
                     if let Err(e) = self.gc_check() {
                         r = Err(e);
                         break;
@@ -5199,7 +5200,8 @@ impl Interp {
         // Proper-tail-call trampoline, exactly like `call`.
         while r.is_ok() {
             match self.pending_tail.take() {
-                Some((f, t, a)) => {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
                     if let Err(e) = self.gc_check() {
                         r = Err(e);
                         break;

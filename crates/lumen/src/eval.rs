@@ -595,7 +595,7 @@ impl Interp {
                     if self.tco_ok && !self.using_stack.iter().any(|f| !f.is_empty()) {
                         return match self.eval_return_expr(e, env)? {
                             TailEval::Tail(f, t, a) => {
-                                self.pending_tail = Some((f, t, a));
+                                self.pending_tail = Some(Box::new((f, t, a)));
                                 Err(Abrupt::Return(Value::Undefined))
                             }
                             TailEval::Val(v) => Err(Abrupt::Return(v)),
