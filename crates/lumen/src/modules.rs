@@ -429,8 +429,10 @@ impl Interp {
         };
         {
             let mut b = meta.borrow_mut();
-            b.props
-                .insert("url", Property::data(Value::from_string(url), true, true, true));
+            b.props.insert(
+                "url",
+                Property::data(Value::from_string(url), true, true, true),
+            );
             if is_path {
                 b.props.insert(
                     "filename",
@@ -440,8 +442,10 @@ impl Interp {
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                b.props
-                    .insert("dirname", Property::data(Value::from_string(dir), true, true, true));
+                b.props.insert(
+                    "dirname",
+                    Property::data(Value::from_string(dir), true, true, true),
+                );
             }
         }
         Value::Obj(meta)
@@ -479,8 +483,7 @@ impl Interp {
     fn link_imports(&mut self, key: &str, body: &[Stmt], env: &Env) -> Result<(), Abrupt> {
         for stmt in body {
             let Stmt::Import(decl) = stmt else { continue };
-            let dep =
-                self.resolved_key(key, &dep_map_key(&decl.source, decl.attr_type.as_deref()));
+            let dep = self.resolved_key(key, &dep_map_key(&decl.source, decl.attr_type.as_deref()));
             for spec in &decl.specs {
                 match spec {
                     ImportSpec::Namespace(local) => {

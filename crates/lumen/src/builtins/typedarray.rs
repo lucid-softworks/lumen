@@ -20,15 +20,7 @@ pub(super) fn install_shared_array_buffer(it: &mut Interp) {
         let g = it.make_native(&format!("get {name}"), 0, f);
         proto.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     };
     sab_getter(it, &proto, "byteLength", |i, this, _| {
@@ -313,15 +305,7 @@ pub(super) fn install_array_buffer(it: &mut Interp) {
         let g = it.make_native(&format!("get {name}"), 0, f);
         proto.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     };
     ab_getter(it, &proto, "byteLength", |i, this, _| {
@@ -1772,15 +1756,7 @@ pub(super) fn install_typed_arrays(it: &mut Interp) {
         let g = it.make_native(&format!("get {name}"), 0, getter);
         ta_proto.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     }
     // %TypedArray.prototype%[@@toStringTag]: a getter returning the kind name (e.g. "Int8Array")
@@ -1794,15 +1770,7 @@ pub(super) fn install_typed_arrays(it: &mut Interp) {
         });
         ta_proto.borrow_mut().props.insert(
             key,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     }
 

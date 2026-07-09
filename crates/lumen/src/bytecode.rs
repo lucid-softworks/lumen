@@ -515,7 +515,9 @@ pub struct Chunk {
     name_caches: Vec<std::cell::Cell<NameIc>>,
     /// Weak handles pinning each name cache's scope allocation (parallel to `name_caches`), so
     /// the cached raw `env` pointer can never be recycled into a different scope while cached.
-    name_pins: std::cell::RefCell<Vec<Option<std::rc::Weak<std::cell::RefCell<crate::interpreter::Scope>>>>>,
+    name_pins: std::cell::RefCell<
+        Vec<Option<std::rc::Weak<std::cell::RefCell<crate::interpreter::Scope>>>>,
+    >,
     /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
     call_caches: Vec<CallSite>,
     /// Weak handles pinning every callee address a call cache has ever recorded (see [`CallIc`]),
@@ -704,7 +706,12 @@ fn pat_idents(p: &Pattern, out: &mut std::collections::HashSet<String>) {
 /// body: recurses through blocks/loops/switch/try but never into nested functions or classes.
 /// `top` distinguishes direct body statements (whose FuncDecls hoist) from block-level ones.
 /// Returns false on a construct whose hoisting we don't model (sloppy Annex B block functions).
-fn hoisted_vars(stmts: &[Stmt], top: bool, strict: bool, out: &mut std::collections::HashSet<String>) -> bool {
+fn hoisted_vars(
+    stmts: &[Stmt],
+    top: bool,
+    strict: bool,
+    out: &mut std::collections::HashSet<String>,
+) -> bool {
     for s in stmts {
         if !hoisted_vars_stmt(s, top, strict, out) {
             return false;
@@ -713,7 +720,12 @@ fn hoisted_vars(stmts: &[Stmt], top: bool, strict: bool, out: &mut std::collecti
     true
 }
 
-fn hoisted_vars_stmt(s: &Stmt, top: bool, strict: bool, out: &mut std::collections::HashSet<String>) -> bool {
+fn hoisted_vars_stmt(
+    s: &Stmt,
+    top: bool,
+    strict: bool,
+    out: &mut std::collections::HashSet<String>,
+) -> bool {
     match s {
         Stmt::VarDecl {
             kind: DeclKind::Var,
@@ -802,7 +814,11 @@ impl CaptureScan {
         };
         sc.fn_body(func)?;
         // A captured name declared by an inner depth-0 scope needs per-block freshness.
-        if sc.captured.iter().any(|n| sc.depth0_inner_decls.contains(n)) {
+        if sc
+            .captured
+            .iter()
+            .any(|n| sc.depth0_inner_decls.contains(n))
+        {
             return None;
         }
         Some((sc.captured, sc.env_this))
@@ -1066,7 +1082,9 @@ impl CaptureScan {
                 self.expr(right)?;
                 let mut names = std::collections::HashSet::new();
                 match decl {
-                    Some(DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing) => {
+                    Some(
+                        DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
+                    ) => {
                         pat_idents(left, &mut names);
                     }
                     Some(DeclKind::Var) => {} // already in the hoisted set
@@ -1387,7 +1405,10 @@ fn compile_inner(
     // Capture analysis: which locals inner functions can name (they live in a real activation
     // env), and whether an inner arrow chain reads `this`. `None` = unanalyzable — bail.
     let Some((captured, env_this)) = CaptureScan::run(func) else {
-        log_bail("capture-scan", "unanalyzable body (eval/with/annexB/pattern)");
+        log_bail(
+            "capture-scan",
+            "unanalyzable body (eval/with/annexB/pattern)",
+        );
         return None;
     };
 
@@ -1431,7 +1452,8 @@ fn compile_inner(
         }
         let slot = c.fresh_slot(name);
         if captured.contains(name) {
-            c.cap_inits.push(CapInit::Param(k as u16, Rc::from(name.as_str())));
+            c.cap_inits
+                .push(CapInit::Param(k as u16, Rc::from(name.as_str())));
             c.env_bind(name, false);
         } else {
             c.scope_bind(name, slot, false);
@@ -1598,80 +1620,84 @@ fn plan_inlines_at(
         filled.dedup_by_key(|c| c.callee);
         let mut ways: Vec<InlineWay> = Vec::new();
         for ic in filled.iter().take(2) {
-        let Some(weak) = pins.get(&ic.callee) else { skip!(idx, "no pin") };
-        let Some(obj) = weak.upgrade() else { skip!(idx, "dead callee") };
-        let b = obj.borrow();
-        let crate::value::Callable::User(f, callee_env) = &b.call else {
-            continue;
-        };
-        // Free names are only spliceable when the callee closes directly over the global
-        // scope: its LoadNames then resolve identically under the caller's chain, provided
-        // the caller doesn't shadow them (checked per-name by the compiler at splice time).
-        let global_closure = Rc::ptr_eq(callee_env, global_env);
-        if f.is_arrow || f.is_strict != caller.is_strict {
-            skip!(idx, "arrow/strictness");
-        }
-        if f.params.iter().any(|p| {
-            p.rest || p.default.is_some() || !matches!(p.pattern, crate::ast::Pattern::Ident(_))
-        }) {
-            skip!(idx, "param shape");
-        }
-        let Some(Some(callee_chunk)) = f.code.get() else {
-            skip!(idx, "callee not compiled");
-        };
-        if std::ptr::eq(&**callee_chunk, chunk) {
-            skip!(idx, "self-recursion");
-        }
-        if callee_chunk.ops.len() > 96
-            || callee_chunk.n_slots > 32
-            || !callee_chunk.jit_no_activation()
-            || callee_chunk.env_this
-            || ic.n_params > 8
-        {
-            skip!(idx, "callee size/shape");
-        }
-        // The splice runs under the caller's frame: no handler regions to relocate, no inner
-        // closures, no name writes. Free-name READS are allowed for global-closure callees —
-        // the compiler re-resolves them at the splice site and refuses shadowed ones.
-        if callee_chunk.ops.iter().any(|op| {
-            matches!(
-                op,
-                Op::PushHandler(_) | Op::MakeClosure(..) | Op::StoreName(_)
-            )
-        }) {
-            skip!(idx, "callee ops (handlers/closures/name writes)");
-        }
-        let mut free_names: Vec<Rc<str>> = Vec::new();
-        for op in callee_chunk.ops.iter() {
-            if let Op::LoadName(n, _) | Op::LoadNameForCall(n, _) = op {
-                let name = callee_chunk.names[*n as usize].clone();
-                if !free_names.contains(&name) {
-                    free_names.push(name);
+            let Some(weak) = pins.get(&ic.callee) else {
+                skip!(idx, "no pin")
+            };
+            let Some(obj) = weak.upgrade() else {
+                skip!(idx, "dead callee")
+            };
+            let b = obj.borrow();
+            let crate::value::Callable::User(f, callee_env) = &b.call else {
+                continue;
+            };
+            // Free names are only spliceable when the callee closes directly over the global
+            // scope: its LoadNames then resolve identically under the caller's chain, provided
+            // the caller doesn't shadow them (checked per-name by the compiler at splice time).
+            let global_closure = Rc::ptr_eq(callee_env, global_env);
+            if f.is_arrow || f.is_strict != caller.is_strict {
+                skip!(idx, "arrow/strictness");
+            }
+            if f.params.iter().any(|p| {
+                p.rest || p.default.is_some() || !matches!(p.pattern, crate::ast::Pattern::Ident(_))
+            }) {
+                skip!(idx, "param shape");
+            }
+            let Some(Some(callee_chunk)) = f.code.get() else {
+                skip!(idx, "callee not compiled");
+            };
+            if std::ptr::eq(&**callee_chunk, chunk) {
+                skip!(idx, "self-recursion");
+            }
+            if callee_chunk.ops.len() > 96
+                || callee_chunk.n_slots > 32
+                || !callee_chunk.jit_no_activation()
+                || callee_chunk.env_this
+                || ic.n_params > 8
+            {
+                skip!(idx, "callee size/shape");
+            }
+            // The splice runs under the caller's frame: no handler regions to relocate, no inner
+            // closures, no name writes. Free-name READS are allowed for global-closure callees —
+            // the compiler re-resolves them at the splice site and refuses shadowed ones.
+            if callee_chunk.ops.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::PushHandler(_) | Op::MakeClosure(..) | Op::StoreName(_)
+                )
+            }) {
+                skip!(idx, "callee ops (handlers/closures/name writes)");
+            }
+            let mut free_names: Vec<Rc<str>> = Vec::new();
+            for op in callee_chunk.ops.iter() {
+                if let Op::LoadName(n, _) | Op::LoadNameForCall(n, _) = op {
+                    let name = callee_chunk.names[*n as usize].clone();
+                    if !free_names.contains(&name) {
+                        free_names.push(name);
+                    }
                 }
             }
-        }
-        if !free_names.is_empty() && !global_closure {
-            skip!(idx, "free names in a non-global closure");
-        }
-        let uses_this = callee_chunk.uses_this();
-        // One level of nesting: the spliced body's own hot monomorphic callees splice too
-        // (an OO benchmark's helpers call helpers — without this, every call inside a splice
-        // stays a real call).
-        let nested = if depth < 1 {
-            plan_inlines_at(callee_chunk, f, global_env, depth + 1)
-        } else {
-            Default::default()
-        };
-        let f = f.clone();
-        drop(b);
-        ways.push(InlineWay {
-            check_this: uses_this && !f.is_strict,
-            uses_this,
-            f,
-            obj,
-            free_names,
-            nested,
-        });
+            if !free_names.is_empty() && !global_closure {
+                skip!(idx, "free names in a non-global closure");
+            }
+            let uses_this = callee_chunk.uses_this();
+            // One level of nesting: the spliced body's own hot monomorphic callees splice too
+            // (an OO benchmark's helpers call helpers — without this, every call inside a splice
+            // stays a real call).
+            let nested = if depth < 1 {
+                plan_inlines_at(callee_chunk, f, global_env, depth + 1)
+            } else {
+                Default::default()
+            };
+            let f = f.clone();
+            drop(b);
+            ways.push(InlineWay {
+                check_this: uses_this && !f.is_strict,
+                uses_this,
+                f,
+                obj,
+                free_names,
+                nested,
+            });
         }
         if ways.is_empty() {
             continue;
@@ -1777,7 +1803,6 @@ struct LoopCtx {
     is_switch: bool,
 }
 
-
 /// Debug (`LUMEN_TIER_LOG=1`): report the AST construct a compile bail came from.
 fn log_bail(what: &str, detail: &str) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1864,9 +1889,7 @@ fn no_assign_to(e: &Expr, name: &str) -> bool {
         Expr::Update { arg, .. } => match &**arg {
             Expr::Ident(n) => n != name,
             Expr::Member { obj, .. } => no_assign_to(obj, name),
-            Expr::Index { obj, index, .. } => {
-                no_assign_to(obj, name) && no_assign_to(index, name)
-            }
+            Expr::Index { obj, index, .. } => no_assign_to(obj, name) && no_assign_to(index, name),
             _ => false,
         },
         Expr::Assign { target, value, .. } => {
@@ -1940,7 +1963,13 @@ impl Compiler {
 
     /// Emit a planned speculative inline for a method call site whose stack already holds
     /// `[this, method, args...]`; anything the splice can't express reverts to the plain call.
-    fn emit_call_with_inline(&mut self, entry: InlinePlanEntry, argc: u16, cc: u32, has_this: bool) {
+    fn emit_call_with_inline(
+        &mut self,
+        entry: InlinePlanEntry,
+        argc: u16,
+        cc: u32,
+        has_this: bool,
+    ) {
         let snap = (
             self.ops.len(),
             self.consts.len(),
@@ -2143,8 +2172,7 @@ impl Compiler {
         while k < resets.len() {
             let start = resets[k];
             let mut count = 1u16;
-            while k + (count as usize) < resets.len()
-                && resets[k + count as usize] == start + count
+            while k + (count as usize) < resets.len() && resets[k + count as usize] == start + count
             {
                 count += 1;
             }
@@ -2308,7 +2336,7 @@ impl Compiler {
                     self.expr(a)?;
                 }
                 let cc = self.new_call_cache();
-                        self.emit(Op::CallWithThis(args.len() as u16, cc));
+                self.emit(Op::CallWithThis(args.len() as u16, cc));
                 Ok(())
             }
             // The chain's base (before any `?.` link): an ordinary expression.
@@ -2439,7 +2467,9 @@ impl Compiler {
                             self.declare_lexical_pattern(pat, is_const)?;
                             continue;
                         }
-                        let Pattern::Ident(name) = pat else { unreachable!() };
+                        let Pattern::Ident(name) = pat else {
+                            unreachable!()
+                        };
                         if captured.contains(name) {
                             self.cap_inits
                                 .push(CapInit::Lexical(Rc::from(name.as_str()), is_const));
@@ -2685,11 +2715,7 @@ impl Compiler {
             }
             Stmt::Continue(None) => {
                 // `continue` skips switch contexts: it targets the innermost enclosing *loop*.
-                let idx = self
-                    .loops
-                    .iter()
-                    .rposition(|c| !c.is_switch)
-                    .ok_or(Bail)?;
+                let idx = self.loops.iter().rposition(|c| !c.is_switch).ok_or(Bail)?;
                 self.emit_exit_cleanup(idx, true)?;
                 let j = self.emit(Op::Jump(0));
                 self.loops[idx].continues.push(j);
@@ -3052,8 +3078,6 @@ impl Compiler {
         Ok(())
     }
 
-
-
     fn block_body(&mut self, body: &[Stmt]) -> CResult {
         self.declare_block_lexicals(body)?;
         for s in body {
@@ -3255,8 +3279,7 @@ impl Compiler {
                 && match &**mobj {
                     Expr::This => true,
                     Expr::Ident(name) => {
-                        matches!(self.home(name), Some(Home::Slot(..)))
-                            && no_assign_to(value, name)
+                        matches!(self.home(name), Some(Home::Slot(..))) && no_assign_to(value, name)
                     }
                     _ => false,
                 } =>
@@ -4021,7 +4044,15 @@ pub fn run(
     let mut pc = 0usize;
     let mut handlers: Vec<Handler> = Vec::new();
     let r = drive_vm(
-        i, chunk, &env, &mut slots, &mut stack, &mut pc, &this_val, &mut handlers, None,
+        i,
+        chunk,
+        &env,
+        &mut slots,
+        &mut stack,
+        &mut pc,
+        &this_val,
+        &mut handlers,
+        None,
     );
     slots.clear();
     stack.clear();
@@ -4150,8 +4181,12 @@ fn run_vm(
                         let old = n.clone();
                         let one = crate::bigint::JsBigInt::from_u64(1);
                         let new = match kind {
-                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => old.add(&one),
-                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => old.sub(&one),
+                            UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => {
+                                old.add(&one)
+                            }
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard => {
+                                old.sub(&one)
+                            }
                         };
                         slots[idx] = Value::BigInt(new.clone());
                         match kind {
@@ -4257,8 +4292,11 @@ fn run_vm(
                 stack.push(v);
             }
             Op::GetPropThis(n, c) => {
-                let v =
-                    i.get_prop_ic(this_val, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let v = i.get_prop_ic(
+                    this_val,
+                    &chunk.names[n as usize],
+                    &chunk.caches[c as usize],
+                )?;
                 stack.push(v);
             }
             Op::GetPropLocal(s, n, c) => {
@@ -4278,7 +4316,12 @@ fn run_vm(
             Op::SetProp(n, c) => {
                 let v = pop!();
                 let obj = pop!();
-                i.set_prop_ic(&obj, &chunk.names[n as usize], v.clone(), &chunk.caches[c as usize])?;
+                i.set_prop_ic(
+                    &obj,
+                    &chunk.names[n as usize],
+                    v.clone(),
+                    &chunk.caches[c as usize],
+                )?;
                 stack.push(v);
             }
             Op::SetPropDrop(n, c) => {
@@ -4288,7 +4331,12 @@ fn run_vm(
             }
             Op::SetPropThisDrop(n, c) => {
                 let v = pop!();
-                i.set_prop_ic(this_val, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+                i.set_prop_ic(
+                    this_val,
+                    &chunk.names[n as usize],
+                    v,
+                    &chunk.caches[c as usize],
+                )?;
             }
             Op::SetPropLocalDrop(s, n, c) => {
                 let v = pop!();
@@ -4444,9 +4492,7 @@ fn run_vm(
                         if i.fast_set_elem(o, *nk, Value::Num(new)).is_ok() {
                             match kind {
                                 UpdKind::PreInc | UpdKind::PreDec => stack.push(Value::Num(new)),
-                                UpdKind::PostInc | UpdKind::PostDec => {
-                                    stack.push(Value::Num(old))
-                                }
+                                UpdKind::PostInc | UpdKind::PostDec => stack.push(Value::Num(old)),
                                 UpdKind::IncDiscard | UpdKind::DecDiscard => {}
                             }
                             continue;
@@ -4462,22 +4508,19 @@ fn run_vm(
                 let old = i.get_member(&obj, &k)?;
                 step_and_store(i, stack, kind, old, |i, v| i.set_member(&obj, &k, v))?;
             }
-            Op::ToPropKeyLocal(s) => {
-                match stack.last().expect("vm stack underflow") {
-                    Value::Num(_) | Value::Str(_) => {}
-                    _ => {
-                        let key = pop!();
-                        if matches!(slots[s as usize], Value::Undefined | Value::Null) {
-                            return Err(i.throw(
-                                "TypeError",
-                                "cannot access property of null or undefined",
-                            ));
-                        }
-                        let k = i.to_property_key(&key)?;
-                        stack.push(Value::str(k));
+            Op::ToPropKeyLocal(s) => match stack.last().expect("vm stack underflow") {
+                Value::Num(_) | Value::Str(_) => {}
+                _ => {
+                    let key = pop!();
+                    if matches!(slots[s as usize], Value::Undefined | Value::Null) {
+                        return Err(
+                            i.throw("TypeError", "cannot access property of null or undefined")
+                        );
                     }
+                    let k = i.to_property_key(&key)?;
+                    stack.push(Value::str(k));
                 }
-            }
+            },
             Op::ToPropKey => {
                 match stack.last().expect("vm stack underflow") {
                     // Side-effect-free and deterministic to coerce later; numbers stay numeric
@@ -4671,8 +4714,9 @@ fn run_vm(
             Op::LoadNameForCall(n, c) => {
                 // A depth-0 cache hit/fill can't have come through a `with` object: `this` is
                 // undefined. Only the full walk can produce a with-object receiver.
-                if let Some(v) =
-                    chunk.name_ic_hit(i, env, c).or_else(|| chunk.name_ic_fill(i, env, n, c))
+                if let Some(v) = chunk
+                    .name_ic_hit(i, env, c)
+                    .or_else(|| chunk.name_ic_fill(i, env, n, c))
                 {
                     stack.push(Value::Undefined);
                     stack.push(v);
@@ -5088,9 +5132,7 @@ impl Chunk {
         }
         // Global mode: only when there are no intermediate scopes whose later mutation could
         // re-route the name — i.e. the chunk runs directly under the global scope.
-        if !Rc::ptr_eq(env, &i.global_env)
-            || !i.ordinary_get_ptr(Rc::as_ptr(&i.global) as usize)
-        {
+        if !Rc::ptr_eq(env, &i.global_env) || !i.ordinary_get_ptr(Rc::as_ptr(&i.global) as usize) {
             return None;
         }
         let g = i.global.borrow();
@@ -5329,8 +5371,13 @@ unsafe fn jit_call_inner(
     } else {
         &raw mut *undef as *const Value
     };
-    let mut r =
-        i.call_jit_cached(&chunk.call_caches[c as usize], &*sp.sub(argc + 1), this_slot, args_ptr, argc);
+    let mut r = i.call_jit_cached(
+        &chunk.call_caches[c as usize],
+        &*sp.sub(argc + 1),
+        this_slot,
+        args_ptr,
+        argc,
+    );
     if r.is_none() {
         // Plain-native fast call: a bare `fn` callee in a proxy-free single-realm engine skips the
         // call/call_inner/call_dispatch layering. Replicates the observable effects exactly: depth
@@ -5457,8 +5504,7 @@ unsafe fn jit_opstat(ctx: &mut crate::jit::JitCtx, pc: u32) {
             // (identified by its leading slot names) and pc for pinpointing bail sites.
             let mut name = op.split(['(', ' ']).next().unwrap_or(&op).to_string();
             if std::env::var("LUMEN_JIT_OPSTAT").as_deref() == Ok("2") {
-                let params: Vec<&str> =
-                    chunk.slot_names.iter().take(3).map(|s| &**s).collect();
+                let params: Vec<&str> = chunk.slot_names.iter().take(3).map(|s| &**s).collect();
                 name = format!("{name} @ fn({}) pc{}", params.join(","), pc);
             }
             let _ = COUNTS.try_with(|c| *c.borrow_mut().0.entry(name).or_insert(0) += 1);
@@ -5634,7 +5680,12 @@ unsafe fn jit_exec_inner(
         Op::SetProp(n, c) => {
             let v = pop!();
             let obj = pop!();
-            i.set_prop_ic(&obj, &chunk.names[n as usize], v.clone(), &chunk.caches[c as usize])?;
+            i.set_prop_ic(
+                &obj,
+                &chunk.names[n as usize],
+                v.clone(),
+                &chunk.caches[c as usize],
+            )?;
             push!(v);
         }
         Op::SetPropDrop(n, c) => {
@@ -5645,7 +5696,12 @@ unsafe fn jit_exec_inner(
         Op::SetPropThisDrop(n, c) => {
             let v = pop!();
             let this = (*ctx.this_raw).clone();
-            i.set_prop_ic(&this, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+            i.set_prop_ic(
+                &this,
+                &chunk.names[n as usize],
+                v,
+                &chunk.caches[c as usize],
+            )?;
         }
         Op::SetPropLocalDrop(s, n, c) => {
             let v = pop!();
@@ -5813,36 +5869,28 @@ unsafe fn jit_exec_inner(
                 push!(v);
             }
         }
-        Op::ToPropKey => {
-            match &*sp.sub(1) {
-                Value::Num(_) | Value::Str(_) => {}
-                _ => {
-                    let key = pop!();
-                    if matches!(&*sp.sub(1), Value::Undefined | Value::Null) {
-                        return Err(
-                            i.throw("TypeError", "cannot access property of null or undefined")
-                        );
-                    }
-                    let k = i.to_property_key(&key)?;
-                    push!(Value::str(k));
+        Op::ToPropKey => match &*sp.sub(1) {
+            Value::Num(_) | Value::Str(_) => {}
+            _ => {
+                let key = pop!();
+                if matches!(&*sp.sub(1), Value::Undefined | Value::Null) {
+                    return Err(i.throw("TypeError", "cannot access property of null or undefined"));
                 }
+                let k = i.to_property_key(&key)?;
+                push!(Value::str(k));
             }
-        }
-        Op::ToPropKeyLocal(s) => {
-            match &*sp.sub(1) {
-                Value::Num(_) | Value::Str(_) => {}
-                _ => {
-                    let key = pop!();
-                    if matches!(slots[s as usize], Value::Undefined | Value::Null) {
-                        return Err(
-                            i.throw("TypeError", "cannot access property of null or undefined")
-                        );
-                    }
-                    let k = i.to_property_key(&key)?;
-                    push!(Value::str(k));
+        },
+        Op::ToPropKeyLocal(s) => match &*sp.sub(1) {
+            Value::Num(_) | Value::Str(_) => {}
+            _ => {
+                let key = pop!();
+                if matches!(slots[s as usize], Value::Undefined | Value::Null) {
+                    return Err(i.throw("TypeError", "cannot access property of null or undefined"));
                 }
+                let k = i.to_property_key(&key)?;
+                push!(Value::str(k));
             }
-        }
+        },
         Op::GetMethod(n, c) => {
             let obj = pop!();
             let m = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
@@ -5991,8 +6039,9 @@ unsafe fn jit_exec_inner(
         }
         Op::LoadNameForCall(n, c) => {
             // A depth-0 cache hit/fill can't have come through a `with` object (see the VM arm).
-            if let Some(v) =
-                chunk.name_ic_hit(i, env, c).or_else(|| chunk.name_ic_fill(i, env, n, c))
+            if let Some(v) = chunk
+                .name_ic_hit(i, env, c)
+                .or_else(|| chunk.name_ic_fill(i, env, n, c))
             {
                 push!(Value::Undefined);
                 push!(v);
@@ -6062,10 +6111,8 @@ unsafe fn jit_exec_inner(
                 values.push(base.add(k).read());
             }
             *sp = base;
-            let v = i.make_plain_object_vm(
-                &chunk.names[start as usize..start as usize + count],
-                values,
-            );
+            let v = i
+                .make_plain_object_vm(&chunk.names[start as usize..start as usize + count], values);
             push!(v);
         }
         Op::ToStr => {
@@ -6268,10 +6315,16 @@ pub(crate) unsafe extern "C" fn jit_unwind(
     let ctx = &mut *ctx;
     // Only thrown completions are catchable; anything else propagates out.
     if !matches!(ctx.error, Some(Abrupt::Throw(_))) {
-        return crate::jit::SpFlag { sp: std::ptr::null_mut(), flag: sp as u64 };
+        return crate::jit::SpFlag {
+            sp: std::ptr::null_mut(),
+            flag: sp as u64,
+        };
     }
     match ctx.handlers.pop() {
-        None => crate::jit::SpFlag { sp: std::ptr::null_mut(), flag: sp as u64 },
+        None => crate::jit::SpFlag {
+            sp: std::ptr::null_mut(),
+            flag: sp as u64,
+        },
         Some((catch_pc, depth)) => {
             let target = ctx.stack_base.add(depth);
             // Drop operands above the handler's depth.
@@ -6284,8 +6337,7 @@ pub(crate) unsafe extern "C" fn jit_unwind(
                 unreachable!()
             };
             target.write(exc);
-            let addr = ctx.code_base as usize
-                + *ctx.pc_offsets.add(catch_pc as usize) as usize;
+            let addr = ctx.code_base as usize + *ctx.pc_offsets.add(catch_pc as usize) as usize;
             crate::jit::SpFlag {
                 sp: addr as *mut Value,
                 flag: target.add(1) as u64,

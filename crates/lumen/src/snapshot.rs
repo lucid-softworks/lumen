@@ -89,7 +89,10 @@ impl Reader<'_> {
     }
     fn f64(&mut self) -> R<f64> {
         let end = self.pos + 8;
-        let bytes = self.buf.get(self.pos..end).ok_or("snapshot: truncated f64")?;
+        let bytes = self
+            .buf
+            .get(self.pos..end)
+            .ok_or("snapshot: truncated f64")?;
         self.pos = end;
         Ok(f64::from_le_bytes(bytes.try_into().unwrap()))
     }
@@ -99,7 +102,10 @@ impl Reader<'_> {
     fn str(&mut self) -> R<String> {
         let len = self.uv()? as usize;
         let end = self.pos + len;
-        let bytes = self.buf.get(self.pos..end).ok_or("snapshot: truncated str")?;
+        let bytes = self
+            .buf
+            .get(self.pos..end)
+            .ok_or("snapshot: truncated str")?;
         self.pos = end;
         String::from_utf8(bytes.to_vec()).map_err(|_| "snapshot: bad utf8".into())
     }
@@ -217,11 +223,7 @@ fn enc_opt_rcstr(w: &mut Writer, o: &Option<Rc<str>>) {
     }
 }
 fn dec_opt_rcstr(r: &mut Reader) -> R<Option<Rc<str>>> {
-    Ok(if r.u8()? == 1 {
-        Some(r.rcstr()?)
-    } else {
-        None
-    })
+    Ok(if r.u8()? == 1 { Some(r.rcstr()?) } else { None })
 }
 
 // ---- Stmt -------------------------------------------------------------------------------------
@@ -687,7 +689,11 @@ fn enc_expr(w: &mut Writer, e: &Expr) {
             enc_expr(w, callee);
             enc_array_elems(w, args);
         }
-        Expr::Member { obj, prop, optional } => {
+        Expr::Member {
+            obj,
+            prop,
+            optional,
+        } => {
             w.u8(26);
             enc_expr(w, obj);
             w.str(prop);
@@ -755,9 +761,7 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
     Ok(match r.u8()? {
         0 => Expr::Paren(Box::new(dec_expr(r)?)),
         1 => Expr::Num(r.f64()?),
-        2 => Expr::BigInt(
-            JsBigInt::parse_radix(&r.str()?, 16).ok_or("snapshot: bad bigint")?,
-        ),
+        2 => Expr::BigInt(JsBigInt::parse_radix(&r.str()?, 16).ok_or("snapshot: bad bigint")?),
         3 => Expr::Str(r.rcstr()?),
         4 => Expr::ToStr(Box::new(dec_expr(r)?)),
         5 => Expr::Bool(r.bool()?),
@@ -1347,7 +1351,13 @@ mod tests {
         // The actual runtime glue — the thing the build-time snapshot will encode.
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../lumen-web/src/js/");
         for file in [
-            "events.js", "encoding.js", "url.js", "streams.js", "fetch.js", "server.js", "crypto.js",
+            "events.js",
+            "encoding.js",
+            "url.js",
+            "streams.js",
+            "fetch.js",
+            "server.js",
+            "crypto.js",
         ] {
             let src = std::fs::read_to_string(format!("{dir}{file}")).unwrap();
             assert_roundtrips(&src);

@@ -123,16 +123,21 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let rcbox_data = as_ptr - stored; // RcBox header (strong+weak) before the value
     let obj_from_rc = rcbox_data + refcell_value; // stored ptr → Object
     let rc_strong_off = 0usize; // strong count is the RcBox's first field
-    // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
-    let strong_ok = unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
+                                // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
+    let strong_ok =
+        unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
 
     // Vec data-pointer and length words (RawVec layout is not guaranteed — locate them by value).
     // Capacity 3 / length 1 makes the three words distinguishable.
     let mut v: Vec<(Rc<str>, Property)> = Vec::with_capacity(3);
     v.push((Rc::from("p"), Property::plain(Value::Num(0.0))));
     let vptr = v.as_ptr() as usize;
-    let vwords =
-        unsafe { std::slice::from_raw_parts(&v as *const Vec<_> as *const usize, std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8) };
+    let vwords = unsafe {
+        std::slice::from_raw_parts(
+            &v as *const Vec<_> as *const usize,
+            std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8,
+        )
+    };
     let vec_ptr_off = vwords.iter().position(|&w| w == vptr).map(|i| i * 8);
     let vec_len_off = vwords.iter().position(|&w| w == 1).map(|i| i * 8);
     // The element templates index a `Vec<u32>` (`Props::elems`) with the same offsets; verify the
@@ -141,7 +146,10 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     v32.push(7);
     let v32ptr = v32.as_ptr() as usize;
     let v32words = unsafe {
-        std::slice::from_raw_parts(&v32 as *const Vec<u32> as *const usize, std::mem::size_of::<Vec<u32>>() / 8)
+        std::slice::from_raw_parts(
+            &v32 as *const Vec<u32> as *const usize,
+            std::mem::size_of::<Vec<u32>>() / 8,
+        )
     };
     let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
         && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
@@ -166,8 +174,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let binding_value = offset_of!(crate::interpreter::Binding, value);
     let binding_init = offset_of!(crate::interpreter::Binding, initialized);
 
-    let valid =
-        strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
+    let valid = strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
     JitLayout {
         obj_from_rc,
         rc_strong_off,
@@ -526,16 +533,26 @@ pub enum TaIndex {
     Ordinary,
 }
 
-/// A property descriptor. A data property uses `value`/`writable`; an accessor uses `get`/`set`.
+/// A property descriptor. A data property uses `value`/`writable`; an accessor uses the boxed
+/// getter/setter pair. Data properties vastly outnumber accessors, so the pair lives behind one
+/// pointer: Property is 40 bytes instead of 80, and a `Props` entry 56 instead of 96 — the
+/// entries array the interpreter chases on every IC hit holds nearly twice the properties per
+/// cache line.
 #[derive(Clone)]
 pub struct Property {
     pub value: Value,
-    pub get: Option<Value>,
-    pub set: Option<Value>,
+    acc: Option<Box<Accessors>>,
     pub accessor: bool,
     pub writable: bool,
     pub enumerable: bool,
     pub configurable: bool,
+}
+
+/// The boxed getter/setter pair of an accessor property.
+#[derive(Clone, Default)]
+pub(crate) struct Accessors {
+    pub get: Option<Value>,
+    pub set: Option<Value>,
 }
 
 impl Property {
@@ -547,13 +564,64 @@ impl Property {
     ) -> Property {
         Property {
             value,
-            get: None,
-            set: None,
+            acc: None,
             accessor: false,
             writable,
             enumerable,
             configurable,
         }
+    }
+    /// An accessor property (`accessor: true`, value `Undefined`, not writable).
+    pub(crate) fn accessor_prop(
+        get: Option<Value>,
+        set: Option<Value>,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Property {
+        Property {
+            value: Value::Undefined,
+            acc: Some(Box::new(Accessors { get, set })),
+            accessor: true,
+            writable: false,
+            enumerable,
+            configurable,
+        }
+    }
+    #[inline]
+    pub(crate) fn getter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.get.as_ref())
+    }
+    #[inline]
+    pub(crate) fn setter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.set.as_ref())
+    }
+    pub(crate) fn set_getter(&mut self, g: Option<Value>) {
+        match (&mut self.acc, g) {
+            (Some(a), g) => a.get = g,
+            (acc @ None, Some(g)) => {
+                *acc = Some(Box::new(Accessors {
+                    get: Some(g),
+                    set: None,
+                }))
+            }
+            (None, None) => {}
+        }
+    }
+    pub(crate) fn set_setter(&mut self, s: Option<Value>) {
+        match (&mut self.acc, s) {
+            (Some(a), s) => a.set = s,
+            (acc @ None, Some(s)) => {
+                *acc = Some(Box::new(Accessors {
+                    get: None,
+                    set: Some(s),
+                }))
+            }
+            (None, None) => {}
+        }
+    }
+    /// Drop the accessor pair (used when a define converts an accessor back to a data property).
+    pub(crate) fn clear_accessors(&mut self) {
+        self.acc = None;
     }
     /// A default plain data property: writable, enumerable, configurable.
     pub(crate) fn plain(value: Value) -> Property {
@@ -838,9 +906,7 @@ impl Props {
         }
         let p = &self.entries[slot].1;
         match &p.value {
-            Value::Num(f)
-                if !p.accessor && p.writable && f.to_bits() != MIRROR_HOLE =>
-            {
+            Value::Num(f) if !p.accessor && p.writable && f.to_bits() != MIRROR_HOLE => {
                 let f = *f;
                 if !f64_exact_i32(f) {
                     self.mirror_flags &= !MIRROR_ALL_I32;
@@ -1305,4 +1371,3 @@ pub fn f64_to_f16(value: f64) -> u16 {
     }
     sign | h
 }
-

@@ -103,15 +103,7 @@ pub(super) fn install_regexp(it: &mut Interp) {
         let g = it.make_native(&format!("get {name}"), 0, f);
         proto.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     };
     add_getter(it, &proto, "source", re_source_get);
@@ -465,15 +457,7 @@ pub(super) fn install_regexp_legacy_statics(it: &mut Interp, ctor: &Gc) {
             };
             ctor.borrow_mut().props.insert(
                 *name,
-                Property {
-                    value: Value::Undefined,
-                    get: Some(Value::Obj(g)),
-                    set,
-                    accessor: true,
-                    writable: false,
-                    enumerable: false,
-                    configurable: true,
-                },
+                Property::accessor_prop(Some(Value::Obj(g)), set, false, true),
             );
         }
     }
@@ -752,7 +736,11 @@ fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
     let global = flags.contains('g');
     let unicode = flags.contains('u') || flags.contains('v');
     Ok(create_regexp_string_iterator(
-        i, matcher, s.into(), global, unicode,
+        i,
+        matcher,
+        s.into(),
+        global,
+        unicode,
     ))
 }
 fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {

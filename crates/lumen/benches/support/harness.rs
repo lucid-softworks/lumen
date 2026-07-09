@@ -39,7 +39,11 @@ impl Default for Bench {
 
 impl Bench {
     pub fn new() -> Bench {
-        Bench { rows: Vec::new(), sample_target: Duration::from_millis(25), samples: 25 }
+        Bench {
+            rows: Vec::new(),
+            sample_target: Duration::from_millis(25),
+            samples: 25,
+        }
     }
 
     /// Time `f`, reporting nanoseconds per call. The closure is run many times per sample; put a
@@ -74,17 +78,34 @@ impl Bench {
             }
         }
 
-        self.rows.push(Row { name: name.to_string(), ns_per_op: best, iters });
+        self.rows.push(Row {
+            name: name.to_string(),
+            ns_per_op: best,
+            iters,
+        });
     }
 
     /// Print the collected results as an aligned table.
     pub fn report(&self) {
-        let name_w = self.rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(9);
+        let name_w = self
+            .rows
+            .iter()
+            .map(|r| r.name.len())
+            .max()
+            .unwrap_or(4)
+            .max(9);
         println!();
-        println!("{:<name_w$}  {:>12}  {:>14}  {:>12}", "benchmark", "time/op", "ops/sec", "iters");
+        println!(
+            "{:<name_w$}  {:>12}  {:>14}  {:>12}",
+            "benchmark", "time/op", "ops/sec", "iters"
+        );
         println!("{}", "-".repeat(name_w + 2 + 12 + 2 + 14 + 2 + 12));
         for r in &self.rows {
-            let ops_per_sec = if r.ns_per_op > 0.0 { 1e9 / r.ns_per_op } else { 0.0 };
+            let ops_per_sec = if r.ns_per_op > 0.0 {
+                1e9 / r.ns_per_op
+            } else {
+                0.0
+            };
             println!(
                 "{:<name_w$}  {:>12}  {:>14}  {:>12}",
                 r.name,

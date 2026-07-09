@@ -736,11 +736,7 @@ impl Regex {
     /// which requires a match at exactly `start`). An ASCII subject matches directly over its
     /// bytes; anything else over the element vector. Returns capture spans: index 0 is the whole
     /// match, then one per group.
-    pub fn exec_text(
-        &self,
-        text: &ReText,
-        start: usize,
-    ) -> Option<Vec<Option<(usize, usize)>>> {
+    pub fn exec_text(&self, text: &ReText, start: usize) -> Option<Vec<Option<(usize, usize)>>> {
         match &text.ascii_src {
             Some(s) => self.exec_impl(s.as_bytes(), start),
             None => self.exec_impl(&text.elems[..], start),
@@ -2444,7 +2440,10 @@ impl<I: ReInput> Matcher<I> {
                 };
                 let idx = |k: usize| if self.back { pos - 1 - k } else { pos + k };
                 let mut avail = 0;
-                while avail < cap && avail < room && self.rep_matches(rep, self.input.at(idx(avail))) {
+                while avail < cap
+                    && avail < room
+                    && self.rep_matches(rep, self.input.at(idx(avail)))
+                {
                     avail += 1;
                 }
                 if avail < min {
@@ -2502,8 +2501,8 @@ impl<I: ReInput> Matcher<I> {
             }
             Inst::Jmp(t) => self.run(prog, *t, pos),
             Inst::AssertStart => {
-                let ok =
-                    pos == 0 || (self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)));
+                let ok = pos == 0
+                    || (self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)));
                 ok && self.run(prog, pc + 1, pos)
             }
             Inst::AssertEnd => {
@@ -2514,7 +2513,8 @@ impl<I: ReInput> Matcher<I> {
             Inst::WordBoundary(want) => {
                 let (icase, unicode) = (self.icase(), self.unicode);
                 let before = pos > 0 && is_word_ic(self.input.at(pos - 1), icase, unicode);
-                let after = pos < self.input.len() && is_word_ic(self.input.at(pos), icase, unicode);
+                let after =
+                    pos < self.input.len() && is_word_ic(self.input.at(pos), icase, unicode);
                 let boundary = before != after;
                 (boundary == *want) && self.run(prog, pc + 1, pos)
             }

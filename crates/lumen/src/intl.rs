@@ -423,15 +423,7 @@ pub(crate) fn def_getter(it: &mut Interp, proto: &Gc, name: &str, f: crate::valu
     let g = it.make_native(&format!("get {name}"), 0, f);
     proto.borrow_mut().props.insert(
         name,
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(g)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
     );
 }
 

@@ -35,8 +35,8 @@ mod interpreter;
 mod intl;
 mod jit;
 mod jstr;
-mod lstr;
 mod lexer;
+mod lstr;
 mod modules;
 #[cfg(feature = "intl")]
 mod numbering;
@@ -103,8 +103,8 @@ pub(crate) fn host_now_ms() -> Option<f64> {
 /// re-parsed, on every boot. Decode it at runtime with [`Engine::eval_snapshot`]. `Err` is a
 /// parse-error message.
 pub fn compile_snapshot(src: &str) -> Result<Vec<u8>, String> {
-    let body = parser::parse_script(src, false)
-        .map_err(|e| format!("{} (line {})", e.message, e.line))?;
+    let body =
+        parser::parse_script(src, false).map_err(|e| format!("{} (line {})", e.message, e.line))?;
     Ok(snapshot::encode(&body))
 }
 
@@ -224,8 +224,9 @@ impl Engine {
         &mut self,
         loader: impl Fn(&str, &str) -> Option<(String, String)> + 'static,
     ) {
-        self.interp.module_loader =
-            Some(std::rc::Rc::new(move |s: &str, r: &str, _a: Option<&str>| loader(s, r)));
+        self.interp.module_loader = Some(std::rc::Rc::new(
+            move |s: &str, r: &str, _a: Option<&str>| loader(s, r),
+        ));
     }
 
     /// [`Engine::set_module_loader`], with import attributes: the loader also receives the

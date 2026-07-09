@@ -15,7 +15,10 @@
 //! Everything is `cfg`-gated to aarch64 + macOS; elsewhere `compile` returns `None` and the
 //! bytecode VM runs as before.
 
-#![cfg_attr(not(all(target_arch = "aarch64", target_os = "macos")), allow(dead_code))]
+#![cfg_attr(
+    not(all(target_arch = "aarch64", target_os = "macos")),
+    allow(dead_code)
+)]
 
 use std::rc::Rc;
 
@@ -600,55 +603,55 @@ mod asm {
     /// `immr:imms` field to OR into the instruction at bit 10 (N is always 0 for the 32-bit
     /// variant). `None` when `v` is not a repeating rotated ones-run (0 and !0 included).
     pub fn logical_imm_w(v: u32) -> Option<u32> {
-            if v == 0 || v == u32::MAX {
-                return None;
-            }
-            // Smallest power-of-two period.
-            let mut p = 32u32;
-            while p > 2 {
-                let h = p / 2;
-                let mask = (1u64 << h) - 1;
-                let mut periodic = true;
-                let mut i = h;
-                while i < 32 {
-                    if (v as u64 >> i) & mask != v as u64 & mask {
-                        periodic = false;
-                        break;
-                    }
-                    i += h;
-                }
-                if !periodic {
+        if v == 0 || v == u32::MAX {
+            return None;
+        }
+        // Smallest power-of-two period.
+        let mut p = 32u32;
+        while p > 2 {
+            let h = p / 2;
+            let mask = (1u64 << h) - 1;
+            let mut periodic = true;
+            let mut i = h;
+            while i < 32 {
+                if (v as u64 >> i) & mask != v as u64 & mask {
+                    periodic = false;
                     break;
                 }
-                p = h;
+                i += h;
             }
-            let emask = if p == 32 { u32::MAX } else { (1u32 << p) - 1 };
-            let elem = v & emask;
-            let len = elem.count_ones();
-            if len == 0 || len == p {
-                return None;
+            if !periodic {
+                break;
             }
-            let ones = ((1u64 << len) - 1) as u32;
-            // The element must be ones(len) rotated right by immr (within p bits).
-            for r in 0..p {
-                let ror = if r == 0 {
-                    ones
-                } else {
-                    ((ones >> r) | (ones << (p - r))) & emask
-                };
-                if ror == elem {
-                    let imms = match p {
-                        32 => 0x00,
-                        16 => 0x20,
-                        8 => 0x30,
-                        4 => 0x38,
-                        _ => 0x3C,
-                    } | (len - 1);
-                    return Some((r << 6) | imms);
-                }
-            }
-            None
+            p = h;
         }
+        let emask = if p == 32 { u32::MAX } else { (1u32 << p) - 1 };
+        let elem = v & emask;
+        let len = elem.count_ones();
+        if len == 0 || len == p {
+            return None;
+        }
+        let ones = ((1u64 << len) - 1) as u32;
+        // The element must be ones(len) rotated right by immr (within p bits).
+        for r in 0..p {
+            let ror = if r == 0 {
+                ones
+            } else {
+                ((ones >> r) | (ones << (p - r))) & emask
+            };
+            if ror == elem {
+                let imms = match p {
+                    32 => 0x00,
+                    16 => 0x20,
+                    8 => 0x30,
+                    4 => 0x38,
+                    _ => 0x3C,
+                } | (len - 1);
+                return Some((r << 6) | imms);
+            }
+        }
+        None
+    }
 
     #[cfg(test)]
     mod tests {
@@ -738,7 +741,12 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
     // Debug: `LUMEN_JIT_DUMP=<substr>` prints the op stream of chunks whose leading slot names
     // contain the substring (empty value = all chunks) as they compile.
     if let Ok(pat) = std::env::var("LUMEN_JIT_DUMP") {
-        let head: Vec<&str> = chunk.jit_slot_names().iter().take(4).map(|s| &**s).collect();
+        let head: Vec<&str> = chunk
+            .jit_slot_names()
+            .iter()
+            .take(4)
+            .map(|s| &**s)
+            .collect();
         let name = head.join(",");
         if pat.is_empty() || name.contains(&pat) {
             eprintln!("[jit-dump] fn({name}) {} ops", ops.len());
@@ -824,8 +832,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         }
         // Numeric register chain: a run of ops whose values stay in FP registers end to end.
         if fast & 16384 != 0 && rc_ok {
-            if let Some((chain, consumed)) = build_chain(chunk, ops, pc, &targeted, layout, fast)
-            {
+            if let Some((chain, consumed)) = build_chain(chunk, ops, pc, &targeted, layout, fast) {
                 emit_chain(&mut a, layout, &chain, &pc_labels, l_unwind);
                 skip = consumed - 1;
                 continue;
@@ -862,19 +869,25 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         // unfused pair via the helpers.
         if fast & 2 != 0 {
             if let (
-                Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+                Op::Lt
+                | Op::Gt
+                | Op::Le
+                | Op::Ge
+                | Op::StrictEq
+                | Op::StrictNotEq
+                | Op::EqEq
                 | Op::NotEq,
                 Some(Op::JumpIfFalse(t)),
             ) = (op, ops.get(pc + 1))
             {
                 if !targeted[pc + 1] {
                     let neg = match op {
-                        Op::Lt => 5,  // PL: !(a<b), true for unordered (NaN must jump)
-                        Op::Gt => 13, // LE: !(a>b), true for unordered
-                        Op::Le => 8,  // HI: !(a<=b), true for unordered
-                        Op::Ge => 11, // LT: !(a>=b), true for unordered
+                        Op::Lt => 5,                  // PL: !(a<b), true for unordered (NaN must jump)
+                        Op::Gt => 13,                 // LE: !(a>b), true for unordered
+                        Op::Le => 8,                  // HI: !(a<=b), true for unordered
+                        Op::Ge => 11,                 // LT: !(a>=b), true for unordered
                         Op::StrictEq | Op::EqEq => 1, // NE: !(a==b), true for unordered
-                        _ => 0,       // EQ: !(a!=b); unordered IS "!=" → correctly no jump
+                        _ => 0, // EQ: !(a!=b); unordered IS "!=" → correctly no jump
                     };
                     let slow = a.new_label();
                     let done = a.new_label();
@@ -1153,21 +1166,42 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::Get);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::Get,
+                );
             }
             Op::SetElemLocalDrop(slot)
                 if fast & 2048 != 0
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::SetDrop);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::SetDrop,
+                );
             }
             Op::SetElemLocal(slot)
                 if fast & 4096 != 0
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::SetKeep);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::SetKeep,
+                );
             }
             // ---- inline property cache: method load (`obj.m(...)`) ----
             Op::GetMethod(n, cache) if fast & 512 != 0 && get_method_inlinable(layout) => {
@@ -1217,9 +1251,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             // truncates; taking the low 32 bits is the mod-2^32 wrap. The scvtf/frintz
             // round-trip proves no i64 saturation happened (NaN/±Inf/|x|≥2^63 all fail it and
             // take the helper, which applies the spec's zero/wrap semantics).
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
-                if fast & 1 != 0 =>
-            {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if fast & 1 != 0 => {
                 let slow = a.new_label();
                 let done = a.new_label();
                 a.ldurb(9, 20, -48);
@@ -1282,7 +1314,9 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             Op::Not if fast & 131072 != 0 && eq_inlinable(layout) => {
                 emit_not_inline(&mut a, layout, pc as u32, l_unwind);
             }
-            Op::SetPropDrop(_, cache) if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) => {
+            Op::SetPropDrop(_, cache)
+                if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
+            {
                 emit_set_prop_inline(
                     &mut a,
                     layout,
@@ -1333,7 +1367,13 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     l_unwind,
                 );
             }
-            Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
             | Op::NotEq
                 if fast & 2 != 0 =>
             {
@@ -1754,7 +1794,6 @@ fn emit_prop_load_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    let d1 = a.new_label();
     let load = a.new_label();
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
     //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
@@ -1791,7 +1830,7 @@ fn emit_prop_load_inline(
     // stabilizes with one shape per way). Each probe is self-contained: it recomputes the
     // receiver base from x10 and jumps to `load` with x11 = holder base, x13 = slot.
     let way2 = a.new_label();
-    let mut probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
+    let probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
         let d1 = a.new_label();
         a.mov_imm64(12, cache_ptr as u64);
         a.ldrb_imm(9, 12, IC_OFF_DEPTH);
@@ -1928,7 +1967,6 @@ fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
     get_prop_inlinable(layout) && layout.obj_proto < 4096
 }
 
-
 /// Same gate as [`get_prop_inlinable`] plus the `writable` byte (the store re-checks it — an
 /// in-place defineProperty can flip attributes without changing the shape).
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1991,7 +2029,11 @@ fn emit_update_prop_inline(
     a.cmp_reg_w(9, 14);
     a.b_cond(C_NE, slow);
     // 4. bounds-check the cached slot, then entry: data property, writable, holding a Num
-    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.ldr_imm(
+        16,
+        11,
+        (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+    );
     a.cmp_reg_x(13, 16);
     a.b_cond(C_HS, slow);
     a.ldr_imm(15, 11, en);
@@ -2007,7 +2049,10 @@ fn emit_update_prop_inline(
     // --- commit: d0 = old, d2 = old ± 1, written in place ---
     a.ldur_d(0, 15, ev + 8);
     a.fmov_one(1);
-    let dec = matches!(kind, UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard);
+    let dec = matches!(
+        kind,
+        UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard
+    );
     a.f_arith(if dec { 1 } else { 0 }, 2, 0, 1);
     a.stur_d(2, 15, ev + 8);
     // drop the receiver (strong was > 1)
@@ -2089,7 +2134,7 @@ fn emit_set_prop_inline(
             a.cmp_imm_w(9, 8);
             a.b_cond(C_NE, slow);
             a.ldur(10, 20, -40); // receiver rc_ptr
-            // receiver refcount > 1 (so the pop-drop below never frees)
+                                 // receiver refcount > 1 (so the pop-drop below never frees)
             a.ldur(9, 10, strong);
             a.cmp_imm_x(9, 1);
             a.b_cond(C_LS, slow);
@@ -2127,7 +2172,11 @@ fn emit_set_prop_inline(
     a.cmp_reg_w(9, 14);
     a.b_cond(C_NE, slow);
     // 6. bounds-check the cached slot, then entry base = entries data ptr + slot*entry_size
-    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.ldr_imm(
+        16,
+        11,
+        (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+    );
     a.cmp_reg_x(13, 16);
     a.b_cond(C_HS, slow);
     a.ldr_imm(15, 11, en);
@@ -2746,12 +2795,13 @@ fn emit_get_elem_inline(
     let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
     let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
     a.ldrb_imm(12, 11, mf);
-    let mask = asm::logical_imm_w(
-        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
-    )
-    .unwrap();
+    let mask = asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
+        .unwrap();
     a.logic_imm_w(0, 12, 12, mask);
-    a.cmp_imm_w(12, (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32);
+    a.cmp_imm_w(
+        12,
+        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+    );
     a.b_cond(C_NE, classic);
     a.ldr_imm(12, 11, ml);
     a.cmp_reg_x(9, 12);
@@ -3035,7 +3085,13 @@ fn emit_set_elem_inline(
     a.bind(no_old_dec);
     // Keep the element mirror coherent (x9/x12/x13/d0/d1 are dead here; v words in 14/16/17,
     // bases in 10/11/15 stay live).
-    emit_mirror_store(a, layout, 11, MirrorKey::StackF64(-40), MirrorVal::Stack(-24));
+    emit_mirror_store(
+        a,
+        layout,
+        11,
+        MirrorKey::StackF64(-40),
+        MirrorVal::Stack(-24),
+    );
     if keep {
         // v now lives in the slot AND stays on the stack as the result: one bump.
         a.ldurb(9, 20, -24);
@@ -3196,12 +3252,14 @@ fn emit_elem_local_keyed(
         let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
         let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
         a.ldrb_imm(12, 11, mf);
-        let mask = asm::logical_imm_w(
-            (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
-        )
-        .unwrap();
+        let mask =
+            asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
+                .unwrap();
         a.logic_imm_w(0, 12, 12, mask);
-        a.cmp_imm_w(12, (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32);
+        a.cmp_imm_w(
+            12,
+            (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+        );
         a.b_cond(C_NE, classic);
         a.ldr_imm(12, 11, ml);
         a.cmp_reg_x(9, 12);
@@ -3301,7 +3359,13 @@ fn emit_elem_local_keyed(
         a.stur(13, 12, strong);
         a.bind(no_old_dec);
         // Element mirror (x9/x12/x13/d1 dead here; the key f64 survives in d0).
-        emit_mirror_store(a, layout, 11, MirrorKey::F64InDreg(0), MirrorVal::Stack(-24));
+        emit_mirror_store(
+            a,
+            layout,
+            11,
+            MirrorKey::F64InDreg(0),
+            MirrorVal::Stack(-24),
+        );
         if kind == ElemLocalKind::SetKeep {
             // v now lives in the slot AND stays on the stack: one bump, result at the key slot.
             a.ldurb(9, 20, -24);
@@ -3419,9 +3483,7 @@ fn build_chain(
                 };
                 (ChainOp::Arith(f), 1, 2)
             }
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
-                if vdepth >= 2 =>
-            {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if vdepth >= 2 => {
                 let code = match ops[pc] {
                     Op::BitAnd => 0,
                     Op::BitOr => 1,
@@ -3446,19 +3508,25 @@ fn build_chain(
             Op::LoadName(_, c) if name_ok => {
                 (ChainOp::LoadName(chunk.jit_name_cache_ptr(*c)), 1, 0)
             }
-            Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
             | Op::NotEq
                 if vdepth == 2 =>
             {
                 match ops.get(pc + 1) {
                     Some(Op::JumpIfFalse(t)) if !targeted[pc + 1] => {
                         let neg = match ops[pc] {
-                            Op::Lt => 5,  // PL (unordered jumps)
-                            Op::Gt => 13, // LE
-                            Op::Le => 8,  // HI
-                            Op::Ge => 11, // LT
+                            Op::Lt => 5,                  // PL (unordered jumps)
+                            Op::Gt => 13,                 // LE
+                            Op::Le => 8,                  // HI
+                            Op::Ge => 11,                 // LT
                             Op::StrictEq | Op::EqEq => 1, // NE
-                            _ => 0,       // EQ
+                            _ => 0,                       // EQ
                         };
                         chain.push((ChainOp::CmpBranch(neg, *t as usize), pc));
                     }
@@ -3482,7 +3550,10 @@ fn build_chain(
     // as plain templates instead is both faster and type-agnostic.
     while matches!(
         chain.last(),
-        Some((ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_), _))
+        Some((
+            ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_),
+            _
+        ))
     ) {
         chain.pop();
     }
@@ -3539,7 +3610,12 @@ fn build_chain(
         return None;
     }
     let consumed = chain.last().map_or(0, |&(op, p)| {
-        p - start + if matches!(op, ChainOp::CmpBranch(..)) { 2 } else { 1 }
+        p - start
+            + if matches!(op, ChainOp::CmpBranch(..)) {
+                2
+            } else {
+                1
+            }
     });
     Some((chain, consumed))
 }
@@ -3746,8 +3822,7 @@ fn emit_chain(
                     // Flag-first ALL_I32 upkeep (dv int-ness is unknown in this tier).
                     let i32_done = a.new_label();
                     a.ldrb_imm(13, 11, mf);
-                    let i32_bit =
-                        asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
+                    let i32_bit = asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
                     a.logic_imm_w(0, 12, 13, i32_bit);
                     a.cbz(12, false, i32_done);
                     a.fcvtzs_w_d(12, dv);
@@ -3756,8 +3831,7 @@ fn emit_chain(
                     a.fmov_x_d(14, dv);
                     a.cmp_reg_x(12, 14);
                     a.b_cond(C_EQ, i32_done);
-                    let clear =
-                        asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
+                    let clear = asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
                     a.logic_imm_w(0, 13, 13, clear);
                     a.strb_imm(13, 11, mf);
                     a.bind(i32_done);
@@ -4110,7 +4184,11 @@ struct NumInfo {
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 impl NumInfo {
     fn unknown() -> NumInfo {
-        NumInfo { integral: false, exp: 255, neg: true }
+        NumInfo {
+            integral: false,
+            exp: 255,
+            neg: true,
+        }
     }
     fn iv(&self) -> bool {
         self.integral && self.exp <= 62
@@ -4199,9 +4277,7 @@ fn plan_loop(
                 };
                 (ChainOp::Arith(f), 1, 2)
             }
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
-                if vdepth >= 2 =>
-            {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if vdepth >= 2 => {
                 let code = match ops[pc] {
                     Op::BitAnd => 0,
                     Op::BitOr => 1,
@@ -4219,7 +4295,13 @@ fn plan_loop(
             Op::Pop if vdepth >= 1 => (ChainOp::Pop, 0, 1),
             Op::Dup if vdepth >= 1 => (ChainOp::Dup, 1, 0),
             Op::ToPropKeyLocal(_) if vdepth >= 1 => (ChainOp::KeyNop, 0, 0),
-            Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
             | Op::NotEq
                 if vdepth == 2 =>
             {
@@ -4229,12 +4311,12 @@ fn plan_loop(
                             return None; // one exit only
                         }
                         let neg = match ops[pc] {
-                            Op::Lt => 5,  // PL (unordered jumps)
-                            Op::Gt => 13, // LE
-                            Op::Le => 8,  // HI
-                            Op::Ge => 11, // LT
+                            Op::Lt => 5,                  // PL (unordered jumps)
+                            Op::Gt => 13,                 // LE
+                            Op::Le => 8,                  // HI
+                            Op::Ge => 11,                 // LT
                             Op::StrictEq | Op::EqEq => 1, // NE
-                            _ => 0,       // EQ
+                            _ => 0,                       // EQ
                         };
                         exit_pc = Some(*t as usize);
                         chain.push((ChainOp::CmpBranch(neg, *t as usize), pc));
@@ -4497,9 +4579,10 @@ fn plan_loop(
             }
             match *cop {
                 ChainOp::Load(off) => {
-                    let nd = bind2.get(&off).copied().unwrap_or_else(|| {
-                        *src2.entry(off).or_insert(idx)
-                    });
+                    let nd = bind2
+                        .get(&off)
+                        .copied()
+                        .unwrap_or_else(|| *src2.entry(off).or_insert(idx));
                     stack2.push(nd);
                 }
                 ChainOp::Update(off, kind) => {
@@ -4508,9 +4591,7 @@ fn plan_loop(
                     bind2.insert(off, idx);
                     if pushes == 1 {
                         match kind {
-                            UpdKind::PostInc | UpdKind::PostDec => {
-                                stack2.push(cur.unwrap_or(idx))
-                            }
+                            UpdKind::PostInc | UpdKind::PostDec => stack2.push(cur.unwrap_or(idx)),
                             _ => stack2.push(idx),
                         }
                     }
@@ -4602,7 +4683,10 @@ fn plan_loop(
                 last.clear();
                 w += 1;
             }
-            if last.iter().any(|&(r, kn, wi)| r == rcv && kn == key && wi == elem_int[k]) {
+            if last
+                .iter()
+                .any(|&(r, kn, wi)| r == rcv && kn == key && wi == elem_int[k])
+            {
                 if elem_int[k] {
                     dups += 1;
                 }
@@ -4618,24 +4702,31 @@ fn plan_loop(
         widened.clear();
         stable = false;
         for _round in 0..64 {
-        plan_kinds = vec![PushKind::None; n];
-        bit_kinds.clear();
-        setelem_i32.clear();
-        // (kind, info) per virtual value; slot state per off.
-        let mut vstack: Vec<(PushKind, NumInfo)> = Vec::new();
-        let mut slot_iv: crate::fasthash::FastMap<u32, NumInfo> = Default::default();
-        for &off in &int_checked {
-            slot_iv.insert(off, NumInfo { integral: true, exp: 31, neg: true });
-        }
-        let mut slot_exp: crate::fasthash::FastMap<u32, u32> = slot_exp_head.clone();
-        let mut stored_exp: crate::fasthash::FastMap<u32, u32> = Default::default();
-        let mut demote: Option<u32> = None;
-        let mut i_live = 0usize;
-        let mut d_live = 0usize;
-        i_peak = 0;
-        d_peak = 0;
-        let mut elem_seen = 0usize;
-        macro_rules! track {
+            plan_kinds = vec![PushKind::None; n];
+            bit_kinds.clear();
+            setelem_i32.clear();
+            // (kind, info) per virtual value; slot state per off.
+            let mut vstack: Vec<(PushKind, NumInfo)> = Vec::new();
+            let mut slot_iv: crate::fasthash::FastMap<u32, NumInfo> = Default::default();
+            for &off in &int_checked {
+                slot_iv.insert(
+                    off,
+                    NumInfo {
+                        integral: true,
+                        exp: 31,
+                        neg: true,
+                    },
+                );
+            }
+            let mut slot_exp: crate::fasthash::FastMap<u32, u32> = slot_exp_head.clone();
+            let mut stored_exp: crate::fasthash::FastMap<u32, u32> = Default::default();
+            let mut demote: Option<u32> = None;
+            let mut i_live = 0usize;
+            let mut d_live = 0usize;
+            i_peak = 0;
+            d_peak = 0;
+            let mut elem_seen = 0usize;
+            macro_rules! track {
             ($k:expr, $dir:tt) => {
                 match $k {
                     PushKind::I { .. } => i_live = (i_live as isize $dir 1) as usize,
@@ -4644,11 +4735,11 @@ fn plan_loop(
                 }
             };
         }
-        for (idx, (cop, _)) in chain.iter().enumerate() {
-            let (i_start, d_start) = (i_live, d_live);
-            let mut i_pushed = 0usize;
-            let mut d_pushed = 0usize;
-            macro_rules! push {
+            for (idx, (cop, _)) in chain.iter().enumerate() {
+                let (i_start, d_start) = (i_live, d_live);
+                let mut i_pushed = 0usize;
+                let mut d_pushed = 0usize;
+                macro_rules! push {
                 ($k:expr, $inf:expr) => {{
                     let (k, inf) = ($k, $inf);
                     track!(k, +);
@@ -4661,253 +4752,303 @@ fn plan_loop(
                     vstack.push((k, inf));
                 }};
             }
-            macro_rules! pop {
+                macro_rules! pop {
                 () => {{
                     let (k, inf) = vstack.pop().expect("loop kind stack");
                     track!(k, -);
                     (k, inf)
                 }};
             }
-            match *cop {
-                ChainOp::ConstNum(bits) => {
-                    let f = f64::from_bits(bits);
-                    let integral = f.fract() == 0.0 && f.abs() < 9.0e18;
-                    let exp = if integral {
-                        (f.abs().max(1.0)).log2().ceil() as u32
-                    } else {
-                        255
-                    };
-                    push!(PushKind::K(bits), NumInfo { integral, exp, neg: f < 0.0 });
-                }
-                ChainOp::Load(off) => {
-                    if i_slots.contains(&off) {
-                        let exp = slot_exp.get(&off).copied().unwrap_or(31);
+                match *cop {
+                    ChainOp::ConstNum(bits) => {
+                        let f = f64::from_bits(bits);
+                        let integral = f.fract() == 0.0 && f.abs() < 9.0e18;
+                        let exp = if integral {
+                            (f.abs().max(1.0)).log2().ceil() as u32
+                        } else {
+                            255
+                        };
                         push!(
-                            PushKind::I { neg: true },
-                            NumInfo { integral: true, exp, neg: true }
+                            PushKind::K(bits),
+                            NumInfo {
+                                integral,
+                                exp,
+                                neg: f < 0.0
+                            }
                         );
-                    } else {
-                        let inf = slot_iv.get(&off).copied().unwrap_or(NumInfo::unknown());
-                        push!(PushKind::D { iv: inf.iv() }, inf);
                     }
-                }
-                ChainOp::Update(off, kind) => {
-                    if !i_slots.contains(&off) {
-                        slot_iv.insert(off, NumInfo::unknown());
-                    }
-                    if !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard) {
+                    ChainOp::Load(off) => {
                         if i_slots.contains(&off) {
+                            let exp = slot_exp.get(&off).copied().unwrap_or(31);
                             push!(
                                 PushKind::I { neg: true },
-                                NumInfo { integral: true, exp: 31, neg: true }
+                                NumInfo {
+                                    integral: true,
+                                    exp,
+                                    neg: true
+                                }
+                            );
+                        } else {
+                            let inf = slot_iv.get(&off).copied().unwrap_or(NumInfo::unknown());
+                            push!(PushKind::D { iv: inf.iv() }, inf);
+                        }
+                    }
+                    ChainOp::Update(off, kind) => {
+                        if !i_slots.contains(&off) {
+                            slot_iv.insert(off, NumInfo::unknown());
+                        }
+                        if !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard) {
+                            if i_slots.contains(&off) {
+                                push!(
+                                    PushKind::I { neg: true },
+                                    NumInfo {
+                                        integral: true,
+                                        exp: 31,
+                                        neg: true
+                                    }
+                                );
+                            } else {
+                                push!(PushKind::D { iv: false }, NumInfo::unknown());
+                            }
+                        }
+                    }
+                    ChainOp::GetElem(_) => {
+                        pop!();
+                        let want_int = elem_int[elem_seen];
+                        elem_seen += 1;
+                        if want_int {
+                            // The w-form conversion guard proves exact i32.
+                            push!(
+                                PushKind::I { neg: true },
+                                NumInfo {
+                                    integral: true,
+                                    exp: 31,
+                                    neg: true
+                                }
                             );
                         } else {
                             push!(PushKind::D { iv: false }, NumInfo::unknown());
                         }
                     }
-                }
-                ChainOp::GetElem(_) => {
-                    pop!();
-                    let want_int = elem_int[elem_seen];
-                    elem_seen += 1;
-                    if want_int {
-                        // The w-form conversion guard proves exact i32.
-                        push!(
-                            PushKind::I { neg: true },
-                            NumInfo { integral: true, exp: 31, neg: true }
-                        );
-                    } else {
-                        push!(PushKind::D { iv: false }, NumInfo::unknown());
+                    ChainOp::SetElem(_, keep) => {
+                        let (vk, vinf) = pop!();
+                        pop!();
+                        // Exact-i32 proof for the mirror: an int-kind value bounded to i32 (int
+                        // kinds can never carry -0.0).
+                        setelem_i32.insert(idx, matches!(vk, PushKind::I { .. }) && vinf.exp <= 31);
+                        if keep {
+                            push!(vk, vinf);
+                        }
                     }
-                }
-                ChainOp::SetElem(_, keep) => {
-                    let (vk, vinf) = pop!();
-                    pop!();
-                    // Exact-i32 proof for the mirror: an int-kind value bounded to i32 (int
-                    // kinds can never carry -0.0).
-                    setelem_i32.insert(
-                        idx,
-                        matches!(vk, PushKind::I { .. }) && vinf.exp <= 31,
-                    );
-                    if keep {
-                        push!(vk, vinf);
-                    }
-                }
-                ChainOp::Arith(f) => {
-                    let (bk, binf) = pop!();
-                    let (ak, ainf) = pop!();
-                    let integral = ainf.integral && binf.integral && f != 3;
-                    let exp = match f {
-                        0 | 1 => ainf.exp.max(binf.exp).saturating_add(1),
-                        2 => ainf.exp.saturating_add(binf.exp),
-                        _ => 255,
-                    };
-                    // Integer lowering: both operands are exact ints in registers (or int
-                    // constants) and the result provably fits 2^52, so 64-bit integer add/sub/
-                    // mul is exact and equals the f64 result — no guards, 1-cycle latency.
-                    let int_side = |k: PushKind, inf: NumInfo| match k {
-                        PushKind::I { .. } => true,
-                        // -0.0 is "integral" but has no integer representation: its sign would
-                        // erase through int arithmetic.
-                        PushKind::K(b) => {
-                            inf.integral && inf.exp <= 52 && b != (-0.0f64).to_bits()
-                        }
-                        // Proven-integral f64 (entry-checked preload or tracked store): a bare
-                        // fcvtzs is exact (the entry guards reject -0.0).
-                        PushKind::D { .. } => inf.integral && inf.exp <= 52,
-                        _ => false,
-                    };
-                    if f != 3 && exp <= 52 && int_side(ak, ainf) && int_side(bk, binf) {
-                        let neg = ainf.neg || binf.neg || f == 1;
-                        push!(PushKind::I { neg }, NumInfo { integral: true, exp, neg });
-                    } else {
-                        let inf =
-                            NumInfo { integral: integral && exp <= 62, exp, neg: true };
-                        push!(PushKind::D { iv: inf.iv() }, inf);
-                    }
-                }
-                ChainOp::Bit(code) => {
-                    let (bk, binf) = pop!();
-                    let (ak, ainf) = pop!();
-                    let _ = binf;
-                    bit_kinds.insert((idx, 0), ak);
-                    bit_kinds.insert((idx, 1), bk);
-                    let kbits = |k: PushKind| match k {
-                        PushKind::K(b) => {
-                            let f = f64::from_bits(b);
-                            if f.fract() == 0.0 && (0.0..2147483648.0).contains(&f) {
-                                Some(f as u32)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                    let inf = match code {
-                        0 => {
-                            // and: a nonneg constant mask bounds the result
-                            match kbits(ak).into_iter().chain(kbits(bk)).min() {
-                                Some(m) => NumInfo {
-                                    integral: true,
-                                    exp: 32 - m.leading_zeros(),
-                                    neg: false,
-                                },
-                                None => NumInfo { integral: true, exp: 32, neg: true },
-                            }
-                        }
-                        5 => {
-                            // shr by a constant: |x >> k| ≤ max(|x| / 2^k, 1) with sign
-                            // preserved (after the i32 wrap, so the input bound caps at 31).
-                            match kbits(bk) {
-                                Some(k) => {
-                                    let e0 = ainf.exp.min(31);
-                                    NumInfo {
-                                        integral: true,
-                                        exp: e0.saturating_sub(k.min(31)).max(1),
-                                        neg: if ainf.exp <= 31 { ainf.neg } else { true },
-                                    }
-                                }
-                                None => NumInfo { integral: true, exp: 32, neg: true },
-                            }
-                        }
-                        3 => {
-                            // shl by a constant of a small nonneg value can't wrap
-                            match (kbits(bk), ainf.neg) {
-                                (Some(k), false) if ainf.exp + k.min(31) <= 31 => NumInfo {
-                                    integral: true,
-                                    exp: ainf.exp + k.min(31),
-                                    neg: false,
-                                },
-                                _ => NumInfo { integral: true, exp: 32, neg: true },
-                            }
-                        }
-                        4 => NumInfo { integral: true, exp: 32, neg: false },
-                        _ => NumInfo { integral: true, exp: 32, neg: true },
-                    };
-                    push!(PushKind::I { neg: inf.neg }, inf);
-                }
-                ChainOp::Neg => {
-                    let (_, vinf) = pop!();
-                    let inf = NumInfo { integral: vinf.integral, exp: vinf.exp, neg: true };
-                    push!(PushKind::D { iv: inf.iv() }, inf);
-                }
-                ChainOp::Store(off) => {
-                    let (vk, vinf) = pop!();
-                    if i_slots.contains(&off) {
-                        // A non-integer store demotes the slot: kinds must be re-simulated.
-                        // Counter slots (±1 updates) additionally require i32 stores — the
-                        // update sequence relies on the w-form overflow check.
-                        let int_ok = match vk {
+                    ChainOp::Arith(f) => {
+                        let (bk, binf) = pop!();
+                        let (ak, ainf) = pop!();
+                        let integral = ainf.integral && binf.integral && f != 3;
+                        let exp = match f {
+                            0 | 1 => ainf.exp.max(binf.exp).saturating_add(1),
+                            2 => ainf.exp.saturating_add(binf.exp),
+                            _ => 255,
+                        };
+                        // Integer lowering: both operands are exact ints in registers (or int
+                        // constants) and the result provably fits 2^52, so 64-bit integer add/sub/
+                        // mul is exact and equals the f64 result — no guards, 1-cycle latency.
+                        let int_side = |k: PushKind, inf: NumInfo| match k {
                             PushKind::I { .. } => true,
+                            // -0.0 is "integral" but has no integer representation: its sign would
+                            // erase through int arithmetic.
                             PushKind::K(b) => {
-                                let f = f64::from_bits(b);
-                                f.fract() == 0.0 && f.abs() < 9.0e15
+                                inf.integral && inf.exp <= 52 && b != (-0.0f64).to_bits()
                             }
+                            // Proven-integral f64 (entry-checked preload or tracked store): a bare
+                            // fcvtzs is exact (the entry guards reject -0.0).
+                            PushKind::D { .. } => inf.integral && inf.exp <= 52,
                             _ => false,
                         };
-                        let exp_cap = if updated.contains(&off) { 31 } else { 52 };
-                        if (!int_ok || vinf.exp > exp_cap) && demote.is_none() {
-                            demote = Some(off);
+                        if f != 3 && exp <= 52 && int_side(ak, ainf) && int_side(bk, binf) {
+                            let neg = ainf.neg || binf.neg || f == 1;
+                            push!(
+                                PushKind::I { neg },
+                                NumInfo {
+                                    integral: true,
+                                    exp,
+                                    neg
+                                }
+                            );
+                        } else {
+                            let inf = NumInfo {
+                                integral: integral && exp <= 62,
+                                exp,
+                                neg: true,
+                            };
+                            push!(PushKind::D { iv: inf.iv() }, inf);
                         }
-                        slot_exp.insert(off, vinf.exp);
-                        let e = stored_exp.entry(off).or_insert(0);
-                        *e = (*e).max(vinf.exp);
                     }
-                    slot_iv.insert(off, vinf);
+                    ChainOp::Bit(code) => {
+                        let (bk, binf) = pop!();
+                        let (ak, ainf) = pop!();
+                        let _ = binf;
+                        bit_kinds.insert((idx, 0), ak);
+                        bit_kinds.insert((idx, 1), bk);
+                        let kbits = |k: PushKind| match k {
+                            PushKind::K(b) => {
+                                let f = f64::from_bits(b);
+                                if f.fract() == 0.0 && (0.0..2147483648.0).contains(&f) {
+                                    Some(f as u32)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let inf = match code {
+                            0 => {
+                                // and: a nonneg constant mask bounds the result
+                                match kbits(ak).into_iter().chain(kbits(bk)).min() {
+                                    Some(m) => NumInfo {
+                                        integral: true,
+                                        exp: 32 - m.leading_zeros(),
+                                        neg: false,
+                                    },
+                                    None => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            5 => {
+                                // shr by a constant: |x >> k| ≤ max(|x| / 2^k, 1) with sign
+                                // preserved (after the i32 wrap, so the input bound caps at 31).
+                                match kbits(bk) {
+                                    Some(k) => {
+                                        let e0 = ainf.exp.min(31);
+                                        NumInfo {
+                                            integral: true,
+                                            exp: e0.saturating_sub(k.min(31)).max(1),
+                                            neg: if ainf.exp <= 31 { ainf.neg } else { true },
+                                        }
+                                    }
+                                    None => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            3 => {
+                                // shl by a constant of a small nonneg value can't wrap
+                                match (kbits(bk), ainf.neg) {
+                                    (Some(k), false) if ainf.exp + k.min(31) <= 31 => NumInfo {
+                                        integral: true,
+                                        exp: ainf.exp + k.min(31),
+                                        neg: false,
+                                    },
+                                    _ => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            4 => NumInfo {
+                                integral: true,
+                                exp: 32,
+                                neg: false,
+                            },
+                            _ => NumInfo {
+                                integral: true,
+                                exp: 32,
+                                neg: true,
+                            },
+                        };
+                        push!(PushKind::I { neg: inf.neg }, inf);
+                    }
+                    ChainOp::Neg => {
+                        let (_, vinf) = pop!();
+                        let inf = NumInfo {
+                            integral: vinf.integral,
+                            exp: vinf.exp,
+                            neg: true,
+                        };
+                        push!(PushKind::D { iv: inf.iv() }, inf);
+                    }
+                    ChainOp::Store(off) => {
+                        let (vk, vinf) = pop!();
+                        if i_slots.contains(&off) {
+                            // A non-integer store demotes the slot: kinds must be re-simulated.
+                            // Counter slots (±1 updates) additionally require i32 stores — the
+                            // update sequence relies on the w-form overflow check.
+                            let int_ok = match vk {
+                                PushKind::I { .. } => true,
+                                PushKind::K(b) => {
+                                    let f = f64::from_bits(b);
+                                    f.fract() == 0.0 && f.abs() < 9.0e15
+                                }
+                                _ => false,
+                            };
+                            let exp_cap = if updated.contains(&off) { 31 } else { 52 };
+                            if (!int_ok || vinf.exp > exp_cap) && demote.is_none() {
+                                demote = Some(off);
+                            }
+                            slot_exp.insert(off, vinf.exp);
+                            let e = stored_exp.entry(off).or_insert(0);
+                            *e = (*e).max(vinf.exp);
+                        }
+                        slot_iv.insert(off, vinf);
+                    }
+                    ChainOp::Pop => {
+                        pop!();
+                    }
+                    ChainOp::Dup => {
+                        let &(vk, vinf) = vstack.last().expect("loop kind stack");
+                        push!(vk, vinf);
+                    }
+                    ChainOp::KeyNop => {}
+                    ChainOp::CmpBranch(..) => {
+                        pop!();
+                        pop!();
+                    }
+                    ChainOp::LoadName(_) => unreachable!(),
                 }
-                ChainOp::Pop => {
-                    pop!();
-                }
-                ChainOp::Dup => {
-                    let &(vk, vinf) = vstack.last().expect("loop kind stack");
-                    push!(vk, vinf);
-                }
-                ChainOp::KeyNop => {}
-                ChainOp::CmpBranch(..) => {
-                    pop!();
-                    pop!();
-                }
-                ChainOp::LoadName(_) => unreachable!(),
+                // Operand registers are freed only at op end, so an op needs its start-of-op
+                // live set plus everything it pushes, simultaneously.
+                i_peak = i_peak.max(i_live).max(i_start + i_pushed);
+                d_peak = d_peak.max(d_live).max(d_start + d_pushed);
             }
-            // Operand registers are freed only at op end, so an op needs its start-of-op
-            // live set plus everything it pushes, simultaneously.
-            i_peak = i_peak.max(i_live).max(i_start + i_pushed);
-            d_peak = d_peak.max(d_live).max(d_start + d_pushed);
+            match demote {
+                Some(off) => {
+                    if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+                        eprintln!("[jit-loop] head {head}: demote I slot {}", off / 24);
+                    }
+                    i_slots.retain(|&o| o != off);
+                    slot_exp_head.remove(&off);
+                }
+                None => {
+                    // Widen loop-head exponent bounds with what this round stored; a stable set of
+                    // bounds means the kinds are final.
+                    let mut changed = false;
+                    for (&off, &e) in &stored_exp {
+                        if !i_slots.contains(&off) {
+                            continue;
+                        }
+                        let entry = slot_exp_head.entry(off).or_insert(31);
+                        let mut new = (*entry).max(e);
+                        if new != *entry && widened.contains(&off) {
+                            new = 53; // second widening: force the demotion path
+                        }
+                        if new != *entry {
+                            *entry = new;
+                            widened.push(off);
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        stable = true;
+                        break;
+                    }
+                }
+            }
         }
-        match demote {
-            Some(off) => {
-                if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
-                    eprintln!("[jit-loop] head {head}: demote I slot {}", off / 24);
-                }
-                i_slots.retain(|&o| o != off);
-                slot_exp_head.remove(&off);
-            }
-            None => {
-                // Widen loop-head exponent bounds with what this round stored; a stable set of
-                // bounds means the kinds are final.
-                let mut changed = false;
-                for (&off, &e) in &stored_exp {
-                    if !i_slots.contains(&off) {
-                        continue;
-                    }
-                    let entry = slot_exp_head.entry(off).or_insert(31);
-                    let mut new = (*entry).max(e);
-                    if new != *entry && widened.contains(&off) {
-                        new = 53; // second widening: force the demotion path
-                    }
-                    if new != *entry {
-                        *entry = new;
-                        widened.push(off);
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    stable = true;
-                    break;
-                }
-            }
-        }
-    }
         if !stable {
             reject!("kind rounds did not converge");
         }
@@ -5049,7 +5190,11 @@ fn plan_loop(
         for &(_, ridx) in &elem_reuse {
             if !elem_retain.iter().any(|(i, _)| *i == ridx) {
                 let k = elem_reads.iter().position(|&(i, _, _)| i == ridx).unwrap();
-                let pin = if elem_int[k] { free_pin_x.pop() } else { free_pin_d.pop() };
+                let pin = if elem_int[k] {
+                    free_pin_x.pop()
+                } else {
+                    free_pin_d.pop()
+                };
                 if let Some(r) = pin {
                     elem_retain.push((ridx, r));
                 }
@@ -5163,8 +5308,12 @@ fn emit_loop_chain(
             _ => None,
         })
         .collect();
-    let all_virgins: Vec<u32> =
-        plan.slots.iter().filter(|s| s.virgin).map(|s| s.off).collect();
+    let all_virgins: Vec<u32> = plan
+        .slots
+        .iter()
+        .filter(|s| s.virgin)
+        .map(|s| s.off)
+        .collect();
 
     // ---- preamble --------------------------------------------------------------------------
     for s in &plan.slots {
@@ -5491,9 +5640,7 @@ fn emit_loop_chain(
                         // A read the planner proved identical to an earlier one (same receiver,
                         // same key value, no element write between) copies the pinned result —
                         // its guards already passed this iteration.
-                        if let Some(&(_, ridx)) =
-                            plan.elem_reuse.iter().find(|&&(d, _)| d == idx)
-                        {
+                        if let Some(&(_, ridx)) = plan.elem_reuse.iter().find(|&&(d, _)| d == idx) {
                             let pin = plan
                                 .elem_retain
                                 .iter()
@@ -5513,8 +5660,11 @@ fn emit_loop_chain(
                         } else {
                             key_to_x9!(key);
                             let rp = rcv_plan(xoff).expect("planned receiver");
-                            let pin =
-                                plan.elem_retain.iter().find(|&&(i, _)| i == idx).map(|p| p.1);
+                            let pin = plan
+                                .elem_retain
+                                .iter()
+                                .find(|&&(i, _)| i == idx)
+                                .map(|p| p.1);
                             if rp.mirror {
                                 // Mirror: bounds + one indexed load (ptr/len share a cache
                                 // line off the cached base). Preamble proved coherent +
@@ -5591,8 +5741,7 @@ fn emit_loop_chain(
                         key_to_x9!(key);
                         let rp = rcv_plan(xoff).expect("planned receiver");
                         let r = rp.reg;
-                        let i32_proven =
-                            plan.setelem_i32.get(&idx).copied().unwrap_or(false);
+                        let i32_proven = plan.setelem_i32.get(&idx).copied().unwrap_or(false);
                         if rp.mirror {
                             // Mirror invariant (preamble-proven): every mirrored element is a
                             // plain writable data Num — the accessor/writable/old-value checks
@@ -5628,10 +5777,9 @@ fn emit_loop_chain(
                                 a.fmov_x_d(14, 2);
                                 a.cmp_reg_x(12, 14);
                                 a.b_cond(C_EQ, i32_done);
-                                let clear = asm::logical_imm_w(
-                                    !(crate::value::MIRROR_ALL_I32 as u32),
-                                )
-                                .unwrap();
+                                let clear =
+                                    asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32))
+                                        .unwrap();
                                 a.logic_imm_w(0, 13, 13, clear);
                                 a.strb_imm(13, r, mf);
                                 a.bind(i32_done);
@@ -5671,13 +5819,7 @@ fn emit_loop_chain(
                                 // check, so the compile-time conversion is exact.
                                 LV::K(bits) => MirrorKey::Const(f64::from_bits(bits) as u32),
                             };
-                            emit_mirror_store(
-                                a,
-                                layout,
-                                r,
-                                mkey,
-                                MirrorVal::Num(2, i32_proven),
-                            );
+                            emit_mirror_store(a, layout, r, mkey, MirrorVal::Num(2, i32_proven));
                         }
                         if keep {
                             vstack.push(val);
@@ -5809,22 +5951,20 @@ fn emit_loop_chain(
                         let v = vstack.pop().expect("loop vstack");
                         let s = slot(off).expect("planned slot");
                         match s.res {
-                            SlotRes::F(dres) => {
-                                match v {
-                                    LV::D(d, _) => {
-                                        a.fmov_d_d(dres, d);
-                                        dead.push(LV::D(d, false));
-                                    }
-                                    LV::I(x, _) => {
-                                        a.scvtf_d_x(dres, x);
-                                        dead.push(LV::I(x, false));
-                                    }
-                                    LV::K(bits) => {
-                                        a.mov_imm64(9, bits);
-                                        a.fmov_d_x(dres, 9);
-                                    }
+                            SlotRes::F(dres) => match v {
+                                LV::D(d, _) => {
+                                    a.fmov_d_d(dres, d);
+                                    dead.push(LV::D(d, false));
                                 }
-                            }
+                                LV::I(x, _) => {
+                                    a.scvtf_d_x(dres, x);
+                                    dead.push(LV::I(x, false));
+                                }
+                                LV::K(bits) => {
+                                    a.mov_imm64(9, bits);
+                                    a.fmov_d_x(dres, 9);
+                                }
+                            },
                             SlotRes::I(xres) => match v {
                                 LV::I(x, _) => {
                                     a.mov(xres, x);
@@ -5949,7 +6089,11 @@ fn emit_loop_chain(
     // ---- rotated loop ----------------------------------------------------------------------
     emit_pass!(0..plan.cond_len, exit_a, Vec::new());
     a.bind(body_l);
-    emit_pass!(plan.cond_len..plan.chain.len(), exit_b, cond_virgins.clone());
+    emit_pass!(
+        plan.cond_len..plan.chain.len(),
+        exit_b,
+        cond_virgins.clone()
+    );
     emit_pass!(0..plan.cond_len, exit_b, all_virgins.clone());
     a.b(body_l);
 
@@ -6164,7 +6308,7 @@ pub fn run(
     let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
     let ok = entry(&mut ctx);
     drop(env); // the env handle must outlive the run (ctx.env_ref aliases it)
-    // Drop any operands left on the raw stack (a throw can leave temporaries).
+               // Drop any operands left on the raw stack (a throw can leave temporaries).
     unsafe {
         let mut p = ctx.stack_base;
         while p < ctx.final_sp {
