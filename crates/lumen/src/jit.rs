@@ -104,6 +104,9 @@ pub struct JitCtx {
     /// [56] The current realm's global `Object` (through the Rc and RefCell): the LoadName
     /// templates' global-mode path validates the cached shape/slot against it.
     pub global_body: *const u8,
+    /// [64] `Rc::as_ptr` of the active realm's global scope: the call template's inline probe
+    /// compares it against the CallIc's fill-time `global_env` (the same-realm proof).
+    pub genv: usize,
     // ---- Rust-only fields ----
     pub interp: *mut Interp,
     pub chunk: *const Chunk,
@@ -133,6 +136,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_pop_handler as *const () as usize,
         crate::bytecode::jit_unwind as *const () as usize,
         crate::bytecode::jit_call as *const () as usize,
+        crate::bytecode::jit_call_hit as *const () as usize,
     ]
 }
 
@@ -144,7 +148,9 @@ pub const H_PUSH_HANDLER: usize = 3;
 pub const H_POP_HANDLER: usize = 4;
 pub const H_UNWIND: usize = 5;
 pub const H_CALL: usize = 6;
-pub const N_HELPERS: usize = 7;
+/// The call template's inline way-1 probe hit: skips the helper-side decode and probe loop.
+pub const H_CALL_HIT: usize = 7;
+pub const N_HELPERS: usize = 8;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -181,6 +187,12 @@ pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
+// The call template's inline way-1 probe reads these CallIc fields by fixed offset.
+const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, callee) == 0);
+const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, global_env) == 32);
+const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, epoch) == 56);
+const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 64);
+const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
 
 /// Two-register return for helpers that produce (new sp, flag) — x0/x1 under the C ABI.
 #[repr(C)]
@@ -1633,8 +1645,49 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 }
             }
             // Calls take the dedicated helper: same contract as the generic one, minus the full
-            // op dispatch (they dominate helper traffic in call-heavy code).
-            Op::Call(..) | Op::CallWithThis(..) => {
+            // op dispatch (they dominate helper traffic in call-heavy code). With bit 524288,
+            // the way-1 identity probe runs inline first — callee payload vs the cached
+            // pointer, fill epoch vs the live CALL_IC_EPOCH, fill realm vs the activation's
+            // global root — and a hit takes the H_CALL_HIT helper, which skips the probe loop
+            // and op decode. Any mismatch (incl. an empty way: callee 0 matches no payload)
+            // falls to the full helper.
+            Op::Call(argc, c) | Op::CallWithThis(argc, c) => {
+                let inline_probe = fast & 524288 != 0;
+                let slow = a.new_label();
+                let done = a.new_label();
+                if inline_probe {
+                    let depth = *argc as u32 + 1; // callee sits under the args
+                    let off = depth as i32 * -24;
+                    if (-256..0).contains(&off) {
+                        let ic0 = chunk.jit_call_cache_ptr(*c);
+                        a.ldurb(9, 20, off);
+                        a.cmp_imm_w(9, 8); // callee must be an Obj
+                        a.b_cond(C_NE, slow);
+                        a.ldur(10, 20, off + 8); // callee payload (stored Rc ptr)
+                        a.mov_imm64(12, ic0 as u64);
+                        a.ldur(11, 12, 0); // ic.callee
+                        a.cmp_reg_x(10, 11);
+                        a.b_cond(C_NE, slow);
+                        a.ldr_w_imm(11, 12, 56); // ic.epoch
+                        a.mov_imm64(13, &crate::bytecode::CALL_IC_EPOCH as *const _ as u64);
+                        a.ldr_w_imm(14, 13, 0);
+                        a.cmp_reg_w(11, 14);
+                        a.b_cond(C_NE, slow);
+                        a.ldr_imm(11, 12, 32); // ic.global_env
+                        a.ldr_imm(14, 19, 64); // ctx.genv
+                        a.cmp_reg_x(11, 14);
+                        a.b_cond(C_NE, slow);
+                        a.mov(0, 19);
+                        a.movz(1, pc as u32, 0);
+                        a.mov(2, 20);
+                        a.ldr_imm(16, 21, (H_CALL_HIT * 8) as u32);
+                        a.blr(16);
+                        a.mov(20, 0);
+                        a.cbnz(1, false, l_unwind);
+                        a.b(done);
+                    }
+                }
+                a.bind(slow);
                 a.mov(0, 19);
                 a.movz(1, pc as u32, 0);
                 a.mov(2, 20);
@@ -1642,6 +1695,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 a.blr(16);
                 a.mov(20, 0);
                 a.cbnz(1, false, l_unwind);
+                a.bind(done);
             }
             _ => {
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -6414,6 +6468,7 @@ pub fn run(
         } else {
             std::ptr::null()
         },
+        genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
         env_ref: &env as *const Env,
@@ -6533,6 +6588,7 @@ pub(crate) unsafe fn run_moved(
         } else {
             std::ptr::null()
         },
+        genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
         env_ref: env,

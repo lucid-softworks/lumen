@@ -5160,7 +5160,7 @@ impl Interp {
     /// spliced inline. On success the new chunk lands in `Function::code2` and the global call-IC
     /// epoch bumps, so every cached caller re-resolves and picks it up; the old chunk stays
     /// alive (and correct) beneath any pointers already handed out.
-    fn try_inline_recompile(
+    pub(crate) fn try_inline_recompile(
         &mut self,
         func: *const crate::ast::Function,
         chunk: &crate::bytecode::Chunk,

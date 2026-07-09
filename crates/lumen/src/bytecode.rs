@@ -181,6 +181,11 @@ impl IcState {
 /// `call_jit_fast` re-checks per call are safe to skip on a hit: they exist to keep EXOTIC
 /// callees off the fast path, and identity proves this callee is the same plain user function.
 #[derive(Clone, Copy)]
+/// `repr(C)` with this field order gives the JIT call template fixed byte offsets for its
+/// inline way-1 probe: callee@0, env@8, chunk@16, code@24, global_env@32, strict@40,
+/// uses_this@41, n_params@42, n_slots@44, func@48, epoch@56 — 64-byte stride inside
+/// [`CallSite::entries`] (compile-asserted in jit.rs).
+#[repr(C)]
 pub struct CallIc {
     /// Stored `Rc` pointer of the callee function object; 0 = empty.
     pub callee: usize,
@@ -5067,6 +5072,12 @@ impl Chunk {
         self.caches.as_ptr() as usize
             + idx as usize * std::mem::size_of::<std::cell::Cell<IcState>>()
     }
+    /// The stable address of call site `idx`'s way-1 `Cell<CallIc>` (same contract as
+    /// [`Chunk::jit_cache_ptr`]: `call_caches` is fixed once compilation finishes and the Chunk
+    /// outlives its JIT code).
+    pub(crate) fn jit_call_cache_ptr(&self, idx: u32) -> usize {
+        self.call_caches[idx as usize].entries.as_ptr() as usize
+    }
     /// The stable address of name-cache site `idx`'s `Cell<NameIc>` (same contract as
     /// [`Chunk::jit_cache_ptr`]).
     pub(crate) fn jit_name_cache_ptr(&self, idx: u32) -> usize {
@@ -5331,6 +5342,72 @@ pub(crate) unsafe extern "C" fn jit_exec(
     jit_opstat(ctx, pc);
     match jit_exec_inner(ctx, pc, &mut sp) {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+/// The call template's inline-probe HIT entry: the emitted code already validated way 1
+/// (callee identity + epoch + realm), so this skips the probe loop — it re-reads the way-1
+/// entry (nothing ran between the machine-code compare and this call), bumps the recompile
+/// counter, and enters the committed path directly. Same contract as [`jit_exec`].
+pub(crate) unsafe extern "C" fn jit_call_hit(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    jit_opstat(ctx, pc);
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    let (argc, c, with_this) = match chunk.ops[pc as usize] {
+        Op::CallWithThis(argc, c) => (argc as usize, c, true),
+        Op::Call(argc, c) => (argc as usize, c, false),
+        _ => unreachable!("jit_call_hit emitted only for call ops"),
+    };
+    let ic = chunk.call_caches[c as usize].entries[0].get();
+    {
+        let chunk_ref = &*ic.chunk;
+        let runs = chunk_ref.jit_runs.get().wrapping_add(1);
+        chunk_ref.jit_runs.set(runs);
+        if runs == inline_recompile_at() {
+            i.try_inline_recompile(ic.func, chunk_ref);
+        }
+    }
+    let args_ptr = sp.sub(argc);
+    let mut undef = std::mem::ManuallyDrop::new(Value::Undefined);
+    let this_slot: *const Value = if with_this {
+        sp.sub(argc + 2)
+    } else {
+        &raw mut *undef as *const Value
+    };
+    let r = i.call_jit_committed(ic, this_slot, args_ptr, argc);
+    // Arguments and `this` were moved; pop them virtually and drop only the callee slot
+    // (same ownership story as jit_call_inner's Some arm).
+    sp = args_ptr.sub(1);
+    match sp.read() {
+        Value::Obj(o) => {
+            if Rc::strong_count(&o) > 1 {
+                unsafe { Rc::decrement_strong_count(Rc::into_raw(o)) };
+            } else {
+                drop(o);
+            }
+        }
+        other => drop(other),
+    }
+    if with_this {
+        sp = sp.sub(1); // `this` was consumed (moved) by the callee — skip, don't drop
+    }
+    match r {
+        Ok(v) => {
+            sp.write(v);
+            crate::jit::SpFlag {
+                sp: sp.add(1),
+                flag: 0,
+            }
+        }
         Err(ab) => {
             ctx.error = Some(ab);
             crate::jit::SpFlag { sp, flag: 1 }
