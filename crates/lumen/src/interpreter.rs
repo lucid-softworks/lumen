@@ -2605,6 +2605,24 @@ impl Interp {
                 }
             }
         }
+        // Stub-cache probe (shared with the get path — a depth-0 entry means "this shape maps
+        // this name at this slot", and accessor/writable are re-checked live either way): a
+        // store site rotating through more shapes than its two ways still resolves without the
+        // hashed existence scan below. Promote into way 1 like the get path does.
+        {
+            let shape = b.props.shape();
+            let e = self.stub_cache[stub_slot(shape, name)].get();
+            if e.name == name.as_ptr() as usize && e.st.recv_shape == shape && e.st.depth == 0 {
+                if let Some((_, p)) = b.props.entry_at(e.st.slot as usize) {
+                    if !p.accessor && p.writable {
+                        b.props.entry_at_mut(e.st.slot as usize).unwrap().1.value = v.clone();
+                        self.ic_way2(cache).set(cache.get());
+                        cache.set(e.st);
+                        return true;
+                    }
+                }
+            }
+        }
         let st = cache.get();
         // Creation fast path (see IC_CREATE): the shape match proves `name` is absent, the
         // epoch + prototype identity re-prove the fill-time chain walk, and the recorded child
@@ -2636,7 +2654,7 @@ impl Interp {
                 let shape = b.props.shape();
                 b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
                 self.ic_way2(cache).set(cache.get());
-                cache.set(crate::bytecode::IcState {
+                let st = crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,
                     recv_shape: shape,
@@ -2644,6 +2662,12 @@ impl Interp {
                     mid_ok: 0,
                     mid_shape: 0,
                     mid2_shape: 0,
+                };
+                cache.set(st);
+                // Mirror into the stub cache (see the probe above).
+                self.stub_cache[stub_slot(shape, name)].set(StubEntry {
+                    name: name.as_ptr() as usize,
+                    st,
                 });
                 true
             }
@@ -4212,16 +4236,26 @@ impl Interp {
     /// its prototype chain.
     pub(crate) fn callee_realm_global(&self, obj: &Gc) -> Option<usize> {
         if let Callable::User(_, env) = &obj.borrow().call {
-            let mut root = env.clone();
-            loop {
-                let parent = root.borrow().parent.clone();
-                match parent {
-                    Some(p) => root = p,
-                    None => break,
+            // Walk to the scope root by raw pointer — every hop is kept alive transitively by
+            // `env` (which the callee's `call` field owns) and nothing mutates the parent links,
+            // so this skips a refcount round-trip per hop on every construct/call that asks.
+            let root = {
+                let mut cur: *const RefCell<Scope> = Rc::as_ptr(env);
+                loop {
+                    let parent = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
+                    match parent {
+                        Some(p) => cur = p,
+                        None => break,
+                    }
                 }
+                cur
+            };
+            // The overwhelmingly common case: the callee closes over THIS realm's global scope.
+            if root == Rc::as_ptr(&self.global_env) {
+                return None;
             }
             for (g, rs) in &self.realms {
-                if Rc::ptr_eq(&root, &rs.global_env) {
+                if root == Rc::as_ptr(&rs.global_env) {
                     if Rc::ptr_eq(&rs.global, &self.global) {
                         return None;
                     }
