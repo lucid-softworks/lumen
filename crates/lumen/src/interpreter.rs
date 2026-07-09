@@ -797,6 +797,12 @@ pub struct Interp {
     /// the proof lapses. Every defineProperty / proto swap / structural change to a marked
     /// prototype bumps the epoch, forcing a re-verify.
     pub(crate) elems_protector: std::cell::Cell<(u32, bool)>,
+    /// Per-CONSTRUCTOR construct cache (`new F(...)` — keyed by callee identity, since a
+    /// constructor's derived state doesn't vary per site): the same raw pointers a [`CallIc`]
+    /// caches, validated by the same epoch. The `Weak` pins the callee's address against
+    /// recycling (ABA), exactly like `Chunk::call_pins`.
+    pub(crate) construct_ics:
+        crate::fasthash::FastMap<usize, (crate::bytecode::CallIc, std::rc::Weak<RefCell<crate::value::Object>>)>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
     pub(crate) iterator_sym: Option<Rc<SymbolData>>,
     /// Well-known symbols, minted once per Interp — additional realms (`$262.createRealm()`) reuse
@@ -1313,6 +1319,7 @@ impl Interp {
             eval_fn: None,
             eval_realm_fns: Default::default(),
             elems_protector: std::cell::Cell::new((0, false)),
+            construct_ics: Default::default(),
             iterator_sym: None,
             wk_syms: Vec::new(),
             short_circuit: false,
@@ -5077,6 +5084,210 @@ impl Interp {
     /// # Safety
     /// `args..args+argc` and `*this_slot` must be initialized `Value`s the caller relinquishes
     /// on `Some`.
+    /// The identity-cached JIT construct (`Op::New` with a plain, same-realm, compiled,
+    /// no-activation function constructor): replicates `construct` → `construct_dispatch`'s
+    /// observable effects for that case — IsConstructor, prototype read (LIVE, each time:
+    /// `F.prototype = other` is a plain value write no epoch sees), OrdinaryCreateFromConstructor,
+    /// depth guard, gc tick, `FnFrame`, new.target = the callee for the body's duration,
+    /// return-override — while skipping the dispatch layering, and MOVES the argument values
+    /// off the caller's operand stack like the cached call does.
+    ///
+    /// `None` = not applicable, no side effects, arguments untouched (caller runs the generic
+    /// path). `Some(r)` = handled; the `argc` arguments at `args` were consumed.
+    ///
+    /// # Safety
+    /// Same contract as `call_jit_cached`: `args..args+argc` must be live operand-stack values
+    /// the caller forgets on `Some`.
+    pub(crate) unsafe fn construct_jit_fast(
+        &mut self,
+        callee: &Value,
+        args: *mut Value,
+        argc: usize,
+    ) -> Option<Result<Value, Abrupt>> {
+        if !self.proxies.is_empty() {
+            return None;
+        }
+        let Value::Obj(o) = callee else { return None };
+        let key = Rc::as_ptr(o) as usize;
+        let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        let genv = Rc::as_ptr(&self.global_env) as usize;
+        let ic = match self.construct_ics.get(&key) {
+            Some((ic, _)) if ic.epoch == epoch && ic.global_env == genv => *ic,
+            _ => self.construct_ic_fill(o, key, epoch, genv)?,
+        };
+        // OrdinaryCreateFromConstructor: the instance prototype is the constructor's LIVE
+        // `prototype` own data property; anything else (accessor, non-object, absent) → generic.
+        let proto = {
+            let b = o.borrow();
+            match b.props.get("prototype") {
+                Some(p) if !p.accessor => match &p.value {
+                    Value::Obj(pp) => pp.clone(),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        };
+        let this = crate::value::Object::new(Some(proto));
+        let this_val = Value::Obj(this);
+        // --- committed: identical shape to call_jit_cached's committed path ---
+        self.depth += 1;
+        if self.depth > MAX_EVAL_DEPTH {
+            self.depth -= 1;
+            unsafe {
+                for k in 0..argc {
+                    std::ptr::drop_in_place(args.add(k));
+                }
+            }
+            return Some(Err(
+                self.throw("RangeError", "Maximum call stack size exceeded")
+            ));
+        }
+        if let Err(e) = self.gc_check_amortized() {
+            self.depth -= 1;
+            unsafe {
+                for k in 0..argc {
+                    std::ptr::drop_in_place(args.add(k));
+                }
+            }
+            return Some(Err(e));
+        }
+        let saved_ctor = std::mem::replace(&mut self.constructing, false);
+        // The body runs with new.target = the callee (what the layered path's pending-new-target
+        // handoff produces for `new F()`); compiled chunks can't read it directly, but natives
+        // the body invokes could observe it ambiently.
+        let saved_nt = std::mem::replace(&mut self.new_target, callee.clone());
+        self.fn_frames.push(FnFrame {
+            fn_ptr: key,
+            coro: self.cur_coro,
+            strict: ic.strict,
+            extra: None,
+        });
+        let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
+        let chunk = unsafe { &*ic.chunk };
+        let code = unsafe { &*ic.code };
+        let tv = if ic.uses_this {
+            this_val.clone()
+        } else {
+            Value::Undefined
+        };
+        let mut r = unsafe {
+            crate::jit::run_moved(
+                self,
+                chunk,
+                code,
+                &*env as *const Env,
+                tv,
+                args,
+                argc,
+                (ic.n_params as usize, ic.n_slots as usize),
+            )
+        };
+        self.fn_frames.pop();
+        self.constructing = saved_ctor;
+        self.new_target = saved_nt;
+        while r.is_ok() {
+            match self.pending_tail.take() {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
+                    if let Err(e) = self.gc_check() {
+                        r = Err(e);
+                        break;
+                    }
+                    r = self.call_inner(f, t, &a);
+                }
+                None => break,
+            }
+        }
+        self.depth -= 1;
+        // A constructor explicitly returning an object overrides the instance.
+        Some(r.map(|ret| match ret {
+            v @ Value::Obj(_) => v,
+            _ => this_val,
+        }))
+    }
+
+    /// [`Interp::construct_jit_fast`]'s miss path: revalidate the full guard set (the same one
+    /// `call_jit_fast` uses, plus [[Construct]]'s own arrow/method/generator/async and
+    /// class-constructor exclusions) and cache the derived state under the callee's identity.
+    fn construct_ic_fill(
+        &mut self,
+        o: &Gc,
+        key: usize,
+        epoch: u32,
+        genv: usize,
+    ) -> Option<crate::bytecode::CallIc> {
+        let (func, env) = match &o.borrow().call {
+            Callable::User(f, e) => (f.clone(), e.clone()),
+            _ => return None,
+        };
+        if func.is_arrow || func.is_method || func.is_generator || func.is_async {
+            return None;
+        }
+        if !self.realms.is_empty() {
+            type ScopeCell = RefCell<Scope>;
+            let mut cur: *const ScopeCell = Rc::as_ptr(&env);
+            let root_is_active = 'walk: {
+                for _ in 0..8 {
+                    if cur == Rc::as_ptr(&self.global_env) {
+                        break 'walk true;
+                    }
+                    match unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) } {
+                        Some(p) => cur = p,
+                        None => break 'walk false,
+                    }
+                }
+                false
+            };
+            if !root_is_active {
+                return None;
+            }
+        }
+        if !self.class_info.is_empty() && self.class_info.contains_key(&key) {
+            return None;
+        }
+        let chunk = match func.code2.get().or_else(|| func.code.get()) {
+            Some(Some(c)) => c,
+            _ => return None,
+        };
+        let code = match chunk.jit.get() {
+            Some(Some(c)) => c,
+            _ => return None,
+        };
+        if !chunk.jit_no_activation() {
+            return None;
+        }
+        let (n_params, n_slots) = chunk.jit_frame();
+        if n_params > u16::MAX as usize || n_slots > u16::MAX as usize {
+            return None;
+        }
+        if self.construct_ics.len() >= 65536 {
+            return None; // runaway-ctor backstop; identity caching should never get here
+        }
+        if !self
+            .global_env_pins
+            .iter()
+            .any(|g| Rc::ptr_eq(g, &self.global_env))
+        {
+            let g = self.global_env.clone();
+            self.global_env_pins.push(g);
+        }
+        let ic = crate::bytecode::CallIc {
+            callee: key,
+            env: Rc::as_ptr(&env),
+            chunk: chunk as *const Rc<crate::bytecode::Chunk>,
+            code: Rc::as_ptr(code),
+            global_env: genv,
+            strict: func.is_strict,
+            uses_this: chunk.uses_this(),
+            n_params: n_params as u16,
+            n_slots: n_slots as u16,
+            func: Rc::as_ptr(&func),
+            epoch,
+        };
+        self.construct_ics.insert(key, (ic, Rc::downgrade(o)));
+        Some(ic)
+    }
+
     pub(crate) unsafe fn call_jit_fast(
         &mut self,
         callee: &Value,

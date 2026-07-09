@@ -6101,7 +6101,27 @@ unsafe fn jit_exec_inner(
         }
         Op::New(argc) => {
             let argc = argc as usize;
-            let args = std::slice::from_raw_parts(sp.sub(argc), argc);
+            let args_ptr = sp.sub(argc);
+            // Identity-cached construct: on Some the arguments were MOVED into the callee's
+            // frame — pop them virtually, drop only the callee slot (see the Op::Call arm's
+            // ownership story).
+            if let Some(r) = i.construct_jit_fast(&*sp.sub(argc + 1), args_ptr, argc) {
+                *sp = args_ptr.sub(1);
+                match sp.read() {
+                    Value::Obj(o) => {
+                        if Rc::strong_count(&o) > 1 {
+                            unsafe { Rc::decrement_strong_count(Rc::into_raw(o)) };
+                        } else {
+                            drop(o);
+                        }
+                    }
+                    other => drop(other),
+                }
+                let v = r?;
+                push!(v);
+                return Ok(());
+            }
+            let args = std::slice::from_raw_parts(args_ptr, argc);
             let callee = (*sp.sub(argc + 1)).clone();
             let v = i.construct(callee, args)?;
             *sp = jit_consume(*sp, argc + 1);
