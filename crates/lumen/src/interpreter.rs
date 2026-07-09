@@ -150,6 +150,9 @@ pub type Env = Rc<RefCell<Scope>>;
 /// One entry of the legacy `fn.caller`/`fn.arguments` reflection stack (see `call_user`). The
 /// arguments object materializes lazily: a body that never names `arguments` skips building it,
 /// and `lazy` keeps what a later reflective read needs to conjure it on demand.
+/// `repr(C)`: the asm call sequence (arc 3b) pushes frames from machine code — fn_ptr@0,
+/// coro@8, strict@12, extra@16, size 24 (asserted in jit.rs).
+#[repr(C)]
 pub struct FnFrame {
     /// `Rc::as_ptr` of the callee. No strong handle is kept: every frame is pushed while its
     /// caller holds the callee alive (the callee `Value` sits on the caller's operand stack or in
