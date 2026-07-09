@@ -2150,71 +2150,100 @@ impl Interp {
         name: &str,
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Option<Value> {
-        use crate::bytecode::IC_EMPTY;
         let head = Rc::as_ptr(o);
-        let st = cache.get();
-        // Shape fast path: a `depth == 0` (own), `depth == 1` (immediate-prototype, e.g. a
-        // method), or `depth == 2` (a subclass hierarchy hop — needs the recorded `mid_shape`)
-        // hit on non-exotic ordinary objects validates by shape-id compares alone — no per-hop
-        // key or hash checks. Shapes are shared across structurally-identical objects, so an id
-        // recorded from one instance validates the same slot on any sibling instance; a shape
-        // match on a non-holder hop proves it still *lacks* the name. Protos are re-followed
-        // live and every hop's shape re-checked, so a proto swap or hop mutation is caught.
-        // Arrays / deeper chains / misses drop to the re-derive walk below.
-        if (st.depth <= 1 || (st.depth == 2 && st.mid_ok != 0)) && st.depth != IC_EMPTY {
-            unsafe {
-                let rb = (*head).borrow();
-                // An Array receiver may shape-validate only as a NON-holder (depth ≥ 1): its
-                // shape proves which NAMED keys it has — so a non-digit name is provably absent
-                // (element keys are all canonical indices) — but NOT where a named entry sits
-                // (element entries occupy slots without transitioning the shape, so two
-                // same-shape arrays can hold `length` at different slots).
-                let recv_shape_ok = matches!(rb.exotic, Exotic::None)
-                    || (matches!(rb.exotic, Exotic::Array)
-                        && st.depth >= 1
-                        && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()));
-                if recv_shape_ok
-                    && self.ordinary_get_ptr(head as usize)
-                    && rb.props.shape() == st.recv_shape
-                {
-                    if st.depth == 0 {
-                        if let Some((_, p)) = rb.props.entry_at(st.slot as usize) {
+        // Two ways per site (polymorphic receivers — subclass hierarchies rotating through one
+        // access site — miss a single way constantly): probe both, then re-derive into way 1
+        // with the old way 1 demoted to way 2.
+        if let Some(v) = self.ic_shape_probe(head, name, cache.get()) {
+            return Some(v);
+        }
+        if let Some(v) = self.ic_shape_probe(head, name, self.ic_way2(cache).get()) {
+            return Some(v);
+        }
+        self.ic_get_rederive(o, name, cache)
+    }
+
+    /// The second cache way of a property site (sites allocate two consecutive cells — see
+    /// `Compiler::new_cache`, which keeps this pointer step in bounds).
+    #[inline]
+    pub(crate) fn ic_way2<'a>(
+        &self,
+        cache: &'a std::cell::Cell<crate::bytecode::IcState>,
+    ) -> &'a std::cell::Cell<crate::bytecode::IcState> {
+        unsafe { &*(cache as *const std::cell::Cell<crate::bytecode::IcState>).add(1) }
+    }
+
+    /// One way's shape fast path: a `depth == 0` (own), `depth == 1` (immediate-prototype, e.g.
+    /// a method), or `depth == 2` (a subclass hierarchy hop — needs the recorded `mid_shape`)
+    /// hit on non-exotic ordinary objects validates by shape-id compares alone — no per-hop
+    /// key or hash checks. Shapes are shared across structurally-identical objects, so an id
+    /// recorded from one instance validates the same slot on any sibling instance; a shape
+    /// match on a non-holder hop proves it still *lacks* the name. Protos are re-followed
+    /// live and every hop's shape re-checked, so a proto swap or hop mutation is caught.
+    /// `None` = miss (no side effects): arrays-as-holders, deeper chains, accessors.
+    #[inline(always)]
+    fn ic_shape_probe(
+        &self,
+        head: *const std::cell::RefCell<Object>,
+        name: &str,
+        st: crate::bytecode::IcState,
+    ) -> Option<Value> {
+        use crate::bytecode::IC_EMPTY;
+        if !((st.depth <= 1 || (st.depth == 2 && st.mid_ok != 0)) && st.depth != IC_EMPTY) {
+            return None;
+        }
+        unsafe {
+            let rb = (*head).borrow();
+            // An Array receiver may shape-validate only as a NON-holder (depth ≥ 1): its
+            // shape proves which NAMED keys it has — so a non-digit name is provably absent
+            // (element keys are all canonical indices) — but NOT where a named entry sits
+            // (element entries occupy slots without transitioning the shape, so two
+            // same-shape arrays can hold `length` at different slots).
+            let recv_shape_ok = matches!(rb.exotic, Exotic::None)
+                || (matches!(rb.exotic, Exotic::Array)
+                    && st.depth >= 1
+                    && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()));
+            if recv_shape_ok
+                && self.ordinary_get_ptr(head as usize)
+                && rb.props.shape() == st.recv_shape
+            {
+                if st.depth == 0 {
+                    if let Some((_, p)) = rb.props.entry_at(st.slot as usize) {
+                        if !p.accessor {
+                            return Some(p.value.clone());
+                        }
+                    }
+                } else if let Some(pr) = rb.proto.as_ref() {
+                    let mut hp = Rc::as_ptr(pr);
+                    drop(rb); // the next hop is a different object; release the borrow
+                    if st.depth == 2 {
+                        let mb = (*hp).borrow();
+                        if !(matches!(mb.exotic, Exotic::None)
+                            && self.ordinary_get_ptr(hp as usize)
+                            && mb.props.shape() == st.mid_shape)
+                        {
+                            return None;
+                        }
+                        match mb.proto.as_ref() {
+                            Some(p) => hp = Rc::as_ptr(p),
+                            None => return None,
+                        }
+                    }
+                    let hb = (*hp).borrow();
+                    if matches!(hb.exotic, Exotic::None)
+                        && self.ordinary_get_ptr(hp as usize)
+                        && hb.props.shape() == st.holder_shape
+                    {
+                        if let Some((_, p)) = hb.props.entry_at(st.slot as usize) {
                             if !p.accessor {
                                 return Some(p.value.clone());
-                            }
-                        }
-                    } else if let Some(pr) = rb.proto.as_ref() {
-                        let mut hp = Rc::as_ptr(pr);
-                        drop(rb); // the next hop is a different object; release the borrow
-                        if st.depth == 2 {
-                            let mb = (*hp).borrow();
-                            if !(matches!(mb.exotic, Exotic::None)
-                                && self.ordinary_get_ptr(hp as usize)
-                                && mb.props.shape() == st.mid_shape)
-                            {
-                                return self.ic_get_rederive(o, name, cache);
-                            }
-                            match mb.proto.as_ref() {
-                                Some(p) => hp = Rc::as_ptr(p),
-                                None => return self.ic_get_rederive(o, name, cache),
-                            }
-                        }
-                        let hb = (*hp).borrow();
-                        if matches!(hb.exotic, Exotic::None)
-                            && self.ordinary_get_ptr(hp as usize)
-                            && hb.props.shape() == st.holder_shape
-                        {
-                            if let Some((_, p)) = hb.props.entry_at(st.slot as usize) {
-                                if !p.accessor {
-                                    return Some(p.value.clone());
-                                }
                             }
                         }
                     }
                 }
             }
         }
-        self.ic_get_rederive(o, name, cache)
+        None
     }
 
     /// [`try_ic_get`]'s miss path: re-derive the resolution by a raw-pointer chain walk and
@@ -2260,6 +2289,9 @@ impl Interp {
                         return Some(v);
                     }
                     let mid_shape = if depth == 2 { mid } else { None };
+                    // Demote the previous way before refilling: a 2-shape site stabilizes
+                    // with one shape per way instead of thrashing a single cell.
+                    self.ic_way2(cache).set(cache.get());
                     cache.set(IcState {
                         depth,
                         slot: slot as u32,
@@ -2370,17 +2402,20 @@ impl Interp {
             return false;
         }
         let st = cache.get();
-        // Shape fast path (own writable data property): a shape match means `slot` still maps
-        // `name`; skip the key compare. `accessor`/`writable` are re-checked (an in-place
-        // defineProperty could have flipped them without changing the shape).
-        if st.depth == 0 && b.props.shape() == st.recv_shape {
-            if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
-                if !p.accessor && p.writable {
-                    b.props.entry_at_mut(st.slot as usize).unwrap().1.value = v.clone();
-                    return true;
+        // Shape fast path (own writable data property), both ways: a shape match means `slot`
+        // still maps `name`; skip the key compare. `accessor`/`writable` are re-checked (an
+        // in-place defineProperty could have flipped them without changing the shape).
+        for st in [st, self.ic_way2(cache).get()] {
+            if st.depth == 0 && b.props.shape() == st.recv_shape {
+                if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
+                    if !p.accessor && p.writable {
+                        b.props.entry_at_mut(st.slot as usize).unwrap().1.value = v.clone();
+                        return true;
+                    }
                 }
             }
         }
+        let st = cache.get();
         // Creation fast path (see IC_CREATE): the shape match proves `name` is absent, the
         // epoch + prototype identity re-prove the fill-time chain walk, and the recorded child
         // shape makes the insert a plain append — no existence scan, no transition lookup.
@@ -2410,6 +2445,7 @@ impl Interp {
                 }
                 let shape = b.props.shape();
                 b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
+                self.ic_way2(cache).set(cache.get());
                 cache.set(crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,

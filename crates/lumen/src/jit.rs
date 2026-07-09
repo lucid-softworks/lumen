@@ -1676,69 +1676,84 @@ fn emit_prop_load_inline(
         a.cmp_imm_x(9, 1);
         a.b_cond(C_LS, slow);
     }
-    // 2. cache: depth + slot
-    a.mov_imm64(12, cache_ptr as u64);
-    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
-    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
-    // 3. receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
-    //    Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE, not
-    //    slot positions, because element entries occupy slots without transitioning the shape),
-    //    plain, shape == recv_shape; x11 = receiver object base
-    a.add_imm(11, 10, rcv);
-    a.ldrb_imm(14, 11, ex);
-    if arr_ok {
-        let ex_ok = a.new_label();
+    // 2-5. probe both cache ways (sites allocate two consecutive cells; the fill path demotes
+    // way 1 to way 2, so a two-shape site — subclass hierarchies rotating through one access —
+    // stabilizes with one shape per way). Each probe is self-contained: it recomputes the
+    // receiver base from x10 and jumps to `load` with x11 = holder base, x13 = slot.
+    let way2 = a.new_label();
+    let mut probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
+        let d1 = a.new_label();
+        a.mov_imm64(12, cache_ptr as u64);
+        a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+        a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+        // receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
+        // Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE,
+        // not slot positions, because element entries occupy slots without transitioning the
+        // shape), plain, shape == recv_shape; x11 = receiver object base
+        a.add_imm(11, 10, rcv);
+        a.ldrb_imm(14, 11, ex);
+        if arr_ok {
+            let ex_ok = a.new_label();
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_EQ, ex_ok);
+            a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+            a.b_cond(C_NE, miss);
+            a.cbz(9, false, miss); // Array receiver must not be the holder (w9 = depth)
+            a.bind(ex_ok);
+        } else {
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_NE, miss);
+        }
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        // depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall to d1.
+        a.cbz(9, false, load);
+        a.cmp_imm_w(9, 1);
+        a.b_cond(C_EQ, d1);
+        a.cmp_imm_w(9, 2);
+        a.b_cond(C_NE, miss);
+        a.ldrb_imm(14, 12, IC_OFF_MID_OK);
+        a.cbz(14, false, miss);
+        // depth-2 mid hop: follow the live proto, validate against mid_shape
+        a.ldr_imm(17, 11, pr); // Option<Gc> niche: pointer or 0
+        a.cbz(17, true, miss);
+        a.add_imm(11, 17, rcv);
+        a.ldrb_imm(14, 11, ex);
         a.cmp_imm_w(14, none_tag);
-        a.b_cond(C_EQ, ex_ok);
-        a.cmp_imm_w(14, layout.exotic_array_tag as u32);
-        a.b_cond(C_NE, slow);
-        a.cbz(9, false, slow); // Array receiver must not be the holder (w9 = depth)
-        a.bind(ex_ok);
-    } else {
+        a.b_cond(C_NE, miss);
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_MID_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        // holder hop (depth 1 entry point; depth 2 falls through): validate holder_shape
+        a.bind(d1);
+        a.ldr_imm(17, 11, pr);
+        a.cbz(17, true, miss);
+        a.add_imm(11, 17, rcv);
+        a.ldrb_imm(14, 11, ex);
         a.cmp_imm_w(14, none_tag);
-        a.b_cond(C_NE, slow);
-    }
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
-    // 4. depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall into d1.
-    a.cbz(9, false, load);
-    a.cmp_imm_w(9, 1);
-    a.b_cond(C_EQ, d1);
-    a.cmp_imm_w(9, 2);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 12, IC_OFF_MID_OK);
-    a.cbz(14, false, slow);
-    // depth-2 mid hop: follow the live proto, validate against mid_shape
-    a.ldr_imm(17, 11, pr); // Option<Gc> niche: pointer or 0
-    a.cbz(17, true, slow);
-    a.add_imm(11, 17, rcv);
-    a.ldrb_imm(14, 11, ex);
-    a.cmp_imm_w(14, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_MID_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
-    // 5. holder hop (depth 1 entry point; depth 2 falls through): validate holder_shape
-    a.bind(d1);
-    a.ldr_imm(17, 11, pr);
-    a.cbz(17, true, slow);
-    a.add_imm(11, 17, rcv);
-    a.ldrb_imm(14, 11, ex);
-    a.cmp_imm_w(14, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
+        a.b_cond(C_NE, miss);
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        a.b(load);
+    };
+    probe(a, cache_ptr, way2);
+    a.bind(way2);
+    probe(
+        a,
+        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
+        slow,
+    );
     // 6. x11 = holder base: bounds-check the cached slot against the live entries length
     //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
     //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;

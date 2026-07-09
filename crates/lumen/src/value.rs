@@ -862,6 +862,18 @@ impl Props {
         if self.mirror_flags & MIRROR_OK == 0 {
             return;
         }
+        // Peek the value first: an object-element array (its very first push, typically) must
+        // not pay a buffer allocation just to invalidate it.
+        {
+            let p = &self.entries[slot].1;
+            let ok = matches!(&p.value, Value::Num(f) if f.to_bits() != MIRROR_HOLE)
+                && !p.accessor
+                && p.writable;
+            if !ok {
+                self.mirror_invalidate();
+                return;
+            }
+        }
         if pads > 0 {
             self.mirror_flags &= !MIRROR_NO_HOLES;
             self.mirror_holes += pads as u32;

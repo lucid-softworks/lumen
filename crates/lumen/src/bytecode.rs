@@ -1381,7 +1381,7 @@ fn compile_inner(
 
     let mut c = Compiler {
         env_this,
-        inline_plan: plan.clone(),
+        plan_stack: vec![(plan.clone(), 0)],
         ..Compiler::default()
     };
     // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
@@ -1554,6 +1554,15 @@ pub(crate) fn plan_inlines(
     caller: &Function,
     global_env: &crate::interpreter::Env,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
+    plan_inlines_at(chunk, caller, global_env, 0)
+}
+
+fn plan_inlines_at(
+    chunk: &Chunk,
+    caller: &Function,
+    global_env: &crate::interpreter::Env,
+    depth: u32,
+) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
     let mut plan: crate::fasthash::FastMap<u32, InlinePlanEntry> = Default::default();
     let log = std::env::var_os("LUMEN_TIER_LOG").is_some();
     macro_rules! skip {
@@ -1572,14 +1581,11 @@ pub(crate) fn plan_inlines(
             .map(|e| e.get())
             .filter(|c| c.callee != 0)
             .collect();
-        // Monomorphic sites only: one distinct callee (refills may duplicate it across ways).
+        // Distinct callees (refills may duplicate one across ways); up to two splice behind
+        // chained guards — polymorphic dispatch sites are the whole game in OO code.
         filled.dedup_by_key(|c| c.callee);
-        let [ic] = filled.as_slice() else {
-            if !filled.is_empty() {
-                skip!(idx, "polymorphic");
-            }
-            continue;
-        };
+        let mut ways: Vec<InlineWay> = Vec::new();
+        for ic in filled.iter().take(2) {
         let Some(weak) = pins.get(&ic.callee) else { skip!(idx, "no pin") };
         let Some(obj) = weak.upgrade() else { skip!(idx, "dead callee") };
         let b = obj.borrow();
@@ -1636,18 +1642,29 @@ pub(crate) fn plan_inlines(
             skip!(idx, "free names in a non-global closure");
         }
         let uses_this = callee_chunk.uses_this();
+        // One level of nesting: the spliced body's own hot monomorphic callees splice too
+        // (an OO benchmark's helpers call helpers — without this, every call inside a splice
+        // stays a real call).
+        let nested = if depth < 1 {
+            plan_inlines_at(callee_chunk, f, global_env, depth + 1)
+        } else {
+            Default::default()
+        };
         let f = f.clone();
         drop(b);
-        plan.insert(
-            idx as u32,
-            InlinePlanEntry {
-                check_this: uses_this && !f.is_strict,
-                uses_this,
-                f,
-                obj,
-                free_names,
-            },
-        );
+        ways.push(InlineWay {
+            check_this: uses_this && !f.is_strict,
+            uses_this,
+            f,
+            obj,
+            free_names,
+            nested,
+        });
+        }
+        if ways.is_empty() {
+            continue;
+        }
+        plan.insert(idx as u32, InlinePlanEntry { ways });
     }
     plan
 }
@@ -1684,12 +1701,10 @@ struct Compiler {
     funcs: Vec<Rc<Function>>,
     cap_inits: Vec<CapInit>,
     env_this: bool,
-    /// Speculative-inline plan for this compile (second-stage only): caller-level call-site
-    /// ordinal → the monomorphic callee to splice in. See [`plan_inlines`].
-    inline_plan: crate::fasthash::FastMap<u32, InlinePlanEntry>,
-    /// Caller-level call sites emitted so far (equals the first compile's `CallIc` index for
-    /// the same site: inline bodies don't consult the plan and the source order is identical).
-    site_ord: u32,
+    /// Speculative-inline plan stack (second-stage only): one frame per active splice, each
+    /// mapping that frame's call-site ordinal (== the function's first-compile `CallIc` index —
+    /// same AST, same emission order) to the callees to splice. See [`plan_inlines`].
+    plan_stack: Vec<(crate::fasthash::FastMap<u32, InlinePlanEntry>, u32)>,
     /// > 0 while compiling a spliced callee body.
     inline_depth: u32,
     /// The slot holding the receiver while inlining a `this`-using callee.
@@ -1702,6 +1717,13 @@ struct Compiler {
 /// One planned inline: the callee function (AST) and its pinned identity.
 #[derive(Clone)]
 pub struct InlinePlanEntry {
+    /// Guarded ways, tried in order; a polymorphic site (DeltaBlue's constraint hierarchies)
+    /// splices each hot callee behind its own identity guard, falling through to the next.
+    pub ways: Vec<InlineWay>,
+}
+
+#[derive(Clone)]
+pub struct InlineWay {
     pub f: Rc<Function>,
     pub obj: crate::value::Gc,
     pub check_this: bool,
@@ -1709,6 +1731,10 @@ pub struct InlinePlanEntry {
     /// Free names the callee reads (global-closure callees only): the splice refuses any that
     /// the caller's scopes shadow, so the inlined LoadNames resolve identically.
     pub free_names: Vec<Rc<str>>,
+    /// The callee's OWN inline plan (depth-capped recursion): call sites inside the spliced
+    /// body splice too, keyed by the callee-frame ordinal — its first-compile cache numbering,
+    /// which the splice reproduces by walking the same AST in the same order.
+    pub nested: crate::fasthash::FastMap<u32, InlinePlanEntry>,
 }
 
 /// Where a name resolves inside the compiled body.
@@ -1872,8 +1898,12 @@ impl Compiler {
     }
     /// Reserve a fresh inline-cache slot (starts empty) for a property-access op.
     fn new_cache(&mut self) -> u32 {
+        // Two consecutive ways per site: consumers address way 1; the probe reaches way 2 at
+        // `cache_ptr + 1` (see `Interp::ic_way2`). Keeps every existing call site untouched.
+        let idx = self.caches.len() as u32;
         self.caches.push(std::cell::Cell::new(IcState::EMPTY));
-        (self.caches.len() - 1) as u32
+        self.caches.push(std::cell::Cell::new(IcState::EMPTY));
+        idx
     }
     /// Reserve a fresh name-cache slot for a free-name op.
     fn new_name_cache(&mut self) -> u32 {
@@ -1882,12 +1912,18 @@ impl Compiler {
     }
     /// Reserve a fresh call-cache slot for a `Call`/`CallWithThis` site.
     fn new_call_cache(&mut self) -> u32 {
-        // Caller-level sites also advance the inline-plan ordinal (see `Compiler::site_ord`).
-        if self.inline_depth == 0 {
-            self.site_ord += 1;
+        // Every frame counts its own call-site ordinals (see `Compiler::plan_stack`).
+        if let Some(top) = self.plan_stack.last_mut() {
+            top.1 += 1;
         }
         self.call_caches.push(CallSite::empty());
         (self.call_caches.len() - 1) as u32
+    }
+
+    /// The current frame's plan entry for the NEXT call site (call before `new_call_cache`).
+    fn plan_hit(&self) -> Option<InlinePlanEntry> {
+        let (plan, ord) = self.plan_stack.last()?;
+        plan.get(ord).cloned()
     }
 
     /// Emit a planned speculative inline for a method call site whose stack already holds
@@ -1929,31 +1965,66 @@ impl Compiler {
         cc: u32,
         has_this: bool,
     ) -> CResult {
-        let f = &entry.f;
         if argc > 8 {
             return Err(Bail); // the JIT guard peeks the callee with a ±256-byte unscaled load
         }
-        // A plain `Call` site has no `this` beneath the callee: a this-using callee would need
-        // the global-or-boxed binding the generic path provides (and the guard's receiver peek
-        // would read past the site's operands).
-        if !has_this && entry.uses_this {
+        // Per-way gates: a plain `Call` site has no `this` beneath the callee (a this-using
+        // callee needs the generic binding, and the guard's receiver peek would read past the
+        // operands); a caller binding (slot or captured) would shadow a global free name.
+        let ways: Vec<&InlineWay> = entry
+            .ways
+            .iter()
+            .filter(|w| {
+                (has_this || !w.uses_this)
+                    && !w.free_names.iter().any(|name| {
+                        self.lookup(name).is_some() || self.env_names.contains_key(&**name)
+                    })
+            })
+            .collect();
+        if ways.is_empty() {
             return Err(Bail);
         }
-        // A caller binding (slot or captured) would shadow the callee's global free name —
-        // its inlined LoadName must resolve exactly as it did in the callee's own scope.
-        for name in &entry.free_names {
-            if self.lookup(name).is_some() || self.env_names.contains_key(&**name) {
-                return Err(Bail);
+        // Each way: identity guard → bind → spliced body → jump to the shared join; a guard
+        // mismatch falls to the next way, the last one to the generic call.
+        let mut end_jumps: Vec<usize> = Vec::new();
+        let mut pending_guard: Option<usize> = None;
+        for w in &ways {
+            if let Some(g) = pending_guard.take() {
+                self.patch(g); // previous way's mismatch lands on this way's guard
             }
+            let guard = self.emit_inline_way(w, argc, has_this, &mut end_jumps)?;
+            pending_guard = Some(guard);
         }
-        // The guard proves the callee is the pinned function (and the receiver an object for a
-        // sloppy this-user); a mismatch lands on the plain call after the spliced body.
+        // ---- join: every way's result jumps here; the last mismatch runs the generic call.
+        self.patch(pending_guard.take().expect("at least one way"));
+        if has_this {
+            self.emit(Op::CallWithThis(argc, cc));
+        } else {
+            self.emit(Op::Call(argc, cc));
+        }
+        for j in end_jumps {
+            self.patch(j);
+        }
+        Ok(())
+    }
+
+    /// One guarded splice: emits the identity guard (returned unpatched — the caller chains it
+    /// to the next way or the generic call), the frame binds, and the body; the result-carrying
+    /// exits are appended to `end_jumps`.
+    fn emit_inline_way(
+        &mut self,
+        w: &InlineWay,
+        argc: u16,
+        has_this: bool,
+        end_jumps: &mut Vec<usize>,
+    ) -> Result<usize, Bail> {
+        let f = &w.f;
         let t = self.inline_targets.len() as u32;
         self.inline_targets.push(InlineTarget {
-            expected: Rc::as_ptr(&entry.obj) as usize,
-            pin: Rc::downgrade(&entry.obj),
+            expected: Rc::as_ptr(&w.obj) as usize,
+            pin: Rc::downgrade(&w.obj),
             argc,
-            check_this: has_this && entry.check_this,
+            check_this: has_this && w.check_this,
         });
         let guard = self.emit(Op::InlineGuard(t, 0));
 
@@ -1981,7 +2052,7 @@ impl Compiler {
         self.emit(Op::Pop); // the method (identity proven; the value itself is dead)
         let this_slot = if !has_this {
             None // a plain Call site: nothing beneath the callee
-        } else if entry.uses_this {
+        } else if w.uses_this {
             let s = self.fresh_slot("(inline this)");
             self.emit(Op::StoreLocal(s));
             Some(s)
@@ -1999,6 +2070,7 @@ impl Compiler {
         let saved_this = std::mem::replace(&mut self.inline_this, this_slot);
         let saved_returns = std::mem::take(&mut self.inline_returns);
         self.inline_depth += 1;
+        self.plan_stack.push((w.nested.clone(), 0));
         self.scopes.push(Vec::new());
         for (k, p) in f.params.iter().enumerate() {
             let Pattern::Ident(name) = &p.pattern else {
@@ -2007,6 +2079,7 @@ impl Compiler {
             self.scope_bind(name, param_slots[k], false);
         }
         let r = self.inline_body(f);
+        self.plan_stack.pop();
         self.inline_depth -= 1;
         let returns = std::mem::replace(&mut self.inline_returns, saved_returns);
         self.inline_this = saved_this;
@@ -2017,19 +2090,9 @@ impl Compiler {
         self.scopes = saved_scopes;
         r?;
 
-        // ---- join: fall-through result, guard-mismatch generic call, return jumps ----
-        let end = self.emit(Op::Jump(0));
-        self.patch(guard);
-        if has_this {
-            self.emit(Op::CallWithThis(argc, cc));
-        } else {
-            self.emit(Op::Call(argc, cc));
-        }
-        self.patch(end);
-        for j in returns {
-            self.patch(j);
-        }
-        Ok(())
+        end_jumps.push(self.emit(Op::Jump(0)));
+        end_jumps.extend(returns);
+        Ok(guard)
     }
 
     /// Compile a spliced callee body: mirrors `compile_inner`'s hoist + lexical + statement
@@ -3509,11 +3572,7 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        let plan_hit = if self.inline_depth == 0 {
-                            self.inline_plan.get(&self.site_ord).cloned()
-                        } else {
-                            None
-                        };
+                        let plan_hit = self.plan_hit();
                         let cc = self.new_call_cache();
                         match plan_hit {
                             Some(entry) => {
@@ -3539,11 +3598,7 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        let plan_hit = if self.inline_depth == 0 {
-                            self.inline_plan.get(&self.site_ord).cloned()
-                        } else {
-                            None
-                        };
+                        let plan_hit = self.plan_hit();
                         let cc = self.new_call_cache();
                         match plan_hit {
                             Some(entry) => {
@@ -3568,11 +3623,7 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        let plan_hit = if self.inline_depth == 0 {
-                            self.inline_plan.get(&self.site_ord).cloned()
-                        } else {
-                            None
-                        };
+                        let plan_hit = self.plan_hit();
                         let cc = self.new_call_cache();
                         match plan_hit {
                             Some(entry) => {
@@ -3592,11 +3643,7 @@ impl Compiler {
                             };
                             self.expr(a)?;
                         }
-                        let plan_hit = if self.inline_depth == 0 {
-                            self.inline_plan.get(&self.site_ord).cloned()
-                        } else {
-                            None
-                        };
+                        let plan_hit = self.plan_hit();
                         let cc = self.new_call_cache();
                         match plan_hit {
                             Some(entry) => {
