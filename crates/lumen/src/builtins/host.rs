@@ -108,15 +108,7 @@ fn make_abstract_module_source(it: &mut Interp) -> Value {
         });
         proto.borrow_mut().props.insert(
             key,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(getter)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(getter)), None, false, true),
         );
     }
     proto.borrow_mut().props.insert(

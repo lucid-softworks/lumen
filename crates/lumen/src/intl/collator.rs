@@ -30,15 +30,7 @@ fn install_compare_getter(it: &mut Interp, proto: &Gc) {
     });
     proto.borrow_mut().props.insert(
         "compare",
-        crate::value::Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(g)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        crate::value::Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
     );
 }
 

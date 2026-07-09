@@ -370,15 +370,7 @@ pub(super) fn install_symbol(it: &mut Interp) {
     });
     sp.borrow_mut().props.insert(
         "description",
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(desc_getter)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(desc_getter)), None, false, true),
     );
 
     let ctor = it.make_native("Symbol", 0, |i, _this, args| {

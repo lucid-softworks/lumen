@@ -595,7 +595,7 @@ impl Interp {
                     if self.tco_ok && !self.using_stack.iter().any(|f| !f.is_empty()) {
                         return match self.eval_return_expr(e, env)? {
                             TailEval::Tail(f, t, a) => {
-                                self.pending_tail = Some((f, t, a));
+                                self.pending_tail = Some(Box::new((f, t, a)));
                                 Err(Abrupt::Return(Value::Undefined))
                             }
                             TailEval::Val(v) => Err(Abrupt::Return(v)),
@@ -2108,7 +2108,7 @@ impl Interp {
             _ => None,
         };
         match prop {
-            Some(p) if p.accessor => match &p.get {
+            Some(p) if p.accessor => match p.getter() {
                 Some(g) => self.call(g.clone(), base.clone(), &[]),
                 None => {
                     let shown = private_display(name);
@@ -2145,7 +2145,7 @@ impl Interp {
         };
         match prop {
             Some(p) if p.accessor => {
-                let Some(setter) = p.set.clone() else {
+                let Some(setter) = p.setter().cloned() else {
                     return Err(self.throw(
                         "TypeError",
                         format!("private accessor {shown} has no setter"),
@@ -2325,7 +2325,6 @@ impl Interp {
             None => Ok(false),
         }
     }
-
 
     // ----- expressions ------------------------------------------------------------------------
 
@@ -2775,26 +2774,16 @@ impl Interp {
         if let Some(p) = b.props.get_mut(key) {
             if p.accessor {
                 if get.is_some() {
-                    p.get = get;
+                    p.set_getter(get);
                 }
                 if set.is_some() {
-                    p.set = set;
+                    p.set_setter(set);
                 }
                 return;
             }
         }
-        b.props.insert(
-            key,
-            Property {
-                value: Value::Undefined,
-                get,
-                set,
-                accessor: true,
-                writable: false,
-                enumerable: true,
-                configurable: true,
-            },
-        );
+        b.props
+            .insert(key, Property::accessor_prop(get, set, true, true));
     }
 
     fn eval_prop_key(&mut self, key: &PropKey, env: &Env) -> Result<String, Abrupt> {
@@ -3937,9 +3926,7 @@ impl Interp {
         let g = self.global.borrow();
         match g.props.get(name) {
             None => g.extensible,
-            Some(p) => {
-                p.configurable || (p.get.is_none() && p.set.is_none() && p.writable && p.enumerable)
-            }
+            Some(p) => p.configurable || (!p.accessor && p.writable && p.enumerable),
         }
     }
 
@@ -3951,7 +3938,7 @@ impl Interp {
             .borrow()
             .props
             .get(name)
-            .map(|p| (p.configurable, p.get.is_none() && p.set.is_none()));
+            .map(|p| (p.configurable, !p.accessor));
         match existing {
             Some((false, true)) => {
                 // A pre-existing non-configurable data property keeps its attributes; only its value
@@ -4257,15 +4244,7 @@ impl Interp {
                     if is_private && !m.is_static {
                         priv_members.push((
                             key.clone(),
-                            Property {
-                                value: Value::Undefined,
-                                get: Some(getter),
-                                set: Some(setter),
-                                accessor: true,
-                                writable: false,
-                                enumerable: false,
-                                configurable: false,
-                            },
+                            Property::accessor_prop(Some(getter), Some(setter), false, false),
                         ));
                     } else {
                         self.define_class_accessor(&target, &key, Some(getter), Some(setter));
@@ -4360,24 +4339,14 @@ impl Interp {
                     if is_private && !m.is_static {
                         if let Some((_, p)) = priv_members.iter_mut().find(|(k, _)| *k == key) {
                             if get.is_some() {
-                                p.get = get;
+                                p.set_getter(get);
                             }
                             if set.is_some() {
-                                p.set = set;
+                                p.set_setter(set);
                             }
                         } else {
-                            priv_members.push((
-                                key,
-                                Property {
-                                    value: Value::Undefined,
-                                    get,
-                                    set,
-                                    accessor: true,
-                                    writable: false,
-                                    enumerable: false,
-                                    configurable: false,
-                                },
-                            ));
+                            priv_members
+                                .push((key, Property::accessor_prop(get, set, false, false)));
                         }
                     } else {
                         self.define_class_accessor(&target, &key, get, set);
@@ -4572,26 +4541,16 @@ impl Interp {
         if let Some(p) = b.props.get_mut(key) {
             if p.accessor {
                 if get.is_some() {
-                    p.get = get;
+                    p.set_getter(get);
                 }
                 if set.is_some() {
-                    p.set = set;
+                    p.set_setter(set);
                 }
                 return;
             }
         }
-        b.props.insert(
-            key,
-            Property {
-                value: Value::Undefined,
-                get,
-                set,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
-        );
+        b.props
+            .insert(key, Property::accessor_prop(get, set, false, true));
     }
 
     /// A function object wrapping an internal [`Callable`] (used for accessor get/set and decorator
@@ -4839,7 +4798,9 @@ impl Interp {
                 // constructors that require `new`. Run it, then graft its own props onto `this`.
                 let saved = self.constructing;
                 self.constructing = true;
-                let made = self.dispatch_native(&call, this.clone(), args).map_err(Abrupt::Throw);
+                let made = self
+                    .dispatch_native(&call, this.clone(), args)
+                    .map_err(Abrupt::Throw);
                 self.constructing = saved;
                 let made = made?;
                 if let (Value::Obj(src), Value::Obj(dst)) = (&made, this) {
@@ -4863,6 +4824,9 @@ impl Interp {
                         // subclass is itself an Array exotic).
                         let src_exotic = src.borrow().exotic.clone();
                         if !matches!(src_exotic, crate::value::Exotic::None) {
+                            if matches!(src_exotic, crate::value::Exotic::Array) {
+                                dst.borrow().props.mark_array();
+                            }
                             dst.borrow_mut().exotic = src_exotic;
                         }
                         // Move the native object's internal slots (Map/Set/TypedArray/buffer/etc.)
@@ -6675,6 +6639,7 @@ fn default_constructor(derived: bool) -> Function {
         hoist: std::cell::OnceCell::new(),
         calls: std::cell::Cell::new(0),
         code: std::cell::OnceCell::new(),
+        code2: std::cell::OnceCell::new(),
         name: None,
         params,
         body,

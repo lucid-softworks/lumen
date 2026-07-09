@@ -226,15 +226,7 @@ pub(super) fn install_dataview(it: &mut Interp) {
         let g = it.make_native(&format!("get {name}"), 0, getter);
         proto.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(g)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
         );
     }
     // DataView.prototype[@@toStringTag] = "DataView" (non-writable, non-enumerable, configurable).

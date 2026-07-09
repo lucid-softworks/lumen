@@ -161,15 +161,12 @@ pub(super) fn install_function_proto(it: &mut Interp) {
     for name in ["caller", "arguments"] {
         fp.borrow_mut().props.insert(
             name,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(throw_type_error.clone())),
-                set: Some(Value::Obj(throw_type_error.clone())),
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(
+                Some(Value::Obj(throw_type_error.clone())),
+                Some(Value::Obj(throw_type_error.clone())),
+                false,
+                true,
+            ),
         );
     }
 

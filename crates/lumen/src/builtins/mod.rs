@@ -10,23 +10,23 @@ use std::rc::Rc;
 // Per-object modules split out of this file (behavior-preserving). Shared helpers remain here and
 // are reachable from each submodule via `use super::*`.
 mod atomics;
-mod dataview;
-mod regexp;
-mod typedarray;
-mod function_proto;
-mod json;
-mod promise;
-mod proxy;
-mod reflect;
 mod collections;
+mod dataview;
 mod date;
 mod disposable;
 mod errors;
+mod function_proto;
 mod globals;
 mod host;
+mod json;
 mod math;
 mod primitives;
+mod promise;
+mod proxy;
+mod reflect;
+mod regexp;
 mod shadowrealm;
+mod typedarray;
 mod weakrefs;
 
 /// `args[i]` or `undefined`.
@@ -763,13 +763,13 @@ pub(crate) fn proxy_gopd_value(
                         (None, None) => true,
                         (Some(x), None) | (None, Some(x)) => matches!(x, Value::Undefined),
                     };
-                    if pd.get.is_some() && !same_fn(&pd.get, &p.get) {
+                    if pd.get.is_some() && !same_fn(&pd.get, &p.getter().cloned()) {
                         return Err(i.make_error(
                             "TypeError",
                             format!("proxy must report the same getter for the non-configurable property '{key}'"),
                         ));
                     }
-                    if pd.set.is_some() && !same_fn(&pd.set, &p.set) {
+                    if pd.set.is_some() && !same_fn(&pd.set, &p.setter().cloned()) {
                         return Err(i.make_error(
                             "TypeError",
                             format!("proxy must report the same setter for the non-configurable property '{key}'"),
@@ -953,13 +953,13 @@ fn proxy_define_property(
                             (None, None) => true,
                             (Some(x), None) | (None, Some(x)) => matches!(x, Value::Undefined),
                         };
-                        if pd.get.is_some() && !same_fn(&pd.get, &p.get) {
+                        if pd.get.is_some() && !same_fn(&pd.get, &p.getter().cloned()) {
                             return Err(i.throw(
                                 "TypeError",
                                 format!("proxy must define the same getter for the non-configurable property '{key}'"),
                             ));
                         }
-                        if pd.set.is_some() && !same_fn(&pd.set, &p.set) {
+                        if pd.set.is_some() && !same_fn(&pd.set, &p.setter().cloned()) {
                             return Err(i.throw(
                                 "TypeError",
                                 format!("proxy must define the same setter for the non-configurable property '{key}'"),
@@ -1266,7 +1266,7 @@ fn reflect_ordinary_set(
         let own = obj.borrow().props.get(key).cloned();
         match own {
             Some(p) if p.accessor => {
-                return match p.set {
+                return match p.setter().cloned() {
                     Some(setter) if setter.is_callable() => {
                         ab(i.call(setter, receiver.clone(), &[value]))?;
                         Ok(true)
@@ -1420,7 +1420,7 @@ pub(crate) fn reflect_ordinary_get(
         let own = obj.borrow().props.get(key).cloned();
         match own {
             Some(p) if p.accessor => {
-                return match p.get {
+                return match p.getter().cloned() {
                     Some(g) if g.is_callable() => ab(i.call(g, receiver.clone(), &[])),
                     _ => Ok(Value::Undefined),
                 };
@@ -2238,15 +2238,7 @@ fn install_species(it: &Interp, ctor: &Gc) {
         let getter = it.make_native("get [Symbol.species]", 0, |_i, this, _| Ok(this));
         ctor.borrow_mut().props.insert(
             key,
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(getter)),
-                set: None,
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(Some(Value::Obj(getter)), None, false, true),
         );
     }
 }
@@ -3129,7 +3121,11 @@ fn install_object(it: &mut Interp) {
             } else if let Value::Obj(co) = &cur {
                 if let Some(p) = co.borrow().props.get(&key) {
                     if p.accessor {
-                        let f = if is_get { p.get.clone() } else { p.set.clone() };
+                        let f = if is_get {
+                            p.getter().cloned()
+                        } else {
+                            p.setter().cloned()
+                        };
                         return Ok(f.unwrap_or(Value::Undefined));
                     }
                     return Ok(Value::Undefined);
@@ -3256,15 +3252,12 @@ fn install_object(it: &mut Interp) {
         });
         op.borrow_mut().props.insert(
             "__proto__",
-            Property {
-                value: Value::Undefined,
-                get: Some(Value::Obj(getter)),
-                set: Some(Value::Obj(setter)),
-                accessor: true,
-                writable: false,
-                enumerable: false,
-                configurable: true,
-            },
+            Property::accessor_prop(
+                Some(Value::Obj(getter)),
+                Some(Value::Obj(setter)),
+                false,
+                true,
+            ),
         );
     }
 
@@ -3790,8 +3783,8 @@ fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool,
 fn descriptor_from_prop(i: &mut Interp, p: Property) -> Value {
     let d = i.new_object();
     if p.accessor {
-        set_data(&d, "get", p.get.unwrap_or(Value::Undefined));
-        set_data(&d, "set", p.set.unwrap_or(Value::Undefined));
+        set_data(&d, "get", p.getter().cloned().unwrap_or(Value::Undefined));
+        set_data(&d, "set", p.setter().cloned().unwrap_or(Value::Undefined));
     } else {
         set_data(&d, "value", p.value);
         set_data(&d, "writable", Value::Bool(p.writable));
@@ -3814,25 +3807,19 @@ struct PartialDesc {
 /// CompletePropertyDescriptor: fill in default attributes for a partial descriptor.
 fn complete_descriptor(pd: PartialDesc) -> Property {
     if pd.is_accessor() {
-        Property {
-            value: Value::Undefined,
-            get: Some(pd.get.unwrap_or(Value::Undefined)),
-            set: Some(pd.set.unwrap_or(Value::Undefined)),
-            accessor: true,
-            writable: false,
-            enumerable: pd.enumerable.unwrap_or(false),
-            configurable: pd.configurable.unwrap_or(false),
-        }
+        Property::accessor_prop(
+            Some(pd.get.unwrap_or(Value::Undefined)),
+            Some(pd.set.unwrap_or(Value::Undefined)),
+            pd.enumerable.unwrap_or(false),
+            pd.configurable.unwrap_or(false),
+        )
     } else {
-        Property {
-            value: pd.value.unwrap_or(Value::Undefined),
-            get: None,
-            set: None,
-            accessor: false,
-            writable: pd.writable.unwrap_or(false),
-            enumerable: pd.enumerable.unwrap_or(false),
-            configurable: pd.configurable.unwrap_or(false),
-        }
+        Property::data(
+            pd.value.unwrap_or(Value::Undefined),
+            pd.writable.unwrap_or(false),
+            pd.enumerable.unwrap_or(false),
+            pd.configurable.unwrap_or(false),
+        )
     }
 }
 impl PartialDesc {
@@ -4078,25 +4065,19 @@ fn define_own_property_ordinary(
                 return Ok(false);
             }
             let prop = if d.is_accessor() {
-                Property {
-                    value: Value::Undefined,
-                    get: opt_norm(d.get),
-                    set: opt_norm(d.set),
-                    accessor: true,
-                    writable: false,
-                    enumerable: d.enumerable.unwrap_or(false),
-                    configurable: d.configurable.unwrap_or(false),
-                }
+                Property::accessor_prop(
+                    opt_norm(d.get),
+                    opt_norm(d.set),
+                    d.enumerable.unwrap_or(false),
+                    d.configurable.unwrap_or(false),
+                )
             } else {
-                Property {
-                    value: d.value.unwrap_or(Value::Undefined),
-                    get: None,
-                    set: None,
-                    accessor: false,
-                    writable: d.writable.unwrap_or(false),
-                    enumerable: d.enumerable.unwrap_or(false),
-                    configurable: d.configurable.unwrap_or(false),
-                }
+                Property::data(
+                    d.value.unwrap_or(Value::Undefined),
+                    d.writable.unwrap_or(false),
+                    d.enumerable.unwrap_or(false),
+                    d.configurable.unwrap_or(false),
+                )
             };
             o.borrow_mut().props.insert(key, prop);
             grow_array_length(i, o, array_index);
@@ -4119,12 +4100,12 @@ fn define_own_property_ordinary(
         }
         if cur.accessor {
             if let Some(g) = &d.get {
-                if !same_value(g, cur.get.as_ref().unwrap_or(&Value::Undefined)) {
+                if !same_value(g, cur.getter().unwrap_or(&Value::Undefined)) {
                     return Ok(false);
                 }
             }
             if let Some(s) = &d.set {
-                if !same_value(s, cur.set.as_ref().unwrap_or(&Value::Undefined)) {
+                if !same_value(s, cur.setter().unwrap_or(&Value::Undefined)) {
                     return Ok(false);
                 }
             }
@@ -4145,15 +4126,14 @@ fn define_own_property_ordinary(
         cur.value = Value::Undefined;
         cur.writable = false;
         if let Some(g) = d.get {
-            cur.get = opt_norm(Some(g));
+            cur.set_getter(opt_norm(Some(g)));
         }
         if let Some(s) = d.set {
-            cur.set = opt_norm(Some(s));
+            cur.set_setter(opt_norm(Some(s)));
         }
     } else if d.is_data() || !cur.accessor {
         if cur.accessor {
-            cur.get = None;
-            cur.set = None;
+            cur.clear_accessors();
             cur.accessor = false;
             cur.value = Value::Undefined;
             cur.writable = false;
@@ -4335,6 +4315,7 @@ fn same_value(a: &Value, b: &Value) -> bool {
 
 fn install_array(it: &mut Interp) {
     let ap = it.array_proto.clone();
+    ap.borrow().props.mark_array();
     ap.borrow_mut().exotic = Exotic::Array;
     ap.borrow_mut().props.insert(
         "length",
@@ -4373,6 +4354,47 @@ fn install_array(it: &mut Interp) {
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
+        // Dense fast path: a plain array whose `length` is a writable own data property and
+        // whose tail is exactly the dense frontier appends in place — no key strings, no
+        // existence scans, no observable coercions (a whole-number own `length` needs none).
+        if matches!(o.borrow().exotic, Exotic::Array)
+            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+            && i.array_append_unshadowed(&o)
+        {
+            let mut b = o.borrow_mut();
+            let len = match b.props.length_property() {
+                Some(p) if !p.accessor && p.writable => match p.value {
+                    Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
+                        Some(n as u32)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(mut len) = len {
+                if (len as u64 + args.len() as u64) <= u32::MAX as u64 {
+                    let mut ok = true;
+                    for a in args {
+                        if b.props.append_element(len, Property::plain(a.clone())) {
+                            len += 1;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    // Sync length up to what actually landed (partial success still moved it).
+                    if !matches!(b.props.length_property().map(|p| &p.value),
+                                 Some(Value::Num(n)) if *n == len as f64)
+                    {
+                        let s = b.props.slot_of("length").unwrap();
+                        b.props.entry_at_mut(s).unwrap().1.value = Value::Num(len as f64);
+                    }
+                    if ok {
+                        return Ok(Value::Num(len as f64));
+                    }
+                }
+            }
+        }
         let ov = Value::Obj(o.clone());
         // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
         // engine's materialization cap).
@@ -4391,6 +4413,30 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
+        // Dense fast path (mirror of push's): take the last element straight off the entries
+        // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
+        // inline caches survive a pop (stack-discipline arrays live on push/pop).
+        if matches!(o.borrow().exotic, Exotic::Array)
+            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+        {
+            let mut b = o.borrow_mut();
+            let len = match b.props.length_property() {
+                Some(p) if !p.accessor && p.writable => match p.value {
+                    Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
+                        Some(n as u32)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(len) = len {
+                if let Some(v) = b.props.pop_last_element(len - 1) {
+                    let s = b.props.slot_of("length").unwrap();
+                    b.props.entry_at_mut(s).unwrap().1.value = Value::Num((len - 1) as f64);
+                    return Ok(v);
+                }
+            }
+        }
         let ov = Value::Obj(o.clone());
         // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
         let len = ab(i.to_length(&o))?;
@@ -5959,14 +6005,8 @@ fn install_iterator(it: &mut Interp) {
             let key = to_string_tag_key(i).unwrap_or_default();
             iterator_proto_weird_set(i, this, arg(a, 0), &key)
         });
-        let acc = |get: Gc, set: Gc| Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(get)),
-            set: Some(Value::Obj(set)),
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
+        let acc = |get: Gc, set: Gc| {
+            Property::accessor_prop(Some(Value::Obj(get)), Some(Value::Obj(set)), false, true)
         };
         proto
             .borrow_mut()

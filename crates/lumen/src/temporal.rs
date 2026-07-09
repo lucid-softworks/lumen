@@ -176,15 +176,7 @@ fn def_getter(it: &Interp, proto: &Gc, name: &str, f: NativeFn) {
     let g = it.make_native(name, 0, f);
     proto.borrow_mut().props.insert(
         name,
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(g)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(g)), None, false, true),
     );
 }
 fn month_code(m: u8) -> String {

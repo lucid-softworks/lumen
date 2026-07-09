@@ -78,6 +78,10 @@ pub struct JitLayout {
     pub vec_len_off: usize,
     /// The `elems` dense-element `Vec<u32>` within `Props`.
     pub props_elems: usize,
+    /// The `mirror` raw-f64 element `Vec` within `Props` (see [`Props::mirror`]).
+    pub props_mirror: usize,
+    /// The `mirror_flags` byte within `Props`.
+    pub props_mirror_flags: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
     pub entry_size: usize,
     /// `Value` within an entry `(Rc<str>, Property)`.
@@ -98,12 +102,39 @@ pub struct JitLayout {
     pub binding_value: usize,
     /// `initialized` bool within a `Binding` (TDZ check).
     pub binding_init: usize,
+    /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
+    pub entry_key: usize,
+    /// The length word within an `Rc<str>` fat pointer (0 or 8 — layout is unstable).
+    pub str_len_word: usize,
+    /// The pointer word within an `Rc<str>` fat pointer (the other one).
+    pub str_ptr_word: usize,
+    /// Stored `Rc<str>` pointer word → the first byte of the string data (the RcBox header).
+    pub str_data_off: usize,
+    /// Whether the four fields above probed successfully (key-checked array-holder entries can
+    /// inline their key compare only when they did).
+    pub key_probe_ok: bool,
     pub valid: bool,
 }
 
 /// Measure [`JitLayout`] against the live types, probing the non-guaranteed std layouts.
 pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     use std::mem::offset_of;
+    // Rc<str> fat-pointer probe (word order and RcBox data offset are not std-guaranteed): a
+    // known 8-byte string tells us which word holds the length; the data pointer is the other,
+    // and `as_ptr` minus the stored word gives the RcBox header size. Fails closed.
+    let (str_len_word, str_ptr_word, str_data_off, key_probe_ok) = {
+        let probe: Rc<str> = "probe_8B".into();
+        let words: [usize; 2] =
+            unsafe { std::mem::transmute_copy::<Rc<str>, [usize; 2]>(&probe) };
+        let data = probe.as_ptr() as usize;
+        if words[0] == 8 && words[1] != 8 && data > words[1] && data - words[1] < 256 {
+            (0usize, 8usize, data - words[1], true)
+        } else if words[1] == 8 && words[0] != 8 && data > words[0] && data - words[0] < 256 {
+            (8usize, 0usize, data - words[0], true)
+        } else {
+            (0, 0, 0, false)
+        }
+    };
     let as_ptr = Rc::as_ptr(sample) as usize; // → the RefCell<Object> (RcBox value field)
     let obj_addr = &*sample.borrow() as *const Object as usize;
     let refcell_value = obj_addr - as_ptr;
@@ -119,16 +150,21 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let rcbox_data = as_ptr - stored; // RcBox header (strong+weak) before the value
     let obj_from_rc = rcbox_data + refcell_value; // stored ptr → Object
     let rc_strong_off = 0usize; // strong count is the RcBox's first field
-    // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
-    let strong_ok = unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
+                                // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
+    let strong_ok =
+        unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
 
     // Vec data-pointer and length words (RawVec layout is not guaranteed — locate them by value).
     // Capacity 3 / length 1 makes the three words distinguishable.
     let mut v: Vec<(Rc<str>, Property)> = Vec::with_capacity(3);
     v.push((Rc::from("p"), Property::plain(Value::Num(0.0))));
     let vptr = v.as_ptr() as usize;
-    let vwords =
-        unsafe { std::slice::from_raw_parts(&v as *const Vec<_> as *const usize, std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8) };
+    let vwords = unsafe {
+        std::slice::from_raw_parts(
+            &v as *const Vec<_> as *const usize,
+            std::mem::size_of::<Vec<(Rc<str>, Property)>>() / 8,
+        )
+    };
     let vec_ptr_off = vwords.iter().position(|&w| w == vptr).map(|i| i * 8);
     let vec_len_off = vwords.iter().position(|&w| w == 1).map(|i| i * 8);
     // The element templates index a `Vec<u32>` (`Props::elems`) with the same offsets; verify the
@@ -137,7 +173,10 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     v32.push(7);
     let v32ptr = v32.as_ptr() as usize;
     let v32words = unsafe {
-        std::slice::from_raw_parts(&v32 as *const Vec<u32> as *const usize, std::mem::size_of::<Vec<u32>>() / 8)
+        std::slice::from_raw_parts(
+            &v32 as *const Vec<u32> as *const usize,
+            std::mem::size_of::<Vec<u32>>() / 8,
+        )
     };
     let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
         && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
@@ -162,8 +201,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let binding_value = offset_of!(crate::interpreter::Binding, value);
     let binding_init = offset_of!(crate::interpreter::Binding, initialized);
 
-    let valid =
-        strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
+    let valid = strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
     JitLayout {
         obj_from_rc,
         rc_strong_off,
@@ -176,7 +214,14 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         vec_ptr_off: vec_ptr_off.unwrap_or(0),
         vec_len_off: vec_len_off.unwrap_or(0),
         props_elems: offset_of!(Props, elems),
+        props_mirror: offset_of!(Props, mirror),
+        props_mirror_flags: offset_of!(Props, mirror_flags),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
+        entry_key: offset_of!((Rc<str>, Property), 0),
+        str_len_word,
+        str_ptr_word,
+        str_data_off,
+        key_probe_ok,
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, accessor),
         entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, writable),
@@ -520,16 +565,26 @@ pub enum TaIndex {
     Ordinary,
 }
 
-/// A property descriptor. A data property uses `value`/`writable`; an accessor uses `get`/`set`.
+/// A property descriptor. A data property uses `value`/`writable`; an accessor uses the boxed
+/// getter/setter pair. Data properties vastly outnumber accessors, so the pair lives behind one
+/// pointer: Property is 40 bytes instead of 80, and a `Props` entry 56 instead of 96 — the
+/// entries array the interpreter chases on every IC hit holds nearly twice the properties per
+/// cache line.
 #[derive(Clone)]
 pub struct Property {
     pub value: Value,
-    pub get: Option<Value>,
-    pub set: Option<Value>,
+    acc: Option<Box<Accessors>>,
     pub accessor: bool,
     pub writable: bool,
     pub enumerable: bool,
     pub configurable: bool,
+}
+
+/// The boxed getter/setter pair of an accessor property.
+#[derive(Clone, Default)]
+pub(crate) struct Accessors {
+    pub get: Option<Value>,
+    pub set: Option<Value>,
 }
 
 impl Property {
@@ -541,13 +596,64 @@ impl Property {
     ) -> Property {
         Property {
             value,
-            get: None,
-            set: None,
+            acc: None,
             accessor: false,
             writable,
             enumerable,
             configurable,
         }
+    }
+    /// An accessor property (`accessor: true`, value `Undefined`, not writable).
+    pub(crate) fn accessor_prop(
+        get: Option<Value>,
+        set: Option<Value>,
+        enumerable: bool,
+        configurable: bool,
+    ) -> Property {
+        Property {
+            value: Value::Undefined,
+            acc: Some(Box::new(Accessors { get, set })),
+            accessor: true,
+            writable: false,
+            enumerable,
+            configurable,
+        }
+    }
+    #[inline]
+    pub(crate) fn getter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.get.as_ref())
+    }
+    #[inline]
+    pub(crate) fn setter(&self) -> Option<&Value> {
+        self.acc.as_ref().and_then(|a| a.set.as_ref())
+    }
+    pub(crate) fn set_getter(&mut self, g: Option<Value>) {
+        match (&mut self.acc, g) {
+            (Some(a), g) => a.get = g,
+            (acc @ None, Some(g)) => {
+                *acc = Some(Box::new(Accessors {
+                    get: Some(g),
+                    set: None,
+                }))
+            }
+            (None, None) => {}
+        }
+    }
+    pub(crate) fn set_setter(&mut self, s: Option<Value>) {
+        match (&mut self.acc, s) {
+            (Some(a), s) => a.set = s,
+            (acc @ None, Some(s)) => {
+                *acc = Some(Box::new(Accessors {
+                    get: None,
+                    set: Some(s),
+                }))
+            }
+            (None, None) => {}
+        }
+    }
+    /// Drop the accessor pair (used when a define converts an accessor back to a data property).
+    pub(crate) fn clear_accessors(&mut self) {
+        self.acc = None;
     }
     /// A default plain data property: writable, enumerable, configurable.
     pub(crate) fn plain(value: Value) -> Property {
@@ -581,6 +687,60 @@ pub struct Props {
     /// dense frontier lives only in `index` (see `note_inserted`). This is what makes `a[i]`
     /// O(1) without hashing or stringifying the index (see `get_index`).
     elems: Vec<u32>,
+    /// Raw-f64 read mirror of the dense elements. While `mirror_flags & MIRROR_OK`:
+    /// `mirror.len() == elems.len()`, and for every `n`: `mirror[n]` is [`MIRROR_HOLE`] exactly
+    /// when `elems[n]` names no element, else the element is a plain writable data property
+    /// whose value is `Num(mirror[n])`. Element reads become one indexed load (no entry chase,
+    /// no tag check), and `MIRROR_ALL_I32` lets the JIT's int loops skip the exactness guard
+    /// entirely. Entries stay authoritative: fast writers dual-store through
+    /// [`Props::set_index_value`]; any foreign `&mut` escape (`get_index_mut`, `get_mut` /
+    /// `entry_at_mut` on an index key) invalidates the mirror instead of tracking it.
+    mirror: Vec<f64>,
+    /// [`MIRROR_OK`] | [`MIRROR_ALL_I32`] | [`MIRROR_NO_HOLES`].
+    mirror_flags: u8,
+    /// Live hole count in `mirror` (descending array fills pad with holes and then fill them:
+    /// `MIRROR_NO_HOLES` comes back when this returns to zero).
+    mirror_holes: u32,
+    /// Some canonical-index key lives ONLY in the string-keyed map (inserted too far past the
+    /// dense frontier — see `note_inserted`): `elems` coverage is no longer proof of element
+    /// absence, so the dense append/pop fast paths stand down. One-way (sparse arrays are rare
+    /// and stay sparse).
+    has_far: std::cell::Cell<bool>,
+    /// This `Props` belongs to an `Exotic::Array` object: canonical-index key inserts skip the
+    /// shape transition. Array shapes encode the *named*-key sequence only (matching
+    /// `push_dense`, which never transitioned) — the get-IC only ever uses an array's shape to
+    /// prove a named key's ABSENCE or with a per-hit key re-check, never for bare slot trust,
+    /// so elements must not churn it: a stable shape is what lets `arr.push(..)`/`arr.length`
+    /// sites cache at all.
+    elem_mode: std::cell::Cell<bool>,
+    /// The `entries` slot of the `"prototype"` key, or `NO_SLOT` — same memo discipline as
+    /// `len_slot`. Every `new` reads the constructor's `.prototype`; function objects are
+    /// ordinary maps, so this skips the scan on the construct hot path.
+    proto_slot: std::cell::Cell<u32>,
+    /// The `entries` slot of the `"length"` key, or `NO_SLOT`. Array `length` can't live in the
+    /// inline caches (element entries occupy slots without transitioning the shape, so a shape
+    /// match doesn't pin the slot) — this memo makes the every-time re-derive a direct slot read
+    /// instead of a hashed key lookup. Maintained by `insert`; any slot-shifting removal resets
+    /// it (`remove` re-memoizes on the next lookup via `length_slot`).
+    len_slot: std::cell::Cell<u32>,
+}
+
+/// See [`Props::mirror`]. Bit values are chosen so the masks the JIT tests (`OK|NO_HOLES` and
+/// `OK|NO_HOLES|ALL_I32`) are contiguous — encodable ARM64 logical immediates.
+pub(crate) const MIRROR_OK: u8 = 1;
+pub(crate) const MIRROR_NO_HOLES: u8 = 2;
+/// Every non-hole mirror value is an exact i32 (bit-identical through an i32 round trip, which
+/// also excludes -0.0).
+pub(crate) const MIRROR_ALL_I32: u8 = 4;
+/// The mirror's hole sentinel: a quiet-NaN payload no arithmetic produces. A user CAN craft
+/// this exact bit pattern (typed-array punning), so the write paths refuse to mirror it — it is
+/// never stored as data, which is what makes reading it back as "absent" sound.
+pub(crate) const MIRROR_HOLE: u64 = 0x7FF8_DEAD_0000_0001;
+
+/// Exact-i32 (and not -0.0): the value survives an i32 round trip bit-identically.
+#[inline]
+pub(crate) fn f64_exact_i32(f: f64) -> bool {
+    (f as i32 as f64).to_bits() == f.to_bits()
 }
 
 /// `elems` hole marker (also caps how many entries dense slots can address).
@@ -726,8 +886,35 @@ impl Props {
             index: Default::default(),
             shape: SHAPE_EMPTY,
             elems: Vec::new(),
+            mirror: Vec::new(),
+            mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,
+            mirror_holes: 0,
             proto_flag: std::cell::Cell::new(false),
+            has_far: std::cell::Cell::new(false),
+            elem_mode: std::cell::Cell::new(false),
+            proto_slot: std::cell::Cell::new(NO_SLOT),
+            len_slot: std::cell::Cell::new(NO_SLOT),
         }
+    }
+
+    /// Mark this map as an array's (see `elem_mode`). One-way, set when the owning object
+    /// becomes `Exotic::Array`.
+    #[inline]
+    pub(crate) fn mark_array(&self) {
+        self.elem_mode.set(true);
+    }
+
+    /// The `"length"` property, resolved through the `len_slot` memo (one compare, no hashing).
+    /// `None` when there is no own `length`.
+    pub(crate) fn length_property(&self) -> Option<&Property> {
+        let s = self.len_slot.get();
+        if s != NO_SLOT {
+            debug_assert!(matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "length"));
+            return self.entries.get(s as usize).map(|(_, p)| p);
+        }
+        let slot = self.find("length")?;
+        self.len_slot.set(slot as u32);
+        Some(&self.entries[slot].1)
     }
 
     /// Mark this object as a live prototype (see `proto_flag`).
@@ -765,11 +952,131 @@ impl Props {
     /// Mutable [`get_index`].
     #[inline]
     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+        // A raw &mut escape can rewrite the value behind the mirror's back.
+        self.mirror_invalidate();
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
         }
         Some(&mut self.entries[slot as usize].1)
+    }
+
+    /// Drop the element mirror (a foreign mutable escape or an unmirrorable element).
+    #[inline]
+    pub(crate) fn mirror_invalidate(&mut self) {
+        if self.mirror_flags & MIRROR_OK != 0 {
+            self.mirror_flags = 0;
+            self.mirror = Vec::new();
+        }
+    }
+
+    /// Re-mirror element `n` from `entries[slot]` (both already linked via `elems`).
+    /// `filled_hole` = position `n` had no element before this (structural — a *data* value
+    /// that happens to equal the hole sentinel must not confuse the accounting).
+    fn mirror_sync(&mut self, n: usize, slot: usize, filled_hole: bool) {
+        if self.mirror_flags & MIRROR_OK == 0 {
+            return;
+        }
+        if self.mirror.len() != self.elems.len() {
+            // Lockstep was broken by a path this code doesn't know — fail safe.
+            self.mirror_invalidate();
+            return;
+        }
+        let p = &self.entries[slot].1;
+        match &p.value {
+            Value::Num(f) if !p.accessor && p.writable && f.to_bits() != MIRROR_HOLE => {
+                let f = *f;
+                if !f64_exact_i32(f) {
+                    self.mirror_flags &= !MIRROR_ALL_I32;
+                }
+                if filled_hole {
+                    self.mirror_holes -= 1;
+                    if self.mirror_holes == 0 {
+                        self.mirror_flags |= MIRROR_NO_HOLES;
+                    }
+                }
+                self.mirror[n] = f;
+            }
+            _ => self.mirror_invalidate(),
+        }
+    }
+
+    /// Grow the mirror alongside `elems` with `pads` holes plus one freshly-linked element.
+    fn mirror_grow(&mut self, pads: usize, slot: usize) {
+        if self.mirror_flags & MIRROR_OK == 0 {
+            return;
+        }
+        // Peek the value first: an object-element array (its very first push, typically) must
+        // not pay a buffer allocation just to invalidate it.
+        {
+            let p = &self.entries[slot].1;
+            let ok = matches!(&p.value, Value::Num(f) if f.to_bits() != MIRROR_HOLE)
+                && !p.accessor
+                && p.writable;
+            if !ok {
+                self.mirror_invalidate();
+                return;
+            }
+        }
+        if pads > 0 {
+            self.mirror_flags &= !MIRROR_NO_HOLES;
+            self.mirror_holes += pads as u32;
+            self.mirror
+                .extend(std::iter::repeat(f64::from_bits(MIRROR_HOLE)).take(pads));
+        }
+        self.mirror.push(0.0);
+        let n = self.mirror.len() - 1;
+        self.mirror_sync(n, slot, false); // freshly appended: never a pre-existing hole
+    }
+
+    /// One-load dense element read: `Some(f)` is the element's Num value; `None` means the
+    /// mirror can't answer (off, out of range, or a hole) — fall back to the classic path,
+    /// which is always correct.
+    #[inline]
+    pub(crate) fn mirror_get(&self, n: u32) -> Option<f64> {
+        if self.mirror_flags & MIRROR_OK == 0 {
+            return None;
+        }
+        let f = *self.mirror.get(n as usize)?;
+        if f.to_bits() == MIRROR_HOLE {
+            return None;
+        }
+        Some(f)
+    }
+
+    /// Overwrite dense element `n`'s value keeping the mirror coherent. `Err` hands the value
+    /// back: no such element, or it isn't a plain writable data property — the caller runs the
+    /// generic path.
+    #[inline]
+    pub(crate) fn set_index_value(&mut self, n: u32, v: Value) -> Result<(), Value> {
+        let Some(&slot) = self.elems.get(n as usize) else {
+            return Err(v);
+        };
+        if slot == NO_SLOT {
+            return Err(v);
+        }
+        let p = &mut self.entries[slot as usize].1;
+        if p.accessor || !p.writable {
+            return Err(v);
+        }
+        if self.mirror_flags & MIRROR_OK != 0 {
+            match &v {
+                Value::Num(f) if f.to_bits() != MIRROR_HOLE => {
+                    if !f64_exact_i32(*f) {
+                        self.mirror_flags &= !MIRROR_ALL_I32;
+                    }
+                    // Lockstep holds whenever the flag does; guard anyway.
+                    match self.mirror.get_mut(n as usize) {
+                        Some(m) => *m = *f,
+                        None => self.mirror_invalidate(),
+                    }
+                }
+                _ => self.mirror_invalidate(),
+            }
+        }
+        let p = &mut self.entries[slot as usize].1;
+        p.value = v;
+        Ok(())
     }
 
     /// Record a fresh entry at `slot` in the dense map when its key is a canonical index at (or
@@ -785,7 +1092,9 @@ impl Props {
         if let Some(n) = canonical_index(key) {
             let n = n as usize;
             if n < self.elems.len() {
+                let filled_hole = self.elems[n] == NO_SLOT;
                 self.elems[n] = slot as u32;
+                self.mirror_sync(n, slot, filled_hole);
             } else if n <= self.elems.len() + 256 {
                 // The pad tolerates *descending* first-fills (`while (--i >= 0) a[i] = 0`,
                 // `r[i+n] = x[i]` from the top — bignum/matrix code does this constantly): the
@@ -793,12 +1102,80 @@ impl Props {
                 // whole upper range map-only for the array's lifetime, killing every dense fast
                 // path. 256 covers real dense workloads; a truly sparse `a[1e6]` still stays
                 // map-only at ≤1KB of hole slots per object.
+                let pads = n - self.elems.len();
                 while self.elems.len() < n {
                     self.elems.push(NO_SLOT);
                 }
                 self.elems.push(slot as u32);
+                self.mirror_grow(pads, slot);
+            } else {
+                self.has_far.set(true);
             }
         }
+    }
+
+    /// Dense tail append: insert element `n` when `n` is exactly the dense frontier and no
+    /// map-only ("far") canonical key exists — which together prove the key is absent, so the
+    /// whole existence scan and key-string hashing of [`Props::insert`] can be skipped. Array
+    /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
+    /// the gates don't hold; the caller runs the generic path.
+    pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
+        if self.has_far.get() || !self.elem_mode.get() || n as usize != self.elems.len() {
+            return false;
+        }
+        self.note_structural();
+        let slot = self.entries.len();
+        let key = index_key(n as usize);
+        if !self.index.is_empty() {
+            self.index.insert(key.clone(), slot);
+        } else if slot + 1 > INDEX_THRESHOLD {
+            self.build_index();
+            self.index.insert(key.clone(), slot);
+        }
+        self.entries.push((key, prop));
+        self.elems.push(slot as u32);
+        self.mirror_grow(0, slot);
+        true
+    }
+
+    /// Dense tail pop: remove element `n` (the array's last) when it is also the last *entry*
+    /// (the common stack discipline — elements are appended last) and the last dense slot, and
+    /// no "far" canonical key exists. Everything is O(1) pops: no entry shift, no re-index, no
+    /// shape change (`elem_mode` maps keep their shape — element keys aren't part of it).
+    /// `Some(value)` = removed; `None` = gates failed, nothing changed, caller goes generic.
+    pub(crate) fn pop_last_element(&mut self, n: u32) -> Option<Value> {
+        if self.has_far.get() || !self.elem_mode.get() {
+            return None;
+        }
+        if n as usize + 1 != self.elems.len() {
+            return None;
+        }
+        let slot = self.elems[n as usize];
+        if slot == NO_SLOT || slot as usize + 1 != self.entries.len() {
+            return None;
+        }
+        let p = &self.entries[slot as usize].1;
+        if p.accessor || !p.configurable {
+            return None;
+        }
+        self.note_structural();
+        let (_, p) = self.entries.pop().unwrap();
+        self.elems.pop();
+        if !self.index.is_empty() {
+            self.index.remove(&index_key(n as usize));
+        }
+        if self.mirror_flags & MIRROR_OK != 0 {
+            debug_assert_eq!(self.mirror.len(), self.elems.len() + 1);
+            let m = self.mirror.pop();
+            if m.map(f64::to_bits) == Some(MIRROR_HOLE) {
+                // (Unreachable while the slot was live, but keep the accounting exact.)
+                self.mirror_holes -= 1;
+                if self.mirror_holes == 0 {
+                    self.mirror_flags |= MIRROR_NO_HOLES;
+                }
+            }
+        }
+        Some(p.value)
     }
     /// The entry slot for `key`. Small maps (≤ [`INDEX_THRESHOLD`] entries — most objects) have
     /// no hash index at all: lookup is a short linear scan and inserts never hash or rehash.
@@ -806,10 +1183,39 @@ impl Props {
     /// then on (an emptied-but-once-large map keeps using it).
     #[inline]
     fn find(&self, key: &str) -> Option<usize> {
-        if self.index.is_empty() {
-            return self.entries.iter().position(|(k, _)| &**k == key);
+        // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
+        // (every push/pop/length read; every `new`); their slots are memoized — answer without
+        // hashing or scanning.
+        if key == "length" {
+            let s = self.len_slot.get();
+            if s != NO_SLOT {
+                debug_assert!(
+                    matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "length")
+                );
+                return Some(s as usize);
+            }
+        } else if key == "prototype" {
+            let s = self.proto_slot.get();
+            if s != NO_SLOT {
+                debug_assert!(
+                    matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "prototype")
+                );
+                return Some(s as usize);
+            }
         }
-        self.index.get(key).copied()
+        let found = if self.index.is_empty() {
+            self.entries.iter().position(|(k, _)| &**k == key)
+        } else {
+            self.index.get(key).copied()
+        };
+        if let Some(s) = found {
+            if key == "length" {
+                self.len_slot.set(s as u32);
+            } else if key == "prototype" {
+                self.proto_slot.set(s as u32);
+            }
+        }
+        found
     }
     /// Build the hash index for every current entry (crossing the small-map threshold).
     fn build_index(&mut self) {
@@ -821,6 +1227,9 @@ impl Props {
         self.find(key).map(|i| &self.entries[i].1)
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
+        if key.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+            self.mirror_invalidate(); // could be an element (see `mirror`)
+        }
         match self.find(key) {
             Some(i) => Some(&mut self.entries[i].1),
             None => None,
@@ -844,6 +1253,13 @@ impl Props {
     /// Mutable [`entry_at`], for the property write inline cache.
     #[inline]
     pub(crate) fn entry_at_mut(&mut self, slot: usize) -> Option<&mut (Rc<str>, Property)> {
+        if self
+            .entries
+            .get(slot)
+            .is_some_and(|(k, _)| k.as_bytes().first().is_some_and(|b| b.is_ascii_digit()))
+        {
+            self.mirror_invalidate(); // could be an element (see `mirror`)
+        }
         self.entries.get_mut(slot)
     }
     /// Drop every property (used by the GC to break a garbage object's reference cycles).
@@ -852,6 +1268,11 @@ impl Props {
         self.entries.clear();
         self.index.clear();
         self.elems.clear();
+        self.mirror.clear();
+        self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
+        self.mirror_holes = 0;
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         self.shape = shape_fresh();
     }
     /// Append the next dense element while *building a fresh array in order* (element index ==
@@ -869,6 +1290,7 @@ impl Props {
         }
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
+        self.mirror_grow(0, slot);
     }
 
     /// Insert a key *known to be absent* (the caller shape-validated the map), landing on a
@@ -893,6 +1315,19 @@ impl Props {
         let key = key.into();
         if let Some(i) = self.find(&key) {
             self.entries[i].1 = prop;
+            if self.mirror_flags & MIRROR_OK != 0
+                && key.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+            {
+                match canonical_index(&key) {
+                    Some(n) if (n as usize) < self.mirror.len() => {
+                        // Replacing an existing entry: position n already had the element.
+                        self.mirror_sync(n as usize, i, false)
+                    }
+                    // A far/map-only index entry stays outside the mirror's range: fine.
+                    Some(_) => {}
+                    None => self.mirror_invalidate(), // "007"-style: not canonical, be safe
+                }
+            }
         } else {
             self.note_structural();
             let slot = self.entries.len();
@@ -903,7 +1338,15 @@ impl Props {
                 self.index.insert(key.clone(), slot);
             }
             // Extending the key sequence transitions to the (shared, memoized) child shape.
-            self.shape = shape_transition(self.shape, &key);
+            // Array element keys don't (see `elem_mode`): array shapes track named keys only.
+            if !(self.elem_mode.get() && canonical_index(&key).is_some()) {
+                self.shape = shape_transition(self.shape, &key);
+            }
+            if &*key == "length" {
+                self.len_slot.set(slot as u32);
+            } else if &*key == "prototype" {
+                self.proto_slot.set(slot as u32);
+            }
             self.entries.push((key, prop));
             self.note_inserted(slot);
         }
@@ -921,11 +1364,16 @@ impl Props {
         }
         self.note_structural();
         self.entries.retain(|(k, _)| keep(k));
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         self.index.clear();
         if self.entries.len() > INDEX_THRESHOLD {
             self.build_index();
         }
         self.elems.clear();
+        self.mirror.clear();
+        self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
+        self.mirror_holes = 0;
         for slot in 0..self.entries.len() {
             self.note_inserted(slot);
         }
@@ -939,12 +1387,31 @@ impl Props {
         };
         self.note_structural();
         self.entries.remove(i);
-        self.shape = shape_fresh(); // slots shifted — deopt (see remove_indices_from)
+        // Slots shifted — deopt to a fresh shape id (see remove_indices_from). Array maps skip
+        // this for ELEMENT keys: their shape tracks named keys only, and array entry slots are
+        // only ever trusted through key-checked ICs (IC_ARR_KEYCHK), which re-verify on hit.
+        if !(self.elem_mode.get() && canonical_index(key).is_some()) {
+            self.shape = shape_fresh();
+        }
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         if !self.index.is_empty() {
             self.index.remove(key);
             // Re-index everything after the removed slot.
             for (j, (k, _)) in self.entries.iter().enumerate().skip(i) {
                 self.index.insert(k.clone(), j);
+            }
+        }
+        if self.mirror_flags & MIRROR_OK != 0 {
+            match canonical_index(key) {
+                Some(n) if (n as usize) < self.mirror.len() => {
+                    if self.mirror[n as usize].to_bits() != MIRROR_HOLE {
+                        self.mirror[n as usize] = f64::from_bits(MIRROR_HOLE);
+                        self.mirror_flags &= !MIRROR_NO_HOLES;
+                        self.mirror_holes += 1;
+                    }
+                }
+                Some(_) | None => {}
             }
         }
         // Dense slots shift down past the removed entry; the removed key's own slot holes.
@@ -1096,4 +1563,3 @@ pub fn f64_to_f16(value: f64) -> u16 {
     }
     sign | h
 }
-

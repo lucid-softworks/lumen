@@ -146,15 +146,12 @@ pub(super) fn install_errors(it: &mut Interp) {
     });
     error_proto.borrow_mut().props.insert(
         "stack",
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(get_stack)),
-            set: Some(Value::Obj(set_stack)),
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(
+            Some(Value::Obj(get_stack)),
+            Some(Value::Obj(set_stack)),
+            false,
+            true,
+        ),
     );
     it.error_protos.insert("Error", error_proto.clone());
 
@@ -341,7 +338,11 @@ fn make_err(i: &mut Interp, kind: &str, args: &[Value]) -> Result<Value, Value> 
 /// InstallErrorCause: when `options` is an object with a `cause` property, copy it to a
 /// non-enumerable own `cause` data property. Both HasProperty and Get are observable (proxy traps)
 /// and propagate their throws.
-pub(super) fn install_error_cause(i: &mut Interp, err: &Value, options: Option<&Value>) -> Result<(), Value> {
+pub(super) fn install_error_cause(
+    i: &mut Interp,
+    err: &Value,
+    options: Option<&Value>,
+) -> Result<(), Value> {
     if let Some(opts @ Value::Obj(_)) = options {
         if ab(i.js_has_property(opts, "cause"))? {
             let cause = ab(i.get_member(opts, "cause"))?;

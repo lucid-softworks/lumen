@@ -227,9 +227,7 @@ pub fn concat(a: &str, b: &str) -> String {
 /// building the result allocation directly must take the slow [`concat`] path when this holds.
 pub fn needs_join_fixup(a: &str, b: &str) -> bool {
     match (a.chars().next_back(), b.chars().next()) {
-        (Some(last), Some(first)) => {
-            smuggled_high(last).is_some() && smuggled_low(first).is_some()
-        }
+        (Some(last), Some(first)) => smuggled_high(last).is_some() && smuggled_low(first).is_some(),
         _ => false,
     }
 }

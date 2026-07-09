@@ -15,8 +15,7 @@ use lumen::Engine;
 
 const FIB: &str = "(function fib(n){return n<2?n:fib(n-1)+fib(n-2)})(28)";
 
-const ARITH_LOOP: &str =
-    "(()=>{let s=0;for(let i=0;i<100000;i++){s+=i*2-1;s^=i&7;}return s})()";
+const ARITH_LOOP: &str = "(()=>{let s=0;for(let i=0;i<100000;i++){s+=i*2-1;s^=i&7;}return s})()";
 
 const ARRAY_OPS: &str = "(()=>{\
     let a=[];for(let i=0;i<10000;i++)a.push(i*3);\

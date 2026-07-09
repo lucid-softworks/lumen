@@ -480,7 +480,12 @@ fn canonicalize_map_key(k: Value) -> Value {
 }
 
 /// Map and Set share almost everything; `is_set` flips key/value handling and method names.
-pub(super) fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
+pub(super) fn install_map_like(
+    it: &mut Interp,
+    name: &'static str,
+    is_set: bool,
+    ctor_fn: NativeFn,
+) {
     let proto = Object::new(Some(it.object_proto.clone()));
     it.extra_protos.insert(name, proto.clone());
 
@@ -650,15 +655,7 @@ pub(super) fn install_map_like(it: &mut Interp, name: &'static str, is_set: bool
     let size_getter = it.make_native("get size", 0, if is_set { set_size } else { map_size });
     proto.borrow_mut().props.insert(
         "size",
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(size_getter)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(size_getter)), None, false, true),
     );
     // @@iterator: Set -> values, Map -> entries.
     if let Some(sym) = it.iterator_sym.clone() {

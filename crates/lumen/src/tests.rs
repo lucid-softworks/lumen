@@ -9689,3 +9689,252 @@ fn import_json_attr_distinct_from_plain_import() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Loop-spanning JIT chains (aarch64-macos): fully-chainable loops keep locals in registers
+// across the back edge. These pin the guard/bail/flush semantics on the machine-code tier;
+// elsewhere they still pass (the plain tiers run the same programs).
+// ---------------------------------------------------------------------------------------------
+
+fn run_jit(src: &str) -> String {
+    let mut e = Engine::new();
+    e.set_tier(crate::bytecode::Tier::Jit);
+    e.set_tier_threshold(0);
+    match e.eval(src, false).expect("parse") {
+        Completion::Value(v) => v,
+        Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+    }
+}
+
+#[test]
+fn loop_chain_int_kernel() {
+    // bignum-style inner loop: elem reads/writes, masks, shifts, int mul/add chains.
+    assert_eq!(
+        run_jit(
+            "function kern(src, dst, x, n) {
+               var xl = x & 0x3fff, xh = x >> 14, i = 0, j = 0, c = 0;
+               while (--n >= 0) {
+                 var l = src[i] & 0x3fff;
+                 var h = src[i++] >> 14;
+                 var m = xh * l + h * xl;
+                 l = xl * l + ((m & 0x3fff) << 14) + dst[j] + c;
+                 c = (l >> 28) + (m >> 14) + xh * h;
+                 dst[j++] = l & 0xfffffff;
+               }
+               return c;
+             }
+             var a = [], b = [];
+             for (var k = 0; k < 40; k++) { a[k] = (k * 2654435 + 7) & 0xfffffff; b[k] = 0; }
+             var c = 0;
+             for (var r = 0; r < 30; r++) c = kern(a, b, 123456789 & 0xfffffff, 40);
+             c + ':' + b[7] + ':' + b[39]"
+        ),
+        "47611497:91409489:39701699"
+    );
+}
+
+#[test]
+fn loop_chain_zero_trip_and_bails() {
+    // Zero-trip: virgin locals keep their pre-loop values (nothing sanitized or flushed).
+    assert_eq!(
+        run_jit(
+            "function f(n) {
+               var s = 'keep';
+               var arr = [1, 2, 3];
+               var i = 0, t = 0;
+               while (--n >= 0) { t = arr[i] & 3; i++; s = 1; }
+               return s + ':' + t + ':' + i;
+             }
+             f(5); f(0) + '|' + f(-3) + '|' + f(2)"
+        ),
+        "keep:0:0|keep:0:0|1:2:2"
+    );
+    // A hole bails mid-iteration; the plain templates finish with identical state.
+    assert_eq!(
+        run_jit(
+            "function f(arr, n) {
+               var s = 0, i = 0;
+               while (--n >= 0) { s = s + (arr[i] & 0xff); i++; }
+               return s;
+             }
+             var good = [1, 2, 3, 4, 5, 6, 7, 8];
+             for (var r = 0; r < 40; r++) f(good, 8);
+             var holey = [1, 2, , 4, 5];
+             f(holey, 5) + ':' + f(good, 8) + ':' + f([1.5, 2, 3.25, 4], 4)"
+        ),
+        "12:36:10"
+    );
+}
+
+#[test]
+fn loop_chain_counter_edges() {
+    // i32 overflow in a ++ counter bails to the plain loop and stays exact.
+    assert_eq!(
+        run_jit(
+            "function f(i, n) {
+               var s = 0;
+               while (--n >= 0) { s = (s + i) % 97; i = i + 1; }
+               return s + ':' + i;
+             }
+             for (var r = 0; r < 40; r++) f(5, 10);
+             f(2147483640, 20)"
+        ),
+        "89:2147483660"
+    );
+    // Walking past 2^53 must stick like f64 (the plain tier's semantics), not keep counting.
+    assert_eq!(
+        run_jit(
+            "function f(i, n) {
+               var last = 0;
+               while (--n >= 0) { i = i + 1; last = i; }
+               return last;
+             }
+             for (var r = 0; r < 40; r++) f(3, 10);
+             f(9007199254740989, 6)"
+        ),
+        "9007199254740992"
+    );
+}
+
+#[test]
+fn loop_chain_float_loops_stay_float() {
+    // A float kernel must not be sent through int entry guards (it would bail every entry).
+    assert_eq!(
+        run_jit(
+            "function f(arr, n) {
+               var s = 0.0, i = 0;
+               while (--n >= 0) { s = s + arr[i] * 1.5; i++; }
+               return s;
+             }
+             var a = [0.5, 1.25, 2.75, 3.125, 4.0625];
+             for (var r = 0; r < 40; r++) f(a, 5);
+             f(a, 5)"
+        ),
+        "17.53125"
+    );
+}
+
+#[test]
+fn loop_chain_elem_dedup_and_aliasing() {
+    // src and dst are the same array: the element-read memo must not survive the write.
+    assert_eq!(
+        run_jit(
+            "function f(a, b, n) {
+               var i = 0, s = 0;
+               while (--n >= 0) { s = s + (a[i] & 0xff); b[i] = (a[i] & 0xf) + 1; s = s + (a[i] & 0xff); i++; }
+               return s;
+             }
+             var x = [10, 20, 30, 40, 50, 60];
+             for (var r = 0; r < 40; r++) { var y = [0,0,0,0,0,0]; f(x, y, 6); }
+             f(x, x, 6)"
+        ),
+        "266"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Speculative inlining: hot chunks recompile with monomorphic callees spliced inline behind an
+// identity guard (bytecode::plan_inlines). Drivers loop enough times to cross the recompile
+// trigger; every case must behave exactly like the generic call path.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn inline_deopt_on_method_reassignment() {
+    assert_eq!(
+        run_jit(
+            "function A() {}
+             A.prototype.m = function (x) { return x + 1; };
+             var a = new A();
+             function driver(a, i) { return a.m(i); }
+             var s = 0;
+             for (var i = 0; i < 500; i++) s += driver(a, i);
+             A.prototype.m = function (x) { return x * 1000; };
+             for (var i = 0; i < 10; i++) s += driver(a, i);
+             s"
+        ),
+        "170250"
+    );
+}
+
+#[test]
+fn inline_vars_reset_per_invocation() {
+    assert_eq!(
+        run_jit(
+            "function acc(n) {
+               var t;
+               if (n > 0) t = n;
+               return typeof t;
+             }
+             var o = { acc: acc };
+             function driver(o, n) { return o.acc(n); }
+             for (var i = 0; i < 300; i++) driver(o, 1);
+             driver(o, 1) + ':' + driver(o, 0)"
+        ),
+        "number:undefined"
+    );
+}
+
+#[test]
+fn inline_argc_adjustment_and_returns() {
+    assert_eq!(
+        run_jit(
+            "function f(a, b, c) { return '' + a + b + c; }
+             var o = { f: f };
+             function d2(o) { return o.f(1, 2); }
+             function d5(o) { return o.f(1, 2, 3, 4, 5); }
+             for (var i = 0; i < 300; i++) { d2(o); d5(o); }
+             d2(o) + '|' + d5(o)"
+        ),
+        "12undefined|123"
+    );
+    assert_eq!(
+        run_jit(
+            "function find(arr, x) {
+               for (var i = 0; i < arr.length; i++) {
+                 if (arr[i] === x) return i;
+               }
+               return -1;
+             }
+             var o = { find: find };
+             var arr = [3, 1, 4, 1, 5, 9, 2, 6];
+             function driver(o, x) { return o.find(arr, x); }
+             var s = 0;
+             for (var i = 0; i < 400; i++) s += driver(o, i & 7);
+             s + ':' + driver(o, 9) + ':' + driver(o, 42)"
+        ),
+        "900:5:-1"
+    );
+}
+
+#[test]
+fn inline_sloppy_this_primitive_receiver_deopts() {
+    assert_eq!(
+        run_jit(
+            "function who() { return typeof this; }
+             Number.prototype.who = who;
+             function driver(o) { return o.who(); }
+             var obj = { who: who };
+             for (var i = 0; i < 300; i++) driver(obj);
+             driver(obj) + ':' + driver(5)"
+        ),
+        "object:object"
+    );
+}
+
+#[test]
+fn inline_throw_from_spliced_body() {
+    assert_eq!(
+        run_jit(
+            "function pick(arr, i) { return arr[i].x; }
+             var o = { pick: pick };
+             var arr = [{ x: 1 }, { x: 2 }];
+             function driver(o, i) { return o.pick(arr, i); }
+             var s = 0;
+             for (var i = 0; i < 300; i++) s += driver(o, i & 1);
+             var caught = '';
+             try { driver(o, 7); } catch (e) { caught = e instanceof TypeError; }
+             s + ':' + caught"
+        ),
+        "450:true"
+    );
+}

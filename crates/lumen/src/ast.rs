@@ -419,6 +419,10 @@ pub struct Function {
     /// (`None` = uses constructs outside the bytecode subset; runs in the tree-walker forever).
     pub calls: std::cell::Cell<u32>,
     pub code: std::cell::OnceCell<Option<Rc<crate::bytecode::Chunk>>>,
+    /// Second-stage compile: the body re-compiled with hot monomorphic callees inlined (see
+    /// `bytecode::plan_inlines`). Preferred over `code` wherever a chunk is fetched; `code`
+    /// stays alive because filled call ICs hold raw pointers into it.
+    pub code2: std::cell::OnceCell<Option<Rc<crate::bytecode::Chunk>>>,
 }
 
 /// One pre-scanned hoisting action for a statement list, replayed against a scope at function

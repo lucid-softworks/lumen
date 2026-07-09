@@ -255,15 +255,7 @@ pub(super) fn install_disposable_stack(it: &mut Interp) {
     });
     proto.borrow_mut().props.insert(
         "disposed",
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(disposed_getter)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(disposed_getter)), None, false, true),
     );
     if let Some(key) = well_known_key(it, "dispose") {
         let dispose = proto.borrow().props.get("dispose").map(|p| p.value.clone());
@@ -410,15 +402,7 @@ pub(super) fn install_async_disposable_stack(it: &mut Interp) {
     });
     proto.borrow_mut().props.insert(
         "disposed",
-        Property {
-            value: Value::Undefined,
-            get: Some(Value::Obj(disposed_getter)),
-            set: None,
-            accessor: true,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
+        Property::accessor_prop(Some(Value::Obj(disposed_getter)), None, false, true),
     );
     if let Some(key) = well_known_key(it, "asyncDispose") {
         let d = proto

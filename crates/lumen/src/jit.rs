@@ -15,11 +15,16 @@
 //! Everything is `cfg`-gated to aarch64 + macOS; elsewhere `compile` returns `None` and the
 //! bytecode VM runs as before.
 
-#![cfg_attr(not(all(target_arch = "aarch64", target_os = "macos")), allow(dead_code))]
+#![cfg_attr(
+    not(all(target_arch = "aarch64", target_os = "macos")),
+    allow(dead_code)
+)]
 
 use std::rc::Rc;
 
-use crate::bytecode::{Chunk, UpdKind};
+use crate::bytecode::Chunk;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+use crate::bytecode::UpdKind;
 use crate::interpreter::{Abrupt, Env, Interp};
 use crate::value::Value;
 
@@ -55,6 +60,9 @@ pub struct JitCode {
     pc_offsets: Vec<u32>,
     /// Statically computed maximum operand-stack depth.
     pub max_stack: usize,
+    /// Whether any template reads `JitCtx::global_body` (free-name caches): frame setup skips
+    /// the realm-global borrow otherwise.
+    pub needs_global: bool,
 }
 
 impl Drop for JitCode {
@@ -124,6 +132,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_push_handler as *const () as usize,
         crate::bytecode::jit_pop_handler as *const () as usize,
         crate::bytecode::jit_unwind as *const () as usize,
+        crate::bytecode::jit_call as *const () as usize,
     ]
 }
 
@@ -134,7 +143,8 @@ pub const H_RETURN: usize = 2;
 pub const H_PUSH_HANDLER: usize = 3;
 pub const H_POP_HANDLER: usize = 4;
 pub const H_UNWIND: usize = 5;
-pub const N_HELPERS: usize = 6;
+pub const H_CALL: usize = 6;
+pub const N_HELPERS: usize = 7;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -225,6 +235,11 @@ mod asm {
         }
 
         /// movz xd, #imm16, lsl #(shift*16)
+        /// ldrh wt, [xn, #imm] (scaled, imm/2)
+        pub fn ldrh_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
+            debug_assert!(imm_bytes.is_multiple_of(2) && imm_bytes / 2 < 4096);
+            self.emit(0x7940_0000 | ((imm_bytes / 2) << 10) | (rn << 5) | rt);
+        }
         pub fn movz(&mut self, rd: u32, imm16: u32, shift: u32) {
             self.emit(0xD280_0000 | (shift << 21) | (imm16 << 5) | rd);
         }
@@ -423,6 +438,10 @@ mod asm {
         pub fn fcvtzs_x_d(&mut self, rd: u32, rn: u32) {
             self.emit(0x9E78_0000 | (rn << 5) | rd);
         }
+        /// fcvtzs wd, dn (float → signed 32-bit, round toward zero, saturating)
+        pub fn fcvtzs_w_d(&mut self, rd: u32, rn: u32) {
+            self.emit(0x1E78_0000 | (rn << 5) | rd);
+        }
         /// scvtf dd, xn (signed 64-bit → double, round to nearest)
         pub fn scvtf_d_x(&mut self, rd: u32, rn: u32) {
             self.emit(0x9E62_0000 | (rn << 5) | rd);
@@ -503,6 +522,67 @@ mod asm {
             debug_assert!(imm < 4096);
             self.emit(0xB100_001F | (imm << 10) | (rn << 5));
         }
+        /// fcmp dn, #0.0
+        pub fn fcmp_zero(&mut self, rn: u32) {
+            self.emit(0x1E60_2008 | (rn << 5));
+        }
+        /// sub xd, xn, xm
+        pub fn sub_reg(&mut self, rd: u32, rn: u32, rm: u32) {
+            self.emit(0xCB00_0000 | (rm << 16) | (rn << 5) | rd);
+        }
+        /// sxtw xd, wn (SBFM xd, xn, #0, #31)
+        pub fn sxtw(&mut self, rd: u32, rn: u32) {
+            self.emit(0x9340_7C00 | (rn << 5) | rd);
+        }
+        /// asr wd, wn, #shift (SBFM wd, wn, #shift, #31)
+        pub fn asr_imm_w(&mut self, rd: u32, rn: u32, shift: u32) {
+            debug_assert!(shift < 32);
+            self.emit(0x1300_7C00 | (shift << 16) | (rn << 5) | rd);
+        }
+        /// lsr wd, wn, #shift (UBFM wd, wn, #shift, #31)
+        pub fn lsr_imm_w(&mut self, rd: u32, rn: u32, shift: u32) {
+            debug_assert!(shift < 32);
+            self.emit(0x5300_7C00 | (shift << 16) | (rn << 5) | rd);
+        }
+        /// lsl wd, wn, #shift (UBFM wd, wn, #(32-shift)%32, #(31-shift))
+        pub fn lsl_imm_w(&mut self, rd: u32, rn: u32, shift: u32) {
+            debug_assert!(shift < 32);
+            let immr = (32 - shift) & 31;
+            let imms = 31 - shift;
+            self.emit(0x5300_0000 | (immr << 16) | (imms << 10) | (rn << 5) | rd);
+        }
+        /// and/orr/eor wd, wn, #imm (logical immediate; `field` from [`logical_imm_w`]) —
+        /// op: 0=and, 1=orr, 2=eor
+        pub fn logic_imm_w(&mut self, op: u32, rd: u32, rn: u32, field: u32) {
+            let bits = match op {
+                0 => 0x1200_0000u32,
+                1 => 0x3200_0000,
+                _ => 0x5200_0000,
+            };
+            self.emit(bits | (field << 10) | (rn << 5) | rd);
+        }
+        /// fmov xd, dn (bit move)
+        pub fn fmov_x_d(&mut self, rd: u32, rn: u32) {
+            self.emit(0x9E66_0000 | (rn << 5) | rd);
+        }
+        /// ldr dt, [xn, xm, lsl #3]
+        pub fn ldr_d_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0xFC60_7800 | (rm << 16) | (rn << 5) | rt);
+        }
+        /// str dt, [xn, xm, lsl #3]
+        pub fn str_d_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0xFC20_7800 | (rm << 16) | (rn << 5) | rt);
+        }
+        /// adds wd, wn, #imm12 (sets flags; V on i32 overflow)
+        pub fn adds_imm_w(&mut self, rd: u32, rn: u32, imm: u32) {
+            debug_assert!(imm < 4096);
+            self.emit(0x3100_0000 | (imm << 10) | (rn << 5) | rd);
+        }
+        /// subs wd, wn, #imm12 (sets flags; V on i32 overflow)
+        pub fn subs_imm_w(&mut self, rd: u32, rn: u32, imm: u32) {
+            debug_assert!(imm < 4096);
+            self.emit(0x7100_0000 | (imm << 10) | (rn << 5) | rd);
+        }
 
         /// Resolve all label patches. Panics on an unbound label (a compiler bug).
         pub fn finish(mut self) -> Vec<u32> {
@@ -521,6 +601,125 @@ mod asm {
                 }
             }
             self.buf
+        }
+    }
+
+    /// Encode a 32-bit logical immediate for AND/ORR/EOR (immediate form): the 12-bit
+    /// `immr:imms` field to OR into the instruction at bit 10 (N is always 0 for the 32-bit
+    /// variant). `None` when `v` is not a repeating rotated ones-run (0 and !0 included).
+    pub fn logical_imm_w(v: u32) -> Option<u32> {
+        if v == 0 || v == u32::MAX {
+            return None;
+        }
+        // Smallest power-of-two period.
+        let mut p = 32u32;
+        while p > 2 {
+            let h = p / 2;
+            let mask = (1u64 << h) - 1;
+            let mut periodic = true;
+            let mut i = h;
+            while i < 32 {
+                if (v as u64 >> i) & mask != v as u64 & mask {
+                    periodic = false;
+                    break;
+                }
+                i += h;
+            }
+            if !periodic {
+                break;
+            }
+            p = h;
+        }
+        let emask = if p == 32 { u32::MAX } else { (1u32 << p) - 1 };
+        let elem = v & emask;
+        let len = elem.count_ones();
+        if len == 0 || len == p {
+            return None;
+        }
+        let ones = ((1u64 << len) - 1) as u32;
+        // The element must be ones(len) rotated right by immr (within p bits).
+        for r in 0..p {
+            let ror = if r == 0 {
+                ones
+            } else {
+                ((ones >> r) | (ones << (p - r))) & emask
+            };
+            if ror == elem {
+                let imms = match p {
+                    32 => 0x00,
+                    16 => 0x20,
+                    8 => 0x30,
+                    4 => 0x38,
+                    _ => 0x3C,
+                } | (len - 1);
+                return Some((r << 6) | imms);
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// Brute-force decoder for the 32-bit logical-immediate field (N=0).
+        fn decode(field: u32) -> Option<u32> {
+            let immr = (field >> 6) & 0x3F;
+            let imms = field & 0x3F;
+            // Element size from the leading-ones pattern of imms.
+            let (p, len) = match imms {
+                s if s & 0x20 == 0 => (32u32, (s & 0x1F) + 1),
+                s if s & 0x30 == 0x20 => (16, (s & 0x0F) + 1),
+                s if s & 0x38 == 0x30 => (8, (s & 0x07) + 1),
+                s if s & 0x3C == 0x38 => (4, (s & 0x03) + 1),
+                s if s & 0x3E == 0x3C => (2, (s & 0x01) + 1),
+                _ => return None,
+            };
+            if len >= p || immr >= p {
+                return None;
+            }
+            let ones = ((1u64 << len) - 1) as u32;
+            let emask = if p == 32 { u32::MAX } else { (1u32 << p) - 1 };
+            let elem = if immr == 0 {
+                ones
+            } else {
+                ((ones >> immr) | (ones << (p - immr))) & emask
+            };
+            let mut v = 0u32;
+            let mut i = 0;
+            while i < 32 {
+                v |= elem << i;
+                i += p;
+            }
+            Some(v)
+        }
+
+        #[test]
+        fn logical_imm_w_roundtrip() {
+            // Every encodable field decodes back to a value that re-encodes to itself.
+            let mut seen = std::collections::HashMap::new();
+            for field in 0u32..(1 << 12) {
+                if let Some(v) = decode(field) {
+                    seen.entry(v).or_insert(field);
+                }
+            }
+            for (&v, _) in &seen {
+                let enc = super::logical_imm_w(v).unwrap_or_else(|| {
+                    panic!("0x{v:08x} should be encodable");
+                });
+                assert_eq!(decode(enc), Some(v), "0x{v:08x} enc {enc:03x}");
+            }
+            // Common masks used by the emitter.
+            for m in [0x3fffu32, 0xfffffff, 0x7fff, 0xff, 1, 0x3fffffff] {
+                assert!(super::logical_imm_w(m).is_some(), "0x{m:x}");
+            }
+            // Non-encodable values.
+            for m in [0u32, u32::MAX, 0x12345678, 5] {
+                if let Some(enc) = super::logical_imm_w(m) {
+                    assert_eq!(decode(enc), Some(m));
+                }
+            }
+            assert!(super::logical_imm_w(0).is_none());
+            assert!(super::logical_imm_w(u32::MAX).is_none());
+            assert!(super::logical_imm_w(0x12345678).is_none());
         }
     }
 }
@@ -544,6 +743,23 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         return None;
     }
     let max_stack = stack_depths(chunk)?;
+    // Debug: `LUMEN_JIT_DUMP=<substr>` prints the op stream of chunks whose leading slot names
+    // contain the substring (empty value = all chunks) as they compile.
+    if let Ok(pat) = std::env::var("LUMEN_JIT_DUMP") {
+        let head: Vec<&str> = chunk
+            .jit_slot_names()
+            .iter()
+            .take(4)
+            .map(|s| &**s)
+            .collect();
+        let name = head.join(",");
+        if pat.is_empty() || name.contains(&pat) {
+            eprintln!("[jit-dump] fn({name}) {} ops", ops.len());
+            for (pc, op) in ops.iter().enumerate() {
+                eprintln!("[jit-dump]   {pc:>4}  {op:?}");
+            }
+        }
+    }
     let fast: u32 = std::env::var("LUMEN_JIT_FAST")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -584,6 +800,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             | Op::JumpIfFalsePeek(t)
             | Op::JumpIfTruePeek(t)
             | Op::JumpIfNotNullishPeek(t)
+            | Op::InlineGuard(_, t)
             | Op::PushHandler(t) => targeted[*t as usize] = true,
             _ => {}
         }
@@ -601,10 +818,26 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             skip -= 1;
             continue;
         }
+        // Loop-spanning chain: a fully-chainable, branch-free loop headed here runs with its
+        // locals register-resident across the back edge. The plain templates for the region are
+        // still emitted below (starting at `plain_h`) as the bail target; the head's canonical
+        // label points at the chain entry, so plain back-edge jumps re-enter the chain.
+        if fast & 32768 != 0 && rc_ok && targeted[pc] {
+            if let Some(plan) = plan_loop(chunk, ops, pc, &targeted, layout, fast) {
+                let plain_h = emit_loop_chain(&mut a, layout, &plan, &pc_labels);
+                a.bind(plain_h);
+                // Bails jump to interior pc labels, so the plain region below must never fuse
+                // across them: mark every interior pc targeted (all fusions respect that).
+                for p in pc + 1..=plan.jump_pc {
+                    targeted[p] = true;
+                }
+                // Fall through: the plain template for this op (and the rest of the region)
+                // emits as usual.
+            }
+        }
         // Numeric register chain: a run of ops whose values stay in FP registers end to end.
         if fast & 16384 != 0 && rc_ok {
-            if let Some((chain, consumed)) = build_chain(chunk, ops, pc, &targeted, layout, fast)
-            {
+            if let Some((chain, consumed)) = build_chain(chunk, ops, pc, &targeted, layout, fast) {
                 emit_chain(&mut a, layout, &chain, &pc_labels, l_unwind);
                 skip = consumed - 1;
                 continue;
@@ -641,19 +874,25 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         // unfused pair via the helpers.
         if fast & 2 != 0 {
             if let (
-                Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+                Op::Lt
+                | Op::Gt
+                | Op::Le
+                | Op::Ge
+                | Op::StrictEq
+                | Op::StrictNotEq
+                | Op::EqEq
                 | Op::NotEq,
                 Some(Op::JumpIfFalse(t)),
             ) = (op, ops.get(pc + 1))
             {
                 if !targeted[pc + 1] {
                     let neg = match op {
-                        Op::Lt => 5,  // PL: !(a<b), true for unordered (NaN must jump)
-                        Op::Gt => 13, // LE: !(a>b), true for unordered
-                        Op::Le => 8,  // HI: !(a<=b), true for unordered
-                        Op::Ge => 11, // LT: !(a>=b), true for unordered
+                        Op::Lt => 5,                  // PL: !(a<b), true for unordered (NaN must jump)
+                        Op::Gt => 13,                 // LE: !(a>b), true for unordered
+                        Op::Le => 8,                  // HI: !(a<=b), true for unordered
+                        Op::Ge => 11,                 // LT: !(a>=b), true for unordered
                         Op::StrictEq | Op::EqEq => 1, // NE: !(a==b), true for unordered
-                        _ => 0,       // EQ: !(a!=b); unordered IS "!=" → correctly no jump
+                        _ => 0, // EQ: !(a!=b); unordered IS "!=" → correctly no jump
                     };
                     let slow = a.new_label();
                     let done = a.new_label();
@@ -779,10 +1018,54 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     false,
                     arr_ok,
+                    PropRecv::Stack,
+                );
+            }
+            // Receiver-direct reads (`this.x`, `slotlocal.x`): the receiver never crosses the
+            // operand stack and needs no refcounting (the frame owns it).
+            Op::GetPropThis(n, cache) if fast & 256 != 0 && get_method_inlinable(layout) => {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
+                    pc as u32,
+                    l_unwind,
+                    false,
+                    arr_ok,
+                    PropRecv::This,
+                );
+            }
+            Op::GetPropLocal(s, n, cache)
+                if fast & 256 != 0
+                    && get_method_inlinable(layout)
+                    && (*s as u32) * 24 + 16 < 4096 =>
+            {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
+                    pc as u32,
+                    l_unwind,
+                    false,
+                    arr_ok,
+                    PropRecv::Slot(*s as u32 * 24),
                 );
             }
             Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
@@ -862,6 +1145,17 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     chunk.jit_name_cache_ptr(*cache),
                     pc as u32,
                     l_unwind,
+                    false,
+                );
+            }
+            Op::LoadNameForCall(_, cache) if fast & 8192 != 0 && load_name_inlinable(layout) => {
+                emit_load_name_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_name_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    true,
                 );
             }
             // ---- inline dense-element fast paths (`a[i]` on plain objects/arrays) ----
@@ -880,21 +1174,42 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::Get);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::Get,
+                );
             }
             Op::SetElemLocalDrop(slot)
                 if fast & 2048 != 0
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::SetDrop);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::SetDrop,
+                );
             }
             Op::SetElemLocal(slot)
                 if fast & 4096 != 0
                     && elem_inlinable(layout)
                     && (*slot as u32) * 24 + 16 < 4096 =>
             {
-                emit_elem_local_inline(&mut a, layout, *slot as u32 * 24, pc as u32, l_unwind, ElemLocalKind::SetKeep);
+                emit_elem_local_inline(
+                    &mut a,
+                    layout,
+                    *slot as u32 * 24,
+                    pc as u32,
+                    l_unwind,
+                    ElemLocalKind::SetKeep,
+                );
             }
             // ---- inline property cache: method load (`obj.m(...)`) ----
             Op::GetMethod(n, cache) if fast & 512 != 0 && get_method_inlinable(layout) => {
@@ -907,10 +1222,12 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     true,
                     arr_ok,
+                    PropRecv::Stack,
                 );
             }
             // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 24) ----
@@ -943,9 +1260,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             // truncates; taking the low 32 bits is the mod-2^32 wrap. The scvtf/frintz
             // round-trip proves no i64 saturation happened (NaN/±Inf/|x|≥2^63 all fail it and
             // take the helper, which applies the spec's zero/wrap semantics).
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
-                if fast & 1 != 0 =>
-            {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if fast & 1 != 0 => {
                 let slow = a.new_label();
                 let done = a.new_label();
                 a.ldurb(9, 20, -48);
@@ -1008,8 +1323,46 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
             Op::Not if fast & 131072 != 0 && eq_inlinable(layout) => {
                 emit_not_inline(&mut a, layout, pc as u32, l_unwind);
             }
-            Op::SetPropDrop(_, cache) if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) => {
-                emit_set_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+            Op::SetPropDrop(_, cache)
+                if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
+            {
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::Stack,
+                );
+            }
+            // Receiver-direct stores (`this.x = v`, `slotlocal.x = v`): the receiver never
+            // crosses the operand stack and needs no refcounting (the frame owns it).
+            Op::SetPropThisDrop(_, cache)
+                if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
+            {
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::This,
+                );
+            }
+            Op::SetPropLocalDrop(s, _, cache)
+                if fast & 65536 != 0
+                    && rc_ok
+                    && set_prop_inlinable(layout)
+                    && (*s as u32) * 24 + 16 < 4096 =>
+            {
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::Slot(*s as u32 * 24),
+                );
             }
             Op::UpdateProp(_, cache, kind)
                 if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
@@ -1023,7 +1376,13 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     l_unwind,
                 );
             }
-            Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
             | Op::NotEq
                 if fast & 2 != 0 =>
             {
@@ -1198,6 +1557,12 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
+            Op::Undef if fast & 128 != 0 => {
+                a.stur(31, 20, 0);
+                a.stur(31, 20, 8);
+                a.stur(31, 20, 16);
+                a.add_imm(20, 20, 24);
+            }
             Op::Const(k) if fast & 128 != 0 && chunk.jit_const_copyable(*k) => {
                 let (word0, word1) = chunk.jit_const_bits(*k);
                 a.mov_imm64(9, word0);
@@ -1205,6 +1570,78 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 a.mov_imm64(9, word1);
                 a.stur(9, 20, 8);
                 a.add_imm(20, 20, 24);
+            }
+            // Fused slot resets (spliced-callee var hoisting): plain tags overwrite in place
+            // with a single byte store; refcounted values (the receiver-array vars of a spliced
+            // bignum kernel, typically) decrement inline while shared. Only a last-reference
+            // drop (or a string-ish tag 5) re-runs the whole (idempotent) op via the helper.
+            Op::ResetSlots(start, count)
+                if rc_ok && (*start as u32 + *count as u32) * 24 < 4096 =>
+            {
+                let slow = a.new_label();
+                let done = a.new_label();
+                for k in *start..*start + *count {
+                    let off = k as u32 * 24;
+                    let plain = a.new_label();
+                    a.ldrb_imm(9, 22, off);
+                    a.cmp_imm_w(9, 5);
+                    a.b_cond(C_LO, plain);
+                    a.b_cond(C_EQ, slow);
+                    a.ldr_imm(10, 22, off + 8);
+                    a.ldur(11, 10, rc_strong);
+                    a.cmp_imm_x(11, 1);
+                    a.b_cond(C_LS, slow);
+                    a.sub_imm(11, 11, 1);
+                    a.stur(11, 10, rc_strong);
+                    a.bind(plain);
+                    a.strb_imm(31, 22, off);
+                }
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
+            // Speculative-inline guard: the callee (argc+1 deep) must be the pinned function —
+            // a tag compare and a pointer compare; mismatch branches to the generic call.
+            Op::InlineGuard(t, target) => {
+                let it = chunk.jit_inline_target(*t);
+                // A Value::Obj payload holds the STORED Rc pointer (the RcBox base), not
+                // `Rc::as_ptr` — read the expected stored word out of an Option<Gc> exactly
+                // like `value::jit_layout` probes it. A dead callee (or an unprobed layout)
+                // degrades to the generic call unconditionally.
+                let stored = it.pin.upgrade().filter(|_| layout.valid).map(|o| {
+                    let some: Option<crate::value::Gc> = Some(o);
+                    unsafe { *(&some as *const Option<crate::value::Gc> as *const usize) }
+                });
+                match stored {
+                    None => a.b(pc_labels[*target as usize]),
+                    Some(s) => {
+                        let dm = (it.argc as i32 + 1) * 24;
+                        a.ldurb(9, 20, -dm);
+                        a.cmp_imm_w(9, 8);
+                        a.b_cond(C_NE, pc_labels[*target as usize]);
+                        a.ldur(9, 20, -dm + 8);
+                        a.mov_imm64(10, s as u64);
+                        a.cmp_reg_x(9, 10);
+                        a.b_cond(C_NE, pc_labels[*target as usize]);
+                        if it.check_this {
+                            a.ldurb(9, 20, -dm - 24);
+                            a.cmp_imm_w(9, 8);
+                            a.b_cond(C_NE, pc_labels[*target as usize]);
+                        }
+                    }
+                }
+            }
+            // Calls take the dedicated helper: same contract as the generic one, minus the full
+            // op dispatch (they dominate helper traffic in call-heavy code).
+            Op::Call(..) | Op::CallWithThis(..) => {
+                a.mov(0, 19);
+                a.movz(1, pc as u32, 0);
+                a.mov(2, 20);
+                a.ldr_imm(16, 21, (H_CALL * 8) as u32);
+                a.blr(16);
+                a.mov(20, 0);
+                a.cbnz(1, false, l_unwind);
             }
             _ => {
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -1270,6 +1707,9 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         sys::pthread_jit_write_protect_np(1);
         sys::sys_icache_invalidate(mem, len);
         Some(JitCode {
+            needs_global: ops
+                .iter()
+                .any(|o| matches!(o, Op::LoadName(..) | Op::LoadNameForCall(..))),
             mem,
             len,
             pc_offsets: pc_insn.iter().map(|i| i * 4).collect(),
@@ -1317,10 +1757,27 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// re-runs the op cleanly. A BigInt value (compound payload), an accessor, any guard miss, or a
 /// last-reference receiver (whose pop-drop would free) falls to the checked helper.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// Where a property read's receiver comes from.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq)]
+enum PropRecv {
+    /// Operand stack top (classic GetProp/GetMethod): consumed, refcount-managed.
+    Stack,
+    /// The frame's `this` binding (`ctx.this_val`): owned by the frame, no refcounting.
+    This,
+    /// A local slot (alive for the whole frame): no refcounting.
+    Slot(u32),
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
     cache_ptr: usize,
+    // The site's interned name (`chunk.jit_name(n)`): its data pointer keys the stub-cache
+    // arm, and its bytes are the key-checked arm's compare immediates. Pinned by the chunk
+    // the emitted code belongs to.
+    name: &str,
     pc: u32,
     l_unwind: usize,
     method: bool,
@@ -1329,6 +1786,7 @@ fn emit_prop_load_inline(
     // element keys are all canonical indices, so a name that doesn't start with a digit cannot
     // collide with one. Prototype hops stay `Exotic::None`-only.
     arr_ok: bool,
+    recv: PropRecv,
 ) {
     use crate::bytecode::{
         IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_RECV_SHAPE,
@@ -1347,89 +1805,165 @@ fn emit_prop_load_inline(
     let none_tag = layout.exotic_none_tag as u32;
 
     let plain = layout.obj_ic_plain as u32;
+    // Key-checked entries (`IC_ARR_KEYCHK`: the holder is an Array — `arr.length`, or a method
+    // on the Array-exotic `Array.prototype`): validated by an inline byte-compare of the entry's
+    // key against the site's compile-time name. Only for short names with a good fat-pointer
+    // probe; otherwise those states keep falling to the helper.
+    let kc = layout.key_probe_ok && !name.is_empty() && name.len() <= 8;
     let slow = a.new_label();
     let done = a.new_label();
-    let d1 = a.new_label();
     let load = a.new_label();
+    let load_kc = a.new_label();
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
-    //    receiver drop (GetProp) — hop walking uses x17.
-    a.ldurb(9, 20, -24);
-    a.cmp_imm_w(9, 8);
-    a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -16);
-    if !method {
-        // receiver refcount > 1 (so the pop-drop below never frees)
-        a.ldur(9, 10, strong);
-        a.cmp_imm_x(9, 1);
-        a.b_cond(C_LS, slow);
+    //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
+    //    the frame owns: no refcount management at all.
+    match recv {
+        PropRecv::Stack => {
+            a.ldurb(9, 20, -24);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 20, -16);
+            if !method {
+                // receiver refcount > 1 (so the pop-drop below never frees)
+                a.ldur(9, 10, strong);
+                a.cmp_imm_x(9, 1);
+                a.b_cond(C_LS, slow);
+            }
+        }
+        PropRecv::This => {
+            a.ldr_imm(14, 19, 48); // ctx.this_raw → the frame's `this` Value
+            a.ldurb(9, 14, 0);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 14, 8);
+        }
+        PropRecv::Slot(off) => {
+            a.ldrb_imm(9, 22, off);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldr_imm(10, 22, off + 8);
+        }
     }
-    // 2. cache: depth + slot
-    a.mov_imm64(12, cache_ptr as u64);
-    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
-    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
-    // 3. receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
-    //    Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE, not
-    //    slot positions, because element entries occupy slots without transitioning the shape),
-    //    plain, shape == recv_shape; x11 = receiver object base
-    a.add_imm(11, 10, rcv);
-    a.ldrb_imm(14, 11, ex);
-    if arr_ok {
-        let ex_ok = a.new_label();
+    // 2-5. probe both cache ways (sites allocate two consecutive cells; the fill path demotes
+    // way 1 to way 2, so a two-shape site — subclass hierarchies rotating through one access —
+    // stabilizes with one shape per way). Each probe is self-contained: it recomputes the
+    // receiver base from x10 and jumps to `load` with x11 = holder base, x13 = slot.
+    let way2 = a.new_label();
+    // `cache_ptr` = the IcState cell address, or 0 for "x12 already holds it" (the stub-cache
+    // arm computes the entry address at run time).
+    let probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
+        let d1 = a.new_label();
+        if cache_ptr != 0 {
+            a.mov_imm64(12, cache_ptr as u64);
+        }
+        a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+        a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+        // receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
+        // Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE,
+        // not slot positions, because element entries occupy slots without transitioning the
+        // shape), plain, shape == recv_shape; x11 = receiver object base
+        a.add_imm(11, 10, rcv);
+        a.ldrb_imm(14, 11, ex);
+        if arr_ok {
+            let ex_ok = a.new_label();
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_EQ, ex_ok);
+            a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+            a.b_cond(C_NE, miss);
+            a.cbz(9, false, miss); // Array receiver must not be the holder (w9 = depth)
+            a.bind(ex_ok);
+        } else {
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_NE, miss);
+        }
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        // depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall
+        // to d1. Non-plain depths divert to the key-checked decoder (`kc_route`) so the
+        // common depths pay nothing for its existence.
+        a.cbz(9, false, load);
+        a.cmp_imm_w(9, 1);
+        a.b_cond(C_EQ, d1);
+        let kc_route = if kc { a.new_label() } else { miss };
+        a.cmp_imm_w(9, 2);
+        a.b_cond(C_NE, kc_route);
+        a.ldrb_imm(14, 12, IC_OFF_MID_OK);
+        a.cbz(14, false, miss);
+        // depth-2 mid hop: follow the live proto, validate against mid_shape
+        a.ldr_imm(17, 11, pr); // Option<Gc> niche: pointer or 0
+        a.cbz(17, true, miss);
+        a.add_imm(11, 17, rcv);
+        a.ldrb_imm(14, 11, ex);
         a.cmp_imm_w(14, none_tag);
-        a.b_cond(C_EQ, ex_ok);
-        a.cmp_imm_w(14, layout.exotic_array_tag as u32);
-        a.b_cond(C_NE, slow);
-        a.cbz(9, false, slow); // Array receiver must not be the holder (w9 = depth)
-        a.bind(ex_ok);
-    } else {
+        a.b_cond(C_NE, miss);
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_MID_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        // holder hop (depth 1 entry point; depth 2 falls through): validate holder_shape
+        a.bind(d1);
+        a.ldr_imm(17, 11, pr);
+        a.cbz(17, true, miss);
+        a.add_imm(11, 17, rcv);
+        a.ldrb_imm(14, 11, ex);
         a.cmp_imm_w(14, none_tag);
-        a.b_cond(C_NE, slow);
-    }
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
-    // 4. depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall into d1.
-    a.cbz(9, false, load);
-    a.cmp_imm_w(9, 1);
-    a.b_cond(C_EQ, d1);
-    a.cmp_imm_w(9, 2);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 12, IC_OFF_MID_OK);
-    a.cbz(14, false, slow);
-    // depth-2 mid hop: follow the live proto, validate against mid_shape
-    a.ldr_imm(17, 11, pr); // Option<Gc> niche: pointer or 0
-    a.cbz(17, true, slow);
-    a.add_imm(11, 17, rcv);
-    a.ldrb_imm(14, 11, ex);
-    a.cmp_imm_w(14, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_MID_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
-    // 5. holder hop (depth 1 entry point; depth 2 falls through): validate holder_shape
-    a.bind(d1);
-    a.ldr_imm(17, 11, pr);
-    a.cbz(17, true, slow);
-    a.add_imm(11, 17, rcv);
-    a.ldrb_imm(14, 11, ex);
-    a.cmp_imm_w(14, none_tag);
-    a.b_cond(C_NE, slow);
-    a.ldrb_imm(14, 11, plain);
-    a.cbz(14, false, slow);
-    a.ldr_w_imm(14, 11, sh);
-    a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
-    a.cmp_reg_w(14, 16);
-    a.b_cond(C_NE, slow);
+        a.b_cond(C_NE, miss);
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, miss);
+        a.ldr_w_imm(14, 11, sh);
+        a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, miss);
+        a.b(load);
+        // key-checked states (`IC_ARR_KEYCHK`): 0x40 = the array receiver IS the holder
+        // (`arr.length`); 0x41 = one hop to an array holder (Array.prototype methods — itself
+        // an Array exotic). The receiver-side Array gate above already passed 0x40 (nonzero
+        // depth). Deeper key-checked states → helper.
+        if kc {
+            a.bind(kc_route);
+            a.cmp_imm_w(9, 0x40);
+            a.b_cond(C_EQ, load_kc);
+            a.cmp_imm_w(9, 0x41);
+            a.b_cond(C_NE, miss);
+            // one proto hop; the holder may be Exotic::None or an Array (its entry key gets
+            // re-checked, which is what makes an array holder's slot trustworthy at all)
+            a.ldr_imm(17, 11, pr);
+            a.cbz(17, true, miss);
+            a.add_imm(11, 17, rcv);
+            a.ldrb_imm(14, 11, ex);
+            let ex_ok = a.new_label();
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_EQ, ex_ok);
+            a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+            a.b_cond(C_NE, miss);
+            a.bind(ex_ok);
+            a.ldrb_imm(14, 11, plain);
+            a.cbz(14, false, miss);
+            a.ldr_w_imm(14, 11, sh);
+            a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+            a.cmp_reg_w(14, 16);
+            a.b_cond(C_NE, miss);
+            a.b(load_kc);
+        }
+    };
+    probe(a, cache_ptr, way2);
+    a.bind(way2);
+    probe(
+        a,
+        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
+        slow,
+    );
     // 6. x11 = holder base: bounds-check the cached slot against the live entries length
     //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
     //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;
     //    data property; non-BigInt
+    let val = a.new_label();
     a.bind(load);
     a.ldr_imm(16, 11, en_len);
     a.cmp_reg_x(13, 16);
@@ -1437,6 +1971,7 @@ fn emit_prop_load_inline(
     a.ldr_imm(15, 11, en);
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
+    a.bind(val);
     a.ldrb_imm(9, 15, ea);
     a.cbnz(9, false, slow);
     a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
@@ -1454,7 +1989,13 @@ fn emit_prop_load_inline(
     a.add_imm(16, 16, 1);
     a.stur(16, 13, strong);
     a.bind(nobump);
-    if method {
+    if !matches!(recv, PropRecv::Stack) {
+        // this/slot receivers were never on the stack: just push the value.
+        a.stur(12, 20, 0);
+        a.stur(13, 20, 8);
+        a.stur(14, 20, 16);
+        a.add_imm(20, 20, 24);
+    } else if method {
         // receiver stays at [-24]; push the method above it
         a.stur(12, 20, 0);
         a.stur(13, 20, 8);
@@ -1472,6 +2013,57 @@ fn emit_prop_load_inline(
         a.stur(14, 20, -8);
     }
     a.b(done);
+    // 6kc. Key-checked landing (out of the hit path's fall-through line): same bounds + entry
+    // compute as `load`, then verify the entry's key IS the site's name (length, then content
+    // against immediates) — an array's slots aren't pinned by its shape, so the key is the
+    // authority. Mismatch (slot shifted since fill) → helper re-derives. Ends by jumping back
+    // into the shared value path.
+    a.bind(load_kc);
+    if kc {
+        a.ldr_imm(16, 11, en_len);
+        a.cmp_reg_x(13, 16);
+        a.b_cond(C_HS, slow);
+        a.ldr_imm(15, 11, en);
+        a.mov_imm64(16, es);
+        a.madd(15, 13, 16, 15);
+        let klen = (layout.entry_key + layout.str_len_word) as i32;
+        let kptr = (layout.entry_key + layout.str_ptr_word) as i32;
+        a.ldur(16, 15, klen);
+        a.cmp_imm_x(16, name.len() as u32);
+        a.b_cond(C_NE, slow);
+        a.ldur(16, 15, kptr); // stored Rc<str> word (RcBox base)
+        let d = layout.str_data_off as u32;
+        let bytes = name.as_bytes();
+        let mut off = 0usize;
+        while bytes.len() - off >= 4 {
+            let imm = u32::from_le_bytes([
+                bytes[off],
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+            ]);
+            a.ldr_w_imm(17, 16, d + off as u32);
+            a.movz(9, imm & 0xFFFF, 0);
+            a.movk(9, imm >> 16, 1);
+            a.cmp_reg_w(17, 9);
+            a.b_cond(C_NE, slow);
+            off += 4;
+        }
+        if bytes.len() - off >= 2 {
+            let imm = u16::from_le_bytes([bytes[off], bytes[off + 1]]) as u32;
+            a.ldrh_imm(17, 16, d + off as u32);
+            a.movz(9, imm, 0);
+            a.cmp_reg_w(17, 9);
+            a.b_cond(C_NE, slow);
+            off += 2;
+        }
+        if bytes.len() - off == 1 {
+            a.ldrb_imm(17, 16, d + off as u32);
+            a.cmp_imm_w(17, bytes[off] as u32);
+            a.b_cond(C_NE, slow);
+        }
+        a.b(val);
+    }
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
     a.bind(done);
@@ -1483,7 +2075,6 @@ fn emit_prop_load_inline(
 fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
     get_prop_inlinable(layout) && layout.obj_proto < 4096
 }
-
 
 /// Same gate as [`get_prop_inlinable`] plus the `writable` byte (the store re-checks it — an
 /// in-place defineProperty can flip attributes without changing the shape).
@@ -1547,7 +2138,11 @@ fn emit_update_prop_inline(
     a.cmp_reg_w(9, 14);
     a.b_cond(C_NE, slow);
     // 4. bounds-check the cached slot, then entry: data property, writable, holding a Num
-    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.ldr_imm(
+        16,
+        11,
+        (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+    );
     a.cmp_reg_x(13, 16);
     a.b_cond(C_HS, slow);
     a.ldr_imm(15, 11, en);
@@ -1563,7 +2158,10 @@ fn emit_update_prop_inline(
     // --- commit: d0 = old, d2 = old ± 1, written in place ---
     a.ldur_d(0, 15, ev + 8);
     a.fmov_one(1);
-    let dec = matches!(kind, UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard);
+    let dec = matches!(
+        kind,
+        UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard
+    );
     a.f_arith(if dec { 1 } else { 0 }, 2, 0, 1);
     a.stur_d(2, 15, ev + 8);
     // drop the receiver (strong was > 1)
@@ -1620,6 +2218,7 @@ fn emit_set_prop_inline(
     cache_ptr: usize,
     pc: u32,
     l_unwind: usize,
+    recv: PropRecv,
 ) {
     use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
     let strong = layout.rc_strong_off as i32;
@@ -1636,63 +2235,99 @@ fn emit_set_prop_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. stack: [obj @ -48, v @ -24] — receiver must be an Obj (tag 8)
-    a.ldurb(9, 20, -48);
-    a.cmp_imm_w(9, 8);
-    a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -40); // receiver rc_ptr
-    // 2. receiver refcount > 1 (so the pop-drop below never frees)
-    a.ldur(9, 10, strong);
-    a.cmp_imm_x(9, 1);
-    a.b_cond(C_LS, slow);
-    // 3. cache: depth must be 0 (own writable data property wins OrdinarySet regardless of the
-    //    prototype chain); load slot + cached receiver shape
-    a.mov_imm64(12, cache_ptr as u64);
-    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
-    a.cbnz(9, false, slow);
-    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
-    a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
-    // 4. object base; exotic None, and not a side-table exotic (proxy/typed-array/namespace)
+    // 1. receiver must be an Obj (tag 8). Stack form: [obj @ -48, v @ -24], refcount-managed;
+    // this/slot forms: [v @ -24] only, the frame owns the receiver.
+    match recv {
+        PropRecv::Stack => {
+            a.ldurb(9, 20, -48);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 20, -40); // receiver rc_ptr
+                                 // receiver refcount > 1 (so the pop-drop below never frees)
+            a.ldur(9, 10, strong);
+            a.cmp_imm_x(9, 1);
+            a.b_cond(C_LS, slow);
+        }
+        PropRecv::This => {
+            a.ldr_imm(14, 19, 48); // ctx.this_raw
+            a.ldurb(9, 14, 0);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 14, 8);
+        }
+        PropRecv::Slot(off) => {
+            a.ldrb_imm(9, 22, off);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldr_imm(10, 22, off + 8);
+        }
+    }
+    // 2. object base; exotic None, and not a side-table exotic (proxy/typed-array/namespace).
+    //    Receiver-wide facts — validated once, shared by both ways.
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(9, 11, ex);
     a.cmp_imm_w(9, none_tag);
     a.b_cond(C_NE, slow);
     a.ldrb_imm(9, 11, plain);
     a.cbz(9, false, slow);
-    // 5. shape id matches
-    a.ldr_w_imm(9, 11, sh);
-    a.cmp_reg_w(9, 14);
-    a.b_cond(C_NE, slow);
-    // 6. bounds-check the cached slot, then entry base = entries data ptr + slot*entry_size
-    a.ldr_imm(16, 11, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
-    a.cmp_reg_x(13, 16);
-    a.b_cond(C_HS, slow);
-    a.ldr_imm(15, 11, en);
-    a.mov_imm64(16, es);
-    a.madd(15, 13, 16, 15);
-    // 7. data property, writable
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
-    a.ldrb_imm(9, 15, ew);
-    a.cbz(9, false, slow);
-    // 8. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
-    //    BigInt or a last reference → helper. An old value that IS the receiver (`o.x === o`)
-    //    also bails: its dec and the receiver dec below hit the same counter, and the two
-    //    independent strong > 1 guards would let the pair scribble it to 0 without running the
-    //    destructor. w9 = old tag, x12 = old payload, x14 = old strong.
-    a.ldurb(9, 15, ev);
-    a.cmp_imm_w(9, 5);
-    a.b_cond(C_EQ, slow);
-    let old_plain = a.new_label();
-    a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, old_plain);
-    a.ldur(12, 15, ev + 8);
-    a.cmp_reg_x(12, 10);
-    a.b_cond(C_EQ, slow);
-    a.ldur(14, 12, strong);
-    a.cmp_imm_x(14, 1);
-    a.b_cond(C_LS, slow);
-    a.bind(old_plain);
+    // 3-8 per way (sites allocate two consecutive cells; the Rust fast path probes both, so
+    // the template must too or a 2-shape store site helper-calls forever): depth 0, shape
+    // match, slot bounds, data+writable, old-value droppability. Way-1 guards jump to way 2,
+    // way-2 guards to the helper. Register results consumed by the commit below: x13 slot,
+    // x15 entry, w9 old tag, x12 old payload, x14 old strong.
+    let way2 = a.new_label();
+    let commit = a.new_label();
+    let way = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
+        a.mov_imm64(12, cache_ptr as u64);
+        a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+        a.cbnz(9, false, miss);
+        a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+        a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
+        a.ldr_w_imm(9, 11, sh);
+        a.cmp_reg_w(9, 14);
+        a.b_cond(C_NE, miss);
+        a.ldr_imm(
+            16,
+            11,
+            (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+        );
+        a.cmp_reg_x(13, 16);
+        a.b_cond(C_HS, miss);
+        a.ldr_imm(15, 11, en);
+        a.mov_imm64(16, es);
+        a.madd(15, 13, 16, 15);
+        a.ldrb_imm(9, 15, ea);
+        a.cbnz(9, false, miss);
+        a.ldrb_imm(9, 15, ew);
+        a.cbz(9, false, miss);
+        // old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline
+        // dec); BigInt or a last reference → helper. An old value that IS the receiver
+        // (`o.x === o`) also bails: its dec and the receiver dec below hit the same counter,
+        // and the two independent strong > 1 guards would let the pair scribble it to 0
+        // without running the destructor.
+        a.ldurb(9, 15, ev);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, miss);
+        let old_plain = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, old_plain);
+        a.ldur(12, 15, ev + 8);
+        a.cmp_reg_x(12, 10);
+        a.b_cond(C_EQ, miss);
+        a.ldur(14, 12, strong);
+        a.cmp_imm_x(14, 1);
+        a.b_cond(C_LS, miss);
+        a.bind(old_plain);
+    };
+    way(a, cache_ptr, way2);
+    a.b(commit);
+    a.bind(way2);
+    way(
+        a,
+        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
+        slow,
+    );
+    a.bind(commit);
     // --- commit: everything validated; from here only writes ---
     // move v into the entry (24 bytes; a refcounted payload moves, not clones)
     a.ldur(13, 20, -24);
@@ -1708,12 +2343,17 @@ fn emit_set_prop_inline(
     a.sub_imm(14, 14, 1);
     a.stur(14, 12, strong);
     a.bind(no_old_dec);
-    // drop the receiver (strong was > 1)
-    a.ldur(9, 10, strong);
-    a.sub_imm(9, 9, 1);
-    a.stur(9, 10, strong);
-    // pop both operands, push nothing
-    a.sub_imm(20, 20, 48);
+    if matches!(recv, PropRecv::Stack) {
+        // drop the receiver (strong was > 1)
+        a.ldur(9, 10, strong);
+        a.sub_imm(9, 9, 1);
+        a.stur(9, 10, strong);
+        // pop both operands, push nothing
+        a.sub_imm(20, 20, 48);
+    } else {
+        // pop just the value
+        a.sub_imm(20, 20, 24);
+    }
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
@@ -2093,6 +2733,9 @@ fn emit_load_name_inline(
     cache_ptr: usize,
     pc: u32,
     l_unwind: usize,
+    // `LoadNameForCall`: the fast path pushes the `this` slot (Undefined — a depth-0 hit can't
+    // come through a `with` object) below the value; the slow path runs the full op.
+    for_call: bool,
 ) {
     let strong = layout.rc_strong_off as i32;
     let slow = a.new_label();
@@ -2113,6 +2756,12 @@ fn emit_load_name_inline(
     a.add_imm(16, 16, 1);
     a.stur(16, 11, strong);
     a.bind(nobump);
+    if for_call {
+        a.stur(31, 20, 0);
+        a.stur(31, 20, 8);
+        a.stur(31, 20, 16);
+        a.add_imm(20, 20, 24);
+    }
     a.stur(10, 20, 0);
     a.stur(11, 20, 8);
     a.stur(13, 20, 16);
@@ -2261,7 +2910,33 @@ fn emit_get_elem_inline(
     a.bind(ex_ok);
     a.ldrb_imm(12, 11, plain);
     a.cbz(12, false, slow);
-    // 5. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
+    // 5. mirror read: coherent + hole-free ⇒ bounds + one indexed load of a known Num — no
+    // entry chase, no tag check, no refcount bump. A miss answers classically below.
+    let classic = a.new_label();
+    let mirror_hit = a.new_label();
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    a.ldrb_imm(12, 11, mf);
+    let mask = asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
+        .unwrap();
+    a.logic_imm_w(0, 12, 12, mask);
+    a.cmp_imm_w(
+        12,
+        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+    );
+    a.b_cond(C_NE, classic);
+    a.ldr_imm(12, 11, ml);
+    a.cmp_reg_x(9, 12);
+    a.b_cond(C_HS, classic);
+    a.ldr_imm(12, 11, mp);
+    a.ldr_d_lsl3(0, 12, 9);
+    a.movz(12, 4, 0);
+    a.fmov_x_d(13, 0);
+    a.movz(14, 0, 0);
+    a.b(mirror_hit); // a Num: skip the refcount-bump block
+    a.bind(classic);
+    // 5b. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
     a.b_cond(C_HS, slow);
@@ -2293,6 +2968,7 @@ fn emit_get_elem_inline(
     a.add_imm(16, 16, 1);
     a.stur(16, 13, strong);
     a.bind(nobump);
+    a.bind(mirror_hit);
     // drop the receiver (strong was > 1; if the value IS the receiver the bump balanced it)
     a.ldur(9, 10, strong);
     a.sub_imm(9, 9, 1);
@@ -2315,6 +2991,110 @@ fn emit_get_elem_inline(
 /// the stack as the expression result and bumps once. A BigInt old value (compound drop), a
 /// BigInt `v` under `keep` (compound clone), a last-reference old value or receiver, an accessor
 /// or non-writable slot, or any dense miss falls to the checked helper.
+/// Where a mirror store's key index comes from.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+enum MirrorKey {
+    /// Exact u32 already in an x register.
+    U32InReg(u32),
+    /// The key Value's f64 payload at `[x20 + off]` (already validated as an exact u32).
+    StackF64(i32),
+    /// A validated u32 key in a d register.
+    F64InDreg(u32),
+    /// Compile-time constant index.
+    Const(u32),
+}
+
+/// What a mirror store writes.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+enum MirrorVal {
+    /// A Value at `[x20 + off]` (tag at `off`, payload at `off+8`); tag unknown — a non-Num
+    /// invalidates the mirror.
+    Stack(i32),
+    /// A proven-Num f64 in a d register; `bool` = proven exact-i32 (keeps `MIRROR_ALL_I32`).
+    Num(u32, bool),
+}
+
+/// The element-mirror side of a dense element store the caller has already committed to the
+/// entry (see `value::Props::mirror`): keep `mirror[n]` coherent, drop `MIRROR_ALL_I32` for
+/// unproven values, and invalidate outright on a non-Num or the hole sentinel. Bounds are
+/// re-checked against the mirror's own length as corruption insurance (the lockstep invariant
+/// should make it redundant). Clobbers x9, x12, x13 and d1 only.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_mirror_store(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    base: u32,
+    key: MirrorKey,
+    val: MirrorVal,
+) {
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let done = a.new_label();
+    let inval = a.new_label();
+    a.ldrb_imm(13, base, mf);
+    let ok_bit = asm::logical_imm_w(crate::value::MIRROR_OK as u32).unwrap();
+    a.logic_imm_w(0, 12, 13, ok_bit);
+    a.cbz(12, false, done);
+    // Value → d1 (or reuse the proven register).
+    let (dv, proven_num, proven_i32) = match val {
+        MirrorVal::Stack(off) => {
+            a.ldurb(9, 20, off);
+            a.cmp_imm_w(9, 4);
+            a.b_cond(C_NE, inval);
+            a.ldur_d(1, 20, off + 8);
+            (1u32, false, false)
+        }
+        MirrorVal::Num(d, i32_proven) => (d, true, i32_proven),
+    };
+    let _ = proven_num;
+    if !proven_i32 {
+        // MIRROR_ALL_I32 upkeep, flag-first: float-heavy code (flag long cleared) pays two
+        // instructions. No hole-sentinel screen: hole accounting is structural (see
+        // `Props::mirror_sync`), a data value equal to the sentinel bits is just a NaN to JIT
+        // readers, and Rust readers fall back to the authoritative entry.
+        let i32_done = a.new_label();
+        let i32_bit = asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
+        a.logic_imm_w(0, 9, 13, i32_bit);
+        a.cbz(9, false, i32_done);
+        a.fcvtzs_w_d(9, dv);
+        a.scvtf_d_w(1, 9);
+        a.fmov_x_d(9, 1);
+        a.fmov_x_d(12, dv);
+        a.cmp_reg_x(9, 12);
+        a.b_cond(C_EQ, i32_done);
+        let clear = asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
+        a.logic_imm_w(0, 13, 13, clear);
+        a.strb_imm(13, base, mf);
+        a.bind(i32_done);
+    }
+    // Key index → x9.
+    match key {
+        MirrorKey::U32InReg(r) => {
+            if r != 9 {
+                a.mov(9, r);
+            }
+        }
+        MirrorKey::StackF64(off) => {
+            a.ldur_d(0, 20, off);
+            a.fcvtzu_w_d(9, 0);
+        }
+        MirrorKey::F64InDreg(d) => a.fcvtzu_w_d(9, d),
+        MirrorKey::Const(n) => a.mov_imm64(9, n as u64),
+    }
+    // Insurance bounds check, then the store.
+    a.ldr_imm(12, base, ml);
+    a.cmp_reg_x(9, 12);
+    a.b_cond(C_HS, inval);
+    a.ldr_imm(12, base, mp);
+    a.add_shifted(12, 12, 9, 3);
+    a.str_d_imm(dv, 12, 0);
+    a.b(done);
+    a.bind(inval);
+    a.strb_imm(31, base, mf);
+    a.bind(done);
+}
+
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn emit_set_elem_inline(
     a: &mut asm::Asm,
@@ -2426,6 +3206,15 @@ fn emit_set_elem_inline(
     a.sub_imm(13, 13, 1);
     a.stur(13, 12, strong);
     a.bind(no_old_dec);
+    // Keep the element mirror coherent (x9/x12/x13/d0/d1 are dead here; v words in 14/16/17,
+    // bases in 10/11/15 stay live).
+    emit_mirror_store(
+        a,
+        layout,
+        11,
+        MirrorKey::StackF64(-40),
+        MirrorVal::Stack(-24),
+    );
     if keep {
         // v now lives in the slot AND stays on the stack as the result: one bump.
         a.ldurb(9, 20, -24);
@@ -2578,7 +3367,35 @@ fn emit_elem_local_keyed(
     a.bind(ex_ok);
     a.ldrb_imm(12, 11, plain);
     a.cbz(12, false, slow);
-    // 5. dense bounds
+    let mirror_hit = a.new_label();
+    let classic = a.new_label();
+    if get {
+        // 5. mirror read: bounds + one indexed load of a known Num (see emit_get_elem_inline).
+        let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+        let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+        let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+        a.ldrb_imm(12, 11, mf);
+        let mask =
+            asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
+                .unwrap();
+        a.logic_imm_w(0, 12, 12, mask);
+        a.cmp_imm_w(
+            12,
+            (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+        );
+        a.b_cond(C_NE, classic);
+        a.ldr_imm(12, 11, ml);
+        a.cmp_reg_x(9, 12);
+        a.b_cond(C_HS, classic);
+        a.ldr_imm(12, 11, mp);
+        a.ldr_d_lsl3(1, 12, 9);
+        a.movz(12, 4, 0);
+        a.fmov_x_d(13, 1);
+        a.movz(14, 0, 0);
+        a.b(mirror_hit);
+    }
+    a.bind(classic);
+    // 5b. dense bounds
     a.ldr_imm(12, 11, ell);
     a.cmp_reg_x(9, 12);
     a.b_cond(C_HS, slow);
@@ -2610,6 +3427,7 @@ fn emit_elem_local_keyed(
         a.add_imm(16, 16, 1);
         a.stur(16, 13, strong);
         a.bind(nobump);
+        a.bind(mirror_hit);
         match key {
             KeySrc::Stack => {
                 // pop key, push value → result replaces the key slot
@@ -2663,6 +3481,14 @@ fn emit_elem_local_keyed(
         a.sub_imm(13, 13, 1);
         a.stur(13, 12, strong);
         a.bind(no_old_dec);
+        // Element mirror (x9/x12/x13/d1 dead here; the key f64 survives in d0).
+        emit_mirror_store(
+            a,
+            layout,
+            11,
+            MirrorKey::F64InDreg(0),
+            MirrorVal::Stack(-24),
+        );
         if kind == ElemLocalKind::SetKeep {
             // v now lives in the slot AND stays on the stack: one bump, result at the key slot.
             a.ldurb(9, 20, -24);
@@ -2780,9 +3606,7 @@ fn build_chain(
                 };
                 (ChainOp::Arith(f), 1, 2)
             }
-            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr
-                if vdepth >= 2 =>
-            {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if vdepth >= 2 => {
                 let code = match ops[pc] {
                     Op::BitAnd => 0,
                     Op::BitOr => 1,
@@ -2807,19 +3631,25 @@ fn build_chain(
             Op::LoadName(_, c) if name_ok => {
                 (ChainOp::LoadName(chunk.jit_name_cache_ptr(*c)), 1, 0)
             }
-            Op::Lt | Op::Gt | Op::Le | Op::Ge | Op::StrictEq | Op::StrictNotEq | Op::EqEq
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
             | Op::NotEq
                 if vdepth == 2 =>
             {
                 match ops.get(pc + 1) {
                     Some(Op::JumpIfFalse(t)) if !targeted[pc + 1] => {
                         let neg = match ops[pc] {
-                            Op::Lt => 5,  // PL (unordered jumps)
-                            Op::Gt => 13, // LE
-                            Op::Le => 8,  // HI
-                            Op::Ge => 11, // LT
+                            Op::Lt => 5,                  // PL (unordered jumps)
+                            Op::Gt => 13,                 // LE
+                            Op::Le => 8,                  // HI
+                            Op::Ge => 11,                 // LT
                             Op::StrictEq | Op::EqEq => 1, // NE
-                            _ => 0,       // EQ
+                            _ => 0,                       // EQ
                         };
                         chain.push((ChainOp::CmpBranch(neg, *t as usize), pc));
                     }
@@ -2843,7 +3673,10 @@ fn build_chain(
     // as plain templates instead is both faster and type-agnostic.
     while matches!(
         chain.last(),
-        Some((ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_), _))
+        Some((
+            ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_),
+            _
+        ))
     ) {
         chain.pop();
     }
@@ -2900,7 +3733,12 @@ fn build_chain(
         return None;
     }
     let consumed = chain.last().map_or(0, |&(op, p)| {
-        p - start + if matches!(op, ChainOp::CmpBranch(..)) { 2 } else { 1 }
+        p - start
+            + if matches!(op, ChainOp::CmpBranch(..)) {
+                2
+            } else {
+                1
+            }
     });
     Some((chain, consumed))
 }
@@ -2920,6 +3758,9 @@ fn emit_chain(
     pc_labels: &[usize],
     l_unwind: usize,
 ) {
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
@@ -3056,6 +3897,70 @@ fn emit_chain(
                         }
                     }
                 }
+                let mirror_done = a.new_label();
+                let classic = a.new_label();
+                if !is_set {
+                    // Mirror read: coherent + hole-free ⇒ bounds + one indexed load, value
+                    // known Num. Any miss (flags, range) answers classically below.
+                    a.ldrb_imm(12, 11, mf);
+                    let mask = asm::logical_imm_w(
+                        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+                    )
+                    .unwrap();
+                    a.logic_imm_w(0, 12, 12, mask);
+                    a.cmp_imm_w(
+                        12,
+                        (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
+                    );
+                    a.b_cond(C_NE, classic);
+                    a.ldr_imm(12, 11, ml);
+                    a.cmp_reg_x(9, 12);
+                    a.b_cond(C_HS, classic);
+                    a.ldr_imm(12, 11, mp);
+                    a.ldr_d_lsl3(dk, 12, 9);
+                    a.b(mirror_done);
+                } else {
+                    // Mirror-slim store: MIRROR_OK proves every (non-hole) element is a plain
+                    // writable data Num, so the accessor/writable/old-value dance collapses to
+                    // a payload overwrite in the entry plus the mirror word. A hole (elems
+                    // NO_SLOT) would CREATE a property — classic handles it.
+                    a.ldrb_imm(12, 11, mf);
+                    let ok_bit = asm::logical_imm_w(crate::value::MIRROR_OK as u32).unwrap();
+                    a.logic_imm_w(0, 12, 12, ok_bit);
+                    a.cbz(12, false, classic);
+                    a.ldr_imm(12, 11, ml);
+                    a.cmp_reg_x(9, 12);
+                    a.b_cond(C_HS, classic);
+                    a.ldr_imm(12, 11, elp);
+                    a.add_shifted(12, 12, 9, 2);
+                    a.ldr_w_imm(13, 12, 0);
+                    a.cmn_imm_w(13, 1);
+                    a.b_cond(C_EQ, classic);
+                    a.ldr_imm(15, 11, en);
+                    a.movz(14, es as u32, 0);
+                    a.madd(15, 13, 14, 15);
+                    a.stur_d(dv, 15, ev + 8);
+                    a.ldr_imm(12, 11, mp);
+                    a.str_d_lsl3(dv, 12, 9);
+                    // Flag-first ALL_I32 upkeep (dv int-ness is unknown in this tier).
+                    let i32_done = a.new_label();
+                    a.ldrb_imm(13, 11, mf);
+                    let i32_bit = asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32).unwrap();
+                    a.logic_imm_w(0, 12, 13, i32_bit);
+                    a.cbz(12, false, i32_done);
+                    a.fcvtzs_w_d(12, dv);
+                    a.scvtf_d_w(1, 12);
+                    a.fmov_x_d(12, 1);
+                    a.fmov_x_d(14, dv);
+                    a.cmp_reg_x(12, 14);
+                    a.b_cond(C_EQ, i32_done);
+                    let clear = asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32)).unwrap();
+                    a.logic_imm_w(0, 13, 13, clear);
+                    a.strb_imm(13, 11, mf);
+                    a.bind(i32_done);
+                    a.b(mirror_done);
+                }
+                a.bind(classic);
                 a.ldr_imm(12, 11, ell);
                 a.cmp_reg_x(9, 12);
                 a.b_cond(C_HS, guard!());
@@ -3096,6 +4001,15 @@ fn emit_chain(
                     a.sub_imm(13, 13, 1);
                     a.stur(13, 12, strong);
                     a.bind(no_dec);
+                    // Element mirror: dv is a proven Num; int-ness is unknown in this tier.
+                    emit_mirror_store(
+                        a,
+                        layout,
+                        11,
+                        MirrorKey::F64InDreg(dk),
+                        MirrorVal::Num(dv, false),
+                    );
+                    a.bind(mirror_done);
                     free.push(dk);
                     if keep {
                         vregs.push((dv, viv)); // v stays the virtual result (a Num — no refcounting)
@@ -3108,6 +4022,7 @@ fn emit_chain(
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_NE, guard!());
                     a.ldur_d(dk, 15, ev + 8); // reuse the key's register for the element
+                    a.bind(mirror_done);
                     vregs.push((dk, false));
                 }
             }
@@ -3257,6 +4172,2124 @@ fn emit_chain(
     a.bind(done);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Loop-spanning chains: a fully-chainable, branch-free loop keeps its locals in registers
+// across the back edge. Slot loads and type guards hoist into a one-time preamble; memory is
+// written only on loop exit or on a bail, which flushes and jumps into the plain templates of
+// the same region (still emitted as usual — the loop head's canonical label points at the chain
+// entry, so both the fallthrough entry and plain back-edge jumps re-enter the chain). The loop
+// is rotated: the condition runs once at entry (copy A, exits with nothing dirty) and again at
+// the bottom of the body (copy B, exits through a flush), so the back edge is a single branch.
+//
+// Value kinds (decided by the planner, followed verbatim by the emitter):
+//   K — compile-time f64 constant, materialized lazily (bit-op immediates are free)
+//   I — exact integer in an x-register (x2..x8): keys and bit ops are single instructions;
+//       float uses convert with one scvtf. `neg` = may be negative (sign-correctness matters).
+//   D — f64 in a d-register (transients d16..; residents d8..d15); `iv` = proven integral with
+//       |v| < 2^62, so ToInt32 is a bare fcvtzs with no round-trip guard.
+//
+// Residency: slots read before written preload behind a tag guard (a failed guard runs the
+// whole loop through the plain templates); ±1-update targets whose stores stay integer live as
+// I with a per-update magnitude guard that keeps them exact (JS numbers stop moving under ±1 at
+// 2^53, so exceeding it must bail rather than diverge); everything else numeric lives as F.
+// Slots written before read ("virgins") get no preamble load — a 2-instruction tag check bails
+// to the plain loop if they hold a refcounted value, so every later flush is a plain overwrite.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// What a chain op pushes, precomputed by the planner (see the module comment above).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PushKind {
+    None,
+    K(u64),
+    I { neg: bool },
+    D { iv: bool },
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// Where a loop-touched numeric slot lives during the run.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SlotRes {
+    /// f64 home in a d-register (d8..d15).
+    F(u32),
+    /// Exact-integer home in an x-register (x2..x8).
+    I(u32),
+    /// Not register-resident: per-access guarded memory ops, like a plain chain.
+    None,
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[derive(Debug)]
+struct SlotPlan {
+    off: u32,
+    res: SlotRes,
+    /// Read (or ±1-updated) before any region store: preamble tag-guard + load.
+    preload: bool,
+    /// Some Store/Update writes it in the region (it must flush on exits and bails).
+    stored: bool,
+    /// Stored before ever read: preamble checks the old value is refcount-free instead of
+    /// loading it, so flushes can plain-overwrite.
+    virgin: bool,
+    /// F resident with a one-time exact-int entry check: loads carry `integral, |v| ≤ 2^31`,
+    /// so integer arithmetic takes them with a bare fcvtzs.
+    int_checked: bool,
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+struct LoopPlan {
+    head: usize,
+    jump_pc: usize,
+    exit_pc: usize,
+    /// Translated ops for `[head, jump_pc)`; the single CmpBranch ends the condition prefix.
+    chain: Vec<(ChainOp, usize)>,
+    /// Chain entries `[0, cond_len)` are the condition (emitted twice: entry + bottom).
+    cond_len: usize,
+    /// Per chain index: what the op pushes (kind agreement between planner and emitter).
+    kinds: Vec<PushKind>,
+    slots: Vec<SlotPlan>,
+    /// Receiver slots validated once. In mirror mode the cached register holds the raw-f64
+    /// element buffer's data pointer (`Props::mirror`) with the length in `len_reg`, and
+    /// element reads are one indexed load; classic mode caches the object base and walks
+    /// entries per access.
+    receivers: Vec<ReceiverPlan>,
+    /// GetElem chain idx → pin register holding its (guarded) result for later reuse.
+    elem_retain: Vec<(usize, u32)>,
+    /// GetElem chain idx → the retaining chain idx whose pin it copies from.
+    elem_reuse: Vec<(usize, usize)>,
+    /// Bit (chain idx, operand side) → pin register: retain the guarded ToInt32 result / reuse.
+    conv_retain: Vec<((usize, u8), u32)>,
+    conv_reuse: Vec<((usize, u8), u32)>,
+    /// Per SetElem chain idx: the stored value is a proven exact-i32 (mirror flag upkeep).
+    setelem_i32: crate::fasthash::FastMap<usize, bool>,
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// How a loop-chain receiver is cached (see `LoopPlan::receivers`).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+struct ReceiverPlan {
+    off: u32,
+    /// x16/x17: the validated object base.
+    reg: u32,
+    /// Element accesses go through the raw-f64 mirror (preamble-proven coherent and hole-free;
+    /// the buffer pointer/length load per access — same cache line, far cheaper than the
+    /// entry chase they replace).
+    mirror: bool,
+    /// Any int-typed element read flows from this receiver (preamble then requires
+    /// `MIRROR_ALL_I32`, letting those reads use a bare fcvtzs).
+    int_reads: bool,
+}
+
+/// Jump target of a control-flow op, if any.
+fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
+    use crate::bytecode::Op;
+    match op {
+        Op::Jump(t)
+        | Op::JumpIfFalse(t)
+        | Op::JumpIfFalsePeek(t)
+        | Op::JumpIfTruePeek(t)
+        | Op::JumpIfNotNullishPeek(t)
+        | Op::InlineGuard(_, t)
+        | Op::PushHandler(t) => Some(*t as usize),
+        _ => None,
+    }
+}
+
+/// Integer-range bookkeeping for iv decisions: |v| ≤ 2^exp and integral. 255 = unknown/not
+/// integral. Kept crude on purpose — it only has to prove products/sums of masked values stay
+/// under 2^62.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct NumInfo {
+    integral: bool,
+    exp: u32,
+    neg: bool,
+}
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+impl NumInfo {
+    fn unknown() -> NumInfo {
+        NumInfo {
+            integral: false,
+            exp: 255,
+            neg: true,
+        }
+    }
+    fn iv(&self) -> bool {
+        self.integral && self.exp <= 62
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn plan_loop(
+    chunk: &Chunk,
+    ops: &[crate::bytecode::Op],
+    head: usize,
+    targeted: &[bool],
+    layout: &crate::value::JitLayout,
+    fast: u32,
+) -> Option<LoopPlan> {
+    use crate::bytecode::Op;
+    if fast & 32768 == 0 {
+        return None;
+    }
+    macro_rules! reject {
+        ($why:expr) => {{
+            if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+                eprintln!("[jit-loop] head {head}: reject: {}", $why);
+            }
+            return None;
+        }};
+    }
+    let in_range = |s: u16| (s as u32) * 24 + 16 < 4096;
+
+    // ---- region discovery: a unique back-edge Jump(head), nothing else targeting the interior
+    let mut jump_pc = None;
+    for (p, op) in ops.iter().enumerate() {
+        if op_jump_target(op) == Some(head) {
+            if matches!(op, Op::Jump(_)) && p > head && jump_pc.is_none() {
+                jump_pc = Some(p);
+            } else {
+                return None;
+            }
+        }
+    }
+    let jump_pc = jump_pc?;
+    if jump_pc == head + 1 {
+        reject!("empty region");
+    }
+    for op in ops {
+        if let Some(t) = op_jump_target(op) {
+            if t > head && t <= jump_pc {
+                reject!(format!("interior target {t}"));
+            }
+        }
+    }
+    debug_assert!(targeted[head]);
+
+    // ---- translate the region; require full coverage and exactly one fused exit branch
+    let mut chain: Vec<(ChainOp, usize)> = Vec::new();
+    let mut vdepth = 0usize;
+    let mut exit_pc = None;
+    let mut cond_len = None;
+    let mut pc = head;
+    while pc < jump_pc {
+        let (cop, push, pop): (ChainOp, usize, usize) = match &ops[pc] {
+            Op::Const(k) => match chunk.jit_const_num(*k) {
+                Some(bits) => (ChainOp::ConstNum(bits), 1, 0),
+                None => return None,
+            },
+            Op::LoadLocal(s) if in_range(*s) => (ChainOp::Load(*s as u32 * 24), 1, 0),
+            Op::UpdateLocal(s, kind) if in_range(*s) => {
+                let pushes = !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard);
+                (ChainOp::Update(*s as u32 * 24, *kind), pushes as usize, 0)
+            }
+            Op::GetElemLocal(x) if in_range(*x) && vdepth >= 1 => {
+                (ChainOp::GetElem(*x as u32 * 24), 1, 1)
+            }
+            Op::SetElemLocal(x) if in_range(*x) && vdepth >= 2 => {
+                (ChainOp::SetElem(*x as u32 * 24, true), 1, 2)
+            }
+            Op::SetElemLocalDrop(x) if in_range(*x) && vdepth >= 2 => {
+                (ChainOp::SetElem(*x as u32 * 24, false), 0, 2)
+            }
+            Op::Add | Op::Sub | Op::Mul | Op::Div if vdepth >= 2 => {
+                let f = match ops[pc] {
+                    Op::Add => 0,
+                    Op::Sub => 1,
+                    Op::Mul => 2,
+                    _ => 3,
+                };
+                (ChainOp::Arith(f), 1, 2)
+            }
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if vdepth >= 2 => {
+                let code = match ops[pc] {
+                    Op::BitAnd => 0,
+                    Op::BitOr => 1,
+                    Op::BitXor => 2,
+                    Op::Shl => 3,
+                    Op::UShr => 4,
+                    _ => 5,
+                };
+                (ChainOp::Bit(code), 1, 2)
+            }
+            Op::Neg if vdepth >= 1 => (ChainOp::Neg, 1, 1),
+            Op::StoreLocal(s) if in_range(*s) && vdepth >= 1 => {
+                (ChainOp::Store(*s as u32 * 24), 0, 1)
+            }
+            Op::Pop if vdepth >= 1 => (ChainOp::Pop, 0, 1),
+            Op::Dup if vdepth >= 1 => (ChainOp::Dup, 1, 0),
+            Op::ToPropKeyLocal(_) if vdepth >= 1 => (ChainOp::KeyNop, 0, 0),
+            Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNotEq
+            | Op::EqEq
+            | Op::NotEq
+                if vdepth == 2 =>
+            {
+                match ops.get(pc + 1) {
+                    Some(Op::JumpIfFalse(t)) if (*t as usize) > jump_pc => {
+                        if exit_pc.is_some() {
+                            return None; // one exit only
+                        }
+                        let neg = match ops[pc] {
+                            Op::Lt => 5,                  // PL (unordered jumps)
+                            Op::Gt => 13,                 // LE
+                            Op::Le => 8,                  // HI
+                            Op::Ge => 11,                 // LT
+                            Op::StrictEq | Op::EqEq => 1, // NE
+                            _ => 0,                       // EQ
+                        };
+                        exit_pc = Some(*t as usize);
+                        chain.push((ChainOp::CmpBranch(neg, *t as usize), pc));
+                        cond_len = Some(chain.len());
+                        vdepth = 0;
+                        pc += 2;
+                        continue;
+                    }
+                    _ => return None,
+                }
+            }
+            _ => reject!(format!("unchainable op at pc {pc}: {:?}", ops[pc])),
+        };
+        if vdepth - pop + push > 8 {
+            reject!("vdepth > 8");
+        }
+        vdepth = vdepth - pop + push;
+        chain.push((cop, pc));
+        pc += 1;
+    }
+    let exit_pc = exit_pc?;
+    let cond_len = cond_len?;
+    if vdepth != 0 || cond_len == chain.len() {
+        reject!("unbalanced or empty body");
+    }
+
+    // ---- value graph: per produced value, its consumers (for elem-int and residency choices)
+    #[derive(Clone, Copy, PartialEq)]
+    enum Use {
+        Bit,
+        Key,
+        Cmp,
+        Arith,
+        Other,
+    }
+    let n = chain.len();
+    // Node ids: one per chain index that pushes (Dup aliases its source).
+    let mut consumers: Vec<Vec<Use>> = vec![Vec::new(); n];
+    let mut slot_src: crate::fasthash::FastMap<u32, usize> = Default::default(); // off → node
+    let mut slot_bind: crate::fasthash::FastMap<u32, usize> = Default::default();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut elem_nodes: Vec<usize> = Vec::new(); // GetElem chain indices
+    let mut receivers: Vec<u32> = Vec::new();
+    let mut stored: Vec<u32> = Vec::new();
+    let mut updated: Vec<u32> = Vec::new();
+    // Raw memo inputs: element reads as (chain idx, receiver, key node), element writes as
+    // (chain idx, receiver), bit ops as (chain idx, lhs node, rhs node).
+    let mut elem_reads: Vec<(usize, u32, usize)> = Vec::new();
+    let mut elem_writes: Vec<(usize, u32)> = Vec::new();
+    let mut bit_uses: Vec<(usize, usize, usize)> = Vec::new();
+    // Result → operand edges for the needs-int propagation below.
+    let mut flow_edges: Vec<(usize, usize)> = Vec::new();
+    for (idx, (cop, _)) in chain.iter().enumerate() {
+        match *cop {
+            ChainOp::ConstNum(_) => stack.push(idx),
+            ChainOp::Load(off) => {
+                let node = match slot_bind.get(&off) {
+                    Some(&b) => b,
+                    None => *slot_src.entry(off).or_insert(idx),
+                };
+                stack.push(node);
+            }
+            ChainOp::Update(off, kind) => {
+                slot_src.entry(off).or_insert(idx);
+                if !updated.contains(&off) {
+                    updated.push(off);
+                }
+                if !stored.contains(&off) {
+                    stored.push(off);
+                }
+                // The update's own read counts as an int-friendly use.
+                let cur = slot_bind.get(&off).copied().or(slot_src.get(&off).copied());
+                if let Some(c) = cur {
+                    consumers[c].push(Use::Arith);
+                }
+                slot_bind.insert(off, idx);
+                let pushes = !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard);
+                if pushes {
+                    // Post forms push the OLD value — the same node as the pre-update binding,
+                    // so a later identical use (an element key, typically) can be deduplicated.
+                    match kind {
+                        UpdKind::PostInc | UpdKind::PostDec => stack.push(cur.unwrap_or(idx)),
+                        _ => stack.push(idx),
+                    }
+                }
+            }
+            ChainOp::GetElem(xoff) => {
+                let k = stack.pop().expect("loop plan stack");
+                consumers[k].push(Use::Key);
+                if !receivers.contains(&xoff) {
+                    receivers.push(xoff);
+                }
+                elem_reads.push((idx, xoff, k));
+                elem_nodes.push(idx);
+                stack.push(idx);
+            }
+            ChainOp::SetElem(xoff, keep) => {
+                let v = stack.pop().expect("loop plan stack");
+                let k = stack.pop().expect("loop plan stack");
+                consumers[v].push(Use::Other);
+                consumers[k].push(Use::Key);
+                if !receivers.contains(&xoff) {
+                    receivers.push(xoff);
+                }
+                elem_writes.push((idx, xoff));
+                if keep {
+                    stack.push(v);
+                }
+            }
+            ChainOp::Arith(_) => {
+                let b = stack.pop().expect("loop plan stack");
+                let a_ = stack.pop().expect("loop plan stack");
+                consumers[a_].push(Use::Arith);
+                consumers[b].push(Use::Arith);
+                flow_edges.push((idx, a_));
+                flow_edges.push((idx, b));
+                stack.push(idx);
+            }
+            ChainOp::Bit(_) => {
+                let b = stack.pop().expect("loop plan stack");
+                let a_ = stack.pop().expect("loop plan stack");
+                consumers[a_].push(Use::Bit);
+                consumers[b].push(Use::Bit);
+                bit_uses.push((idx, a_, b));
+                stack.push(idx);
+            }
+            ChainOp::Neg => {
+                let v = stack.pop().expect("loop plan stack");
+                consumers[v].push(Use::Arith);
+                flow_edges.push((idx, v));
+                stack.push(idx);
+            }
+            ChainOp::Store(off) => {
+                let v = stack.pop().expect("loop plan stack");
+                consumers[v].push(Use::Other);
+                slot_bind.insert(off, v);
+                if !stored.contains(&off) {
+                    stored.push(off);
+                }
+            }
+            ChainOp::Pop => {
+                let v = stack.pop().expect("loop plan stack");
+                consumers[v].push(Use::Other);
+            }
+            ChainOp::Dup => {
+                let v = *stack.last().expect("loop plan stack");
+                stack.push(v);
+            }
+            ChainOp::KeyNop => {}
+            ChainOp::CmpBranch(..) => {
+                let b = stack.pop().expect("loop plan stack");
+                let a_ = stack.pop().expect("loop plan stack");
+                consumers[a_].push(Use::Cmp);
+                consumers[b].push(Use::Cmp);
+            }
+            ChainOp::LoadName(_) => return None, // not supported in loop chains
+        }
+    }
+
+    // Elem ops present require the inline layout; receivers must never be written in-region.
+    if !elem_nodes.is_empty() || !receivers.is_empty() {
+        if fast & 1024 == 0 || !elem_inlinable(layout) {
+            reject!("elem layout");
+        }
+    }
+    if receivers.len() > 2 {
+        reject!("too many receivers");
+    }
+    for r in &receivers {
+        if stored.contains(r) {
+            reject!("stored receiver");
+        }
+    }
+
+    // ---- slot classification
+    let mut slot_offs: Vec<u32> = Vec::new();
+    for (cop, _) in &chain {
+        match *cop {
+            ChainOp::Load(off) | ChainOp::Update(off, _) | ChainOp::Store(off) => {
+                if !slot_offs.contains(&off) && !receivers.contains(&off) {
+                    slot_offs.push(off);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Read-before-store per slot: first access wins.
+    let mut first_access: crate::fasthash::FastMap<u32, bool> = Default::default(); // true=read
+    for (cop, _) in &chain {
+        match *cop {
+            ChainOp::Load(off) | ChainOp::Update(off, _) => {
+                first_access.entry(off).or_insert(true);
+            }
+            ChainOp::Store(off) => {
+                first_access.entry(off).or_insert(false);
+            }
+            _ => {}
+        }
+    }
+
+    // needs-int: a value feeds a bit op or key, directly or through arithmetic whose result
+    // does. This is what justifies speculative exact-int guards: a float here would have been
+    // truncated (or bailed) downstream anyway, so proving int early only moves the check.
+    let mut needs_int = vec![false; n];
+    for (idx, uses) in consumers.iter().enumerate() {
+        if uses.iter().any(|u| matches!(u, Use::Bit | Use::Key)) {
+            needs_int[idx] = true;
+        }
+    }
+    loop {
+        let mut changed = false;
+        for &(r, op) in &flow_edges {
+            if needs_int[r] && !needs_int[op] {
+                needs_int[op] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Elem-int decision: the value (transitively) feeds an int context.
+    let elem_int: Vec<bool> = elem_nodes.iter().map(|&idx| needs_int[idx]).collect();
+
+    // Residency policy. x-registers are scarce (9 shared with transients), so they go where
+    // integer latency matters: counters (±1 updates), loop-carried accumulators (read before
+    // stored — the cross-iteration critical path), and stored slots whose values feed bit ops
+    // or keys directly. Read-only preloads that feed int contexts stay in d-registers behind a
+    // one-time exact-int entry check (`int_checked`): integer arithmetic takes them with a bare
+    // fcvtzs. The sim rounds below demote any I candidate whose stores turn out non-integer.
+    let mut i_slots: Vec<u32> = updated.clone();
+    let mut int_checked: Vec<u32> = Vec::new();
+    // Store-value nodes per slot, for the direct-consumer test.
+    let mut store_nodes: crate::fasthash::FastMap<u32, Vec<usize>> = Default::default();
+    {
+        let mut stack2: Vec<usize> = Vec::new();
+        let mut bind2: crate::fasthash::FastMap<u32, usize> = Default::default();
+        let mut src2: crate::fasthash::FastMap<u32, usize> = Default::default();
+        for (idx, (cop, _)) in chain.iter().enumerate() {
+            let (pops, pushes): (usize, usize) = match *cop {
+                ChainOp::ConstNum(_) | ChainOp::LoadName(_) => (0, 1),
+                ChainOp::Load(_) => (0, 1),
+                ChainOp::Update(_, k) => (
+                    0,
+                    !matches!(k, UpdKind::IncDiscard | UpdKind::DecDiscard) as usize,
+                ),
+                ChainOp::GetElem(_) => (1, 1),
+                ChainOp::SetElem(_, keep) => (2, keep as usize),
+                ChainOp::Arith(_) | ChainOp::Bit(_) => (2, 1),
+                ChainOp::Neg => (1, 1),
+                ChainOp::Store(_) | ChainOp::Pop => (1, 0),
+                ChainOp::Dup => (0, 1),
+                ChainOp::KeyNop => (0, 0),
+                ChainOp::CmpBranch(..) => (2, 0),
+            };
+            let mut popped: Vec<usize> = Vec::new();
+            for _ in 0..pops {
+                popped.push(stack2.pop().expect("residency stack"));
+            }
+            match *cop {
+                ChainOp::Load(off) => {
+                    let nd = bind2
+                        .get(&off)
+                        .copied()
+                        .unwrap_or_else(|| *src2.entry(off).or_insert(idx));
+                    stack2.push(nd);
+                }
+                ChainOp::Update(off, kind) => {
+                    let cur = bind2.get(&off).copied().or(src2.get(&off).copied());
+                    src2.entry(off).or_insert(idx);
+                    bind2.insert(off, idx);
+                    if pushes == 1 {
+                        match kind {
+                            UpdKind::PostInc | UpdKind::PostDec => stack2.push(cur.unwrap_or(idx)),
+                            _ => stack2.push(idx),
+                        }
+                    }
+                }
+                ChainOp::Store(off) => {
+                    store_nodes.entry(off).or_default().push(popped[0]);
+                    bind2.insert(off, popped[0]);
+                }
+                ChainOp::Dup => {
+                    let v = *stack2.last().expect("residency stack");
+                    stack2.push(v);
+                }
+                ChainOp::SetElem(_, true) => stack2.push(popped[0]),
+                _ => {
+                    for _ in 0..pushes {
+                        stack2.push(idx);
+                    }
+                }
+            }
+        }
+    }
+    for &off in &slot_offs {
+        if i_slots.contains(&off) {
+            continue;
+        }
+        let preloaded = first_access.get(&off).copied().unwrap_or(false);
+        let is_stored = stored.contains(&off);
+        if preloaded && !is_stored {
+            if slot_src.get(&off).is_some_and(|&nd| needs_int[nd]) {
+                int_checked.push(off);
+            }
+            continue;
+        }
+        if !is_stored {
+            continue;
+        }
+        let carried = preloaded; // read before stored: loop-carried accumulator
+        let bit_fed = store_nodes.get(&off).is_some_and(|nodes| {
+            nodes.iter().any(|&nd| {
+                consumers[nd]
+                    .iter()
+                    .any(|u| matches!(u, Use::Bit | Use::Key))
+            })
+        });
+        if carried || bit_fed {
+            i_slots.push(off);
+        }
+    }
+
+    // ---- kind simulation (multiple rounds: residency demotions can change kinds, and the
+    // loop-carried exponent bounds of int-resident slots need a cross-iteration fixed point)
+    let mut plan_kinds: Vec<PushKind> = Vec::new();
+    let mut i_peak = 0usize;
+    let mut d_peak = 0usize;
+    // Bit-operand kinds per (chain idx, side), from the final round (conversion memos below).
+    let mut bit_kinds: crate::fasthash::FastMap<(usize, u8), PushKind> = Default::default();
+    // Per SetElem chain idx: stored value proven exact-i32 (final round).
+    let mut setelem_i32: crate::fasthash::FastMap<usize, bool> = Default::default();
+    // Loop-head |value| ≤ 2^exp bound per int-resident slot: entry guards prove 31; stores
+    // widen it; iterate until stable (or the slot demotes to float residency).
+    let mut slot_exp_head: crate::fasthash::FastMap<u32, u32> = Default::default();
+    for &off in &i_slots {
+        slot_exp_head.insert(off, 31);
+    }
+    // One precise widening per slot; a second jumps past the int cap so the slot demotes and
+    // the rounds terminate (a slot can otherwise creep +1 per round forever).
+    let mut widened: Vec<u32> = Vec::new();
+    #[allow(unused_assignments)]
+    let mut stable = false;
+    // Integer registers available to chains: x2..x8 plus x0/x1 — nothing in a chain fast path
+    // calls out or scratches them (helpers only run on bail/exit stubs, after the flush).
+    const I_UNIVERSE: [u32; 9] = [2, 3, 4, 5, 6, 7, 8, 0, 1];
+    let use_count = |off: u32, chain: &[(ChainOp, usize)]| {
+        chain
+            .iter()
+            .filter(|(c, _)| {
+                matches!(*c, ChainOp::Load(o) | ChainOp::Update(o, _) | ChainOp::Store(o) if o == off)
+            })
+            .count()
+    };
+    // Whether an int-kind duplicate element read exists (it would want an x pin — worth
+    // demoting one resident for, at ~20 instructions per iteration saved).
+    let want_pin: usize = {
+        let mut last: Vec<(u32, usize, bool)> = Vec::new();
+        let mut dups = 0usize;
+        let mut w = 0usize;
+        for (k, &(idx, rcv, key)) in elem_reads.iter().enumerate() {
+            while w < elem_writes.len() && elem_writes[w].0 < idx {
+                last.clear();
+                w += 1;
+            }
+            if last
+                .iter()
+                .any(|&(r, kn, wi)| r == rcv && kn == key && wi == elem_int[k])
+            {
+                if elem_int[k] {
+                    dups += 1;
+                }
+            } else {
+                last.push((rcv, key, elem_int[k]));
+            }
+        }
+        dups.min(1)
+    };
+    let mut pins_demoted = 0usize;
+    let pins_wanted = want_pin;
+    'budget: loop {
+        widened.clear();
+        stable = false;
+        for _round in 0..64 {
+            plan_kinds = vec![PushKind::None; n];
+            bit_kinds.clear();
+            setelem_i32.clear();
+            // (kind, info) per virtual value; slot state per off.
+            let mut vstack: Vec<(PushKind, NumInfo)> = Vec::new();
+            let mut slot_iv: crate::fasthash::FastMap<u32, NumInfo> = Default::default();
+            for &off in &int_checked {
+                slot_iv.insert(
+                    off,
+                    NumInfo {
+                        integral: true,
+                        exp: 31,
+                        neg: true,
+                    },
+                );
+            }
+            let mut slot_exp: crate::fasthash::FastMap<u32, u32> = slot_exp_head.clone();
+            let mut stored_exp: crate::fasthash::FastMap<u32, u32> = Default::default();
+            let mut demote: Option<u32> = None;
+            let mut i_live = 0usize;
+            let mut d_live = 0usize;
+            i_peak = 0;
+            d_peak = 0;
+            let mut elem_seen = 0usize;
+            macro_rules! track {
+            ($k:expr, $dir:tt) => {
+                match $k {
+                    PushKind::I { .. } => i_live = (i_live as isize $dir 1) as usize,
+                    PushKind::D { .. } => d_live = (d_live as isize $dir 1) as usize,
+                    _ => {}
+                }
+            };
+        }
+            for (idx, (cop, _)) in chain.iter().enumerate() {
+                let (i_start, d_start) = (i_live, d_live);
+                let mut i_pushed = 0usize;
+                let mut d_pushed = 0usize;
+                macro_rules! push {
+                ($k:expr, $inf:expr) => {{
+                    let (k, inf) = ($k, $inf);
+                    track!(k, +);
+                    match k {
+                        PushKind::I { .. } => i_pushed += 1,
+                        PushKind::D { .. } => d_pushed += 1,
+                        _ => {}
+                    }
+                    plan_kinds[idx] = k;
+                    vstack.push((k, inf));
+                }};
+            }
+                macro_rules! pop {
+                () => {{
+                    let (k, inf) = vstack.pop().expect("loop kind stack");
+                    track!(k, -);
+                    (k, inf)
+                }};
+            }
+                match *cop {
+                    ChainOp::ConstNum(bits) => {
+                        let f = f64::from_bits(bits);
+                        let integral = f.fract() == 0.0 && f.abs() < 9.0e18;
+                        let exp = if integral {
+                            (f.abs().max(1.0)).log2().ceil() as u32
+                        } else {
+                            255
+                        };
+                        push!(
+                            PushKind::K(bits),
+                            NumInfo {
+                                integral,
+                                exp,
+                                neg: f < 0.0
+                            }
+                        );
+                    }
+                    ChainOp::Load(off) => {
+                        if i_slots.contains(&off) {
+                            let exp = slot_exp.get(&off).copied().unwrap_or(31);
+                            push!(
+                                PushKind::I { neg: true },
+                                NumInfo {
+                                    integral: true,
+                                    exp,
+                                    neg: true
+                                }
+                            );
+                        } else {
+                            let inf = slot_iv.get(&off).copied().unwrap_or(NumInfo::unknown());
+                            push!(PushKind::D { iv: inf.iv() }, inf);
+                        }
+                    }
+                    ChainOp::Update(off, kind) => {
+                        if !i_slots.contains(&off) {
+                            slot_iv.insert(off, NumInfo::unknown());
+                        }
+                        if !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard) {
+                            if i_slots.contains(&off) {
+                                push!(
+                                    PushKind::I { neg: true },
+                                    NumInfo {
+                                        integral: true,
+                                        exp: 31,
+                                        neg: true
+                                    }
+                                );
+                            } else {
+                                push!(PushKind::D { iv: false }, NumInfo::unknown());
+                            }
+                        }
+                    }
+                    ChainOp::GetElem(_) => {
+                        pop!();
+                        let want_int = elem_int[elem_seen];
+                        elem_seen += 1;
+                        if want_int {
+                            // The w-form conversion guard proves exact i32.
+                            push!(
+                                PushKind::I { neg: true },
+                                NumInfo {
+                                    integral: true,
+                                    exp: 31,
+                                    neg: true
+                                }
+                            );
+                        } else {
+                            push!(PushKind::D { iv: false }, NumInfo::unknown());
+                        }
+                    }
+                    ChainOp::SetElem(_, keep) => {
+                        let (vk, vinf) = pop!();
+                        pop!();
+                        // Exact-i32 proof for the mirror: an int-kind value bounded to i32 (int
+                        // kinds can never carry -0.0).
+                        setelem_i32.insert(idx, matches!(vk, PushKind::I { .. }) && vinf.exp <= 31);
+                        if keep {
+                            push!(vk, vinf);
+                        }
+                    }
+                    ChainOp::Arith(f) => {
+                        let (bk, binf) = pop!();
+                        let (ak, ainf) = pop!();
+                        let integral = ainf.integral && binf.integral && f != 3;
+                        let exp = match f {
+                            0 | 1 => ainf.exp.max(binf.exp).saturating_add(1),
+                            2 => ainf.exp.saturating_add(binf.exp),
+                            _ => 255,
+                        };
+                        // Integer lowering: both operands are exact ints in registers (or int
+                        // constants) and the result provably fits 2^52, so 64-bit integer add/sub/
+                        // mul is exact and equals the f64 result — no guards, 1-cycle latency.
+                        let int_side = |k: PushKind, inf: NumInfo| match k {
+                            PushKind::I { .. } => true,
+                            // -0.0 is "integral" but has no integer representation: its sign would
+                            // erase through int arithmetic.
+                            PushKind::K(b) => {
+                                inf.integral && inf.exp <= 52 && b != (-0.0f64).to_bits()
+                            }
+                            // Proven-integral f64 (entry-checked preload or tracked store): a bare
+                            // fcvtzs is exact (the entry guards reject -0.0).
+                            PushKind::D { .. } => inf.integral && inf.exp <= 52,
+                            _ => false,
+                        };
+                        if f != 3 && exp <= 52 && int_side(ak, ainf) && int_side(bk, binf) {
+                            let neg = ainf.neg || binf.neg || f == 1;
+                            push!(
+                                PushKind::I { neg },
+                                NumInfo {
+                                    integral: true,
+                                    exp,
+                                    neg
+                                }
+                            );
+                        } else {
+                            let inf = NumInfo {
+                                integral: integral && exp <= 62,
+                                exp,
+                                neg: true,
+                            };
+                            push!(PushKind::D { iv: inf.iv() }, inf);
+                        }
+                    }
+                    ChainOp::Bit(code) => {
+                        let (bk, binf) = pop!();
+                        let (ak, ainf) = pop!();
+                        let _ = binf;
+                        bit_kinds.insert((idx, 0), ak);
+                        bit_kinds.insert((idx, 1), bk);
+                        let kbits = |k: PushKind| match k {
+                            PushKind::K(b) => {
+                                let f = f64::from_bits(b);
+                                if f.fract() == 0.0 && (0.0..2147483648.0).contains(&f) {
+                                    Some(f as u32)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let inf = match code {
+                            0 => {
+                                // and: a nonneg constant mask bounds the result
+                                match kbits(ak).into_iter().chain(kbits(bk)).min() {
+                                    Some(m) => NumInfo {
+                                        integral: true,
+                                        exp: 32 - m.leading_zeros(),
+                                        neg: false,
+                                    },
+                                    None => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            5 => {
+                                // shr by a constant: |x >> k| ≤ max(|x| / 2^k, 1) with sign
+                                // preserved (after the i32 wrap, so the input bound caps at 31).
+                                match kbits(bk) {
+                                    Some(k) => {
+                                        let e0 = ainf.exp.min(31);
+                                        NumInfo {
+                                            integral: true,
+                                            exp: e0.saturating_sub(k.min(31)).max(1),
+                                            neg: if ainf.exp <= 31 { ainf.neg } else { true },
+                                        }
+                                    }
+                                    None => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            3 => {
+                                // shl by a constant of a small nonneg value can't wrap
+                                match (kbits(bk), ainf.neg) {
+                                    (Some(k), false) if ainf.exp + k.min(31) <= 31 => NumInfo {
+                                        integral: true,
+                                        exp: ainf.exp + k.min(31),
+                                        neg: false,
+                                    },
+                                    _ => NumInfo {
+                                        integral: true,
+                                        exp: 32,
+                                        neg: true,
+                                    },
+                                }
+                            }
+                            4 => NumInfo {
+                                integral: true,
+                                exp: 32,
+                                neg: false,
+                            },
+                            _ => NumInfo {
+                                integral: true,
+                                exp: 32,
+                                neg: true,
+                            },
+                        };
+                        push!(PushKind::I { neg: inf.neg }, inf);
+                    }
+                    ChainOp::Neg => {
+                        let (_, vinf) = pop!();
+                        let inf = NumInfo {
+                            integral: vinf.integral,
+                            exp: vinf.exp,
+                            neg: true,
+                        };
+                        push!(PushKind::D { iv: inf.iv() }, inf);
+                    }
+                    ChainOp::Store(off) => {
+                        let (vk, vinf) = pop!();
+                        if i_slots.contains(&off) {
+                            // A non-integer store demotes the slot: kinds must be re-simulated.
+                            // Counter slots (±1 updates) additionally require i32 stores — the
+                            // update sequence relies on the w-form overflow check.
+                            let int_ok = match vk {
+                                PushKind::I { .. } => true,
+                                PushKind::K(b) => {
+                                    let f = f64::from_bits(b);
+                                    f.fract() == 0.0 && f.abs() < 9.0e15
+                                }
+                                _ => false,
+                            };
+                            let exp_cap = if updated.contains(&off) { 31 } else { 52 };
+                            if (!int_ok || vinf.exp > exp_cap) && demote.is_none() {
+                                demote = Some(off);
+                            }
+                            slot_exp.insert(off, vinf.exp);
+                            let e = stored_exp.entry(off).or_insert(0);
+                            *e = (*e).max(vinf.exp);
+                        }
+                        slot_iv.insert(off, vinf);
+                    }
+                    ChainOp::Pop => {
+                        pop!();
+                    }
+                    ChainOp::Dup => {
+                        let &(vk, vinf) = vstack.last().expect("loop kind stack");
+                        push!(vk, vinf);
+                    }
+                    ChainOp::KeyNop => {}
+                    ChainOp::CmpBranch(..) => {
+                        pop!();
+                        pop!();
+                    }
+                    ChainOp::LoadName(_) => unreachable!(),
+                }
+                // Operand registers are freed only at op end, so an op needs its start-of-op
+                // live set plus everything it pushes, simultaneously.
+                i_peak = i_peak.max(i_live).max(i_start + i_pushed);
+                d_peak = d_peak.max(d_live).max(d_start + d_pushed);
+            }
+            match demote {
+                Some(off) => {
+                    if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+                        eprintln!("[jit-loop] head {head}: demote I slot {}", off / 24);
+                    }
+                    i_slots.retain(|&o| o != off);
+                    slot_exp_head.remove(&off);
+                }
+                None => {
+                    // Widen loop-head exponent bounds with what this round stored; a stable set of
+                    // bounds means the kinds are final.
+                    let mut changed = false;
+                    for (&off, &e) in &stored_exp {
+                        if !i_slots.contains(&off) {
+                            continue;
+                        }
+                        let entry = slot_exp_head.entry(off).or_insert(31);
+                        let mut new = (*entry).max(e);
+                        if new != *entry && widened.contains(&off) {
+                            new = 53; // second widening: force the demotion path
+                        }
+                        if new != *entry {
+                            *entry = new;
+                            widened.push(off);
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        stable = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !stable {
+            reject!("kind rounds did not converge");
+        }
+        // Register budget: demote the least-used I resident and re-simulate when over; also
+        // give up (a bounded number of) residents so the receiver/memo pins fit — a length
+        // pin turns every element access into one load, worth far more than a counter's home.
+        let over = i_peak + i_slots.len() > I_UNIVERSE.len();
+        let pin_squeeze = pins_demoted < pins_wanted
+            && i_peak + i_slots.len() + (pins_wanted - pins_demoted) > I_UNIVERSE.len();
+        if over || pin_squeeze {
+            let victim = i_slots
+                .iter()
+                .copied()
+                .min_by_key(|&off| use_count(off, &chain));
+            match victim {
+                Some(v) => {
+                    if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+                        eprintln!(
+                            "[jit-loop] head {head}: demote I slot {} ({})",
+                            v / 24,
+                            if over { "pressure" } else { "pin" }
+                        );
+                    }
+                    if !over {
+                        pins_demoted += 1;
+                    }
+                    i_slots.retain(|&o| o != v);
+                    slot_exp_head.remove(&v);
+                    continue 'budget;
+                }
+                None if over => reject!(format!("i pressure: peak {i_peak}")),
+                None => break,
+            }
+        }
+        break;
+    }
+    if d_peak + 1 > 8 {
+        reject!(format!("d pressure: peak {d_peak}"));
+    }
+    let f_slots: Vec<u32> = slot_offs
+        .iter()
+        .copied()
+        .filter(|o| !i_slots.contains(o))
+        .collect();
+    if f_slots.len() > 8 {
+        reject!(format!("f pressure: {} slots", f_slots.len()));
+    }
+
+    let mut slots: Vec<SlotPlan> = Vec::new();
+    let mut next_d = 8u32;
+    let mut next_x = 0usize; // index into I_UNIVERSE
+    for &off in &slot_offs {
+        let res = if i_slots.contains(&off) {
+            let r = SlotRes::I(I_UNIVERSE[next_x]);
+            next_x += 1;
+            r
+        } else if f_slots.contains(&off) {
+            let r = SlotRes::F(next_d);
+            next_d += 1;
+            r
+        } else {
+            SlotRes::None
+        };
+        let preload = first_access.get(&off).copied().unwrap_or(false);
+        let is_stored = stored.contains(&off);
+        slots.push(SlotPlan {
+            off,
+            res,
+            preload,
+            stored: is_stored,
+            virgin: is_stored && !preload,
+            int_checked: int_checked.contains(&off),
+        });
+    }
+    // Sanity: kinds recorded for the final residency sets. The last sim round used exactly
+    // `i_slots`/all-resident F, matching the assignment above.
+
+    // Which receivers feed int-typed element reads (their mirror mode also needs ALL_I32).
+    let mut rcv_int: Vec<u32> = Vec::new();
+    {
+        let mut seen = 0usize;
+        for (cop, _) in &chain {
+            if let ChainOp::GetElem(off) = *cop {
+                if elem_int[seen] && !rcv_int.contains(&off) {
+                    rcv_int.push(off);
+                }
+                seen += 1;
+            }
+        }
+    }
+
+    // ---- memoization: duplicate element reads and repeated guarded ToInt32 conversions.
+    // Node ids are SSA-like (an id never changes value), so a second element read with the same
+    // (receiver, key id) — with no intervening element write — and a second Bit-op use of the
+    // same unproven-f64 id can reuse the first result from a pinned register. Pins live in the
+    // leftover resident registers; memos are dropped when none are free.
+    // x pins: whatever the universe leaves after I residents and the transient reserve; d pins
+    // from the resident bank's leftovers (d transients live in d16.. and never collide).
+    let mut free_pin_x: Vec<u32> = I_UNIVERSE
+        .iter()
+        .copied()
+        .filter(|x| !slots.iter().any(|s| s.res == SlotRes::I(*x)))
+        .skip(i_peak)
+        .collect();
+    let mut free_pin_d: Vec<u32> = (next_d..16).collect();
+    let receivers: Vec<ReceiverPlan> = receivers
+        .iter()
+        .enumerate()
+        .map(|(k, &off)| ReceiverPlan {
+            off,
+            reg: 16 + k as u32,
+            mirror: fast & 262144 != 0,
+            int_reads: rcv_int.contains(&off),
+        })
+        .collect();
+    let mut elem_retain: Vec<(usize, u32)> = Vec::new();
+    let mut elem_reuse: Vec<(usize, usize)> = Vec::new(); // (dup idx, retain idx)
+    {
+        // (rcv, key node, want-int) → retain chain idx
+        let mut last: Vec<((u32, usize, bool), usize)> = Vec::new();
+        let mut w = 0usize;
+        for (k, &(idx, rcv, key)) in elem_reads.iter().enumerate() {
+            // Any element write invalidates every pending read: two receiver slots can hold the
+            // same array at runtime, so same-receiver screening would be unsound.
+            while w < elem_writes.len() && elem_writes[w].0 < idx {
+                last.clear();
+                w += 1;
+            }
+            let want = elem_int[k];
+            match last
+                .iter()
+                .find(|((r, kn, wi), _)| *r == rcv && *kn == key && *wi == want)
+            {
+                Some(&(_, ridx)) => elem_reuse.push((idx, ridx)),
+                None => last.push(((rcv, key, want), idx)),
+            }
+        }
+        // Only reads that are actually reused get pins.
+        for &(_, ridx) in &elem_reuse {
+            if !elem_retain.iter().any(|(i, _)| *i == ridx) {
+                let k = elem_reads.iter().position(|&(i, _, _)| i == ridx).unwrap();
+                let pin = if elem_int[k] {
+                    free_pin_x.pop()
+                } else {
+                    free_pin_d.pop()
+                };
+                if let Some(r) = pin {
+                    elem_retain.push((ridx, r));
+                }
+            }
+        }
+        // Drop reuses whose retain got no pin.
+        elem_reuse.retain(|&(_, ridx)| elem_retain.iter().any(|(i, _)| *i == ridx));
+    }
+    let mut conv_retain: Vec<((usize, u8), u32)> = Vec::new();
+    let mut conv_reuse: Vec<((usize, u8), u32)> = Vec::new();
+    {
+        // Guarded conversions only (D with iv=false): the 7-instruction guard is worth a pin.
+        let mut by_id: crate::fasthash::FastMap<usize, Vec<(usize, u8)>> = Default::default();
+        for &(idx, aid, bid) in &bit_uses {
+            for (side, id) in [(0u8, aid), (1u8, bid)] {
+                if matches!(bit_kinds.get(&(idx, side)), Some(PushKind::D { iv: false })) {
+                    by_id.entry(id).or_default().push((idx, side));
+                }
+            }
+        }
+        let mut ids: Vec<(usize, Vec<(usize, u8)>)> =
+            by_id.into_iter().filter(|(_, v)| v.len() >= 2).collect();
+        ids.sort_by_key(|(id, _)| *id);
+        for (_, mut uses) in ids {
+            let Some(pin) = free_pin_x.pop() else { break };
+            uses.sort();
+            conv_retain.push((uses[0], pin));
+            for &u in &uses[1..] {
+                conv_reuse.push((u, pin));
+            }
+        }
+    }
+
+    if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
+        eprintln!(
+            "[jit-loop] head {head}: CHAINED {} ops, {} slots ({} I), {} receivers, memo elem {}r/{}u conv {}r/{}u",
+            chain.len(),
+            slots.len(),
+            slots.iter().filter(|s| matches!(s.res, SlotRes::I(_))).count(),
+            receivers.len(),
+            elem_retain.len(),
+            elem_reuse.len(),
+            conv_retain.len(),
+            conv_reuse.len()
+        );
+    }
+    Some(LoopPlan {
+        head,
+        jump_pc,
+        exit_pc,
+        chain,
+        cond_len,
+        kinds: plan_kinds,
+        slots,
+        receivers,
+        elem_retain,
+        elem_reuse,
+        conv_retain,
+        conv_reuse,
+        setelem_i32,
+    })
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// A virtual value during loop-chain emission.
+#[derive(Clone, Copy)]
+enum LV {
+    K(u64),
+    I(u32, bool), // x-register, may-be-negative
+    D(u32, bool), // d-register, integral-valued
+}
+
+/// Emit the loop chain for `plan`. Returns the label for the plain fallback of the head op —
+/// the caller binds it immediately after and continues emitting the plain region.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_loop_chain(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    plan: &LoopPlan,
+    pc_labels: &[usize],
+) -> usize {
+    let strong = layout.rc_strong_off as i32;
+    let rcv = layout.obj_from_rc as u32;
+    let ex = layout.obj_exotic as u32;
+    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
+    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
+    let ev = layout.entry_value as i32;
+    let ea = layout.entry_accessor as u32;
+    let ew = layout.entry_writable as u32;
+    let es = layout.entry_size as u64;
+    let none_tag = layout.exotic_none_tag as u32;
+    let arr_tag = layout.exotic_array_tag as u32;
+    let plain = layout.obj_ic_plain as u32;
+    let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
+    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
+    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+
+    let plain_h = a.new_label();
+    let body_l = a.new_label();
+    let exit_a = a.new_label();
+    let exit_b = a.new_label();
+
+    let slot = |off: u32| plan.slots.iter().find(|s| s.off == off);
+    let rcv_plan = |off: u32| plan.receivers.iter().find(|r| r.off == off);
+    // Virgins stored within the condition prefix (they flush even on the entry exit).
+    let cond_virgins: Vec<u32> = plan.chain[..plan.cond_len]
+        .iter()
+        .filter_map(|(c, _)| match *c {
+            ChainOp::Store(off) if slot(off).is_some_and(|s| s.virgin) => Some(off),
+            _ => None,
+        })
+        .collect();
+    let all_virgins: Vec<u32> = plan
+        .slots
+        .iter()
+        .filter(|s| s.virgin)
+        .map(|s| s.off)
+        .collect();
+
+    // ---- preamble --------------------------------------------------------------------------
+    for s in &plan.slots {
+        if s.virgin {
+            // The old value must be drop-free so flushes can plain-overwrite.
+            a.ldrb_imm(9, 22, s.off);
+            a.cmp_imm_w(9, 5);
+            a.b_cond(C_HS, plain_h);
+        }
+        if !s.preload {
+            continue;
+        }
+        a.ldrb_imm(9, 22, s.off);
+        a.cmp_imm_w(9, 4);
+        a.b_cond(C_NE, plain_h);
+        match s.res {
+            SlotRes::F(d) => {
+                a.ldr_d_imm(d, 22, s.off + 8);
+                if s.int_checked {
+                    // One-time exact-i32 proof (bit-compare: -0.0 must not pass); the value
+                    // stays in its d home and integer consumers convert with a bare fcvtzs.
+                    a.fcvtzs_w_d(9, d);
+                    a.scvtf_d_w(1, 9);
+                    a.fmov_x_d(10, 1);
+                    a.fmov_x_d(11, d);
+                    a.cmp_reg_x(10, 11);
+                    a.b_cond(C_NE, plain_h);
+                }
+            }
+            SlotRes::I(x) => {
+                // Exact i32 (w-form conversion + compare-back): counters keep the invariant
+                // with a flag-setting ±1, and the planner's range analysis starts from 2^31.
+                a.ldr_d_imm(0, 22, s.off + 8);
+                a.fcvtzs_w_d(x, 0);
+                a.scvtf_d_w(1, x);
+                a.fmov_x_d(9, 1);
+                a.fmov_x_d(10, 0);
+                a.cmp_reg_x(9, 10);
+                a.b_cond(C_NE, plain_h);
+                a.sxtw(x, x);
+            }
+            SlotRes::None => {}
+        }
+    }
+    for rp in &plan.receivers {
+        let (off, r) = (rp.off, rp.reg);
+        a.ldrb_imm(10, 22, off);
+        a.cmp_imm_w(10, 8);
+        a.b_cond(C_NE, plain_h);
+        a.ldr_imm(10, 22, off + 8);
+        a.add_imm(r, 10, rcv);
+        a.ldrb_imm(12, r, ex);
+        let ex_ok = a.new_label();
+        a.cmp_imm_w(12, none_tag);
+        a.b_cond(C_EQ, ex_ok);
+        a.cmp_imm_w(12, arr_tag);
+        a.b_cond(C_NE, plain_h);
+        a.bind(ex_ok);
+        a.ldrb_imm(12, r, plain);
+        a.cbz(12, false, plain_h);
+        if rp.mirror {
+            // The element buffer must be coherent, hole-free, and (for int-read receivers)
+            // all-i32: element reads become bounds + one indexed load with no tag check.
+            let mut need = (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32;
+            if rp.int_reads {
+                need |= crate::value::MIRROR_ALL_I32 as u32;
+            }
+            a.ldrb_imm(12, r, mf);
+            let field = asm::logical_imm_w(need).expect("mirror mask encodable");
+            a.logic_imm_w(0, 12, 12, field);
+            a.cmp_imm_w(12, need);
+            a.b_cond(C_NE, plain_h);
+        }
+    }
+
+    // ---- emission state --------------------------------------------------------------------
+    // (chain idx, bail label, vstack snapshot, virgins stored at that point)
+    let mut bails: Vec<(usize, usize, Vec<LV>, Vec<u32>)> = Vec::new();
+    let mut vstack: Vec<LV> = Vec::new();
+    let pinned = |x: u32| {
+        plan.elem_retain.iter().any(|&(_, p)| p == x)
+            || plan.conv_retain.iter().any(|&(_, p)| p == x)
+    };
+    let mut free_i: Vec<u32> = [1u32, 0, 8, 7, 6, 5, 4, 3, 2]
+        .into_iter()
+        .filter(|x| !plan.slots.iter().any(|s| s.res == SlotRes::I(*x)) && !pinned(*x))
+        .collect();
+    let mut free_d: Vec<u32> = (16..24).rev().collect();
+
+    macro_rules! emit_pass {
+        ($range:expr, $exit:expr, $base_virgins:expr) => {{
+            let mut stores_seen: Vec<u32> = $base_virgins;
+            for idx in $range {
+                let (ref cop, _) = plan.chain[idx];
+                let bail = a.new_label();
+                #[allow(unused_assignments)]
+                let mut used = false;
+                let snap = vstack.clone();
+                let seen_snap = stores_seen.clone();
+                // Operand registers freed by this op return to the pools only once the op has
+                // emitted its last guard — a bail spills the pre-op snapshot, so no operand
+                // register may be reused (and clobbered) while a guard can still fire.
+                let mut dead: Vec<LV> = Vec::new();
+                macro_rules! guard {
+                    () => {{
+                        #[allow(unused_assignments)]
+                        {
+                            used = true;
+                        }
+                        bail
+                    }};
+                }
+                // Convert helpers ------------------------------------------------------------
+                macro_rules! to_w {
+                    // Value into a w-usable scratch gpr; returns the register number.
+                    ($v:expr, $scr:expr) => {{
+                        match $v {
+                            LV::I(x, _) => x,
+                            LV::K(bits) => {
+                                let iv = f64::from_bits(bits) as i64;
+                                a.mov_imm64($scr, iv as u64);
+                                $scr
+                            }
+                            LV::D(d, iv) => {
+                                a.fcvtzs_x_d($scr, d);
+                                if !iv {
+                                    a.scvtf_d_x(0, $scr);
+                                    a.frintz(1, d);
+                                    a.fcmp(0, 1);
+                                    a.b_cond(C_NE, guard!());
+                                    a.cmn_imm_x($scr, 1);
+                                    a.b_cond(C_VS, guard!());
+                                }
+                                $scr
+                            }
+                        }
+                    }};
+                }
+                macro_rules! free_v {
+                    ($v:expr) => {
+                        dead.push($v)
+                    };
+                }
+                macro_rules! to_d {
+                    // Value into a d-register; the original register is deferred-freed, so the
+                    // caller owns the result only if the source was already D.
+                    ($v:expr) => {{
+                        match $v {
+                            LV::D(d, _) => d,
+                            LV::I(x, _) => {
+                                let d = free_d.pop().expect("loop d pool");
+                                a.scvtf_d_x(d, x);
+                                dead.push(LV::I(x, false));
+                                d
+                            }
+                            LV::K(bits) => {
+                                let d = free_d.pop().expect("loop d pool");
+                                a.mov_imm64(9, bits);
+                                a.fmov_d_x(d, 9);
+                                d
+                            }
+                        }
+                    }};
+                }
+                macro_rules! key_to_x9 {
+                    ($v:expr) => {
+                        match $v {
+                            LV::I(x, neg) => {
+                                if neg {
+                                    a.cmp_imm_x(x, 0);
+                                    a.b_cond(11, guard!()); // LT
+                                }
+                                a.mov(9, x);
+                                dead.push(LV::I(x, false));
+                            }
+                            LV::K(bits) => {
+                                let f = f64::from_bits(bits);
+                                if f.fract() == 0.0 && (0.0..2147483648.0).contains(&f) {
+                                    a.mov_imm64(9, f as u64);
+                                } else {
+                                    a.mov_imm64(9, bits);
+                                    a.fmov_d_x(0, 9);
+                                    a.fcvtzu_w_d(9, 0);
+                                    a.ucvtf_d_w(1, 9);
+                                    a.fcmp(0, 1);
+                                    a.b_cond(C_NE, guard!());
+                                }
+                            }
+                            LV::D(d, _) => {
+                                a.fcvtzu_w_d(9, d);
+                                a.ucvtf_d_w(0, 9);
+                                a.fcmp(d, 0);
+                                a.b_cond(C_NE, guard!());
+                                dead.push(LV::D(d, false));
+                            }
+                        }
+                    };
+                }
+                // Element lookup: key index in x9, receiver base in `r` → entry pointer in x15.
+                macro_rules! elem_entry {
+                    ($r:expr) => {{
+                        a.ldr_imm(12, $r, ell);
+                        a.cmp_reg_x(9, 12);
+                        a.b_cond(C_HS, guard!());
+                        a.ldr_imm(12, $r, elp);
+                        a.add_shifted(12, 12, 9, 2);
+                        a.ldr_w_imm(13, 12, 0);
+                        a.cmn_imm_w(13, 1);
+                        a.b_cond(C_EQ, guard!());
+                        a.ldr_imm(15, $r, en);
+                        a.movz(9, es as u32, 0);
+                        a.madd(15, 13, 9, 15);
+                        a.ldrb_imm(9, 15, ea);
+                        a.cbnz(9, false, guard!());
+                    }};
+                }
+
+                match *cop {
+                    ChainOp::ConstNum(bits) => vstack.push(LV::K(bits)),
+                    ChainOp::Load(off) => {
+                        let s = slot(off).expect("planned slot");
+                        match s.res {
+                            SlotRes::F(dres) => {
+                                let dt = free_d.pop().expect("loop d pool");
+                                a.fmov_d_d(dt, dres);
+                                let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
+                                vstack.push(LV::D(dt, iv));
+                            }
+                            SlotRes::I(xres) => {
+                                let xt = free_i.pop().expect("loop i pool");
+                                a.mov(xt, xres);
+                                vstack.push(LV::I(xt, true));
+                            }
+                            SlotRes::None => {
+                                a.ldrb_imm(9, 22, off);
+                                a.cmp_imm_w(9, 4);
+                                a.b_cond(C_NE, guard!());
+                                let dt = free_d.pop().expect("loop d pool");
+                                a.ldr_d_imm(dt, 22, off + 8);
+                                let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
+                                vstack.push(LV::D(dt, iv));
+                            }
+                        }
+                    }
+                    ChainOp::Update(off, kind) => {
+                        let s = slot(off).expect("planned slot");
+                        let dec = matches!(
+                            kind,
+                            UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard
+                        );
+                        match s.res {
+                            SlotRes::I(xres) => {
+                                // The entry guard proved exact i32; a flag-setting w-form ±1
+                                // keeps it (V = left i32 = bail), far from f64's 2^53 edge.
+                                if dec {
+                                    a.subs_imm_w(9, xres, 1);
+                                } else {
+                                    a.adds_imm_w(9, xres, 1);
+                                }
+                                a.b_cond(C_VS, guard!());
+                                a.sxtw(9, 9);
+                                match kind {
+                                    UpdKind::PostInc | UpdKind::PostDec => {
+                                        let xt = free_i.pop().expect("loop i pool");
+                                        a.mov(xt, xres);
+                                        a.mov(xres, 9);
+                                        vstack.push(LV::I(xt, true));
+                                    }
+                                    UpdKind::PreInc | UpdKind::PreDec => {
+                                        a.mov(xres, 9);
+                                        let xt = free_i.pop().expect("loop i pool");
+                                        a.mov(xt, xres);
+                                        vstack.push(LV::I(xt, true));
+                                    }
+                                    _ => a.mov(xres, 9),
+                                }
+                            }
+                            SlotRes::F(dres) => {
+                                let f = if dec { 1 } else { 0 };
+                                a.fmov_one(0);
+                                match kind {
+                                    UpdKind::PostInc | UpdKind::PostDec => {
+                                        let dt = free_d.pop().expect("loop d pool");
+                                        a.fmov_d_d(dt, dres);
+                                        a.f_arith(f, dres, dres, 0);
+                                        vstack.push(LV::D(dt, false));
+                                    }
+                                    UpdKind::PreInc | UpdKind::PreDec => {
+                                        a.f_arith(f, dres, dres, 0);
+                                        let dt = free_d.pop().expect("loop d pool");
+                                        a.fmov_d_d(dt, dres);
+                                        vstack.push(LV::D(dt, false));
+                                    }
+                                    _ => a.f_arith(f, dres, dres, 0),
+                                }
+                            }
+                            SlotRes::None => {
+                                a.ldrb_imm(9, 22, off);
+                                a.cmp_imm_w(9, 4);
+                                a.b_cond(C_NE, guard!());
+                                let f = if dec { 1 } else { 0 };
+                                a.ldr_d_imm(0, 22, off + 8);
+                                a.fmov_one(1);
+                                a.f_arith(f, 1, 0, 1);
+                                a.str_d_imm(1, 22, off + 8);
+                                match kind {
+                                    UpdKind::PostInc | UpdKind::PostDec => {
+                                        let dt = free_d.pop().expect("loop d pool");
+                                        a.fmov_d_d(dt, 0);
+                                        vstack.push(LV::D(dt, false));
+                                    }
+                                    UpdKind::PreInc | UpdKind::PreDec => {
+                                        let dt = free_d.pop().expect("loop d pool");
+                                        a.fmov_d_d(dt, 1);
+                                        vstack.push(LV::D(dt, false));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ChainOp::GetElem(xoff) => {
+                        let key = vstack.pop().expect("loop vstack");
+                        // A read the planner proved identical to an earlier one (same receiver,
+                        // same key value, no element write between) copies the pinned result —
+                        // its guards already passed this iteration.
+                        if let Some(&(_, ridx)) = plan.elem_reuse.iter().find(|&&(d, _)| d == idx) {
+                            let pin = plan
+                                .elem_retain
+                                .iter()
+                                .find(|&&(i, _)| i == ridx)
+                                .expect("planned retain")
+                                .1;
+                            free_v!(key);
+                            if matches!(plan.kinds[idx], PushKind::I { .. }) {
+                                let xt = free_i.pop().expect("loop i pool");
+                                a.mov(xt, pin);
+                                vstack.push(LV::I(xt, true));
+                            } else {
+                                let dt = free_d.pop().expect("loop d pool");
+                                a.fmov_d_d(dt, pin);
+                                vstack.push(LV::D(dt, false));
+                            }
+                        } else {
+                            key_to_x9!(key);
+                            let rp = rcv_plan(xoff).expect("planned receiver");
+                            let pin = plan
+                                .elem_retain
+                                .iter()
+                                .find(|&&(i, _)| i == idx)
+                                .map(|p| p.1);
+                            if rp.mirror {
+                                // Mirror: bounds + one indexed load (ptr/len share a cache
+                                // line off the cached base). Preamble proved coherent +
+                                // hole-free (+ all-i32 for int reads): no tag check, and int
+                                // reads need no exactness guard.
+                                a.ldr_imm(12, rp.reg, ml);
+                                a.cmp_reg_x(9, 12);
+                                a.b_cond(C_HS, guard!());
+                                a.ldr_imm(12, rp.reg, mp);
+                                if matches!(plan.kinds[idx], PushKind::I { .. }) {
+                                    a.ldr_d_lsl3(0, 12, 9);
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.fcvtzs_w_d(xt, 0);
+                                    a.sxtw(xt, xt);
+                                    if let Some(p) = pin {
+                                        a.mov(p, xt);
+                                    }
+                                    vstack.push(LV::I(xt, true));
+                                } else {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.ldr_d_lsl3(dt, 12, 9);
+                                    if let Some(p) = pin {
+                                        a.fmov_d_d(p, dt);
+                                    }
+                                    vstack.push(LV::D(dt, false));
+                                }
+                            } else {
+                                let r = rp.reg;
+                                elem_entry!(r);
+                                a.ldrb_imm(9, 15, ev as u32);
+                                a.cmp_imm_w(9, 4);
+                                a.b_cond(C_NE, guard!());
+                                if matches!(plan.kinds[idx], PushKind::I { .. }) {
+                                    // w-form: the exactness compare-back also proves i32 (the
+                                    // planner's range analysis relies on that bound).
+                                    a.ldur_d(0, 15, ev + 8);
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.fcvtzs_w_d(xt, 0);
+                                    a.scvtf_d_w(1, xt);
+                                    // Bit-compare, not fcmp: IEEE equality would accept -0.0
+                                    // and erase its sign through the int-typed value.
+                                    a.fmov_x_d(9, 1);
+                                    a.fmov_x_d(10, 0);
+                                    a.cmp_reg_x(9, 10);
+                                    a.b_cond(C_NE, guard!());
+                                    a.sxtw(xt, xt);
+                                    if let Some(p) = pin {
+                                        a.mov(p, xt);
+                                    }
+                                    vstack.push(LV::I(xt, true));
+                                } else {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.ldur_d(dt, 15, ev + 8);
+                                    if let Some(p) = pin {
+                                        a.fmov_d_d(p, dt);
+                                    }
+                                    vstack.push(LV::D(dt, false));
+                                }
+                            }
+                        }
+                    }
+                    ChainOp::SetElem(xoff, keep) => {
+                        let val = vstack.pop().expect("loop vstack");
+                        let key = vstack.pop().expect("loop vstack");
+                        // Stage the value into d2 before the key conversion (d0/d1 scratch).
+                        match val {
+                            LV::D(d, _) => a.fmov_d_d(2, d),
+                            LV::I(x, _) => a.scvtf_d_x(2, x),
+                            LV::K(bits) => {
+                                a.mov_imm64(9, bits);
+                                a.fmov_d_x(2, 9);
+                            }
+                        }
+                        key_to_x9!(key);
+                        let rp = rcv_plan(xoff).expect("planned receiver");
+                        let r = rp.reg;
+                        let i32_proven = plan.setelem_i32.get(&idx).copied().unwrap_or(false);
+                        if rp.mirror {
+                            // Mirror invariant (preamble-proven): every mirrored element is a
+                            // plain writable data Num — the accessor/writable/old-value checks
+                            // and the tag write all collapse. A hole (elems NO_SLOT) bails:
+                            // that store would CREATE a property.
+                            a.ldr_imm(12, r, ml);
+                            a.cmp_reg_x(9, 12);
+                            a.b_cond(C_HS, guard!());
+                            a.ldr_imm(12, r, elp);
+                            a.add_shifted(12, 12, 9, 2);
+                            a.ldr_w_imm(13, 12, 0);
+                            a.cmn_imm_w(13, 1);
+                            a.b_cond(C_EQ, guard!());
+                            a.ldr_imm(15, r, en);
+                            a.movz(12, es as u32, 0);
+                            a.madd(15, 13, 12, 15);
+                            a.stur_d(2, 15, ev + 8);
+                            a.ldr_imm(12, r, mp);
+                            a.str_d_lsl3(2, 12, 9);
+                            if !i32_proven {
+                                // MIRROR_ALL_I32 upkeep, flag-first (no sentinel screen —
+                                // hole accounting is structural, see Props::mirror_sync).
+                                let i32_done = a.new_label();
+                                a.ldrb_imm(13, r, mf);
+                                let i32_bit =
+                                    asm::logical_imm_w(crate::value::MIRROR_ALL_I32 as u32)
+                                        .unwrap();
+                                a.logic_imm_w(0, 12, 13, i32_bit);
+                                a.cbz(12, false, i32_done);
+                                a.fcvtzs_w_d(12, 2);
+                                a.scvtf_d_w(1, 12);
+                                a.fmov_x_d(12, 1);
+                                a.fmov_x_d(14, 2);
+                                a.cmp_reg_x(12, 14);
+                                a.b_cond(C_EQ, i32_done);
+                                let clear =
+                                    asm::logical_imm_w(!(crate::value::MIRROR_ALL_I32 as u32))
+                                        .unwrap();
+                                a.logic_imm_w(0, 13, 13, clear);
+                                a.strb_imm(13, r, mf);
+                                a.bind(i32_done);
+                            }
+                        } else {
+                            elem_entry!(r);
+                            a.ldrb_imm(9, 15, ew);
+                            a.cbz(9, false, guard!());
+                            a.ldrb_imm(14, 15, ev as u32);
+                            a.cmp_imm_w(14, 5);
+                            a.b_cond(C_EQ, guard!());
+                            let old_plain = a.new_label();
+                            a.cmp_imm_w(14, 6);
+                            a.b_cond(C_LO, old_plain);
+                            a.ldur(12, 15, ev + 8);
+                            a.ldur(13, 12, strong);
+                            a.cmp_imm_x(13, 1);
+                            a.b_cond(C_LS, guard!());
+                            a.bind(old_plain);
+                            a.movz(9, 4, 0);
+                            a.stur(9, 15, ev);
+                            a.stur_d(2, 15, ev + 8);
+                            a.stur(31, 15, ev + 16);
+                            let no_dec = a.new_label();
+                            a.cmp_imm_w(14, 6);
+                            a.b_cond(C_LO, no_dec);
+                            a.ldur(13, 12, strong);
+                            a.sub_imm(13, 13, 1);
+                            a.stur(13, 12, strong);
+                            a.bind(no_dec);
+                            // Element mirror: the value was staged in d2; key registers are
+                            // still intact (operand frees are deferred to op end).
+                            let mkey = match key {
+                                LV::I(x, _) => MirrorKey::U32InReg(x),
+                                LV::D(d, _) => MirrorKey::F64InDreg(d),
+                                // A K key reaching the commit passed the exact-u32 runtime
+                                // check, so the compile-time conversion is exact.
+                                LV::K(bits) => MirrorKey::Const(f64::from_bits(bits) as u32),
+                            };
+                            emit_mirror_store(a, layout, r, mkey, MirrorVal::Num(2, i32_proven));
+                        }
+                        if keep {
+                            vstack.push(val);
+                        } else {
+                            free_v!(val);
+                        }
+                    }
+                    ChainOp::Arith(f) => {
+                        let b = vstack.pop().expect("loop vstack");
+                        let a_ = vstack.pop().expect("loop vstack");
+                        if let PushKind::I { neg } = plan.kinds[idx] {
+                            // Range-proven exact integer arithmetic: no guards needed.
+                            let to_x = |a: &mut asm::Asm, v: LV, scr: u32| match v {
+                                LV::I(x, _) => x,
+                                LV::K(bits) => {
+                                    a.mov_imm64(scr, f64::from_bits(bits) as i64 as u64);
+                                    scr
+                                }
+                                // Planner-proven integral: exact without a guard.
+                                LV::D(d, _) => {
+                                    a.fcvtzs_x_d(scr, d);
+                                    scr
+                                }
+                            };
+                            let xb = to_x(a, b, 10);
+                            let xa = to_x(a, a_, 9);
+                            let xt = free_i.pop().expect("loop i pool");
+                            match f {
+                                0 => a.add_shifted(xt, xa, xb, 0),
+                                1 => a.sub_reg(xt, xa, xb),
+                                _ => a.madd(xt, xa, xb, 31),
+                            }
+                            free_v!(a_);
+                            free_v!(b);
+                            vstack.push(LV::I(xt, neg));
+                        } else {
+                            let db = to_d!(b);
+                            let da = to_d!(a_);
+                            a.f_arith(f, da, da, db);
+                            dead.push(LV::D(db, false));
+                            let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
+                            vstack.push(LV::D(da, iv));
+                        }
+                    }
+                    ChainOp::Bit(code) => {
+                        let b = vstack.pop().expect("loop vstack");
+                        let a_ = vstack.pop().expect("loop vstack");
+                        let neg = matches!(plan.kinds[idx], PushKind::I { neg: true });
+                        // A guarded ToInt32 the planner proved repeats an earlier one reuses the
+                        // pinned result; the first instance converts into its pin.
+                        macro_rules! conv {
+                            ($v:expr, $side:expr, $scr:expr) => {{
+                                let reuse = plan
+                                    .conv_reuse
+                                    .iter()
+                                    .find(|&&((i, s), _)| i == idx && s == $side)
+                                    .map(|p| p.1);
+                                match (reuse, $v) {
+                                    // The operand register is untouched; the arm's free_v!
+                                    // releases it at op end like any other operand.
+                                    (Some(pin), LV::D(..)) => pin,
+                                    _ => {
+                                        let scr = plan
+                                            .conv_retain
+                                            .iter()
+                                            .find(|&&((i, s), _)| i == idx && s == $side)
+                                            .map(|p| p.1)
+                                            .unwrap_or($scr);
+                                        to_w!($v, scr)
+                                    }
+                                }
+                            }};
+                        }
+                        // Immediate forms when the rhs is a suitable constant.
+                        let imm = match b {
+                            LV::K(bits) => {
+                                let f = f64::from_bits(bits);
+                                if f.fract() == 0.0 && (0.0..4294967296.0).contains(&f) {
+                                    Some(f as u32)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let enc = imm.and_then(|m| match code {
+                            0..=2 => asm::logical_imm_w(m),
+                            _ => Some(m & 31),
+                        });
+                        let xt;
+                        if let Some(field) = enc {
+                            let wa = conv!(a_, 0, 9);
+                            xt = free_i.pop().expect("loop i pool");
+                            match code {
+                                0 | 1 | 2 => a.logic_imm_w(code, xt, wa, field),
+                                3 => a.lsl_imm_w(xt, wa, field),
+                                4 => a.lsr_imm_w(xt, wa, field),
+                                _ => a.asr_imm_w(xt, wa, field),
+                            }
+                            free_v!(a_);
+                        } else {
+                            let wb = conv!(b, 1, 10);
+                            let wa = conv!(a_, 0, 9);
+                            xt = free_i.pop().expect("loop i pool");
+                            match code {
+                                0 => a.logic_w(0, xt, wa, wb),
+                                1 => a.logic_w(1, xt, wa, wb),
+                                2 => a.logic_w(2, xt, wa, wb),
+                                3 => a.shift_w(0, xt, wa, wb),
+                                4 => a.shift_w(1, xt, wa, wb),
+                                _ => a.shift_w(2, xt, wa, wb),
+                            }
+                            free_v!(a_);
+                            free_v!(b);
+                        }
+                        if neg {
+                            a.sxtw(xt, xt);
+                        }
+                        vstack.push(LV::I(xt, neg));
+                    }
+                    ChainOp::Neg => {
+                        let v = vstack.pop().expect("loop vstack");
+                        let d = to_d!(v);
+                        a.fneg(d, d);
+                        let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
+                        vstack.push(LV::D(d, iv));
+                    }
+                    ChainOp::Store(off) => {
+                        let v = vstack.pop().expect("loop vstack");
+                        let s = slot(off).expect("planned slot");
+                        match s.res {
+                            SlotRes::F(dres) => match v {
+                                LV::D(d, _) => {
+                                    a.fmov_d_d(dres, d);
+                                    dead.push(LV::D(d, false));
+                                }
+                                LV::I(x, _) => {
+                                    a.scvtf_d_x(dres, x);
+                                    dead.push(LV::I(x, false));
+                                }
+                                LV::K(bits) => {
+                                    a.mov_imm64(9, bits);
+                                    a.fmov_d_x(dres, 9);
+                                }
+                            },
+                            SlotRes::I(xres) => match v {
+                                LV::I(x, _) => {
+                                    a.mov(xres, x);
+                                    dead.push(LV::I(x, false));
+                                }
+                                LV::K(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    a.mov_imm64(xres, f as i64 as u64);
+                                }
+                                LV::D(..) => unreachable!("planner demotes float-stored I slots"),
+                            },
+                            SlotRes::None => {
+                                let dv = to_d!(v);
+                                a.ldrb_imm(9, 22, off);
+                                a.cmp_imm_w(9, 5);
+                                a.b_cond(C_EQ, guard!());
+                                let st_plain = a.new_label();
+                                a.cmp_imm_w(9, 6);
+                                a.b_cond(C_LO, st_plain);
+                                a.ldr_imm(10, 22, off + 8);
+                                a.ldur(11, 10, strong);
+                                a.cmp_imm_x(11, 1);
+                                a.b_cond(C_LS, guard!());
+                                a.sub_imm(11, 11, 1);
+                                a.stur(11, 10, strong);
+                                a.bind(st_plain);
+                                a.movz(9, 4, 0);
+                                a.str_imm(9, 22, off);
+                                a.str_d_imm(dv, 22, off + 8);
+                                a.str_imm(31, 22, off + 16);
+                                dead.push(LV::D(dv, false));
+                            }
+                        }
+                        if s.virgin && !stores_seen.contains(&off) {
+                            stores_seen.push(off);
+                        }
+                    }
+                    ChainOp::Pop => {
+                        let v = vstack.pop().expect("loop vstack");
+                        free_v!(v);
+                    }
+                    ChainOp::Dup => {
+                        let v = *vstack.last().expect("loop vstack");
+                        match v {
+                            LV::K(bits) => vstack.push(LV::K(bits)),
+                            LV::I(x, neg) => {
+                                let xt = free_i.pop().expect("loop i pool");
+                                a.mov(xt, x);
+                                vstack.push(LV::I(xt, neg));
+                            }
+                            LV::D(d, iv) => {
+                                let dt = free_d.pop().expect("loop d pool");
+                                a.fmov_d_d(dt, d);
+                                vstack.push(LV::D(dt, iv));
+                            }
+                        }
+                    }
+                    ChainOp::KeyNop => {}
+                    ChainOp::CmpBranch(neg, _) => {
+                        let b = vstack.pop().expect("loop vstack");
+                        let a_ = vstack.pop().expect("loop vstack");
+                        let k_imm12 = |v: LV| match v {
+                            LV::K(bits) => {
+                                let f = f64::from_bits(bits);
+                                if f.fract() == 0.0 && (0.0..4096.0).contains(&f) {
+                                    Some(f as u32)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        let int_neg = match neg {
+                            5 => 10, // !(a<b) → GE
+                            8 => 12, // !(a<=b) → GT
+                            n => n,  // LE/LT/NE/EQ hold for signed ints
+                        };
+                        match (a_, b) {
+                            (LV::I(xa, _), LV::I(xb, _)) => {
+                                a.cmp_reg_x(xa, xb);
+                                a.b_cond(int_neg, $exit);
+                                dead.push(LV::I(xa, false));
+                                dead.push(LV::I(xb, false));
+                            }
+                            (LV::I(xa, _), kb) if k_imm12(kb).is_some() => {
+                                a.cmp_imm_x(xa, k_imm12(kb).unwrap());
+                                a.b_cond(int_neg, $exit);
+                                dead.push(LV::I(xa, false));
+                            }
+                            (a2, LV::K(bits)) if f64::from_bits(bits) == 0.0 => {
+                                let da = to_d!(a2);
+                                a.fcmp_zero(da);
+                                a.b_cond(neg, $exit);
+                                dead.push(LV::D(da, false));
+                            }
+                            (a2, b2) => {
+                                let db = to_d!(b2);
+                                let da = to_d!(a2);
+                                a.fcmp(da, db);
+                                a.b_cond(neg, $exit);
+                                dead.push(LV::D(da, false));
+                                dead.push(LV::D(db, false));
+                            }
+                        }
+                    }
+                    ChainOp::LoadName(_) => unreachable!(),
+                }
+                if used {
+                    bails.push((idx, bail, snap, seen_snap));
+                }
+                for v in dead {
+                    match v {
+                        LV::I(x, _) => free_i.push(x),
+                        LV::D(d, _) => free_d.push(d),
+                        LV::K(_) => {}
+                    }
+                }
+            }
+        }};
+    }
+
+    // ---- rotated loop ----------------------------------------------------------------------
+    emit_pass!(0..plan.cond_len, exit_a, Vec::new());
+    a.bind(body_l);
+    emit_pass!(
+        plan.cond_len..plan.chain.len(),
+        exit_b,
+        cond_virgins.clone()
+    );
+    emit_pass!(0..plan.cond_len, exit_b, all_virgins.clone());
+    a.b(body_l);
+
+    // ---- exits and bails -------------------------------------------------------------------
+    let emit_flush = |a: &mut asm::Asm, virgins: &[u32]| {
+        for s in &plan.slots {
+            if !s.stored {
+                continue;
+            }
+            if s.virgin && !virgins.contains(&s.off) {
+                continue;
+            }
+            let d = match s.res {
+                SlotRes::F(d) => d,
+                SlotRes::I(x) => {
+                    a.scvtf_d_x(0, x);
+                    0
+                }
+                SlotRes::None => continue, // stores wrote through
+            };
+            if s.virgin {
+                a.movz(9, 4, 0);
+                a.str_imm(9, 22, s.off);
+                a.str_d_imm(d, 22, s.off + 8);
+                a.str_imm(31, 22, s.off + 16);
+            } else {
+                a.str_d_imm(d, 22, s.off + 8);
+            }
+        }
+    };
+    a.bind(exit_a);
+    emit_flush(a, &cond_virgins);
+    a.b(pc_labels[plan.exit_pc]);
+    a.bind(exit_b);
+    emit_flush(a, &all_virgins);
+    a.b(pc_labels[plan.exit_pc]);
+
+    for (idx, label, snap, seen) in bails {
+        a.bind(label);
+        for v in &snap {
+            match *v {
+                LV::K(bits) => {
+                    a.mov_imm64(9, bits);
+                    a.movz(10, 4, 0);
+                    a.stur(10, 20, 0);
+                    a.stur(9, 20, 8);
+                }
+                LV::I(x, _) => {
+                    a.scvtf_d_x(0, x);
+                    a.movz(9, 4, 0);
+                    a.stur(9, 20, 0);
+                    a.stur_d(0, 20, 8);
+                }
+                LV::D(d, _) => {
+                    a.movz(9, 4, 0);
+                    a.stur(9, 20, 0);
+                    a.stur_d(d, 20, 8);
+                }
+            }
+            a.stur(31, 20, 16);
+            a.add_imm(20, 20, 24);
+        }
+        emit_flush(a, &seen);
+        let pc = plan.chain[idx].1;
+        if pc == plan.head {
+            a.b(plain_h);
+        } else {
+            a.b(pc_labels[pc]);
+        }
+    }
+    plain_h
+}
+
 /// The generic per-op helper call: `jit_exec(ctx, pc, sp)` → (new sp, threw?). The sp is taken
 /// unconditionally — it reflects consumed operands even when the op threw, which is what keeps
 /// the unwinder's cleanup from re-dropping moved-out slots.
@@ -3323,7 +6356,8 @@ fn stack_depths(chunk: &Chunk) -> Option<usize> {
             Op::JumpIfFalse(t)
             | Op::JumpIfFalsePeek(t)
             | Op::JumpIfTruePeek(t)
-            | Op::JumpIfNotNullishPeek(t) => {
+            | Op::JumpIfNotNullishPeek(t)
+            | Op::InlineGuard(_, t) => {
                 work.push((*t as usize, next));
                 work.push((pc + 1, next));
             }
@@ -3374,9 +6408,11 @@ pub fn run(
         final_sp: stack_base,
         env_raw,
         this_raw: std::ptr::null(),
-        global_body: {
+        global_body: if code.needs_global {
             let b = i.global.borrow();
             &*b as *const crate::value::Object as *const u8
+        } else {
+            std::ptr::null()
         },
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
@@ -3395,7 +6431,7 @@ pub fn run(
     let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
     let ok = entry(&mut ctx);
     drop(env); // the env handle must outlive the run (ctx.env_ref aliases it)
-    // Drop any operands left on the raw stack (a throw can leave temporaries).
+               // Drop any operands left on the raw stack (a throw can leave temporaries).
     unsafe {
         let mut p = ctx.stack_base;
         while p < ctx.final_sp {
@@ -3441,8 +6477,9 @@ pub(crate) unsafe fn run_moved(
     this_val: Value,
     args: *mut Value,
     argc: usize,
+    // `chunk.jit_frame()`, precomputed by the caller (the cached call reads it from its IC).
+    (n_params, n_slots): (usize, usize),
 ) -> Result<Value, Abrupt> {
-    let (n_params, n_slots) = chunk.jit_frame();
     let seed = n_params.min(argc);
     // Frame memory: one fixed-size raw buffer from the freelist ([slots | operand stack]);
     // oversized frames use the legacy pooled-Vec pair. The buffer is a plain allocation (not a
@@ -3469,8 +6506,10 @@ pub(crate) unsafe fn run_moved(
         for k in seed..argc {
             std::ptr::drop_in_place(args.add(k));
         }
+        // Initializing a slot to Undefined only needs the tag byte (repr(u8) discriminant 0):
+        // no consumer reads a Value's payload behind tag 0, so stale payload bytes are dead.
         for k in seed..n_slots {
-            slots_ptr.add(k).write(Value::Undefined);
+            *(slots_ptr.add(k) as *mut u8) = 0;
         }
         for &s in chunk.jit_var_force_resets() {
             let s = s as usize;
@@ -3488,9 +6527,11 @@ pub(crate) unsafe fn run_moved(
         final_sp: stack_base,
         env_raw,
         this_raw: std::ptr::null(),
-        global_body: {
+        global_body: if code.needs_global {
             let b = i.global.borrow();
             &*b as *const crate::value::Object as *const u8
+        } else {
+            std::ptr::null()
         },
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
@@ -3514,9 +6555,30 @@ pub(crate) unsafe fn run_moved(
             std::ptr::drop_in_place(p);
             p = p.add(1);
         }
-        // Drop the frame's local slots (initialized Values throughout the run).
+        // Drop the frame's local slots (initialized Values throughout the run). Numeric frames
+        // are the common case: a tag peek skips the outlined drop for trivially-copyable tags
+        // (Undefined/Empty/Null/Bool/Num — repr(u8) discriminants 0..=4). Refcounted tags
+        // (Str/Sym/Obj ≥ 6 — the discriminant order the templates rely on) whose payload is a
+        // shared reference collapse to a bare strong-count decrement, exactly like the inline
+        // templates' drop path (strong sits at payload+0 for Rc and LStr alike; BigInt tag 5
+        // and last references take the real drop).
+        // The bare-decrement path shares the templates' layout contract (fail closed if the
+        // probe ever finds a std whose strong count moved).
+        let rc_dec_ok = i.jit_layout.get().is_some_and(|l| l.valid && l.rc_strong_off == 0);
         for k in 0..n_slots {
-            std::ptr::drop_in_place(slots_ptr.add(k));
+            let p = slots_ptr.add(k);
+            let tag = *(p as *const u8);
+            if tag < 5 {
+                continue;
+            }
+            if rc_dec_ok && tag >= 6 {
+                let strong = *(p as *const usize).add(1) as *mut usize;
+                if *strong > 1 {
+                    *strong -= 1;
+                    continue;
+                }
+            }
+            std::ptr::drop_in_place(p);
         }
     }
     match legacy {
@@ -3573,6 +6635,7 @@ pub(crate) unsafe fn run_moved(
     _this_val: Value,
     _args: *mut Value,
     _argc: usize,
+    _frame: (usize, usize),
 ) -> Result<Value, Abrupt> {
     unreachable!("jit code cannot exist on this platform")
 }
