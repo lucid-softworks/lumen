@@ -328,6 +328,12 @@ pub enum Op {
     SetProp(u32, u32),
     /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
     SetPropDrop(u32, u32),
+    /// `this.name = v` statement — SetPropDrop with the receiver from the frame's `this`
+    /// binding: pops only the value.
+    SetPropThisDrop(u32, u32),
+    /// `local.name = v` statement — receiver from a slot; pops only the value. Only emitted
+    /// when the RHS provably can't reassign the local (evaluation-order safety).
+    SetPropLocalDrop(u16, u32, u32),
     /// Template-literal substitution: ToString (string hint) on the top of the stack.
     ToStr,
     /// `for…of` prologue: pops the iterable, pushes the iterator object then its `next` method
@@ -3237,6 +3243,51 @@ impl Compiler {
                     Ok(true)
                 }
             },
+            // Receiver-direct statement stores: `this.x = v` (always safe — `this` can't be
+            // reassigned) and `slotlocal.x = v` when the RHS provably can't reassign the local
+            // (the receiver is read at set time, after the RHS — evaluation order must agree).
+            Expr::Member {
+                obj: mobj,
+                prop,
+                optional: false,
+            } if op == "="
+                && !prop.starts_with('#')
+                && match &**mobj {
+                    Expr::This => true,
+                    Expr::Ident(name) => {
+                        matches!(self.home(name), Some(Home::Slot(..)))
+                            && no_assign_to(value, name)
+                    }
+                    _ => false,
+                } =>
+            {
+                self.expr(value)?;
+                let i = self.name_idx(prop);
+                let c = self.new_cache();
+                match &**mobj {
+                    Expr::This => {
+                        if self.inline_depth > 0 {
+                            match self.inline_this {
+                                Some(slot) => {
+                                    self.emit(Op::SetPropLocalDrop(slot, i, c));
+                                }
+                                None => return Err(Bail), // splice without a this binding
+                            }
+                        } else {
+                            self.uses_this = true;
+                            self.emit(Op::SetPropThisDrop(i, c));
+                        }
+                    }
+                    Expr::Ident(name) => {
+                        let Some(Home::Slot(slot, _)) = self.home(name) else {
+                            unreachable!()
+                        };
+                        self.emit(Op::SetPropLocalDrop(slot, i, c));
+                    }
+                    _ => unreachable!(),
+                }
+                Ok(true)
+            }
             Expr::Member {
                 obj,
                 prop,
@@ -3268,6 +3319,7 @@ impl Compiler {
                 self.emit(Op::SetPropDrop(i, c));
                 Ok(true)
             }
+
             Expr::Index {
                 obj,
                 index,
@@ -4234,6 +4286,24 @@ fn run_vm(
                 let obj = pop!();
                 i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
             }
+            Op::SetPropThisDrop(n, c) => {
+                let v = pop!();
+                i.set_prop_ic(this_val, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+            }
+            Op::SetPropLocalDrop(s, n, c) => {
+                let v = pop!();
+                let obj = slots[s as usize].clone();
+                if matches!(obj, Value::Empty) {
+                    return Err(i.throw(
+                        "ReferenceError",
+                        format!(
+                            "cannot access '{}' before initialization",
+                            chunk.slot_names[s as usize]
+                        ),
+                    ));
+                }
+                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+            }
             Op::DestructureGuard => {
                 if matches!(
                     stack.last().expect("vm stack underflow"),
@@ -5131,6 +5201,8 @@ impl Chunk {
             Op::GetPropLocal(..) => (0, 1),
             Op::SetProp(..) => (2, 1),
             Op::SetPropDrop(..) => (2, 0),
+            Op::SetPropThisDrop(..) => (1, 0),
+            Op::SetPropLocalDrop(..) => (1, 0),
             Op::GetElem => (2, 1),
             Op::SetElem => (3, 1),
             Op::SetElemDrop => (3, 0),
@@ -5568,6 +5640,25 @@ unsafe fn jit_exec_inner(
         Op::SetPropDrop(n, c) => {
             let v = pop!();
             let obj = pop!();
+            i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+        }
+        Op::SetPropThisDrop(n, c) => {
+            let v = pop!();
+            let this = (*ctx.this_raw).clone();
+            i.set_prop_ic(&this, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
+        }
+        Op::SetPropLocalDrop(s, n, c) => {
+            let v = pop!();
+            let obj = slots[s as usize].clone();
+            if matches!(obj, Value::Empty) {
+                return Err(i.throw(
+                    "ReferenceError",
+                    format!(
+                        "cannot access '{}' before initialization",
+                        chunk.slot_names[s as usize]
+                    ),
+                ));
+            }
             i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])?;
         }
         Op::DestructureGuard => {

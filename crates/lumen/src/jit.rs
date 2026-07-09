@@ -1283,7 +1283,43 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                 emit_not_inline(&mut a, layout, pc as u32, l_unwind);
             }
             Op::SetPropDrop(_, cache) if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) => {
-                emit_set_prop_inline(&mut a, layout, chunk.jit_cache_ptr(*cache), pc as u32, l_unwind);
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::Stack,
+                );
+            }
+            // Receiver-direct stores (`this.x = v`, `slotlocal.x = v`): the receiver never
+            // crosses the operand stack and needs no refcounting (the frame owns it).
+            Op::SetPropThisDrop(_, cache)
+                if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
+            {
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::This,
+                );
+            }
+            Op::SetPropLocalDrop(s, _, cache)
+                if fast & 65536 != 0
+                    && rc_ok
+                    && set_prop_inlinable(layout)
+                    && (*s as u32) * 24 + 16 < 4096 =>
+            {
+                emit_set_prop_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    PropRecv::Slot(*s as u32 * 24),
+                );
             }
             Op::UpdateProp(_, cache, kind)
                 if fast & 65536 != 0 && rc_ok && set_prop_inlinable(layout) =>
@@ -2028,6 +2064,7 @@ fn emit_set_prop_inline(
     cache_ptr: usize,
     pc: u32,
     l_unwind: usize,
+    recv: PropRecv,
 ) {
     use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
     let strong = layout.rc_strong_off as i32;
@@ -2044,15 +2081,33 @@ fn emit_set_prop_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. stack: [obj @ -48, v @ -24] — receiver must be an Obj (tag 8)
-    a.ldurb(9, 20, -48);
-    a.cmp_imm_w(9, 8);
-    a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -40); // receiver rc_ptr
-    // 2. receiver refcount > 1 (so the pop-drop below never frees)
-    a.ldur(9, 10, strong);
-    a.cmp_imm_x(9, 1);
-    a.b_cond(C_LS, slow);
+    // 1. receiver must be an Obj (tag 8). Stack form: [obj @ -48, v @ -24], refcount-managed;
+    // this/slot forms: [v @ -24] only, the frame owns the receiver.
+    match recv {
+        PropRecv::Stack => {
+            a.ldurb(9, 20, -48);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 20, -40); // receiver rc_ptr
+            // receiver refcount > 1 (so the pop-drop below never frees)
+            a.ldur(9, 10, strong);
+            a.cmp_imm_x(9, 1);
+            a.b_cond(C_LS, slow);
+        }
+        PropRecv::This => {
+            a.ldr_imm(14, 19, 48); // ctx.this_raw
+            a.ldurb(9, 14, 0);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 14, 8);
+        }
+        PropRecv::Slot(off) => {
+            a.ldrb_imm(9, 22, off);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldr_imm(10, 22, off + 8);
+        }
+    }
     // 3. cache: depth must be 0 (own writable data property wins OrdinarySet regardless of the
     //    prototype chain); load slot + cached receiver shape
     a.mov_imm64(12, cache_ptr as u64);
@@ -2116,12 +2171,17 @@ fn emit_set_prop_inline(
     a.sub_imm(14, 14, 1);
     a.stur(14, 12, strong);
     a.bind(no_old_dec);
-    // drop the receiver (strong was > 1)
-    a.ldur(9, 10, strong);
-    a.sub_imm(9, 9, 1);
-    a.stur(9, 10, strong);
-    // pop both operands, push nothing
-    a.sub_imm(20, 20, 48);
+    if matches!(recv, PropRecv::Stack) {
+        // drop the receiver (strong was > 1)
+        a.ldur(9, 10, strong);
+        a.sub_imm(9, 9, 1);
+        a.stur(9, 10, strong);
+        // pop both operands, push nothing
+        a.sub_imm(20, 20, 48);
+    } else {
+        // pop just the value
+        a.sub_imm(20, 20, 24);
+    }
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
