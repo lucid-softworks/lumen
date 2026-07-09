@@ -5053,6 +5053,24 @@ impl Interp {
                 self.try_inline_recompile(ic.func, chunk_ref);
             }
         }
+        Some(unsafe { self.call_jit_committed(ic, this_slot, args, argc) })
+    }
+
+    /// [`Interp::call_jit_cached`]'s committed tail, split out so the asm call thunk can enter
+    /// it with an already-validated `CallIc` (the probe having run in machine code). From here
+    /// the arguments and `*this_slot` are consumed unconditionally.
+    ///
+    /// # Safety
+    /// `ic` must be a hit validated THIS turn (callee identity + epoch + realm), with the callee
+    /// object alive in the caller's hands; `args..args+argc` and `*this_slot` are live
+    /// operand-stack values the caller forgets.
+    pub(crate) unsafe fn call_jit_committed(
+        &mut self,
+        ic: crate::bytecode::CallIc,
+        this_slot: *const Value,
+        args: *mut Value,
+        argc: usize,
+    ) -> Result<Value, Abrupt> {
         // --- committed: identical to call_jit_fast's committed path ---
         self.depth += 1;
         if self.depth > MAX_EVAL_DEPTH {
@@ -5063,9 +5081,7 @@ impl Interp {
                 }
                 std::ptr::drop_in_place(this_slot as *mut Value);
             }
-            return Some(Err(
-                self.throw("RangeError", "Maximum call stack size exceeded")
-            ));
+            return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
         }
         if let Err(e) = self.gc_check_amortized() {
             self.depth -= 1;
@@ -5075,7 +5091,7 @@ impl Interp {
                 }
                 std::ptr::drop_in_place(this_slot as *mut Value);
             }
-            return Some(Err(e));
+            return Err(e);
         }
         let saved_ctor = std::mem::replace(&mut self.constructing, false);
         let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
@@ -5137,7 +5153,7 @@ impl Interp {
             }
         }
         self.depth -= 1;
-        Some(r)
+        r
     }
 
     /// One-shot second-stage compile of a hot chunk's function with its monomorphic callees
