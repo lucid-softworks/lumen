@@ -5141,6 +5141,9 @@ struct LoopPlan {
     /// are typically closure vars — `i < width` — and paid a full name-IC probe per iteration
     /// as plain chains).
     names: Vec<NamePlan>,
+    /// Some pin drew from x23-x28 (callee-saved): the loop brackets itself with save/restore
+    /// pairs — a preamble spill, and a reload on every exit and bail path.
+    uses_ext: bool,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -6218,11 +6221,19 @@ fn plan_loop(
     // leftover resident registers; memos are dropped when none are free.
     // x pins: whatever the universe leaves after I residents and the transient reserve; d pins
     // from the resident bank's leftovers (d transients live in d16.. and never collide).
-    let mut free_pin_x: Vec<u32> = I_UNIVERSE
-        .iter()
-        .copied()
-        .filter(|x| !slots.iter().any(|s| s.res == SlotRes::I(*x)))
-        .skip(i_peak)
+    // Pin pool: the caller-saved leftovers, then x23-x28 (callee-saved — using any obliges
+    // the loop to bracket itself with save/restore pairs, a fixed ~6-instruction cost per
+    // loop ENTRY against one shaved load per element access per iteration). Pops take the
+    // caller-saved ones first.
+    let mut free_pin_x: Vec<u32> = [28u32, 27, 26, 25, 24, 23]
+        .into_iter()
+        .chain(
+            I_UNIVERSE
+                .iter()
+                .copied()
+                .filter(|x| !slots.iter().any(|s| s.res == SlotRes::I(*x)))
+                .skip(i_peak),
+        )
         .collect();
     let mut free_pin_d: Vec<u32> = (next_d..16).collect();
     // Receivers 1-2 take x16/x17; 3-4 draw from the pin pool BEFORE the memo pins (a receiver
@@ -6363,6 +6374,14 @@ fn plan_loop(
             conv_reuse.len()
         );
     }
+    let uses_ext = receivers.iter().any(|r| {
+        r.reg >= 23
+            || [r.mlreg, r.mpreg, r.elpreg, r.enreg]
+                .iter()
+                .flatten()
+                .any(|&x| x >= 23)
+    }) || elem_retain.iter().any(|&(_, p)| p >= 23)
+        || conv_retain.iter().any(|&(_, p)| p >= 23);
     Some(LoopPlan {
         head,
         jump_pc,
@@ -6378,6 +6397,7 @@ fn plan_loop(
         conv_reuse,
         setelem_i32,
         names,
+        uses_ext,
     })
 }
 
@@ -6420,6 +6440,20 @@ fn emit_loop_chain(
     let body_l = a.new_label();
     let exit_a = a.new_label();
     let exit_b = a.new_label();
+    // x23-x28 bracket (see LoopPlan::uses_ext): saved before ANY preamble step (receiver bases
+    // may live in ext registers), reloaded on every path out — preamble failures route through
+    // `pre_fail`, exits and bails emit the reload inline.
+    let pre_fail = if plan.uses_ext { a.new_label() } else { plain_h };
+    if plan.uses_ext {
+        a.stp_pre(23, 24, -48);
+        a.stp_off(25, 26, 16);
+        a.stp_off(27, 28, 32);
+    }
+    let restore_ext = |a: &mut asm::Asm| {
+        a.ldp_off(25, 26, 16);
+        a.ldp_off(27, 28, 32);
+        a.ldp_post(23, 24, 48);
+    };
 
     let slot = |off: u32| plan.slots.iter().find(|s| s.off == off);
     let rcv_plan = |off: u32| plan.receivers.iter().find(|r| r.off == off);
@@ -6444,14 +6478,14 @@ fn emit_loop_chain(
             // The old value must be drop-free so flushes can plain-overwrite.
             a.ldrb_imm(9, 22, s.off);
             a.cmp_imm_w(9, 5);
-            a.b_cond(C_HS, plain_h);
+            a.b_cond(C_HS, pre_fail);
         }
         if !s.preload {
             continue;
         }
         a.ldrb_imm(9, 22, s.off);
         a.cmp_imm_w(9, 4);
-        a.b_cond(C_NE, plain_h);
+        a.b_cond(C_NE, pre_fail);
         match s.res {
             SlotRes::F(d) => {
                 a.ldr_d_imm(d, 22, s.off + 8);
@@ -6463,7 +6497,7 @@ fn emit_loop_chain(
                     a.fmov_x_d(10, 1);
                     a.fmov_x_d(11, d);
                     a.cmp_reg_x(10, 11);
-                    a.b_cond(C_NE, plain_h);
+                    a.b_cond(C_NE, pre_fail);
                 }
             }
             SlotRes::I(x) => {
@@ -6475,7 +6509,7 @@ fn emit_loop_chain(
                 a.fmov_x_d(9, 1);
                 a.fmov_x_d(10, 0);
                 a.cmp_reg_x(9, 10);
-                a.b_cond(C_NE, plain_h);
+                a.b_cond(C_NE, pre_fail);
                 a.sxtw(x, x);
             }
             SlotRes::None => {}
@@ -6484,10 +6518,10 @@ fn emit_loop_chain(
     // Names: one validation + load per name for the whole loop. Emitted BEFORE the receivers —
     // the name-IC validator clobbers x9-x17 and the receiver bases live in x16/x17.
     for np in &plan.names {
-        emit_name_ic_value_ptr(a, layout, np.ptr, plain_h);
+        emit_name_ic_value_ptr(a, layout, np.ptr, pre_fail);
         a.ldurb(9, 14, 0);
         a.cmp_imm_w(9, 4);
-        a.b_cond(C_NE, plain_h); // only a Num can live in a register
+        a.b_cond(C_NE, pre_fail); // only a Num can live in a register
         a.ldur_d(np.dreg, 14, 8);
         if np.int_checked {
             // One-time exact-i32 proof, same shape as an int_checked slot preload.
@@ -6496,14 +6530,14 @@ fn emit_loop_chain(
             a.fmov_x_d(10, 1);
             a.fmov_x_d(11, np.dreg);
             a.cmp_reg_x(10, 11);
-            a.b_cond(C_NE, plain_h);
+            a.b_cond(C_NE, pre_fail);
         }
     }
     for rp in &plan.receivers {
         let (off, r) = (rp.off, rp.reg);
         a.ldrb_imm(10, 22, off);
         a.cmp_imm_w(10, 8);
-        a.b_cond(C_NE, plain_h);
+        a.b_cond(C_NE, pre_fail);
         a.ldr_imm(10, 22, off + 8);
         a.add_imm(r, 10, rcv);
         a.ldrb_imm(12, r, ex);
@@ -6511,10 +6545,10 @@ fn emit_loop_chain(
         a.cmp_imm_w(12, none_tag);
         a.b_cond(C_EQ, ex_ok);
         a.cmp_imm_w(12, arr_tag);
-        a.b_cond(C_NE, plain_h);
+        a.b_cond(C_NE, pre_fail);
         a.bind(ex_ok);
         a.ldrb_imm(12, r, plain);
-        a.cbz(12, false, plain_h);
+        a.cbz(12, false, pre_fail);
         if rp.mirror {
             // The element buffer must be coherent, hole-free, and (for int-read receivers)
             // all-i32: element reads become bounds + one indexed load with no tag check.
@@ -6526,7 +6560,7 @@ fn emit_loop_chain(
             let field = asm::logical_imm_w(need).expect("mirror mask encodable");
             a.logic_imm_w(0, 12, 12, field);
             a.cmp_imm_w(12, need);
-            a.b_cond(C_NE, plain_h);
+            a.b_cond(C_NE, pre_fail);
         }
         // Pinned vector fields (stable for the whole region — helper-free vocabulary, and slim
         // stores never grow or reallocate).
@@ -7401,10 +7435,21 @@ fn emit_loop_chain(
     };
     a.bind(exit_a);
     emit_flush(a, &cond_virgins);
+    if plan.uses_ext {
+        restore_ext(a);
+    }
     a.b(pc_labels[plan.exit_pc]);
     a.bind(exit_b);
     emit_flush(a, &all_virgins);
+    if plan.uses_ext {
+        restore_ext(a);
+    }
     a.b(pc_labels[plan.exit_pc]);
+    if plan.uses_ext {
+        a.bind(pre_fail);
+        restore_ext(a);
+        a.b(plain_h);
+    }
 
     for (idx, label, snap, seen) in bails {
         a.bind(label);
@@ -7432,6 +7477,9 @@ fn emit_loop_chain(
             a.add_imm(20, 20, 24);
         }
         emit_flush(a, &seen);
+        if plan.uses_ext {
+            restore_ext(a);
+        }
         let pc = plan.chain[idx].1;
         if pc == plan.head {
             a.b(plain_h);
