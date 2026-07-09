@@ -2406,36 +2406,52 @@ impl Interp {
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Option<Value> {
         let head = Rc::as_ptr(o);
-        // Two ways per site (polymorphic receivers — subclass hierarchies rotating through one
-        // access site — miss a single way constantly): probe both, then the global stub cache
-        // (unbounded polymorphism), then re-derive into way 1 with the old way 1 demoted.
-        if let Some(v) = self.ic_shape_probe(head, name, cache.get()) {
-            return Some(v);
-        }
-        if let Some(v) = self.ic_shape_probe(head, name, self.ic_way2(cache).get()) {
-            return Some(v);
+        // PROP_IC_WAYS ways per site (polymorphic receivers — subclass hierarchies rotating
+        // through one access site — miss fewer ways constantly): probe all, then the global
+        // stub cache (unbounded polymorphism), then re-derive into way 1 with the older ways
+        // demoted.
+        for k in 0..crate::bytecode::PROP_IC_WAYS {
+            if let Some(v) = self.ic_shape_probe(head, name, self.ic_way(cache, k).get()) {
+                return Some(v);
+            }
         }
         let shape = unsafe { (*head).borrow().props.shape() };
         let e = self.stub_cache[stub_slot(shape, name)].get();
         if e.name == name.as_ptr() as usize && e.st.recv_shape == shape {
             if let Some(v) = self.ic_shape_probe(head, name, e.st) {
-                // Promote into the site (demoting way 1): the next access hits way-first.
-                self.ic_way2(cache).set(cache.get());
-                cache.set(e.st);
+                // Promote into the site (demoting the other ways): the next access hits
+                // way-first.
+                self.ic_insert(cache, e.st);
                 return Some(v);
             }
         }
         self.ic_get_rederive(o, name, cache)
     }
 
-    /// The second cache way of a property site (sites allocate two consecutive cells — see
+    /// Cache way `k` of a property site (sites allocate `PROP_IC_WAYS` consecutive cells — see
     /// `Compiler::new_cache`, which keeps this pointer step in bounds).
     #[inline]
-    pub(crate) fn ic_way2<'a>(
+    pub(crate) fn ic_way<'a>(
         &self,
         cache: &'a std::cell::Cell<crate::bytecode::IcState>,
+        k: usize,
     ) -> &'a std::cell::Cell<crate::bytecode::IcState> {
-        unsafe { &*(cache as *const std::cell::Cell<crate::bytecode::IcState>).add(1) }
+        debug_assert!(k < crate::bytecode::PROP_IC_WAYS);
+        unsafe { &*(cache as *const std::cell::Cell<crate::bytecode::IcState>).add(k) }
+    }
+
+    /// Install `st` as way 1 of the site, demoting the existing ways one step (LRU-ish: a site
+    /// cycling through up to `PROP_IC_WAYS` shapes keeps them all resident).
+    #[inline]
+    pub(crate) fn ic_insert(
+        &self,
+        cache: &std::cell::Cell<crate::bytecode::IcState>,
+        st: crate::bytecode::IcState,
+    ) {
+        for k in (1..crate::bytecode::PROP_IC_WAYS).rev() {
+            self.ic_way(cache, k).set(self.ic_way(cache, k - 1).get());
+        }
+        cache.set(st);
     }
 
     /// One way's shape fast path: a `depth == 0` (own), `depth == 1` (immediate-prototype, e.g.
@@ -2576,9 +2592,9 @@ impl Interp {
                     }
                     let mid_shape = if depth >= 2 { mid } else { None };
                     let mid2_shape = if depth == 3 { mid2 } else { None };
-                    // Demote the previous way before refilling: a 2-shape site stabilizes
-                    // with one shape per way instead of thrashing a single cell.
-                    self.ic_way2(cache).set(cache.get());
+                    // Demote the previous ways before refilling: a site rotating through up
+                    // to PROP_IC_WAYS shapes stabilizes with one shape per way instead of
+                    // thrashing a single cell.
                     let st = IcState {
                         depth: depth | if keychk { crate::bytecode::IC_ARR_KEYCHK } else { 0 },
                         slot: slot as u32,
@@ -2588,7 +2604,7 @@ impl Interp {
                         mid_shape: mid_shape.unwrap_or(0),
                         mid2_shape: mid2_shape.unwrap_or(0),
                     };
-                    cache.set(st);
+                    self.ic_insert(cache, st);
                     // Mirror into the stub cache so OTHER shapes rotating through this
                     // site don't evict this resolution for good.
                     self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
@@ -2699,11 +2715,11 @@ impl Interp {
         if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
             return false;
         }
-        let st = cache.get();
-        // Shape fast path (own writable data property), both ways: a shape match means `slot`
+        // Shape fast path (own writable data property), every way: a shape match means `slot`
         // still maps `name`; skip the key compare. `accessor`/`writable` are re-checked (an
         // in-place defineProperty could have flipped them without changing the shape).
-        for st in [st, self.ic_way2(cache).get()] {
+        for k in 0..crate::bytecode::PROP_IC_WAYS {
+            let st = self.ic_way(cache, k).get();
             if st.depth == 0 && b.props.shape() == st.recv_shape {
                 if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
                     if !p.accessor && p.writable {
@@ -2715,7 +2731,7 @@ impl Interp {
         }
         // Stub-cache probe (shared with the get path — a depth-0 entry means "this shape maps
         // this name at this slot", and accessor/writable are re-checked live either way): a
-        // store site rotating through more shapes than its two ways still resolves without the
+        // store site rotating through more shapes than its ways still resolves without the
         // hashed existence scan below. Promote into way 1 like the get path does.
         {
             let shape = b.props.shape();
@@ -2724,8 +2740,7 @@ impl Interp {
                 if let Some((_, p)) = b.props.entry_at(e.st.slot as usize) {
                     if !p.accessor && p.writable {
                         b.props.entry_at_mut(e.st.slot as usize).unwrap().1.value = v.clone();
-                        self.ic_way2(cache).set(cache.get());
-                        cache.set(e.st);
+                        self.ic_insert(cache, e.st);
                         return true;
                     }
                 }
@@ -2761,7 +2776,6 @@ impl Interp {
                 }
                 let shape = b.props.shape();
                 b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
-                self.ic_way2(cache).set(cache.get());
                 let st = crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,
@@ -2771,7 +2785,7 @@ impl Interp {
                     mid_shape: 0,
                     mid2_shape: 0,
                 };
-                cache.set(st);
+                self.ic_insert(cache, st);
                 // Mirror into the stub cache (see the probe above).
                 self.stub_cache[stub_slot(shape, name)].set(StubEntry {
                     name: name.as_ptr() as usize,

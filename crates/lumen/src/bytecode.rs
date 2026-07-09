@@ -78,6 +78,11 @@ pub const IC_OFF_MID_OK: u32 = 13;
 pub const IC_OFF_MID_SHAPE: u32 = 16;
 
 pub const IC_EMPTY: u8 = u8::MAX;
+/// Way count of a property IC site: `Compiler::new_cache` allocates this many consecutive
+/// cells, the Rust probes walk all of them, and the JIT get/set templates loop over them
+/// inline (a 3-4 shape site — one dispatch loop over a class hierarchy — otherwise thrashes
+/// 2 ways and helper-calls forever).
+pub const PROP_IC_WAYS: usize = 4;
 /// Flag bit OR'd into `IcState::depth` when the HOLDER is an `Exotic::Array` (including a
 /// depth-0 array receiver — `arr.length`, and `Array.prototype`, itself an Array exotic, as a
 /// method holder): array shapes don't pin named slots (element entries occupy slots without
@@ -1966,11 +1971,13 @@ impl Compiler {
     }
     /// Reserve a fresh inline-cache slot (starts empty) for a property-access op.
     fn new_cache(&mut self) -> u32 {
-        // Two consecutive ways per site: consumers address way 1; the probe reaches way 2 at
-        // `cache_ptr + 1` (see `Interp::ic_way2`). Keeps every existing call site untouched.
+        // PROP_IC_WAYS consecutive ways per site: consumers address way 1; probes reach the
+        // others at `cache_ptr + k` (see `Interp::ic_way`). Keeps every existing call site
+        // untouched.
         let idx = self.caches.len() as u32;
-        self.caches.push(std::cell::Cell::new(IcState::EMPTY));
-        self.caches.push(std::cell::Cell::new(IcState::EMPTY));
+        for _ in 0..PROP_IC_WAYS {
+            self.caches.push(std::cell::Cell::new(IcState::EMPTY));
+        }
         idx
     }
     /// Reserve a fresh name-cache slot for a free-name op.

@@ -1990,11 +1990,10 @@ fn emit_prop_load_inline(
             a.ldr_imm(10, 22, off + 8);
         }
     }
-    // 2-5. probe both cache ways (sites allocate two consecutive cells; the fill path demotes
-    // way 1 to way 2, so a two-shape site — subclass hierarchies rotating through one access —
-    // stabilizes with one shape per way). Each probe is self-contained: it recomputes the
-    // receiver base from x10 and jumps to `load` with x11 = holder base, x13 = slot.
-    let way2 = a.new_label();
+    // 2-5. probe every cache way (sites allocate PROP_IC_WAYS consecutive cells; the fill path
+    // demotes ways one step, so a site rotating through up to that many shapes stabilizes with
+    // one shape per way). Each probe is self-contained: it recomputes the receiver base from
+    // x10 and jumps to `load` with x11 = holder base, x13 = slot.
     // `cache_ptr` = the IcState cell address, or 0 for "x12 already holds it" (the stub-cache
     // arm computes the entry address at run time).
     let probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
@@ -2098,13 +2097,22 @@ fn emit_prop_load_inline(
             a.b(load_kc);
         }
     };
-    probe(a, cache_ptr, way2);
-    a.bind(way2);
-    probe(
-        a,
-        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
-        slow,
-    );
+    // Loop the self-contained probe over every way (x8 = way cursor, w7 = ways left — both
+    // untouched by the probe body; a hit exits through `load`/`load_kc`). One emitted body
+    // instead of PROP_IC_WAYS unrolled copies keeps per-site code size flat.
+    let l_way = a.new_label();
+    let l_way_next = a.new_label();
+    a.mov_imm64(8, cache_ptr as u64);
+    a.movz(7, crate::bytecode::PROP_IC_WAYS as u32, 0);
+    a.bind(l_way);
+    a.mov(12, 8);
+    probe(a, 0, l_way_next);
+    a.bind(l_way_next);
+    let ic_stride = std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>();
+    a.add_imm(8, 8, ic_stride as u32);
+    a.sub_imm(7, 7, 1);
+    a.cbnz(7, false, l_way);
+    a.b(slow);
     // 6. x11 = holder base: bounds-check the cached slot against the live entries length
     //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
     //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;
@@ -2778,15 +2786,18 @@ fn emit_set_prop_inline(
     a.b_cond(C_NE, slow);
     a.ldrb_imm(9, 11, plain);
     a.cbz(9, false, slow);
-    // 3-8 per way (sites allocate two consecutive cells; the Rust fast path probes both, so
-    // the template must too or a 2-shape store site helper-calls forever): depth 0, shape
-    // match, slot bounds, data+writable, old-value droppability. Way-1 guards jump to way 2,
-    // way-2 guards to the helper. Register results consumed by the commit below: x13 slot,
-    // x15 entry, w9 old tag, x12 old payload, x14 old strong.
-    let way2 = a.new_label();
+    // 3-8 per way (sites allocate PROP_IC_WAYS consecutive cells; the Rust fast path probes
+    // all of them, so the template must too or a rotating store site helper-calls forever):
+    // depth 0, shape match, slot bounds, data+writable, old-value droppability. Guard misses
+    // jump to the next way, the last way's to the helper. Register results consumed by the
+    // commit below: x13 slot, x15 entry, w9 old tag, x12 old payload, x14 old strong.
+    // `cache_ptr` = the IcState cell address, or 0 for "x12 already holds it" (the way loop
+    // keeps its cursor in x8: the body clobbers x12 on the old-value path).
     let commit = a.new_label();
     let way = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
-        a.mov_imm64(12, cache_ptr as u64);
+        if cache_ptr != 0 {
+            a.mov_imm64(12, cache_ptr as u64);
+        }
         a.ldrb_imm(9, 12, IC_OFF_DEPTH);
         a.cbnz(9, false, miss);
         a.ldr_w_imm(13, 12, IC_OFF_SLOT);
@@ -2827,14 +2838,22 @@ fn emit_set_prop_inline(
         a.b_cond(C_LS, miss);
         a.bind(old_plain);
     };
-    way(a, cache_ptr, way2);
-    a.b(commit);
-    a.bind(way2);
-    way(
-        a,
-        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
-        slow,
-    );
+    {
+        let l_way = a.new_label();
+        let l_way_next = a.new_label();
+        a.mov_imm64(8, cache_ptr as u64);
+        a.movz(7, crate::bytecode::PROP_IC_WAYS as u32, 0);
+        a.bind(l_way);
+        a.mov(12, 8);
+        way(a, 0, l_way_next);
+        a.b(commit);
+        a.bind(l_way_next);
+        let ic_stride = std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>();
+        a.add_imm(8, 8, ic_stride as u32);
+        a.sub_imm(7, 7, 1);
+        a.cbnz(7, false, l_way);
+        a.b(slow);
+    }
     a.bind(commit);
     // --- commit: everything validated; from here only writes ---
     // move v into the entry (24 bytes; a refcounted payload moves, not clones)
