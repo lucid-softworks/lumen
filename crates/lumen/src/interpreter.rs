@@ -5402,6 +5402,7 @@ impl Interp {
             uses_this: chunk.uses_this(),
             n_params: n_params as u16,
             n_slots: n_slots as u16,
+            direct: chunk.jit_direct_flags(code),
             func: Rc::as_ptr(&func),
             epoch,
         };
@@ -5507,6 +5508,7 @@ impl Interp {
                         uses_this: chunk.uses_this(),
                         n_params: n_params as u16,
                         n_slots: n_slots as u16,
+                        direct: chunk.jit_direct_flags(code),
                         func: Rc::as_ptr(&func),
                         epoch: crate::bytecode::CALL_IC_EPOCH
                             .load(std::sync::atomic::Ordering::Relaxed),

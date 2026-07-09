@@ -206,6 +206,10 @@ pub struct CallIc {
     /// `Chunk::jit_frame()` at fill time: the callee frame shape without touching the chunk.
     pub n_params: u16,
     pub n_slots: u16,
+    /// Direct-call gates computed at fill: bit 0 = the chunk has NO `jit_var_force_resets`
+    /// (the asm sequence's tag-byte slot init suffices); bit 1 = the chunk needs the realm's
+    /// global body pointer (the sequence requires the caller's `ctx.global_body` to be live).
+    pub direct: u8,
     /// `Rc::as_ptr` of the callee's `ast::Function` (alive while the callee object is: `call`
     /// is never reassigned) — the inline-recompile trigger needs the AST.
     pub func: *const crate::ast::Function,
@@ -225,6 +229,7 @@ impl CallIc {
         uses_this: false,
         n_params: 0,
         n_slots: 0,
+        direct: 0,
         func: std::ptr::null(),
         epoch: 0,
     };
@@ -5198,6 +5203,20 @@ impl Chunk {
     pub(crate) fn jit_no_activation(&self) -> bool {
         !self.needs_env()
     }
+    /// [`CallIc::direct`] gates for this chunk (see its docs).
+    pub(crate) fn jit_direct_flags(&self, code: &crate::jit::JitCode) -> u8 {
+        let mut f = 0u8;
+        if self.jit_var_force_resets().is_empty() {
+            f |= 1;
+        }
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        if code.needs_global {
+            f |= 2;
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+        let _ = code;
+        f
+    }
     pub(crate) fn jit_var_force_resets(&self) -> &[u16] {
         &self.var_force_resets
     }
@@ -5347,6 +5366,88 @@ pub(crate) unsafe extern "C" fn jit_exec(
             crate::jit::SpFlag { sp, flag: 1 }
         }
     }
+}
+
+/// Teardown for a direct (shared-ctx) JIT→JIT call — the asm sequence already ran the callee
+/// with the ctx fields swapped to the callee's frame; this drops whatever the callee left
+/// (operand-stack range + slots, with the shared-reference decrement fast path), returns the
+/// frame buffer to the pool, pops the FnFrame (including a materialized `extra`), drains a
+/// pending tail call, and decrements the recursion depth. The caller's asm then restores the
+/// swapped fields and pushes `ctx.ret` (still owned by ctx until the asm moves it out).
+/// Returns 0 = ok (ret valid) / 1 = threw (ctx.error set).
+///
+/// # Safety
+/// `ctx` must still hold the CALLEE's swapped frame fields (slots/stack_base/final_sp/n_slots),
+/// with `ctx.slots` being the pooled buffer base.
+pub(crate) unsafe extern "C" fn jit_direct_finish(
+    ctx: *mut crate::jit::JitCtx,
+    threw: u32,
+    _sp: *mut Value,
+) -> u64 {
+    let ctx = &mut *ctx;
+    let i = &mut *ctx.interp;
+    // Leftover operand stack (only on throw; clean returns leave it empty).
+    let mut p = ctx.stack_base;
+    while p < ctx.final_sp {
+        std::ptr::drop_in_place(p);
+        p = p.add(1);
+    }
+    // Slot drops with the shared-reference fast path (mirrors run_moved's exit loop).
+    let rc_dec_ok = i.jit_layout.get().is_some_and(|l| l.valid && l.rc_strong_off == 0);
+    for k in 0..ctx.n_slots {
+        let p = ctx.slots.add(k);
+        let tag = *(p as *const u8);
+        if tag < 5 {
+            continue;
+        }
+        if rc_dec_ok && tag >= 6 {
+            let strong = *(p as *const usize).add(1) as *mut usize;
+            if *strong > 1 {
+                *strong -= 1;
+                continue;
+            }
+        }
+        std::ptr::drop_in_place(p);
+    }
+    // Return the frame buffer (asm popped it from the freelist; base == ctx.slots).
+    let buf = std::ptr::NonNull::new_unchecked(ctx.slots);
+    if i.frame_pool.len() < 64 {
+        i.frame_pool.0.push(buf);
+    } else {
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+            ctx.slots as *mut std::mem::MaybeUninit<Value>,
+            crate::jit::FRAME_BUF,
+        )));
+    }
+    // FnFrame pop (the asm pushed it; a materialized `extra` drops here).
+    if let Some(f) = i.fn_frames.pop() {
+        drop(f.extra);
+    }
+    let mut threw = threw != 0;
+    // Proper-tail-call trampoline, exactly like the layered paths.
+    if !threw {
+        loop {
+            match i.pending_tail.take() {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
+                    let r = i
+                        .gc_check_amortized()
+                        .and_then(|()| i.call_inner(f, t, &a));
+                    match r {
+                        Ok(v) => ctx.ret = v,
+                        Err(e) => {
+                            ctx.error = Some(e);
+                            threw = true;
+                            break;
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+    i.depth -= 1;
+    threw as u64
 }
 
 /// The call template's inline-probe HIT entry: the emitted code already validated way 1
@@ -6426,6 +6527,14 @@ pub(crate) unsafe extern "C" fn jit_unwind(
     let ctx = &mut *ctx;
     // Only thrown completions are catchable; anything else propagates out.
     if !matches!(ctx.error, Some(Abrupt::Throw(_))) {
+        return crate::jit::SpFlag {
+            sp: std::ptr::null_mut(),
+            flag: sp as u64,
+        };
+    }
+    if ctx.handlers.len() <= ctx.handler_floor {
+        // No handler belongs to THIS activation (a shared-ctx direct call must not consume
+        // its caller's regions — their depths are relative to a different stack base).
         return crate::jit::SpFlag {
             sp: std::ptr::null_mut(),
             flag: sp as u64,

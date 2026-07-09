@@ -53,6 +53,7 @@ mod sys {
 
 /// A finished JIT compilation: executable code plus the pc→code-offset table the unwinder uses
 /// to land on catch handlers.
+#[repr(C)]
 pub struct JitCode {
     mem: *mut u8,
     len: usize,
@@ -119,6 +120,11 @@ pub struct JitCtx {
     pub n_slots: usize,
     /// Active `try` regions: (catch pc, operand-stack depth to unwind to).
     pub handlers: Vec<(u32, usize)>,
+    /// The handler-stack watermark of THIS activation: `jit_unwind` propagates out (instead of
+    /// popping) once `handlers.len()` reaches it. Always 0 for a `run`/`run_moved` activation
+    /// (each owns a fresh Vec); the direct-call sequence shares the caller's ctx — and its
+    /// handlers Vec — so it swaps this to the live length for the callee's duration.
+    pub handler_floor: usize,
     pub code_base: *const u8,
     pub pc_offsets: *const u32,
     pub error: Option<Abrupt>,
@@ -137,6 +143,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_unwind as *const () as usize,
         crate::bytecode::jit_call as *const () as usize,
         crate::bytecode::jit_call_hit as *const () as usize,
+        crate::bytecode::jit_direct_finish as *const () as usize,
     ]
 }
 
@@ -150,7 +157,9 @@ pub const H_UNWIND: usize = 5;
 pub const H_CALL: usize = 6;
 /// The call template's inline way-1 probe hit: skips the helper-side decode and probe loop.
 pub const H_CALL_HIT: usize = 7;
-pub const N_HELPERS: usize = 8;
+/// Teardown for a direct (shared-ctx) call: drops, frame-pool return, FnFrame pop, tail drain.
+pub const H_DIRECT_FINISH: usize = 8;
+pub const N_HELPERS: usize = 9;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -206,6 +215,9 @@ mod layout_asserts {
     const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, strict) == 12);
     const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, extra) == 16);
     const _: () = assert!(std::mem::size_of::<crate::interpreter::FnFrame>() == 24);
+    // The direct-call sequence reads the callee's code/pc_offsets straight from its JitCode.
+    const _: () = assert!(std::mem::offset_of!(super::JitCode, mem) == 0);
+    const _: () = assert!(std::mem::offset_of!(super::JitCode, pc_offsets) == 16);
 }
 
 /// Two-register return for helpers that produce (new sp, flag) — x0/x1 under the C ABI.
@@ -6491,6 +6503,7 @@ pub fn run(
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
         n_slots,
         handlers: Vec::new(),
+        handler_floor: 0,
         code_base: code.mem,
         pc_offsets: code.pc_offsets.as_ptr(),
         error: None,
@@ -6611,6 +6624,7 @@ pub(crate) unsafe fn run_moved(
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
         n_slots,
         handlers: Vec::new(),
+        handler_floor: 0,
         code_base: code.mem,
         pc_offsets: code.pc_offsets.as_ptr(),
         error: None,
