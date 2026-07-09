@@ -273,8 +273,11 @@ pub static CALL_IC_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 /// routinely polymorphic (DeltaBlue rotates a handful of `execute` implementations through one
 /// loop), so a single entry thrashes; four entries filled round-robin stabilize any site with up
 /// to four distinct callees.
+/// Way count of [`CallSite::entries`] — the JIT call template's inline probe walks all of them.
+pub const CALL_IC_WAYS: usize = 4;
+
 pub struct CallSite {
-    pub entries: [std::cell::Cell<CallIc>; 4],
+    pub entries: [std::cell::Cell<CallIc>; CALL_IC_WAYS],
     /// Round-robin fill cursor.
     pub next: std::cell::Cell<u8>,
 }
@@ -5495,16 +5498,19 @@ pub(crate) unsafe extern "C" fn jit_direct_finish(
     threw as u64
 }
 
-/// The call template's inline-probe HIT entry: the emitted code already validated way 1
-/// (callee identity + epoch + realm), so this skips the probe loop — it re-reads the way-1
-/// entry (nothing ran between the machine-code compare and this call), bumps the recompile
-/// counter, and enters the committed path directly. Same contract as [`jit_exec`].
+/// The call template's inline-probe HIT entry: the emitted code already validated one way
+/// (callee identity + epoch + realm — the way index rides in bits 16.. of `pc`, the pc itself
+/// in the low 16), so this skips the probe loop — it re-reads that entry (nothing ran between
+/// the machine-code compare and this call), bumps the recompile counter, and enters the
+/// committed path directly. Same contract as [`jit_exec`].
 pub(crate) unsafe extern "C" fn jit_call_hit(
     ctx: *mut crate::jit::JitCtx,
     pc: u32,
     mut sp: *mut Value,
 ) -> crate::jit::SpFlag {
     let ctx = &mut *ctx;
+    let way = (pc >> 16) as usize & (CALL_IC_WAYS - 1);
+    let pc = pc & 0xFFFF;
     jit_opstat(ctx, pc);
     let i = &mut *ctx.interp;
     let chunk = &*ctx.chunk;
@@ -5513,7 +5519,8 @@ pub(crate) unsafe extern "C" fn jit_call_hit(
         Op::Call(argc, c) => (argc as usize, c, false),
         _ => unreachable!("jit_call_hit emitted only for call ops"),
     };
-    let ic = chunk.call_caches[c as usize].entries[0].get();
+    let ic = chunk.call_caches[c as usize].entries[way].get();
+    jit_callstat(i, ctx, &ic, argc, with_this, sp);
     {
         let chunk_ref = &*ic.chunk;
         let runs = chunk_ref.jit_runs.get().wrapping_add(1);
@@ -5711,6 +5718,85 @@ unsafe fn jit_call_inner(
     *sp = jit_consume(*sp, argc + 1 + with_this as usize);
     push!(v);
     Ok(())
+}
+
+/// Debug: `LUMEN_JIT_CALLSTAT=1` tallies, for every call that reaches the way-1 HIT helper,
+/// which direct-call gate would have (or did) reject the shared-ctx fast path. Temporary
+/// diagnostic mirroring `emit_direct_call`'s runtime checks in emission order.
+#[inline(always)]
+unsafe fn jit_callstat(
+    i: &crate::interpreter::Interp,
+    ctx: &crate::jit::JitCtx,
+    ic: &CallIc,
+    argc: usize,
+    with_this: bool,
+    sp: *mut Value,
+) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("LUMEN_JIT_CALLSTAT").is_some()) {
+        return;
+    }
+    struct Dump(crate::fasthash::FastMap<&'static str, u64>);
+    impl Drop for Dump {
+        fn drop(&mut self) {
+            let mut v: Vec<_> = self.0.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            for (r, n) in v {
+                eprintln!("[jit-callstat] {n:>12}  {r}");
+            }
+        }
+    }
+    thread_local! {
+        static COUNTS: std::cell::RefCell<Dump> = std::cell::RefCell::new(Dump(Default::default()));
+    }
+    let reason: &'static str = 'r: {
+        if argc > 8 {
+            break 'r "emit: argc > 8";
+        }
+        if ic.direct & 1 == 0 {
+            break 'r "gate: var force resets";
+        }
+        if ic.direct & 8 == 0 {
+            break 'r "gate: frame > FRAME_BUF";
+        }
+        if !(*ic.chunk_raw).inline_attempted.get() {
+            break 'r "gate: recompile not settled";
+        }
+        if ic.direct & 2 != 0 && ctx.global_body.is_null() {
+            break 'r "gate: needs_global, no live global_body";
+        }
+        if ic.n_params as usize != argc {
+            break 'r "gate: argc != n_params";
+        }
+        if ic.uses_this && !ic.strict {
+            if !with_this {
+                break 'r "gate: sloppy this-user, no receiver";
+            }
+            let tag = *(sp.sub(argc + 2) as *const u8);
+            if tag != 8 {
+                break 'r "gate: sloppy this-user, non-object receiver";
+            }
+        }
+        if let Value::Obj(o) = &*sp.sub(argc + 1) {
+            if Rc::strong_count(o) <= 1 {
+                break 'r "gate: callee refcount <= 1";
+            }
+        }
+        if i.depth >= crate::interpreter::MAX_EVAL_DEPTH {
+            break 'r "gate: depth";
+        }
+        if (i.gc_tick + 1) % 16 == 0 {
+            break 'r "gate: gc tick due";
+        }
+        if i.fn_frames.len() == i.fn_frames.capacity() {
+            break 'r "gate: fn_frames at capacity";
+        }
+        if i.frame_pool.is_empty() {
+            break 'r "gate: frame pool empty";
+        }
+        break 'r "all gates pass (direct not emitted at site?)";
+    };
+    let _ = COUNTS.try_with(|c| *c.borrow_mut().0.entry(reason).or_insert(0) += 1);
 }
 
 /// Debug: `LUMEN_JIT_OPSTAT=1` tallies which ops still reach a helper (the JIT's slow path) and

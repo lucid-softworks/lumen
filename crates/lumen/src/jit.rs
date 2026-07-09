@@ -378,6 +378,12 @@ mod asm {
             self.patches.push((self.buf.len(), label, PatchKind::B));
             self.emit(0x1400_0000);
         }
+        /// bl label (patched; same imm26 shape as B). The callee stub must preserve x19..x22
+        /// and, if it calls out itself, spill/reload x30.
+        pub fn bl_label(&mut self, label: usize) {
+            self.patches.push((self.buf.len(), label, PatchKind::B));
+            self.emit(0x9400_0000);
+        }
         /// cbz x/w reg, label (patched); `is64` selects X vs W.
         pub fn cbz(&mut self, rt: u32, is64: bool, label: usize) {
             self.patches.push((self.buf.len(), label, PatchKind::Cb));
@@ -852,6 +858,8 @@ pub fn compile(
     let l_unwind = a.new_label();
     let l_ret_ok = a.new_label();
     let l_ret_throw = a.new_label();
+    // The direct-call teardown stub (one per chunk, `bl`-reached; emitted after the epilogues).
+    let l_direct_finish = a.new_label();
 
     // ---- prologue ----
     // Frame: save fp/lr + x19..x22 (x19=ctx, x20=sp, x21=helpers, x22=slots) + d8..d15
@@ -1730,22 +1738,44 @@ pub fn compile(
                         a.cmp_imm_w(9, 8); // callee must be an Obj
                         a.b_cond(C_NE, slow);
                         a.ldur(10, 20, off + 8); // callee payload (stored Rc ptr)
-                        a.mov_imm64(12, ic0 as u64);
-                        a.ldur(11, 12, 0); // ic.callee (an Rc::as_ptr identity)
                         // the payload is the STORED RcBox pointer; as_ptr sits one probed
                         // header further (comparing them raw was a silent 100% miss)
                         a.add_imm(13, 10, layout.gc_data_off as u32);
+                        // Probe ALL 4 ways (a stable polymorphic site — e.g. one dispatch
+                        // loop over a handful of receiver classes — otherwise pays the full
+                        // helper on every call that isn't way 1): x12 = entry cursor,
+                        // w14 = ways left, w15 = live epoch, x17 = ctx.genv.
+                        a.mov_imm64(12, ic0 as u64);
+                        a.mov_imm64(11, &crate::bytecode::CALL_IC_EPOCH as *const _ as u64);
+                        a.ldr_w_imm(15, 11, 0);
+                        a.ldr_imm(17, 19, 64); // ctx.genv
+                        a.movz(14, crate::bytecode::CALL_IC_WAYS as u32, 0);
+                        let l_probe = a.new_label();
+                        let l_next = a.new_label();
+                        let l_hit = a.new_label();
+                        a.bind(l_probe);
+                        a.ldur(11, 12, 0); // ic.callee (an Rc::as_ptr identity)
                         a.cmp_reg_x(13, 11);
-                        a.b_cond(C_NE, slow);
+                        a.b_cond(C_NE, l_next);
                         a.ldr_w_imm(11, 12, 56); // ic.epoch
-                        a.mov_imm64(13, &crate::bytecode::CALL_IC_EPOCH as *const _ as u64);
-                        a.ldr_w_imm(14, 13, 0);
-                        a.cmp_reg_w(11, 14);
-                        a.b_cond(C_NE, slow);
+                        a.cmp_reg_w(11, 15);
+                        a.b_cond(C_NE, l_next);
                         a.ldr_imm(11, 12, 32); // ic.global_env
-                        a.ldr_imm(14, 19, 64); // ctx.genv
-                        a.cmp_reg_x(11, 14);
-                        a.b_cond(C_NE, slow);
+                        a.cmp_reg_x(11, 17);
+                        a.b_cond(C_EQ, l_hit);
+                        a.bind(l_next);
+                        // entry stride (size compile-asserted below the JitCtx asserts)
+                        let stride = std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>();
+                        a.add_imm(12, 12, stride as u32);
+                        a.sub_imm(14, 14, 1);
+                        a.cbnz(14, false, l_probe);
+                        a.b(slow);
+                        // x15 = the hit way (ways-left counter → index), kept live through
+                        // the direct sequence's NO-MUTATION gate checks (they never touch
+                        // x15; every route into hit_slow happens before any blr).
+                        a.bind(l_hit);
+                        a.movz(15, crate::bytecode::CALL_IC_WAYS as u32, 0);
+                        a.sub_reg(15, 15, 14);
                         // Direct shared-ctx call (opt-in while it stabilizes): its own gate
                         // misses land on `hit_slow` = the H_CALL_HIT form below.
                         let hit_slow = a.new_label();
@@ -1762,11 +1792,15 @@ pub fn compile(
                                 hit_slow,
                                 l_unwind,
                                 done,
+                                l_direct_finish,
                             );
                         }
                         a.bind(hit_slow);
                         a.mov(0, 19);
+                        // x1 = pc | way << 16 (pcs are < 65536: every helper call encodes
+                        // the pc as one movz)
                         a.movz(1, pc as u32, 0);
+                        a.add_shifted(1, 1, 15, 16);
                         a.mov(2, 20);
                         a.ldr_imm(16, 21, (H_CALL_HIT * 8) as u32);
                         a.blr(16);
@@ -1829,6 +1863,12 @@ pub fn compile(
     a.ldp_off(19, 20, 16);
     a.ldp_post(29, 30, 112);
     a.ret();
+
+    // ---- direct-call teardown stub (only reachable from emitted direct sequences) ----
+    a.bind(l_direct_finish);
+    if direct_on {
+        emit_direct_finish_stub(&mut a, ilayout, rc_ok && layout.rc_strong_off == 0);
+    }
 
     let words = a.finish();
     let len = words.len() * 4;
@@ -2254,6 +2294,8 @@ fn emit_direct_call(
     hit_slow: usize,
     l_unwind: usize,
     done: usize,
+    // Label of the chunk's shared direct-finish stub (`emit_direct_finish_stub`).
+    finish_stub: usize,
 ) -> bool {
     use std::mem::offset_of;
     // Emission gates: probed Interp offsets must exist and fit the addressing modes used.
@@ -2511,13 +2553,12 @@ fn emit_direct_call(
     a.mov(0, 19);
     a.ldur(16, 12, IC_CODE_MEM);
     a.blr(16);
-    // w0 = 1 ok / 0 threw → w1 = threw for the finish helper
+    // w0 = 1 ok / 0 threw → w1 = threw for the finish stub
     let field1 = asm::logical_imm_w(1).unwrap();
     a.logic_imm_w(2, 1, 0, field1); // eor w1, w0, #1
-    a.mov(0, 19);
-    a.ldr_imm(16, 21, (H_DIRECT_FINISH * 8) as u32);
-    a.blr(16); // x0 = final threw (drops, pool return, frame pop, tail drain, depth--)
-    a.mov(8, 0); // keep across the restores
+    // Teardown (drops, pool return, frame pop, tail drain, depth--): one shared per-chunk stub
+    // (see `emit_direct_finish_stub`) whose fast path never leaves machine code. w8 = threw.
+    a.bl_label(finish_stub);
 
     // ---- restore every swapped field ----
     a.ldr_imm(14, 19, 72); // ctx.interp (x14 was clobbered by the callee/helpers)
@@ -2583,6 +2624,172 @@ fn emit_direct_call(
     a.add_imm(20, 20, 24);
     a.b(done);
     true
+}
+
+/// The direct-call teardown stub, emitted ONCE per chunk (sites reach it by `bl`; per-site
+/// inlining would grow every call site by ~90 instructions). Entry: w1 = threw, x19 = ctx
+/// (still holding the CALLEE's swapped frame fields), x21 = helpers. Exit: w8 = final threw,
+/// everything else caller-saved clobbered. The fast path replicates `jit_direct_finish` for
+/// the common shape — clean return, empty operand stack, no pending tail call, no
+/// materialized FnFrame extra, room in the frame pool, and every owned Value (slots +
+/// `this`) either trivially droppable (tag < 5) or a shared reference (bare strong-count
+/// decrement) — in two passes: validate everything with NO mutation, then commit. Any
+/// deviation falls to the H_DIRECT_FINISH helper with state untouched.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_direct_finish_stub(
+    a: &mut asm::Asm,
+    il: &crate::interpreter::InterpLayout,
+    // The templates' rc contract (strong at payload+0) — without it every teardown takes the
+    // helper (which falls back to real drops).
+    rc_dec_ok: bool,
+) {
+    use std::mem::offset_of;
+    let cx_this = offset_of!(JitCtx, this_val) as u32;
+    let cx_slots = offset_of!(JitCtx, slots) as u32;
+    let cx_n_slots = offset_of!(JitCtx, n_slots) as u32;
+    let slow = a.new_label();
+    let fits8 = |o: usize| o % 8 == 0 && o / 8 < 4096;
+    let fast_ok = rc_dec_ok
+        && il.valid
+        && fits8(cx_this as usize)
+        && fits8(cx_slots as usize)
+        && fits8(cx_n_slots as usize)
+        && fits8(il.pending_tail)
+        && fits8(il.fn_frames + il.fnf_ptr_word)
+        && fits8(il.fn_frames + il.fnf_len_word)
+        && fits8(il.frame_pool + il.fp_ptr_word)
+        && fits8(il.frame_pool + il.fp_len_word)
+        && fits8(il.frame_pool + il.fp_cap_word)
+        && il.depth % 4 == 0
+        && il.depth / 4 < 4096;
+    // The stub calls out (H_DROP_AT per last-reference Value, or the full helper), so lr is
+    // spilled for the whole body; both exits share the epilogue.
+    let done = a.new_label();
+    a.stp_pre(29, 30, -16);
+    if fast_ok {
+        a.cbnz(1, false, slow); // threw → helper
+        a.ldr_imm(14, 19, 72); // ctx.interp
+        // operand stack clean (a clean return always leaves final_sp == stack_base)
+        a.ldr_imm(9, 19, 16); // ctx.final_sp
+        a.ldr_imm(10, 19, 8); // ctx.stack_base
+        a.cmp_reg_x(9, 10);
+        a.b_cond(C_NE, slow);
+        // no pending proper-tail-call (Option<Box> niche: None = 0)
+        a.ldr_imm(9, 14, il.pending_tail as u32);
+        a.cbnz(9, true, slow);
+        // FnFrame top: no materialized `extra` (the asm push wrote None; only the callee's own
+        // arguments-object materialization could have filled it)
+        a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+        a.ldr_imm(6, 14, (il.fn_frames + il.fnf_ptr_word) as u32);
+        a.sub_imm(16, 16, 1);
+        a.movz(5, 24, 0);
+        a.madd(6, 16, 5, 6);
+        a.ldur(9, 6, 16); // FnFrame.extra
+        a.cbnz(9, true, slow);
+        // frame-pool room: len < 64 (the pool's policy cap) and len < capacity (a push must
+        // not reallocate the Vec from machine code). Value drops below never touch the pool,
+        // the frame stack, or the depth, so validating here stays sound.
+        a.ldr_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+        a.cmp_imm_x(7, 64);
+        a.b_cond(C_HS, slow);
+        a.ldr_imm(4, 14, (il.frame_pool + il.fp_cap_word) as u32);
+        a.cmp_reg_x(7, 4);
+        a.b_cond(C_HS, slow);
+        // ---- commit ----
+        // Drop the owned Values (callee `this`, then every slot). The strong count is re-read
+        // PER VALUE, after all earlier decrements: two slots aliasing one object (`a = b = new
+        // X` seeds several slots from one allocation) must route the LAST reference to a real
+        // drop — a snapshot-validated bare dec would zero the count without ever running the
+        // destructor and leak the whole subgraph (Splay's splay_ dummy node caught exactly
+        // that). Bare dec when shared; H_DROP_AT (full drop, may cascade) for a last reference
+        // or a BigInt. Only x9 (cursor) and x5 (remaining) survive the helper: spilled around
+        // the call, everything else re-read afterwards.
+        let drop_at = |a: &mut asm::Asm, value_reg: u32| {
+            // x<value_reg> = address of the Value to drop; clobbers x0-x17 minus the spills.
+            a.stp_pre(9, 5, -16);
+            a.mov(2, value_reg);
+            a.mov(0, 19);
+            a.movz(1, 0, 0);
+            a.ldr_imm(16, 21, (H_DROP_AT * 8) as u32);
+            a.blr(16);
+            a.ldp_post(9, 5, 16);
+        };
+        // callee `this` (the caller's restore overwrites the 24 bytes right after the stub)
+        let this_done = a.new_label();
+        let this_drop = a.new_label();
+        a.ldrb_imm(9, 19, cx_this);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_LO, this_done);
+        a.b_cond(C_EQ, this_drop); // BigInt → full drop
+        a.ldr_imm(10, 19, cx_this + 8);
+        a.ldur(11, 10, 0); // strong (rc contract: payload+0)
+        a.cmp_imm_x(11, 1);
+        a.b_cond(C_LS, this_drop); // last reference → full drop
+        a.sub_imm(11, 11, 1);
+        a.stur(11, 10, 0);
+        a.b(this_done);
+        a.bind(this_drop);
+        a.add_imm(9, 19, cx_this);
+        drop_at(a, 9);
+        a.bind(this_done);
+        // slots
+        let c_loop = a.new_label();
+        let c_next = a.new_label();
+        let c_drop = a.new_label();
+        let c_done = a.new_label();
+        a.ldr_imm(9, 19, cx_slots);
+        a.ldr_imm(5, 19, cx_n_slots);
+        a.bind(c_loop);
+        a.cbz(5, true, c_done);
+        a.ldrb_imm(11, 9, 0);
+        a.cmp_imm_w(11, 5);
+        a.b_cond(C_LO, c_next);
+        a.b_cond(C_EQ, c_drop); // BigInt
+        a.ldr_imm(12, 9, 8);
+        a.ldur(13, 12, 0);
+        a.cmp_imm_x(13, 1);
+        a.b_cond(C_LS, c_drop); // last reference
+        a.sub_imm(13, 13, 1);
+        a.stur(13, 12, 0);
+        a.b(c_next);
+        a.bind(c_drop);
+        drop_at(a, 9);
+        a.bind(c_next);
+        a.add_imm(9, 9, 24);
+        a.sub_imm(5, 5, 1);
+        a.b(c_loop);
+        a.bind(c_done);
+        // Bookkeeping (x14/x16/x7 may be stale after helper drops: re-read everything).
+        a.ldr_imm(14, 19, 72); // ctx.interp
+        // FnFrame pop
+        a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+        a.sub_imm(16, 16, 1);
+        a.str_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+        // frame-pool push: ptr[len] = ctx.slots; len++ (room validated above; drops can't
+        // have grown the pool)
+        a.ldr_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+        a.ldr_imm(4, 14, (il.frame_pool + il.fp_ptr_word) as u32);
+        a.ldr_imm(6, 19, cx_slots);
+        a.add_shifted(4, 4, 7, 3);
+        a.stur(6, 4, 0);
+        a.add_imm(7, 7, 1);
+        a.str_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+        // depth--
+        a.ldr_w_imm(4, 14, il.depth as u32);
+        a.sub_imm(4, 4, 1);
+        a.str_w_imm(4, 14, il.depth as u32);
+        a.movz(8, 0, 0); // not threw
+        a.b(done);
+    }
+    // ---- helper fallback (nothing mutated above: `slow` is only reachable pre-commit) ----
+    a.bind(slow);
+    a.mov(0, 19);
+    a.ldr_imm(16, 21, (H_DIRECT_FINISH * 8) as u32);
+    a.blr(16);
+    a.mov(8, 0);
+    a.bind(done);
+    a.ldp_post(29, 30, 16);
+    a.ret();
 }
 
 /// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
@@ -6904,6 +7111,23 @@ fn stack_depths(chunk: &Chunk) -> Option<usize> {
 // Running
 // ---------------------------------------------------------------------------------------------
 
+/// `ctx.global_body` for a fresh frame: the live global object's body pointer. Populated even
+/// when this chunk never reads it, because a direct (shared-ctx) JIT→JIT call can only enter a
+/// `needs_global` CALLEE if the caller's ctx already carries the pointer — a null here forces
+/// every such call through the layered path. Falls back to null (never needed) or the original
+/// panicking borrow (needed, but the global is mutably borrowed — same failure as before).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn jit_global_body(i: &Interp, code: &JitCode) -> *const u8 {
+    if let Ok(b) = i.global.try_borrow() {
+        &*b as *const crate::value::Object as *const u8
+    } else if code.needs_global {
+        let b = i.global.borrow();
+        &*b as *const crate::value::Object as *const u8
+    } else {
+        std::ptr::null()
+    }
+}
+
 /// Execute a JIT-compiled chunk: mirrors `bytecode::run` (activation env, pooled slot buffer),
 /// with the operand stack in a pooled flat buffer sized by the static analysis.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -6935,12 +7159,7 @@ pub fn run(
         final_sp: stack_base,
         env_raw,
         this_raw: std::ptr::null(),
-        global_body: if code.needs_global {
-            let b = i.global.borrow();
-            &*b as *const crate::value::Object as *const u8
-        } else {
-            std::ptr::null()
-        },
+        global_body: jit_global_body(i, code),
         genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
@@ -7056,12 +7275,7 @@ pub(crate) unsafe fn run_moved(
         final_sp: stack_base,
         env_raw,
         this_raw: std::ptr::null(),
-        global_body: if code.needs_global {
-            let b = i.global.borrow();
-            &*b as *const crate::value::Object as *const u8
-        } else {
-            std::ptr::null()
-        },
+        global_body: jit_global_body(i, code),
         genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
