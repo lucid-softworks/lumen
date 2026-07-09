@@ -1004,6 +1004,47 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     l_unwind,
                     false,
                     arr_ok,
+                    PropRecv::Stack,
+                );
+            }
+            // Receiver-direct reads (`this.x`, `slotlocal.x`): the receiver never crosses the
+            // operand stack and needs no refcounting (the frame owns it).
+            Op::GetPropThis(n, cache) if fast & 256 != 0 && get_method_inlinable(layout) => {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    false,
+                    arr_ok,
+                    PropRecv::This,
+                );
+            }
+            Op::GetPropLocal(s, n, cache)
+                if fast & 256 != 0
+                    && get_method_inlinable(layout)
+                    && (*s as u32) * 24 + 16 < 4096 =>
+            {
+                let arr_ok = !chunk
+                    .jit_name(*n)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_digit());
+                emit_prop_load_inline(
+                    &mut a,
+                    layout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                    false,
+                    arr_ok,
+                    PropRecv::Slot(*s as u32 * 24),
                 );
             }
             Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
@@ -1143,6 +1184,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     l_unwind,
                     true,
                     arr_ok,
+                    PropRecv::Stack,
                 );
             }
             // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 24) ----
@@ -1630,6 +1672,19 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// re-runs the op cleanly. A BigInt value (compound payload), an accessor, any guard miss, or a
 /// last-reference receiver (whose pop-drop would free) falls to the checked helper.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+/// Where a property read's receiver comes from.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq)]
+enum PropRecv {
+    /// Operand stack top (classic GetProp/GetMethod): consumed, refcount-managed.
+    Stack,
+    /// The frame's `this` binding (`ctx.this_val`): owned by the frame, no refcounting.
+    This,
+    /// A local slot (alive for the whole frame): no refcounting.
+    Slot(u32),
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -1642,6 +1697,7 @@ fn emit_prop_load_inline(
     // element keys are all canonical indices, so a name that doesn't start with a digit cannot
     // collide with one. Prototype hops stay `Exotic::None`-only.
     arr_ok: bool,
+    recv: PropRecv,
 ) {
     use crate::bytecode::{
         IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_RECV_SHAPE,
@@ -1665,16 +1721,34 @@ fn emit_prop_load_inline(
     let d1 = a.new_label();
     let load = a.new_label();
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
-    //    receiver drop (GetProp) — hop walking uses x17.
-    a.ldurb(9, 20, -24);
-    a.cmp_imm_w(9, 8);
-    a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -16);
-    if !method {
-        // receiver refcount > 1 (so the pop-drop below never frees)
-        a.ldur(9, 10, strong);
-        a.cmp_imm_x(9, 1);
-        a.b_cond(C_LS, slow);
+    //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
+    //    the frame owns: no refcount management at all.
+    match recv {
+        PropRecv::Stack => {
+            a.ldurb(9, 20, -24);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 20, -16);
+            if !method {
+                // receiver refcount > 1 (so the pop-drop below never frees)
+                a.ldur(9, 10, strong);
+                a.cmp_imm_x(9, 1);
+                a.b_cond(C_LS, slow);
+            }
+        }
+        PropRecv::This => {
+            a.ldr_imm(14, 19, 48); // ctx.this_raw → the frame's `this` Value
+            a.ldurb(9, 14, 0);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldur(10, 14, 8);
+        }
+        PropRecv::Slot(off) => {
+            a.ldrb_imm(9, 22, off);
+            a.cmp_imm_w(9, 8);
+            a.b_cond(C_NE, slow);
+            a.ldr_imm(10, 22, off + 8);
+        }
     }
     // 2-5. probe both cache ways (sites allocate two consecutive cells; the fill path demotes
     // way 1 to way 2, so a two-shape site — subclass hierarchies rotating through one access —
@@ -1782,7 +1856,13 @@ fn emit_prop_load_inline(
     a.add_imm(16, 16, 1);
     a.stur(16, 13, strong);
     a.bind(nobump);
-    if method {
+    if !matches!(recv, PropRecv::Stack) {
+        // this/slot receivers were never on the stack: just push the value.
+        a.stur(12, 20, 0);
+        a.stur(13, 20, 8);
+        a.stur(14, 20, 16);
+        a.add_imm(20, 20, 24);
+    } else if method {
         // receiver stays at [-24]; push the method above it
         a.stur(12, 20, 0);
         a.stur(13, 20, 8);

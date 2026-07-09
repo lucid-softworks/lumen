@@ -318,6 +318,12 @@ pub enum Op {
     /// `obj.name`. First operand is the name index; second is the per-site inline-cache index into
     /// `Chunk::caches` (see `Interp::get_prop_ic`).
     GetProp(u32, u32),
+    /// `this.name` — GetProp with the receiver read straight from the frame's `this` binding:
+    /// no operand-stack traffic and no receiver refcounting (the frame owns the binding).
+    GetPropThis(u32, u32),
+    /// `local.name` — receiver read straight from a slot (alive for the whole frame). A TDZ
+    /// slot throws the same ReferenceError LoadLocal would.
+    GetPropLocal(u16, u32, u32),
     /// `obj.name = v`. Operands: name index, inline-cache index.
     SetProp(u32, u32),
     /// `obj.name = v` in statement position: stores without leaving `v` on the stack.
@@ -3401,6 +3407,35 @@ impl Compiler {
                 prop,
                 optional: false,
             } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
+                // Receiver-direct forms: `this.x` and `slotlocal.x` skip the operand-stack
+                // round trip (push + refcount bump + drop) entirely.
+                match &**obj {
+                    // Inside a splice `this` is the receiver slot; otherwise the frame binding.
+                    Expr::This if self.inline_depth > 0 => {
+                        if let Some(slot) = self.inline_this {
+                            let i = self.name_idx(prop);
+                            let c = self.new_cache();
+                            self.emit(Op::GetPropLocal(slot, i, c));
+                            return Ok(());
+                        }
+                    }
+                    Expr::This => {
+                        self.uses_this = true;
+                        let i = self.name_idx(prop);
+                        let c = self.new_cache();
+                        self.emit(Op::GetPropThis(i, c));
+                        return Ok(());
+                    }
+                    Expr::Ident(name) => {
+                        if let Some(Home::Slot(slot, _)) = self.home(name) {
+                            let i = self.name_idx(prop);
+                            let c = self.new_cache();
+                            self.emit(Op::GetPropLocal(slot, i, c));
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
                 self.expr(obj)?;
                 let i = self.name_idx(prop);
                 let c = self.new_cache();
@@ -4166,6 +4201,25 @@ fn run_vm(
             Op::LoadThis => stack.push(this_val.clone()),
             Op::GetProp(n, c) => {
                 let obj = pop!();
+                let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                stack.push(v);
+            }
+            Op::GetPropThis(n, c) => {
+                let v =
+                    i.get_prop_ic(this_val, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                stack.push(v);
+            }
+            Op::GetPropLocal(s, n, c) => {
+                let obj = slots[s as usize].clone();
+                if matches!(obj, Value::Empty) {
+                    return Err(i.throw(
+                        "ReferenceError",
+                        format!(
+                            "cannot access '{}' before initialization",
+                            chunk.slot_names[s as usize]
+                        ),
+                    ));
+                }
                 let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 stack.push(v);
             }
@@ -5073,6 +5127,8 @@ impl Chunk {
             Op::UpdateElem(k) => (2, upd(k)),
             Op::Tdz(_) => (0, 0),
             Op::GetProp(..) => (1, 1),
+            Op::GetPropThis(..) => (0, 1),
+            Op::GetPropLocal(..) => (0, 1),
             Op::SetProp(..) => (2, 1),
             Op::SetPropDrop(..) => (2, 0),
             Op::GetElem => (2, 1),
@@ -5481,6 +5537,25 @@ unsafe fn jit_exec_inner(
         Op::LoadThis => push!(ctx.this_val.clone()),
         Op::GetProp(n, c) => {
             let obj = pop!();
+            let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+            push!(v);
+        }
+        Op::GetPropThis(n, c) => {
+            let this = (*ctx.this_raw).clone();
+            let v = i.get_prop_ic(&this, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+            push!(v);
+        }
+        Op::GetPropLocal(s, n, c) => {
+            let obj = slots[s as usize].clone();
+            if matches!(obj, Value::Empty) {
+                return Err(i.throw(
+                    "ReferenceError",
+                    format!(
+                        "cannot access '{}' before initialization",
+                        chunk.slot_names[s as usize]
+                    ),
+                ));
+            }
             let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
             push!(v);
         }
