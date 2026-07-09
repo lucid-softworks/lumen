@@ -6557,12 +6557,28 @@ pub(crate) unsafe fn run_moved(
         }
         // Drop the frame's local slots (initialized Values throughout the run). Numeric frames
         // are the common case: a tag peek skips the outlined drop for trivially-copyable tags
-        // (Undefined/Empty/Null/Bool/Num — repr(u8) discriminants 0..=4).
+        // (Undefined/Empty/Null/Bool/Num — repr(u8) discriminants 0..=4). Refcounted tags
+        // (Str/Sym/Obj ≥ 6 — the discriminant order the templates rely on) whose payload is a
+        // shared reference collapse to a bare strong-count decrement, exactly like the inline
+        // templates' drop path (strong sits at payload+0 for Rc and LStr alike; BigInt tag 5
+        // and last references take the real drop).
+        // The bare-decrement path shares the templates' layout contract (fail closed if the
+        // probe ever finds a std whose strong count moved).
+        let rc_dec_ok = i.jit_layout.get().is_some_and(|l| l.valid && l.rc_strong_off == 0);
         for k in 0..n_slots {
             let p = slots_ptr.add(k);
-            if *(p as *const u8) >= 5 {
-                std::ptr::drop_in_place(p);
+            let tag = *(p as *const u8);
+            if tag < 5 {
+                continue;
             }
+            if rc_dec_ok && tag >= 6 {
+                let strong = *(p as *const usize).add(1) as *mut usize;
+                if *strong > 1 {
+                    *strong -= 1;
+                    continue;
+                }
+            }
+            std::ptr::drop_in_place(p);
         }
     }
     match legacy {
