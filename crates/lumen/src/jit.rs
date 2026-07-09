@@ -294,10 +294,6 @@ mod asm {
         }
 
         /// movz xd, #imm16, lsl #(shift*16)
-        /// brk #0 — temporary diagnostics only.
-        pub fn brk_dbg(&mut self) {
-            self.emit(0xD420_0000);
-        }
         /// str wt, [xn, #imm] (scaled, imm/4)
         pub fn str_w_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
             debug_assert!(imm_bytes.is_multiple_of(4) && imm_bytes / 4 < 4096);
@@ -1730,16 +1726,9 @@ pub fn compile(
                     let off = depth as i32 * -24;
                     if (-256..0).contains(&off) {
                         let ic0 = chunk.jit_call_cache_ptr(*c);
-                        let brk_stage: u32 = std::env::var("LUMEN_JIT_PROBEBRK")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
                         a.ldurb(9, 20, off);
                         a.cmp_imm_w(9, 8); // callee must be an Obj
                         a.b_cond(C_NE, slow);
-                        if brk_stage == 1 {
-                            a.brk_dbg();
-                        }
                         a.ldur(10, 20, off + 8); // callee payload (stored Rc ptr)
                         a.mov_imm64(12, ic0 as u64);
                         a.ldur(11, 12, 0); // ic.callee (an Rc::as_ptr identity)
@@ -1748,22 +1737,13 @@ pub fn compile(
                         a.add_imm(13, 10, layout.gc_data_off as u32);
                         a.cmp_reg_x(13, 11);
                         a.b_cond(C_NE, slow);
-                        if brk_stage == 2 {
-                            a.brk_dbg();
-                        }
                         a.ldr_w_imm(11, 12, 56); // ic.epoch
                         a.mov_imm64(13, &crate::bytecode::CALL_IC_EPOCH as *const _ as u64);
                         a.ldr_w_imm(14, 13, 0);
                         a.cmp_reg_w(11, 14);
                         a.b_cond(C_NE, slow);
-                        if brk_stage == 3 {
-                            a.brk_dbg();
-                        }
                         a.ldr_imm(11, 12, 32); // ic.global_env
                         a.ldr_imm(14, 19, 64); // ctx.genv
-                        if brk_stage == 4 {
-                            a.brk_dbg();
-                        }
                         a.cmp_reg_x(11, 14);
                         a.b_cond(C_NE, slow);
                         // Direct shared-ctx call (opt-in while it stabilizes): its own gate
@@ -1785,9 +1765,6 @@ pub fn compile(
                             );
                         }
                         a.bind(hit_slow);
-                        if std::env::var_os("LUMEN_JIT_HITBRK").is_some() {
-                            a.brk_dbg();
-                        }
                         a.mov(0, 19);
                         a.movz(1, pc as u32, 0);
                         a.mov(2, 20);
@@ -2338,28 +2315,18 @@ fn emit_direct_call(
     if attempted_off >= 4096 {
         return false;
     }
-    let dbrk: u32 = std::env::var("LUMEN_JIT_DIRECTBRK")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    if dbrk == 1 {
-        a.brk_dbg(); // temp diagnostics
-    }
     a.ldurb(9, 12, IC_DIRECT);
     let field1b = asm::logical_imm_w(1).unwrap();
     a.logic_imm_w(0, 11, 9, field1b); // bit 0: no force resets
     a.cbz(11, false, hit_slow);
+    let field8 = asm::logical_imm_w(8).unwrap();
+    a.logic_imm_w(0, 11, 9, field8); // bit 3: frame fits FRAME_BUF
+    a.cbz(11, false, hit_slow);
     // recompile settled (live chunk byte — see attempted_off)
-    if dbrk == 2 {
-        a.brk_dbg(); // before-attempted
-    }
     a.ldur(11, 12, IC_CHUNK_RAW);
     a.ldrb_imm(11, 11, attempted_off as u32);
     a.cbz(11, false, hit_slow);
     // needs_global (bit 1) requires a live ctx.global_body
-    if dbrk == 3 {
-        a.brk_dbg(); // after-attempted
-    }
     let no_glob = a.new_label();
     let field2 = asm::logical_imm_w(2).unwrap();
     a.logic_imm_w(0, 11, 9, field2);
@@ -2372,9 +2339,6 @@ fn emit_direct_call(
     a.cmp_imm_w(9, argc as u32);
     a.b_cond(C_NE, hit_slow);
     // this binding: a this-using SLOPPY callee needs boxing/global fallback unless the
-    if dbrk == 4 {
-        a.brk_dbg(); // after-nparams
-    }
     // incoming receiver is already an object.
     a.ldrb_imm(9, 12, IC_USES_THIS);
     let this_ok = a.new_label();
@@ -2389,34 +2353,22 @@ fn emit_direct_call(
         a.b(hit_slow); // no receiver + sloppy this-user: global boxing → generic
     }
     a.bind(this_ok);
-    if dbrk == 5 {
-        a.brk_dbg(); // after-this
-    }
     // callee refcount > 1 (the post-call dec then never frees mid-sequence; a same-call
     // binding deletion is caught by the post-dec zero check)
     a.ldur(9, 10, strong);
     a.cmp_imm_x(9, 1);
     a.b_cond(C_LS, hit_slow);
     // interp-side room: depth, gc tick, fn_frames capacity, frame pool
-    if dbrk == 6 {
-        a.brk_dbg(); // after-strong
-    }
     a.ldr_imm(14, 19, 72); // ctx.interp
     a.ldr_w_imm(11, 14, il.depth as u32);
     a.mov_imm64(13, crate::interpreter::MAX_EVAL_DEPTH as u64);
     a.cmp_reg_x(11, 13); // w-load zero-extends; the compare stays 64-bit
     a.b_cond(C_HS, hit_slow);
-    if dbrk == 9 {
-        a.brk_dbg(); // after-depth
-    }
     a.ldr_w_imm(13, 14, il.gc_tick as u32);
     a.add_imm(13, 13, 1);
     let field15 = asm::logical_imm_w(15).unwrap();
     a.logic_imm_w(0, 4, 13, field15); // and w4, w13, #15
     a.cbz(4, false, hit_slow); // gc due → generic
-    if dbrk == 7 {
-        a.brk_dbg(); // after-gc
-    }
     a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
     a.ldr_imm(17, 14, (il.fn_frames + il.fnf_cap_word) as u32);
     a.cmp_reg_x(16, 17);
@@ -2425,9 +2377,6 @@ fn emit_direct_call(
     a.cbz(7, true, hit_slow);
 
     // ---- mutations ----
-    if dbrk == 8 {
-        a.brk_dbg(); // all-gates-passed
-    }
     a.add_imm(11, 11, 1);
     a.str_w_imm(11, 14, il.depth as u32); // depth++ (u32 field)
     a.str_w_imm(13, 14, il.gc_tick as u32); // tick (not due)
@@ -2523,12 +2472,11 @@ fn emit_direct_call(
     a.stur(4, 31, 64);
     a.stur(5, 31, 72);
     a.stur(6, 31, 80);
-    a.ldrb_imm(4, 12, IC_USES_THIS);
-    let this_undef = a.new_label();
-    let this_set = a.new_label();
     if with_this {
-        a.cbz(4, false, this_undef);
-        // move the receiver in (24B; the caller-stack slot is skipped at cleanup, not dropped)
+        // ALWAYS move the receiver into ctx.this_val — even when the callee never reads
+        // `this` — because the finish helper's `this_val = Undefined` is what consumes it
+        // (skipping the caller-stack slot at cleanup without this move leaked the receiver
+        // on every this-less method call; Splay OOM'd on exactly that).
         let s = -((argc as i32 + 2) * 24);
         a.ldur(4, 20, s);
         a.ldur(5, 20, s + 8);
@@ -2536,11 +2484,9 @@ fn emit_direct_call(
         a.str_imm(4, 19, cx_this);
         a.str_imm(5, 19, cx_this + 8);
         a.str_imm(6, 19, cx_this + 16);
-        a.b(this_set);
+    } else {
+        a.strb_imm(31, 19, cx_this); // Undefined tag (payload stale; tag-only reads)
     }
-    a.bind(this_undef);
-    a.strb_imm(31, 19, cx_this); // Undefined tag (payload stale; tag-only reads)
-    a.bind(this_set);
     // constructing (byte) + new_target (tag byte): cleared for the callee
     a.ldrb_imm(4, 14, il.constructing as u32);
     a.stur(4, 31, 88);

@@ -5225,8 +5225,17 @@ impl Chunk {
             f |= 1;
         }
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-        if code.needs_global {
-            f |= 2;
+        {
+            if code.needs_global {
+                f |= 2;
+            }
+            // The direct sequence carves [slots|operand stack] from one fixed-size pooled
+            // buffer, exactly like run_moved's fast path — a frame that doesn't fit must take
+            // the layered path (run_moved falls back to growable Vecs there).
+            let (_, n_slots) = self.jit_frame();
+            if n_slots + code.max_stack <= crate::jit::FRAME_BUF {
+                f |= 8;
+            }
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
         let _ = code;
