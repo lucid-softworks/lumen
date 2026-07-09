@@ -221,7 +221,9 @@ mod layout_asserts {
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, chunk_raw) == 64);
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, code_mem) == 72);
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, pc_offs_ptr) == 80);
-    const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 88);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, native) == 88);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, intrinsic) == 96);
+    const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 104);
     const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
     // 3b reads Interp state from machine code through ctx.interp.
     const _: () = assert!(std::mem::offset_of!(JitCtx, interp) == 72);
@@ -297,6 +299,10 @@ mod asm {
         /// ldr xt, [xn, xm, lsl #3] (register-offset, scaled)
         pub fn ldr_x_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
             self.emit(0xF860_7800 | (rm << 16) | (rn << 5) | rt);
+        }
+        /// ldrb wt, [xn, xm] (register-offset, unscaled)
+        pub fn ldrb_reg(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0x3860_6800 | (rm << 16) | (rn << 5) | rt);
         }
         /// ldrh wt, [xn, #imm] (scaled, imm/2)
         pub fn ldrh_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
@@ -1095,6 +1101,7 @@ pub fn compile(
                 emit_prop_load_inline(
                     &mut a,
                     layout,
+                    ilayout,
                     chunk.jit_cache_ptr(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
@@ -1115,6 +1122,7 @@ pub fn compile(
                 emit_prop_load_inline(
                     &mut a,
                     layout,
+                    ilayout,
                     chunk.jit_cache_ptr(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
@@ -1137,6 +1145,7 @@ pub fn compile(
                 emit_prop_load_inline(
                     &mut a,
                     layout,
+                    ilayout,
                     chunk.jit_cache_ptr(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
@@ -1299,6 +1308,7 @@ pub fn compile(
                 emit_prop_load_inline(
                     &mut a,
                     layout,
+                    ilayout,
                     chunk.jit_cache_ptr(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
@@ -1768,11 +1778,67 @@ pub fn compile(
                         a.bind(l_hit);
                         a.movz(15, crate::bytecode::CALL_IC_WAYS as u32, 0);
                         a.sub_reg(15, 15, 14);
-                        // Direct shared-ctx call (opt-in while it stabilizes): its own gate
-                        // misses land on `hit_slow` = the H_CALL_HIT form below.
+                        let with_this = matches!(op, Op::CallWithThis(..));
                         let hit_slow = a.new_label();
+                        // Inline intrinsics: a native entry the template can finish without
+                        // leaving machine code. charCodeAt on a known-ASCII receiver with an
+                        // exact in-bounds u32 index is a byte load — meriyah-style scanners
+                        // make millions of these per parse. Any miss (intrinsic id, receiver
+                        // tag/hint, index shape, bounds, last-reference operands) takes the
+                        // H_CALL_HIT form, whose Rust side handles native entries generally.
+                        if with_this && *argc == 1 && rc_ok && layout.rc_strong_off == 0 {
+                            let no_intr = a.new_label();
+                            a.ldrb_imm(9, 12, 96); // ic.intrinsic (offset compile-asserted)
+                            a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_CODE_AT as u32);
+                            a.b_cond(C_NE, no_intr);
+                            // receiver: Str with the ASCII hint
+                            a.ldurb(9, 20, -72);
+                            a.cmp_imm_w(9, 6);
+                            a.b_cond(C_NE, hit_slow);
+                            a.ldur(11, 20, -64);
+                            a.ldr_w_imm(14, 11, crate::lstr::CAP_OFF as u32);
+                            a.lsr_imm(14, 14, 31);
+                            a.cbz(14, false, hit_slow);
+                            // index: exact u32 Num
+                            a.ldurb(9, 20, -24);
+                            a.cmp_imm_w(9, 4);
+                            a.b_cond(C_NE, hit_slow);
+                            a.ldur_d(0, 20, -16);
+                            a.fcvtzu_w_d(9, 0);
+                            a.ucvtf_d_w(1, 9);
+                            a.fcmp(0, 1);
+                            a.b_cond(C_NE, hit_slow);
+                            // bounds (ASCII: byte index == unit index); OOB answers NaN in the
+                            // helper
+                            a.ldr_w_imm(14, 11, crate::lstr::LEN_OFF as u32);
+                            a.cmp_reg_x(9, 14);
+                            a.b_cond(C_HS, hit_slow);
+                            // both refcounted operands must survive a bare dec
+                            a.ldur(14, 11, 0);
+                            a.cmp_imm_x(14, 1);
+                            a.b_cond(C_LS, hit_slow);
+                            a.ldur(13, 10, 0);
+                            a.cmp_imm_x(13, 1);
+                            a.b_cond(C_LS, hit_slow);
+                            // ---- commit: byte load, decs, Num over the receiver slot ----
+                            a.add_imm(16, 11, crate::lstr::DATA_OFF as u32);
+                            a.ldrb_reg(16, 16, 9);
+                            a.ucvtf_d_w(0, 16);
+                            a.sub_imm(14, 14, 1);
+                            a.stur(14, 11, 0);
+                            a.sub_imm(13, 13, 1);
+                            a.stur(13, 10, 0);
+                            a.movz(9, 4, 0);
+                            a.stur(9, 20, -72);
+                            a.stur_d(0, 20, -64);
+                            a.stur(31, 20, -56);
+                            a.sub_imm(20, 20, 48);
+                            a.b(done);
+                            a.bind(no_intr);
+                        }
+                        // Direct shared-ctx call: its own gate misses land on `hit_slow` =
+                        // the H_CALL_HIT form below.
                         if direct_on {
-                            let with_this = matches!(op, Op::CallWithThis(..));
                             let attempted_off = chunk.jit_inline_attempted_off();
                             emit_direct_call(
                                 &mut a,
@@ -1985,6 +2051,9 @@ enum PropRecv {
 fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
+    // Interp field offsets: string-primitive method receivers resolve against the ACTIVE
+    // realm's String.prototype through ctx.interp.
+    il: &crate::interpreter::InterpLayout,
     cache_ptr: usize,
     // The site's interned name (`chunk.jit_name(n)`): its data pointer keys the stub-cache
     // arm, and its bytes are the key-checked arm's compare immediates. Pinned by the chunk
@@ -2029,12 +2098,38 @@ fn emit_prop_load_inline(
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
     //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
     //    the frame owns: no refcount management at all.
+    // String-primitive receivers (method loads only — the receiver slot is never dropped or
+    // refcounted on this path): resolve against the active realm's String.prototype, whose
+    // stored Rc pointer plays the receiver role for the probe. The Rust helper fills the SAME
+    // site cache with proto-based states (see get_prop_ic's primitive arm), so shapes align.
+    let str_ok = method
+        && il.valid
+        && il.string_proto % 8 == 0
+        && il.string_proto / 8 < 4096
+        && name != "length"
+        && name != "description"
+        && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit());
     match recv {
         PropRecv::Stack => {
             a.ldurb(9, 20, -24);
-            a.cmp_imm_w(9, 8);
-            a.b_cond(C_NE, slow);
-            a.ldur(10, 20, -16);
+            if str_ok {
+                let obj_recv = a.new_label();
+                let probe_go = a.new_label();
+                a.cmp_imm_w(9, 8);
+                a.b_cond(C_EQ, obj_recv);
+                a.cmp_imm_w(9, 6);
+                a.b_cond(C_NE, slow);
+                a.ldr_imm(10, 19, 72); // ctx.interp
+                a.ldr_imm(10, 10, il.string_proto as u32);
+                a.b(probe_go);
+                a.bind(obj_recv);
+                a.ldur(10, 20, -16);
+                a.bind(probe_go);
+            } else {
+                a.cmp_imm_w(9, 8);
+                a.b_cond(C_NE, slow);
+                a.ldur(10, 20, -16);
+            }
             if !method {
                 // receiver refcount > 1 (so the pop-drop below never frees)
                 a.ldur(9, 10, strong);
@@ -2072,16 +2167,28 @@ fn emit_prop_load_inline(
         // receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
         // Array receiver additionally requires depth ≥ 1: its shape proves named-key ABSENCE,
         // not slot positions, because element entries occupy slots without transitioning the
-        // shape), plain, shape == recv_shape; x11 = receiver object base
+        // shape; or StrWrap when `str_ok` — String.prototype/string wrappers intercept only
+        // index and `length` reads, both excluded by the str_ok name gates), plain,
+        // shape == recv_shape; x11 = receiver object base
         a.add_imm(11, 10, rcv);
         a.ldrb_imm(14, 11, ex);
-        if arr_ok {
+        if arr_ok || str_ok {
             let ex_ok = a.new_label();
             a.cmp_imm_w(14, none_tag);
             a.b_cond(C_EQ, ex_ok);
-            a.cmp_imm_w(14, layout.exotic_array_tag as u32);
-            a.b_cond(C_NE, miss);
-            a.cbz(9, false, miss); // Array receiver must not be the holder (w9 = depth)
+            if arr_ok {
+                let not_arr = a.new_label();
+                a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+                a.b_cond(C_NE, not_arr);
+                a.cbz(9, false, miss); // Array receiver must not be the holder (w9 = depth)
+                a.b(ex_ok);
+                a.bind(not_arr);
+            }
+            if str_ok {
+                a.cmp_imm_w(14, layout.exotic_strwrap_tag as u32);
+                a.b_cond(C_EQ, ex_ok);
+            }
+            a.b(miss);
             a.bind(ex_ok);
         } else {
             a.cmp_imm_w(14, none_tag);

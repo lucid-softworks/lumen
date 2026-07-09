@@ -25,7 +25,7 @@ struct Header {
     /// Strong count — MUST stay the first field (the JIT bumps it at payload offset 0).
     strong: Cell<usize>,
     len: Cell<u32>,
-    cap: u32,
+    cap: Cell<u32>,
     // `cap` bytes of UTF-8 follow.
 }
 
@@ -39,6 +39,15 @@ const HDR: usize = std::mem::size_of::<Header>();
 /// Byte offset of the length within the header — the JIT's inline equality/truthiness templates
 /// read `len` from machine code through the stored pointer (the strong count stays at offset 0).
 pub(crate) const LEN_OFF: usize = std::mem::offset_of!(Header, len);
+/// Byte offset of `cap` (which carries [`ASCII_HINT`] in its top bit) — the JIT's charCodeAt
+/// intrinsic tests the hint from machine code.
+pub(crate) const CAP_OFF: usize = std::mem::offset_of!(Header, cap);
+/// Byte offset of the first content byte.
+pub(crate) const DATA_OFF: usize = HDR;
+/// Top bit of `cap`: the content is KNOWN all-ASCII (byte index == UTF-16 unit index, and every
+/// byte IS its unit). Purely a hint — never set for non-ASCII content, may be clear for ASCII
+/// content. Maintained by every constructor/mutator; capacity readers mask it off.
+pub(crate) const ASCII_HINT: u32 = 1 << 31;
 
 fn layout(cap: u32) -> Layout {
     Layout::from_size_align(HDR + cap as usize, std::mem::align_of::<Header>())
@@ -49,17 +58,35 @@ impl LStr {
     /// Allocate with `cap` bytes of capacity, seeding `content` (must fit).
     fn alloc(content: &str, cap: u32) -> LStr {
         debug_assert!(content.len() <= cap as usize);
+        debug_assert!(cap & ASCII_HINT == 0, "capacity claims the hint bit");
         unsafe {
             let p = alloc(layout(cap)) as *mut Header;
             let p = NonNull::new(p).expect("allocation failed");
+            // The hint holds for `content`; constructors that append more bytes afterwards
+            // re-AND it with the extra bytes' ASCII-ness (see concat2/concat_grown).
+            let hint = if content.is_ascii() { ASCII_HINT } else { 0 };
             p.as_ptr().write(Header {
                 strong: Cell::new(1),
                 len: Cell::new(content.len() as u32),
-                cap,
+                cap: Cell::new(cap | hint),
             });
             let data = (p.as_ptr() as *mut u8).add(HDR);
             std::ptr::copy_nonoverlapping(content.as_ptr(), data, content.len());
             LStr { p }
+        }
+    }
+
+    /// Whether the content is KNOWN all-ASCII (see [`ASCII_HINT`]).
+    #[inline]
+    pub(crate) fn ascii_hint(&self) -> bool {
+        self.hdr().cap.get() & ASCII_HINT != 0
+    }
+
+    #[inline]
+    fn and_ascii(&self, extra_is_ascii: bool) {
+        if !extra_is_ascii {
+            let h = self.hdr();
+            h.cap.set(h.cap.get() & !ASCII_HINT);
         }
     }
 
@@ -73,6 +100,7 @@ impl LStr {
             std::ptr::copy_nonoverlapping(b.as_ptr(), data.add(a.len()), b.len());
             s.hdr().len.set(total as u32);
         }
+        s.and_ascii(a.is_ascii() && b.is_ascii());
         s
     }
 
@@ -120,7 +148,7 @@ impl LStr {
             return false;
         }
         let len = h.len.get() as usize;
-        if len + x.len() > h.cap as usize {
+        if len + x.len() > (h.cap.get() & !ASCII_HINT) as usize {
             return false;
         }
         unsafe {
@@ -128,6 +156,7 @@ impl LStr {
             std::ptr::copy_nonoverlapping(x.as_ptr(), data.add(len), x.len());
         }
         h.len.set((len + x.len()) as u32);
+        self.and_ascii(x.is_ascii());
         true
     }
 
@@ -135,13 +164,16 @@ impl LStr {
     /// Doubles (at least) so a rebuilt accumulator amortizes the next appends.
     pub fn concat_grown(&self, x: &str) -> LStr {
         let need = self.as_str().len() + x.len();
-        let cap = u32::try_from((need * 2).max(32)).unwrap_or(u32::MAX);
+        let cap = u32::try_from((need * 2).max(32))
+            .unwrap_or(ASCII_HINT - 1)
+            .min(ASCII_HINT - 1); // the top bit is the ASCII hint, never capacity
         let s = LStr::alloc(self.as_str(), cap.max(need as u32));
         unsafe {
             let data = (s.p.as_ptr() as *mut u8).add(HDR);
             std::ptr::copy_nonoverlapping(x.as_ptr(), data.add(self.as_str().len()), x.len());
         }
         s.hdr().len.set(need as u32);
+        s.and_ascii(x.is_ascii());
         s
     }
 }
@@ -161,7 +193,7 @@ impl Drop for LStr {
         let h = self.hdr();
         let s = h.strong.get();
         if s == 1 {
-            let cap = h.cap;
+            let cap = h.cap.get() & !ASCII_HINT;
             unsafe { dealloc(self.p.as_ptr() as *mut u8, layout(cap)) };
         } else {
             h.strong.set(s - 1);

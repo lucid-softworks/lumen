@@ -97,6 +97,9 @@ pub struct JitLayout {
     pub exotic_none_tag: u8,
     /// `Exotic::Array`'s discriminant byte (the element templates also accept arrays).
     pub exotic_array_tag: u8,
+    /// `Exotic::StrWrap`'s discriminant byte (String.prototype IS a StrWrap — the GetMethod
+    /// template accepts it as a named-read holder; index/length reads never take that path).
+    pub exotic_strwrap_tag: u8,
     /// `ic_plain` byte within `Object` (the per-receiver "not in an exotic side table" flag).
     pub obj_ic_plain: usize,
     /// `Rc::as_ptr(env)` → the scope's `VarMap` generation counter (through the `RefCell`).
@@ -191,6 +194,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
     let arr = Exotic::Array;
     let exotic_array_tag = unsafe { *(&arr as *const Exotic as *const u8) };
+    let sw = Exotic::StrWrap("".into());
+    let exotic_strwrap_tag = unsafe { *(&sw as *const Exotic as *const u8) };
 
     // Scope offsets for the inline LoadName template: Rc::as_ptr → RefCell<Scope> value →
     // Scope.vars → VarMap generation. The RefCell value offset is probed on a live scope.
@@ -233,6 +238,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, writable),
         exotic_none_tag,
         exotic_array_tag,
+        exotic_strwrap_tag,
         scope_gen,
         binding_value,
         binding_init,

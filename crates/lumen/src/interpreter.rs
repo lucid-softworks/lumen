@@ -727,6 +727,9 @@ pub(crate) struct InterpLayout {
     pub fp_ptr_word: usize,
     pub fp_len_word: usize,
     pub fp_cap_word: usize,
+    /// `string_proto` (a `Gc` = one stored `Rc` pointer): the GetMethod template resolves
+    /// string-primitive receivers against the ACTIVE realm's String.prototype through this.
+    pub string_proto: usize,
     pub valid: bool,
 }
 
@@ -793,6 +796,7 @@ pub(crate) fn interp_layout(i: &mut Interp) -> InterpLayout {
         fp_ptr_word: fp.0,
         fp_len_word: fp.1,
         fp_cap_word: fp.2,
+        string_proto: off(&i.string_proto as *const _ as usize),
         valid: true,
     }
 }
@@ -1238,6 +1242,15 @@ impl Interp {
 
     /// `$262.createRealm()`: build a fresh realm (its own global + intrinsics) and register it. The
     /// well-known symbols are shared with the creating realm so `@@iterator` etc. match cross-realm.
+    /// Whether a SECOND realm exists (`$262.createRealm`). `Interp::new` always registers the
+    /// main realm, so `realms.is_empty()` never distinguishes anything — cross-realm dispatch
+    /// only becomes possible once another realm joins, and realms are never removed. Every
+    /// single-realm fast-path gate keys on this.
+    #[inline]
+    pub(crate) fn multi_realm(&self) -> bool {
+        self.realms.len() > 1
+    }
+
     pub(crate) fn create_realm(&mut self) -> Value {
         // Register the creating (main) realm too, so cross-realm dispatch can switch BACK to it
         // and resolve its intrinsics like any other realm's.
@@ -2390,7 +2403,12 @@ impl Interp {
     /// table (proxy, namespace, typed array) is not.
     #[inline]
     fn ic_plain_ptr(&self, ptr: usize, b: &Object) -> bool {
-        matches!(b.exotic, Exotic::None | Exotic::Array) && self.ordinary_get_ptr(ptr)
+        // StrWrap (String.prototype, string wrapper objects): index and `length` reads are
+        // exotic-provided and never live in `entries`, and StrWrap maps are NOT `elem_mode`,
+        // so named entries stay shape-pinned — a named non-index IC over one is as sound as
+        // over an ordinary object.
+        matches!(b.exotic, Exotic::None | Exotic::Array | Exotic::StrWrap(_))
+            && self.ordinary_get_ptr(ptr)
     }
 
     /// The `GetProp`/`GetMethod` inline-cache fast path; `None` means "take the slow path".
@@ -2491,10 +2509,12 @@ impl Interp {
             // (element keys are all canonical indices) — but NOT where a named entry sits
             // (element entries occupy slots without transitioning the shape, so two
             // same-shape arrays can hold `length` at different slots).
+            let non_digit = !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit());
             let recv_shape_ok = matches!(rb.exotic, Exotic::None)
-                || (matches!(rb.exotic, Exotic::Array)
-                    && (depth >= 1 || keychk)
-                    && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()));
+                || (matches!(rb.exotic, Exotic::Array) && (depth >= 1 || keychk) && non_digit)
+                // StrWrap named entries are shape-pinned (not elem_mode); index/length reads
+                // are exotic-provided and never fill states at this site's name.
+                || (matches!(rb.exotic, Exotic::StrWrap(_)) && non_digit);
             if recv_shape_ok
                 && self.ordinary_get_ptr(head as usize)
                 && rb.props.shape() == st.recv_shape
@@ -2515,7 +2535,7 @@ impl Interp {
                         .take(depth.saturating_sub(1) as usize)
                     {
                         let mb = (*hp).borrow();
-                        if !(matches!(mb.exotic, Exotic::None)
+                        if !(matches!(mb.exotic, Exotic::None | Exotic::StrWrap(_))
                             && self.ordinary_get_ptr(hp as usize)
                             && mb.props.shape() == mid_shape)
                         {
@@ -2527,7 +2547,7 @@ impl Interp {
                         }
                     }
                     let hb = (*hp).borrow();
-                    let holder_exotic_ok = matches!(hb.exotic, Exotic::None)
+                    let holder_exotic_ok = matches!(hb.exotic, Exotic::None | Exotic::StrWrap(_))
                         || (keychk && matches!(hb.exotic, Exotic::Array));
                     if holder_exotic_ok
                         && self.ordinary_get_ptr(hp as usize)
@@ -2586,7 +2606,7 @@ impl Interp {
                     // (`IC_ARR_KEYCHK`): hits re-verify the entry's key, and the JIT templates
                     // (exact depth compares, no bounds check) route it to the helper. Digit
                     // names stay uncached (element reads have their own paths).
-                    let keychk = !matches!(b.exotic, Exotic::None);
+                    let keychk = !matches!(b.exotic, Exotic::None | Exotic::StrWrap(_));
                     if keychk && name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
                         return Some(v);
                     }
@@ -2613,10 +2633,10 @@ impl Interp {
                     });
                     return Some(v);
                 }
-                if depth == 1 && matches!(b.exotic, Exotic::None) {
+                if depth == 1 && matches!(b.exotic, Exotic::None | Exotic::StrWrap(_)) {
                     mid = Some(b.props.shape());
                 }
-                if depth == 2 && matches!(b.exotic, Exotic::None) {
+                if depth == 2 && matches!(b.exotic, Exotic::None | Exotic::StrWrap(_)) {
                     mid2 = Some(b.props.shape());
                 }
                 match b.proto.as_ref() {
@@ -4369,7 +4389,7 @@ impl Interp {
     ) -> Result<Value, Abrupt> {
         // A cross-realm callee runs with its own realm's intrinsics active (so a thrown TypeError,
         // a fresh object's prototype, or a global lookup lands in the right realm).
-        if !self.realms.is_empty() {
+        if self.multi_realm() {
             if let Value::Obj(o) = &callee {
                 // A proxy's trap machinery runs in the caller's realm (the trap-arguments array is
                 // a caller-realm Array); invoking the trap function swaps on its own.
@@ -4478,7 +4498,7 @@ impl Interp {
         // `eval(...)` of the current realm is intercepted earlier, in `eval_call`.) Only a
         // native function can be a realm's `eval` — skip the property lookup for user calls,
         // which is every hot call (the main realm always registers, so the map is never empty).
-        if !self.realms.is_empty()
+        if self.multi_realm()
             && self.eval_realm_fns.contains(&(Rc::as_ptr(&obj) as usize))
         {
             let realm_g = obj
@@ -5099,6 +5119,10 @@ impl Interp {
             }
         }
         let ic = hit?;
+        if ic.native != 0 {
+            let nf: crate::value::NativeFn = unsafe { std::mem::transmute(ic.native) };
+            return Some(unsafe { self.call_native_committed(nf, this_slot, args, argc) });
+        }
         // Inline-recompile trigger: a chunk that keeps running in machine code gets one shot at
         // splicing its own hot monomorphic callees (see `bytecode::plan_inlines`).
         {
@@ -5110,6 +5134,63 @@ impl Interp {
             }
         }
         Some(unsafe { self.call_jit_committed(ic, this_slot, args, argc) })
+    }
+
+    /// A native-entry IC hit: invoke the builtin straight from the cache — no receiver borrow,
+    /// no `Callable` dispatch, no re-probe. Replicates the observable effects of the
+    /// plain-native fast call (depth guard, amortized gc tick, constructing/new.target
+    /// save-clear-restore, defensive tail drain). Ownership matches
+    /// [`Interp::call_jit_committed`]: the arguments and `*this_slot` are consumed
+    /// unconditionally (the native borrows them during the call; they drop after it).
+    ///
+    /// # Safety
+    /// Same contract as `call_jit_committed`.
+    pub(crate) unsafe fn call_native_committed(
+        &mut self,
+        nf: crate::value::NativeFn,
+        this_slot: *const Value,
+        args: *mut Value,
+        argc: usize,
+    ) -> Result<Value, Abrupt> {
+        let drop_operands = || unsafe {
+            for k in 0..argc {
+                std::ptr::drop_in_place(args.add(k));
+            }
+            std::ptr::drop_in_place(this_slot as *mut Value);
+        };
+        self.depth += 1;
+        if self.depth > MAX_EVAL_DEPTH {
+            self.depth -= 1;
+            drop_operands();
+            return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
+        }
+        if let Err(e) = self.gc_check_amortized() {
+            self.depth -= 1;
+            drop_operands();
+            return Err(e);
+        }
+        let saved_ctor = std::mem::replace(&mut self.constructing, false);
+        let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
+        let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
+        let mut r = nf(self, unsafe { &*this_slot }.clone(), args_ref).map_err(Abrupt::Throw);
+        self.constructing = saved_ctor;
+        self.new_target = saved_nt;
+        while r.is_ok() {
+            match self.pending_tail.take() {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
+                    if let Err(e) = self.gc_check_amortized() {
+                        r = Err(e);
+                        break;
+                    }
+                    r = self.call_inner(f, t, &a);
+                }
+                None => break,
+            }
+        }
+        self.depth -= 1;
+        drop_operands();
+        r
     }
 
     /// [`Interp::call_jit_cached`]'s committed tail, split out so the asm call thunk can enter
@@ -5397,7 +5478,7 @@ impl Interp {
         if func.is_arrow || func.is_method || func.is_generator || func.is_async {
             return None;
         }
-        if !self.realms.is_empty() {
+        if self.multi_realm() {
             type ScopeCell = RefCell<Scope>;
             let mut cur: *const ScopeCell = Rc::as_ptr(&env);
             let root_is_active = 'walk: {
@@ -5462,6 +5543,8 @@ impl Interp {
             chunk_raw: Rc::as_ptr(chunk),
             code_mem: code.mem_ptr(),
             pc_offs_ptr: code.pc_offsets_ptr(),
+            native: 0,
+            intrinsic: 0,
         };
         self.construct_ics.insert(key, (ic, Rc::downgrade(o)));
         Some(ic)
@@ -5496,7 +5579,7 @@ impl Interp {
         if func.is_arrow {
             return None;
         }
-        if !self.realms.is_empty() {
+        if self.multi_realm() {
             type ScopeCell = RefCell<Scope>;
             let mut cur: *const ScopeCell = Rc::as_ptr(&env);
             let root_is_active = 'walk: {
@@ -5576,6 +5659,8 @@ impl Interp {
                         chunk_raw: Rc::as_ptr(chunk),
                         code_mem: code.mem_ptr(),
                         pc_offs_ptr: code.pc_offsets_ptr(),
+                        native: 0,
+                        intrinsic: 0,
                     });
                 }
             }
@@ -6615,7 +6700,7 @@ impl Interp {
         }
         // A cross-realm constructor runs with its own realm's intrinsics active. The caller's
         // realm is remembered for the [[Construct]] errors thrown after the callee context pops.
-        if !self.realms.is_empty() {
+        if self.multi_realm() {
             if let Value::Obj(o) = &callee {
                 if !self.proxies.contains_key(&(Rc::as_ptr(o) as usize)) {
                     if let Some(gptr) = self.callee_realm_global(o) {

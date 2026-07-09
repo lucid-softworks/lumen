@@ -7941,6 +7941,25 @@ fn locale_upper(s: &str, lang: Option<&str>) -> String {
     }
 }
 
+/// `String.prototype.charCodeAt` (named: the JIT's call-IC fill compares the fn pointer to
+/// tag intrinsic entries — see `bytecode::INTRINSIC_CHAR_CODE_AT`).
+pub(crate) fn nf_char_code_at(
+    i: &mut crate::interpreter::Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let s = this_string(i, &this)?;
+    let n = ab(i.to_number(&arg(args, 0)))?;
+    let idx = if n.is_nan() { 0.0 } else { n.trunc() };
+    if idx < 0.0 || !idx.is_finite() {
+        return Ok(Value::Num(f64::NAN));
+    }
+    Ok(match i.unit_at(&s, idx as usize) {
+        Some(u) => Value::Num(u as f64),
+        None => Value::Num(f64::NAN),
+    })
+}
+
 fn this_string(i: &mut Interp, this: &Value) -> Result<crate::lstr::LStr, Value> {
     match this {
         Value::Str(s) => Ok(s.clone()),
@@ -8032,18 +8051,7 @@ fn install_string(it: &mut Interp) {
             None => Value::str(""),
         })
     });
-    it.def_method(&sp, "charCodeAt", 1, |i, this, args| {
-        let s = this_string(i, &this)?;
-        let n = ab(i.to_number(&arg(args, 0)))?;
-        let idx = if n.is_nan() { 0.0 } else { n.trunc() };
-        if idx < 0.0 || !idx.is_finite() {
-            return Ok(Value::Num(f64::NAN));
-        }
-        Ok(match i.unit_at(&s, idx as usize) {
-            Some(u) => Value::Num(u as f64),
-            None => Value::Num(f64::NAN),
-        })
-    });
+    it.def_method(&sp, "charCodeAt", 1, nf_char_code_at);
     it.def_method(&sp, "indexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let needle = ab(i.to_string(&arg(args, 0)))?;

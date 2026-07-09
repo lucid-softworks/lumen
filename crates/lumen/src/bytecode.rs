@@ -223,12 +223,27 @@ pub struct CallIc {
     pub epoch: u32,
     /// `Rc::as_ptr` of the callee's chunk — what `ctx.chunk` holds (the direct-call sequence
     /// swaps it in without the RcBox-offset arithmetic a `*const Rc<Chunk>` deref would need).
+    /// NULL for a NATIVE entry (see `native`) — every machine-code consumer that dereferences
+    /// chunk state must route null to the helper first.
     pub chunk_raw: *const Chunk,
     /// The callee machine code's entry address (`JitCode::mem`).
     pub code_mem: *const u8,
     /// The callee's pc→code-offset table data pointer (`JitCode::pc_offsets.as_ptr()`).
     pub pc_offs_ptr: *const u32,
+    /// Native-callee entry: the builtin's fn pointer (0 = a user-function entry). A hit
+    /// invokes it straight from the IC — no receiver borrow, no `Callable` dispatch, no
+    /// re-probe. Identity/epoch/realm guards are exactly the user-entry ones; the callee
+    /// object is pinned in `call_pins` like any cached callee, and a builtin's `call` field
+    /// is never reassigned while the object lives.
+    pub native: usize,
+    /// Intrinsic id for a native entry the call template can inline entirely (0 = none;
+    /// see `INTRINSIC_CHAR_CODE_AT`). Filled from the fn pointer at record time.
+    pub intrinsic: u8,
 }
+
+/// `String.prototype.charCodeAt`: the call template inlines the all-ASCII receiver + exact-u32
+/// in-bounds index case to a byte load (see `crate::lstr::ASCII_HINT`).
+pub const INTRINSIC_CHAR_CODE_AT: u8 = 1;
 
 impl CallIc {
     pub const EMPTY: CallIc = CallIc {
@@ -247,6 +262,8 @@ impl CallIc {
         chunk_raw: std::ptr::null(),
         code_mem: std::ptr::null(),
         pc_offs_ptr: std::ptr::null(),
+        native: 0,
+        intrinsic: 0,
     };
 }
 
@@ -5521,7 +5538,7 @@ pub(crate) unsafe extern "C" fn jit_call_hit(
     };
     let ic = chunk.call_caches[c as usize].entries[way].get();
     jit_callstat(i, ctx, &ic, argc, with_this, sp);
-    {
+    if ic.native == 0 {
         let chunk_ref = &*ic.chunk;
         let runs = chunk_ref.jit_runs.get().wrapping_add(1);
         chunk_ref.jit_runs.set(runs);
@@ -5536,7 +5553,12 @@ pub(crate) unsafe extern "C" fn jit_call_hit(
     } else {
         &raw mut *undef as *const Value
     };
-    let r = i.call_jit_committed(ic, this_slot, args_ptr, argc);
+    let r = if ic.native != 0 {
+        let nf: crate::value::NativeFn = std::mem::transmute(ic.native);
+        i.call_native_committed(nf, this_slot, args_ptr, argc)
+    } else {
+        i.call_jit_committed(ic, this_slot, args_ptr, argc)
+    };
     // Arguments and `this` were moved; pop them virtually and drop only the callee slot
     // (same ownership story as jit_call_inner's Some arm).
     sp = args_ptr.sub(1);
@@ -5623,10 +5645,10 @@ unsafe fn jit_call_inner(
     );
     if r.is_none() {
         // Plain-native fast call: a bare `fn` callee in a proxy-free single-realm engine skips the
-        // call/call_inner/call_dispatch layering. Replicates the observable effects exactly: depth
-        // guard, amortized gc tick, constructing/new.target save-clear-restore, and the tail-call
-        // drain (a native can't set pending_tail itself, but a defensive drain is nearly free).
-        if i.proxies.is_empty() && i.realms.is_empty() {
+        // call/call_inner/call_dispatch layering. The callee is ALSO recorded as a native IC
+        // entry (identity-pinned like a user callee), so subsequent calls take the machine-code
+        // probe + `call_native_committed` — no receiver borrow, no `Callable` dispatch.
+        if i.proxies.is_empty() && !i.multi_realm() {
             let callee = &*sp.sub(argc + 1);
             if let Value::Obj(o) = callee {
                 let nf = match &o.borrow().call {
@@ -5634,42 +5656,70 @@ unsafe fn jit_call_inner(
                     _ => None,
                 };
                 if let Some(nf) = nf {
-                    i.depth += 1;
-                    if i.depth > crate::interpreter::MAX_EVAL_DEPTH {
-                        i.depth -= 1;
-                        return Err(i.throw("RangeError", "Maximum call stack size exceeded"));
-                    }
-                    if let Err(e) = i.gc_check_amortized() {
-                        i.depth -= 1;
-                        return Err(e);
-                    }
-                    let saved_ctor = std::mem::replace(&mut i.constructing, false);
-                    let saved_nt = std::mem::replace(&mut i.new_target, Value::Undefined);
-                    let this = if with_this {
-                        (*sp.sub(argc + 2)).clone()
-                    } else {
-                        Value::Undefined
-                    };
-                    let args = std::slice::from_raw_parts(args_ptr, argc);
-                    let mut r = nf(i, this, args).map_err(Abrupt::Throw);
-                    i.constructing = saved_ctor;
-                    i.new_target = saved_nt;
-                    while r.is_ok() {
-                        match i.pending_tail.take() {
-                            Some(bx) => {
-                                let (f, t, a) = *bx;
-                                if let Err(e) = i.gc_check_amortized() {
-                                    r = Err(e);
-                                    break;
-                                }
-                                r = i.call_inner(f, t, &a);
+                    {
+                        let key = Rc::as_ptr(o) as usize;
+                        let mut p = chunk.call_pins.borrow_mut();
+                        if p.len() < 4096 || p.contains_key(&key) {
+                            p.entry(key).or_insert_with(|| Rc::downgrade(o));
+                            drop(p);
+                            if !i
+                                .global_env_pins
+                                .iter()
+                                .any(|g| Rc::ptr_eq(g, &i.global_env))
+                            {
+                                let g = i.global_env.clone();
+                                i.global_env_pins.push(g);
                             }
-                            None => break,
+                            chunk.call_caches[c as usize].fill(CallIc {
+                                callee: key,
+                                env: std::ptr::null(),
+                                chunk: std::ptr::null(),
+                                code: std::ptr::null(),
+                                global_env: Rc::as_ptr(&i.global_env) as usize,
+                                strict: true,
+                                uses_this: true,
+                                n_params: 0,
+                                n_slots: 0,
+                                direct: 0, // bit 0 clear: the direct sequence's first gate bails
+                                func: std::ptr::null(),
+                                epoch: CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed),
+                                chunk_raw: std::ptr::null(),
+                                code_mem: std::ptr::null(),
+                                pc_offs_ptr: std::ptr::null(),
+                                native: nf as usize,
+                                intrinsic: if nf as usize
+                                    == crate::builtins::nf_char_code_at as usize
+                                {
+                                    INTRINSIC_CHAR_CODE_AT
+                                } else {
+                                    0
+                                },
+                            });
                         }
                     }
-                    i.depth -= 1;
+                    let mut undef2 = std::mem::ManuallyDrop::new(Value::Undefined);
+                    let this_slot2: *const Value = if with_this {
+                        sp.sub(argc + 2)
+                    } else {
+                        &raw mut *undef2 as *const Value
+                    };
+                    let r = i.call_native_committed(nf, this_slot2, args_ptr, argc);
+                    // Arguments and `this` were consumed; drop only the callee slot.
+                    *sp = args_ptr.sub(1);
+                    match sp.read() {
+                        Value::Obj(o) => {
+                            if Rc::strong_count(&o) > 1 {
+                                unsafe { Rc::decrement_strong_count(Rc::into_raw(o)) };
+                            } else {
+                                drop(o);
+                            }
+                        }
+                        other => drop(other),
+                    }
+                    if with_this {
+                        *sp = sp.sub(1);
+                    }
                     let v = r?;
-                    *sp = jit_consume(*sp, argc + 1 + with_this as usize);
                     push!(v);
                     return Ok(());
                 }
@@ -5750,6 +5800,9 @@ unsafe fn jit_callstat(
         static COUNTS: std::cell::RefCell<Dump> = std::cell::RefCell::new(Dump(Default::default()));
     }
     let reason: &'static str = 'r: {
+        if ic.native != 0 {
+            break 'r "native entry";
+        }
         if argc > 8 {
             break 'r "emit: argc > 8";
         }
