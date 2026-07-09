@@ -235,6 +235,11 @@ mod asm {
         }
 
         /// movz xd, #imm16, lsl #(shift*16)
+        /// ldrh wt, [xn, #imm] (scaled, imm/2)
+        pub fn ldrh_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
+            debug_assert!(imm_bytes.is_multiple_of(2) && imm_bytes / 2 < 4096);
+            self.emit(0x7940_0000 | ((imm_bytes / 2) << 10) | (rn << 5) | rt);
+        }
         pub fn movz(&mut self, rd: u32, imm16: u32, shift: u32) {
             self.emit(0xD280_0000 | (shift << 21) | (imm16 << 5) | rd);
         }
@@ -1013,6 +1018,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     false,
@@ -1032,6 +1038,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     false,
@@ -1053,6 +1060,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     false,
@@ -1214,6 +1222,7 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
                     true,
@@ -1765,6 +1774,10 @@ fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
     cache_ptr: usize,
+    // The site's interned name (`chunk.jit_name(n)`): its data pointer keys the stub-cache
+    // arm, and its bytes are the key-checked arm's compare immediates. Pinned by the chunk
+    // the emitted code belongs to.
+    name: &str,
     pc: u32,
     l_unwind: usize,
     method: bool,
@@ -1792,9 +1805,15 @@ fn emit_prop_load_inline(
     let none_tag = layout.exotic_none_tag as u32;
 
     let plain = layout.obj_ic_plain as u32;
+    // Key-checked entries (`IC_ARR_KEYCHK`: the holder is an Array — `arr.length`, or a method
+    // on the Array-exotic `Array.prototype`): validated by an inline byte-compare of the entry's
+    // key against the site's compile-time name. Only for short names with a good fat-pointer
+    // probe; otherwise those states keep falling to the helper.
+    let kc = layout.key_probe_ok && !name.is_empty() && name.len() <= 8;
     let slow = a.new_label();
     let done = a.new_label();
     let load = a.new_label();
+    let load_kc = a.new_label();
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
     //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
     //    the frame owns: no refcount management at all.
@@ -1830,9 +1849,13 @@ fn emit_prop_load_inline(
     // stabilizes with one shape per way). Each probe is self-contained: it recomputes the
     // receiver base from x10 and jumps to `load` with x11 = holder base, x13 = slot.
     let way2 = a.new_label();
+    // `cache_ptr` = the IcState cell address, or 0 for "x12 already holds it" (the stub-cache
+    // arm computes the entry address at run time).
     let probe = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
         let d1 = a.new_label();
-        a.mov_imm64(12, cache_ptr as u64);
+        if cache_ptr != 0 {
+            a.mov_imm64(12, cache_ptr as u64);
+        }
         a.ldrb_imm(9, 12, IC_OFF_DEPTH);
         a.ldr_w_imm(13, 12, IC_OFF_SLOT);
         // receiver hop: exotic None (or Array when `arr_ok` — but only as a NON-holder, so an
@@ -1859,12 +1882,15 @@ fn emit_prop_load_inline(
         a.ldr_w_imm(16, 12, IC_OFF_RECV_SHAPE);
         a.cmp_reg_w(14, 16);
         a.b_cond(C_NE, miss);
-        // depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall to d1.
+        // depth routing: 0 → holder is the receiver; 1 → one hop; 2 → mid hop then fall
+        // to d1. Non-plain depths divert to the key-checked decoder (`kc_route`) so the
+        // common depths pay nothing for its existence.
         a.cbz(9, false, load);
         a.cmp_imm_w(9, 1);
         a.b_cond(C_EQ, d1);
+        let kc_route = if kc { a.new_label() } else { miss };
         a.cmp_imm_w(9, 2);
-        a.b_cond(C_NE, miss);
+        a.b_cond(C_NE, kc_route);
         a.ldrb_imm(14, 12, IC_OFF_MID_OK);
         a.cbz(14, false, miss);
         // depth-2 mid hop: follow the live proto, validate against mid_shape
@@ -1895,6 +1921,36 @@ fn emit_prop_load_inline(
         a.cmp_reg_w(14, 16);
         a.b_cond(C_NE, miss);
         a.b(load);
+        // key-checked states (`IC_ARR_KEYCHK`): 0x40 = the array receiver IS the holder
+        // (`arr.length`); 0x41 = one hop to an array holder (Array.prototype methods — itself
+        // an Array exotic). The receiver-side Array gate above already passed 0x40 (nonzero
+        // depth). Deeper key-checked states → helper.
+        if kc {
+            a.bind(kc_route);
+            a.cmp_imm_w(9, 0x40);
+            a.b_cond(C_EQ, load_kc);
+            a.cmp_imm_w(9, 0x41);
+            a.b_cond(C_NE, miss);
+            // one proto hop; the holder may be Exotic::None or an Array (its entry key gets
+            // re-checked, which is what makes an array holder's slot trustworthy at all)
+            a.ldr_imm(17, 11, pr);
+            a.cbz(17, true, miss);
+            a.add_imm(11, 17, rcv);
+            a.ldrb_imm(14, 11, ex);
+            let ex_ok = a.new_label();
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_EQ, ex_ok);
+            a.cmp_imm_w(14, layout.exotic_array_tag as u32);
+            a.b_cond(C_NE, miss);
+            a.bind(ex_ok);
+            a.ldrb_imm(14, 11, plain);
+            a.cbz(14, false, miss);
+            a.ldr_w_imm(14, 11, sh);
+            a.ldr_w_imm(16, 12, IC_OFF_HOLDER_SHAPE);
+            a.cmp_reg_w(14, 16);
+            a.b_cond(C_NE, miss);
+            a.b(load_kc);
+        }
     };
     probe(a, cache_ptr, way2);
     a.bind(way2);
@@ -1907,6 +1963,7 @@ fn emit_prop_load_inline(
     //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
     //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;
     //    data property; non-BigInt
+    let val = a.new_label();
     a.bind(load);
     a.ldr_imm(16, 11, en_len);
     a.cmp_reg_x(13, 16);
@@ -1914,6 +1971,7 @@ fn emit_prop_load_inline(
     a.ldr_imm(15, 11, en);
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
+    a.bind(val);
     a.ldrb_imm(9, 15, ea);
     a.cbnz(9, false, slow);
     a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
@@ -1955,6 +2013,57 @@ fn emit_prop_load_inline(
         a.stur(14, 20, -8);
     }
     a.b(done);
+    // 6kc. Key-checked landing (out of the hit path's fall-through line): same bounds + entry
+    // compute as `load`, then verify the entry's key IS the site's name (length, then content
+    // against immediates) — an array's slots aren't pinned by its shape, so the key is the
+    // authority. Mismatch (slot shifted since fill) → helper re-derives. Ends by jumping back
+    // into the shared value path.
+    a.bind(load_kc);
+    if kc {
+        a.ldr_imm(16, 11, en_len);
+        a.cmp_reg_x(13, 16);
+        a.b_cond(C_HS, slow);
+        a.ldr_imm(15, 11, en);
+        a.mov_imm64(16, es);
+        a.madd(15, 13, 16, 15);
+        let klen = (layout.entry_key + layout.str_len_word) as i32;
+        let kptr = (layout.entry_key + layout.str_ptr_word) as i32;
+        a.ldur(16, 15, klen);
+        a.cmp_imm_x(16, name.len() as u32);
+        a.b_cond(C_NE, slow);
+        a.ldur(16, 15, kptr); // stored Rc<str> word (RcBox base)
+        let d = layout.str_data_off as u32;
+        let bytes = name.as_bytes();
+        let mut off = 0usize;
+        while bytes.len() - off >= 4 {
+            let imm = u32::from_le_bytes([
+                bytes[off],
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+            ]);
+            a.ldr_w_imm(17, 16, d + off as u32);
+            a.movz(9, imm & 0xFFFF, 0);
+            a.movk(9, imm >> 16, 1);
+            a.cmp_reg_w(17, 9);
+            a.b_cond(C_NE, slow);
+            off += 4;
+        }
+        if bytes.len() - off >= 2 {
+            let imm = u16::from_le_bytes([bytes[off], bytes[off + 1]]) as u32;
+            a.ldrh_imm(17, 16, d + off as u32);
+            a.movz(9, imm, 0);
+            a.cmp_reg_w(17, 9);
+            a.b_cond(C_NE, slow);
+            off += 2;
+        }
+        if bytes.len() - off == 1 {
+            a.ldrb_imm(17, 16, d + off as u32);
+            a.cmp_imm_w(17, bytes[off] as u32);
+            a.b_cond(C_NE, slow);
+        }
+        a.b(val);
+    }
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
     a.bind(done);
@@ -2153,58 +2262,72 @@ fn emit_set_prop_inline(
             a.ldr_imm(10, 22, off + 8);
         }
     }
-    // 3. cache: depth must be 0 (own writable data property wins OrdinarySet regardless of the
-    //    prototype chain); load slot + cached receiver shape
-    a.mov_imm64(12, cache_ptr as u64);
-    a.ldrb_imm(9, 12, IC_OFF_DEPTH);
-    a.cbnz(9, false, slow);
-    a.ldr_w_imm(13, 12, IC_OFF_SLOT);
-    a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
-    // 4. object base; exotic None, and not a side-table exotic (proxy/typed-array/namespace)
+    // 2. object base; exotic None, and not a side-table exotic (proxy/typed-array/namespace).
+    //    Receiver-wide facts — validated once, shared by both ways.
     a.add_imm(11, 10, rcv);
     a.ldrb_imm(9, 11, ex);
     a.cmp_imm_w(9, none_tag);
     a.b_cond(C_NE, slow);
     a.ldrb_imm(9, 11, plain);
     a.cbz(9, false, slow);
-    // 5. shape id matches
-    a.ldr_w_imm(9, 11, sh);
-    a.cmp_reg_w(9, 14);
-    a.b_cond(C_NE, slow);
-    // 6. bounds-check the cached slot, then entry base = entries data ptr + slot*entry_size
-    a.ldr_imm(
-        16,
-        11,
-        (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+    // 3-8 per way (sites allocate two consecutive cells; the Rust fast path probes both, so
+    // the template must too or a 2-shape store site helper-calls forever): depth 0, shape
+    // match, slot bounds, data+writable, old-value droppability. Way-1 guards jump to way 2,
+    // way-2 guards to the helper. Register results consumed by the commit below: x13 slot,
+    // x15 entry, w9 old tag, x12 old payload, x14 old strong.
+    let way2 = a.new_label();
+    let commit = a.new_label();
+    let way = |a: &mut asm::Asm, cache_ptr: usize, miss: usize| {
+        a.mov_imm64(12, cache_ptr as u64);
+        a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+        a.cbnz(9, false, miss);
+        a.ldr_w_imm(13, 12, IC_OFF_SLOT);
+        a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
+        a.ldr_w_imm(9, 11, sh);
+        a.cmp_reg_w(9, 14);
+        a.b_cond(C_NE, miss);
+        a.ldr_imm(
+            16,
+            11,
+            (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+        );
+        a.cmp_reg_x(13, 16);
+        a.b_cond(C_HS, miss);
+        a.ldr_imm(15, 11, en);
+        a.mov_imm64(16, es);
+        a.madd(15, 13, 16, 15);
+        a.ldrb_imm(9, 15, ea);
+        a.cbnz(9, false, miss);
+        a.ldrb_imm(9, 15, ew);
+        a.cbz(9, false, miss);
+        // old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline
+        // dec); BigInt or a last reference → helper. An old value that IS the receiver
+        // (`o.x === o`) also bails: its dec and the receiver dec below hit the same counter,
+        // and the two independent strong > 1 guards would let the pair scribble it to 0
+        // without running the destructor.
+        a.ldurb(9, 15, ev);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, miss);
+        let old_plain = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, old_plain);
+        a.ldur(12, 15, ev + 8);
+        a.cmp_reg_x(12, 10);
+        a.b_cond(C_EQ, miss);
+        a.ldur(14, 12, strong);
+        a.cmp_imm_x(14, 1);
+        a.b_cond(C_LS, miss);
+        a.bind(old_plain);
+    };
+    way(a, cache_ptr, way2);
+    a.b(commit);
+    a.bind(way2);
+    way(
+        a,
+        cache_ptr + std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>(),
+        slow,
     );
-    a.cmp_reg_x(13, 16);
-    a.b_cond(C_HS, slow);
-    a.ldr_imm(15, 11, en);
-    a.mov_imm64(16, es);
-    a.madd(15, 13, 16, 15);
-    // 7. data property, writable
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
-    a.ldrb_imm(9, 15, ew);
-    a.cbz(9, false, slow);
-    // 8. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
-    //    BigInt or a last reference → helper. An old value that IS the receiver (`o.x === o`)
-    //    also bails: its dec and the receiver dec below hit the same counter, and the two
-    //    independent strong > 1 guards would let the pair scribble it to 0 without running the
-    //    destructor. w9 = old tag, x12 = old payload, x14 = old strong.
-    a.ldurb(9, 15, ev);
-    a.cmp_imm_w(9, 5);
-    a.b_cond(C_EQ, slow);
-    let old_plain = a.new_label();
-    a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, old_plain);
-    a.ldur(12, 15, ev + 8);
-    a.cmp_reg_x(12, 10);
-    a.b_cond(C_EQ, slow);
-    a.ldur(14, 12, strong);
-    a.cmp_imm_x(14, 1);
-    a.b_cond(C_LS, slow);
-    a.bind(old_plain);
+    a.bind(commit);
     // --- commit: everything validated; from here only writes ---
     // move v into the entry (24 bytes; a refcounted payload moves, not clones)
     a.ldur(13, 20, -24);

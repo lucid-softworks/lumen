@@ -102,12 +102,39 @@ pub struct JitLayout {
     pub binding_value: usize,
     /// `initialized` bool within a `Binding` (TDZ check).
     pub binding_init: usize,
+    /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
+    pub entry_key: usize,
+    /// The length word within an `Rc<str>` fat pointer (0 or 8 — layout is unstable).
+    pub str_len_word: usize,
+    /// The pointer word within an `Rc<str>` fat pointer (the other one).
+    pub str_ptr_word: usize,
+    /// Stored `Rc<str>` pointer word → the first byte of the string data (the RcBox header).
+    pub str_data_off: usize,
+    /// Whether the four fields above probed successfully (key-checked array-holder entries can
+    /// inline their key compare only when they did).
+    pub key_probe_ok: bool,
     pub valid: bool,
 }
 
 /// Measure [`JitLayout`] against the live types, probing the non-guaranteed std layouts.
 pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     use std::mem::offset_of;
+    // Rc<str> fat-pointer probe (word order and RcBox data offset are not std-guaranteed): a
+    // known 8-byte string tells us which word holds the length; the data pointer is the other,
+    // and `as_ptr` minus the stored word gives the RcBox header size. Fails closed.
+    let (str_len_word, str_ptr_word, str_data_off, key_probe_ok) = {
+        let probe: Rc<str> = "probe_8B".into();
+        let words: [usize; 2] =
+            unsafe { std::mem::transmute_copy::<Rc<str>, [usize; 2]>(&probe) };
+        let data = probe.as_ptr() as usize;
+        if words[0] == 8 && words[1] != 8 && data > words[1] && data - words[1] < 256 {
+            (0usize, 8usize, data - words[1], true)
+        } else if words[1] == 8 && words[0] != 8 && data > words[0] && data - words[0] < 256 {
+            (8usize, 0usize, data - words[0], true)
+        } else {
+            (0, 0, 0, false)
+        }
+    };
     let as_ptr = Rc::as_ptr(sample) as usize; // → the RefCell<Object> (RcBox value field)
     let obj_addr = &*sample.borrow() as *const Object as usize;
     let refcell_value = obj_addr - as_ptr;
@@ -190,6 +217,11 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         props_mirror: offset_of!(Props, mirror),
         props_mirror_flags: offset_of!(Props, mirror_flags),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
+        entry_key: offset_of!((Rc<str>, Property), 0),
+        str_len_word,
+        str_ptr_word,
+        str_data_off,
+        key_probe_ok,
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, accessor),
         entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, writable),
