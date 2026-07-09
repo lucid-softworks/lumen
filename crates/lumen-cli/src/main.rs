@@ -5,6 +5,7 @@
 //!   lumen-cli repl                     repl explicitly (even when piped — for scripting it)
 //!   lumen-cli <file.js> [args...]      run a script to loop quiescence
 //!   lumen-cli -e '<code>'              evaluate a string
+//!   lumen-cli -v | --version           print the version
 //!   --tier=interp|bytecode, --tier-threshold=N   select the engine execution tier
 
 use std::io::{IsTerminal, Read};
@@ -41,6 +42,9 @@ fn main() {
             println!(
                 "usage: lumen-cli [repl | file.js [args...] | -e code] [--tier=interp|bytecode]"
             );
+            return;
+        } else if a == "-v" || a == "--version" {
+            println!("lumen {}", env!("CARGO_PKG_VERSION"));
             return;
         } else {
             // First free arg is the script; the rest belong to it (visible via process.argv).

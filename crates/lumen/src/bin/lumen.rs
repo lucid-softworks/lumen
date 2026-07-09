@@ -1,5 +1,6 @@
 //! Minimal shell: evaluate JS files in one engine, printing console output as it appears.
 //! Usage: lumen [--module] [--tier=interp|bytecode|jit] [--tier-threshold=N] [file.js ...]
+//!        lumen -v | --version    print the version
 //!
 //! With no files, reads from stdin: an interactive REPL when stdin is a terminal (one realm
 //! for the whole session, incomplete input continues on the next line), otherwise the whole
@@ -21,6 +22,10 @@ fn main() {
     let args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|a| {
+            if a == "-v" || a == "--version" {
+                println!("lumen {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             if a == "--module" {
                 module = true;
                 false
