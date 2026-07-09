@@ -207,3 +207,19 @@ upstream CLI bundle does not support runtime benchmark selection; `--only <name>
 rebuilds `dist/cli.js` in that checkout with webpack's build-time selector
 (`npx webpack --env.only=<name>`) before running lumen. The full suite is a
 many-hours run on current lumen builds; prefer `--only <name>` while iterating.
+
+### ARES-6
+
+```sh
+# one-time: provide an ARES-6 checkout outside this repo
+# the default lookup is the sibling ../ARES-6; ARES6=... overrides it
+scripts/run-ares6.sh                    # full ARES-6 suite
+scripts/run-ares6.sh air basic          # selected workloads: air, basic, babylon, ml
+ARES6=/path/to/ARES-6 scripts/run-ares6.sh babylon ml
+```
+
+ARES-6 sources are not vendored here. The runner expects a checkout at `../ARES-6` by default; set `ARES6=/path/to/ARES-6` to point at another checkout.
+
+The reported `summary:` is the ARES-6 geomean in milliseconds, so lower is better. A selected run reports a partial geomean over only the selected workloads, which is useful for local iteration but is not the official full-suite ARES-6 score. If a workload fails, or if the expected metric and completion lines are missing, `scripts/run-ares6.sh` exits nonzero instead of hiding the failure.
+
+Expect the full suite to take a long time on the current tree-walking engine; use selected workloads for quicker local checks.
