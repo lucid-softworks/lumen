@@ -187,20 +187,26 @@ pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 const _: () = assert!(std::mem::size_of::<Value>() == 24);
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
-// The call template's inline way-1 probe reads these CallIc fields by fixed offset.
-const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, callee) == 0);
-const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, global_env) == 32);
-const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, epoch) == 56);
-const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 64);
-const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
-// 3b reads Interp state from machine code through ctx.interp.
-const _: () = assert!(std::mem::offset_of!(JitCtx, interp) == 72);
-// The asm frame push writes FnFrame fields by fixed offset.
-const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, fn_ptr) == 0);
-const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, coro) == 8);
-const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, strict) == 12);
-const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, extra) == 16);
-const _: () = assert!(std::mem::size_of::<crate::interpreter::FnFrame>() == 24);
+// The offsets below bake 8-byte pointers into the emitted templates: JIT-platform only (on
+// wasm32 pointers are 4 bytes and none of this code exists).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+mod layout_asserts {
+    use super::JitCtx;
+    // The call template's inline way-1 probe reads these CallIc fields by fixed offset.
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, callee) == 0);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, global_env) == 32);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, epoch) == 56);
+    const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 64);
+    const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
+    // 3b reads Interp state from machine code through ctx.interp.
+    const _: () = assert!(std::mem::offset_of!(JitCtx, interp) == 72);
+    // The asm frame push writes FnFrame fields by fixed offset.
+    const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, fn_ptr) == 0);
+    const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, coro) == 8);
+    const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, strict) == 12);
+    const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, extra) == 16);
+    const _: () = assert!(std::mem::size_of::<crate::interpreter::FnFrame>() == 24);
+}
 
 /// Two-register return for helpers that produce (new sp, flag) — x0/x1 under the C ABI.
 #[repr(C)]
