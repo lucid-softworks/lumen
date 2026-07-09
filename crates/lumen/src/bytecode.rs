@@ -5842,7 +5842,16 @@ unsafe fn jit_exec_inner(
 ) -> Result<(), Abrupt> {
     let i = &mut *ctx.interp;
     let chunk = &*ctx.chunk;
-    let env = unsafe { &*ctx.env_ref };
+    // The activation env, reconstructed from the swapped `env_raw` (NOT a dedicated handle
+    // pointer: the direct-call sequence swaps env_raw per activation, so this is the only
+    // field that's correct for a shared-ctx callee — a separate `env_ref` silently resolved
+    // free names in the CALLER's scope). The aliased handle outlives the run: `run` holds a
+    // local, `run_moved`'s caller keeps one alive, and a direct call pins the callee object
+    // (whose `Callable::User` owns the env) on the caller's operand stack until after finish.
+    let env_h = std::mem::ManuallyDrop::new(unsafe {
+        Rc::from_raw(ctx.env_raw as *const std::cell::RefCell<crate::interpreter::Scope>)
+    });
+    let env: &Env = &env_h;
     let slots = std::slice::from_raw_parts_mut(ctx.slots, ctx.n_slots);
     macro_rules! pop {
         () => {{

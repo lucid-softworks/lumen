@@ -123,11 +123,6 @@ pub struct JitCtx {
     // ---- Rust-only fields ----
     pub interp: *mut Interp,
     pub chunk: *const Chunk,
-    /// The activation env the chunk runs under. A raw pointer: the handle it aliases outlives
-    /// the run — `run` keeps its freshly-made env in a local across the call; `run_moved` points
-    /// at a handle the caller keeps alive (a local clone, or the env inside the callee's
-    /// `Callable::User`, pinned by the callee object on the caller's operand stack).
-    pub env_ref: *const Env,
     pub this_val: Value,
     pub n_slots: usize,
     /// Active `try` regions: (catch pc, operand-stack depth to unwind to).
@@ -7163,7 +7158,6 @@ pub fn run(
         genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
-        env_ref: &env as *const Env,
         this_val,
         slots: slots.as_mut_ptr(),
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
@@ -7279,7 +7273,6 @@ pub(crate) unsafe fn run_moved(
         genv: Rc::as_ptr(&i.global_env) as usize,
         interp: i as *mut Interp,
         chunk: Rc::as_ptr(chunk),
-        env_ref: env,
         this_val,
         slots: slots_ptr,
         inline_ic_safe: &i.inline_ic_safe as *const std::cell::Cell<bool> as *const u8,
