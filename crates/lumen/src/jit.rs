@@ -837,12 +837,9 @@ pub fn compile(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
-    // Direct shared-ctx calls: explicit opt-in while the sequence stabilizes (flips to a fast
-    // bit once the full suite has it on by default).
-    let direct_on = {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var_os("LUMEN_JIT_DIRECT").is_some())
-    };
+    // Direct shared-ctx calls, on by default like every other emitter feature (mask bit 20
+    // off for debugging). Requires the inline call probe (bit 524288) to emit at all.
+    let direct_on = fast & (1 << 20) != 0;
     // Whether the probed layout supports inline refcount bumps/decs (clone/drop of Str/Sym/Obj
     // without a helper call). All strong-count templates gate on this.
     let rc_ok = layout.valid && layout.rc_strong_off < 256;
