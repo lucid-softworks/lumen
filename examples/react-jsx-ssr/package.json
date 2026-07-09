@@ -8,6 +8,6 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "esbuild": "^0.21.5"
+    "esbuild": "^0.25.0"
   }
 }
