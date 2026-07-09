@@ -4167,6 +4167,42 @@ impl Interp {
                 sstack.push(e.clone());
             }
         }
+        // Debug: `LUMEN_GC_DUMP=1` prints each external-rooted object's shape (its first prop
+        // names) with strong/internal counts — the fastest way to see WHAT pins a leaked graph.
+        if std::env::var_os("LUMEN_GC_DUMP").is_some() {
+            let mut shown = 0;
+            for o in &live {
+                let b = o.borrow();
+                if !b.gc_mark.get() {
+                    continue;
+                }
+                let internal = b.gc_internal.get() as usize;
+                let strong = Rc::strong_count(o);
+                let keys: Vec<&str> = b.props.iter().take(4).map(|(k, _)| &**k).collect();
+                eprintln!(
+                    "[gc-dump] root strong={strong} internal={internal} props={keys:?}"
+                );
+                shown += 1;
+                if shown >= 60 {
+                    break;
+                }
+            }
+            let mut sshown = 0;
+            for (k, e) in scopes.iter().enumerate() {
+                let internal = s_internal[k] as usize;
+                let strong = Rc::strong_count(e);
+                if strong <= internal + 1 {
+                    continue;
+                }
+                let b = e.borrow();
+                let vars: Vec<&str> = b.vars.keys().take(6).map(|k| &**k).collect();
+                eprintln!("[gc-dump] scope-root strong={strong} internal={internal} vars={vars:?}");
+                sshown += 1;
+                if sshown >= 40 {
+                    break;
+                }
+            }
+        }
         // Mark everything reachable from the roots, across both node types.
         loop {
             if let Some(o) = stack.pop() {
