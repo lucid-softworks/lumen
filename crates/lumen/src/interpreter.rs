@@ -700,6 +700,100 @@ fn stub_slot(shape: u32, name: &str) -> usize {
     (shape as usize ^ n ^ (n >> 7)) & (STUB_CACHE_SIZE - 1)
 }
 
+/// Runtime-probed byte offsets from an `Interp`'s base address to the fields the asm call
+/// thunk touches (see the asm-call-frames arc). `Interp` is not `repr(C)`, so nothing here is
+/// compile-time stable — every offset is measured against a live instance, and `valid` fails
+/// closed. Vec word offsets (`ptr`/`len`/`cap` order) are probed per instantiation, same as
+/// [`crate::value::JitLayout`]'s.
+#[derive(Clone, Copy, Default)]
+#[allow(dead_code)] // consumed incrementally as the asm thunk lands
+pub(crate) struct InterpLayout {
+    pub depth: usize,
+    pub gc_tick: usize,
+    pub cur_coro: usize,
+    pub constructing: usize,
+    pub new_target: usize,
+    pub pending_tail: usize,
+    /// `fn_frames` Vec base, plus its ptr/len/cap word offsets within the Vec header.
+    pub fn_frames: usize,
+    pub fnf_ptr_word: usize,
+    pub fnf_len_word: usize,
+    pub fnf_cap_word: usize,
+    /// `frame_pool` (Vec<NonNull<Value>>) base + its word offsets.
+    pub frame_pool: usize,
+    pub fp_ptr_word: usize,
+    pub fp_len_word: usize,
+    pub fp_cap_word: usize,
+    pub valid: bool,
+}
+
+/// Probe the ptr/len/cap word order of a `Vec<T>` header holding at least one element whose
+/// data pointer and length are known. Returns (ptr_word, len_word, cap_word) or None.
+fn probe_vec_words<T>(v: &Vec<T>, len: usize, cap: usize) -> Option<(usize, usize, usize)> {
+    let data = v.as_ptr() as usize;
+    let words: [usize; 3] = unsafe { std::mem::transmute_copy::<Vec<T>, [usize; 3]>(v) };
+    let mut ptr_w = None;
+    let mut len_w = None;
+    let mut cap_w = None;
+    for (k, w) in words.iter().enumerate() {
+        if *w == data && ptr_w.is_none() {
+            ptr_w = Some(k * 8);
+        } else if *w == len && len_w.is_none() {
+            len_w = Some(k * 8);
+        } else if *w == cap && cap_w.is_none() {
+            cap_w = Some(k * 8);
+        }
+    }
+    Some((ptr_w?, len_w?, cap_w?))
+}
+
+pub(crate) fn interp_layout(i: &mut Interp) -> InterpLayout {
+    let base = i as *mut Interp as usize;
+    let off = |p: usize| p - base;
+    // Distinguishable len/cap for the Vec probes: len 3, cap ≥ 4 and != 3.
+    let saved_frames = std::mem::take(&mut i.fn_frames);
+    i.fn_frames = Vec::with_capacity(7);
+    for k in 0..3 {
+        i.fn_frames.push(FnFrame {
+            fn_ptr: 0x1000 + k,
+            coro: 0,
+            strict: false,
+            extra: None,
+        });
+    }
+    let fnf = probe_vec_words(&i.fn_frames, 3, i.fn_frames.capacity());
+    i.fn_frames = saved_frames;
+    let saved_pool = std::mem::replace(&mut i.frame_pool.0, Vec::with_capacity(7));
+    for _ in 0..3 {
+        i.frame_pool
+            .0
+            .push(std::ptr::NonNull::new(0x2000 as *mut Value).unwrap());
+    }
+    let fp = probe_vec_words(&i.frame_pool.0, 3, i.frame_pool.0.capacity());
+    i.frame_pool.0.clear();
+    i.frame_pool.0 = saved_pool;
+    let (Some(fnf), Some(fp)) = (fnf, fp) else {
+        return InterpLayout::default(); // valid: false
+    };
+    InterpLayout {
+        depth: off(&i.depth as *const _ as usize),
+        gc_tick: off(&i.gc_tick as *const _ as usize),
+        cur_coro: off(&i.cur_coro as *const _ as usize),
+        constructing: off(&i.constructing as *const _ as usize),
+        new_target: off(&i.new_target as *const _ as usize),
+        pending_tail: off(&i.pending_tail as *const _ as usize),
+        fn_frames: off(&i.fn_frames as *const _ as usize),
+        fnf_ptr_word: fnf.0,
+        fnf_len_word: fnf.1,
+        fnf_cap_word: fnf.2,
+        frame_pool: off(&i.frame_pool as *const _ as usize),
+        fp_ptr_word: fp.0,
+        fp_len_word: fp.1,
+        fp_cap_word: fp.2,
+        valid: true,
+    }
+}
+
 pub struct Interp {
     pub(crate) global: Gc,
     pub(crate) global_env: Env,
@@ -759,6 +853,9 @@ pub struct Interp {
     /// Object-graph byte offsets the JIT's inline property-cache templates bake in (measured once;
     /// see [`crate::value::jit_layout`]). Lazily computed on first JIT compile.
     pub(crate) jit_layout: std::cell::OnceCell<crate::value::JitLayout>,
+    /// Runtime-probed `Interp` field offsets for the asm call thunk (see [`InterpLayout`]).
+    /// Filled by [`Interp::interp_layout_init`] on first JIT compile, like `jit_layout`.
+    pub(crate) interp_layout: std::cell::Cell<InterpLayout>,
     /// Whether the JIT's inline property caches are safe to run: they can't cheaply check the
     /// exotic side tables (proxy / typed-array / module namespace / deferred namespace) from
     /// machine code, so this flag latches *false* the first time any object is registered in one,
@@ -1346,6 +1443,7 @@ impl Interp {
             cur_coro: 0,
             jit_helpers: crate::jit::helper_table(),
             jit_layout: std::cell::OnceCell::new(),
+            interp_layout: std::cell::Cell::new(InterpLayout::default()),
             inline_ic_safe: std::cell::Cell::new(true),
             str_units: Vec::new(),
             re_texts: Vec::new(),
@@ -4855,6 +4953,10 @@ impl Interp {
                 let layout = *self
                     .jit_layout
                     .get_or_init(|| crate::value::jit_layout(&self.object_proto));
+                if !self.interp_layout.get().valid {
+                    let l = interp_layout(self);
+                    self.interp_layout.set(l);
+                }
                 let _ = chunk
                     .jit
                     .set(crate::jit::compile(chunk, &layout).map(std::rc::Rc::new));

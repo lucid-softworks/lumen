@@ -9938,3 +9938,37 @@ fn inline_throw_from_spliced_body() {
         "450:true"
     );
 }
+
+#[test]
+fn interp_layout_probes() {
+    // The asm call thunk's foundation: every probed Interp offset must resolve, and the Vec
+    // header word probes must find three distinct words. Fails closed at runtime (valid=false
+    // simply disables the thunk), but a probe failure on the dev platform should be loud.
+    let mut e = crate::Engine::new();
+    e.set_tier(crate::bytecode::Tier::Jit);
+    // Force a JIT compile so the layout initializes through the production path.
+    let _ = e.eval("function f(a){ return a + 1; } for (var i = 0; i < 64; i++) f(i);", false);
+    let l = e.interp.interp_layout.get();
+    assert!(l.valid, "interp layout probe failed on this platform");
+    let mut offs = [
+        l.depth,
+        l.gc_tick,
+        l.cur_coro,
+        l.constructing,
+        l.new_target,
+        l.pending_tail,
+        l.fn_frames,
+        l.frame_pool,
+    ];
+    offs.sort_unstable();
+    for w in offs.windows(2) {
+        assert_ne!(w[0], w[1], "two probed fields share an offset");
+    }
+    let words = |a: usize, b: usize, c: usize| {
+        let mut v = [a, b, c];
+        v.sort_unstable();
+        v == [0, 8, 16]
+    };
+    assert!(words(l.fnf_ptr_word, l.fnf_len_word, l.fnf_cap_word));
+    assert!(words(l.fp_ptr_word, l.fp_len_word, l.fp_cap_word));
+}
