@@ -193,6 +193,8 @@ const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, global_env) 
 const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, epoch) == 56);
 const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 64);
 const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
+// 3b reads Interp state from machine code through ctx.interp.
+const _: () = assert!(std::mem::offset_of!(JitCtx, interp) == 72);
 
 /// Two-register return for helpers that produce (new sp, flag) — x0/x1 under the C ABI.
 #[repr(C)]
