@@ -56,12 +56,17 @@ pub struct IcState {
     pub holder_shape: u32,
     pub slot: u32,
     pub depth: u8,
-    /// Whether `mid_shape` was recorded (a `depth == 2` fill whose intermediate hop was a plain
-    /// ordinary object). Needed as a flag because shape id 0 is a real shape (the empty object).
+    /// Bit 0: `mid_shape` was recorded (a `depth ≥ 2` fill whose depth-1 hop was a plain
+    /// ordinary object); bit 1: `mid2_shape` too (depth 3). Flags are needed because shape id 0
+    /// is a real shape (the empty object).
     pub mid_ok: u8,
     /// The intermediate (depth-1) hop's shape for a `depth == 2` hit: a match proves that hop
     /// still lacks the name, making the two-hop shape fast path sound.
     pub mid_shape: u32,
+    /// The depth-2 hop's shape for a `depth == 3` hit (three-level class hierarchies put base
+    /// methods three hops from an instance; without this they'd re-walk every access). Recorded
+    /// iff `mid_ok & 2`. The JIT templates handle depth ≤ 2 and route deeper hits to the helper.
+    pub mid2_shape: u32,
 }
 
 /// Byte offsets into an [`IcState`] `Cell`, for the JIT inline templates.
@@ -73,6 +78,13 @@ pub const IC_OFF_MID_OK: u32 = 13;
 pub const IC_OFF_MID_SHAPE: u32 = 16;
 
 pub const IC_EMPTY: u8 = u8::MAX;
+/// Flag bit OR'd into `IcState::depth` when the HOLDER is an `Exotic::Array` (including a
+/// depth-0 array receiver — `arr.length`, and `Array.prototype`, itself an Array exotic, as a
+/// method holder): array shapes don't pin named slots (element entries occupy slots without
+/// transitioning the shape), so a hit must re-check the entry's key. The JIT templates compare
+/// `depth` exactly and so route these to the helper automatically. Only meaningful while
+/// `depth < 0x80` (`IC_CREATE`/`IC_EMPTY` have the bit set but are filtered by range first).
+pub const IC_ARR_KEYCHK: u8 = 0x40;
 /// Deepest prototype hop the IC will record; hotter sites deeper than this stay on the slow path.
 pub const IC_MAX_DEPTH: u8 = 4;
 /// `IcState::depth` marker for a property-*creation* cache (constructor `this.x = v` on a fresh
@@ -144,6 +156,7 @@ impl IcState {
         depth: IC_EMPTY,
         mid_ok: 0,
         mid_shape: 0,
+        mid2_shape: 0,
     };
 }
 

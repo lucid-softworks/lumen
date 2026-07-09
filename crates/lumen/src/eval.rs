@@ -4824,6 +4824,9 @@ impl Interp {
                         // subclass is itself an Array exotic).
                         let src_exotic = src.borrow().exotic.clone();
                         if !matches!(src_exotic, crate::value::Exotic::None) {
+                            if matches!(src_exotic, crate::value::Exotic::Array) {
+                                dst.borrow().props.mark_array();
+                            }
                             dst.borrow_mut().exotic = src_exotic;
                         }
                         // Move the native object's internal slots (Map/Set/TypedArray/buffer/etc.)

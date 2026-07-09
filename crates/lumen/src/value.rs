@@ -669,6 +669,28 @@ pub struct Props {
     /// Live hole count in `mirror` (descending array fills pad with holes and then fill them:
     /// `MIRROR_NO_HOLES` comes back when this returns to zero).
     mirror_holes: u32,
+    /// Some canonical-index key lives ONLY in the string-keyed map (inserted too far past the
+    /// dense frontier — see `note_inserted`): `elems` coverage is no longer proof of element
+    /// absence, so the dense append/pop fast paths stand down. One-way (sparse arrays are rare
+    /// and stay sparse).
+    has_far: std::cell::Cell<bool>,
+    /// This `Props` belongs to an `Exotic::Array` object: canonical-index key inserts skip the
+    /// shape transition. Array shapes encode the *named*-key sequence only (matching
+    /// `push_dense`, which never transitioned) — the get-IC only ever uses an array's shape to
+    /// prove a named key's ABSENCE or with a per-hit key re-check, never for bare slot trust,
+    /// so elements must not churn it: a stable shape is what lets `arr.push(..)`/`arr.length`
+    /// sites cache at all.
+    elem_mode: std::cell::Cell<bool>,
+    /// The `entries` slot of the `"prototype"` key, or `NO_SLOT` — same memo discipline as
+    /// `len_slot`. Every `new` reads the constructor's `.prototype`; function objects are
+    /// ordinary maps, so this skips the scan on the construct hot path.
+    proto_slot: std::cell::Cell<u32>,
+    /// The `entries` slot of the `"length"` key, or `NO_SLOT`. Array `length` can't live in the
+    /// inline caches (element entries occupy slots without transitioning the shape, so a shape
+    /// match doesn't pin the slot) — this memo makes the every-time re-derive a direct slot read
+    /// instead of a hashed key lookup. Maintained by `insert`; any slot-shifting removal resets
+    /// it (`remove` re-memoizes on the next lookup via `length_slot`).
+    len_slot: std::cell::Cell<u32>,
 }
 
 /// See [`Props::mirror`]. Bit values are chosen so the masks the JIT tests (`OK|NO_HOLES` and
@@ -836,7 +858,31 @@ impl Props {
             mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,
             mirror_holes: 0,
             proto_flag: std::cell::Cell::new(false),
+            has_far: std::cell::Cell::new(false),
+            elem_mode: std::cell::Cell::new(false),
+            proto_slot: std::cell::Cell::new(NO_SLOT),
+            len_slot: std::cell::Cell::new(NO_SLOT),
         }
+    }
+
+    /// Mark this map as an array's (see `elem_mode`). One-way, set when the owning object
+    /// becomes `Exotic::Array`.
+    #[inline]
+    pub(crate) fn mark_array(&self) {
+        self.elem_mode.set(true);
+    }
+
+    /// The `"length"` property, resolved through the `len_slot` memo (one compare, no hashing).
+    /// `None` when there is no own `length`.
+    pub(crate) fn length_property(&self) -> Option<&Property> {
+        let s = self.len_slot.get();
+        if s != NO_SLOT {
+            debug_assert!(matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "length"));
+            return self.entries.get(s as usize).map(|(_, p)| p);
+        }
+        let slot = self.find("length")?;
+        self.len_slot.set(slot as u32);
+        Some(&self.entries[slot].1)
     }
 
     /// Mark this object as a live prototype (see `proto_flag`).
@@ -1030,8 +1076,74 @@ impl Props {
                 }
                 self.elems.push(slot as u32);
                 self.mirror_grow(pads, slot);
+            } else {
+                self.has_far.set(true);
             }
         }
+    }
+
+    /// Dense tail append: insert element `n` when `n` is exactly the dense frontier and no
+    /// map-only ("far") canonical key exists — which together prove the key is absent, so the
+    /// whole existence scan and key-string hashing of [`Props::insert`] can be skipped. Array
+    /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
+    /// the gates don't hold; the caller runs the generic path.
+    pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
+        if self.has_far.get() || !self.elem_mode.get() || n as usize != self.elems.len() {
+            return false;
+        }
+        self.note_structural();
+        let slot = self.entries.len();
+        let key = index_key(n as usize);
+        if !self.index.is_empty() {
+            self.index.insert(key.clone(), slot);
+        } else if slot + 1 > INDEX_THRESHOLD {
+            self.build_index();
+            self.index.insert(key.clone(), slot);
+        }
+        self.entries.push((key, prop));
+        self.elems.push(slot as u32);
+        self.mirror_grow(0, slot);
+        true
+    }
+
+    /// Dense tail pop: remove element `n` (the array's last) when it is also the last *entry*
+    /// (the common stack discipline — elements are appended last) and the last dense slot, and
+    /// no "far" canonical key exists. Everything is O(1) pops: no entry shift, no re-index, no
+    /// shape change (`elem_mode` maps keep their shape — element keys aren't part of it).
+    /// `Some(value)` = removed; `None` = gates failed, nothing changed, caller goes generic.
+    pub(crate) fn pop_last_element(&mut self, n: u32) -> Option<Value> {
+        if self.has_far.get() || !self.elem_mode.get() {
+            return None;
+        }
+        if n as usize + 1 != self.elems.len() {
+            return None;
+        }
+        let slot = self.elems[n as usize];
+        if slot == NO_SLOT || slot as usize + 1 != self.entries.len() {
+            return None;
+        }
+        let p = &self.entries[slot as usize].1;
+        if p.accessor || !p.configurable {
+            return None;
+        }
+        self.note_structural();
+        let (_, p) = self.entries.pop().unwrap();
+        self.elems.pop();
+        if !self.index.is_empty() {
+            self.index.remove(&index_key(n as usize));
+        }
+        if self.mirror_flags & MIRROR_OK != 0 {
+            debug_assert_eq!(self.mirror.len(), self.elems.len() + 1);
+            let m = self.mirror.pop();
+            if m.map(f64::to_bits) == Some(MIRROR_HOLE) {
+                // (Unreachable while the slot was live, but keep the accounting exact.)
+                self.mirror_holes -= 1;
+                if self.mirror_holes == 0 {
+                    self.mirror_flags |= MIRROR_NO_HOLES;
+                }
+            }
+        }
+        Some(p.value)
     }
     /// The entry slot for `key`. Small maps (≤ [`INDEX_THRESHOLD`] entries — most objects) have
     /// no hash index at all: lookup is a short linear scan and inserts never hash or rehash.
@@ -1039,10 +1151,39 @@ impl Props {
     /// then on (an emptied-but-once-large map keeps using it).
     #[inline]
     fn find(&self, key: &str) -> Option<usize> {
-        if self.index.is_empty() {
-            return self.entries.iter().position(|(k, _)| &**k == key);
+        // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
+        // (every push/pop/length read; every `new`); their slots are memoized — answer without
+        // hashing or scanning.
+        if key == "length" {
+            let s = self.len_slot.get();
+            if s != NO_SLOT {
+                debug_assert!(
+                    matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "length")
+                );
+                return Some(s as usize);
+            }
+        } else if key == "prototype" {
+            let s = self.proto_slot.get();
+            if s != NO_SLOT {
+                debug_assert!(
+                    matches!(self.entries.get(s as usize), Some((k, _)) if &**k == "prototype")
+                );
+                return Some(s as usize);
+            }
         }
-        self.index.get(key).copied()
+        let found = if self.index.is_empty() {
+            self.entries.iter().position(|(k, _)| &**k == key)
+        } else {
+            self.index.get(key).copied()
+        };
+        if let Some(s) = found {
+            if key == "length" {
+                self.len_slot.set(s as u32);
+            } else if key == "prototype" {
+                self.proto_slot.set(s as u32);
+            }
+        }
+        found
     }
     /// Build the hash index for every current entry (crossing the small-map threshold).
     fn build_index(&mut self) {
@@ -1098,6 +1239,8 @@ impl Props {
         self.mirror.clear();
         self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
         self.mirror_holes = 0;
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         self.shape = shape_fresh();
     }
     /// Append the next dense element while *building a fresh array in order* (element index ==
@@ -1163,7 +1306,15 @@ impl Props {
                 self.index.insert(key.clone(), slot);
             }
             // Extending the key sequence transitions to the (shared, memoized) child shape.
-            self.shape = shape_transition(self.shape, &key);
+            // Array element keys don't (see `elem_mode`): array shapes track named keys only.
+            if !(self.elem_mode.get() && canonical_index(&key).is_some()) {
+                self.shape = shape_transition(self.shape, &key);
+            }
+            if &*key == "length" {
+                self.len_slot.set(slot as u32);
+            } else if &*key == "prototype" {
+                self.proto_slot.set(slot as u32);
+            }
             self.entries.push((key, prop));
             self.note_inserted(slot);
         }
@@ -1181,6 +1332,8 @@ impl Props {
         }
         self.note_structural();
         self.entries.retain(|(k, _)| keep(k));
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         self.index.clear();
         if self.entries.len() > INDEX_THRESHOLD {
             self.build_index();
@@ -1202,7 +1355,14 @@ impl Props {
         };
         self.note_structural();
         self.entries.remove(i);
-        self.shape = shape_fresh(); // slots shifted — deopt (see remove_indices_from)
+        // Slots shifted — deopt to a fresh shape id (see remove_indices_from). Array maps skip
+        // this for ELEMENT keys: their shape tracks named keys only, and array entry slots are
+        // only ever trusted through key-checked ICs (IC_ARR_KEYCHK), which re-verify on hit.
+        if !(self.elem_mode.get() && canonical_index(key).is_some()) {
+            self.shape = shape_fresh();
+        }
+        self.len_slot.set(NO_SLOT);
+        self.proto_slot.set(NO_SLOT);
         if !self.index.is_empty() {
             self.index.remove(key);
             // Re-index everything after the removed slot.

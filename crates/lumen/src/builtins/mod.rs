@@ -4315,6 +4315,7 @@ fn same_value(a: &Value, b: &Value) -> bool {
 
 fn install_array(it: &mut Interp) {
     let ap = it.array_proto.clone();
+    ap.borrow().props.mark_array();
     ap.borrow_mut().exotic = Exotic::Array;
     ap.borrow_mut().props.insert(
         "length",
@@ -4353,6 +4354,47 @@ fn install_array(it: &mut Interp) {
 
     it.def_method(&ap, "push", 1, |i, this, args| {
         let o = arr_to_object(i, &this)?;
+        // Dense fast path: a plain array whose `length` is a writable own data property and
+        // whose tail is exactly the dense frontier appends in place — no key strings, no
+        // existence scans, no observable coercions (a whole-number own `length` needs none).
+        if matches!(o.borrow().exotic, Exotic::Array)
+            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+            && i.array_append_unshadowed(&o)
+        {
+            let mut b = o.borrow_mut();
+            let len = match b.props.length_property() {
+                Some(p) if !p.accessor && p.writable => match p.value {
+                    Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
+                        Some(n as u32)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(mut len) = len {
+                if (len as u64 + args.len() as u64) <= u32::MAX as u64 {
+                    let mut ok = true;
+                    for a in args {
+                        if b.props.append_element(len, Property::plain(a.clone())) {
+                            len += 1;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    // Sync length up to what actually landed (partial success still moved it).
+                    if !matches!(b.props.length_property().map(|p| &p.value),
+                                 Some(Value::Num(n)) if *n == len as f64)
+                    {
+                        let s = b.props.slot_of("length").unwrap();
+                        b.props.entry_at_mut(s).unwrap().1.value = Value::Num(len as f64);
+                    }
+                    if ok {
+                        return Ok(Value::Num(len as f64));
+                    }
+                }
+            }
+        }
         let ov = Value::Obj(o.clone());
         // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
         // engine's materialization cap).
@@ -4371,6 +4413,30 @@ fn install_array(it: &mut Interp) {
     });
     it.def_method(&ap, "pop", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
+        // Dense fast path (mirror of push's): take the last element straight off the entries
+        // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
+        // inline caches survive a pop (stack-discipline arrays live on push/pop).
+        if matches!(o.borrow().exotic, Exotic::Array)
+            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+        {
+            let mut b = o.borrow_mut();
+            let len = match b.props.length_property() {
+                Some(p) if !p.accessor && p.writable => match p.value {
+                    Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
+                        Some(n as u32)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(len) = len {
+                if let Some(v) = b.props.pop_last_element(len - 1) {
+                    let s = b.props.slot_of("length").unwrap();
+                    b.props.entry_at_mut(s).unwrap().1.value = Value::Num((len - 1) as f64);
+                    return Ok(v);
+                }
+            }
+        }
         let ov = Value::Obj(o.clone());
         // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
         let len = ab(i.to_length(&o))?;

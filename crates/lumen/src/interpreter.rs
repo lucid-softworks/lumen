@@ -161,9 +161,27 @@ pub struct FnFrame {
     /// Owning coroutine body (`Interp::cur_coro`; 0 = the main driver): a worker-thread panic
     /// evicts the dead body's frames by this tag (see `ThreadCoro::resume`).
     pub coro: u32,
-    pub args_obj: Value,
     pub strict: bool,
+    /// The rare per-frame state (a live `arguments` object, or what a reflective `fn.arguments`
+    /// read needs to conjure one). Boxed so the common frame stays 24 bytes — frames are pushed
+    /// and popped on EVERY call, and the pop's copy-out and drop-check of a fat frame was a
+    /// measurable slice of the call path.
+    pub extra: Option<Box<FrameExtra>>,
+}
+
+/// See [`FnFrame::extra`].
+pub struct FrameExtra {
+    pub args_obj: Value,
     pub lazy: Option<(Rc<crate::ast::Function>, Rc<[Value]>, Env)>,
+}
+
+impl Default for FrameExtra {
+    fn default() -> FrameExtra {
+        FrameExtra {
+            args_obj: Value::Null,
+            lazy: None,
+        }
+    }
 }
 
 impl FnFrame {
@@ -644,6 +662,44 @@ fn pattern_has_expr(pat: &Pattern) -> bool {
     }
 }
 
+/// One megamorphic-stub-cache entry (see [`Interp::stub_cache`]): the derived resolution for a
+/// (receiver shape, site name pointer) pair. `name` is the identity of the *site's* interned
+/// name `Rc<str>` data pointer — two sites reading the same property text through different
+/// `Rc`s simply use separate entries. The default (`name: 0`) can't match a real probe.
+#[derive(Clone, Copy)]
+pub(crate) struct StubEntry {
+    pub(crate) name: usize,
+    pub(crate) st: crate::bytecode::IcState,
+}
+
+impl Default for StubEntry {
+    fn default() -> StubEntry {
+        StubEntry {
+            name: 0,
+            st: crate::bytecode::IcState {
+                recv_shape: 0,
+                holder_shape: 0,
+                slot: 0,
+                depth: crate::bytecode::IC_EMPTY,
+                mid_ok: 0,
+                mid_shape: 0,
+                mid2_shape: 0,
+            },
+        }
+    }
+}
+
+/// Stub-cache capacity (power of two). 4096 × 24-byte entries = 96 KiB.
+const STUB_CACHE_SIZE: usize = 4096;
+
+/// The table index for a (receiver shape, name pointer) pair. The name pointer's low bits are
+/// alignment zeros; shift them off before mixing so they contribute entropy.
+#[inline(always)]
+fn stub_slot(shape: u32, name: &str) -> usize {
+    let n = name.as_ptr() as usize >> 3;
+    (shape as usize ^ n ^ (n >> 7)) & (STUB_CACHE_SIZE - 1)
+}
+
 pub struct Interp {
     pub(crate) global: Gc,
     pub(crate) global_env: Env,
@@ -671,6 +727,14 @@ pub struct Interp {
     /// Recycled (slots, operand stack) buffers for bytecode-VM activations, so a hot call tree
     /// doesn't allocate two `Vec`s per call (see `bytecode::run`).
     pub(crate) vm_pool: Vec<(Vec<Value>, Vec<Value>)>,
+    /// Megamorphic stub cache: a global open-addressed table keyed by (receiver shape, site name
+    /// pointer) holding the last derived [`crate::bytecode::IcState`] for that pair. Probed when
+    /// both of a site's ways miss, so a site rotating through more receiver shapes than it has
+    /// ways (constraint hierarchies, visitor patterns) still resolves by shape compares instead
+    /// of re-walking the chain with hashed key lookups. Entries are validated by the same live
+    /// shape probe as the per-site ways, so stale entries are misses, never wrong hits — the
+    /// table needs no invalidation.
+    pub(crate) stub_cache: Vec<std::cell::Cell<StubEntry>>,
     /// Freelist of fixed-size raw frame buffers ([`crate::jit::FRAME_BUF`] `Value`s each) for the
     /// JIT fast call's slots + operand stack — a pop and pointer math per call instead of `Vec`
     /// bookkeeping. Buffers hold no live values while pooled.
@@ -722,6 +786,17 @@ pub struct Interp {
     /// The global `eval` function object, so a *direct* eval call (`eval(src)` by that name) can be
     /// distinguished from an indirect one and run in the caller's scope.
     pub(crate) eval_fn: Option<Gc>,
+    /// Object pointers of every function tagged `__eval_realm` (each realm's `eval`): the
+    /// pre-filter `call_dispatch` checks before the property lookup, so ordinary calls skip it.
+    pub(crate) eval_realm_fns: crate::fasthash::FastSet<usize>,
+    /// The "no-elements-on-array-protos" protector: `(epoch, clean)` — while `epoch` matches the
+    /// live [`crate::value::proto_epoch`], `clean` says the canonical `Array.prototype` →
+    /// `Object.prototype` chain has no canonical-index own keys, no exotic hops, and terminates
+    /// at `Object.prototype`. The dense `push` fast path needs this proof: an indexed accessor
+    /// on the chain must intercept the append (OrdinarySet), so the fast path stands down when
+    /// the proof lapses. Every defineProperty / proto swap / structural change to a marked
+    /// prototype bumps the epoch, forcing a re-verify.
+    pub(crate) elems_protector: std::cell::Cell<(u32, bool)>,
     /// `Symbol.iterator`, cached so the iterator protocol can look up `obj[@@iterator]` cheaply.
     pub(crate) iterator_sym: Option<Rc<SymbolData>>,
     /// Well-known symbols, minted once per Interp — additional realms (`$262.createRealm()`) reuse
@@ -1133,6 +1208,7 @@ impl Interp {
                 "__eval_realm",
                 Property::data(Value::Obj(self.global.clone()), false, false, false),
             );
+            self.eval_realm_fns.insert(Rc::as_ptr(ef) as usize);
         }
 
         let realm_state = self.snapshot_realm();
@@ -1235,6 +1311,8 @@ impl Interp {
             depth: 0,
             class_info: Default::default(),
             eval_fn: None,
+            eval_realm_fns: Default::default(),
+            elems_protector: std::cell::Cell::new((0, false)),
             iterator_sym: None,
             wk_syms: Vec::new(),
             short_circuit: false,
@@ -1254,6 +1332,7 @@ impl Interp {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
             vm_pool: Vec::new(),
+            stub_cache: vec![std::cell::Cell::new(StubEntry::default()); STUB_CACHE_SIZE],
             frame_pool: FramePool(Vec::new()),
             creation_pins: Default::default(),
             global_env_pins: Vec::new(),
@@ -1782,6 +1861,10 @@ impl Interp {
 
     pub fn make_array(&self, items: Vec<Value>) -> Value {
         let obj = Object::new(Some(self.array_proto.clone()));
+        {
+            let b = obj.borrow_mut();
+            b.props.mark_array();
+        }
         obj.borrow_mut().exotic = Exotic::Array;
         let len = items.len();
         {
@@ -2056,6 +2139,51 @@ impl Interp {
     /// have extra semantics the fast paths would skip. (Typed arrays and proxies keep their
     /// indexed data out of `props`, so a dense hit on them is impossible and they need no guard.)
     #[inline]
+    /// Whether appending a NEW element to array `o` can skip the OrdinarySet prototype walk:
+    /// `o`'s prototype is exactly the realm's `Array.prototype` and the protector proof holds
+    /// (see [`Interp::elems_protector`]). The caller has already verified `o` itself.
+    pub(crate) fn array_append_unshadowed(&self, o: &Gc) -> bool {
+        {
+            let b = o.borrow();
+            match b.proto.as_ref() {
+                Some(p) if Rc::ptr_eq(p, &self.array_proto) => {}
+                _ => return false,
+            }
+        }
+        let epoch = crate::value::proto_epoch();
+        if epoch == u32::MAX {
+            return false; // permanently invalidated — never trust the cache
+        }
+        let (e, ok) = self.elems_protector.get();
+        if e == epoch {
+            return ok;
+        }
+        let no_index_keys = |g: &Gc| {
+            g.borrow().props.iter().all(|(k, _)| {
+                !k.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+                    || crate::value::canonical_index(k).is_none()
+            })
+        };
+        let ap = &self.array_proto;
+        let op = &self.object_proto;
+        let ok = self.ordinary_get_ptr(Rc::as_ptr(ap) as usize)
+            && self.ordinary_get_ptr(Rc::as_ptr(op) as usize)
+            && matches!(ap.borrow().proto.as_ref(), Some(p) if Rc::ptr_eq(p, op))
+            && op.borrow().proto.is_none()
+            && matches!(op.borrow().exotic, Exotic::None)
+            && no_index_keys(ap)
+            && no_index_keys(op)
+            && {
+                // Future structural inserts on either proto must bump the epoch this proof is
+                // keyed on (plain `Array.prototype[0] = v` isn't a defineProperty).
+                ap.borrow().props.mark_proto();
+                op.borrow().props.mark_proto();
+                true
+            };
+        self.elems_protector.set((epoch, ok));
+        ok
+    }
+
     fn plain_for_elems(&self, o: &Gc) -> bool {
         if !matches!(o.borrow().exotic, Exotic::Array | Exotic::None) {
             return false;
@@ -2171,13 +2299,23 @@ impl Interp {
     ) -> Option<Value> {
         let head = Rc::as_ptr(o);
         // Two ways per site (polymorphic receivers — subclass hierarchies rotating through one
-        // access site — miss a single way constantly): probe both, then re-derive into way 1
-        // with the old way 1 demoted to way 2.
+        // access site — miss a single way constantly): probe both, then the global stub cache
+        // (unbounded polymorphism), then re-derive into way 1 with the old way 1 demoted.
         if let Some(v) = self.ic_shape_probe(head, name, cache.get()) {
             return Some(v);
         }
         if let Some(v) = self.ic_shape_probe(head, name, self.ic_way2(cache).get()) {
             return Some(v);
+        }
+        let shape = unsafe { (*head).borrow().props.shape() };
+        let e = self.stub_cache[stub_slot(shape, name)].get();
+        if e.name == name.as_ptr() as usize && e.st.recv_shape == shape {
+            if let Some(v) = self.ic_shape_probe(head, name, e.st) {
+                // Promote into the site (demoting way 1): the next access hits way-first.
+                self.ic_way2(cache).set(cache.get());
+                cache.set(e.st);
+                return Some(v);
+            }
         }
         self.ic_get_rederive(o, name, cache)
     }
@@ -2207,8 +2345,19 @@ impl Interp {
         name: &str,
         st: crate::bytecode::IcState,
     ) -> Option<Value> {
-        use crate::bytecode::IC_EMPTY;
-        if !((st.depth <= 1 || (st.depth == 2 && st.mid_ok != 0)) && st.depth != IC_EMPTY) {
+        use crate::bytecode::{IC_ARR_KEYCHK, IC_EMPTY};
+        let _ = IC_EMPTY;
+        // Key-checked entries (array holder — see `IC_ARR_KEYCHK`): decode the flag off the
+        // depth. The `< 0x80` range check filters `IC_CREATE`/`IC_EMPTY`.
+        if st.depth >= 0x80 {
+            return None;
+        }
+        let keychk = st.depth & IC_ARR_KEYCHK != 0;
+        let depth = st.depth & !IC_ARR_KEYCHK;
+        if !(depth <= 1
+            || (depth == 2 && st.mid_ok & 1 != 0)
+            || (depth == 3 && st.mid_ok & 3 == 3))
+        {
             return None;
         }
         unsafe {
@@ -2220,26 +2369,31 @@ impl Interp {
             // same-shape arrays can hold `length` at different slots).
             let recv_shape_ok = matches!(rb.exotic, Exotic::None)
                 || (matches!(rb.exotic, Exotic::Array)
-                    && st.depth >= 1
+                    && (depth >= 1 || keychk)
                     && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()));
             if recv_shape_ok
                 && self.ordinary_get_ptr(head as usize)
                 && rb.props.shape() == st.recv_shape
             {
-                if st.depth == 0 {
-                    if let Some((_, p)) = rb.props.entry_at(st.slot as usize) {
-                        if !p.accessor {
+                if depth == 0 {
+                    if let Some((k, p)) = rb.props.entry_at(st.slot as usize) {
+                        if (!keychk || &**k == name) && !p.accessor {
                             return Some(p.value.clone());
                         }
                     }
                 } else if let Some(pr) = rb.proto.as_ref() {
                     let mut hp = Rc::as_ptr(pr);
                     drop(rb); // the next hop is a different object; release the borrow
-                    if st.depth == 2 {
+                    // Validate each intermediate hop's shape (a match proves it still lacks
+                    // the name), following live protos.
+                    for mid_shape in [st.mid_shape, st.mid2_shape]
+                        .into_iter()
+                        .take(depth.saturating_sub(1) as usize)
+                    {
                         let mb = (*hp).borrow();
                         if !(matches!(mb.exotic, Exotic::None)
                             && self.ordinary_get_ptr(hp as usize)
-                            && mb.props.shape() == st.mid_shape)
+                            && mb.props.shape() == mid_shape)
                         {
                             return None;
                         }
@@ -2249,12 +2403,14 @@ impl Interp {
                         }
                     }
                     let hb = (*hp).borrow();
-                    if matches!(hb.exotic, Exotic::None)
+                    let holder_exotic_ok = matches!(hb.exotic, Exotic::None)
+                        || (keychk && matches!(hb.exotic, Exotic::Array));
+                    if holder_exotic_ok
                         && self.ordinary_get_ptr(hp as usize)
                         && hb.props.shape() == st.holder_shape
                     {
-                        if let Some((_, p)) = hb.props.entry_at(st.slot as usize) {
-                            if !p.accessor {
+                        if let Some((k, p)) = hb.props.entry_at(st.slot as usize) {
+                            if (!keychk || &**k == name) && !p.accessor {
                                 return Some(p.value.clone());
                             }
                         }
@@ -2287,6 +2443,7 @@ impl Interp {
         // two-hop chain. An Array mid hop stays ineligible (its shape doesn't track elements, so
         // a shape match couldn't prove an index-like name is still absent).
         let mut mid = None;
+        let mut mid2 = None;
         unsafe {
             for depth in 0..=IC_MAX_DEPTH {
                 let b = (*cur).borrow();
@@ -2299,30 +2456,44 @@ impl Interp {
                         return None; // getter — must run through [[Get]]
                     }
                     let v = p.value.clone();
-                    // An Array HOLDER's slot must never be cached: element entries occupy slots
-                    // without transitioning the shape, so a plain object sharing the shape id
-                    // maps the name at a DIFFERENT slot — the shape paths (and especially the
-                    // JIT template, which does no bounds check) would read the wrong entry.
-                    // Array reads simply re-derive every time, as they always did.
-                    if !matches!(b.exotic, Exotic::None) {
+                    // An Array HOLDER's slot can't be trusted by shape alone: element entries
+                    // occupy slots without transitioning the shape, so two same-shape arrays
+                    // map the name at DIFFERENT slots. Cache it as a key-checked entry
+                    // (`IC_ARR_KEYCHK`): hits re-verify the entry's key, and the JIT templates
+                    // (exact depth compares, no bounds check) route it to the helper. Digit
+                    // names stay uncached (element reads have their own paths).
+                    let keychk = !matches!(b.exotic, Exotic::None);
+                    if keychk && name.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
                         return Some(v);
                     }
-                    let mid_shape = if depth == 2 { mid } else { None };
+                    let mid_shape = if depth >= 2 { mid } else { None };
+                    let mid2_shape = if depth == 3 { mid2 } else { None };
                     // Demote the previous way before refilling: a 2-shape site stabilizes
                     // with one shape per way instead of thrashing a single cell.
                     self.ic_way2(cache).set(cache.get());
-                    cache.set(IcState {
-                        depth,
+                    let st = IcState {
+                        depth: depth | if keychk { crate::bytecode::IC_ARR_KEYCHK } else { 0 },
                         slot: slot as u32,
                         recv_shape,
                         holder_shape: b.props.shape(),
-                        mid_ok: mid_shape.is_some() as u8,
+                        mid_ok: mid_shape.is_some() as u8 | ((mid2_shape.is_some() as u8) << 1),
                         mid_shape: mid_shape.unwrap_or(0),
+                        mid2_shape: mid2_shape.unwrap_or(0),
+                    };
+                    cache.set(st);
+                    // Mirror into the stub cache so OTHER shapes rotating through this
+                    // site don't evict this resolution for good.
+                    self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
+                        name: name.as_ptr() as usize,
+                        st,
                     });
                     return Some(v);
                 }
                 if depth == 1 && matches!(b.exotic, Exotic::None) {
                     mid = Some(b.props.shape());
+                }
+                if depth == 2 && matches!(b.exotic, Exotic::None) {
+                    mid2 = Some(b.props.shape());
                 }
                 match b.proto.as_ref() {
                     Some(p) => cur = Rc::as_ptr(p),
@@ -2472,6 +2643,7 @@ impl Interp {
                     holder_shape: shape,
                     mid_ok: 0,
                     mid_shape: 0,
+                    mid2_shape: 0,
                 });
                 true
             }
@@ -2559,6 +2731,7 @@ impl Interp {
             holder_shape: b.props.shape(),
             mid_ok: 0,
             mid_shape: crate::value::proto_epoch(),
+            mid2_shape: 0,
         });
         let pin = cur.take().map(|p| Rc::downgrade(&p)).unwrap_or_default();
         self.creation_pins.insert(key, (proto_ptr, pin));
@@ -2858,16 +3031,24 @@ impl Interp {
                                     ("arguments", Some(k)) => {
                                         // The activation skipped building its arguments object
                                         // (the body never names it) — conjure it now.
-                                        if matches!(self.fn_frames[k].args_obj, Value::Null) {
-                                            if let Some((func, args, scope)) =
-                                                self.fn_frames[k].lazy.clone()
+                                        let lazy = match self.fn_frames[k].extra.as_deref() {
+                                            Some(x) if matches!(x.args_obj, Value::Null) => {
+                                                x.lazy.clone()
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some((func, args, scope)) = lazy {
+                                            let ao =
+                                                self.make_arguments_object(&func, &args, &scope, r);
+                                            if let Some(x) = self.fn_frames[k].extra.as_deref_mut()
                                             {
-                                                let ao = self
-                                                    .make_arguments_object(&func, &args, &scope, r);
-                                                self.fn_frames[k].args_obj = Value::Obj(ao);
+                                                x.args_obj = Value::Obj(ao);
                                             }
                                         }
-                                        self.fn_frames[k].args_obj.clone()
+                                        match self.fn_frames[k].extra.as_deref() {
+                                            Some(x) => x.args_obj.clone(),
+                                            None => Value::Null,
+                                        }
                                     }
                                     (_, Some(k)) => match self.fn_frames[..k].last() {
                                         None => Value::Null,
@@ -3532,7 +3713,7 @@ impl Interp {
         if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
             return self.ta_len(info).unwrap_or(0);
         }
-        match obj.borrow().props.get("length").map(|p| p.value.clone()) {
+        match obj.borrow().props.length_property().map(|p| p.value.clone()) {
             Some(Value::Num(n)) => n as usize,
             _ => 0,
         }
@@ -4101,8 +4282,12 @@ impl Interp {
             }
         }
         // An indirect call to another realm's `eval` runs in that realm's global scope. (A direct
-        // `eval(...)` of the current realm is intercepted earlier, in `eval_call`.)
-        if !self.realms.is_empty() {
+        // `eval(...)` of the current realm is intercepted earlier, in `eval_call`.) Only a
+        // native function can be a realm's `eval` — skip the property lookup for user calls,
+        // which is every hot call (the main realm always registers, so the map is never empty).
+        if !self.realms.is_empty()
+            && self.eval_realm_fns.contains(&(Rc::as_ptr(&obj) as usize))
+        {
             let realm_g = obj
                 .borrow()
                 .props
@@ -4659,9 +4844,8 @@ impl Interp {
         self.fn_frames.push(FnFrame {
             fn_ptr: Rc::as_ptr(fn_obj) as usize,
             coro: self.cur_coro,
-            args_obj: Value::Null,
             strict: func.is_strict,
-            lazy: None,
+            extra: None,
         });
         let r = self.call_user_inner(func, closure, this, args, is_construct, fn_obj);
         self.fn_frames.pop();
@@ -4754,9 +4938,8 @@ impl Interp {
         self.fn_frames.push(FnFrame {
             fn_ptr: ic.callee,
             coro: self.cur_coro,
-            args_obj: Value::Null,
             strict: ic.strict,
-            lazy: None,
+            extra: None,
         });
         // Reconstruct the one owned env handle the frame needs: alive because the callee is
         // alive and its `call` field (which owns the env) is never reassigned while live.
@@ -4994,9 +5177,8 @@ impl Interp {
         self.fn_frames.push(FnFrame {
             fn_ptr: Rc::as_ptr(o) as usize,
             coro: self.cur_coro,
-            args_obj: Value::Null,
             strict: func.is_strict,
-            lazy: None,
+            extra: None,
         });
         let this_val = self.bind_compiled_this(&func, chunk, unsafe { this_slot.read() }, false);
         let mut r = unsafe {
@@ -5233,7 +5415,8 @@ impl Interp {
             if scan & crate::ast::SCAN_ARGUMENTS != 0 {
                 let ao = self.make_arguments_object(func, args, &scope, fn_obj);
                 if let Some(frame) = self.fn_frames.last_mut() {
-                    frame.args_obj = Value::Obj(ao.clone());
+                    frame.extra.get_or_insert_with(Default::default).args_obj =
+                        Value::Obj(ao.clone());
                 }
                 scope.borrow_mut().vars.insert(
                     "arguments".to_string(),
@@ -5248,7 +5431,8 @@ impl Interp {
                 );
             } else if !func.is_strict && !func.is_generator && !func.is_async && !func.is_method {
                 if let Some(frame) = self.fn_frames.last_mut() {
-                    frame.lazy = Some((func.clone(), Rc::from(args), scope.clone()));
+                    frame.extra.get_or_insert_with(Default::default).lazy =
+                        Some((func.clone(), Rc::from(args), scope.clone()));
                 }
             }
             // Methods and class constructors may reference `super.x` — including from a direct
