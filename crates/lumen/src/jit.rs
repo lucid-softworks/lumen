@@ -66,6 +66,18 @@ pub struct JitCode {
     pub needs_global: bool,
 }
 
+impl JitCode {
+    /// The machine-code entry address (for CallIc fills — the direct-call sequence branches
+    /// to it through the swapped ctx).
+    pub(crate) fn mem_ptr(&self) -> *const u8 {
+        self.mem
+    }
+    /// The pc→code-offset table's data pointer (same purpose).
+    pub(crate) fn pc_offsets_ptr(&self) -> *const u32 {
+        self.pc_offsets.as_ptr()
+    }
+}
+
 impl Drop for JitCode {
     fn drop(&mut self) {
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -144,6 +156,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_call as *const () as usize,
         crate::bytecode::jit_call_hit as *const () as usize,
         crate::bytecode::jit_direct_finish as *const () as usize,
+        crate::bytecode::jit_drop_at as *const () as usize,
     ]
 }
 
@@ -159,7 +172,9 @@ pub const H_CALL: usize = 6;
 pub const H_CALL_HIT: usize = 7;
 /// Teardown for a direct (shared-ctx) call: drops, frame-pool return, FnFrame pop, tail drain.
 pub const H_DIRECT_FINISH: usize = 8;
-pub const N_HELPERS: usize = 9;
+/// Drop the single `Value` at `sp` (the direct-call sequence's rare last-reference callee).
+pub const H_DROP_AT: usize = 9;
+pub const N_HELPERS: usize = 10;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -205,7 +220,13 @@ mod layout_asserts {
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, callee) == 0);
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, global_env) == 32);
     const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, epoch) == 56);
-    const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 64);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, n_params) == 42);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, n_slots) == 44);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, direct) == 46);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, chunk_raw) == 64);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, code_mem) == 72);
+    const _: () = assert!(std::mem::offset_of!(crate::bytecode::CallIc, pc_offs_ptr) == 80);
+    const _: () = assert!(std::mem::size_of::<std::cell::Cell<crate::bytecode::CallIc>>() == 88);
     const _: () = assert!(std::mem::offset_of!(JitCtx, genv) == 64);
     // 3b reads Interp state from machine code through ctx.interp.
     const _: () = assert!(std::mem::offset_of!(JitCtx, interp) == 72);
@@ -273,6 +294,19 @@ mod asm {
         }
 
         /// movz xd, #imm16, lsl #(shift*16)
+        /// brk #0 — temporary diagnostics only.
+        pub fn brk_dbg(&mut self) {
+            self.emit(0xD420_0000);
+        }
+        /// str wt, [xn, #imm] (scaled, imm/4)
+        pub fn str_w_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
+            debug_assert!(imm_bytes.is_multiple_of(4) && imm_bytes / 4 < 4096);
+            self.emit(0xB900_0000 | ((imm_bytes / 4) << 10) | (rn << 5) | rt);
+        }
+        /// ldr xt, [xn, xm, lsl #3] (register-offset, scaled)
+        pub fn ldr_x_lsl3(&mut self, rt: u32, rn: u32, rm: u32) {
+            self.emit(0xF860_7800 | (rm << 16) | (rn << 5) | rt);
+        }
         /// ldrh wt, [xn, #imm] (scaled, imm/2)
         pub fn ldrh_imm(&mut self, rt: u32, rn: u32, imm_bytes: u32) {
             debug_assert!(imm_bytes.is_multiple_of(2) && imm_bytes / 2 < 4096);
@@ -769,7 +803,11 @@ mod asm {
 /// Compile `chunk` to machine code, or `None` when unsupported (non-macOS/ARM64, async bodies,
 /// or an op stream whose stack depths don't line up — a compiler bug caught defensively).
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCode> {
+pub fn compile(
+    chunk: &Chunk,
+    layout: &crate::value::JitLayout,
+    ilayout: &crate::interpreter::InterpLayout,
+) -> Option<JitCode> {
     use crate::bytecode::{Op, UpdKind};
 
     let ops = chunk.jit_ops();
@@ -802,6 +840,12 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
+    // Direct shared-ctx calls: explicit opt-in while the sequence stabilizes (flips to a fast
+    // bit once the full suite has it on by default).
+    let direct_on = {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("LUMEN_JIT_DIRECT").is_some())
+    };
     // Whether the probed layout supports inline refcount bumps/decs (clone/drop of Str/Sym/Obj
     // without a helper call). All strong-count templates gate on this.
     let rc_ok = layout.valid && layout.rc_strong_off < 256;
@@ -1686,23 +1730,64 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
                     let off = depth as i32 * -24;
                     if (-256..0).contains(&off) {
                         let ic0 = chunk.jit_call_cache_ptr(*c);
+                        let brk_stage: u32 = std::env::var("LUMEN_JIT_PROBEBRK")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
                         a.ldurb(9, 20, off);
                         a.cmp_imm_w(9, 8); // callee must be an Obj
                         a.b_cond(C_NE, slow);
+                        if brk_stage == 1 {
+                            a.brk_dbg();
+                        }
                         a.ldur(10, 20, off + 8); // callee payload (stored Rc ptr)
                         a.mov_imm64(12, ic0 as u64);
-                        a.ldur(11, 12, 0); // ic.callee
-                        a.cmp_reg_x(10, 11);
+                        a.ldur(11, 12, 0); // ic.callee (an Rc::as_ptr identity)
+                        // the payload is the STORED RcBox pointer; as_ptr sits one probed
+                        // header further (comparing them raw was a silent 100% miss)
+                        a.add_imm(13, 10, layout.gc_data_off as u32);
+                        a.cmp_reg_x(13, 11);
                         a.b_cond(C_NE, slow);
+                        if brk_stage == 2 {
+                            a.brk_dbg();
+                        }
                         a.ldr_w_imm(11, 12, 56); // ic.epoch
                         a.mov_imm64(13, &crate::bytecode::CALL_IC_EPOCH as *const _ as u64);
                         a.ldr_w_imm(14, 13, 0);
                         a.cmp_reg_w(11, 14);
                         a.b_cond(C_NE, slow);
+                        if brk_stage == 3 {
+                            a.brk_dbg();
+                        }
                         a.ldr_imm(11, 12, 32); // ic.global_env
                         a.ldr_imm(14, 19, 64); // ctx.genv
+                        if brk_stage == 4 {
+                            a.brk_dbg();
+                        }
                         a.cmp_reg_x(11, 14);
                         a.b_cond(C_NE, slow);
+                        // Direct shared-ctx call (opt-in while it stabilizes): its own gate
+                        // misses land on `hit_slow` = the H_CALL_HIT form below.
+                        let hit_slow = a.new_label();
+                        if direct_on {
+                            let with_this = matches!(op, Op::CallWithThis(..));
+                            let attempted_off = chunk.jit_inline_attempted_off();
+                            emit_direct_call(
+                                &mut a,
+                                ilayout,
+                                layout.gc_data_off,
+                                attempted_off,
+                                *argc as usize,
+                                with_this,
+                                hit_slow,
+                                l_unwind,
+                                done,
+                            );
+                        }
+                        a.bind(hit_slow);
+                        if std::env::var_os("LUMEN_JIT_HITBRK").is_some() {
+                            a.brk_dbg();
+                        }
                         a.mov(0, 19);
                         a.movz(1, pc as u32, 0);
                         a.mov(2, 20);
@@ -1799,7 +1884,11 @@ pub fn compile(chunk: &Chunk, layout: &crate::value::JitLayout) -> Option<JitCod
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-pub fn compile(_chunk: &Chunk, _layout: &crate::value::JitLayout) -> Option<JitCode> {
+pub fn compile(
+    _chunk: &Chunk,
+    _layout: &crate::value::JitLayout,
+    _ilayout: &crate::interpreter::InterpLayout,
+) -> Option<JitCode> {
     None
 }
 
@@ -2147,6 +2236,399 @@ fn emit_prop_load_inline(
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
     a.bind(done);
+}
+
+/// The direct (shared-ctx) JIT→JIT call sequence, emitted after the way-1 probe hit when the
+/// fill-time gates allow it (see [`crate::bytecode::CallIc::direct`]). Everything the layered
+/// path does survives — recursion depth, the amortized gc tick (a due tick falls to the
+/// generic path BEFORE any mutation), the `FnFrame`, constructing/new.target clearing, the
+/// callee's own handler watermark — but the callee runs on the CALLER's `JitCtx` with its
+/// frame fields swapped, entered by a bare `blr`: no helper dispatch, no probe re-read, no
+/// fresh JitCtx, no `run_moved`. Teardown (drops, pool return, frame pop, tail drain) is one
+/// `H_DIRECT_FINISH` call; the sequence then restores every swapped field and either pushes
+/// the return value or routes to the caller's unwind. Falls back to `hit_slow` (the
+/// H_CALL_HIT path) on any gate failure, with NO state mutated.
+///
+/// Returns false (nothing emitted) when an emission-time precondition fails — the caller then
+/// emits only the probe + H_CALL_HIT form.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_direct_call(
+    a: &mut asm::Asm,
+    ilayout: &crate::interpreter::InterpLayout,
+    // Stored-pointer → `Rc::as_ptr` header delta (`JitLayout::gc_data_off`): FnFrame.fn_ptr
+    // records the as_ptr identity (FnFrame::callee reconstructs an Rc from it).
+    gc_data_off: usize,
+    // Byte offset of `Chunk::inline_attempted` (computed by the caller from its own chunk —
+    // same monomorphized layout as the callee's): the sequence requires the callee's one-shot
+    // recompile to have happened (or been attempted), else it keeps taking H_CALL_HIT, which
+    // is what bumps jit_runs toward the trigger. A landed code2 bumps the epoch and refills
+    // the site with the new chunk anyway.
+    attempted_off: usize,
+    argc: usize,
+    with_this: bool,
+    hit_slow: usize,
+    l_unwind: usize,
+    done: usize,
+) -> bool {
+    use std::mem::offset_of;
+    // Emission gates: probed Interp offsets must exist and fit the addressing modes used.
+    if !ilayout.valid || argc > 8 || gc_data_off >= 4096 {
+        return false;
+    }
+    let fits8 = |o: usize| o % 8 == 0 && o / 8 < 4096;
+    let fits4 = |o: usize| o % 4 == 0 && o / 4 < 4096;
+    let il = ilayout;
+    if !(fits4(il.depth)
+        && fits4(il.gc_tick)
+        && fits4(il.cur_coro)
+        && il.constructing < 4096
+        && fits8(il.new_target)
+        && fits8(il.fn_frames + il.fnf_ptr_word)
+        && fits8(il.fn_frames + il.fnf_len_word)
+        && fits8(il.fn_frames + il.fnf_cap_word)
+        && fits8(il.frame_pool + il.fp_ptr_word)
+        && fits8(il.frame_pool + il.fp_len_word)
+        && fits8(il.new_target + 16))
+    {
+        return false;
+    }
+    // The handlers Vec's length-word offset within JitCtx (per-instantiation, probed here).
+    let handlers_len_off = {
+        let mut v: Vec<(u32, usize)> = Vec::with_capacity(5);
+        v.push((1, 1));
+        v.push((2, 2));
+        v.push((3, 3));
+        let words: [usize; 3] =
+            unsafe { std::mem::transmute_copy::<Vec<(u32, usize)>, [usize; 3]>(&v) };
+        let Some(w) = words.iter().position(|w| *w == 3) else {
+            return false;
+        };
+        offset_of!(JitCtx, handlers) + w * 8
+    };
+    if !fits8(handlers_len_off) {
+        return false;
+    }
+    const IC_ENV: i32 = 8;
+    const IC_STRICT: u32 = 40;
+    const IC_USES_THIS: u32 = 41;
+    const IC_NPARAMS: u32 = 42;
+    const IC_NSLOTS: u32 = 44;
+    const IC_DIRECT: i32 = 46;
+    const IC_CHUNK_RAW: i32 = 64;
+    const IC_CODE_MEM: i32 = 72;
+    const IC_PC_OFFS: i32 = 80;
+    let cx_slots = offset_of!(JitCtx, slots) as u32;
+    let cx_stack_base = offset_of!(JitCtx, stack_base) as u32;
+    let cx_env_raw = offset_of!(JitCtx, env_raw) as u32;
+    let cx_chunk = offset_of!(JitCtx, chunk) as u32;
+    let cx_n_slots = offset_of!(JitCtx, n_slots) as u32;
+    let cx_code_base = offset_of!(JitCtx, code_base) as u32;
+    let cx_pc_offsets = offset_of!(JitCtx, pc_offsets) as u32;
+    let cx_floor = offset_of!(JitCtx, handler_floor) as u32;
+    let cx_this = offset_of!(JitCtx, this_val) as u32;
+    let cx_ret = offset_of!(JitCtx, ret) as u32;
+    if !(fits8(cx_this as usize) && fits8(cx_ret as usize)) {
+        return false;
+    }
+    // rc strong at payload+0 — same contract as the templates (layout.valid checked upstream).
+    let strong = 0i32;
+
+    // ---- checks (entry state: x12 = ic0 ptr, x10 = callee stored Rc ptr; NO mutations) ----
+    // direct bits 0 (no force resets) and 2 (recompile settled)
+    if attempted_off >= 4096 {
+        return false;
+    }
+    let dbrk: u32 = std::env::var("LUMEN_JIT_DIRECTBRK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if dbrk == 1 {
+        a.brk_dbg(); // temp diagnostics
+    }
+    a.ldurb(9, 12, IC_DIRECT);
+    let field1b = asm::logical_imm_w(1).unwrap();
+    a.logic_imm_w(0, 11, 9, field1b); // bit 0: no force resets
+    a.cbz(11, false, hit_slow);
+    // recompile settled (live chunk byte — see attempted_off)
+    if dbrk == 2 {
+        a.brk_dbg(); // before-attempted
+    }
+    a.ldur(11, 12, IC_CHUNK_RAW);
+    a.ldrb_imm(11, 11, attempted_off as u32);
+    a.cbz(11, false, hit_slow);
+    // needs_global (bit 1) requires a live ctx.global_body
+    if dbrk == 3 {
+        a.brk_dbg(); // after-attempted
+    }
+    let no_glob = a.new_label();
+    let field2 = asm::logical_imm_w(2).unwrap();
+    a.logic_imm_w(0, 11, 9, field2);
+    a.cbz(11, false, no_glob);
+    a.ldr_imm(11, 19, 56); // ctx.global_body
+    a.cbz(11, true, hit_slow);
+    a.bind(no_glob);
+    // n_params == argc exactly
+    a.ldrh_imm(9, 12, IC_NPARAMS);
+    a.cmp_imm_w(9, argc as u32);
+    a.b_cond(C_NE, hit_slow);
+    // this binding: a this-using SLOPPY callee needs boxing/global fallback unless the
+    if dbrk == 4 {
+        a.brk_dbg(); // after-nparams
+    }
+    // incoming receiver is already an object.
+    a.ldrb_imm(9, 12, IC_USES_THIS);
+    let this_ok = a.new_label();
+    a.cbz(9, false, this_ok);
+    a.ldrb_imm(9, 12, IC_STRICT);
+    a.cbnz(9, false, this_ok);
+    if with_this {
+        a.ldurb(9, 20, -((argc as i32 + 2) * 24));
+        a.cmp_imm_w(9, 8);
+        a.b_cond(C_NE, hit_slow);
+    } else {
+        a.b(hit_slow); // no receiver + sloppy this-user: global boxing → generic
+    }
+    a.bind(this_ok);
+    if dbrk == 5 {
+        a.brk_dbg(); // after-this
+    }
+    // callee refcount > 1 (the post-call dec then never frees mid-sequence; a same-call
+    // binding deletion is caught by the post-dec zero check)
+    a.ldur(9, 10, strong);
+    a.cmp_imm_x(9, 1);
+    a.b_cond(C_LS, hit_slow);
+    // interp-side room: depth, gc tick, fn_frames capacity, frame pool
+    if dbrk == 6 {
+        a.brk_dbg(); // after-strong
+    }
+    a.ldr_imm(14, 19, 72); // ctx.interp
+    a.ldr_w_imm(11, 14, il.depth as u32);
+    a.mov_imm64(13, crate::interpreter::MAX_EVAL_DEPTH as u64);
+    a.cmp_reg_x(11, 13); // w-load zero-extends; the compare stays 64-bit
+    a.b_cond(C_HS, hit_slow);
+    if dbrk == 9 {
+        a.brk_dbg(); // after-depth
+    }
+    a.ldr_w_imm(13, 14, il.gc_tick as u32);
+    a.add_imm(13, 13, 1);
+    let field15 = asm::logical_imm_w(15).unwrap();
+    a.logic_imm_w(0, 4, 13, field15); // and w4, w13, #15
+    a.cbz(4, false, hit_slow); // gc due → generic
+    if dbrk == 7 {
+        a.brk_dbg(); // after-gc
+    }
+    a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+    a.ldr_imm(17, 14, (il.fn_frames + il.fnf_cap_word) as u32);
+    a.cmp_reg_x(16, 17);
+    a.b_cond(C_HS, hit_slow);
+    a.ldr_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+    a.cbz(7, true, hit_slow);
+
+    // ---- mutations ----
+    if dbrk == 8 {
+        a.brk_dbg(); // all-gates-passed
+    }
+    a.add_imm(11, 11, 1);
+    a.str_w_imm(11, 14, il.depth as u32); // depth++ (u32 field)
+    a.str_w_imm(13, 14, il.gc_tick as u32); // tick (not due)
+    // FnFrame push: entry = ptr + len*24
+    a.ldr_imm(6, 14, (il.fn_frames + il.fnf_ptr_word) as u32);
+    a.movz(5, 24, 0);
+    a.madd(6, 16, 5, 6);
+    a.add_imm(4, 10, gc_data_off as u32);
+    a.stur(4, 6, 0); // fn_ptr = the callee's as_ptr identity
+    a.ldr_w_imm(5, 14, il.cur_coro as u32);
+    a.str_w_imm(5, 6, 8); // coro
+    a.ldrb_imm(5, 12, IC_STRICT);
+    a.sturb(5, 6, 12); // strict
+    a.stur(31, 6, 16); // extra = None (xzr)
+    a.add_imm(16, 16, 1);
+    a.str_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+    // frame pool pop: buf = ptr[--len] → x9 (the callee slots base)
+    a.sub_imm(7, 7, 1);
+    a.str_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+    a.ldr_imm(5, 14, (il.frame_pool + il.fp_ptr_word) as u32);
+    a.ldr_x_lsl3(9, 5, 7);
+    // move the argc arguments (24B each) off the caller stack into the callee slots
+    for k in 0..argc {
+        let s = (k as i32 - argc as i32) * 24;
+        let d = (k * 24) as i32;
+        a.ldur(4, 20, s);
+        a.ldur(5, 20, s + 8);
+        a.ldur(6, 20, s + 16);
+        a.stur(4, 9, d);
+        a.stur(5, 9, d + 8);
+        a.stur(6, 9, d + 16);
+    }
+    // tag-init the remaining slots (Undefined = tag byte 0)
+    a.ldrh_imm(5, 12, IC_NSLOTS); // w5 = n_slots (stays live for stack_base below)
+    a.movz(6, argc as u32, 0);
+    a.movz(4, 24, 0);
+    let init_loop = a.new_label();
+    let init_done = a.new_label();
+    a.bind(init_loop);
+    a.cmp_reg_w(6, 5);
+    a.b_cond(C_HS, init_done);
+    a.madd(3, 6, 4, 9);
+    a.sturb(31, 3, 0);
+    a.add_imm(6, 6, 1);
+    a.b(init_loop);
+    a.bind(init_done);
+
+    // ---- swap: save the caller's frame fields to an SP-carved area, install the callee's --
+    a.sub_imm(31, 31, 128);
+    // slots
+    a.ldr_imm(4, 19, cx_slots);
+    a.stur(4, 31, 0);
+    a.str_imm(9, 19, cx_slots);
+    // stack_base = slots + n_slots*24
+    a.ldr_imm(4, 19, cx_stack_base);
+    a.stur(4, 31, 8);
+    a.movz(4, 24, 0);
+    a.madd(3, 5, 4, 9);
+    a.str_imm(3, 19, cx_stack_base);
+    // env_raw
+    a.ldr_imm(4, 19, cx_env_raw);
+    a.stur(4, 31, 16);
+    a.ldur(4, 12, IC_ENV);
+    a.str_imm(4, 19, cx_env_raw);
+    // chunk
+    a.ldr_imm(4, 19, cx_chunk);
+    a.stur(4, 31, 24);
+    a.ldur(4, 12, IC_CHUNK_RAW);
+    a.str_imm(4, 19, cx_chunk);
+    // n_slots
+    a.ldr_imm(4, 19, cx_n_slots);
+    a.stur(4, 31, 32);
+    a.str_imm(5, 19, cx_n_slots);
+    // code_base
+    a.ldr_imm(4, 19, cx_code_base);
+    a.stur(4, 31, 40);
+    a.ldur(4, 12, IC_CODE_MEM);
+    a.str_imm(4, 19, cx_code_base);
+    // pc_offsets
+    a.ldr_imm(4, 19, cx_pc_offsets);
+    a.stur(4, 31, 48);
+    a.ldur(4, 12, IC_PC_OFFS);
+    a.str_imm(4, 19, cx_pc_offsets);
+    // handler_floor = live handlers.len
+    a.ldr_imm(4, 19, cx_floor);
+    a.stur(4, 31, 56);
+    a.ldr_imm(4, 19, handlers_len_off as u32);
+    a.str_imm(4, 19, cx_floor);
+    // this_val (24B): save old, install the callee's
+    a.ldr_imm(4, 19, cx_this);
+    a.ldr_imm(5, 19, cx_this + 8);
+    a.ldr_imm(6, 19, cx_this + 16);
+    a.stur(4, 31, 64);
+    a.stur(5, 31, 72);
+    a.stur(6, 31, 80);
+    a.ldrb_imm(4, 12, IC_USES_THIS);
+    let this_undef = a.new_label();
+    let this_set = a.new_label();
+    if with_this {
+        a.cbz(4, false, this_undef);
+        // move the receiver in (24B; the caller-stack slot is skipped at cleanup, not dropped)
+        let s = -((argc as i32 + 2) * 24);
+        a.ldur(4, 20, s);
+        a.ldur(5, 20, s + 8);
+        a.ldur(6, 20, s + 16);
+        a.str_imm(4, 19, cx_this);
+        a.str_imm(5, 19, cx_this + 8);
+        a.str_imm(6, 19, cx_this + 16);
+        a.b(this_set);
+    }
+    a.bind(this_undef);
+    a.strb_imm(31, 19, cx_this); // Undefined tag (payload stale; tag-only reads)
+    a.bind(this_set);
+    // constructing (byte) + new_target (tag byte): cleared for the callee
+    a.ldrb_imm(4, 14, il.constructing as u32);
+    a.stur(4, 31, 88);
+    a.strb_imm(31, 14, il.constructing as u32);
+    a.ldr_imm(4, 14, il.new_target as u32);
+    a.ldr_imm(5, 14, (il.new_target + 8) as u32);
+    a.ldr_imm(6, 14, (il.new_target + 16) as u32);
+    a.stur(4, 31, 96);
+    a.stur(5, 31, 104);
+    a.stur(6, 31, 112);
+    a.strb_imm(31, 14, il.new_target as u32); // Undefined tag
+
+    // ---- run the callee on the shared ctx ----
+    a.mov(0, 19);
+    a.ldur(16, 12, IC_CODE_MEM);
+    a.blr(16);
+    // w0 = 1 ok / 0 threw → w1 = threw for the finish helper
+    let field1 = asm::logical_imm_w(1).unwrap();
+    a.logic_imm_w(2, 1, 0, field1); // eor w1, w0, #1
+    a.mov(0, 19);
+    a.ldr_imm(16, 21, (H_DIRECT_FINISH * 8) as u32);
+    a.blr(16); // x0 = final threw (drops, pool return, frame pop, tail drain, depth--)
+    a.mov(8, 0); // keep across the restores
+
+    // ---- restore every swapped field ----
+    a.ldr_imm(14, 19, 72); // ctx.interp (x14 was clobbered by the callee/helpers)
+    a.ldur(4, 31, 0);
+    a.str_imm(4, 19, cx_slots);
+    a.ldur(4, 31, 8);
+    a.str_imm(4, 19, cx_stack_base);
+    a.ldur(4, 31, 16);
+    a.str_imm(4, 19, cx_env_raw);
+    a.ldur(4, 31, 24);
+    a.str_imm(4, 19, cx_chunk);
+    a.ldur(4, 31, 32);
+    a.str_imm(4, 19, cx_n_slots);
+    a.ldur(4, 31, 40);
+    a.str_imm(4, 19, cx_code_base);
+    a.ldur(4, 31, 48);
+    a.str_imm(4, 19, cx_pc_offsets);
+    a.ldur(4, 31, 56);
+    a.str_imm(4, 19, cx_floor);
+    a.ldur(4, 31, 64);
+    a.ldur(5, 31, 72);
+    a.ldur(6, 31, 80);
+    a.str_imm(4, 19, cx_this);
+    a.str_imm(5, 19, cx_this + 8);
+    a.str_imm(6, 19, cx_this + 16);
+    a.ldur(4, 31, 88);
+    a.strb_imm(4, 14, il.constructing as u32);
+    a.ldur(4, 31, 96);
+    a.ldur(5, 31, 104);
+    a.ldur(6, 31, 112);
+    a.str_imm(4, 14, il.new_target as u32);
+    a.str_imm(5, 14, (il.new_target + 8) as u32);
+    a.str_imm(6, 14, (il.new_target + 16) as u32);
+    a.add_imm(31, 31, 128);
+
+    // ---- pop the callee (and skip the consumed this slot); dispatch on threw ----
+    let callee_off = -((argc as i32 + 1) * 24);
+    a.ldur(5, 20, callee_off + 8);
+    a.ldur(6, 5, strong);
+    a.sub_imm(6, 6, 1);
+    a.stur(6, 5, strong);
+    let no_free = a.new_label();
+    a.cbnz(6, true, no_free);
+    // last reference (binding deleted during the call): real drop via helper
+    a.mov(0, 19);
+    a.movz(1, 0, 0);
+    a.mov_imm64(6, (argc as u64 + 1) * 24);
+    a.sub_reg(2, 20, 6);
+    a.ldr_imm(16, 21, (H_DROP_AT * 8) as u32);
+    a.blr(16);
+    a.bind(no_free);
+    let popped = ((argc + 1 + with_this as usize) * 24) as u32;
+    a.sub_imm(20, 20, popped);
+    a.cbnz(8, true, l_unwind); // threw → caller unwind (fields restored)
+    // push ctx.ret (move: reset its tag to Undefined)
+    a.ldr_imm(4, 19, cx_ret);
+    a.ldr_imm(5, 19, cx_ret + 8);
+    a.ldr_imm(6, 19, cx_ret + 16);
+    a.stur(4, 20, 0);
+    a.stur(5, 20, 8);
+    a.stur(6, 20, 16);
+    a.strb_imm(31, 19, cx_ret);
+    a.add_imm(20, 20, 24);
+    a.b(done);
+    true
 }
 
 /// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks

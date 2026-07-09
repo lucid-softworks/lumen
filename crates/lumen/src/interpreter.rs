@@ -4962,7 +4962,10 @@ impl Interp {
                 }
                 let _ = chunk
                     .jit
-                    .set(crate::jit::compile(chunk, &layout).map(std::rc::Rc::new));
+                    .set(
+                        crate::jit::compile(chunk, &layout, &self.interp_layout.get())
+                            .map(std::rc::Rc::new),
+                    );
             }
             if let Some(Some(code)) = chunk.jit.get() {
                 jit_code = Some(code.clone());
@@ -5402,9 +5405,13 @@ impl Interp {
             uses_this: chunk.uses_this(),
             n_params: n_params as u16,
             n_slots: n_slots as u16,
-            direct: chunk.jit_direct_flags(code),
+            direct: chunk.jit_direct_flags(code)
+                | (((chunk.inline_attempted.get() || func.code2.get().is_some()) as u8) << 2),
             func: Rc::as_ptr(&func),
             epoch,
+            chunk_raw: Rc::as_ptr(chunk),
+            code_mem: code.mem_ptr(),
+            pc_offs_ptr: code.pc_offsets_ptr(),
         };
         self.construct_ics.insert(key, (ic, Rc::downgrade(o)));
         Some(ic)
@@ -5508,10 +5515,17 @@ impl Interp {
                         uses_this: chunk.uses_this(),
                         n_params: n_params as u16,
                         n_slots: n_slots as u16,
-                        direct: chunk.jit_direct_flags(code),
+                        direct: chunk.jit_direct_flags(code)
+                            | (((chunk.inline_attempted.get()
+                                || func.code2.get().is_some())
+                                as u8)
+                                << 2),
                         func: Rc::as_ptr(&func),
                         epoch: crate::bytecode::CALL_IC_EPOCH
                             .load(std::sync::atomic::Ordering::Relaxed),
+                        chunk_raw: Rc::as_ptr(chunk),
+                        code_mem: code.mem_ptr(),
+                        pc_offs_ptr: code.pc_offsets_ptr(),
                     });
                 }
             }

@@ -216,6 +216,13 @@ pub struct CallIc {
     /// [`CALL_IC_EPOCH`] at fill time; a mismatch forces a re-fill (so a fresh second-stage
     /// compile of the callee replaces the cached chunk/code pointers).
     pub epoch: u32,
+    /// `Rc::as_ptr` of the callee's chunk — what `ctx.chunk` holds (the direct-call sequence
+    /// swaps it in without the RcBox-offset arithmetic a `*const Rc<Chunk>` deref would need).
+    pub chunk_raw: *const Chunk,
+    /// The callee machine code's entry address (`JitCode::mem`).
+    pub code_mem: *const u8,
+    /// The callee's pc→code-offset table data pointer (`JitCode::pc_offsets.as_ptr()`).
+    pub pc_offs_ptr: *const u32,
 }
 
 impl CallIc {
@@ -232,6 +239,9 @@ impl CallIc {
         direct: 0,
         func: std::ptr::null(),
         epoch: 0,
+        chunk_raw: std::ptr::null(),
+        code_mem: std::ptr::null(),
+        pc_offs_ptr: std::ptr::null(),
     };
 }
 
@@ -5203,6 +5213,11 @@ impl Chunk {
     pub(crate) fn jit_no_activation(&self) -> bool {
         !self.needs_env()
     }
+    /// Byte offset of `inline_attempted` within `Chunk` (self-probed; every Chunk shares the
+    /// monomorphized layout, so the caller's offset is the callee's too).
+    pub(crate) fn jit_inline_attempted_off(&self) -> usize {
+        &self.inline_attempted as *const _ as usize - self as *const Chunk as usize
+    }
     /// [`CallIc::direct`] gates for this chunk (see its docs).
     pub(crate) fn jit_direct_flags(&self, code: &crate::jit::JitCode) -> u8 {
         let mut f = 0u8;
@@ -5368,6 +5383,17 @@ pub(crate) unsafe extern "C" fn jit_exec(
     }
 }
 
+/// Drop the single `Value` at `sp` (rare path: the direct-call sequence's callee slot when its
+/// refcount hits zero, or any slot the inline decrement can't handle).
+pub(crate) unsafe extern "C" fn jit_drop_at(
+    _ctx: *mut crate::jit::JitCtx,
+    _imm: u32,
+    sp: *mut Value,
+) -> *mut Value {
+    std::ptr::drop_in_place(sp);
+    sp
+}
+
 /// Teardown for a direct (shared-ctx) JIT→JIT call — the asm sequence already ran the callee
 /// with the ctx fields swapped to the callee's frame; this drops whatever the callee left
 /// (operand-stack range + slots, with the shared-reference decrement fast path), returns the
@@ -5419,6 +5445,9 @@ pub(crate) unsafe extern "C" fn jit_direct_finish(
             crate::jit::FRAME_BUF,
         )));
     }
+    // The callee's `this` binding lives in the shared ctx — drop it before the asm restores
+    // the caller's value over it (a plain overwrite would leak a refcounted `this` per call).
+    ctx.this_val = Value::Undefined;
     // FnFrame pop (the asm pushed it; a materialized `extra` drops here).
     if let Some(f) = i.fn_frames.pop() {
         drop(f.extra);

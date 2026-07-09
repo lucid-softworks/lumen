@@ -44,7 +44,7 @@ fn main() {
             );
             return;
         } else if a == "-v" || a == "--version" {
-            println!("lumen {}", env!("CARGO_PKG_VERSION"));
+            println!("lumen {}", full_version());
             return;
         } else {
             // First free arg is the script; the rest belong to it (visible via process.argv).
@@ -80,7 +80,7 @@ fn main() {
     } else if force_repl || std::io::stdin().is_terminal() {
         println!(
             "lumen {} (.help for help, .exit or Ctrl-D to quit)",
-            env!("CARGO_PKG_VERSION")
+            full_version()
         );
         let stdin = std::io::stdin();
         Repl::new(runtime).run(&mut stdin.lock(), &mut std::io::stdout());
@@ -152,4 +152,14 @@ fn json_type_field(json: &str) -> Option<String> {
 fn die(code: i32, message: &str) -> ! {
     eprintln!("{message}");
     std::process::exit(code);
+}
+
+/// `0.1.2`, or `0.1.2-nightly (abc1234)` when the build set LUMEN_VERSION_SUFFIX (the nightly
+/// workflow passes `-nightly (<short sha>)`).
+fn full_version() -> String {
+    format!(
+        "{}{}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("LUMEN_VERSION_SUFFIX").unwrap_or("")
+    )
 }

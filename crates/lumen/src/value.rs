@@ -64,6 +64,9 @@ pub struct SymbolData {
 pub struct JitLayout {
     /// Stored `Rc` pointer → the `Object` (through the `RcBox` header and the `RefCell` wrapper).
     pub obj_from_rc: usize,
+    /// Stored `Rc` pointer → `Rc::as_ptr` (the RcBox header size): what the call probes add to
+    /// a Value payload before comparing against a fill-time `Rc::as_ptr` identity.
+    pub gc_data_off: usize,
     /// Stored `Rc` pointer → the strong count (the `RcBox`'s first field).
     pub rc_strong_off: usize,
     pub obj_proto: usize,
@@ -136,6 +139,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         }
     };
     let as_ptr = Rc::as_ptr(sample) as usize; // → the RefCell<Object> (RcBox value field)
+    let stored_word = unsafe { *(sample as *const Gc as *const usize) };
+    let gc_data_off = as_ptr.wrapping_sub(stored_word);
     let obj_addr = &*sample.borrow() as *const Object as usize;
     let refcell_value = obj_addr - as_ptr;
 
@@ -204,6 +209,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let valid = strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
     JitLayout {
         obj_from_rc,
+        gc_data_off,
         rc_strong_off,
         obj_proto: offset_of!(Object, proto),
         obj_ic_plain: offset_of!(Object, ic_plain),

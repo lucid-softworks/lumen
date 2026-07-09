@@ -23,7 +23,12 @@ fn main() {
         .skip(1)
         .filter(|a| {
             if a == "-v" || a == "--version" {
-                println!("lumen {}", env!("CARGO_PKG_VERSION"));
+                // The nightly workflow sets LUMEN_VERSION_SUFFIX to "-nightly (<short sha>)".
+                println!(
+                    "lumen {}{}",
+                    env!("CARGO_PKG_VERSION"),
+                    option_env!("LUMEN_VERSION_SUFFIX").unwrap_or("")
+                );
                 std::process::exit(0);
             }
             if a == "--module" {
