@@ -2196,30 +2196,59 @@ impl Interp {
         }
         .cloned()
         .unwrap_or_else(|| self.function_proto.clone());
-        let obj = Object::new(Some(fn_proto));
-        let arity = func
-            .params
-            .iter()
-            .take_while(|p| p.default.is_none() && !p.rest)
-            .count();
-        let name = func.name.clone().unwrap_or_default();
-        {
-            let mut b = obj.borrow_mut();
-            b.call = Callable::User(func, env);
-            b.props.insert(
-                crate::value::fn_key(0), // "length"
-                Property::data(Value::Num(arity as f64), false, false, true),
-            );
-            b.props.insert(
-                crate::value::fn_key(1), // "name"
-                Property::data(Value::from_string(name), false, false, true),
-            );
-        }
         // A `prototype` is present on ordinary functions and on generators — sync OR async (even
         // generator methods); arrows, plain async functions, and concise methods/getters/setters have
         // none. A generator's `.prototype` chains to %GeneratorPrototype% / %AsyncGeneratorPrototype%
         // (an ordinary function's is a plain object). Only ordinary functions are constructors.
         let has_prototype = !is_arrow && (is_generator || (!is_async && !is_method));
+        // Per-FUNCTION map templates (see `ast::Function::fn_maps`): the shape transitions, key
+        // hashing, and the name string are paid once; every closure instance clones the finished
+        // maps (entry-vector copy, refcount bumps) and patches the two identity-dependent values
+        // in place — value writes never touch the shape.
+        let (fn_map, proto_map) = func.fn_maps.get_or_init(|| {
+            let arity = func
+                .params
+                .iter()
+                .take_while(|p| p.default.is_none() && !p.rest)
+                .count();
+            let name = func.name.clone().unwrap_or_default();
+            let mut p = crate::value::Props::new();
+            p.insert(
+                crate::value::fn_key(0), // "length"
+                Property::data(Value::Num(arity as f64), false, false, true),
+            );
+            p.insert(
+                crate::value::fn_key(1), // "name"
+                Property::data(Value::from_string(name), false, false, true),
+            );
+            if has_prototype {
+                p.insert(
+                    crate::value::fn_key(2), // "prototype" (placeholder value; patched per clone)
+                    Property::data(Value::Undefined, true, false, false),
+                );
+            }
+            let pp = if has_prototype {
+                let mut q = crate::value::Props::new();
+                // A generator's `.prototype` has no own `constructor` (the methods live on the
+                // intrinsic).
+                if !is_generator {
+                    q.insert(
+                        crate::value::fn_key(3), // "constructor" (placeholder; patched per clone)
+                        Property::builtin(Value::Undefined),
+                    );
+                }
+                Some(q)
+            } else {
+                None
+            };
+            (p, pp)
+        });
+        let obj = Object::new(Some(fn_proto));
+        {
+            let mut b = obj.borrow_mut();
+            b.call = Callable::User(func.clone(), env);
+            b.props = fn_map.clone();
+        }
         if has_prototype {
             let proto_parent = match (is_generator, is_async) {
                 (true, false) => self.extra_protos.get("%GeneratorPrototype%").cloned(),
@@ -2228,17 +2257,20 @@ impl Interp {
             }
             .or_else(|| Some(self.object_proto.clone()));
             let proto = Object::new(proto_parent);
-            // A generator's `.prototype` has no own `constructor` (the methods live on the intrinsic).
-            if !is_generator {
-                proto.borrow_mut().props.insert(
-                    crate::value::fn_key(3), // "constructor"
-                    Property::builtin(Value::Obj(obj.clone())),
-                );
+            {
+                let mut pb = proto.borrow_mut();
+                pb.props = proto_map.as_ref().expect("prototype template").clone();
+                if !is_generator {
+                    pb.props.entry_at_mut(0).expect("constructor slot").1.value =
+                        Value::Obj(obj.clone());
+                }
             }
-            obj.borrow_mut().props.insert(
-                crate::value::fn_key(2), // "prototype"
-                Property::data(Value::Obj(proto), true, false, false),
-            );
+            obj.borrow_mut()
+                .props
+                .entry_at_mut(2)
+                .expect("prototype slot")
+                .1
+                .value = Value::Obj(proto);
         }
         if !is_arrow && !is_method && !is_async && !is_generator {
             obj.borrow_mut().is_constructor = true;

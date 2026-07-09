@@ -423,6 +423,12 @@ pub struct Function {
     /// `bytecode::plan_inlines`). Preferred over `code` wherever a chunk is fetched; `code`
     /// stays alive because filled call ICs hold raw pointers into it.
     pub code2: std::cell::OnceCell<Option<Rc<crate::bytecode::Chunk>>>,
+    /// Lazily-built object-map templates for closures of this function (see
+    /// `Interp::make_function`): the function object's `Props` (length/name and a `prototype`
+    /// placeholder) and, for prototype-bearing kinds, the fresh `.prototype`'s `Props` — cloned
+    /// per closure instance instead of rebuilt insert by insert, so key hashing and shape
+    /// transitions are paid once per FUNCTION rather than once per closure.
+    pub fn_maps: std::cell::OnceCell<(crate::value::Props, Option<crate::value::Props>)>,
 }
 
 /// One pre-scanned hoisting action for a statement list, replayed against a scope at function

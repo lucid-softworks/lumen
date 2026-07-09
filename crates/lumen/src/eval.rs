@@ -5118,6 +5118,35 @@ impl Interp {
         Value::Obj(obj)
     }
 
+    /// [`Interp::make_plain_object_vm`] through a per-site pre-shaped map (distinct keys only —
+    /// the compiler guarantees it): the first execution builds the final `Props` once via the
+    /// insert path with placeholder values; every later instance clones it (entry-vector copy,
+    /// key refcount bumps) and writes the values slot by slot — no hashing, no shape
+    /// transitions. Values arrive in key order, one slot per key.
+    pub(crate) fn make_plain_object_templated(
+        &mut self,
+        tmpl: &std::cell::OnceCell<crate::value::Props>,
+        keys: &[std::rc::Rc<str>],
+        values: Vec<Value>,
+    ) -> Value {
+        let map = tmpl.get_or_init(|| {
+            let mut p = crate::value::Props::new();
+            for k in keys {
+                p.insert(k.clone(), crate::value::Property::plain(Value::Undefined));
+            }
+            p
+        });
+        let obj = crate::value::Object::new(Some(self.object_proto.clone()));
+        {
+            let mut b = obj.borrow_mut();
+            b.props = map.clone();
+            for (slot, v) in values.into_iter().enumerate() {
+                b.props.entry_at_mut(slot).expect("template slot").1.value = v;
+            }
+        }
+        Value::Obj(obj)
+    }
+
     fn eval_unary(&mut self, op: &str, arg: &Expr, env: &Env) -> Result<Value, Abrupt> {
         if op == "typeof" {
             // typeof on an unresolved identifier yields "undefined" rather than throwing.
@@ -6640,6 +6669,7 @@ fn default_constructor(derived: bool) -> Function {
         calls: std::cell::Cell::new(0),
         code: std::cell::OnceCell::new(),
         code2: std::cell::OnceCell::new(),
+            fn_maps: std::cell::OnceCell::new(),
         name: None,
         params,
         body,

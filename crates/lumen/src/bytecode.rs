@@ -508,7 +508,7 @@ pub enum Op {
     New(u16),
     MakeArray(u16),
     /// Object literal: `count` plain data keys starting at names[start], values on the stack.
-    MakeObject(u32, u16),
+    MakeObject(u32, u16, u32),
     Throw,
     Return,
     ReturnUndef,
@@ -568,6 +568,10 @@ pub struct Chunk {
     /// `Chunk` is shared across calls via `Rc`, so these persist. `Cell` is fine: the VM runs one
     /// thread at a time (coroutine ping-pong), like the rest of the engine's shared-`Rc` state.
     caches: Vec<std::cell::Cell<IcState>>,
+    /// One pre-shaped `Props` template per plain object-literal site (`Op::MakeObject`'s third
+    /// operand indexes this; `u32::MAX` = duplicate keys, take the insert path). Built on first
+    /// execution, cloned per instance — key hashing and shape transitions paid once per SITE.
+    obj_maps: Vec<std::cell::OnceCell<crate::value::Props>>,
     /// One [`NameIc`] slot per free-name op (`LoadName`/`LoadNameForCall`), persisting across
     /// calls like `caches`.
     name_caches: Vec<std::cell::Cell<NameIc>>,
@@ -1611,6 +1615,7 @@ fn compile_inner(
         funcs: c.funcs,
         cap_inits: c.cap_inits,
         env_this: c.env_this,
+        obj_maps: (0..c.obj_maps).map(|_| std::cell::OnceCell::new()).collect(),
         caches: c.caches,
         name_pins: std::cell::RefCell::new(vec![None; c.name_caches.len()]),
         name_caches: c.name_caches,
@@ -1780,6 +1785,8 @@ struct Compiler {
     /// loop's `LoopCtx` (drained when that loop pushes its context).
     pending_labels: Vec<String>,
     uses_this: bool,
+    /// Count of object-literal template sites handed out (see `Chunk::obj_maps`).
+    obj_maps: u32,
     caches: Vec<std::cell::Cell<IcState>>,
     name_caches: Vec<std::cell::Cell<NameIc>>,
     call_caches: Vec<CallSite>,
@@ -3876,7 +3883,19 @@ impl Compiler {
                 for k in &keys {
                     self.names.push(Rc::from(k.as_str()));
                 }
-                self.emit(Op::MakeObject(start, count));
+                // Distinct keys → a pre-shaped template site ({a:1, a:2} keeps the insert path:
+                // the template's slot-indexed value writes assume one slot per key).
+                let tidx = {
+                    let mut sorted: Vec<&String> = keys.iter().collect();
+                    sorted.sort();
+                    if count > 0 && sorted.windows(2).all(|w| w[0] != w[1]) {
+                        self.obj_maps += 1;
+                        self.obj_maps - 1
+                    } else {
+                        u32::MAX
+                    }
+                };
+                self.emit(Op::MakeObject(start, count, tidx));
                 Ok(())
             }
             other => {
@@ -4806,13 +4825,15 @@ fn run_vm(
                 let items: Vec<Value> = stack.split_off(at);
                 stack.push(i.make_array(items));
             }
-            Op::MakeObject(start, count) => {
+            Op::MakeObject(start, count, tidx) => {
                 let at = stack.len() - count as usize;
                 let values: Vec<Value> = stack.split_off(at);
-                let v = i.make_plain_object_vm(
-                    &chunk.names[start as usize..start as usize + count as usize],
-                    values,
-                );
+                let keys = &chunk.names[start as usize..start as usize + count as usize];
+                let v = if tidx != u32::MAX {
+                    i.make_plain_object_templated(&chunk.obj_maps[tidx as usize], keys, values)
+                } else {
+                    i.make_plain_object_vm(keys, values)
+                };
                 stack.push(v);
             }
             Op::ToStr => {
@@ -5387,7 +5408,7 @@ impl Chunk {
             Op::CallWithThis(argc, _) => (*argc as usize + 2, 1),
             Op::New(argc) => (*argc as usize + 1, 1),
             Op::MakeArray(n) => (*n as usize, 1),
-            Op::MakeObject(_, count) => (*count as usize, 1),
+            Op::MakeObject(_, count, _) => (*count as usize, 1),
             Op::Throw | Op::Return => (1, 0),
             Op::ReturnUndef => (0, 0),
             Op::Await => (1, 1),
@@ -6508,7 +6529,7 @@ unsafe fn jit_exec_inner(
             *sp = base;
             push!(i.make_array(items));
         }
-        Op::MakeObject(start, count) => {
+        Op::MakeObject(start, count, tidx) => {
             let count = count as usize;
             let mut values = Vec::with_capacity(count);
             let base = sp.sub(count);
@@ -6516,8 +6537,12 @@ unsafe fn jit_exec_inner(
                 values.push(base.add(k).read());
             }
             *sp = base;
-            let v = i
-                .make_plain_object_vm(&chunk.names[start as usize..start as usize + count], values);
+            let keys = &chunk.names[start as usize..start as usize + count];
+            let v = if tidx != u32::MAX {
+                i.make_plain_object_templated(&chunk.obj_maps[tidx as usize], keys, values)
+            } else {
+                i.make_plain_object_vm(keys, values)
+            };
             push!(v);
         }
         Op::ToStr => {

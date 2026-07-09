@@ -1140,6 +1140,7 @@ fn dec_function(r: &mut Reader) -> R<Function> {
         calls: Cell::new(0),
         code: OnceCell::new(),
         code2: OnceCell::new(),
+        fn_maps: OnceCell::new(),
     })
 }
 

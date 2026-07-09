@@ -679,6 +679,7 @@ impl Property {
 
 /// Insertion-ordered string-keyed property map. A `Vec` of entries preserves order (good enough for
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
+#[derive(Clone)]
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
     index: crate::fasthash::FastMap<Rc<str>, usize>,
@@ -883,6 +884,15 @@ pub(crate) fn index_key(n: usize) -> Rc<str> {
 /// Interned `"length"` / `"name"` / `"prototype"` / `"constructor"` keys (see `FN_KEYS`).
 pub(crate) fn fn_key(i: usize) -> Rc<str> {
     FN_KEYS.with(|k| k[i].clone())
+}
+
+impl std::fmt::Debug for Props {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Props")
+            .field("entries", &self.entries.len())
+            .field("shape", &self.shape)
+            .finish()
+    }
 }
 
 impl Default for Props {
