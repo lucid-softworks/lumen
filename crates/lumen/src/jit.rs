@@ -1863,6 +1863,27 @@ pub fn compile(
     }
 
     let words = a.finish();
+    // Debug: `LUMEN_JIT_CODEDUMP=<substr>` prints the finished code words (hex, one per line)
+    // of chunks whose leading slot names contain the substring — round-trip them through
+    // `clang -c` + `objdump -d` for a disassembly of exactly what runs. Any value also prints
+    // a `[jit-map]` line per compiled chunk (runtime base + length), which joins a `sample`
+    // profile's raw addresses to chunk-relative offsets.
+    let codedump_pat = std::env::var("LUMEN_JIT_CODEDUMP").ok();
+    if let Some(pat) = &codedump_pat {
+        let head: Vec<&str> = chunk
+            .jit_slot_names()
+            .iter()
+            .take(4)
+            .map(|s| &**s)
+            .collect();
+        let name = head.join(",");
+        if !pat.is_empty() && name.contains(pat.as_str()) {
+            eprintln!("[jit-codedump] fn({name}) {} words", words.len());
+            for w in &words {
+                eprintln!("[jit-codedump] {w:08x}");
+            }
+        }
+    }
     let len = words.len() * 4;
     unsafe {
         let mem = sys::mmap(
@@ -1880,6 +1901,19 @@ pub fn compile(
         std::ptr::copy_nonoverlapping(words.as_ptr() as *const u8, mem, len);
         sys::pthread_jit_write_protect_np(1);
         sys::sys_icache_invalidate(mem, len);
+        if codedump_pat.is_some() {
+            let head: Vec<&str> = chunk
+                .jit_slot_names()
+                .iter()
+                .take(4)
+                .map(|s| &**s)
+                .collect();
+            eprintln!(
+                "[jit-map] fn({}) base={:#x} len={len}",
+                head.join(","),
+                mem as usize
+            );
+        }
         Some(JitCode {
             needs_global: ops
                 .iter()
@@ -6221,11 +6255,19 @@ fn plan_loop(
         });
     }
     if fast & 262144 != 0 {
-        for rp in rplans.iter_mut() {
+        // Heaviest-accessed receiver first, and its FULL pin set before the next receiver
+        // gets any: in the lin_solve shape one array carries 5 of 6 accesses per iteration —
+        // splitting pins evenly left its mirror data pointer reloading every access.
+        let weight = |off: u32| {
+            elem_reads.iter().filter(|&&(_, r, _)| r == off).count()
+                + elem_writes.iter().filter(|&&(_, r)| r == off).count()
+        };
+        let mut order: Vec<usize> = (0..rplans.len()).collect();
+        order.sort_by_key(|&k| std::cmp::Reverse(weight(rplans[k].off)));
+        for k in order {
+            let rp = &mut rplans[k];
             rp.mlreg = free_pin_x.pop();
             rp.mpreg = free_pin_x.pop();
-        }
-        for rp in rplans.iter_mut() {
             if written.contains(&rp.off) {
                 rp.elpreg = free_pin_x.pop();
                 rp.enreg = free_pin_x.pop();
@@ -6522,6 +6564,12 @@ fn emit_loop_chain(
         })
         .collect();
     let mut free_d: Vec<u32> = (16..24).rev().collect();
+    // Loads push ALIASES of resident registers (zero-copy: consumers never clobber their
+    // operands — Arith/Neg/Bit write fresh destinations). The pools only take back their own:
+    // a freed alias of an I/F home or a name home silently stays out.
+    let pool_i: Vec<u32> = free_i.clone();
+    let is_pool_i = |x: u32| pool_i.contains(&x);
+    let is_pool_d = |d: u32| (16..24).contains(&d);
 
     macro_rules! emit_pass {
         ($range:expr, $exit:expr, $base_virgins:expr) => {{
@@ -6577,6 +6625,29 @@ fn emit_loop_chain(
                         dead.push($v)
                     };
                 }
+                // Materialize any live vstack alias of a resident register about to be
+                // overwritten (an Update/Store to its slot): the pushed value must keep the
+                // OLD contents. Runs after the pre-op snapshot (bails read the still-unmutated
+                // resident) and before the mutation.
+                macro_rules! flush_aliases {
+                    ($home:expr, $is_f:expr) => {{
+                        for k in 0..vstack.len() {
+                            match vstack[k] {
+                                LV::D(d, iv) if $is_f && d == $home => {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.fmov_d_d(dt, d);
+                                    vstack[k] = LV::D(dt, iv);
+                                }
+                                LV::I(x, ng) if !$is_f && x == $home => {
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.mov(xt, x);
+                                    vstack[k] = LV::I(xt, ng);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }};
+                }
                 macro_rules! to_d {
                     // Value into a d-register; the original register is deferred-freed, so the
                     // caller owns the result only if the source was already D.
@@ -6601,11 +6672,11 @@ fn emit_loop_chain(
                 macro_rules! key_to_x9 {
                     ($v:expr) => {
                         match $v {
-                            LV::I(x, neg) => {
-                                if neg {
-                                    a.cmp_imm_x(x, 0);
-                                    a.b_cond(11, guard!()); // LT
-                                }
+                            LV::I(x, _neg) => {
+                                // No explicit negative check: LV::I is a sign-extended exact
+                                // i32, and every consumer's FIRST use of x9 is an unsigned
+                                // bounds compare against a vector length — a negative reads
+                                // as ≥ 2^63 and takes the same bail the explicit check did.
                                 a.mov(9, x);
                                 dead.push(LV::I(x, false));
                             }
@@ -6657,15 +6728,12 @@ fn emit_loop_chain(
                         let s = slot(off).expect("planned slot");
                         match s.res {
                             SlotRes::F(dres) => {
-                                let dt = free_d.pop().expect("loop d pool");
-                                a.fmov_d_d(dt, dres);
+                                // Zero-copy alias of the home (see the pool filter).
                                 let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
-                                vstack.push(LV::D(dt, iv));
+                                vstack.push(LV::D(dres, iv));
                             }
                             SlotRes::I(xres) => {
-                                let xt = free_i.pop().expect("loop i pool");
-                                a.mov(xt, xres);
-                                vstack.push(LV::I(xt, true));
+                                vstack.push(LV::I(xres, true));
                             }
                             SlotRes::None => {
                                 a.ldrb_imm(9, 22, off);
@@ -6680,6 +6748,11 @@ fn emit_loop_chain(
                     }
                     ChainOp::Update(off, kind) => {
                         let s = slot(off).expect("planned slot");
+                        match s.res {
+                            SlotRes::F(d) => flush_aliases!(d, true),
+                            SlotRes::I(x) => flush_aliases!(x, false),
+                            SlotRes::None => {}
+                        }
                         let dec = matches!(
                             kind,
                             UpdKind::PreDec | UpdKind::PostDec | UpdKind::DecDiscard
@@ -6688,27 +6761,26 @@ fn emit_loop_chain(
                             SlotRes::I(xres) => {
                                 // The entry guard proved exact i32; a flag-setting w-form ±1
                                 // keeps it (V = left i32 = bail), far from f64's 2^53 edge.
+                                // The guard fires before any mutation, so the sign-extend can
+                                // land straight in the resident.
                                 if dec {
                                     a.subs_imm_w(9, xres, 1);
                                 } else {
                                     a.adds_imm_w(9, xres, 1);
                                 }
                                 a.b_cond(C_VS, guard!());
-                                a.sxtw(9, 9);
                                 match kind {
                                     UpdKind::PostInc | UpdKind::PostDec => {
                                         let xt = free_i.pop().expect("loop i pool");
                                         a.mov(xt, xres);
-                                        a.mov(xres, 9);
+                                        a.sxtw(xres, 9);
                                         vstack.push(LV::I(xt, true));
                                     }
                                     UpdKind::PreInc | UpdKind::PreDec => {
-                                        a.mov(xres, 9);
-                                        let xt = free_i.pop().expect("loop i pool");
-                                        a.mov(xt, xres);
-                                        vstack.push(LV::I(xt, true));
+                                        a.sxtw(xres, 9);
+                                        vstack.push(LV::I(xres, true));
                                     }
-                                    _ => a.mov(xres, 9),
+                                    _ => a.sxtw(xres, 9),
                                 }
                             }
                             SlotRes::F(dres) => {
@@ -7010,12 +7082,16 @@ fn emit_loop_chain(
                             free_v!(b);
                             vstack.push(LV::I(xt, neg));
                         } else {
+                            // Fresh destination: operands may be zero-copy aliases of resident
+                            // registers (f_arith is 3-operand, so this costs nothing).
                             let db = to_d!(b);
                             let da = to_d!(a_);
-                            a.f_arith(f, da, da, db);
+                            let dt = free_d.pop().expect("loop d pool");
+                            a.f_arith(f, dt, da, db);
+                            dead.push(LV::D(da, false));
                             dead.push(LV::D(db, false));
                             let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
-                            vstack.push(LV::D(da, iv));
+                            vstack.push(LV::D(dt, iv));
                         }
                     }
                     ChainOp::Bit(code) => {
@@ -7097,13 +7173,20 @@ fn emit_loop_chain(
                     ChainOp::Neg => {
                         let v = vstack.pop().expect("loop vstack");
                         let d = to_d!(v);
-                        a.fneg(d, d);
+                        let dt = free_d.pop().expect("loop d pool");
+                        a.fneg(dt, d);
+                        dead.push(LV::D(d, false));
                         let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
-                        vstack.push(LV::D(d, iv));
+                        vstack.push(LV::D(dt, iv));
                     }
                     ChainOp::Store(off) => {
                         let v = vstack.pop().expect("loop vstack");
                         let s = slot(off).expect("planned slot");
+                        match s.res {
+                            SlotRes::F(d) => flush_aliases!(d, true),
+                            SlotRes::I(x) => flush_aliases!(x, false),
+                            SlotRes::None => {}
+                        }
                         match s.res {
                             SlotRes::F(dres) => match v {
                                 LV::D(d, _) => {
@@ -7164,15 +7247,26 @@ fn emit_loop_chain(
                         let v = *vstack.last().expect("loop vstack");
                         match v {
                             LV::K(bits) => vstack.push(LV::K(bits)),
+                            // Aliases duplicate for free (nothing clobbers them; the pool
+                            // filter blocks their double-free). Owned temps still copy — the
+                            // two entries free independently.
                             LV::I(x, neg) => {
-                                let xt = free_i.pop().expect("loop i pool");
-                                a.mov(xt, x);
-                                vstack.push(LV::I(xt, neg));
+                                if is_pool_i(x) {
+                                    let xt = free_i.pop().expect("loop i pool");
+                                    a.mov(xt, x);
+                                    vstack.push(LV::I(xt, neg));
+                                } else {
+                                    vstack.push(LV::I(x, neg));
+                                }
                             }
                             LV::D(d, iv) => {
-                                let dt = free_d.pop().expect("loop d pool");
-                                a.fmov_d_d(dt, d);
-                                vstack.push(LV::D(dt, iv));
+                                if is_pool_d(d) {
+                                    let dt = free_d.pop().expect("loop d pool");
+                                    a.fmov_d_d(dt, d);
+                                    vstack.push(LV::D(dt, iv));
+                                } else {
+                                    vstack.push(LV::D(d, iv));
+                                }
                             }
                         }
                     }
@@ -7208,6 +7302,24 @@ fn emit_loop_chain(
                                 a.b_cond(int_neg, $exit);
                                 dead.push(LV::I(xa, false));
                             }
+                            // One side exact-int in a register, the other a PROVEN-integral
+                            // f64 (an int-checked name/preload): a bare x-form fcvtzs is exact,
+                            // so the compare stays integer — the loop-head `i < width` pattern,
+                            // otherwise a per-iteration scvtf + fcmp on the branch path.
+                            (LV::I(xa, _), LV::D(db, true)) => {
+                                a.fcvtzs_x_d(9, db);
+                                a.cmp_reg_x(xa, 9);
+                                a.b_cond(int_neg, $exit);
+                                dead.push(LV::I(xa, false));
+                                dead.push(LV::D(db, false));
+                            }
+                            (LV::D(da, true), LV::I(xb, _)) => {
+                                a.fcvtzs_x_d(9, da);
+                                a.cmp_reg_x(9, xb);
+                                a.b_cond(int_neg, $exit);
+                                dead.push(LV::D(da, false));
+                                dead.push(LV::I(xb, false));
+                            }
                             (a2, LV::K(bits)) if f64::from_bits(bits) == 0.0 => {
                                 let da = to_d!(a2);
                                 a.fcmp_zero(da);
@@ -7225,17 +7337,14 @@ fn emit_loop_chain(
                         }
                     }
                     ChainOp::LoadName(ptr) => {
-                        // Preamble-pinned: copy the home into a transient (consumers clobber
-                        // their operand registers), like an F-resident slot load.
+                        // Preamble-pinned, never written in-region: a zero-copy alias.
                         let np = plan
                             .names
                             .iter()
                             .find(|n| n.ptr == ptr)
                             .expect("planned name");
-                        let dt = free_d.pop().expect("loop d pool");
-                        a.fmov_d_d(dt, np.dreg);
                         let iv = matches!(plan.kinds[idx], PushKind::D { iv: true });
-                        vstack.push(LV::D(dt, iv));
+                        vstack.push(LV::D(np.dreg, iv));
                     }
                 }
                 if used {
@@ -7243,9 +7352,9 @@ fn emit_loop_chain(
                 }
                 for v in dead {
                     match v {
-                        LV::I(x, _) => free_i.push(x),
-                        LV::D(d, _) => free_d.push(d),
-                        LV::K(_) => {}
+                        LV::I(x, _) if is_pool_i(x) => free_i.push(x),
+                        LV::D(d, _) if is_pool_d(d) => free_d.push(d),
+                        _ => {}
                     }
                 }
             }
