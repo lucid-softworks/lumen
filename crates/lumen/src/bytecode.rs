@@ -137,13 +137,20 @@ pub const IC_CREATE: u8 = 0xFD;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct NameIc {
-    /// `Rc::as_ptr` of the scope at cache time (0 = empty; low bit set = global-object mode).
+    /// `Rc::as_ptr` of the scope at cache time (0 = empty). Low tag bits (scope allocations
+    /// are ≥8-aligned): bit 0 = global-object mode; bit 1 = depth-1 mode, where the pointer
+    /// is the current env's PARENT — the current env is this chunk's activation, whose fresh
+    /// per-call pointer could never hit an exact compare (see `Chunk::name_ic_fill`).
     pub env: usize,
     /// Scope mode: the resolved `&Binding` within that scope's map. Global mode: shape<<32|slot.
     /// `u64` (not `usize`) so the packing is well-defined on 32-bit targets (wasm).
     pub binding: u64,
+    /// Generation of the map holding `binding` at fill time (structural changes invalidate).
     pub gen: u32,
-    pub _pad: u32,
+    /// Depth-1 mode: the activation's post-construction generation — chunk-determined (the
+    /// cap_inits insert count), so it validates EVERY fresh activation of this chunk while
+    /// catching a sloppy inner eval's var hoisted into a live one. 0 otherwise.
+    pub act_gen: u32,
 }
 
 impl NameIc {
@@ -151,7 +158,7 @@ impl NameIc {
         env: 0,
         binding: 0,
         gen: 0,
-        _pad: 0,
+        act_gen: 0,
     };
 }
 
@@ -5580,6 +5587,30 @@ impl Chunk {
             }
             return Some(p.value.clone());
         }
+        if ic.env & 2 != 0 {
+            // Depth-1 mode (see NameIc): `env` is this chunk's fresh activation. Its expected
+            // generation proves it holds exactly the chunk's cap_inits — which can never
+            // include a LoadName'd free name — so the parent resolution still applies; the
+            // parent's generation proves the binding pointer live and unmoved.
+            let b = env.borrow();
+            if b.vars.generation() != ic.act_gen {
+                return None;
+            }
+            let p = b.parent.as_ref()?;
+            if Rc::as_ptr(p) as usize | 2 != ic.env {
+                return None;
+            }
+            let pb = p.borrow();
+            if pb.vars.generation() != ic.gen {
+                return None;
+            }
+            let bd = unsafe { &*(ic.binding as usize as *const crate::interpreter::Binding) };
+            return if bd.initialized {
+                Some(bd.value.clone())
+            } else {
+                None
+            };
+        }
         None
     }
     /// Depth-0 cache fill: the name resolves directly in `env` as a plain initialized binding —
@@ -5602,12 +5633,42 @@ impl Chunk {
                     env: Rc::as_ptr(env) as usize,
                     binding: bd as *const _ as usize as u64,
                     gen: b.vars.generation(),
-                    _pad: 0,
+                    act_gen: 0,
                 });
                 drop(b);
                 // Pin the scope allocation so the raw `env` compare stays ABA-safe.
                 self.name_pins.borrow_mut()[c as usize] = Some(Rc::downgrade(env));
                 return Some(v);
+            }
+            // Depth-1 fill, ONLY for a chunk that runs under an activation: `env` is then that
+            // activation — fresh pointer every call (the depth-0 mode above can never hit) but
+            // chunk-determined CONTENTS, so its generation alone re-proves "this name still
+            // isn't shadowed here" on any later activation. Never valid for no-activation
+            // chunks: their run env is a closure-instance-specific scope whose generation says
+            // nothing about which names it holds.
+            if self.needs_env() {
+                if let Some(p) = &b.parent {
+                    let pb = p.borrow();
+                    if pb.with_obj.is_none() {
+                        if let Some(bd) = pb.vars.get(&*self.names[n as usize]) {
+                            if bd.initialized && bd.import_ref.is_none() {
+                                let v = bd.value.clone();
+                                self.name_caches[c as usize].set(NameIc {
+                                    env: Rc::as_ptr(p) as usize | 2,
+                                    binding: bd as *const _ as usize as u64,
+                                    gen: pb.vars.generation(),
+                                    act_gen: b.vars.generation(),
+                                });
+                                let pin = Rc::downgrade(p);
+                                drop(pb);
+                                drop(b);
+                                // Pin the PARENT: that's the raw pointer the hit compares.
+                                self.name_pins.borrow_mut()[c as usize] = Some(pin);
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
             }
         }
         // Global mode: only when there are no intermediate scopes whose later mutation could
@@ -5629,7 +5690,7 @@ impl Chunk {
             env: Rc::as_ptr(env) as usize | 1,
             binding: ((g.props.shape() as u64) << 32) | slot as u64,
             gen: env.borrow().vars.generation(),
-            _pad: 0,
+            act_gen: 0,
         });
         drop(g);
         self.name_pins.borrow_mut()[c as usize] = Some(Rc::downgrade(env));
