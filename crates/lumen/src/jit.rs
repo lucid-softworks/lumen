@@ -1659,6 +1659,51 @@ pub fn compile(
                 a.stur(9, 20, 8);
                 a.add_imm(20, 20, 24);
             }
+            // String consts: copy the 24-byte Value from its stable chunk slot and bump the
+            // LStr strong count — parser-shaped code pushes literal strings millions of times
+            // (meriyah's token kinds, astring's syntax fragments).
+            Op::Const(k)
+                if fast & 128 != 0 && rc_ok && layout.rc_strong_off == 0
+                    && chunk.jit_const_is_str(*k) =>
+            {
+                a.mov_imm64(9, chunk.jit_const_ptr(*k) as u64);
+                a.ldr_imm(10, 9, 0);
+                a.ldr_imm(11, 9, 8);
+                a.ldr_imm(12, 9, 16);
+                a.stur(10, 20, 0);
+                a.stur(11, 20, 8);
+                a.stur(12, 20, 16);
+                a.ldur(13, 11, 0); // strong (payload+0)
+                a.add_imm(13, 13, 1);
+                a.stur(13, 11, 0);
+                a.add_imm(20, 20, 24);
+            }
+            // TDZ entry: the slot becomes `Empty` (tag 1). The old value drops in place —
+            // trivially for tags < 5, by a bare shared-reference decrement for refcounted
+            // tags; a BigInt or a last reference re-runs the (idempotent) op via the helper.
+            Op::Tdz(slot) if fast & 16 != 0 && rc_ok && (*slot as u32) * 24 + 16 < 4096 => {
+                let off = *slot as u32 * 24;
+                let slow = a.new_label();
+                let done = a.new_label();
+                let plain = a.new_label();
+                a.ldrb_imm(9, 22, off);
+                a.cmp_imm_w(9, 5);
+                a.b_cond(C_LO, plain);
+                a.b_cond(C_EQ, slow); // BigInt → helper
+                a.ldr_imm(10, 22, off + 8);
+                a.ldur(11, 10, rc_strong);
+                a.cmp_imm_x(11, 1);
+                a.b_cond(C_LS, slow); // last reference → real drop via helper
+                a.sub_imm(11, 11, 1);
+                a.stur(11, 10, rc_strong);
+                a.bind(plain);
+                a.movz(9, 1, 0); // Empty tag (payload stale; tag-only reads)
+                a.strb_imm(9, 22, off);
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
             // Fused slot resets (spliced-callee var hoisting): plain tags overwrite in place
             // with a single byte store; refcounted values (the receiver-array vars of a spliced
             // bignum kernel, typically) decrement inline while shared. Only a last-reference

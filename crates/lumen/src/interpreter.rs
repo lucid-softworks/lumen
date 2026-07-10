@@ -2519,8 +2519,40 @@ impl Interp {
         name: &str,
         st: crate::bytecode::IcState,
     ) -> Option<Value> {
-        use crate::bytecode::{IC_ARR_KEYCHK, IC_EMPTY};
+        use crate::bytecode::{IC_ABSENT, IC_ARR_KEYCHK, IC_EMPTY};
         let _ = IC_EMPTY;
+        // Cached absence: re-walk the live chain, validating each level's shape (and the same
+        // plainness/exotic gates a rederive would demand). All shapes matching proves the key
+        // is still absent everywhere — the read is `undefined` with no entry scan at all.
+        if st.depth == IC_ABSENT {
+            let shapes = [st.recv_shape, st.mid_shape, st.mid2_shape, st.holder_shape];
+            let levels = st.slot as usize;
+            if levels == 0 || levels > 4 {
+                return None;
+            }
+            let mut cur = head;
+            for (k, &shape) in shapes.iter().take(levels).enumerate() {
+                let b = unsafe { (*cur).borrow() };
+                if !(matches!(b.exotic, Exotic::None)
+                    && self.ordinary_get_ptr(cur as usize)
+                    && b.props.shape() == shape)
+                {
+                    return None;
+                }
+                match b.proto.as_ref() {
+                    Some(p) => cur = Rc::as_ptr(p),
+                    None => {
+                        return if k + 1 == levels {
+                            Some(Value::Undefined)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            // Chain grew a level (a proto was attached where the fill saw the end).
+            return None;
+        }
         // Key-checked entries (array holder — see `IC_ARR_KEYCHK`): decode the flag off the
         // depth. The `< 0x80` range check filters `IC_CREATE`/`IC_EMPTY`.
         if st.depth >= 0x80 {
@@ -2620,12 +2652,21 @@ impl Interp {
         // a shape match couldn't prove an index-like name is still absent).
         let mut mid = None;
         let mut mid2 = None;
+        // Level shapes for an absent-property fill (see `IC_ABSENT`): valid only while every
+        // level so far is a plain `Exotic::None` object (exotics answer some names outside
+        // their entries — a wrapper's `length` — so absence-of-entry proves nothing there).
+        let mut absent_shapes: [u32; 4] = [0; 4];
+        let mut absent_ok = true;
         unsafe {
             for depth in 0..=IC_MAX_DEPTH {
                 let b = (*cur).borrow();
                 if !self.ic_plain_ptr(cur as usize, &b) {
                     return None;
                 }
+                if (depth as usize) < 4 {
+                    absent_shapes[depth as usize] = b.props.shape();
+                }
+                absent_ok = absent_ok && matches!(b.exotic, Exotic::None);
                 if let Some(slot) = b.props.slot_of(name) {
                     let (_, p) = b.props.entry_at(slot).unwrap();
                     if p.accessor {
@@ -2673,7 +2714,30 @@ impl Interp {
                 }
                 match b.proto.as_ref() {
                     Some(p) => cur = Rc::as_ptr(p),
-                    None => return None, // chain ended: absent property — slow path
+                    None => {
+                        // Chain ended: the property is absent. Cache that (the cheapest read
+                        // there is) when every level was a plain ordinary object and the
+                        // chain fits the four shape fields.
+                        let levels = depth as usize + 1;
+                        if absent_ok && levels <= 4 {
+                            let st = IcState {
+                                depth: crate::bytecode::IC_ABSENT,
+                                slot: levels as u32,
+                                recv_shape: absent_shapes[0],
+                                holder_shape: absent_shapes[3],
+                                mid_ok: 0,
+                                mid_shape: absent_shapes[1],
+                                mid2_shape: absent_shapes[2],
+                            };
+                            self.ic_insert(cache, st);
+                            self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
+                                name: name.as_ptr() as usize,
+                                st,
+                            });
+                            return Some(Value::Undefined);
+                        }
+                        return None;
+                    }
                 }
             }
         }

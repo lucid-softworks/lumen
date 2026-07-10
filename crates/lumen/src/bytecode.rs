@@ -78,6 +78,13 @@ pub const IC_OFF_MID_OK: u32 = 13;
 pub const IC_OFF_MID_SHAPE: u32 = 16;
 
 pub const IC_EMPTY: u8 = u8::MAX;
+/// `IcState::depth` marker for a cached ABSENT property: on a receiver of `recv_shape`, `name`
+/// is missing along the entire (all `Exotic::None`, all ic-plain) prototype chain. The chain's
+/// shapes sit in recv_shape/mid_shape/mid2_shape/holder_shape in walk order with the level
+/// count in `slot` (1-4); a hit re-walks the live chain validating each shape and yields
+/// `undefined`. Shape-only proof is sound for absence: a shape pins the exact key set of a
+/// non-elem-mode map, and every level's exotic/side-table gates are re-checked live.
+pub const IC_ABSENT: u8 = 0xFC;
 /// Way count of a property IC site: `Compiler::new_cache` allocates this many consecutive
 /// cells, the Rust probes walk all of them, and the JIT get/set templates loop over them
 /// inline (a 3-4 shape site — one dispatch loop over a class hierarchy — otherwise thrashes
@@ -5304,6 +5311,15 @@ impl Chunk {
             self.consts[k as usize],
             Value::Undefined | Value::Null | Value::Bool(_) | Value::Num(_)
         )
+    }
+    /// Stable address of const `k` (the chunk is pinned by any code that runs it): the JIT's
+    /// string-const template copies the Value and bumps its refcount inline.
+    pub(crate) fn jit_const_ptr(&self, k: u32) -> *const Value {
+        &self.consts[k as usize] as *const Value
+    }
+    /// Whether const `k` is a string (payload strong count at offset 0 — the template's bump).
+    pub(crate) fn jit_const_is_str(&self, k: u32) -> bool {
+        matches!(self.consts[k as usize], Value::Str(_))
     }
     /// The f64 bits of a Num const (for the JIT's register-chain emitter).
     pub(crate) fn jit_const_num(&self, k: u32) -> Option<u64> {
