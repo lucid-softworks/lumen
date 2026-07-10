@@ -154,6 +154,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_drop_at as *const () as usize,
         crate::bytecode::jit_make_object as *const () as usize,
         crate::bytecode::jit_set_prop as *const () as usize,
+        crate::bytecode::jit_get_prop as *const () as usize,
     ]
 }
 
@@ -176,7 +177,10 @@ pub const H_MAKE_OBJECT: usize = 10;
 /// Dedicated property-store entry (`SetProp`/`SetPropDrop`/`SetPropThisDrop`/`SetPropLocalDrop`
 /// misses): straight into `set_prop_ic`, no generic op decode.
 pub const H_SET_PROP: usize = 11;
-pub const N_HELPERS: usize = 12;
+/// Dedicated property-read entry (`GetProp`/`GetPropThis`/`GetPropLocal`/`GetMethod` misses):
+/// straight into `get_prop_ic`.
+pub const H_GET_PROP: usize = 12;
+pub const N_HELPERS: usize = 13;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1938,6 +1942,9 @@ pub fn compile(
             | Op::SetPropLocalDrop(..) => {
                 emit_op_helper(&mut a, H_SET_PROP, pc as u32, l_unwind);
             }
+            Op::GetProp(..) | Op::GetPropThis(..) | Op::GetPropLocal(..) | Op::GetMethod(..) => {
+                emit_op_helper(&mut a, H_GET_PROP, pc as u32, l_unwind);
+            }
             _ => {
                 emit_exec(&mut a, pc as u32, l_unwind);
             }
@@ -2453,7 +2460,7 @@ fn emit_prop_load_inline(
         a.b(val);
     }
     a.bind(slow);
-    emit_exec(a, pc, l_unwind);
+    emit_op_helper(a, H_GET_PROP, pc, l_unwind);
     a.bind(done);
 }
 
@@ -2493,6 +2500,9 @@ fn emit_direct_call(
 ) -> bool {
     use std::mem::offset_of;
     // Emission gates: probed Interp offsets must exist and fit the addressing modes used.
+    // argc caps at 8: the sequence addresses the receiver at -((argc + 2) * 24), and the
+    // unscaled ldur/stur immediate is a signed 9-bit (±256) field — argc 9 would already be
+    // out of range (encoding silently corrupts, there is no release-mode assert).
     if !ilayout.valid || argc > 8 || gc_data_off >= 4096 {
         return false;
     }

@@ -5738,6 +5738,74 @@ pub(crate) unsafe extern "C" fn jit_set_prop(
     }
 }
 
+/// Dedicated property-read entry (same contract as [`jit_exec`]): straight into
+/// [`crate::interpreter::Interp::get_prop_ic`] for the four read shapes, skipping the generic
+/// op decode.
+pub(crate) unsafe extern "C" fn jit_get_prop(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    jit_opstat(ctx, pc);
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    let r: Result<(), Abrupt> = (|| {
+        match chunk.ops[pc as usize] {
+            Op::GetProp(n, c) => {
+                sp = sp.sub(1);
+                let obj = sp.read();
+                let v =
+                    i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                sp.write(v);
+                sp = sp.add(1);
+                Ok(())
+            }
+            Op::GetPropThis(n, c) => {
+                let this = (*ctx.this_raw).clone();
+                let v =
+                    i.get_prop_ic(&this, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                sp.write(v);
+                sp = sp.add(1);
+                Ok(())
+            }
+            Op::GetPropLocal(s, n, c) => {
+                let obj = (*ctx.slots.add(s as usize)).clone();
+                if matches!(obj, Value::Empty) {
+                    return Err(i.throw(
+                        "ReferenceError",
+                        format!(
+                            "cannot access '{}' before initialization",
+                            chunk.slot_names[s as usize]
+                        ),
+                    ));
+                }
+                let v =
+                    i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                sp.write(v);
+                sp = sp.add(1);
+                Ok(())
+            }
+            Op::GetMethod(n, c) => {
+                let obj = &*sp.sub(1); // receiver stays on the stack
+                let m =
+                    i.get_prop_ic(obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                sp.write(m);
+                sp = sp.add(1);
+                Ok(())
+            }
+            _ => unreachable!("jit_get_prop emitted only for property reads"),
+        }
+    })();
+    match r {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
 /// Dedicated helper for `Op::Call` / `Op::CallWithThis` sites — the same contract as
 /// [`jit_exec`], minus the full op dispatch (calls dominate helper traffic in call-heavy code,
 /// so the two arms get a two-way decode of their own).
