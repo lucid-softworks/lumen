@@ -5714,8 +5714,8 @@ unsafe fn jit_call_inner(
                                 code_mem: std::ptr::null(),
                                 pc_offs_ptr: std::ptr::null(),
                                 native: nf as usize,
-                                intrinsic: if nf as usize
-                                    == crate::builtins::nf_char_code_at as usize
+                                intrinsic: if nf as *const () as usize
+                                    == crate::builtins::nf_char_code_at as *const () as usize
                                 {
                                     INTRINSIC_CHAR_CODE_AT
                                 } else {

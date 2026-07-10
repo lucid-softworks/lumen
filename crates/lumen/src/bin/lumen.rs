@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 use lumen::{Completion, Engine};
 
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL_ALLOC: lumen::fastalloc::ClassAlloc = lumen::fastalloc::ClassAlloc;
+
 fn main() {
     let mut module = false;
     let mut interactive = false;

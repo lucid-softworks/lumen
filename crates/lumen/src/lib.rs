@@ -22,6 +22,13 @@
 // realm. That trips clippy's `wrong_self_convention`, which assumes `to_*` is a cheap borrow.
 #![allow(clippy::wrong_self_convention)]
 
+/// The engine's size-class caching allocator — allocation-bound workloads (one refcounted box
+/// per JS object/scope) run 15-30% faster than on the system allocator. NOT registered here: a
+/// library must not preempt an embedder's `#[global_allocator]` (the test262 runner caps
+/// worker allocations with its own). Binaries opt in:
+/// `#[global_allocator] static A: lumen::fastalloc::ClassAlloc = lumen::fastalloc::ClassAlloc;`
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fastalloc;
 mod ast;
 mod bigint;
 mod builtins;
