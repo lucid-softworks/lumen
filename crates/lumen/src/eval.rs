@@ -950,7 +950,7 @@ impl Interp {
             let parent = from.borrow().parent.clone();
             let e = new_scope(parent);
             for n in &per_iter {
-                let b = from.borrow().vars.get(n).cloned();
+                let b = from.borrow().vars.get(n.as_str()).cloned();
                 if let Some(b) = b {
                     e.borrow_mut().vars.insert(n.clone(), b);
                 }
@@ -3658,7 +3658,7 @@ impl Interp {
                 let b = s.borrow();
                 for k in b.vars.keys() {
                     if k.starts_with('#') {
-                        private_names.push(k.clone());
+                        private_names.push(k.to_string());
                     }
                 }
                 cur = b.parent.clone();
@@ -3792,7 +3792,7 @@ impl Interp {
         self.strict = strict;
         self.hoist(body, &probe, &[]);
         self.strict = saved_strict;
-        let var_names: Vec<String> = probe.borrow().vars.keys().cloned().collect();
+        let var_names: Vec<String> = probe.borrow().vars.keys().map(|k| k.to_string()).collect();
         // A callable hoisted value is a function declaration (which becomes a global *function*
         // binding); everything else is a plain `var`.
         let is_func = |name: &str| {
@@ -3809,7 +3809,7 @@ impl Interp {
             // A sloppy eval must not hoist a `var` over a same-named global lexical declaration...
             if is_global {
                 for name in &var_names {
-                    if name != "this" && self.global_env.borrow().vars.contains_key(name) {
+                    if name != "this" && self.global_env.borrow().vars.contains_key(name.as_str()) {
                         return Err(self.throw(
                             "SyntaxError",
                             format!("Identifier '{name}' has already been declared"),
@@ -3832,7 +3832,7 @@ impl Interp {
                 };
                 if !skip {
                     for name in &var_names {
-                        if s.borrow().vars.contains_key(name) {
+                        if s.borrow().vars.contains_key(name.as_str()) {
                             return Err(self.throw(
                                 "SyntaxError",
                                 format!("Identifier '{name}' has already been declared"),
@@ -3879,7 +3879,7 @@ impl Interp {
             let value = probe
                 .borrow()
                 .vars
-                .get(name)
+                .get(name.as_str())
                 .map(|b| b.value.clone())
                 .unwrap_or(Value::Undefined);
             if is_global {
@@ -3894,7 +3894,7 @@ impl Interp {
                     b.deletable = true;
                     b
                 });
-            } else if !var_env.borrow().vars.contains_key(name) {
+            } else if !var_env.borrow().vars.contains_key(name.as_str()) {
                 var_env.borrow_mut().vars.insert(name.clone(), {
                     let mut b = Binding::data(Value::Undefined, true, true);
                     b.deletable = true;
@@ -5545,7 +5545,7 @@ impl Interp {
                 let old = scope
                     .borrow()
                     .vars
-                    .get(name)
+                    .get(name.as_str())
                     .map(|bd| bd.value.clone())
                     .unwrap_or(Value::Undefined);
                 if let Value::Num(n) = old {
@@ -5589,7 +5589,7 @@ impl Interp {
                     let old = scope
                         .borrow()
                         .vars
-                        .get(name)
+                        .get(name.as_str())
                         .map(|bd| bd.value.clone())
                         .unwrap_or(Value::Undefined);
                     let rhs = self.eval(value, env)?;
@@ -7225,7 +7225,7 @@ impl Interp {
                     let (has_binding, with_obj, parent) = {
                         let b = s.borrow();
                         (
-                            b.vars.contains_key(name),
+                            b.vars.contains_key(name.as_str()),
                             b.with_obj.clone(),
                             b.parent.clone(),
                         )
@@ -7319,7 +7319,7 @@ impl Interp {
                 RefBase::Scope(s) => {
                     let (initialized, value, import) = {
                         let b = s.borrow();
-                        match b.vars.get(name) {
+                        match b.vars.get(name.as_str()) {
                             Some(bd) => (bd.initialized, bd.value.clone(), bd.import_ref.clone()),
                             None => return self.get_var(name, s),
                         }

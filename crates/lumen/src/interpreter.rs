@@ -259,12 +259,12 @@ pub(crate) struct RegexpLastMatch {
 /// mutation site can't forget the bump (it won't compile).
 #[derive(Default)]
 pub struct VarMap {
-    map: crate::fasthash::FastMap<String, Binding>,
+    map: crate::fasthash::FastMap<std::rc::Rc<str>, Binding>,
     generation: std::cell::Cell<u32>,
 }
 
 impl std::ops::Deref for VarMap {
-    type Target = crate::fasthash::FastMap<String, Binding>;
+    type Target = crate::fasthash::FastMap<std::rc::Rc<str>, Binding>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }
@@ -280,9 +280,9 @@ impl VarMap {
     fn bump(&self) {
         self.generation.set(self.generation.get().wrapping_add(1));
     }
-    pub fn insert(&mut self, k: String, v: Binding) -> Option<Binding> {
+    pub fn insert(&mut self, k: impl Into<std::rc::Rc<str>>, v: Binding) -> Option<Binding> {
         self.bump();
-        self.map.insert(k, v)
+        self.map.insert(k.into(), v)
     }
     pub fn remove(&mut self, k: &str) -> Option<Binding> {
         self.bump();
@@ -3045,7 +3045,7 @@ impl Interp {
                 if !self.mapped_arguments.is_empty() {
                     if let Some(name) = self.mapped_arg_name(ptr, key) {
                         if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
-                            let v = env.borrow().vars.get(&name).map(|b| b.value.clone());
+                            let v = env.borrow().vars.get(name.as_str()).map(|b| b.value.clone());
                             if let Some(v) = v {
                                 return Ok(v);
                             }
@@ -3313,7 +3313,7 @@ impl Interp {
     pub(crate) fn mapped_arg_value(&self, ptr: usize, key: &str) -> Option<Value> {
         let name = self.mapped_arg_name(ptr, key)?;
         let (env, _) = self.mapped_arguments.get(&ptr)?;
-        env.borrow().vars.get(&name).map(|b| b.value.clone())
+        env.borrow().vars.get(name.as_str()).map(|b| b.value.clone())
     }
 
     /// Write through a mapped `arguments[key]` alias into its parameter binding.
@@ -5168,6 +5168,88 @@ impl Interp {
         Some(unsafe { self.call_jit_committed(ic, this_slot, args, argc) })
     }
 
+    /// A needs-env IC hit ([`crate::bytecode::CALL_IC_NEEDS_ENV`]): same guards and frame
+    /// bookkeeping as [`Interp::call_jit_committed`], entering through [`crate::jit::run`] —
+    /// which builds the activation environment — instead of `run_moved`. The arguments and
+    /// `*this_slot` are consumed unconditionally (the run borrows the argument slice; they
+    /// drop after it returns).
+    ///
+    /// # Safety
+    /// Same contract as `call_jit_committed`.
+    pub(crate) unsafe fn call_jit_env_committed(
+        &mut self,
+        ic: crate::bytecode::CallIc,
+        this_slot: *const Value,
+        args: *mut Value,
+        argc: usize,
+    ) -> Result<Value, Abrupt> {
+        let drop_args = || unsafe {
+            for k in 0..argc {
+                std::ptr::drop_in_place(args.add(k));
+            }
+        };
+        self.depth += 1;
+        if self.depth > MAX_EVAL_DEPTH {
+            self.depth -= 1;
+            drop_args();
+            unsafe { std::ptr::drop_in_place(this_slot as *mut Value) };
+            return Err(self.throw("RangeError", "Maximum call stack size exceeded"));
+        }
+        if let Err(e) = self.gc_check_amortized() {
+            self.depth -= 1;
+            drop_args();
+            unsafe { std::ptr::drop_in_place(this_slot as *mut Value) };
+            return Err(e);
+        }
+        let saved_ctor = std::mem::replace(&mut self.constructing, false);
+        let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
+        self.fn_frames.push(FnFrame {
+            fn_ptr: ic.callee,
+            coro: self.cur_coro,
+            strict: ic.strict,
+            extra: None,
+        });
+        // Same non-owning env borrow as the moved path: the callee object on the caller's
+        // operand stack keeps it alive through its never-reassigned `call` field.
+        let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
+        let chunk = unsafe { &*ic.chunk };
+        let code = unsafe { &*ic.code };
+        let this_read = unsafe { this_slot.read() };
+        let this_val = if !ic.uses_this {
+            drop(this_read);
+            Value::Undefined
+        } else if ic.strict {
+            this_read
+        } else {
+            match this_read {
+                Value::Undefined | Value::Null => Value::Obj(self.global.clone()),
+                other @ Value::Obj(_) => other,
+                prim => crate::builtins::box_primitive_pub(self, prim),
+            }
+        };
+        let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
+        let mut r = crate::jit::run(self, chunk, code, &env, this_val, args_ref);
+        drop_args();
+        self.fn_frames.pop();
+        self.constructing = saved_ctor;
+        self.new_target = saved_nt;
+        while r.is_ok() {
+            match self.pending_tail.take() {
+                Some(bx) => {
+                    let (f, t, a) = *bx;
+                    if let Err(e) = self.gc_check() {
+                        r = Err(e);
+                        break;
+                    }
+                    r = self.call_inner(f, t, &a);
+                }
+                None => break,
+            }
+        }
+        self.depth -= 1;
+        r
+    }
+
     /// A native-entry IC hit: invoke the builtin straight from the cache — no receiver borrow,
     /// no `Callable` dispatch, no re-probe. Replicates the observable effects of the
     /// plain-native fast call (depth guard, amortized gc tick, constructing/new.target
@@ -5240,6 +5322,9 @@ impl Interp {
         args: *mut Value,
         argc: usize,
     ) -> Result<Value, Abrupt> {
+        if ic.direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 {
+            return unsafe { self.call_jit_env_committed(ic, this_slot, args, argc) };
+        }
         // --- committed: identical to call_jit_fast's committed path ---
         self.depth += 1;
         if self.depth > MAX_EVAL_DEPTH {
@@ -5644,9 +5729,11 @@ impl Interp {
             Some(Some(c)) => c,
             _ => return None,
         };
-        if !chunk.jit_no_activation() {
-            return None;
-        }
+        // A callee that needs an activation env (captured locals / lexical this) is cacheable
+        // too: its committed path enters through `jit::run` (which builds the activation)
+        // instead of `run_moved`. IC entries carry direct bit 4; bits 0-3 stay clear, so the
+        // machine-code direct sequence's first gate routes them to the helper.
+        let needs_env = !chunk.jit_no_activation();
         // Every guard passed: remember the callee at this site so the next call takes the
         // one-compare cached path. The Weak pin makes the raw identity compare ABA-safe (the
         // address can't be recycled while pinned); a megamorphic site stops refilling at the cap
@@ -5680,11 +5767,15 @@ impl Interp {
                         uses_this: chunk.uses_this(),
                         n_params: n_params as u16,
                         n_slots: n_slots as u16,
-                        direct: chunk.jit_direct_flags(code)
-                            | (((chunk.inline_attempted.get()
-                                || func.code2.get().is_some())
-                                as u8)
-                                << 2),
+                        direct: if needs_env {
+                            crate::bytecode::CALL_IC_NEEDS_ENV
+                        } else {
+                            chunk.jit_direct_flags(code)
+                                | (((chunk.inline_attempted.get()
+                                    || func.code2.get().is_some())
+                                    as u8)
+                                    << 2)
+                        },
                         func: Rc::as_ptr(&func),
                         epoch: crate::bytecode::CALL_IC_EPOCH
                             .load(std::sync::atomic::Ordering::Relaxed),
@@ -5731,17 +5822,30 @@ impl Interp {
             extra: None,
         });
         let this_val = self.bind_compiled_this(&func, chunk, unsafe { this_slot.read() }, false);
-        let mut r = unsafe {
-            crate::jit::run_moved(
-                self,
-                chunk,
-                code,
-                &env as *const Env,
-                this_val,
-                args,
-                argc,
-                chunk.jit_frame(),
-            )
+        let mut r = if needs_env {
+            // The run borrows the arguments (its activation seeds by clone); consume them
+            // afterwards to keep the committed ownership contract.
+            let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
+            let r = crate::jit::run(self, chunk, code, &env, this_val, args_ref);
+            unsafe {
+                for k in 0..argc {
+                    std::ptr::drop_in_place(args.add(k));
+                }
+            }
+            r
+        } else {
+            unsafe {
+                crate::jit::run_moved(
+                    self,
+                    chunk,
+                    code,
+                    &env as *const Env,
+                    this_val,
+                    args,
+                    argc,
+                    chunk.jit_frame(),
+                )
+            }
         };
         self.fn_frames.pop();
         self.constructing = saved_ctor;
@@ -6669,7 +6773,7 @@ impl Interp {
     /// environment). `hoist` has just created the body's `var` bindings as `undefined`; fill in the
     /// initial value from the parameter scope for names it declares.
     fn seed_param_vars(&self, param_scope: &Env, body_scope: &Env) {
-        let names: Vec<String> = body_scope.borrow().vars.keys().cloned().collect();
+        let names: Vec<String> = body_scope.borrow().vars.keys().map(|k| k.to_string()).collect();
         for name in names {
             if name == "this" {
                 continue;
@@ -6677,7 +6781,7 @@ impl Interp {
             let seeded = param_scope
                 .borrow()
                 .vars
-                .get(&name)
+                .get(name.as_str())
                 .filter(|b| b.initialized)
                 .map(|b| b.value.clone());
             if let Some(v) = seeded {
@@ -6979,7 +7083,7 @@ impl Interp {
                 .props
                 .get(n.as_str())
                 .is_some_and(|p| !p.configurable);
-            if self.global_env.borrow().vars.contains_key(n)
+            if self.global_env.borrow().vars.contains_key(n.as_str())
                 || self.global_var_names.contains(n)
                 || restricted
             {
@@ -7001,7 +7105,7 @@ impl Interp {
                 .global
                 .borrow()
                 .props
-                .get(name.as_str())
+                .get(&**name)
                 .map(|p| (p.configurable, p.accessor, p.writable, p.enumerable));
             if !matches!(binding.value, Value::Undefined) {
                 // CanDeclareGlobalFunction.
@@ -7026,7 +7130,7 @@ impl Interp {
                 ));
             }
         }
-        let new_vars: Vec<String> = probe.borrow().vars.keys().cloned().collect();
+        let new_vars: Vec<String> = probe.borrow().vars.keys().map(|k| k.to_string()).collect();
         self.global_var_names.extend(new_vars.iter().cloned());
         self.hoist(body, &self.global_env.clone(), &[]);
         // The global Environment Record is object-backed: this script's `var`/`function` bindings

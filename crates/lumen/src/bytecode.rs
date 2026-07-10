@@ -241,6 +241,12 @@ pub struct CallIc {
     pub intrinsic: u8,
 }
 
+/// [`CallIc::direct`] bit 4: the callee needs an activation environment (captured locals or
+/// lexical `this`) — the committed path enters through `jit::run` (which builds it) instead of
+/// `run_moved`. Bits 0-3 stay clear on such entries, so the machine-code direct sequence's
+/// first gate routes them to the helper.
+pub const CALL_IC_NEEDS_ENV: u8 = 16;
+
 /// `String.prototype.charCodeAt`: the call template inlines the all-ASCII receiver + exact-u32
 /// in-bounds index case to a byte load (see `crate::lstr::ASCII_HINT`).
 pub const INTRINSIC_CHAR_CODE_AT: u8 = 1;
@@ -628,7 +634,7 @@ impl Chunk {
                 match ci {
                     CapInit::Param(k, name) => {
                         b.vars.insert(
-                            name.to_string(),
+                            name.clone(),
                             crate::interpreter::Binding {
                                 value: args.get(*k as usize).cloned().unwrap_or(Value::Undefined),
                                 mutable: true,
@@ -642,7 +648,7 @@ impl Chunk {
                     CapInit::Var(name) => {
                         if !b.vars.contains_key(&**name) {
                             b.vars.insert(
-                                name.to_string(),
+                                name.clone(),
                                 crate::interpreter::Binding {
                                     value: Value::Undefined,
                                     mutable: true,
@@ -657,7 +663,7 @@ impl Chunk {
                     CapInit::Fn(fidx, name) => fns.push((*fidx, name.clone())),
                     CapInit::Lexical(name, is_const) => {
                         b.vars.insert(
-                            name.to_string(),
+                            name.clone(),
                             crate::interpreter::Binding {
                                 value: Value::Undefined,
                                 mutable: !is_const,
@@ -672,7 +678,7 @@ impl Chunk {
             }
             if self.env_this {
                 b.vars.insert(
-                    "this".to_string(),
+                    "this",
                     crate::interpreter::Binding {
                         value: this_val.clone(),
                         mutable: false,
@@ -5823,6 +5829,9 @@ unsafe fn jit_callstat(
     let reason: &'static str = 'r: {
         if ic.native != 0 {
             break 'r "native entry";
+        }
+        if ic.direct & CALL_IC_NEEDS_ENV != 0 {
+            break 'r "env entry";
         }
         if argc > 8 {
             break 'r "emit: argc > 8";
