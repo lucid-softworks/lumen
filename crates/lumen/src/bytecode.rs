@@ -425,6 +425,27 @@ pub enum Op {
     /// stack (peeked, not popped) is null/undefined — GetProp's own nullish error has a
     /// different message, and the check must run before any property read.
     DestructureGuard,
+    /// Array-destructuring prologue: pops the iterable and walks the iterator protocol for `n`
+    /// pattern elements (undefined once exhausted; IteratorClose when the pattern didn't drain
+    /// it), pushing the `n` element values (last element on top — the stores emit in reverse,
+    /// which is unobservable because only uncaptured slot leaves compile to this). Flat
+    /// ident/hole elements only: a nested pattern's own reads would interleave with the
+    /// iterator steps in the wrong order.
+    DestructureArr(u16),
+    /// `delete obj.name` (pops obj, pushes the bool result). Operands: name index and the
+    /// *function's* strictness — the oracle's `self.strict` is not maintained across direct
+    /// JIT→JIT call sequences, so it travels in the op.
+    DeleteProp(u32, bool),
+    /// `delete obj[k]` (pops k then obj, pushes the bool result; ToPropertyKey on the key
+    /// before the nullish-base check, matching the oracle's order).
+    DeleteElem(bool),
+    /// `f(a, b, ...c)` — a spread argument in the LAST position (the only shape whose
+    /// evaluate-everything-then-expand lowering matches the spec's interleaved evaluation
+    /// order): pops the iterable and `argc-1` plain arguments, expands via the iterator
+    /// protocol, and calls through the generic path (no call IC — spread sites are cold).
+    CallSpread(u16),
+    /// [`Op::CallSpread`] with a receiver beneath the callee (method calls, with-object hits).
+    CallSpreadThis(u16),
     /// Statement-position `obj.name += v` (pops v, the compound-read lval, obj): appends IN
     /// PLACE when the property still holds the exact string the read produced and everything is
     /// plain (see `Interp::append_prop_fast`); otherwise runs the generic Add + IC store —
@@ -1499,6 +1520,7 @@ fn compile_inner(
 
     let mut c = Compiler {
         env_this,
+        strict: func.is_strict,
         plan_stack: vec![(plan.clone(), 0)],
         ..Compiler::default()
     };
@@ -1795,6 +1817,8 @@ fn plan_inlines_at(
 
 #[derive(Default)]
 struct Compiler {
+    /// The compiled function's strictness (carried into ops whose runtime behavior forks on it).
+    strict: bool,
     ops: Vec<Op>,
     consts: Vec<Value>,
     names: Vec<Rc<str>>,
@@ -2303,6 +2327,19 @@ impl Compiler {
                 }
                 Ok(())
             }
+            Pattern::Array(elems) => {
+                for e in elems {
+                    match e {
+                        ArrayPatElem::Hole => {}
+                        ArrayPatElem::Elem {
+                            pattern,
+                            default: None,
+                        } => self.declare_lexical_pattern(pattern, is_const)?,
+                        _ => return Err(Bail),
+                    }
+                }
+                Ok(())
+            }
             _ => Err(Bail),
         }
     }
@@ -2353,7 +2390,97 @@ impl Compiler {
                 self.emit(Op::Pop);
                 Ok(())
             }
+            Pattern::Array(elems) => {
+                // Batched iterator walk (Op::DestructureArr), then stores in reverse. Batching
+                // is only order-unobservable when every leaf is an UNCAPTURED slot (an env-homed
+                // leaf's initialization is visible to a later iterator step's next() per spec)
+                // and elements are flat idents/holes (a nested pattern's own reads would
+                // interleave with the steps), with no defaults (their evaluation interleaves).
+                for e in elems.iter() {
+                    match e {
+                        ArrayPatElem::Hole => {}
+                        ArrayPatElem::Elem {
+                            pattern: Pattern::Ident(n),
+                            default: None,
+                        } if matches!(self.home(n), Some(Home::Slot(..))) => {}
+                        _ => return Err(Bail),
+                    }
+                }
+                self.emit(Op::DestructureArr(elems.len() as u16));
+                for e in elems.iter().rev() {
+                    match e {
+                        ArrayPatElem::Hole => {
+                            self.emit(Op::Pop);
+                        }
+                        ArrayPatElem::Elem { pattern, .. } => {
+                            self.destructure_store(pattern, kind)?;
+                        }
+                        ArrayPatElem::Rest(_) => unreachable!("filtered above"),
+                    }
+                }
+                Ok(())
+            }
             _ => Err(Bail),
+        }
+    }
+
+    /// Emit a call's arguments left to right. `Ok(true)`: the last argument was a spread —
+    /// the caller must emit a `CallSpread` op (evaluate-then-expand only matches the spec's
+    /// interleaved order when nothing evaluates after the spread part, so any other spread
+    /// position bails).
+    fn call_args(&mut self, args: &[ArrayElem]) -> Result<bool, Bail> {
+        let spread_at = args
+            .iter()
+            .position(|a| !matches!(a, ArrayElem::Item(_)));
+        if let Some(k) = spread_at {
+            if k != args.len() - 1 || !matches!(args[k], ArrayElem::Spread(_)) {
+                log_bail("expr", "spread argument (non-final)");
+                return Err(Bail);
+            }
+        }
+        for a in args {
+            match a {
+                ArrayElem::Item(e) | ArrayElem::Spread(e) => self.expr(e)?,
+                ArrayElem::Hole => return Err(Bail),
+            }
+        }
+        Ok(spread_at.is_some())
+    }
+
+    /// `delete obj.p` / `delete obj[k]` on plain (non-optional, non-super, public) references;
+    /// a non-reference operand evaluates for its effects and deletes to `true`. Identifier
+    /// deletes (env bindings) and optional chains stay in the oracle.
+    fn delete_expr(&mut self, arg: &Expr) -> CResult {
+        match arg {
+            Expr::Paren(inner) => self.delete_expr(inner),
+            Expr::Member {
+                obj,
+                prop,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
+                self.expr(obj)?;
+                let n = self.name_idx(prop);
+                self.emit(Op::DeleteProp(n, self.strict));
+                Ok(())
+            }
+            Expr::Index {
+                obj,
+                index,
+                optional: false,
+            } if !matches!(**obj, Expr::Super) => {
+                self.expr(obj)?;
+                self.expr(index)?;
+                self.emit(Op::DeleteElem(self.strict));
+                Ok(())
+            }
+            Expr::Ident(_) | Expr::OptionalChain(_) => Err(Bail),
+            other => {
+                self.expr(other)?;
+                self.emit(Op::Pop);
+                let k = self.const_idx(Value::Bool(true));
+                self.emit(Op::Const(k));
+                Ok(())
+            }
         }
     }
 
@@ -2991,9 +3118,6 @@ impl Compiler {
                 is_await: false,
                 body,
             } => {
-                let Pattern::Ident(name) = left else {
-                    return Err(Bail);
-                };
                 let labels = std::mem::take(&mut self.pending_labels);
                 // The loop variable: a declaration binds a fresh (uncaptured — else the
                 // per-iteration env freshness matters and we bail) slot scoped to the loop; a
@@ -3006,13 +3130,17 @@ impl Compiler {
                     Slot(u16),
                     Cap(u32),
                     Name(u32),
+                    /// Destructuring lexical head: bound by `destructure_store` INSIDE the
+                    /// body's handler region (a binding throw must IteratorClose in throw mode,
+                    /// which is exactly what the body's abort pad does).
+                    Pattern(DeclKind),
                 }
-                let bind = match decl {
-                    Some(DeclKind::Using | DeclKind::AwaitUsing) => {
+                let bind = match (left, decl) {
+                    (_, Some(DeclKind::Using | DeclKind::AwaitUsing)) => {
                         self.scopes.pop();
                         return Err(Bail);
                     }
-                    Some(kind) => {
+                    (Pattern::Ident(name), Some(kind)) => {
                         if self.env_names.contains_key(name) || self.captured_name(name) {
                             self.scopes.pop();
                             return Err(Bail);
@@ -3025,7 +3153,30 @@ impl Compiler {
                         }
                         Bind::Slot(slot)
                     }
-                    None => match self.home(name) {
+                    (pat, Some(kind @ (DeclKind::Let | DeclKind::Const))) => {
+                        // A destructuring lexical head: fresh uncaptured slots for every leaf,
+                        // declared (in TDZ) before `right` like the ident path. `var` patterns
+                        // would have to write hoisted function-scope bindings — those stay in
+                        // the oracle.
+                        let mut leaf_names = std::collections::HashSet::new();
+                        pat_idents(pat, &mut leaf_names);
+                        if leaf_names
+                            .iter()
+                            .any(|n| self.env_names.contains_key(n) || self.captured_name(n))
+                            || self
+                                .declare_lexical_pattern(pat, matches!(kind, DeclKind::Const))
+                                .is_err()
+                        {
+                            self.scopes.pop();
+                            return Err(Bail);
+                        }
+                        Bind::Pattern(*kind)
+                    }
+                    (_, Some(DeclKind::Var)) => {
+                        self.scopes.pop();
+                        return Err(Bail);
+                    }
+                    (Pattern::Ident(name), None) => match self.home(name) {
                         Some(Home::Slot(slot, is_const)) => {
                             if is_const {
                                 self.scopes.pop();
@@ -3042,6 +3193,11 @@ impl Compiler {
                         }
                         None => Bind::Name(self.name_idx(name)),
                     },
+                    // Destructuring *assignment* head (`for ([a, b] of xs)`) — oracle.
+                    (_, None) => {
+                        self.scopes.pop();
+                        return Err(Bail);
+                    }
                 };
                 let er = self.expr(right);
                 if er.is_err() {
@@ -3072,11 +3228,17 @@ impl Compiler {
                     Bind::Name(n) => {
                         self.emit(Op::StoreName(n));
                     }
+                    Bind::Pattern(_) => {} // bound below, inside the handler region
                 }
                 let push = self.emit(Op::PushHandler(0));
                 self.try_depth += 1;
                 self.loops.last_mut().expect("just pushed").body_try_depth = self.try_depth;
-                let r = self.stmt(body);
+                let r = match bind {
+                    Bind::Pattern(kind) => self
+                        .destructure_store(left, kind)
+                        .and_then(|()| self.stmt(body)),
+                    _ => self.stmt(body),
+                };
                 let ctx = self.loops.pop().expect("just pushed");
                 self.scopes.pop();
                 r?;
@@ -3707,6 +3869,7 @@ impl Compiler {
                         self.expr(arg)?;
                         self.emit(Op::Typeof);
                     }
+                    "delete" => return self.delete_expr(arg),
                     _ => return Err(Bail),
                 }
                 Ok(())
@@ -3765,21 +3928,18 @@ impl Compiler {
                         let i = self.name_idx(prop);
                         let c = self.new_cache();
                         self.emit(Op::GetMethod(i, c));
-                        for a in args {
-                            let ArrayElem::Item(a) = a else {
-                                log_bail("expr", "spread argument");
-                                return Err(Bail);
-                            };
-                            self.expr(a)?;
-                        }
-                        let plan_hit = self.plan_hit();
-                        let cc = self.new_call_cache();
-                        match plan_hit {
-                            Some(entry) => {
-                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
-                            }
-                            None => {
-                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        if self.call_args(args)? {
+                            self.emit(Op::CallSpreadThis(args.len() as u16));
+                        } else {
+                            let plan_hit = self.plan_hit();
+                            let cc = self.new_call_cache();
+                            match plan_hit {
+                                Some(entry) => {
+                                    self.emit_call_with_inline(entry, args.len() as u16, cc, true)
+                                }
+                                None => {
+                                    self.emit(Op::CallWithThis(args.len() as u16, cc));
+                                }
                             }
                         }
                     }
@@ -3791,21 +3951,18 @@ impl Compiler {
                         self.expr(obj)?;
                         self.expr(index)?;
                         self.emit(Op::GetMethodElem);
-                        for a in args {
-                            let ArrayElem::Item(a) = a else {
-                                log_bail("expr", "spread argument");
-                                return Err(Bail);
-                            };
-                            self.expr(a)?;
-                        }
-                        let plan_hit = self.plan_hit();
-                        let cc = self.new_call_cache();
-                        match plan_hit {
-                            Some(entry) => {
-                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
-                            }
-                            None => {
-                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        if self.call_args(args)? {
+                            self.emit(Op::CallSpreadThis(args.len() as u16));
+                        } else {
+                            let plan_hit = self.plan_hit();
+                            let cc = self.new_call_cache();
+                            match plan_hit {
+                                Some(entry) => {
+                                    self.emit_call_with_inline(entry, args.len() as u16, cc, true)
+                                }
+                                None => {
+                                    self.emit(Op::CallWithThis(args.len() as u16, cc));
+                                }
                             }
                         }
                     }
@@ -3816,41 +3973,35 @@ impl Compiler {
                         let i = self.name_idx(name);
                         let c = self.new_name_cache();
                         self.emit(Op::LoadNameForCall(i, c));
-                        for a in args {
-                            let ArrayElem::Item(a) = a else {
-                                log_bail("expr", "spread argument");
-                                return Err(Bail);
-                            };
-                            self.expr(a)?;
-                        }
-                        let plan_hit = self.plan_hit();
-                        let cc = self.new_call_cache();
-                        match plan_hit {
-                            Some(entry) => {
-                                self.emit_call_with_inline(entry, args.len() as u16, cc, true)
-                            }
-                            None => {
-                                self.emit(Op::CallWithThis(args.len() as u16, cc));
+                        if self.call_args(args)? {
+                            self.emit(Op::CallSpreadThis(args.len() as u16));
+                        } else {
+                            let plan_hit = self.plan_hit();
+                            let cc = self.new_call_cache();
+                            match plan_hit {
+                                Some(entry) => {
+                                    self.emit_call_with_inline(entry, args.len() as u16, cc, true)
+                                }
+                                None => {
+                                    self.emit(Op::CallWithThis(args.len() as u16, cc));
+                                }
                             }
                         }
                     }
                     other => {
                         self.expr(other)?;
-                        for a in args {
-                            let ArrayElem::Item(a) = a else {
-                                log_bail("expr", "spread argument");
-                                return Err(Bail);
-                            };
-                            self.expr(a)?;
-                        }
-                        let plan_hit = self.plan_hit();
-                        let cc = self.new_call_cache();
-                        match plan_hit {
-                            Some(entry) => {
-                                self.emit_call_with_inline(entry, args.len() as u16, cc, false)
-                            }
-                            None => {
-                                self.emit(Op::Call(args.len() as u16, cc));
+                        if self.call_args(args)? {
+                            self.emit(Op::CallSpread(args.len() as u16));
+                        } else {
+                            let plan_hit = self.plan_hit();
+                            let cc = self.new_call_cache();
+                            match plan_hit {
+                                Some(entry) => {
+                                    self.emit_call_with_inline(entry, args.len() as u16, cc, false)
+                                }
+                                None => {
+                                    self.emit(Op::Call(args.len() as u16, cc));
+                                }
                             }
                         }
                     }
@@ -4461,6 +4612,68 @@ fn run_vm(
                 ) {
                     return Err(i.throw("TypeError", "cannot destructure null or undefined"));
                 }
+            }
+            Op::DestructureArr(n) => {
+                let v = pop!();
+                let (it, nx) = i.get_iterator(&v)?;
+                let mut done = false;
+                for _ in 0..n {
+                    if !done {
+                        match i.iterator_step(&it, &nx)? {
+                            Some(x) => {
+                                stack.push(x);
+                                continue;
+                            }
+                            None => done = true,
+                        }
+                    }
+                    stack.push(Value::Undefined);
+                }
+                if !done {
+                    i.iterator_close_normal(&it)?;
+                }
+            }
+            Op::DeleteProp(n, strict) => {
+                let base = pop!();
+                let prop = &chunk.names[n as usize];
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Err(i.throw(
+                        "TypeError",
+                        format!("cannot delete property '{prop}' of null or undefined"),
+                    ));
+                }
+                let v = i.delete_prop_with(base, prop, strict)?;
+                stack.push(v);
+            }
+            Op::DeleteElem(strict) => {
+                let idx = pop!();
+                let base = pop!();
+                let key = i.to_property_key(&idx)?;
+                if matches!(base, Value::Undefined | Value::Null) {
+                    return Err(i.throw(
+                        "TypeError",
+                        format!("cannot delete property '{key}' of null or undefined"),
+                    ));
+                }
+                let v = i.delete_prop_with(base, &key, strict)?;
+                stack.push(v);
+            }
+            Op::CallSpread(argc) | Op::CallSpreadThis(argc) => {
+                let spread = pop!();
+                let at = stack.len() - (argc as usize - 1);
+                let mut args: Vec<Value> = stack.split_off(at);
+                let (it, nx) = i.get_iterator(&spread)?;
+                while let Some(x) = i.iterator_step(&it, &nx)? {
+                    args.push(x);
+                }
+                let callee = pop!();
+                let this = if matches!(op, Op::CallSpreadThis(_)) {
+                    pop!()
+                } else {
+                    Value::Undefined
+                };
+                let v = i.call(callee, this, &args)?;
+                stack.push(v);
             }
             Op::AppendProp(n, c) => {
                 let v = pop!();
@@ -5397,6 +5610,11 @@ impl Chunk {
             Op::SetElemDrop => (3, 0),
             Op::AppendProp(..) => (3, 0),
             Op::DestructureGuard => (1, 1),
+            Op::DestructureArr(n) => (1, *n as usize),
+            Op::DeleteProp(..) => (1, 1),
+            Op::DeleteElem(_) => (2, 1),
+            Op::CallSpread(argc) => (*argc as usize + 1, 1),
+            Op::CallSpreadThis(argc) => (*argc as usize + 2, 1),
             Op::ToStr => (1, 1),
             Op::GetIter => (1, 2),
             Op::IterStepL(..) => (0, 2),
@@ -6367,6 +6585,69 @@ unsafe fn jit_exec_inner(
             if matches!(&*sp.sub(1), Value::Undefined | Value::Null) {
                 return Err(i.throw("TypeError", "cannot destructure null or undefined"));
             }
+        }
+        Op::DestructureArr(n) => {
+            let v = pop!();
+            let (it, nx) = i.get_iterator(&v)?;
+            let mut done = false;
+            for _ in 0..n {
+                if !done {
+                    match i.iterator_step(&it, &nx)? {
+                        Some(x) => {
+                            push!(x);
+                            continue;
+                        }
+                        None => done = true,
+                    }
+                }
+                push!(Value::Undefined);
+            }
+            if !done {
+                i.iterator_close_normal(&it)?;
+            }
+        }
+        Op::DeleteProp(n, strict) => {
+            let base = pop!();
+            let prop = &chunk.names[n as usize];
+            if matches!(base, Value::Undefined | Value::Null) {
+                return Err(i.throw(
+                    "TypeError",
+                    format!("cannot delete property '{prop}' of null or undefined"),
+                ));
+            }
+            let v = i.delete_prop_with(base, prop, strict)?;
+            push!(v);
+        }
+        Op::DeleteElem(strict) => {
+            let idx = pop!();
+            let base = pop!();
+            let key = i.to_property_key(&idx)?;
+            if matches!(base, Value::Undefined | Value::Null) {
+                return Err(i.throw(
+                    "TypeError",
+                    format!("cannot delete property '{key}' of null or undefined"),
+                ));
+            }
+            let v = i.delete_prop_with(base, &key, strict)?;
+            push!(v);
+        }
+        Op::CallSpread(argc) | Op::CallSpreadThis(argc) => {
+            let spread = pop!();
+            let mut plain: Vec<Value> = (1..argc).map(|_| pop!()).collect();
+            plain.reverse();
+            let callee = pop!();
+            let this = if matches!(chunk.ops[pc as usize], Op::CallSpreadThis(_)) {
+                pop!()
+            } else {
+                Value::Undefined
+            };
+            let mut args = plain;
+            let (it, nx) = i.get_iterator(&spread)?;
+            while let Some(x) = i.iterator_step(&it, &nx)? {
+                args.push(x);
+            }
+            let v = i.call(callee, this, &args)?;
+            push!(v);
         }
         Op::AppendProp(n, c) => {
             let v = pop!();

@@ -5340,6 +5340,18 @@ impl Interp {
 
     /// [[Delete]] on an evaluated base (shared by the plain and optional `delete` paths).
     fn delete_prop_on(&mut self, base: Value, prop: &str) -> Result<Value, Abrupt> {
+        let strict = self.strict;
+        self.delete_prop_with(base, prop, strict)
+    }
+
+    /// [[Delete]] with the caller's strictness: the VM's delete ops carry the compiled
+    /// function's flag (a direct JIT→JIT call sequence does not maintain `self.strict`).
+    pub(crate) fn delete_prop_with(
+        &mut self,
+        base: Value,
+        prop: &str,
+        strict: bool,
+    ) -> Result<Value, Abrupt> {
         {
             {
                 if let Value::Obj(o) = &base {
@@ -5347,7 +5359,7 @@ impl Interp {
                     let ptr = Rc::as_ptr(o) as usize;
                     if let Some((target, handler)) = self.proxy_at(ptr) {
                         let ok = self.proxy_delete(target, handler, prop)?;
-                        if !ok && self.strict {
+                        if !ok && strict {
                             return Err(
                                 self.throw("TypeError", format!("cannot delete property '{prop}'"))
                             );
@@ -5359,7 +5371,7 @@ impl Interp {
                     if let Some(info) = self.typed_arrays.get(&ptr).copied() {
                         match self.ta_index_kind(&info, prop) {
                             TaIndex::Element(_) => {
-                                if self.strict {
+                                if strict {
                                     return Err(
                                         self.throw("TypeError", "cannot delete a TypedArray index")
                                     );
@@ -5382,7 +5394,7 @@ impl Interp {
                         return Ok(Value::Bool(true));
                     }
                     // [[Delete]] returned false: strict-mode `delete` throws.
-                    if self.strict {
+                    if strict {
                         return Err(self.throw(
                             "TypeError",
                             format!("cannot delete non-configurable property '{prop}'"),
@@ -5394,7 +5406,7 @@ impl Interp {
                 // properties of the string exotic wrapper: [[Delete]] is false (TypeError strict).
                 if let Value::Str(sv) = &base {
                     if self.string_own_key(sv, prop) {
-                        if self.strict {
+                        if strict {
                             return Err(self.throw(
                                 "TypeError",
                                 format!("cannot delete non-configurable property '{prop}'"),

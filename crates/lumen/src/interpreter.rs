@@ -307,6 +307,12 @@ pub struct Scope {
     pub parent: Option<Env>,
     /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
     pub with_obj: Option<Value>,
+    /// `true` when this scope or ANY ancestor is a `with` scope (propagated at construction).
+    /// Compiled tiers refuse to run a body whose closure chain is under a `with`: the VM's
+    /// free-name ops re-resolve at execution time, but a with-object binding can appear or
+    /// vanish between the spec's reference resolution and the store (e.g. `x = (delete env.x,
+    /// 0)`) — the tree-walker models that; the ops don't.
+    pub under_with: bool,
     /// `true` if this is a *variable* environment (a function body scope, the global scope, or an
     /// `eval` scope) — the target for `var`/function hoisting. Block, `with`, and function *parameter*
     /// scopes are `false`, so a sloppy direct `eval` hoists its vars past them into the nearest
@@ -398,10 +404,14 @@ fn scope_snapshot() -> Vec<Env> {
 }
 
 pub fn new_scope(parent: Option<Env>) -> Env {
+    let under_with = parent
+        .as_ref()
+        .is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
         vars: Default::default(),
         parent,
         with_obj: None,
+        under_with,
         var_boundary: false,
         catch_param: false,
         lexical_names: Vec::new(),
@@ -413,10 +423,14 @@ pub fn new_scope(parent: Option<Env>) -> Env {
 /// A *variable* environment: the hoisting target for `var`/function declarations (function body,
 /// global, or `eval` scope). See [`Scope::var_boundary`].
 pub fn new_var_scope(parent: Option<Env>) -> Env {
+    let under_with = parent
+        .as_ref()
+        .is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
         vars: Default::default(),
         parent,
         with_obj: None,
+        under_with,
         var_boundary: true,
         catch_param: false,
         lexical_names: Vec::new(),
@@ -428,10 +442,12 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
 /// A `catch (e)` parameter environment: like a block scope, but flagged so a sloppy direct `eval`'s
 /// var-hoisting walk skips it (see [`Scope::catch_param`]).
 pub fn new_catch_scope(parent: Env) -> Env {
+    let under_with = parent.borrow().under_with;
     let e = Rc::new(RefCell::new(Scope {
         vars: Default::default(),
         parent: Some(parent),
         with_obj: None,
+        under_with,
         var_boundary: false,
         catch_param: true,
         lexical_names: Vec::new(),
@@ -446,6 +462,7 @@ pub fn new_with_scope(parent: Env, obj: Value) -> Env {
         vars: Default::default(),
         parent: Some(parent),
         with_obj: Some(obj),
+        under_with: true,
         var_boundary: false,
         catch_param: false,
         lexical_names: Vec::new(),
@@ -5230,7 +5247,9 @@ impl Interp {
                     return None;
                 }
                 let (fp, ep) = match &o.borrow().call {
-                    Callable::User(f, e) if !f.is_arrow => {
+                    // `under_with`: see the refusal in `call_jit_fast` — this retry runs a
+                    // FRESH closure instance whose env was never vetted there.
+                    Callable::User(f, e) if !f.is_arrow && !e.borrow().under_with => {
                         (Rc::as_ptr(f), Rc::as_ptr(e))
                     }
                     _ => return None,
@@ -5803,6 +5822,12 @@ impl Interp {
         if func.is_arrow {
             return None;
         }
+        // A closure under a `with` scope stays on the tree-walker (see `Scope::under_with`):
+        // the VM's free-name ops re-resolve at execution time, which is observably wrong when
+        // a with-object binding changes between the spec's reference resolution and its use.
+        if env.borrow().under_with {
+            return None;
+        }
         if self.multi_realm() {
             type ScopeCell = RefCell<Scope>;
             let mut cur: *const ScopeCell = Rc::as_ptr(&env);
@@ -6001,6 +6026,8 @@ impl Interp {
             && !func.is_generator
             && !func.is_async
             && (!is_construct || !self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize)))
+            // Closures under a `with` scope stay on the tree-walker (see `Scope::under_with`).
+            && !closure.borrow().under_with
         {
             if func.code.get().is_none() {
                 let n = func.calls.get().saturating_add(1);
