@@ -5150,7 +5150,47 @@ impl Interp {
                 }
             }
         }
-        let ic = hit?;
+        let ic = match hit {
+            Some(ic) => ic,
+            None => {
+                // Fresh-closure retry: a needs-env entry whose AST FUNCTION matches the callee
+                // still applies — closures created per call share the function and chunk; only
+                // the environment differs, and that comes from the live callee object. One
+                // borrow + pointer compare instead of a full call_jit_fast re-walk + refill
+                // per instance.
+                let has_env_entry = site.entries.iter().any(|e| {
+                    let p = e.as_ptr();
+                    unsafe { (*p).direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 }
+                });
+                if !has_env_entry {
+                    return None;
+                }
+                let (fp, ep) = match &o.borrow().call {
+                    Callable::User(f, e) if !f.is_arrow => {
+                        (Rc::as_ptr(f), Rc::as_ptr(e))
+                    }
+                    _ => return None,
+                };
+                let mut found = None;
+                for e in &site.entries {
+                    let p = e.as_ptr();
+                    unsafe {
+                        if (*p).direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0
+                            && (*p).func == fp
+                            && (*p).global_env == genv
+                            && (*p).epoch == epoch
+                        {
+                            found = Some(*p);
+                            break;
+                        }
+                    }
+                }
+                let ic = found?;
+                return Some(unsafe {
+                    self.call_jit_env_committed(ic, ep, this_slot, args, argc)
+                });
+            }
+        };
         if ic.native != 0 {
             let nf: crate::value::NativeFn = unsafe { std::mem::transmute(ic.native) };
             return Some(unsafe { self.call_native_committed(nf, this_slot, args, argc) });
@@ -5179,6 +5219,7 @@ impl Interp {
     pub(crate) unsafe fn call_jit_env_committed(
         &mut self,
         ic: crate::bytecode::CallIc,
+        env_ptr: *const RefCell<Scope>,
         this_slot: *const Value,
         args: *mut Value,
         argc: usize,
@@ -5210,8 +5251,10 @@ impl Interp {
             extra: None,
         });
         // Same non-owning env borrow as the moved path: the callee object on the caller's
-        // operand stack keeps it alive through its never-reassigned `call` field.
-        let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
+        // operand stack keeps it alive through its never-reassigned `call` field. `env_ptr`
+        // is the LIVE callee's env — for a func-keyed hit it differs from `ic.env` (which
+        // belongs to whichever closure instance filled the entry).
+        let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(env_ptr) });
         let chunk = unsafe { &*ic.chunk };
         let code = unsafe { &*ic.code };
         let this_read = unsafe { this_slot.read() };
@@ -5323,7 +5366,7 @@ impl Interp {
         argc: usize,
     ) -> Result<Value, Abrupt> {
         if ic.direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 {
-            return unsafe { self.call_jit_env_committed(ic, this_slot, args, argc) };
+            return unsafe { self.call_jit_env_committed(ic, ic.env, this_slot, args, argc) };
         }
         // --- committed: identical to call_jit_fast's committed path ---
         self.depth += 1;
