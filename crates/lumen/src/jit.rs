@@ -1692,6 +1692,21 @@ pub fn compile(
             // TDZ entry: the slot becomes `Empty` (tag 1). The old value drops in place —
             // trivially for tags < 5, by a bare shared-reference decrement for refcounted
             // tags; a BigInt or a last reference re-runs the (idempotent) op via the helper.
+            // Destructuring nullish guard: a pure peek — tag not Undefined(0)/Null(2) falls
+            // through with no stack traffic; nullish re-runs the op via the helper, which
+            // throws the TypeError. Three instructions instead of 3.5M helper trips on
+            // destructuring-heavy parses.
+            Op::DestructureGuard => {
+                let slow = a.new_label();
+                let done = a.new_label();
+                a.ldurb(9, 20, -24);
+                a.cbz(9, false, slow); // Undefined
+                a.cmp_imm_w(9, 2);
+                a.b_cond(C_NE, done); // anything but Null
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
             Op::Tdz(slot) if fast & 16 != 0 && rc_ok && (*slot as u32) * 24 + 16 < 4096 => {
                 let off = *slot as u32 * 24;
                 let slow = a.new_label();
@@ -2138,8 +2153,8 @@ fn emit_prop_load_inline(
     recv: PropRecv,
 ) {
     use crate::bytecode::{
-        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_RECV_SHAPE,
-        IC_OFF_SLOT,
+        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID2_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE,
+        IC_OFF_RECV_SHAPE, IC_OFF_SLOT,
     };
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
@@ -2163,6 +2178,7 @@ fn emit_prop_load_inline(
     let done = a.new_label();
     let load = a.new_label();
     let load_kc = a.new_label();
+    let absent_hit = a.new_label();
     // 1. receiver must be an Obj (tag 8); x10 = its stored Rc pointer, kept live for the final
     //    receiver drop (stack form) — hop walking uses x17. The this/slot forms read a binding
     //    the frame owns: no refcount management at all.
@@ -2275,8 +2291,9 @@ fn emit_prop_load_inline(
         a.cmp_imm_w(9, 1);
         a.b_cond(C_EQ, d1);
         let kc_route = if kc { a.new_label() } else { miss };
+        let other = a.new_label();
         a.cmp_imm_w(9, 2);
-        a.b_cond(C_NE, kc_route);
+        a.b_cond(C_NE, other);
         a.ldrb_imm(14, 12, IC_OFF_MID_OK);
         a.cbz(14, false, miss);
         // depth-2 mid hop: follow the live proto, validate against mid_shape
@@ -2307,6 +2324,50 @@ fn emit_prop_load_inline(
         a.cmp_reg_w(14, 16);
         a.b_cond(C_NE, miss);
         a.b(load);
+        // Cached ABSENCE (`IC_ABSENT`, the AST-shaped read `node.optionalField`): re-walk the
+        // live chain — every level None-exotic, ic-plain, shape matching the recorded walk
+        // (level 1 already validated by the receiver checks above; ABSENT states only fill
+        // from all-None chains, so re-require None on receivers the `arr_ok`/`str_ok` gates
+        // let through) — and the chain must END where the fill saw it end. Then the read is
+        // `undefined` with no entry scan at all. Method loads keep the helper (an absent
+        // method throws there anyway).
+        a.bind(other);
+        if !method {
+            a.cmp_imm_w(9, crate::bytecode::IC_ABSENT as u32);
+            a.b_cond(C_NE, kc_route);
+            if arr_ok || str_ok {
+                a.ldrb_imm(14, 11, ex);
+                a.cmp_imm_w(14, none_tag);
+                a.b_cond(C_NE, miss);
+            }
+            let chain_end = a.new_label();
+            for (lvl, shape_off) in [
+                (2u32, IC_OFF_MID_SHAPE),
+                (3u32, IC_OFF_MID2_SHAPE),
+                (4u32, IC_OFF_HOLDER_SHAPE),
+            ] {
+                a.cmp_imm_w(13, lvl);
+                a.b_cond(C_LO, chain_end);
+                a.ldr_imm(17, 11, pr);
+                a.cbz(17, true, miss); // chain ended before the recorded level count
+                a.add_imm(11, 17, rcv);
+                a.ldrb_imm(14, 11, ex);
+                a.cmp_imm_w(14, none_tag);
+                a.b_cond(C_NE, miss);
+                a.ldrb_imm(14, 11, plain);
+                a.cbz(14, false, miss);
+                a.ldr_w_imm(14, 11, sh);
+                a.ldr_w_imm(16, 12, shape_off);
+                a.cmp_reg_w(14, 16);
+                a.b_cond(C_NE, miss);
+            }
+            a.bind(chain_end);
+            a.ldr_imm(17, 11, pr);
+            a.cbz(17, true, absent_hit);
+            a.b(miss); // a proto was attached where the fill saw the end
+        } else if !kc {
+            a.b(miss);
+        }
         // key-checked states (`IC_ARR_KEYCHK`): 0x40 = the array receiver IS the holder
         // (`arr.length`); 0x41 = one hop to an array holder (Array.prototype methods — itself
         // an Array exotic). The receiver-side Array gate above already passed 0x40 (nonzero
@@ -2458,6 +2519,26 @@ fn emit_prop_load_inline(
             a.b_cond(C_NE, slow);
         }
         a.b(val);
+    }
+    // 6a. absent landing: the read is `undefined`. Tag-only write (stale payload is fine —
+    // Undefined drops touch nothing; the Tdz template sets the same precedent).
+    a.bind(absent_hit);
+    if !method {
+        a.movz(9, 0, 0);
+        match recv {
+            PropRecv::Stack => {
+                // drop the receiver (strong was > 1: decrement, no free), overwrite in place
+                a.ldur(14, 10, strong);
+                a.sub_imm(14, 14, 1);
+                a.stur(14, 10, strong);
+                a.sturb(9, 20, -24);
+            }
+            PropRecv::This | PropRecv::Slot(_) => {
+                a.strb_imm(9, 20, 0);
+                a.add_imm(20, 20, 24);
+            }
+        }
+        a.b(done);
     }
     a.bind(slow);
     emit_op_helper(a, H_GET_PROP, pc, l_unwind);

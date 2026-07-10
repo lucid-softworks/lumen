@@ -76,6 +76,7 @@ pub const IC_OFF_SLOT: u32 = 8;
 pub const IC_OFF_DEPTH: u32 = 12;
 pub const IC_OFF_MID_OK: u32 = 13;
 pub const IC_OFF_MID_SHAPE: u32 = 16;
+pub const IC_OFF_MID2_SHAPE: u32 = 20;
 
 pub const IC_EMPTY: u8 = u8::MAX;
 /// `IcState::depth` marker for a cached ABSENT property: on a receiver of `recv_shape`, `name`
