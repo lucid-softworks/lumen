@@ -5738,6 +5738,38 @@ pub(crate) unsafe extern "C" fn jit_set_prop(
     }
 }
 
+thread_local! {
+    /// Scratch site cells for COMPUTED string-key property reads (`o[k]` where `k` is a
+    /// string): `get_prop_ic` needs a site, and probes address all `PROP_IC_WAYS` CONSECUTIVE
+    /// cells relative to the one passed (`Interp::ic_way`), so the scratch must be a full
+    /// way-array. Computed sites have no cells of their own — the global stub cache (keyed by
+    /// receiver shape + key data pointer, both stable for the shared LStr instances that flow
+    /// through dispatch tables like astring's `this[node.type]`) carries the real caching;
+    /// these cells just absorb the fills.
+    static ELEM_IC: [std::cell::Cell<IcState>; PROP_IC_WAYS] =
+        const { [const { std::cell::Cell::new(IcState::EMPTY) }; PROP_IC_WAYS] };
+}
+
+/// Computed string-key read fast path: route through the property-IC machinery instead of the
+/// raw `get_member` chain walk. The way cells are CLEARED first — an `IcState` carries no
+/// name (a real site cell binds one implicitly), so a stale way entry filled for one key
+/// would answer a different key on the same shape. Resolution therefore comes from the
+/// name-keyed STUB cache (hit: shape-validated, no scan) or a rederive; the scratch ways
+/// only absorb the fills. Digit-leading keys keep the element paths.
+#[inline]
+fn get_elem_str_ic(
+    i: &mut crate::interpreter::Interp,
+    obj: &Value,
+    key: &crate::lstr::LStr,
+) -> Result<Value, Abrupt> {
+    ELEM_IC.with(|cells| {
+        for c in cells {
+            c.set(IcState::EMPTY);
+        }
+        i.get_prop_ic(obj, key, &cells[0])
+    })
+}
+
 /// Dedicated property-read entry (same contract as [`jit_exec`]): straight into
 /// [`crate::interpreter::Interp::get_prop_ic`] for the four read shapes, skipping the generic
 /// op decode.
@@ -6351,6 +6383,13 @@ unsafe fn jit_exec_inner(
                     return Ok(());
                 }
             }
+            if let (Value::Obj(_), Value::Str(s)) = (&obj, &key) {
+                if !s.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+                    let v = get_elem_str_ic(i, &obj, s)?;
+                    push!(v);
+                    return Ok(());
+                }
+            }
             if matches!(obj, Value::Undefined | Value::Null) {
                 return Err(i.throw("TypeError", "cannot read property of null or undefined"));
             }
@@ -6511,6 +6550,13 @@ unsafe fn jit_exec_inner(
                         let k = i.to_property_key(&key)?;
                         i.get_member(&obj, &k)?
                     }
+                }
+            } else if let (Value::Obj(_), Value::Str(s)) = (&obj, &key) {
+                if !s.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
+                    get_elem_str_ic(i, &obj, s)?
+                } else {
+                    let k = i.to_property_key(&key)?;
+                    i.get_member(&obj, &k)?
                 }
             } else {
                 if matches!(obj, Value::Undefined | Value::Null) {
