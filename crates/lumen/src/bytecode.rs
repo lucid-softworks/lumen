@@ -5633,6 +5633,111 @@ pub(crate) unsafe extern "C" fn jit_call_hit(
     }
 }
 
+/// Dedicated `Op::MakeObject` entry (same contract as [`jit_exec`]): clones the site's
+/// pre-shaped map and moves the values straight off the operand stack — no generic op
+/// dispatch, no intermediate `Vec`.
+pub(crate) unsafe extern "C" fn jit_make_object(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    jit_opstat(ctx, pc);
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    let Op::MakeObject(start, count, tidx) = chunk.ops[pc as usize] else {
+        unreachable!("jit_make_object emitted only for MakeObject");
+    };
+    let count = count as usize;
+    let base = sp.sub(count);
+    let keys = &chunk.names[start as usize..start as usize + count];
+    let v = if tidx != u32::MAX {
+        i.make_plain_object_templated_from(&chunk.obj_maps[tidx as usize], keys, base, count)
+    } else {
+        let mut values = Vec::with_capacity(count);
+        for k in 0..count {
+            values.push(base.add(k).read());
+        }
+        i.make_plain_object_vm(keys, values)
+    };
+    sp = base;
+    sp.write(v);
+    crate::jit::SpFlag {
+        sp: sp.add(1),
+        flag: 0,
+    }
+}
+
+/// Dedicated property-store entry (same contract as [`jit_exec`]): straight into
+/// [`crate::interpreter::Interp::set_prop_ic`] for the four store shapes, skipping the
+/// generic op decode — creation-heavy code (`node.value = x` on a shape that lacks the key)
+/// funnels every write through here.
+pub(crate) unsafe extern "C" fn jit_set_prop(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = &mut *ctx;
+    jit_opstat(ctx, pc);
+    let i = &mut *ctx.interp;
+    let chunk = &*ctx.chunk;
+    let r: Result<(), Abrupt> = (|| {
+        match chunk.ops[pc as usize] {
+            Op::SetProp(n, c) => {
+                sp = sp.sub(1);
+                let v = sp.read();
+                sp = sp.sub(1);
+                let obj = sp.read();
+                i.set_prop_ic(
+                    &obj,
+                    &chunk.names[n as usize],
+                    v.clone(),
+                    &chunk.caches[c as usize],
+                )?;
+                sp.write(v);
+                sp = sp.add(1);
+                Ok(())
+            }
+            Op::SetPropDrop(n, c) => {
+                sp = sp.sub(1);
+                let v = sp.read();
+                sp = sp.sub(1);
+                let obj = sp.read();
+                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
+            }
+            Op::SetPropThisDrop(n, c) => {
+                sp = sp.sub(1);
+                let v = sp.read();
+                let this = (*ctx.this_raw).clone();
+                i.set_prop_ic(&this, &chunk.names[n as usize], v, &chunk.caches[c as usize])
+            }
+            Op::SetPropLocalDrop(s, n, c) => {
+                sp = sp.sub(1);
+                let v = sp.read();
+                let obj = (*ctx.slots.add(s as usize)).clone();
+                if matches!(obj, Value::Empty) {
+                    return Err(i.throw(
+                        "ReferenceError",
+                        format!(
+                            "cannot access '{}' before initialization",
+                            chunk.slot_names[s as usize]
+                        ),
+                    ));
+                }
+                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
+            }
+            _ => unreachable!("jit_set_prop emitted only for property stores"),
+        }
+    })();
+    match r {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(ab) => {
+            ctx.error = Some(ab);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
 /// Dedicated helper for `Op::Call` / `Op::CallWithThis` sites — the same contract as
 /// [`jit_exec`], minus the full op dispatch (calls dominate helper traffic in call-heavy code,
 /// so the two arms get a two-way decode of their own).

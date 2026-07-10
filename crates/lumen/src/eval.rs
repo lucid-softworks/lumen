@@ -5118,6 +5118,37 @@ impl Interp {
         Value::Obj(obj)
     }
 
+    /// [`Interp::make_plain_object_templated`] reading the values straight off the JIT operand
+    /// stack (moved; the caller forgets them) — no intermediate `Vec` per instantiation.
+    ///
+    /// # Safety
+    /// `base..base+count` must be initialized `Value`s the caller relinquishes.
+    pub(crate) unsafe fn make_plain_object_templated_from(
+        &mut self,
+        tmpl: &std::cell::OnceCell<crate::value::Props>,
+        keys: &[std::rc::Rc<str>],
+        base: *const Value,
+        count: usize,
+    ) -> Value {
+        let map = tmpl.get_or_init(|| {
+            let mut p = crate::value::Props::new();
+            for k in keys {
+                p.insert(k.clone(), crate::value::Property::plain(Value::Undefined));
+            }
+            p
+        });
+        let obj = crate::value::Object::new(Some(self.object_proto.clone()));
+        {
+            let mut b = obj.borrow_mut();
+            b.props = map.clone();
+            for slot in 0..count {
+                b.props.entry_at_mut(slot).expect("template slot").1.value =
+                    unsafe { base.add(slot).read() };
+            }
+        }
+        Value::Obj(obj)
+    }
+
     /// [`Interp::make_plain_object_vm`] through a per-site pre-shaped map (distinct keys only —
     /// the compiler guarantees it): the first execution builds the final `Props` once via the
     /// insert path with placeholder values; every later instance clones it (entry-vector copy,

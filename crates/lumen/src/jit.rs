@@ -152,6 +152,8 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_call_hit as *const () as usize,
         crate::bytecode::jit_direct_finish as *const () as usize,
         crate::bytecode::jit_drop_at as *const () as usize,
+        crate::bytecode::jit_make_object as *const () as usize,
+        crate::bytecode::jit_set_prop as *const () as usize,
     ]
 }
 
@@ -169,7 +171,12 @@ pub const H_CALL_HIT: usize = 7;
 pub const H_DIRECT_FINISH: usize = 8;
 /// Drop the single `Value` at `sp` (the direct-call sequence's rare last-reference callee).
 pub const H_DROP_AT: usize = 9;
-pub const N_HELPERS: usize = 10;
+/// Dedicated `Op::MakeObject` entry: template clone + stack-direct value writes, no op decode.
+pub const H_MAKE_OBJECT: usize = 10;
+/// Dedicated property-store entry (`SetProp`/`SetPropDrop`/`SetPropThisDrop`/`SetPropLocalDrop`
+/// misses): straight into `set_prop_ic`, no generic op decode.
+pub const H_SET_PROP: usize = 11;
+pub const N_HELPERS: usize = 12;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1922,6 +1929,15 @@ pub fn compile(
                 a.cbnz(1, false, l_unwind);
                 a.bind(done);
             }
+            Op::MakeObject(..) => {
+                emit_op_helper(&mut a, H_MAKE_OBJECT, pc as u32, l_unwind);
+            }
+            Op::SetProp(..)
+            | Op::SetPropDrop(..)
+            | Op::SetPropThisDrop(..)
+            | Op::SetPropLocalDrop(..) => {
+                emit_op_helper(&mut a, H_SET_PROP, pc as u32, l_unwind);
+            }
             _ => {
                 emit_exec(&mut a, pc as u32, l_unwind);
             }
@@ -2562,10 +2578,13 @@ fn emit_direct_call(
     a.ldr_imm(11, 19, 56); // ctx.global_body
     a.cbz(11, true, hit_slow);
     a.bind(no_glob);
-    // n_params == argc exactly
+    // n_params >= argc: the sequence moves exactly `argc` arguments and its slot-init loop
+    // already tags every remaining slot (argc..n_slots) Undefined, which IS the missing-
+    // argument binding. Over-application (argc > n_params) keeps the helper: the surplus
+    // values must be dropped, and refcounted drops don't belong in this sequence.
     a.ldrh_imm(9, 12, IC_NPARAMS);
     a.cmp_imm_w(9, argc as u32);
-    a.b_cond(C_NE, hit_slow);
+    a.b_cond(C_LO, hit_slow);
     // this binding: a this-using SLOPPY callee needs boxing/global fallback unless the
     // incoming receiver is already an object.
     a.ldrb_imm(9, 12, IC_USES_THIS);
@@ -3268,7 +3287,7 @@ fn emit_set_prop_inline(
     }
     a.b(done);
     a.bind(slow);
-    emit_exec(a, pc, l_unwind);
+    emit_op_helper(a, H_SET_PROP, pc, l_unwind);
     a.bind(done);
 }
 
@@ -7647,10 +7666,17 @@ fn emit_loop_chain(
 /// the unwinder's cleanup from re-dropping moved-out slots.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn emit_exec(a: &mut asm::Asm, pc: u32, l_unwind: usize) {
+    emit_op_helper(a, H_EXEC, pc, l_unwind);
+}
+
+/// [`emit_exec`] through a DEDICATED helper slot (same `(ctx, pc, sp) → SpFlag` contract):
+/// hot op families skip the generic decode.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_op_helper(a: &mut asm::Asm, idx: usize, pc: u32, l_unwind: usize) {
     a.mov(0, 19);
     a.movz(1, pc, 0);
     a.mov(2, 20);
-    a.ldr_imm(16, 21, (H_EXEC * 8) as u32);
+    a.ldr_imm(16, 21, (idx * 8) as u32);
     a.blr(16);
     a.mov(20, 0);
     a.cbnz(1, false, l_unwind);
