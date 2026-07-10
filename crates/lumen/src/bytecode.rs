@@ -1480,9 +1480,19 @@ fn compile_inner(
     // Capture analysis: which locals inner functions can name (they live in a real activation
     // env), and whether an inner arrow chain reads `this`. `None` = unanalyzable — bail.
     let Some((captured, env_this)) = CaptureScan::run(func) else {
+        let head: String = func
+            .source
+            .as_deref()
+            .unwrap_or("<no source>")
+            .chars()
+            .take(90)
+            .collect();
         log_bail(
             "capture-scan",
-            "unanalyzable body (eval/with/annexB/pattern)",
+            &format!(
+                "unanalyzable body (eval/with/annexB/pattern) in: {}",
+                head.replace('\n', " ")
+            ),
         );
         return None;
     };
