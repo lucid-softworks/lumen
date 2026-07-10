@@ -5994,7 +5994,7 @@ fn get_elem_str_ic(
         for c in cells {
             c.set(IcState::EMPTY);
         }
-        i.get_prop_ic(obj, key, &cells[0])
+        i.get_prop_keyed(obj, key, &cells[0])
     })
 }
 

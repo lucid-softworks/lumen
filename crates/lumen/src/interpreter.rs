@@ -2418,9 +2418,35 @@ impl Interp {
         name: &str,
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Result<Value, Abrupt> {
+        self.get_prop_ic_impl(base, name, cache, true)
+    }
+
+    /// [`Interp::get_prop_ic`] for a RUNTIME string key (computed reads — `o[k]`): the global
+    /// stub cache is keyed by name data pointer under the invariant that those pointers are
+    /// site-interned `Rc<str>`s alive for the chunk's lifetime. A transient key must neither
+    /// probe it (a freed key's recycled address false-hits another key's entry — with the
+    /// size-class allocator this happens on the very next iteration of an
+    /// `Object.entries` loop) nor fill it (the dangling pointer would later false-match a
+    /// fresh site name allocated at the same address).
+    pub(crate) fn get_prop_keyed(
+        &mut self,
+        base: &Value,
+        name: &str,
+        cache: &std::cell::Cell<crate::bytecode::IcState>,
+    ) -> Result<Value, Abrupt> {
+        self.get_prop_ic_impl(base, name, cache, false)
+    }
+
+    fn get_prop_ic_impl(
+        &mut self,
+        base: &Value,
+        name: &str,
+        cache: &std::cell::Cell<crate::bytecode::IcState>,
+        stable_name: bool,
+    ) -> Result<Value, Abrupt> {
         match base {
             Value::Obj(o) => {
-                if let Some(v) = self.try_ic_get(o, name, cache) {
+                if let Some(v) = self.try_ic_get(o, name, cache, stable_name) {
                     return Ok(v);
                 }
             }
@@ -2437,7 +2463,7 @@ impl Interp {
                     Value::Num(_) => self.number_proto.clone(),
                     _ => self.boolean_proto.clone(),
                 };
-                if let Some(v) = self.try_ic_get(&proto, name, cache) {
+                if let Some(v) = self.try_ic_get(&proto, name, cache, stable_name) {
                     return Ok(v);
                 }
             }
@@ -2471,6 +2497,7 @@ impl Interp {
         o: &Gc,
         name: &str,
         cache: &std::cell::Cell<crate::bytecode::IcState>,
+        stable_name: bool,
     ) -> Option<Value> {
         let head = Rc::as_ptr(o);
         // PROP_IC_WAYS ways per site (polymorphic receivers — subclass hierarchies rotating
@@ -2482,17 +2509,19 @@ impl Interp {
                 return Some(v);
             }
         }
-        let shape = unsafe { (*head).borrow().props.shape() };
-        let e = self.stub_cache[stub_slot(shape, name)].get();
-        if e.name == name.as_ptr() as usize && e.st.recv_shape == shape {
-            if let Some(v) = self.ic_shape_probe(head, name, e.st) {
-                // Promote into the site (demoting the other ways): the next access hits
-                // way-first.
-                self.ic_insert(cache, e.st);
-                return Some(v);
+        if stable_name {
+            let shape = unsafe { (*head).borrow().props.shape() };
+            let e = self.stub_cache[stub_slot(shape, name)].get();
+            if e.name == name.as_ptr() as usize && e.st.recv_shape == shape {
+                if let Some(v) = self.ic_shape_probe(head, name, e.st) {
+                    // Promote into the site (demoting the other ways): the next access hits
+                    // way-first.
+                    self.ic_insert(cache, e.st);
+                    return Some(v);
+                }
             }
         }
-        self.ic_get_rederive(o, name, cache)
+        self.ic_get_rederive(o, name, cache, stable_name)
     }
 
     /// Cache way `k` of a property site (sites allocate `PROP_IC_WAYS` consecutive cells — see
@@ -2653,6 +2682,7 @@ impl Interp {
         o: &Gc,
         name: &str,
         cache: &std::cell::Cell<crate::bytecode::IcState>,
+        stable_name: bool,
     ) -> Option<Value> {
         use crate::bytecode::{IcState, IC_MAX_DEPTH};
         type ObjCell = std::cell::RefCell<Object>;
@@ -2716,11 +2746,14 @@ impl Interp {
                     };
                     self.ic_insert(cache, st);
                     // Mirror into the stub cache so OTHER shapes rotating through this
-                    // site don't evict this resolution for good.
-                    self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
-                        name: name.as_ptr() as usize,
-                        st,
-                    });
+                    // site don't evict this resolution for good — stable site names only
+                    // (see `get_prop_keyed`).
+                    if stable_name {
+                        self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
+                            name: name.as_ptr() as usize,
+                            st,
+                        });
+                    }
                     return Some(v);
                 }
                 if depth == 1 && matches!(b.exotic, Exotic::None | Exotic::StrWrap(_)) {
@@ -2747,10 +2780,12 @@ impl Interp {
                                 mid2_shape: absent_shapes[2],
                             };
                             self.ic_insert(cache, st);
-                            self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
-                                name: name.as_ptr() as usize,
-                                st,
-                            });
+                            if stable_name {
+                                self.stub_cache[stub_slot(recv_shape, name)].set(StubEntry {
+                                    name: name.as_ptr() as usize,
+                                    st,
+                                });
+                            }
                             return Some(Value::Undefined);
                         }
                         return None;
