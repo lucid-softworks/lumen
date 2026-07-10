@@ -756,15 +756,37 @@ impl std::fmt::Debug for Chunk {
 /// bails to the tree-walker.
 struct CaptureScan {
     /// Declared-name scopes, innermost last, each tagged with the function-nesting depth it
-    /// belongs to (0 = the function being compiled).
-    scopes: Vec<(std::collections::HashSet<String>, u32)>,
+    /// belongs to (0 = the function being compiled) and its push serial.
+    scopes: Vec<(std::collections::HashSet<String>, u32, u32)>,
     fn_depth: u32,
     /// Names resolving from depth > 0 to a depth-0 scope.
     captured: std::collections::HashSet<String>,
     /// Names declared by a depth-0 scope that is NOT the function's top scope (block lexicals,
-    /// for-head lexicals, catch params). If one of these is captured, the per-block binding
-    /// freshness slots can't express — the caller bails.
+    /// for-head lexicals, catch params). If one of these is captured, per-block binding
+    /// freshness matters — unless the name qualifies for activation homing (see
+    /// `homable_inner_lets`), the caller bails.
     depth0_inner_decls: std::collections::HashSet<String>,
+    /// Activation-homing candidates: a plain `let` declared by a once-per-call depth-0 scope
+    /// (a block/switch outside every loop — freshness never matters) with no ENCLOSING
+    /// declaration of the same name (an enclosing slot would wrongly shadow the env binding
+    /// inside the block), keyed name → declaring scope serial. Same-name declarations nested
+    /// INSIDE the candidate's scope are fine (their slots shadow the env binding correctly);
+    /// any other same-name declaration poisons the entry. At the end a candidate homes only
+    /// if every capture of the name resolved through ITS scope (see `captured_serials`) and
+    /// the name was never a free/global reference.
+    candidates: std::collections::HashMap<String, u32>,
+    /// Names that ever entered (or were disqualified from) candidacy — a second same-name
+    /// once-per-call `let` cannot home (both would map to ONE activation binding).
+    ever_candidates: std::collections::HashSet<String>,
+    /// For candidate names: the scope serials their captures resolved through.
+    captured_serials: std::collections::HashMap<String, std::collections::HashSet<u32>>,
+    /// Names referenced somewhere they did NOT resolve to a scope (free/global uses).
+    free_refs: std::collections::HashSet<String>,
+    /// Innermost loop nesting at the current walk position (for-head scopes and every scope
+    /// pushed inside a loop body are never homable).
+    loop_depth: u32,
+    /// Scope-push counter (the serial stored per scope for capture attribution).
+    next_serial: u32,
     /// Whether `this` is read from an inner arrow chain rooted at the outer function.
     env_this: bool,
     /// Arrow-ness of each enclosing function on the current path (index 0 = the outer function).
@@ -899,34 +921,101 @@ fn hoisted_vars_stmt(
 
 impl CaptureScan {
     /// Analyze `func`, returning (captured names, inner-arrow-reads-this) or `None` to bail.
-    fn run(func: &Function) -> Option<(std::collections::HashSet<String>, bool)> {
+    fn run(
+        func: &Function,
+    ) -> Option<(
+        std::collections::HashSet<String>,
+        bool,
+        Vec<String>,
+    )> {
         let mut sc = CaptureScan {
             scopes: Vec::new(),
             fn_depth: 0,
             captured: Default::default(),
             depth0_inner_decls: Default::default(),
+            candidates: Default::default(),
+            ever_candidates: Default::default(),
+            captured_serials: Default::default(),
+            free_refs: Default::default(),
+            loop_depth: 0,
+            next_serial: 0,
             env_this: false,
             arrow_path: vec![func.is_arrow],
         };
         sc.fn_body(func)?;
-        // A captured name declared by an inner depth-0 scope needs per-block freshness.
-        if sc
-            .captured
-            .iter()
-            .any(|n| sc.depth0_inner_decls.contains(n))
-        {
-            return None;
+        // A captured name declared by an inner depth-0 scope needs per-block freshness —
+        // except a candidate whose EVERY capture resolved through its own scope (a same-name
+        // capture through any other binding — a for-of head, another block — captured a
+        // DIFFERENT binding, which one activation slot can't express), which the compiler
+        // homes activation-wide instead.
+        let mut homed: Vec<String> = Vec::new();
+        for n in &sc.captured {
+            if sc.depth0_inner_decls.contains(n) {
+                let ok = sc.candidates.get(n).is_some_and(|cs| {
+                    !sc.free_refs.contains(n)
+                        && sc
+                            .captured_serials
+                            .get(n)
+                            .is_some_and(|set| set.len() == 1 && set.contains(cs))
+                });
+                if !ok {
+                    return None;
+                }
+                homed.push(n.clone());
+            }
         }
-        Some((sc.captured, sc.env_this))
+        // Homed names leave `captured`: the remaining consumers (param/var/body-lexical
+        // homing, the for-of gates) concern OTHER bindings of the name, and any same-name
+        // binding that could conflict already poisoned candidacy above.
+        for n in &homed {
+            sc.captured.remove(n);
+        }
+        homed.sort(); // deterministic cap_init order
+        Some((sc.captured, sc.env_this, homed))
     }
 
     fn push_scope(&mut self, names: std::collections::HashSet<String>) {
+        self.push_scope_lets(names, Default::default());
+    }
+
+    /// Like [`CaptureScan::push_scope`]; `lets` is the subset of `names` declared by plain
+    /// `let`s, which qualify for activation homing when the scope runs at most once per call
+    /// (outside every loop) and the name is unique/unambiguous (see `homable_inner_lets`).
+    fn push_scope_lets(
+        &mut self,
+        names: std::collections::HashSet<String>,
+        lets: std::collections::HashSet<String>,
+    ) {
+        let serial = self.next_serial;
+        self.next_serial += 1;
         if self.fn_depth == 0 && !self.scopes.is_empty() {
             for n in &names {
                 self.depth0_inner_decls.insert(n.clone());
+                let enclosed = self.scopes.iter().any(|(s, _, _)| s.contains(n));
+                if self.loop_depth == 0
+                    && lets.contains(n)
+                    && !enclosed
+                    && self.ever_candidates.insert(n.clone())
+                {
+                    self.candidates.insert(n.clone(), serial);
+                } else {
+                    // A non-qualifying declaration doesn't poison an existing candidate: a
+                    // later same-name SLOT declaration (nested or sibling) shadows the env
+                    // binding correctly, and a capture through it fails the serial check in
+                    // `run`. It does block FUTURE candidacy — the pending-consumption scheme
+                    // in the compiler requires the candidate to be the walk-order-FIRST
+                    // block-lexical declaration of its name.
+                    self.ever_candidates.insert(n.clone());
+                }
+            }
+        } else if self.fn_depth == 0 {
+            // The function's top scope: params/vars/body lexicals block all same-name
+            // candidacy (they'd be enclosing declarations).
+            for n in &names {
+                self.ever_candidates.insert(n.clone());
             }
         }
-        self.scopes.push((names, self.fn_depth));
+        self.scopes.push((names, self.fn_depth, serial));
     }
 
     /// Walk a whole function: params + hoisted vars + top-level lexicals in one scope, then body.
@@ -962,13 +1051,35 @@ impl CaptureScan {
     }
 
     /// Add a statement list's block-scoped declarations (let/const/class, strict block functions).
+    /// `lets` (when wanted) additionally collects the plain-`let` names — the only kind that
+    /// qualifies for activation homing when captured (see `homable_inner_lets`).
     fn declare_lexicals(&self, stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        self.declare_lexicals_lets(stmts, out, &mut Default::default());
+    }
+
+    fn declare_lexicals_lets(
+        &self,
+        stmts: &[Stmt],
+        out: &mut std::collections::HashSet<String>,
+        lets: &mut std::collections::HashSet<String>,
+    ) {
         for s in stmts {
             match s {
                 Stmt::VarDecl {
                     kind: DeclKind::Let | DeclKind::Const | DeclKind::Using | DeclKind::AwaitUsing,
                     decls,
                 } => {
+                    if matches!(
+                        s,
+                        Stmt::VarDecl {
+                            kind: DeclKind::Let,
+                            ..
+                        }
+                    ) {
+                        for (p, _) in decls {
+                            pat_idents(p, lets);
+                        }
+                    }
                     for (p, _) in decls {
                         pat_idents(p, out);
                     }
@@ -993,8 +1104,9 @@ impl CaptureScan {
 
     fn block(&mut self, stmts: &[Stmt]) -> Option<()> {
         let mut names = std::collections::HashSet::new();
-        self.declare_lexicals(stmts, &mut names);
-        self.push_scope(names);
+        let mut lets = std::collections::HashSet::new();
+        self.declare_lexicals_lets(stmts, &mut names, &mut lets);
+        self.push_scope_lets(names, lets);
         for s in stmts {
             self.stmt(s)?;
         }
@@ -1003,15 +1115,22 @@ impl CaptureScan {
     }
 
     fn reference(&mut self, name: &str) {
-        for (scope, depth) in self.scopes.iter().rev() {
+        for (scope, depth, serial) in self.scopes.iter().rev() {
             if scope.contains(name) {
                 if *depth == 0 && self.fn_depth > 0 {
                     self.captured.insert(name.to_string());
+                    self.captured_serials
+                        .entry(name.to_string())
+                        .or_default()
+                        .insert(*serial);
                 }
                 return;
             }
         }
-        // Unresolved: a global/free name of the whole compilation — nothing to capture.
+        // Unresolved: a global/free name of the whole compilation — nothing to capture, but
+        // it poisons activation homing for a like-named block lexical (whose env binding
+        // would wrongly shadow the global for this reference).
+        self.free_refs.insert(name.to_string());
     }
 
     /// Walk a pattern in *assignment* position (destructuring assignment): idents are references.
@@ -1121,10 +1240,16 @@ impl CaptureScan {
             Stmt::Block(b) => self.block(b),
             Stmt::While { test, body } => {
                 self.expr(test)?;
-                self.stmt(body)
+                self.loop_depth += 1;
+                let r = self.stmt(body);
+                self.loop_depth -= 1;
+                r
             }
             Stmt::DoWhile { body, test } => {
-                self.stmt(body)?;
+                self.loop_depth += 1;
+                let r = self.stmt(body);
+                self.loop_depth -= 1;
+                r?;
                 self.expr(test)
             }
             Stmt::For {
@@ -1143,6 +1268,9 @@ impl CaptureScan {
                         pat_idents(p, &mut names);
                     }
                 }
+                // The head scope itself counts as in-loop: its lexicals are per-iteration
+                // fresh, never once-per-call.
+                self.loop_depth += 1;
                 self.push_scope(names);
                 let r = (|| {
                     match init.as_deref() {
@@ -1166,6 +1294,7 @@ impl CaptureScan {
                     self.stmt(body)
                 })();
                 self.scopes.pop();
+                self.loop_depth -= 1;
                 r
             }
             Stmt::ForInOf {
@@ -1186,6 +1315,7 @@ impl CaptureScan {
                     Some(DeclKind::Var) => {} // already in the hoisted set
                     None => {}
                 }
+                self.loop_depth += 1;
                 self.push_scope(names);
                 let r = (|| {
                     if decl.is_none() {
@@ -1196,6 +1326,7 @@ impl CaptureScan {
                     self.stmt(body)
                 })();
                 self.scopes.pop();
+                self.loop_depth -= 1;
                 r
             }
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Empty | Stmt::Debugger => Some(()),
@@ -1232,10 +1363,11 @@ impl CaptureScan {
             Stmt::Switch { disc, cases } => {
                 self.expr(disc)?;
                 let mut names = std::collections::HashSet::new();
+                let mut lets = std::collections::HashSet::new();
                 for c in cases {
-                    self.declare_lexicals(&c.body, &mut names);
+                    self.declare_lexicals_lets(&c.body, &mut names, &mut lets);
                 }
-                self.push_scope(names);
+                self.push_scope_lets(names, lets);
                 let r = (|| {
                     for c in cases {
                         if let Some(t) = &c.test {
@@ -1500,7 +1632,7 @@ fn compile_inner(
     }
     // Capture analysis: which locals inner functions can name (they live in a real activation
     // env), and whether an inner arrow chain reads `this`. `None` = unanalyzable — bail.
-    let Some((captured, env_this)) = CaptureScan::run(func) else {
+    let Some((captured, env_this, block_lets)) = CaptureScan::run(func) else {
         let head: String = func
             .source
             .as_deref()
@@ -1524,6 +1656,17 @@ fn compile_inner(
         plan_stack: vec![(plan.clone(), 0)],
         ..Compiler::default()
     };
+    // Captured once-per-call block `let`s home in the activation (TDZ from entry, initialized
+    // by the declaring block's own StoreCapInit); CaptureScan proved no enclosing same-name
+    // declaration and block-resolved references only, so the function-flat env map is
+    // faithful (nested same-name declarations shadow it through their slots).
+    for name in &block_lets {
+        c.cap_inits
+            .push(CapInit::Lexical(Rc::from(name.as_str()), false));
+        c.env_bind(name, false);
+        c.homed_lets.insert(name.clone());
+        c.homed_pending.insert(name.clone());
+    }
     // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
     // resolves to the later parameter, matching the env behavior where the later insert wins).
     // A captured parameter keeps its positional slot (dead) but homes in the activation env.
@@ -1819,6 +1962,12 @@ fn plan_inlines_at(
 struct Compiler {
     /// The compiled function's strictness (carried into ops whose runtime behavior forks on it).
     strict: bool,
+    /// Captured once-per-call block `let`s homed in the activation (see CaptureScan's
+    /// `candidates`). `homed_pending` holds the ones whose declaring block hasn't been reached
+    /// yet: the FIRST block-level declaration of the name consumes it (skipping slot creation);
+    /// any later same-name declaration is a nested shadow and binds a slot normally.
+    homed_lets: std::collections::HashSet<String>,
+    homed_pending: std::collections::HashSet<String>,
     ops: Vec<Op>,
     consts: Vec<Value>,
     names: Vec<Rc<str>>,
@@ -2307,6 +2456,13 @@ impl Compiler {
     fn declare_lexical_pattern(&mut self, pat: &Pattern, is_const: bool) -> CResult {
         match pat {
             Pattern::Ident(name) => {
+                if self.homed_pending.remove(name) {
+                    // The homed block `let`'s own declaration (see `Compiler::homed_lets`):
+                    // in TDZ since entry, no slot, no per-entry Tdz (the block runs at most
+                    // once per call by construction). Consumed so any LATER same-name
+                    // declaration (a nested for-of head, a sibling block) slot-shadows.
+                    return Ok(());
+                }
                 let slot = self.fresh_slot(name);
                 self.scope_bind(name, slot, is_const);
                 self.tdz_slots.insert(slot);
@@ -3141,7 +3297,9 @@ impl Compiler {
                         return Err(Bail);
                     }
                     (Pattern::Ident(name), Some(kind)) => {
-                        if self.env_names.contains_key(name) || self.captured_name(name) {
+                        // An env-homed name blocks a head slot — except a homed block `let`
+                        // (`Compiler::homed_lets`), which a fresh slot shadows correctly.
+                        if self.env_names.contains_key(name) && !self.homed_lets.contains(name) {
                             self.scopes.pop();
                             return Err(Bail);
                         }
@@ -3160,12 +3318,11 @@ impl Compiler {
                         // the oracle.
                         let mut leaf_names = std::collections::HashSet::new();
                         pat_idents(pat, &mut leaf_names);
-                        if leaf_names
-                            .iter()
-                            .any(|n| self.env_names.contains_key(n) || self.captured_name(n))
-                            || self
-                                .declare_lexical_pattern(pat, matches!(kind, DeclKind::Const))
-                                .is_err()
+                        if leaf_names.iter().any(|n| {
+                            self.env_names.contains_key(n) && !self.homed_lets.contains(n)
+                        }) || self
+                            .declare_lexical_pattern(pat, matches!(kind, DeclKind::Const))
+                            .is_err()
                         {
                             self.scopes.pop();
                             return Err(Bail);
