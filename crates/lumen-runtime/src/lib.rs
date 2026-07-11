@@ -183,6 +183,15 @@ impl Runtime {
     /// `__filename`/`require` in scope), then loop to quiescence. `Err` is the rendered
     /// uncaught error. This is what the CLI uses for `lumen-cli file.js`.
     pub fn run_main(&mut self, path: &str) -> Result<(), String> {
+        let result = self.start_main(path);
+        self.run_to_completion();
+        result
+    }
+
+    /// Start `path` as the CJS main module WITHOUT pumping the macrotask loop (only the top-level
+    /// microtask checkpoint runs). Worker threads use this: the caller arms its message inbox
+    /// first and then drives the loop itself. `Err` is the rendered uncaught error.
+    pub(crate) fn start_main(&mut self, path: &str) -> Result<(), String> {
         // A CJS script can still dynamic-`import()`: give the engine the ESM loader and resolve
         // bare relative specifiers against the entry file.
         let loader = esm::make_loader(self.builtin_modules());
@@ -201,7 +210,7 @@ impl Runtime {
             Value::Undefined,
             &[Value::from_string(path.to_string())],
         );
-        self.run_to_completion();
+        self.engine.run_microtasks();
         result
             .map(|_| ())
             .map_err(|e| describe_error(self.engine.ctx(), &e))
