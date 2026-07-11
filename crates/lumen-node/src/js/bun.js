@@ -152,9 +152,35 @@ function deepMatch(subset, obj) {
 }
 
 // ---- hashing ----------------------------------------------------------------------------------
-// crc32 and adler32 are exact and cheap (verified bit-for-bit against Bun). Bun's default hash
-// (wyhash) and the cityHash/xxHash/murmur/rapidhash family need bit-exact ports lumen doesn't have
-// yet, so they honestly throw rather than emit values that differ from Bun.
+// All of Bun.hash is real and verified bit-for-bit against Bun 1.2.21 (oracle fixture:
+// crates/lumen-node/tests/fixtures/bun_hash_oracle.txt). crc32/adler32 stay in JS (cheap);
+// wyhash/cityHash/xxHash/murmur/rapidhash are native ops (__bunhash, crates/lumen-node/src/
+// bunhash.rs) ported from the exact Zig stdlib sources Bun compiles in.
+//
+// Input coercion mirrors Bun's hashWrap: no argument → ""; ArrayBuffer/TypedArray/DataView →
+// their bytes; anything else (including explicit undefined/null) → String(x) as UTF-8. The seed
+// mirrors JSC toUInt64NoTruncate: bigint → mod 2^64; int32 numbers sign-extend (so -1 →
+// 2^64-1); other integer doubles are used only when 0 <= d < 2^51 (JSC int52 — negative doubles
+// clamp to 0); everything else (non-integer, NaN, ±Inf, non-number) → 0.
+const HASH_EMPTY = new Uint8Array(0);
+function hashBytes(args) {
+  if (args.length === 0) return HASH_EMPTY;
+  const x = args[0];
+  if (typeof x === "string") return Buffer.from(x, "utf8");
+  if (x instanceof ArrayBuffer) return new Uint8Array(x);
+  if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+  return Buffer.from(String(x), "utf8");
+}
+function hashSeed(args) {
+  const s = args[1];
+  if (typeof s === "bigint") return BigInt.asUintN(64, s);
+  if (typeof s === "number") {
+    if ((s | 0) === s) return BigInt.asUintN(64, BigInt(s | 0));
+    if (Number.isInteger(s) && s > 0 && s < 2 ** 51) return BigInt(s);
+  }
+  return 0n;
+}
+const hashU64 = (v) => BigInt.asUintN(64, v);
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
@@ -164,28 +190,32 @@ const CRC_TABLE = (() => {
   }
   return t;
 })();
-function crc32(data) {
-  const b = toU8(data);
+function crc32Core(b) {
   let c = 0xffffffff;
   for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function adler32(data) {
-  const b = toU8(data);
+function adler32Core(b) {
   let a = 1, s = 0;
   for (let i = 0; i < b.length; i++) { a = (a + b[i]) % 65521; s = (s + a) % 65521; }
   return ((s << 16) | a) >>> 0;
 }
-const hash = function hash() {
-  throw new Error("Bun.hash default (wyhash) is not implemented in lumen; use Bun.hash.crc32 / Bun.hash.adler32");
+// Bun.hash(input, seed) IS wyhash (the same callback object in Bun).
+const hash = function hash(...args) {
+  return hashU64(__bunhash.wyhash(hashBytes(args), hashSeed(args)));
 };
-hash.crc32 = crc32;
-hash.adler32 = adler32;
-for (const name of ["wyhash", "cityHash32", "cityHash64", "xxHash32", "xxHash64", "xxHash3", "murmur32v3", "murmur32v2", "murmur64v2", "rapidhash"]) {
-  hash[name] = () => {
-    throw new Error(`Bun.hash.${name} is not implemented in lumen (would not be bit-exact with Bun)`);
-  };
-}
+hash.wyhash = function wyhash(...args) { return hashU64(__bunhash.wyhash(hashBytes(args), hashSeed(args))); };
+hash.cityHash64 = function cityHash64(...args) { return hashU64(__bunhash.cityHash64(hashBytes(args), hashSeed(args))); };
+hash.xxHash64 = function xxHash64(...args) { return hashU64(__bunhash.xxHash64(hashBytes(args), hashSeed(args))); };
+hash.xxHash3 = function xxHash3(...args) { return hashU64(__bunhash.xxHash3(hashBytes(args), hashSeed(args))); };
+hash.murmur64v2 = function murmur64v2(...args) { return hashU64(__bunhash.murmur64v2(hashBytes(args), hashSeed(args))); };
+hash.rapidhash = function rapidhash(...args) { return hashU64(__bunhash.rapidhash(hashBytes(args), hashSeed(args))); };
+hash.cityHash32 = function cityHash32(...args) { return __bunhash.cityHash32(hashBytes(args)); }; // seed ignored, like Bun
+hash.xxHash32 = function xxHash32(...args) { return __bunhash.xxHash32(hashBytes(args), hashSeed(args)); };
+hash.murmur32v3 = function murmur32v3(...args) { return __bunhash.murmur32v3(hashBytes(args), hashSeed(args)); };
+hash.murmur32v2 = function murmur32v2(...args) { return __bunhash.murmur32v2(hashBytes(args), hashSeed(args)); };
+hash.crc32 = function crc32(...args) { return crc32Core(hashBytes(args)); }; // seed ignored, like Bun
+hash.adler32 = function adler32(...args) { return adler32Core(hashBytes(args)); };
 
 // ---- CryptoHasher / MD5 / SHA* ----------------------------------------------------------------
 // Backed by node crypto (md5/sha1/sha256 are real; every other algorithm throws at the crypto

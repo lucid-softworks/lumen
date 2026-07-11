@@ -24,6 +24,7 @@ use std::path::Path;
 
 use lumen_host::{ops, Ctx, Extension, SpawnHandle, Value};
 
+mod bunhash;
 mod child;
 mod dns;
 mod dylib;
@@ -104,6 +105,21 @@ pub fn extension() -> Extension {
                     "toBuffer" (3) => ffi::op_to_buffer,
                     "registerCallback" (3) => ffi::op_register_callback,
                     "unregisterCallback" (1) => ffi::op_unregister_callback,
+                ],
+            ),
+            (
+                "__bunhash",
+                ops![
+                    "wyhash" (2) => bunhash::op_wyhash,
+                    "cityHash32" (2) => bunhash::op_city_hash32,
+                    "cityHash64" (2) => bunhash::op_city_hash64,
+                    "xxHash32" (2) => bunhash::op_xx_hash32,
+                    "xxHash64" (2) => bunhash::op_xx_hash64,
+                    "xxHash3" (2) => bunhash::op_xx_hash3,
+                    "murmur32v3" (2) => bunhash::op_murmur32v3,
+                    "murmur32v2" (2) => bunhash::op_murmur32v2,
+                    "murmur64v2" (2) => bunhash::op_murmur64v2,
+                    "rapidhash" (2) => bunhash::op_rapidhash,
                 ],
             ),
             ("__child", child::CHILD_OPS),

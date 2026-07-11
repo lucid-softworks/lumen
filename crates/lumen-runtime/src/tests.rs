@@ -1878,3 +1878,49 @@ fn esm_module_not_found_is_an_error() {
     let err = rt.run_module(&entry.to_string_lossy()).unwrap_err();
     assert!(err.contains("not found") || err.contains("nope"), "{err}");
 }
+
+/// Bun.hash through the whole JS glue stack: values are Bun 1.2.21 outputs (the exhaustive
+/// oracle-matrix test lives in lumen-node's `bunhash::tests`; this covers the glue — return
+/// types, input coercion, and seed coercion edge cases).
+#[test]
+fn bun_hash_matches_bun_through_the_glue() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const h = Bun.hash;
+        console.log(`${typeof h("hello")} ${h("hello")}`);
+        console.log(`${h.wyhash("hello", 1)}`);
+        console.log(`${typeof h.cityHash32("hello")} ${h.cityHash32("hello")}`);
+        console.log(`${h.cityHash64("hello")}`);
+        console.log(`${h.xxHash32("hello")} ${h.xxHash64("hello")} ${h.xxHash3("hello")}`);
+        console.log(`${h.murmur32v3("hello")} ${h.murmur32v2("hello")} ${h.murmur64v2("hello")}`);
+        console.log(`${h.rapidhash("hello")} ${h.crc32("hello")} ${h.adler32("hello")}`);
+        // seed coercion: int32 sign-extends; 2^51 clamps to 0; bigints wrap mod 2^64
+        console.log(`${h.wyhash("x", -1)} ${h.wyhash("x", 2 ** 51) === h.wyhash("x", 0)}`);
+        console.log(`${h.wyhash("hello world test", 2n ** 64n - 1n)}`);
+        // input coercion: string === its utf8 bytes === offset subarray; null → "null"
+        const bytes = new TextEncoder().encode("hello");
+        const sub = new Uint8Array(new TextEncoder().encode("XXhelloYY").buffer, 2, 5);
+        console.log(`${h.wyhash(bytes) === h.wyhash("hello")} ${h.wyhash(sub) === h.wyhash("hello")}`);
+        console.log(`${h.wyhash(null) === h.wyhash("null")}`);
+        "#,
+    );
+    rt.run_to_completion();
+    assert_eq!(
+        out.lines(),
+        [
+            "bigint 1019145960556548909",
+            "15802777309726279454",
+            "number 2039911270",
+            "16172099214758459231",
+            "4211111929 2794345569481354659 10760762337991515389",
+            "613153351 3848350155 2191231550387646743",
+            "9166712279701818032 907060870 103547413",
+            "12979056674793561970 true",
+            "5531584226709605751",
+            "true true",
+            "true",
+        ]
+    );
+}
