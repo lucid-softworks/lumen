@@ -1315,13 +1315,8 @@ const password = {
 const secrets = { get: notImpl("Bun.secrets.get"), set: notImpl("Bun.secrets.set"), delete: notImpl("Bun.secrets.delete") };
 const CSRF = { generate: notImpl("Bun.CSRF.generate"), verify: notImpl("Bun.CSRF.verify") };
 const throwClass = (name) => class { constructor() { throw new Error(`${name} is not supported in lumen`); } };
-const FFI = {
-  dlopen: notImpl("bun:ffi dlopen"),
-  CString: throwClass("bun:ffi CString"),
-  ptr: notImpl("bun:ffi ptr"),
-  read: {},
-  suffix: proc.platform === "darwin" ? "dylib" : "so",
-};
+// bun:ffi is registered before this module; Bun.FFI is the same live surface.
+const FFI = __builtins.get("bun:ffi");
 
 // ---- semver -----------------------------------------------------------------------------------
 // node-semver-compatible satisfies() and order(). Supports ^ ~ x-ranges hyphen-ranges and the

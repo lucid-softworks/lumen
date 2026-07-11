@@ -4,19 +4,11 @@
 // pure-JS over BigInt: Ed25519/X25519 sign/verify + key generation, and ASN.1 DER/PEM/JWK key
 // plumbing (createPublicKey/createPrivateKey, KeyObject.export as pkcs1/sec1/pkcs8/spki ×
 // pem/der/jwk) for RSA, Ed25519, X25519 and EC P-256 — all cross-verified against Node v22 in
-// both directions. Not constant-time (correctness-first, not an HSM). Still honest throwing
-// stubs (no primitive yet): symmetric ciphers, RSA/ECDSA sign-verify-encrypt, DH/ECDH, primes,
-// X.509 — they refuse loudly rather than returning fake ciphertext or signatures.
-// native web-crypto source (/dev/urandom). Real and bit-exact with Node v22 (cross-checked):
-// hashing (md5/sha1/sha256 pure-JS; sha384/sha512/sha512-224/sha512-256 native), HMAC, PBKDF2,
-// HKDF, scrypt (native RFC 7914 ROMix over the JS PBKDF2), and the symmetric AES ciphers
+// both directions. Not constant-time (correctness-first, not an HSM). Native code adds the
+// SHA-512 family, scrypt ROMix, and symmetric AES ciphers
 // aes-{128,192,256}-{ecb,cbc,ctr,gcm} via createCipheriv/createDecipheriv (PKCS#7 padding,
-// streaming update/final, GCM AAD + auth tags) — native ops in lumen-node/src/crypto.rs. No
-// native RSA/EC/DH primitives exist in the engine, so public-key sign/verify, key generation for
-// asymmetric keys, Diffie-Hellman, primes, and X.509 are honest throwing stubs — they refuse
-// loudly rather than returning fake ciphertext or signatures (STOP-AND-FLAG territory for
-// crypto correctness). Non-AES ciphers (chacha20, des, cfb/ofb/ccm/ocb/xts, …) also throw,
-// naming the algorithm.
+// streaming update/final, GCM AAD + auth tags). DH/ECDH, ECDSA, X.509, and non-AES ciphers
+// remain honest throwing stubs.
 
 const webCrypto = globalThis.crypto;
 
