@@ -26,6 +26,7 @@ use lumen_host::{ops, Ctx, Extension, SpawnHandle, Value};
 
 mod bunhash;
 mod child;
+mod crypto;
 mod dns;
 mod dylib;
 mod ffi;
@@ -127,6 +128,7 @@ pub fn extension() -> Extension {
             ("__child", child::CHILD_OPS),
             ("__net", net::NET_OPS),
             ("__udp", net::UDP_OPS),
+            ("__crypto", crypto::CRYPTO_OPS),
             (
                 "__dns",
                 ops![

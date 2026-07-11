@@ -218,8 +218,8 @@ hash.crc32 = function crc32(...args) { return crc32Core(hashBytes(args)); }; // 
 hash.adler32 = function adler32(...args) { return adler32Core(hashBytes(args)); };
 
 // ---- CryptoHasher / MD5 / SHA* ----------------------------------------------------------------
-// Backed by node crypto (md5/sha1/sha256 are real; every other algorithm throws at the crypto
-// layer, which is the honest outcome — lumen has no impl for them).
+// Backed by node crypto (md5/sha1/sha256/sha384/sha512/sha512-224/sha512-256 are real; every other
+// algorithm throws at the crypto layer, which is the honest outcome — lumen has no impl for them).
 class CryptoHasher {
   constructor(algorithm, hmacKey) {
     this.algorithm = algorithm;
@@ -242,7 +242,7 @@ class CryptoHasher {
     return encoding ? out.toString(encoding) : new Uint8Array(out);
   }
 }
-CryptoHasher.algorithms = ["md5", "sha1", "sha256"];
+CryptoHasher.algorithms = ["md5", "sha1", "sha256", "sha384", "sha512", "sha512-224", "sha512-256"];
 
 function makeHashClass(algo) {
   const C = class {
@@ -258,7 +258,7 @@ function makeHashClass(algo) {
   };
   return C;
 }
-// md5/sha1/sha256 are real; md4/sha224/sha384/sha512/sha512-256 throw at construct/hash time.
+// md5/sha1/sha256/sha384/sha512/sha512-256 are real; md4/sha224 throw at construct/hash time.
 const MD5 = makeHashClass("md5");
 const MD4 = makeHashClass("md4");
 const SHA1 = makeHashClass("sha1");
@@ -268,9 +268,9 @@ const SHA384 = makeHashClass("sha384");
 const SHA512 = makeHashClass("sha512");
 const SHA512_256 = makeHashClass("sha512-256");
 
-// Bun.sha defaults to SHA-512/256, which lumen's crypto cannot produce — honest throw.
-function sha() {
-  throw new Error("Bun.sha (SHA-512/256) is not supported in lumen (crypto backs md5/sha1/sha256 only)");
+// Bun.sha is the SHA-512/256 one-shot (real: native SHA-512 core in lumen-node/src/crypto.rs).
+function sha(input, encoding) {
+  return SHA512_256.hash(input, encoding);
 }
 
 // ---- UUID v5 / v7 -----------------------------------------------------------------------------

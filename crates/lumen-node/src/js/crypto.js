@@ -7,6 +7,16 @@
 // both directions. Not constant-time (correctness-first, not an HSM). Still honest throwing
 // stubs (no primitive yet): symmetric ciphers, RSA/ECDSA sign-verify-encrypt, DH/ECDH, primes,
 // X.509 — they refuse loudly rather than returning fake ciphertext or signatures.
+// native web-crypto source (/dev/urandom). Real and bit-exact with Node v22 (cross-checked):
+// hashing (md5/sha1/sha256 pure-JS; sha384/sha512/sha512-224/sha512-256 native), HMAC, PBKDF2,
+// HKDF, scrypt (native RFC 7914 ROMix over the JS PBKDF2), and the symmetric AES ciphers
+// aes-{128,192,256}-{ecb,cbc,ctr,gcm} via createCipheriv/createDecipheriv (PKCS#7 padding,
+// streaming update/final, GCM AAD + auth tags) — native ops in lumen-node/src/crypto.rs. No
+// native RSA/EC/DH primitives exist in the engine, so public-key sign/verify, key generation for
+// asymmetric keys, Diffie-Hellman, primes, and X.509 are honest throwing stubs — they refuse
+// loudly rather than returning fake ciphertext or signatures (STOP-AND-FLAG territory for
+// crypto correctness). Non-AES ciphers (chacha20, des, cfb/ofb/ccm/ocb/xts, …) also throw,
+// naming the algorithm.
 
 const webCrypto = globalThis.crypto;
 
@@ -170,15 +180,22 @@ function md5(bytes) {
 
 // ---- hash registry ----------------------------------------------------------------------------
 // Every algorithm here is bit-exact with Node (verified in the probe). blockSize is the HMAC block
-// size (64 bytes for all three md5/sha1/sha256).
+// size (64 bytes for md5/sha1/sha256; 128 for the SHA-512 family, which is native — see
+// lumen-node/src/crypto.rs).
 
 const HASH_REG = {
   md5: { fn: md5, outLen: 16, blockSize: 64 },
   sha1: { fn: sha1, outLen: 20, blockSize: 64 },
   sha256: { fn: sha256, outLen: 32, blockSize: 64 },
+  sha512: { fn: (b) => __crypto.sha512(0, b), outLen: 64, blockSize: 128 },
+  sha384: { fn: (b) => __crypto.sha512(1, b), outLen: 48, blockSize: 128 },
+  "sha512-224": { fn: (b) => __crypto.sha512(2, b), outLen: 28, blockSize: 128 },
+  "sha512-256": { fn: (b) => __crypto.sha512(3, b), outLen: 32, blockSize: 128 },
 };
 HASH_REG["sha-1"] = HASH_REG.sha1;
 HASH_REG["sha-256"] = HASH_REG.sha256;
+HASH_REG["sha-384"] = HASH_REG.sha384;
+HASH_REG["sha-512"] = HASH_REG.sha512;
 HASH_REG["ssl3-md5"] = HASH_REG.md5;
 HASH_REG["ssl3-sha1"] = HASH_REG.sha1;
 
@@ -186,7 +203,7 @@ function resolveHash(algorithm) {
   const reg = HASH_REG[String(algorithm).toLowerCase()];
   if (!reg) {
     throw new Error(
-      `Digest method not supported: ${algorithm} (lumen supports md5, sha1, sha256)`,
+      `Digest method not supported: ${algorithm} (lumen supports md5, sha1, sha256, sha384, sha512, sha512-224, sha512-256)`,
     );
   }
   return reg;
@@ -1708,6 +1725,378 @@ function generateKeyPair(type, options, cb) {
   try { res = generateKeyPairSync(type, options); } catch (e) { err = e; }
   queueMicrotask(() => (err ? cb(err) : cb(null, res.publicKey, res.privateKey)));
 }
+// ---- AES ciphers (native __crypto ops; see lumen-node/src/crypto.rs) ---------------------------
+// Real: aes-{128,192,256}-{ecb,cbc,ctr,gcm}, streaming update/final with Node's buffer-holdback,
+// PKCS#7 auto-padding, GCM AAD/auth-tag (variable tag lengths) — all bit-exact with Node v22.
+// Everything else (chacha20, des, cfb/ofb/ccm/ocb/xts, …) throws honestly, naming the algorithm.
+
+const CIPHERS = {
+  "aes-128-ecb": { mode: "ecb", name: "aes-128-ecb", nid: 418, blockSize: 16, keyLength: 16 },
+  "aes-128-cbc": { mode: "cbc", name: "aes-128-cbc", nid: 419, blockSize: 16, ivLength: 16, keyLength: 16 },
+  "aes-128-ctr": { mode: "ctr", name: "aes-128-ctr", nid: 904, blockSize: 1, ivLength: 16, keyLength: 16 },
+  "aes-128-gcm": { mode: "gcm", name: "id-aes128-gcm", nid: 895, blockSize: 1, ivLength: 12, keyLength: 16 },
+  "aes-192-ecb": { mode: "ecb", name: "aes-192-ecb", nid: 422, blockSize: 16, keyLength: 24 },
+  "aes-192-cbc": { mode: "cbc", name: "aes-192-cbc", nid: 423, blockSize: 16, ivLength: 16, keyLength: 24 },
+  "aes-192-ctr": { mode: "ctr", name: "aes-192-ctr", nid: 905, blockSize: 1, ivLength: 16, keyLength: 24 },
+  "aes-192-gcm": { mode: "gcm", name: "id-aes192-gcm", nid: 898, blockSize: 1, ivLength: 12, keyLength: 24 },
+  "aes-256-ecb": { mode: "ecb", name: "aes-256-ecb", nid: 426, blockSize: 16, keyLength: 32 },
+  "aes-256-cbc": { mode: "cbc", name: "aes-256-cbc", nid: 427, blockSize: 16, ivLength: 16, keyLength: 32 },
+  "aes-256-ctr": { mode: "ctr", name: "aes-256-ctr", nid: 906, blockSize: 1, ivLength: 16, keyLength: 32 },
+  "aes-256-gcm": { mode: "gcm", name: "id-aes256-gcm", nid: 901, blockSize: 1, ivLength: 12, keyLength: 32 },
+};
+const CIPHER_ALIASES = { aes128: "aes-128-cbc", aes192: "aes-192-cbc", aes256: "aes-256-cbc" };
+const GCM_TAG_LENS = [4, 8, 12, 13, 14, 15, 16];
+
+function codedError(Ctor, message, code) {
+  const e = new Ctor(message);
+  if (code) e.code = code;
+  return e;
+}
+
+function resolveCipherName(algorithm) {
+  let name = String(algorithm).toLowerCase();
+  if (CIPHER_ALIASES[name]) name = CIPHER_ALIASES[name];
+  return CIPHERS[name];
+}
+
+function initCipher(self, algorithm, key, iv, options, isDecipher) {
+  const info = resolveCipherName(algorithm);
+  if (!info) {
+    throw new Error(
+      `node:crypto cipher '${algorithm}' is not supported in lumen (aes-{128,192,256}-{ecb,cbc,ctr,gcm} only)`,
+    );
+  }
+  const keyBytes = toBytes(key);
+  if (keyBytes.length !== info.keyLength) {
+    throw codedError(RangeError, "Invalid key length", "ERR_CRYPTO_INVALID_KEYLEN");
+  }
+  let ivBytes = iv == null ? null : toBytes(iv);
+  if (info.mode === "ecb") {
+    if (ivBytes && ivBytes.length !== 0) {
+      throw codedError(TypeError, "Invalid initialization vector", "ERR_CRYPTO_INVALID_IV");
+    }
+    ivBytes = null;
+  } else if (info.mode === "gcm") {
+    if (!ivBytes || ivBytes.length === 0) {
+      throw codedError(TypeError, "Invalid initialization vector", "ERR_CRYPTO_INVALID_IV");
+    }
+  } else if (!ivBytes || ivBytes.length !== 16) {
+    throw codedError(TypeError, "Invalid initialization vector", "ERR_CRYPTO_INVALID_IV");
+  }
+  self._info = info;
+  self._key = Uint8Array.from(keyBytes);
+  self._iv = ivBytes ? Uint8Array.from(ivBytes) : null;
+  self._decipher = isDecipher;
+  self._autoPadding = true;
+  self._state = 0; // 0 = init, 1 = updating, 2 = finalized
+  self._buf = new Uint8Array(0);
+  if (info.mode === "gcm") {
+    self._tagLenExplicit = !!(options && options.authTagLength !== undefined);
+    if (self._tagLenExplicit) {
+      const n = options.authTagLength;
+      if (!GCM_TAG_LENS.includes(n)) {
+        throw codedError(TypeError, `Invalid authentication tag length: ${n}`, "ERR_CRYPTO_INVALID_AUTH_TAG");
+      }
+      self._tagLen = n;
+    } else {
+      self._tagLen = 16;
+    }
+    self._aad = new Uint8Array(0);
+    self._ct = new Uint8Array(0); // accumulated ciphertext, for the tag at final()
+    self._counter = Uint8Array.from(__crypto.gcmInit(self._key, self._iv)); // inc32(J0)
+    self._ks = new Uint8Array(0);
+    self._authTag = null; // decipher: set via setAuthTag
+    self._tag = null; // cipher: computed at final()
+  } else if (info.mode === "ctr") {
+    self._counter = Uint8Array.from(self._iv);
+    self._ks = new Uint8Array(0);
+  }
+}
+
+// Bump the counter block: CTR increments all 128 bits, GCM only the low 32 (SP 800-38D inc32).
+function incCounter(block, low32Only) {
+  for (let i = 15; i >= (low32Only ? 12 : 0); i--) {
+    block[i] = (block[i] + 1) & 0xff;
+    if (block[i] !== 0) break;
+  }
+}
+
+// XOR `input` against the CTR/GCM keystream: use the leftover partial keystream block first, then
+// generate the rest in one batched native ECB call over consecutive counter blocks.
+function keystreamXor(self, input) {
+  const out = new Uint8Array(input.length);
+  const left = Math.min(self._ks.length, input.length);
+  for (let i = 0; i < left; i++) out[i] = input[i] ^ self._ks[i];
+  self._ks = self._ks.subarray(left);
+  const remaining = input.length - left;
+  if (remaining > 0) {
+    const nblocks = Math.ceil(remaining / 16);
+    const counters = new Uint8Array(nblocks * 16);
+    const low32 = self._info.mode === "gcm";
+    for (let b = 0; b < nblocks; b++) {
+      counters.set(self._counter, b * 16);
+      incCounter(self._counter, low32);
+    }
+    const stream = __crypto.aesEcb(true, self._key, counters);
+    for (let i = 0; i < remaining; i++) out[left + i] = input[left + i] ^ stream[i];
+    self._ks = stream.subarray(remaining);
+  }
+  return out;
+}
+
+// ECB/CBC streaming: emit complete blocks, buffering the remainder. A decipher with auto-padding
+// additionally holds the last full block back so final() can strip the PKCS#7 padding.
+function blockUpdate(self, bytes) {
+  const all = concatBytes(self._buf, bytes);
+  let n = all.length - (all.length % 16);
+  if (self._decipher && self._autoPadding && n > 0 && n === all.length) n -= 16;
+  if (n <= 0) {
+    self._buf = all;
+    return new Uint8Array(0);
+  }
+  const chunk = all.subarray(0, n);
+  self._buf = Uint8Array.from(all.subarray(n));
+  let out;
+  if (self._info.mode === "ecb") {
+    out = __crypto.aesEcb(!self._decipher, self._key, chunk);
+  } else {
+    out = __crypto.aesCbc(!self._decipher, self._key, self._iv, chunk);
+    // CBC chains through the last ciphertext block (output when encrypting, input when decrypting).
+    const src = self._decipher ? chunk : out;
+    self._iv = Uint8Array.from(src.subarray(src.length - 16));
+  }
+  return out;
+}
+
+function cipherUpdate(self, data, inputEncoding, outputEncoding) {
+  if (self._state === 2) throw new Error("Trying to add data in unsupported state");
+  self._state = 1;
+  const bytes = toBytes(data, inputEncoding || "utf8");
+  let out;
+  const mode = self._info.mode;
+  if (mode === "ecb" || mode === "cbc") {
+    out = blockUpdate(self, bytes);
+  } else {
+    out = keystreamXor(self, bytes);
+    if (mode === "gcm") self._ct = concatBytes(self._ct, self._decipher ? bytes : out);
+  }
+  const buf = Buffer.from(out);
+  return outputEncoding && outputEncoding !== "buffer" ? buf.toString(outputEncoding) : buf;
+}
+
+const wrongFinalBlock = () =>
+  codedError(Error, "error:1C80006B:Provider routines::wrong final block length", "ERR_OSSL_WRONG_FINAL_BLOCK_LENGTH");
+const badDecrypt = () =>
+  codedError(Error, "error:1C800064:Provider routines::bad decrypt", "ERR_OSSL_BAD_DECRYPT");
+
+function cipherFinal(self, outputEncoding) {
+  if (self._state === 2) throw codedError(Error, "Invalid state", "ERR_CRYPTO_INVALID_STATE");
+  self._state = 2;
+  const mode = self._info.mode;
+  let out = new Uint8Array(0);
+  if (mode === "ecb" || mode === "cbc") {
+    if (!self._decipher) {
+      if (self._autoPadding) {
+        const padLen = 16 - self._buf.length;
+        const block = new Uint8Array(16);
+        block.set(self._buf);
+        block.fill(padLen, self._buf.length);
+        out = mode === "ecb"
+          ? __crypto.aesEcb(true, self._key, block)
+          : __crypto.aesCbc(true, self._key, self._iv, block);
+      } else if (self._buf.length !== 0) {
+        throw wrongFinalBlock();
+      }
+    } else if (self._autoPadding) {
+      // The held-back block must be exactly one block; anything else means misaligned input.
+      if (self._buf.length !== 16) throw wrongFinalBlock();
+      const block = mode === "ecb"
+        ? __crypto.aesEcb(false, self._key, self._buf)
+        : __crypto.aesCbc(false, self._key, self._iv, self._buf);
+      const padLen = block[15];
+      let ok = padLen >= 1 && padLen <= 16;
+      for (let i = 16 - padLen; ok && i < 16; i++) if (block[i] !== padLen) ok = false;
+      if (!ok) throw badDecrypt();
+      out = block.subarray(0, 16 - padLen);
+    } else if (self._buf.length !== 0) {
+      throw wrongFinalBlock();
+    }
+  } else if (mode === "gcm") {
+    const full = __crypto.gcmTag(self._key, self._iv, self._aad, self._ct);
+    if (self._decipher) {
+      const tag = self._authTag;
+      let ok = tag !== null;
+      if (ok) {
+        let diff = 0;
+        for (let i = 0; i < tag.length; i++) diff |= tag[i] ^ full[i];
+        ok = diff === 0;
+      }
+      if (!ok) throw new Error("Unsupported state or unable to authenticate data");
+    } else {
+      self._tag = Uint8Array.from(full.subarray(0, self._tagLen));
+    }
+  }
+  const buf = Buffer.from(out);
+  return outputEncoding && outputEncoding !== "buffer" ? buf.toString(outputEncoding) : buf;
+}
+
+function cipherSetAAD(self, buffer, options) {
+  if (self._info.mode !== "gcm" || self._state !== 0) {
+    throw codedError(Error, "Invalid state for operation setAAD", "ERR_CRYPTO_INVALID_STATE");
+  }
+  self._aad = concatBytes(self._aad, toBytes(buffer, options && options.encoding));
+  return self;
+}
+
+class Cipheriv {
+  constructor(algorithm, key, iv, options) {
+    initCipher(this, algorithm, key, iv, options, false);
+  }
+  update(data, inputEncoding, outputEncoding) {
+    return cipherUpdate(this, data, inputEncoding, outputEncoding);
+  }
+  final(outputEncoding) {
+    return cipherFinal(this, outputEncoding);
+  }
+  setAutoPadding(autoPadding) {
+    this._autoPadding = autoPadding === undefined ? true : !!autoPadding;
+    return this;
+  }
+  setAAD(buffer, options) {
+    return cipherSetAAD(this, buffer, options);
+  }
+  getAuthTag() {
+    if (this._info.mode !== "gcm" || this._state !== 2 || this._tag === null) {
+      throw codedError(Error, "Invalid state for operation getAuthTag", "ERR_CRYPTO_INVALID_STATE");
+    }
+    return Buffer.from(this._tag);
+  }
+}
+
+class Decipheriv {
+  constructor(algorithm, key, iv, options) {
+    initCipher(this, algorithm, key, iv, options, true);
+  }
+  update(data, inputEncoding, outputEncoding) {
+    return cipherUpdate(this, data, inputEncoding, outputEncoding);
+  }
+  final(outputEncoding) {
+    return cipherFinal(this, outputEncoding);
+  }
+  setAutoPadding(autoPadding) {
+    this._autoPadding = autoPadding === undefined ? true : !!autoPadding;
+    return this;
+  }
+  setAAD(buffer, options) {
+    return cipherSetAAD(this, buffer, options);
+  }
+  setAuthTag(tag, encoding) {
+    if (this._info.mode !== "gcm" || this._state === 2) {
+      throw codedError(Error, "Invalid state for operation setAuthTag", "ERR_CRYPTO_INVALID_STATE");
+    }
+    const t = toBytes(tag, encoding);
+    const valid = this._tagLenExplicit ? t.length === this._tagLen : GCM_TAG_LENS.includes(t.length);
+    if (!valid) {
+      throw codedError(TypeError, `Invalid authentication tag length: ${t.length}`, "ERR_CRYPTO_INVALID_AUTH_TAG");
+    }
+    this._authTag = Uint8Array.from(t);
+    return this;
+  }
+}
+
+// getCipherInfo mirrors Node: name (with the id-aes*-gcm OpenSSL names) or nid lookup; the
+// keyLength/ivLength options act as a "does the cipher support this?" probe.
+function getCipherInfo(nameOrNid, options) {
+  let info;
+  if (typeof nameOrNid === "number") {
+    info = Object.values(CIPHERS).find((c) => c.nid === nameOrNid);
+  } else {
+    info = resolveCipherName(nameOrNid);
+  }
+  if (!info) return undefined;
+  const result = { mode: info.mode, name: info.name, nid: info.nid, blockSize: info.blockSize };
+  if (info.ivLength !== undefined) result.ivLength = info.ivLength;
+  result.keyLength = info.keyLength;
+  if (options && options.keyLength !== undefined && options.keyLength !== info.keyLength) return undefined;
+  if (options && options.ivLength !== undefined) {
+    if (info.mode === "ecb") return undefined;
+    if (info.mode === "gcm") {
+      if (options.ivLength < 1) return undefined;
+      result.ivLength = options.ivLength; // GCM accepts variable IV sizes; Node echoes the query
+    } else if (options.ivLength !== 16) {
+      return undefined;
+    }
+  }
+  return result;
+}
+
+// ---- scrypt (RFC 7914; ROMix is native, PBKDF2-HMAC-SHA256 wrapping is the JS one above) -------
+
+function validateScryptNum(name, v, max) {
+  if (typeof v !== "number") {
+    const rendered = typeof v === "string" ? `'${v}'` : String(v);
+    throw codedError(
+      TypeError,
+      `The "${name}" argument must be of type number. Received type ${typeof v} (${rendered})`,
+      "ERR_INVALID_ARG_TYPE",
+    );
+  }
+  if (!Number.isInteger(v)) {
+    throw codedError(RangeError, `The value of "${name}" is out of range. It must be an integer. Received ${v}`, "ERR_OUT_OF_RANGE");
+  }
+  if (v < 0 || v > max) {
+    throw codedError(RangeError, `The value of "${name}" is out of range. It must be >= 0 && <= ${max}. Received ${v}`, "ERR_OUT_OF_RANGE");
+  }
+  return v;
+}
+
+function scryptSync(password, salt, keylen, options) {
+  validateScryptNum("keylen", keylen, 2147483647);
+  const opts = options || {};
+  const pickOpt = (primary, alias) => {
+    if (opts[primary] !== undefined && opts[alias] !== undefined) {
+      throw codedError(Error, "Invalid scrypt parameter", "ERR_CRYPTO_SCRYPT_INVALID_PARAMETER");
+    }
+    const name = opts[primary] !== undefined ? primary : alias;
+    if (opts[name] === undefined) return undefined;
+    return validateScryptNum(name, opts[name], 4294967295);
+  };
+  // Falsy (0/undefined) falls back to the default, matching Node's `|| default` behavior.
+  const N = pickOpt("N", "cost") || 16384;
+  const r = pickOpt("r", "blockSize") || 8;
+  const p = pickOpt("p", "parallelization") || 1;
+  let maxmem = 32 * 1024 * 1024;
+  if (opts.maxmem !== undefined) maxmem = validateScryptNum("maxmem", opts.maxmem, Number.MAX_SAFE_INTEGER) || maxmem;
+  if (N < 2 || (N & (N - 1)) !== 0) {
+    throw codedError(RangeError, "Invalid scrypt params", "ERR_CRYPTO_INVALID_SCRYPT_PARAMS");
+  }
+  // OpenSSL's memory accounting: B (128*r*p) plus V (128*r*(N+2)) must fit in maxmem.
+  if (128 * r * p + 128 * r * (N + 2) > maxmem) {
+    throw codedError(
+      RangeError,
+      "Invalid scrypt params: error:030000AC:digital envelope routines::memory limit exceeded",
+      "ERR_CRYPTO_INVALID_SCRYPT_PARAMS",
+    );
+  }
+  const B = pbkdf2Sync(password, salt, 1, 128 * r * p, "sha256");
+  const mixed = __crypto.scryptRomix(B, N, r);
+  return Buffer.from(pbkdf2Sync(password, mixed, 1, keylen, "sha256"));
+}
+
+function scrypt(password, salt, keylen, options, callback) {
+  if (typeof options === "function") {
+    callback = options;
+    options = undefined;
+  }
+  if (typeof callback !== "function") throw new TypeError("callback must be a function");
+  let result, err;
+  try {
+    result = scryptSync(password, salt, keylen, options);
+  } catch (e) {
+    err = e;
+  }
+  queueMicrotask(() => (err ? callback(err) : callback(null, result)));
+}
 
 // ---- honest stubs (no native primitive backs these) -------------------------------------------
 
@@ -1716,10 +2105,6 @@ function notImpl(name) {
     throw new Error(`node:crypto ${name} is not supported in lumen (no native primitive available)`);
   };
 }
-
-// getCipherInfo returns undefined for unknown ciphers in Node; lumen supports none, so every
-// query is "unknown" — this matches Node's contract rather than inventing cipher metadata.
-const getCipherInfo = () => undefined;
 
 // ---- constants (real OpenSSL values, captured from Node v22) -----------------------------------
 
@@ -1759,11 +2144,13 @@ const crypto = {
   Hash,
   Hmac,
   hash,
-  getHashes: () => ["md5", "sha1", "sha256", "sha384", "sha512"],
+  getHashes: () => ["md5", "sha1", "sha256", "sha384", "sha512", "sha512-224", "sha512-256"],
   pbkdf2,
   pbkdf2Sync,
   hkdf,
   hkdfSync,
+  scrypt,
+  scryptSync,
 
   // -- real: randomness --
   randomBytes,
@@ -1780,9 +2167,15 @@ const crypto = {
   generateKey,
   generateKeySync,
 
+  // -- real: symmetric ciphers (native AES; see lumen-node/src/crypto.rs) --
+  createCipheriv: (algorithm, key, iv, options) => new Cipheriv(algorithm, key, iv, options),
+  createDecipheriv: (algorithm, key, iv, options) => new Decipheriv(algorithm, key, iv, options),
+  Cipheriv,
+  Decipheriv,
+
   // -- real: introspection / config --
-  // lumen backs no symmetric ciphers or named curves, so these are honestly empty.
-  getCiphers: () => [],
+  // getCiphers lists exactly the cipher set lumen actually implements; no named curves exist.
+  getCiphers: () => Object.keys(CIPHERS).slice().sort(),
   getCurves: () => [],
   getCipherInfo,
   getFips: () => 0,
@@ -1793,14 +2186,6 @@ const crypto = {
   // -- real: WebCrypto bridge (subtle backs SHA-256 digest + getRandomValues/randomUUID) --
   webcrypto: webCrypto,
   subtle: webCrypto.subtle,
-
-  // -- stubs: symmetric ciphers (no AES/ChaCha primitive) --
-  createCipheriv: notImpl("createCipheriv"),
-  createDecipheriv: notImpl("createDecipheriv"),
-  Cipher: notImpl("Cipher"),
-  Cipheriv: notImpl("Cipheriv"),
-  Decipher: notImpl("Decipher"),
-  Decipheriv: notImpl("Decipheriv"),
 
   // -- real: sign/verify (Ed25519 + RSA PKCS#1 v1.5/PSS; ECDSA lands with the EC tier) --
   sign: cryptoSign,
@@ -1820,7 +2205,6 @@ const crypto = {
   createPrivateKey,
   generateKeyPair,
   generateKeyPairSync,
-
   // -- stubs: Diffie-Hellman / ECDH (no bignum/EC primitive) --
   DiffieHellman: notImpl("DiffieHellman"),
   DiffieHellmanGroup: notImpl("DiffieHellmanGroup"),
@@ -1831,16 +2215,11 @@ const crypto = {
   getDiffieHellman: notImpl("getDiffieHellman"),
   diffieHellman: notImpl("diffieHellman"),
 
-  // -- stubs: scrypt (memory-hard; no native backing, refused rather than shipped unverified) --
-  scrypt: notImpl("scrypt"),
-  scryptSync: notImpl("scryptSync"),
-
   // -- real: probable primes (Miller-Rabin over BigInt) --
   checkPrime,
   checkPrimeSync,
   generatePrime,
   generatePrimeSync,
-
   // -- stubs: X.509 / legacy SPKAC --
   X509Certificate: notImpl("X509Certificate"),
   Certificate: notImpl("Certificate"),
