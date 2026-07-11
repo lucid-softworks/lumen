@@ -240,6 +240,7 @@ const __BUILTIN_NAMES = [
   "v8", "inspector", "inspector/promises", "worker_threads", "readline",
   "readline/promises", "test", "tls", "process",
   "diagnostics_channel", "domain", "trace_events",
+  "vm", "repl", "cluster", "dgram", "wasi",
 ];
 const __esmBuiltinSources = {};
 for (const name of __BUILTIN_NAMES) {

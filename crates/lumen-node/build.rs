@@ -37,6 +37,11 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "child_process.js", wrap: true },
     GlueFile { name: "dns.js", wrap: true },
     GlueFile { name: "stdlib_extras.js", wrap: true },
+    GlueFile { name: "vm.js", wrap: true },
+    GlueFile { name: "repl.js", wrap: true },
+    GlueFile { name: "cluster.js", wrap: true },
+    GlueFile { name: "dgram.js", wrap: true },
+    GlueFile { name: "wasi.js", wrap: true },
     GlueFile { name: "module.js", wrap: false },
 ];
 
