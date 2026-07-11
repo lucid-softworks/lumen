@@ -13,6 +13,7 @@ const cache = new Map(); // resolved filename -> module
 const EXTENSIONS = [".js", ".json", ".cjs", ".node"];
 
 function isCoreSpecifier(spec) {
+  if (spec === "bun" || spec.startsWith("bun:")) return CORE.has(spec) ? spec : null;
   const bare = spec.startsWith("node:") ? spec.slice(5) : spec;
   return CORE.has(bare) ? bare : null;
 }
