@@ -29,6 +29,7 @@ mod dns;
 mod dylib;
 mod ffi;
 mod napi;
+mod net;
 
 /// The runtime's blocking-work spawner (threadpool), for async ops.
 fn spawn_handle(ctx: &mut Ctx) -> SpawnHandle {
@@ -106,6 +107,8 @@ pub fn extension() -> Extension {
                 ],
             ),
             ("__child", child::CHILD_OPS),
+            ("__net", net::NET_OPS),
+            ("__udp", net::UDP_OPS),
             (
                 "__dns",
                 ops![
@@ -115,7 +118,11 @@ pub fn extension() -> Extension {
                 ],
             ),
         ],
-        state_init: Some(|state: &mut lumen_host::OpState| state.put(child::ChildRegistry::default())),
+        state_init: Some(|state: &mut lumen_host::OpState| {
+            state.put(child::ChildRegistry::default());
+            state.put(net::NetRegistry::default());
+            state.put(net::DgramRegistry::default());
+        }),
         js_init: Some(JS_GLUE),
         js_init_snapshot: Some(JS_GLUE_SNAPSHOT),
     }
