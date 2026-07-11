@@ -5,9 +5,10 @@
 //
 // The adaptation is buffered end-to-end (Lumen.serve buffers bodies): the request body is pushed
 // into the IncomingMessage Readable up front, and the ServerResponse Writable collects writes
-// until end(), then hands one web Response back to Lumen.serve. Not supported: the client side
-// (http.request/get — no use in a server example; lumen has global fetch for outbound), keep-alive
-// tuning, trailers, Expect: 100-continue, or streaming a response incrementally over the socket.
+// until end(), then hands one web Response back to Lumen.serve. The client side (http.request/get,
+// + the https twins) is implemented too, buffered over the global fetch() — see the ClientRequest
+// section below. Not supported (throws honestly): keep-alive/socket tuning (http.Agent is a no-op),
+// trailers, Expect: 100-continue, protocol upgrade, raw socket access, incremental streaming.
 
 const EventEmitter = __builtins.get("events");
 const stream = __builtins.get("stream");
@@ -240,10 +241,42 @@ function createServer(opts, handler) {
   return new Server(opts, handler);
 }
 
-// Outbound client: lumen exposes global fetch; a full http.request/Agent isn't provided.
-function notImplementedClient() {
-  throw new Error("node:http client (request/get) is not implemented in lumen; use the global fetch()");
+// Outbound client (http.request/get): buffered end-to-end over the global fetch(), mirroring the
+// server side which is buffered too. ClientRequest is a Writable that collects the body until
+// end(), issues one fetch(), and surfaces the reply as an IncomingMessage (Readable). Features
+// fetch cannot express (trailers, Expect: 100-continue, protocol upgrade, raw socket access) throw
+// honestly; http.Agent is accepted as connection-pool metadata but drives no real pool.
+function notSupportedOverFetch(what) {
+  throw new Error(`node:http ${what} is not supported in lumen (the client runs over fetch(), which cannot express it)`);
 }
+
+// Normalize the (url | options), (options), optional-callback overloads into one options object.
+// Node accepts request(url[,options][,cb]) and request(options[,cb]); url may be a string or URL.
+function normalizeClientArgs(input, options, cb, defaultProtocol) {
+  let opts = {};
+  if (typeof input === "string" || input instanceof URL) {
+    const u = input instanceof URL ? input : new URL(input);
+    opts.protocol = u.protocol;
+    opts.hostname = decodeURIComponent(u.hostname);
+    if (u.port) opts.port = u.port;
+    opts.path = (u.pathname || "/") + (u.search || "");
+    if (u.username || u.password) opts.auth = `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`;
+    if (options && typeof options === "object") Object.assign(opts, options);
+    else if (typeof options === "function") cb = options;
+  } else if (input && typeof input === "object") {
+    opts = { ...input };
+    if (typeof options === "function") cb = options;
+    else if (options && typeof options === "object") Object.assign(opts, options);
+  } else if (typeof input === "function") {
+    cb = input;
+  }
+  if (!opts.protocol) opts.protocol = defaultProtocol || "http:";
+  opts._cb = typeof cb === "function" ? cb : undefined;
+  return opts;
+}
+
+// Headers fetch computes/forbids itself; drop them so the fetch layer sets them correctly.
+const CLIENT_SKIP_HEADERS = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"]);
 
 // ---- header validators (real; Node-shaped error codes) ----------------------------------------
 // RFC 7230 token chars; matches Node's checkIsHttpToken.
@@ -292,11 +325,172 @@ class OutgoingMessage extends Writable {
   setTimeout(_ms, cb) { if (cb) this.once("timeout", cb); return this; }
 }
 class ClientRequest extends OutgoingMessage {
-  constructor() {
+  constructor(input, options, cb) {
     super();
-    notImplementedClient();
+    const opts = normalizeClientArgs(input, options, cb, (new.target && new.target._defaultProtocol) || "http:");
+    this.protocol = opts.protocol;
+    this.method = String(opts.method || "GET").toUpperCase();
+    this.path = opts.path || "/";
+    this.host = opts.hostname || opts.host || "localhost";
+    const defaultPort = this.protocol === "https:" ? 443 : 80;
+    this.port = opts.port != null ? Number(opts.port) : defaultPort;
+    this._opts = opts;
+    this._bodyChunks = [];
+    this.aborted = false;
+    this.reusedSocket = false;
+    this._controller = new AbortController();
+    this._timeoutMs = typeof opts.timeout === "number" ? opts.timeout : undefined;
+    this._timer = null;
+    this.res = null;
+    // Minimal socket surface (Node code inspects a few fields); connecting/timeout are cosmetic.
+    this.socket = { remoteAddress: this.host, remotePort: this.port, encrypted: this.protocol === "https:", destroyed: false };
+    this.connection = this.socket;
+
+    if (opts.headers) {
+      for (const k of Object.keys(opts.headers)) {
+        if (opts.headers[k] !== undefined) this.setHeader(k, opts.headers[k]);
+      }
+    }
+    if (opts.auth && !this.hasHeader("authorization")) {
+      this.setHeader("Authorization", "Basic " + Buffer.from(String(opts.auth)).toString("base64"));
+    }
+    if (opts._cb) this.once("response", opts._cb);
+
+    // An AbortSignal in the options aborts the in-flight request (WHATWG semantics).
+    const sig = opts.signal;
+    if (sig && typeof sig.addEventListener === "function") {
+      if (sig.aborted) queueMicrotask(() => this.destroy(sig.reason));
+      else sig.addEventListener("abort", () => this.destroy(sig.reason), { once: true });
+    }
+    // Node's socket inactivity timeout: fire 'timeout' if the reply hasn't arrived. It does NOT
+    // abort the request — the listener decides (Node behaviour).
+    if (this._timeoutMs !== undefined) this.setTimeout(this._timeoutMs);
   }
+
+  setTimeout(ms, cb) {
+    this._timeoutMs = ms;
+    if (cb) this.once("timeout", cb);
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    if (ms > 0) {
+      this._timer = setTimeout(() => { this._timer = null; this.emit("timeout"); }, ms);
+      if (this._timer && typeof this._timer.unref === "function") this._timer.unref();
+    }
+    return this;
+  }
+  _clearTimer() { if (this._timer) { clearTimeout(this._timer); this._timer = null; } }
+
+  _write(chunk, encoding, cb) {
+    if (chunk != null && chunk.length !== 0) {
+      this._bodyChunks.push(chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk), encoding || "utf8"));
+    }
+    cb();
+  }
+  _final(cb) { this._send(); cb(); }
+
+  async _send() {
+    if (this.aborted || this.destroyed) return;
+    this.headersSent = true;
+    const url = `${this.protocol}//${this.host}${this.port ? ":" + this.port : ""}${this.path}`;
+    const headers = new Headers();
+    for (const { name, value } of this._headers.values()) {
+      if (CLIENT_SKIP_HEADERS.has(name.toLowerCase())) continue;
+      if (Array.isArray(value)) for (const v of value) headers.append(name, String(v));
+      else headers.set(name, String(value));
+    }
+    const noBody = this.method === "GET" || this.method === "HEAD";
+    let total = 0;
+    for (const c of this._bodyChunks) total += c.length;
+    const body = noBody || total === 0 ? undefined : Buffer.concat(this._bodyChunks, total);
+
+    let fetchRes;
+    try {
+      fetchRes = await fetch(url, {
+        method: this.method,
+        headers,
+        body,
+        signal: this._controller.signal,
+        redirect: "manual",
+      });
+    } catch (err) {
+      this._clearTimer();
+      if (this.aborted) return; // 'abort'/'error' already surfaced by destroy()
+      this.emit("error", err);
+      return;
+    }
+    if (this.aborted || this.destroyed) return;
+
+    const res = new IncomingMessage(this.socket);
+    res.statusCode = fetchRes.status;
+    res.statusMessage = fetchRes.statusText || STATUS_CODES[fetchRes.status] || "";
+    res.url = url;
+    res.method = this.method;
+    for (const [k, v] of fetchRes.headers) {
+      res.headers[k] = res.headers[k] !== undefined ? res.headers[k] + ", " + v : v;
+      res.rawHeaders.push(k, v);
+    }
+    this.res = res;
+    res.req = this;
+    this.emit("response", res);
+
+    // Buffered body: read it all, push into the Readable, then EOF.
+    let buf;
+    try { buf = Buffer.from(await fetchRes.arrayBuffer()); } catch { buf = Buffer.alloc(0); }
+    this._clearTimer();
+    if (this.aborted || this.destroyed) { res.push(null); return; }
+    if (buf.length) res.push(buf);
+    res.push(null);
+    res.complete = true;
+  }
+
+  abort() {
+    if (this.aborted) return;
+    this.aborted = true;
+    this._clearTimer();
+    try { this._controller.abort(); } catch {}
+    this.socket.destroyed = true;
+    this.emit("abort");
+    process.nextTick(() => this.destroy());
+  }
+  destroy(err) {
+    if (this.destroyed) return this;
+    this.destroyed = true;
+    this._clearTimer();
+    try { this._controller.abort(); } catch {}
+    this.socket.destroyed = true;
+    if (err) this.emit("error", err);
+    this.emit("close");
+    return this;
+  }
+
+  // Fetch cannot expose the raw socket, so these Node affordances throw honestly.
+  flushHeaders() { this.headersSent = true; }
+  get writableEnded() { return this.writableFinished; }
 }
+ClientRequest._defaultProtocol = "http:";
+
+// http.request(url|options[,options][,cb]) — build a ClientRequest. Not auto-ended (the caller
+// writes a body then calls end()); http.get ends immediately.
+function request(input, options, cb) {
+  return new ClientRequest(input, options, cb);
+}
+function get(input, options, cb) {
+  const req = new ClientRequest(input, options, cb);
+  req.end();
+  return req;
+}
+function httpsRequest(input, options, cb) {
+  const req = new HttpsClientRequest(input, options, cb);
+  return req;
+}
+function httpsGet(input, options, cb) {
+  const req = new HttpsClientRequest(input, options, cb);
+  req.end();
+  return req;
+}
+// https twin: same client, default protocol https:. fetch surfaces the honest "no TLS" error when
+// the request actually goes out over https.
+class HttpsClientRequest extends ClientRequest {}
+HttpsClientRequest._defaultProtocol = "https:";
 
 // The internal connection listener wires a raw socket into the request pipeline — not available
 // without JS sockets. Exported (Node exposes it) but honest.
@@ -308,8 +502,9 @@ function _connectionListener() {
 // that still validates like Node (accepts a number).
 function setMaxIdleHTTPParsers(_max) { /* no-op: lumen keeps no HTTP parser free-list */ }
 
-// Client-side Agent: constructing is fine (config/pooling metadata), but there is no socket pool to
-// drive, so any real request through it goes via notImplementedClient at request time.
+// Client-side Agent: accepted as connection-pool metadata but drives no real pool — the client
+// runs over fetch(), which manages its own connections. Documented as a no-op (Node users pass an
+// Agent for keep-alive/socket tuning; none of that is observable through fetch, so it's ignored).
 class Agent extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -322,7 +517,8 @@ class Agent extends EventEmitter {
     this.requests = {};
     this.protocol = "http:";
   }
-  createConnection() { notImplementedClient(); }
+  // No real socket pool exists (fetch owns connections); raw socket creation isn't available.
+  createConnection() { notSupportedOverFetch("Agent.createConnection (raw sockets)"); }
   getName() { return "localhost:"; }
   destroy() {}
 }
@@ -343,8 +539,8 @@ const http = {
   ClientRequest,
   STATUS_CODES,
   METHODS,
-  request: notImplementedClient,
-  get: notImplementedClient,
+  request,
+  get,
   Agent,
   globalAgent,
   maxHeaderSize: 16384,
@@ -364,8 +560,9 @@ __builtins.set("http", http);
 __builtins.set("https", {
   Server,
   createServer,
-  request: notImplementedClient,
-  get: notImplementedClient,
+  request: httpsRequest,
+  get: httpsGet,
+  ClientRequest: HttpsClientRequest,
   Agent,
   globalAgent: new Agent(),
 });
