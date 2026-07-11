@@ -1,0 +1,56 @@
+run: {"changes":1,"lastInsertRowid":1}
+types: number string number true 1,2,3 number
+missing: null
+values: [[1,"alice"]]
+all: [{"id":1,"name":"alice"}]
+syntax: SQLiteError true true 1 | near "SELCT": syntax error
+unique: SQLiteError SQLITE_CONSTRAINT_PRIMARYKEY 1555 | UNIQUE constraint failed: u.id
+notnull: SQLiteError SQLITE_CONSTRAINT_NOTNULL 1299 | NOT NULL constraint failed: u.x
+notable: SQLiteError true 1 | no such table: nope
+tx ret: 42
+tx threw: boom
+tx rows: [[21]]
+nested: [[10],[20],[21]]
+tx variants: function function function 7
+default big: 9007199254740992 number
+safeIntegers chain: true
+safe big: 9007199254740993 bigint
+bigint bound: 10
+db safeInts: 1 bigint bigint
+forms: [[null,null,null],[1,2,3],[4,5,6],[7,8,9]]
+strict: {"a":10,"b":20}
+strict missing: Error | Missing parameter "b"
+strict prefixed: Error | Missing parameter "a"
+bind 42 -> integer
+bind 2^40 -> integer
+bind 2^50 -> integer
+bind 2^51 -> real
+bind 1.5 -> real
+bind -2^51 -> integer
+bind -2^51-1 -> real
+bind -0 -> real
+fn bind: TypeError | Binding expected string, TypedArray, boolean, number, bigint or null
+symbol bind: TypeError | Binding expected string, TypedArray, boolean, number, bigint or null
+null bind: null
+bool bind: 1 integer
+nan bind: null
+mismatch: Error | SQLite query expected 3 values, received 1
+0-param ignores args: {"c":4}
+cached: true false
+toString: SELECT id AS foo, name FROM t WHERE id=1
+columnNames: ["foo","name"] paramsCount: 1
+iterated: [1,2,3]
+iterate next: {"value":{"id":1,"name":"a"},"done":false}
+as: true A
+exec: {"changes":2,"lastInsertRowid":13}
+select run changes: 0
+closed query: RangeError | Cannot use a closed database
+closed run: Error | Database has closed
+finalized: Error | Statement has finalized
+recreated: {"x":1}
+serialize nonempty: true
+deserialize: 3
+ctor from bytes: 3
+SQLiteError ctor: SQLiteError can only be constructed by bun:sqlite
+surface: function 20 function 1 42
+done

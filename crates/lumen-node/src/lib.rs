@@ -32,6 +32,7 @@ mod dylib;
 mod ffi;
 mod napi;
 mod net;
+mod sqlite;
 
 /// The runtime's blocking-work spawner (threadpool), for async ops.
 fn spawn_handle(ctx: &mut Ctx) -> SpawnHandle {
@@ -129,6 +130,7 @@ pub fn extension() -> Extension {
             ("__net", net::NET_OPS),
             ("__udp", net::UDP_OPS),
             ("__crypto", crypto::CRYPTO_OPS),
+            ("__sqlite", sqlite::SQLITE_OPS),
             (
                 "__dns",
                 ops![
