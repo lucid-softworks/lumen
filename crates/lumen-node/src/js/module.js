@@ -492,9 +492,12 @@ function makeBuiltinEsmSource(name) {
 // The clean builtin base names (skip the "node:module" alias key). Order is cosmetic here.
 const __BUILTIN_NAMES = [
   "buffer", "path", "os", "fs", "module",
-  "events", "util", "crypto", "querystring", "url", "net", "assert",
-  "string_decoder", "tty", "async_hooks", "zlib", "stream", "stream/web", "http", "https", "http2",
-  "perf_hooks", "fs/promises", "child_process", "dns", "dns/promises",
+  "events", "util", "sys", "console", "timers", "timers/promises",
+  "crypto", "querystring", "url", "net", "assert", "assert/strict",
+  "string_decoder", "tty", "async_hooks", "zlib", "stream", "stream/web",
+  "stream/promises", "stream/consumers", "http", "https", "http2",
+  "perf_hooks", "fs/promises", "path/posix", "path/win32", "child_process",
+  "dns", "dns/promises",
   "v8", "inspector", "inspector/promises", "worker_threads", "readline",
   "readline/promises", "test", "tls", "process",
   "diagnostics_channel", "domain", "trace_events",

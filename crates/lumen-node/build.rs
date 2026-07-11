@@ -27,6 +27,8 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "domain.js", wrap: true },
     GlueFile { name: "trace_events.js", wrap: true },
     GlueFile { name: "util.js", wrap: true },
+    GlueFile { name: "console.js", wrap: true },
+    GlueFile { name: "timers.js", wrap: true },
     GlueFile { name: "crypto.js", wrap: true },
     GlueFile { name: "punycode.js", wrap: true },
     GlueFile { name: "shims.js", wrap: true },

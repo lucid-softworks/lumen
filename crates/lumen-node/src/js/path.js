@@ -170,6 +170,22 @@ function makePath(sep, isWin) {
       if (/^[\\/][\\/]/.test(p)) return "\\\\?\\UNC\\" + p.slice(2);
       return p;
     },
+    matchesGlob(p, pattern) {
+      p = String(p);
+      pattern = String(pattern);
+      if (isWin) { p = p.replace(/\\/g, "/"); pattern = pattern.replace(/\\/g, "/"); }
+      let re = "";
+      for (let i = 0; i < pattern.length; i++) {
+        const c = pattern[i];
+        if (c === "*") {
+          if (pattern[i + 1] === "*") { re += ".*"; i++; if (pattern[i + 1] === "/") i++; }
+          else re += "[^/]*";
+        } else if (c === "?") re += "[^/]";
+        else if ("\\^$.|+()[]{}".includes(c)) re += "\\" + c;
+        else re += c;
+      }
+      return new RegExp("^" + re + "$").test(p);
+    },
   };
   path._makeLong = path.toNamespacedPath; // legacy alias Node still exports
   return path;
@@ -184,6 +200,10 @@ win32.win32 = win32;
 
 const isWindows = os_platform_is_win();
 __builtins.set("path", isWindows ? win32 : posix);
+// `path.posix` / `path.win32` are also require-able as their own submodules — the *same* objects,
+// so `require('path/posix') === require('path').posix`.
+__builtins.set("path/posix", posix);
+__builtins.set("path/win32", win32);
 
 function os_platform_is_win() {
   // __os.info() is available (os.js runs after this file? no — before). Use the raw op.

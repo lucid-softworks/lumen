@@ -378,32 +378,87 @@
   });
 }
 
-// ---- node:inspector ---------------------------------------------------------------------------
-// No V8 inspector is attached; the correct state is "inert", not a pretend session.
+// ---- node:inspector (and node:inspector/promises) ---------------------------------------------
+// No V8 inspector is attached; the correct state is "inert", not a pretend session. Session.post
+// reports the unavailability honestly (callback error / rejected promise); the module shape
+// otherwise mirrors Node's (open/close/url/waitForDebugger, the Network domain, `console`).
 {
   const noop = () => {};
+  const unavailable = () => new Error("node:inspector is not available in lumen");
   class Session {
     connect() {}
     connectToMainThread() {}
     disconnect() {}
     post(_method, _params, callback) {
       const cb = typeof _params === "function" ? _params : callback;
-      if (cb) cb(new Error("node:inspector is not available in lumen"));
+      if (cb) cb(unavailable());
     }
     on() { return this; }
     once() { return this; }
     removeListener() { return this; }
+    emit() { return false; }
   }
-  const inspector = {
+  // The Network inspector domain (Node ≥ 22): reporting hooks that no-op without an inspector.
+  const Network = {
+    requestWillBeSent: noop,
+    responseReceived: noop,
+    loadingFinished: noop,
+    loadingFailed: noop,
+  };
+  const base = {
     open: noop,
     close: noop,
     url: () => undefined,
     waitForDebugger: noop,
-    Session,
     console: globalThis.console,
+    Network,
   };
-  __builtins.set("inspector", inspector);
-  __builtins.set("inspector/promises", { Session });
+  __builtins.set("inspector", { ...base, Session });
+
+  // The promises variant: identical surface, but Session.post returns a Promise.
+  class SessionPromises extends Session {
+    post(_method, _params) {
+      return Promise.reject(unavailable());
+    }
+  }
+  __builtins.set("inspector/promises", { ...base, Session: SessionPromises });
+}
+
+// ---- node:sys ---------------------------------------------------------------------------------
+// The long-deprecated alias for node:util — the *same* object, exactly as Node's `sys` is.
+__builtins.set("sys", __builtins.get("util"));
+
+// ---- node:stream/promises ---------------------------------------------------------------------
+// Promise forms of stream.pipeline / stream.finished, over the existing node:stream module.
+{
+  const stream = __builtins.get("stream");
+  __builtins.set("stream/promises", {
+    finished: (s, opts) =>
+      new Promise((resolve, reject) => stream.finished(s, opts || {}, (err) => (err ? reject(err) : resolve()))),
+    pipeline: (...args) =>
+      new Promise((resolve, reject) => stream.pipeline(...args, (err) => (err ? reject(err) : resolve()))),
+  });
+}
+
+// ---- node:stream/consumers --------------------------------------------------------------------
+// Fully consume a stream / async-iterable / iterable into a single value.
+{
+  async function collect(src) {
+    const chunks = [];
+    for await (const chunk of src) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  const text = async (src) => (await collect(src)).toString("utf8");
+  const buffer = async (src) => collect(src);
+  const json = async (src) => JSON.parse(await text(src));
+  const arrayBuffer = async (src) => {
+    const b = await collect(src);
+    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  };
+  const blob = async (src) => new Blob([await collect(src)]);
+  __builtins.set("stream/consumers", { arrayBuffer, blob, buffer, json, text });
 }
 
 // ---- node:worker_threads ----------------------------------------------------------------------
