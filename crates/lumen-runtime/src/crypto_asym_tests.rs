@@ -72,7 +72,7 @@ fn node_crypto_sha512_family() {
             "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
             "cf83e1357eefb8bdf1542850d66d8007",
             "b42af09057bac1e2d41708e48a902e09",
-            "md5,sha1,sha256,sha384,sha512",
+            "md5,sha1,sha256,sha384,sha512,sha512-224,sha512-256",
         ]
     );
 }

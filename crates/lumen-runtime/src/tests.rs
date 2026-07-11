@@ -236,7 +236,13 @@ struct TempDir(std::path::PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> TempDir {
-        let dir = std::env::temp_dir().join(format!("lumen-fs-test-{tag}-{}", std::process::id()));
+        static NEXT_TEMP_DIR: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_TEMP_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "lumen-fs-test-{tag}-{}-{id}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("mkdir tempdir");
         TempDir(dir)
     }
