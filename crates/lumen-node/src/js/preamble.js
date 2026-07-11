@@ -4,10 +4,12 @@ const __node = globalThis.__node;
 const __os = globalThis.__os;
 const __zlib = globalThis.__zlib;
 const __child = globalThis.__child;
+const __ffi = globalThis.__ffi;
 delete globalThis.__node;
 delete globalThis.__os;
 delete globalThis.__zlib;
 delete globalThis.__child;
+delete globalThis.__ffi;
 
 // Node's `global` is an alias for the global object.
 if (typeof globalThis.global === "undefined") {

@@ -257,6 +257,14 @@ impl Value {
     pub fn bigint_from_i64(v: i64) -> Value {
         Value::BigInt(crate::bigint::JsBigInt::from(v))
     }
+    /// A BigInt from a `u64` (for the embedder's 64-bit bridge, e.g. an unsigned FFI return).
+    pub fn bigint_from_u64(v: u64) -> Value {
+        Value::BigInt(crate::bigint::JsBigInt::from_u64(v))
+    }
+    /// A BigInt from an `i128` (an FFI `int64_t` widened to preserve its sign).
+    pub fn bigint_from_i128(v: i128) -> Value {
+        Value::BigInt(crate::bigint::JsBigInt::from_i128(v))
+    }
     /// Read a BigInt as an `i64` (wrapping past ±2^63), for the embedder's 64-bit bridge. `None`
     /// when the value isn't a BigInt.
     pub fn bigint_as_i64(&self) -> Option<i64> {

@@ -27,6 +27,7 @@ use lumen_host::{ops, Ctx, Extension, SpawnHandle, Value};
 mod child;
 mod dns;
 mod dylib;
+mod ffi;
 mod napi;
 
 /// The runtime's blocking-work spawner (threadpool), for async ops.
@@ -86,6 +87,22 @@ pub fn extension() -> Extension {
                     "gzip" (1) => op_zlib_gzip,
                     "gunzip" (1) => op_zlib_gunzip,
                     "crc32" (2) => op_zlib_crc32,
+                ],
+            ),
+            (
+                "__ffi",
+                ops![
+                    "dlopen" (1) => ffi::op_dlopen,
+                    "dlsym" (2) => ffi::op_dlsym,
+                    "dlclose" (1) => ffi::op_dlclose,
+                    "call" (4) => ffi::op_call,
+                    "ptr" (2) => ffi::op_ptr,
+                    "read" (3) => ffi::op_read,
+                    "readCString" (3) => ffi::op_read_cstring,
+                    "toArrayBuffer" (3) => ffi::op_to_array_buffer,
+                    "toBuffer" (3) => ffi::op_to_buffer,
+                    "registerCallback" (3) => ffi::op_register_callback,
+                    "unregisterCallback" (1) => ffi::op_unregister_callback,
                 ],
             ),
             ("__child", child::CHILD_OPS),

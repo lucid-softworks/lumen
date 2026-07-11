@@ -1,22 +1,13 @@
 // bun:ffi — Bun's foreign-function-interface surface.
 //
-// Backing reality: lumen has a real dynamic linker (dlopen/dlsym, see dylib.rs) but it is wired
-// only for N-API `.node` addons, which are called through a *fixed* C signature
-// (`napi_register_module`). A generic FFI — invoking an arbitrary symbol with a caller-described
-// signature (int/double/pointer args, native return) — requires a libffi-style trampoline to
-// marshal registers per calling convention at runtime. lumen ships no libffi and no such hostcall,
-// so there is no honest way to call an arbitrary native function. dlopen/linkSymbols/ptr/read/… all
-// throw at call time rather than fake a result. What *is* real and portable is exported for real:
-// the FFIType enum table (numeric values copied verbatim from Bun) and the platform library
-// `suffix`, both of which tools read for feature-detection and path construction.
+// Backing reality: lumen has a real dynamic linker (dlopen/dlsym, see dylib.rs) and a libffi-free
+// trampoline (ffi.rs) that calls arbitrary symbols by monomorphizing an `extern "C"` fn-pointer per
+// argument register-class signature. This glue is a thin marshalling layer over the `__ffi` ops:
+// it resolves symbols, normalizes the FFIType table, and shapes CString/JSCallback/read.* the way
+// Bun v1.2.21 does. Signatures the trampoline can't lower (>8 args, struct-by-value, varargs, and
+// float-typed JSCallbacks) throw honestly rather than fake a result.
 
 {
-  const unsupported = (what) => () => {
-    throw new Error(
-      `bun:ffi ${what} is not supported in lumen (generic native calls need a libffi trampoline)`,
-    );
-  };
-
   // Bun's FFIType — numeric values copied exactly (verified against bun v1.2.21). Both the named
   // aliases and the self-referential numeric keys are present, matching Bun's object shape.
   const FFIType = {
@@ -65,60 +56,148 @@
   // Self-referential numeric keys (0..17), exactly as Bun exposes them.
   for (let i = 0; i <= 17; i++) FFIType[i] = i;
 
-  // Real: the platform's shared-library extension, used to build dlopen paths. Read lazily —
+  const CSTRING = 14;
+  const VOID = 13;
+
+  // Resolve a type spec (a numeric FFIType, an alias number, or a string like "i32") to its code.
+  const normalizeType = (t) => {
+    if (typeof t === "number") return t;
+    if (typeof t === "string" && t in FFIType) return FFIType[t];
+    if (t && typeof t === "object" && typeof t.tag === "string" && t.tag in FFIType) {
+      return FFIType[t.tag];
+    }
+    throw new TypeError(`bun:ffi: unknown FFIType ${String(t)}`);
+  };
+
+  // The platform's shared-library extension, used to build dlopen paths. Read lazily —
   // `process.platform` is populated by the runtime *after* this glue evaluates.
   const suffixFor = () => {
     const platform = (globalThis.process && globalThis.process.platform) || "linux";
     return platform === "darwin" ? "dylib" : platform === "win32" ? "dll" : "so";
   };
 
-  // CString extends String in Bun and decodes a C string starting at a native pointer. Without a
-  // real pointer story the only honest thing is to refuse at construction.
+  // CString extends String and decodes a NUL-terminated (or fixed-length) C string at a native
+  // pointer. `byteLength` is left undefined when no explicit length is given (matching Bun).
   class CString extends String {
-    constructor() {
-      super("");
-      throw new Error(
-        "bun:ffi CString is not supported in lumen (reading from a native pointer needs FFI)",
-      );
+    constructor(ptr, byteOffset, byteLength) {
+      const off = byteOffset || 0;
+      const len = byteLength === undefined ? -1 : byteLength;
+      super(ptr ? __ffi.readCString(ptr, off, len) : "");
+      this.ptr = ptr;
+      this.byteOffset = off;
+      this.byteLength = byteLength;
     }
     get arrayBuffer() {
-      throw new Error("bun:ffi CString is not supported in lumen");
+      if (this.byteLength === undefined) {
+        throw new TypeError("bun:ffi CString.arrayBuffer needs an explicit byteLength");
+      }
+      return __ffi.toArrayBuffer(this.ptr, this.byteOffset, this.byteLength);
     }
   }
 
-  class CFunction {
-    constructor() {
-      throw new Error(
-        "bun:ffi CFunction is not supported in lumen (calling a native function needs FFI)",
-      );
-    }
-  }
-
-  class JSCallback {
-    constructor() {
-      throw new Error(
-        "bun:ffi JSCallback is not supported in lumen (exposing JS to native needs FFI)",
-      );
-    }
-  }
-
-  // read.* — DataView-style reads *from a native address*. Every one needs a real pointer.
-  const readThrow = (t) => () => {
-    throw new Error(`bun:ffi read.${t} is not supported in lumen (needs a native pointer)`);
+  // Wrap a resolved function pointer as a JS callable: marshal args, trampoline, marshal the
+  // return. A cstring return is rewrapped in a CString.
+  const makeCaller = (fnPtr, retCode, argCodes) => {
+    const isCString = retCode === CSTRING;
+    return (...args) => {
+      const r = __ffi.call(fnPtr, retCode, argCodes, args);
+      return isCString ? new CString(r) : r;
+    };
   };
-  const read = {
-    u8: readThrow("u8"),
-    i8: readThrow("i8"),
-    u16: readThrow("u16"),
-    i16: readThrow("i16"),
-    u32: readThrow("u32"),
-    i32: readThrow("i32"),
-    u64: readThrow("u64"),
-    i64: readThrow("i64"),
-    f32: readThrow("f32"),
-    f64: readThrow("f64"),
-    ptr: readThrow("ptr"),
-    intptr: readThrow("intptr"),
+
+  const defToCodes = (def) => ({
+    argCodes: (def.args || []).map(normalizeType),
+    retCode: normalizeType(def.returns === undefined ? VOID : def.returns),
+  });
+
+  // CFunction — build a callable straight from a raw function pointer.
+  function CFunction(def) {
+    const { argCodes, retCode } = defToCodes(def);
+    return makeCaller(def.ptr, retCode, argCodes);
+  }
+
+  // JSCallback — expose a JS function to native code via a pooled `extern "C"` thunk. Only
+  // integer/pointer register-class signatures are supported (the qsort-comparator family); a
+  // float-typed callback throws honestly.
+  class JSCallback {
+    #id;
+    constructor(fn, def) {
+      const d = def || {};
+      const argCodes = (d.args || []).map(normalizeType);
+      const retCode = normalizeType(d.returns === undefined ? VOID : d.returns);
+      const [ptr, id] = __ffi.registerCallback(fn, argCodes, retCode);
+      this.ptr = ptr;
+      this.#id = id;
+    }
+    close() {
+      if (this.#id !== undefined) {
+        __ffi.unregisterCallback(this.#id);
+        this.#id = undefined;
+        this.ptr = null;
+      }
+    }
+  }
+
+  // read.* — typed reads from a native address (little-endian on both supported targets).
+  const readKinds = {
+    u8: 0,
+    i8: 1,
+    u16: 2,
+    i16: 3,
+    u32: 4,
+    i32: 5,
+    u64: 6,
+    i64: 7,
+    f32: 8,
+    f64: 9,
+    ptr: 10,
+    intptr: 11,
+  };
+  const read = {};
+  for (const name of Object.keys(readKinds)) {
+    const kind = readKinds[name];
+    read[name] = (p, offset) => __ffi.read(p, offset || 0, kind);
+  }
+
+  const ptr = (value, byteOffset) => __ffi.ptr(value, byteOffset || 0);
+
+  const toArrayBuffer = (p, byteOffset, byteLength) =>
+    __ffi.toArrayBuffer(p, byteOffset || 0, byteLength || 0);
+
+  const toBuffer = (p, byteOffset, byteLength) => {
+    const u8 = __ffi.toBuffer(p, byteOffset || 0, byteLength || 0);
+    return globalThis.Buffer ? globalThis.Buffer.from(u8.buffer) : u8;
+  };
+
+  // dlopen — open a library and bind each declared symbol to a caller.
+  const dlopen = (path, symbols) => {
+    const libId = __ffi.dlopen(String(path));
+    const out = {};
+    for (const name of Object.keys(symbols || {})) {
+      const def = symbols[name] || {};
+      const { argCodes, retCode } = defToCodes(def);
+      const fnPtr = __ffi.dlsym(libId, def.name || name);
+      out[name] = makeCaller(fnPtr, retCode, argCodes);
+    }
+    return {
+      symbols: out,
+      close: () => __ffi.dlclose(libId),
+    };
+  };
+
+  // linkSymbols — like dlopen, but each symbol already carries its resolved `ptr`.
+  const linkSymbols = (symbols) => {
+    const out = {};
+    for (const name of Object.keys(symbols || {})) {
+      const def = symbols[name] || {};
+      const { argCodes, retCode } = defToCodes(def);
+      out[name] = makeCaller(def.ptr, retCode, argCodes);
+    }
+    return { symbols: out, close: () => {} };
+  };
+
+  const unsupported = (what, why) => () => {
+    throw new Error(`bun:ffi ${what} is not supported in lumen${why ? ` (${why})` : ""}`);
   };
 
   __builtins.set("bun:ffi", {
@@ -130,14 +209,15 @@
     CFunction,
     JSCallback,
     read,
-    dlopen: unsupported("dlopen"),
-    linkSymbols: unsupported("linkSymbols"),
-    ptr: unsupported("ptr"),
-    toArrayBuffer: unsupported("toArrayBuffer"),
-    toBuffer: unsupported("toBuffer"),
-    cc: unsupported("cc"),
-    viewSource: unsupported("viewSource"),
+    ptr,
+    toArrayBuffer,
+    toBuffer,
+    dlopen,
+    linkSymbols,
+    cc: unsupported("cc", "runtime C compilation needs a toolchain bridge"),
+    viewSource: unsupported("viewSource", "no JIT source to disassemble"),
     native: {
+      // Bun's internal fast-path hooks; the public dlopen/JSCallback above are the supported entry.
       dlopen: unsupported("native.dlopen"),
       callback: unsupported("native.callback"),
     },
