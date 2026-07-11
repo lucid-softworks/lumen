@@ -77,6 +77,8 @@ pub fn extension() -> Extension {
                 ops![
                     "info" (0) => op_os_info,
                     "hostname" (0) => op_hostname,
+                    "getPriority" (1) => op_os_getpriority,
+                    "setPriority" (2) => op_os_setpriority,
                 ],
             ),
             (
@@ -724,6 +726,97 @@ fn op_hostname(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, V
         })
         .unwrap_or_else(|| "localhost".to_string());
     Ok(Value::from_string(name))
+}
+
+// ---- os.getPriority / os.setPriority, over getpriority(2)/setpriority(2) ----
+// std exposes no nice-value API, so reach libc directly (same category as the utimes/statvfs FFI
+// above). `PRIO_PROCESS` is 0 on macOS and Linux. Each op returns either the numeric priority /
+// undefined on success, or `{ errno, code }` on failure so os.js can build Node's ERR_SYSTEM_ERROR.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+extern "C" {
+    fn getpriority(which: std::os::raw::c_int, who: std::os::raw::c_uint) -> std::os::raw::c_int;
+    fn setpriority(
+        which: std::os::raw::c_int,
+        who: std::os::raw::c_uint,
+        prio: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+}
+
+// The thread-local errno cell, so getpriority's -1 return can be disambiguated from a real error
+// (a nice value of -1 is legal). macOS spells the accessor `__error`, Linux `__errno_location`.
+#[cfg(target_os = "macos")]
+extern "C" {
+    #[link_name = "__error"]
+    fn errno_location() -> *mut std::os::raw::c_int;
+}
+#[cfg(target_os = "linux")]
+extern "C" {
+    #[link_name = "__errno_location"]
+    fn errno_location() -> *mut std::os::raw::c_int;
+}
+
+/// Map a raw errno to the code string Node reports (the subset getpriority/setpriority raise).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn priority_errno_code(errno: i32) -> &'static str {
+    match errno {
+        1 => "EPERM",
+        3 => "ESRCH",
+        13 => "EACCES",
+        22 => "EINVAL",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn priority_error(ctx: &mut Ctx, errno: i32) -> Value {
+    let obj = Value::Obj(ctx.new_object());
+    let _ = ctx.set_member(&obj, "errno", Value::Num(-(errno as f64)));
+    let _ = ctx.set_member(&obj, "code", Value::str(priority_errno_code(errno)));
+    obj
+}
+
+fn op_os_getpriority(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let pid = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as i64;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        // getpriority can legitimately return -1..-20, so zero errno first and consult it after.
+        // SAFETY: errno_location returns a valid pointer to the thread's errno cell; PRIO_PROCESS(0)
+        // with a pid touches no memory.
+        let rc = unsafe {
+            *errno_location() = 0;
+            getpriority(0, pid as std::os::raw::c_uint)
+        };
+        let errno = unsafe { *errno_location() };
+        if rc == -1 && errno != 0 {
+            return Ok(priority_error(ctx, errno));
+        }
+        Ok(Value::Num(rc as f64))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        Ok(Value::Num(0.0))
+    }
+}
+
+fn op_os_setpriority(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let pid = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as i64;
+    let prio = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))? as i32;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        // SAFETY: PRIO_PROCESS(0) with a pid and an integer priority; no memory is touched.
+        let rc = unsafe { setpriority(0, pid as std::os::raw::c_uint, prio) };
+        if rc != 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            return Ok(priority_error(ctx, errno));
+        }
+        Ok(Value::Undefined)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (pid, prio);
+        Ok(Value::Undefined)
+    }
 }
 
 // ---- node:zlib, over the shared DEFLATE codec ----

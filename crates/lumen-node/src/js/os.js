@@ -3,6 +3,27 @@
 const __osInfo = __os.info();
 const EOL = __osInfo.platform === "win32" ? "\r\n" : "\n";
 
+// libuv errno descriptions for the codes getpriority/setpriority can raise.
+const __ERRNO_DESC = { EPERM: "operation not permitted", ESRCH: "no such process", EACCES: "permission denied", EINVAL: "invalid argument", UNKNOWN: "unknown error" };
+function systemError(syscall, info) {
+  const code = info.code || "UNKNOWN";
+  const desc = __ERRNO_DESC[code] || "unknown error";
+  const err = new Error(`A system error occurred: ${syscall} returned ${code} (${desc})`);
+  err.code = "ERR_SYSTEM_ERROR";
+  err.errno = info.errno;
+  err.syscall = syscall;
+  err.info = { errno: info.errno, code, message: desc, syscall };
+  return err;
+}
+function validatePid(pid, name) {
+  if (typeof pid !== "number" || !Number.isInteger(pid)) {
+    const e = new TypeError(`The "${name}" argument must be of type number. Received ${typeof pid}`);
+    e.code = "ERR_INVALID_ARG_TYPE";
+    throw e;
+  }
+  return pid;
+}
+
 const os = {
   EOL,
   platform: () => __osInfo.platform,
@@ -36,9 +57,32 @@ const os = {
       { address: "::1", netmask: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", family: "IPv6", mac: "00:00:00:00:00:00", internal: true, cidr: "::1/128", scopeid: 0 },
     ],
   }),
-  // getpriority(2) isn't reachable from std; 0 is the default every un-reniced process has.
-  getPriority: () => 0,
-  setPriority: () => { throw new Error("os.setPriority is not supported in lumen"); },
+  // getPriority/setPriority over getpriority(2)/setpriority(2) (see __os in lib.rs). The native op
+  // returns the value/undefined on success, or { errno, code } on failure, which we wrap in Node's
+  // ERR_SYSTEM_ERROR exactly as libuv does.
+  getPriority: (pid = 0) => {
+    const r = __os.getPriority(validatePid(pid, "pid"));
+    if (r && typeof r === "object") throw systemError("uv_os_getpriority", r);
+    return r;
+  },
+  setPriority: (...args) => {
+    // Node: setPriority(priority) or setPriority(pid, priority).
+    let pid = 0, priority;
+    if (args.length >= 2) { pid = validatePid(args[0], "pid"); priority = args[1]; }
+    else priority = args[0];
+    if (typeof priority !== "number" || !Number.isInteger(priority)) {
+      const e = new TypeError(`The "priority" argument must be of type number. Received ${typeof priority}`);
+      e.code = "ERR_INVALID_ARG_TYPE";
+      throw e;
+    }
+    if (priority < -20 || priority > 19) {
+      const e = new RangeError(`The value of "priority" is out of range. It must be >= -20 && <= 19. Received ${priority}`);
+      e.code = "ERR_OUT_OF_RANGE";
+      throw e;
+    }
+    const r = __os.setPriority(pid, priority);
+    if (r && typeof r === "object") throw systemError("uv_os_setpriority", r);
+  },
   totalmem: () => 0,
   freemem: () => 0,
   uptime: () => 0,
