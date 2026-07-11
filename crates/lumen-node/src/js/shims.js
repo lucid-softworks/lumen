@@ -248,7 +248,28 @@
     return pairs.join(sep);
   }
 
-  __builtins.set("querystring", { parse, stringify, decode: parse, encode: stringify, escape: qsEscape, unescape: qsUnescape });
+  // Node's unescapeBuffer: %XX pairs become bytes, '+' becomes a space only when `decodeSpaces`,
+  // malformed escapes stay literal, and char codes are written raw (Uint8Array truncates >0xFF).
+  const hexVal = (c) =>
+    c >= 0x30 && c <= 0x39 ? c - 0x30 : c >= 0x41 && c <= 0x46 ? c - 0x37 : c >= 0x61 && c <= 0x66 ? c - 0x57 : -1;
+  function unescapeBuffer(s, decodeSpaces = false) {
+    s = String(s);
+    const out = Buffer.alloc(s.length);
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c === 0x2b /* + */ && decodeSpaces) { out[n++] = 0x20; continue; }
+      if (c === 0x25 /* % */ && i + 2 < s.length) {
+        const hi = hexVal(s.charCodeAt(i + 1));
+        const lo = hexVal(s.charCodeAt(i + 2));
+        if (hi >= 0 && lo >= 0) { out[n++] = (hi << 4) | lo; i += 2; continue; }
+      }
+      out[n++] = c;
+    }
+    return out.slice(0, n);
+  }
+
+  __builtins.set("querystring", { parse, stringify, decode: parse, encode: stringify, escape: qsEscape, unescape: qsUnescape, unescapeBuffer });
 }
 
 // ---- node:url ---------------------------------------------------------------------------------
@@ -306,15 +327,46 @@
     return out;
   }
 
+  const resolve = (from, to) => new URL(to, new URL(from, "http://localhost")).href;
+
+  // Legacy resolveObject: resolve, then hand back a parse()-shaped object.
+  function resolveObject(source, relative) {
+    if (!source) return relative;
+    return legacyParse(resolve(typeof source === "string" ? source : format(source), relative));
+  }
+
+  // What http.request(new URL(...)) uses. Mirrors Node: bracket-free IPv6 hostname, numeric port
+  // (only when present), decoded `user:pass` auth.
+  function urlToHttpOptions(url) {
+    const options = {
+      protocol: url.protocol,
+      hostname: typeof url.hostname === "string" && url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname,
+      hash: url.hash,
+      search: url.search,
+      pathname: url.pathname,
+      path: `${url.pathname || ""}${url.search || ""}`,
+      href: url.href,
+    };
+    if (url.port !== "") options.port = Number(url.port);
+    if (url.username || url.password) options.auth = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
+    return options;
+  }
+
+  // Punycode-backed domain converters. Node's use full IDNA/UTS46; lowercasing first covers the
+  // mapping step that matters in practice.
+  const punycode = __builtins.get("punycode");
+
   __builtins.set("url", {
     parse: legacyParse,
     format,
-    resolve: (from, to) => new URL(to, new URL(from, "http://localhost")).href,
+    resolve,
+    resolveObject,
+    urlToHttpOptions,
     URL,
     URLSearchParams,
     Url: function Url() {},
-    domainToASCII: (d) => d,
-    domainToUnicode: (d) => d,
+    domainToASCII: (d) => punycode.toASCII(String(d).toLowerCase()),
+    domainToUnicode: (d) => punycode.toUnicode(String(d).toLowerCase()),
     fileURLToPath: (u) => (typeof u === "string" ? u : u.pathname).replace(/^file:\/\//, ""),
     pathToFileURL: (p) => new URL("file://" + p),
   });
@@ -404,6 +456,24 @@ __builtins.set("tty", {
   }
   __builtins.set("async_hooks", {
     AsyncResource,
+    // Node's async_wrap provider table (v22). The ids are static names, not live counters, so
+    // exposing the real list keeps feature-detecting consumers working.
+    asyncWrapProviders: Object.freeze({
+      NONE: 0, DIRHANDLE: 1, DNSCHANNEL: 2, ELDHISTOGRAM: 3, FILEHANDLE: 4, FILEHANDLECLOSEREQ: 5,
+      BLOBREADER: 6, FSEVENTWRAP: 7, FSREQCALLBACK: 8, FSREQPROMISE: 9, GETADDRINFOREQWRAP: 10,
+      GETNAMEINFOREQWRAP: 11, HEAPSNAPSHOT: 12, HTTP2SESSION: 13, HTTP2STREAM: 14, HTTP2PING: 15,
+      HTTP2SETTINGS: 16, HTTPINCOMINGMESSAGE: 17, HTTPCLIENTREQUEST: 18, JSSTREAM: 19, JSUDPWRAP: 20,
+      MESSAGEPORT: 21, PIPECONNECTWRAP: 22, PIPESERVERWRAP: 23, PIPEWRAP: 24, PROCESSWRAP: 25,
+      PROMISE: 26, QUERYWRAP: 27, QUIC_ENDPOINT: 28, QUIC_LOGSTREAM: 29, QUIC_PACKET: 30,
+      QUIC_SESSION: 31, QUIC_STREAM: 32, QUIC_UDP: 33, SHUTDOWNWRAP: 34, SIGNALWRAP: 35,
+      STATWATCHER: 36, STREAMPIPE: 37, TCPCONNECTWRAP: 38, TCPSERVERWRAP: 39, TCPWRAP: 40,
+      TTYWRAP: 41, UDPSENDWRAP: 42, UDPWRAP: 43, SIGINTWATCHDOG: 44, WORKER: 45,
+      WORKERHEAPSNAPSHOT: 46, WORKERHEAPSTATISTICS: 47, WRITEWRAP: 48, ZLIB: 49,
+      CHECKPRIMEREQUEST: 50, PBKDF2REQUEST: 51, KEYPAIRGENREQUEST: 52, KEYGENREQUEST: 53,
+      KEYEXPORTREQUEST: 54, CIPHERREQUEST: 55, DERIVEBITSREQUEST: 56, HASHREQUEST: 57,
+      RANDOMBYTESREQUEST: 58, RANDOMPRIMEREQUEST: 59, SCRYPTREQUEST: 60, SIGNREQUEST: 61,
+      TLSWRAP: 62, VERIFYREQUEST: 63,
+    }),
     executionAsyncId: () => 0,
     triggerAsyncId: () => 0,
     executionAsyncResource: () => ({}),

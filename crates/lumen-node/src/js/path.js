@@ -21,6 +21,63 @@ function makePath(sep, isWin) {
 
   const splitRe = isWin ? /[\\/]+/ : /\/+/;
 
+  // ---- matchesGlob ------------------------------------------------------------------------------
+  // Minimatch-compatible subset: *, ?, [...] (with ! / ^ negation), {a,b}, and ** as a whole
+  // segment. Like Node (windowsPathsNoEscape), backslashes in the PATTERN are separators, not
+  // escapes; wildcards don't match a leading dot; ** never crosses a dot segment and, when
+  // trailing, must match at least one segment. Braces spanning a '/' are not supported.
+  const GLOBSTAR = Symbol("globstar");
+  const escRe = (ch) => (".*+?^${}()|[]\\".includes(ch) ? "\\" + ch : ch);
+
+  function segToRegExp(seg) {
+    let re = "";
+    let braceDepth = 0;
+    let i = 0;
+    while (i < seg.length) {
+      const c = seg[i];
+      if (c === "*") { re += "[^/]*"; i++; continue; }
+      if (c === "?") { re += "[^/]"; i++; continue; }
+      if (c === "[") {
+        const close = seg.indexOf("]", i + 2); // first ']' is literal when the class would be empty
+        if (close < 0) { re += "\\["; i++; continue; }
+        let cls = seg.slice(i + 1, close);
+        let neg = false;
+        if (cls[0] === "!" || cls[0] === "^") { neg = true; cls = cls.slice(1); }
+        re += "[" + (neg ? "^" : "") + cls.replace(/[\\\]^]/g, "\\$&") + "]";
+        i = close + 1;
+        continue;
+      }
+      if (c === "{") { braceDepth++; re += "(?:"; i++; continue; }
+      if (c === "}" && braceDepth > 0) { braceDepth--; re += ")"; i++; continue; }
+      if (c === "," && braceDepth > 0) { re += "|"; i++; continue; }
+      re += escRe(c);
+      i++;
+    }
+    return new RegExp("^" + (seg[0] === "." ? "" : "(?!\\.)") + re + "$");
+  }
+
+  function matchSegs(pSegs, pi, gSegs, gi) {
+    while (gi < gSegs.length) {
+      const g = gSegs[gi];
+      if (g === GLOBSTAR) {
+        if (gi === gSegs.length - 1) {
+          if (pi >= pSegs.length) return false; // trailing ** needs something to match
+          for (; pi < pSegs.length; pi++) if (pSegs[pi].startsWith(".")) return false;
+          return true;
+        }
+        for (let k = pi; k <= pSegs.length; k++) {
+          if (matchSegs(pSegs, k, gSegs, gi + 1)) return true;
+          if (k < pSegs.length && pSegs[k].startsWith(".")) break;
+        }
+        return false;
+      }
+      if (pi >= pSegs.length || !g.test(pSegs[pi])) return false;
+      pi++;
+      gi++;
+    }
+    return pi === pSegs.length;
+  }
+
   const path = {
     sep,
     delimiter: isWin ? ";" : ":",
@@ -97,10 +154,24 @@ function makePath(sep, isWin) {
       const up = fromParts.slice(i).map(() => "..");
       return [...up, ...toParts.slice(i)].join(sep) || ".";
     },
+    matchesGlob(p, pattern) {
+      if (typeof p !== "string") throw new TypeError('The "path" argument must be of type string');
+      if (typeof pattern !== "string") throw new TypeError('The "pattern" argument must be of type string');
+      const gSegs = pattern.replace(/\\/g, "/").split("/").map((s) => (s === "**" ? GLOBSTAR : segToRegExp(s)));
+      const pSegs = (isWin ? p.replace(/\\/g, "/") : p).split("/");
+      return matchSegs(pSegs, 0, gSegs, 0);
+    },
+    // Long-path form on win32 (\\?\C:\… / \\?\UNC\…); a pass-through on posix. Unlike Node we
+    // prefix without resolving against the (posix) cwd.
     toNamespacedPath(p) {
+      if (!isWin || typeof p !== "string" || p.length === 0) return p;
+      if (p.startsWith("\\\\?\\") || p.startsWith("\\\\.\\")) return p;
+      if (/^[a-zA-Z]:[\\/]/.test(p)) return "\\\\?\\" + p;
+      if (/^[\\/][\\/]/.test(p)) return "\\\\?\\UNC\\" + p.slice(2);
       return p;
     },
   };
+  path._makeLong = path.toNamespacedPath; // legacy alias Node still exports
   return path;
 }
 

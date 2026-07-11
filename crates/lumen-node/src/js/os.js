@@ -22,6 +22,23 @@ const os = {
       times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 },
     })),
   availableParallelism: () => __osInfo.cpus,
+  // uname -m spelling of the arch (Node reports "arm64" on darwin but "aarch64" on linux).
+  machine: () =>
+    __osInfo.arch === "x64" ? "x86_64"
+    : __osInfo.arch === "arm64" ? (__osInfo.platform === "darwin" ? "arm64" : "aarch64")
+    : __osInfo.arch === "ia32" ? "i686"
+    : __osInfo.arch,
+  // Enumerating real interfaces needs getifaddrs(), which std doesn't expose; loopback is the one
+  // interface every host has, so report just it (correct, if incomplete) rather than {}.
+  networkInterfaces: () => ({
+    [__osInfo.platform === "darwin" ? "lo0" : "lo"]: [
+      { address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", mac: "00:00:00:00:00:00", internal: true, cidr: "127.0.0.1/8" },
+      { address: "::1", netmask: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", family: "IPv6", mac: "00:00:00:00:00:00", internal: true, cidr: "::1/128", scopeid: 0 },
+    ],
+  }),
+  // getpriority(2) isn't reachable from std; 0 is the default every un-reniced process has.
+  getPriority: () => 0,
+  setPriority: () => { throw new Error("os.setPriority is not supported in lumen"); },
   totalmem: () => 0,
   freemem: () => 0,
   uptime: () => 0,
