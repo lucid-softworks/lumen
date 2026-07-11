@@ -81,7 +81,7 @@ function loadNodeModules(name, start) {
   }
 }
 
-function resolveFilename(specifier, fromDir) {
+function defaultResolveFilename(specifier, fromDir) {
   const core = isCoreSpecifier(specifier);
   if (core) return "node:" + core;
   if (specifier.startsWith("./") || specifier.startsWith("../") || path.isAbsolute(specifier)) {
@@ -97,6 +97,154 @@ function resolveFilename(specifier, fromDir) {
   const e = new Error(`Cannot find module '${specifier}'`);
   e.code = "MODULE_NOT_FOUND";
   throw e;
+}
+
+// --- registerHooks (Node's sync module customization hooks) -------------------------------------
+// module.registerHooks({ resolve, load }) chains user hooks onto require()'s resolve and load
+// steps, LIFO like Node's (the most recently registered hook runs first; nextResolve/nextLoad
+// walks toward the default). Hooks speak URLs — file:// for files, node: for builtins — so the
+// default steps translate to/from the path-based machinery above. Scope, honestly: this covers
+// the CommonJS require() path (resolve + load, including require.resolve and Module._load).
+// ESM `import` of files is resolved/loaded by the runtime's native loader and does NOT consult
+// these hooks (wiring that up needs loader changes in Rust, not glue).
+const __registeredHooks = []; // registration order; chains are built newest-outermost
+
+// Minimal path <-> file URL translation (symmetric; percent-encodes only what breaks a URL).
+function pathToFileUrl(p) {
+  let s = String(p).replace(/\\/g, "/");
+  if (!s.startsWith("/")) s = "/" + s; // win32 drive form C:/x -> /C:/x
+  return "file://" + s.replace(/%/g, "%25").replace(/#/g, "%23").replace(/\?/g, "%3F").replace(/ /g, "%20");
+}
+function fileUrlToPath(u) {
+  let p = String(u).slice("file://".length);
+  const q = p.indexOf("?");
+  if (q >= 0) p = p.slice(0, q); // a search suffix is legal in a loader URL; the file is the path
+  p = p.replace(/^\/([A-Za-z]:)/, "$1");
+  return decodeURIComponent(p);
+}
+function hookConditions() {
+  return ["require", "node", "default"];
+}
+
+// Compose the registered hooks of one kind around `defaultStep`, newest hook outermost. Each
+// hook must either call next() or return { shortCircuit: true }, exactly as Node enforces.
+function chainHooks(kind, defaultStep) {
+  let next = defaultStep;
+  for (const reg of __registeredHooks) { // oldest first, so the newest ends up outermost
+    const fn = reg[kind];
+    if (!fn) continue;
+    const inner = next;
+    next = (arg0, context) => {
+      let calledNext = false;
+      const nextHook = (a, c) => {
+        calledNext = true;
+        return inner(a === undefined ? arg0 : a, c === undefined ? context : c);
+      };
+      const result = fn(arg0, context, nextHook);
+      if (!result || typeof result !== "object") {
+        const e = new TypeError(`The "${kind}" hook must return an object`);
+        e.code = "ERR_INVALID_RETURN_VALUE";
+        throw e;
+      }
+      if (!calledNext && !result.shortCircuit) {
+        const e = new TypeError(
+          `Expected true to be returned for the "shortCircuit" from the "${kind}" hook but got ${result.shortCircuit}.`,
+        );
+        e.code = "ERR_INVALID_RETURN_PROPERTY_VALUE";
+        throw e;
+      }
+      return result;
+    };
+  }
+  return next;
+}
+
+function hasHook(kind) {
+  for (const reg of __registeredHooks) if (reg[kind]) return true;
+  return false;
+}
+
+// resolveFilename: the single resolve funnel (require, require.resolve, Module._load /
+// _resolveFilename all land here). With hooks registered, run the chain over URLs and map the
+// winning url back into the internal filename form ("node:x" or an absolute path).
+function resolveFilename(specifier, fromDir, parentFilename) {
+  if (!hasHook("resolve")) return defaultResolveFilename(specifier, fromDir);
+  const defaultStep = (spec, _context) => {
+    const filename = defaultResolveFilename(String(spec), fromDir);
+    return {
+      url: filename.startsWith("node:") ? filename : pathToFileUrl(filename),
+      shortCircuit: true,
+    };
+  };
+  const run = chainHooks("resolve", defaultStep);
+  const result = run(String(specifier), {
+    conditions: hookConditions(),
+    importAttributes: {},
+    parentURL: parentFilename ? pathToFileUrl(parentFilename) : pathToFileUrl(fromDir + "/"),
+  });
+  const url = String(result.url);
+  if (url.startsWith("node:") || isBuiltin(url)) return url.startsWith("node:") ? url : "node:" + url;
+  if (url.startsWith("file://")) return __node.realpath(fileUrlToPath(url));
+  throw new Error(
+    `registerHooks: resolve returned unsupported URL scheme '${url}' (file:// and node: are supported in lumen)`,
+  );
+}
+
+// Compile CommonJS source into `module` via the wrapper — the shared back half of the `.js`
+// extension handler, split out so a registerHooks load hook can feed transformed source in.
+function compileCommonJS(module, filename, source) {
+  const dirname = path.dirname(filename);
+  // A leading #! shebang line is stripped, as Node does, before wrapping.
+  source = String(source).replace(/^#!.*/, "");
+  const require = makeRequire(dirname, module);
+  const compiled = new Function("exports", "require", "module", "__filename", "__dirname", source);
+  compiled.call(module.exports, module.exports, require, module, filename, dirname);
+}
+
+// A load-hook `source` may be a string or a TypedArray/ArrayBuffer (Node accepts both).
+function hookSourceToString(source) {
+  if (typeof source === "string") return source;
+  if (source instanceof ArrayBuffer) return Buffer.from(new Uint8Array(source)).toString("utf8");
+  if (ArrayBuffer.isView(source)) {
+    return Buffer.from(new Uint8Array(source.buffer, source.byteOffset, source.byteLength)).toString("utf8");
+  }
+  return String(source);
+}
+
+// With load hooks registered, run the chain for `filename` and materialize the result. Returns
+// true when the hooks produced the module; false to fall through to the extension dispatch
+// (builtin/addon results, i.e. source === null on a non-transformable format).
+function loadViaHooks(module, filename) {
+  const defaultStep = (u, _context) => {
+    const url = String(u);
+    if (url.startsWith("node:")) return { format: "builtin", source: null, shortCircuit: true };
+    const p = url.startsWith("file://") ? fileUrlToPath(url) : url;
+    const ext = path.extname(p);
+    if (ext === ".json") return { format: "json", source: __node.readText(p), shortCircuit: true };
+    if (ext === ".node") return { format: "addon", source: null, shortCircuit: true };
+    // Node v22's default nextLoad reports `format: undefined` for a required .js file (the CJS
+    // loader decides by extension after the chain); mirror that so format-switching hooks match.
+    return { format: undefined, source: __node.readText(p), shortCircuit: true };
+  };
+  const run = chainHooks("load", defaultStep);
+  const result = run(pathToFileUrl(filename), {
+    format: undefined,
+    conditions: hookConditions(),
+    importAttributes: {},
+  });
+  if (result.source == null) return false; // addon or builtin: extension dispatch handles it
+  const source = hookSourceToString(result.source);
+  if (result.format === "json") {
+    module.exports = JSON.parse(source);
+    return true;
+  }
+  if (result.format === undefined || result.format === "commonjs") {
+    compileCommonJS(module, filename, source);
+    return true;
+  }
+  throw new Error(
+    `registerHooks: load format '${result.format}' is not supported in lumen (commonjs and json are)`,
+  );
 }
 
 function loadModule(filename, parent) {
@@ -118,22 +266,28 @@ function loadModule(filename, parent) {
   cache.set(filename, module);
   if (parent) parent.children.push(module);
 
-  // Dispatch on file extension through Module._extensions, exactly as Node does: `.js`/`.cjs`
-  // run the module wrapper, `.json` is parsed, `.node` is dlopen'd for its N-API registration.
-  // An unknown extension falls back to the `.js` loader, matching Node's default.
-  const ext = path.extname(filename);
-  const handler = Module._extensions[ext] || Module._extensions[".js"];
-  handler(module, filename);
+  // registerHooks load chain first (it can rewrite the source); otherwise — and for results the
+  // hooks leave alone (addons) — dispatch on file extension through Module._extensions, exactly
+  // as Node does: `.js`/`.cjs` run the module wrapper, `.json` is parsed, `.node` is dlopen'd for
+  // its N-API registration. An unknown extension falls back to the `.js` loader, like Node.
+  if (!(hasHook("load") && loadViaHooks(module, filename))) {
+    const ext = path.extname(filename);
+    const handler = Module._extensions[ext] || Module._extensions[".js"];
+    handler(module, filename);
+  }
   module.loaded = true;
   return module;
 }
 
 function makeRequire(fromDir, parentModule) {
+  const parentFilename = parentModule && typeof parentModule.filename === "string" ? parentModule.filename : undefined;
   const require = function (specifier) {
-    const filename = resolveFilename(String(specifier), fromDir);
+    const filename = resolveFilename(String(specifier), fromDir, parentFilename);
     return loadModule(filename, parentModule).exports;
   };
-  require.resolve = (specifier) => resolveFilename(String(specifier), fromDir);
+  // Node v22.16 quirk, mirrored deliberately: require.resolve() does NOT consult registerHooks
+  // (only actual loads do) — verified against `node -e`.
+  require.resolve = (specifier) => defaultResolveFilename(String(specifier), fromDir);
   require.cache = Object.create(null);
   require.main = mainModule;
   Object.defineProperty(require, "cache", {
@@ -226,12 +380,7 @@ function wrap(source) {
 // wrapping an entry (as ts-node / pirates do) actually takes effect — real behavior, not a stub.
 const _extensions = {
   ".js": function (module, filename) {
-    const dirname = path.dirname(filename);
-    // A leading #! shebang line is stripped, as Node does, before wrapping.
-    const source = __node.readText(filename).replace(/^#!.*/, "");
-    const require = makeRequire(dirname, module);
-    const compiled = new Function("exports", "require", "module", "__filename", "__dirname", source);
-    compiled.call(module.exports, module.exports, require, module, filename, dirname);
+    compileCommonJS(module, filename, __node.readText(filename));
   },
   ".json": function (module, filename) {
     module.exports = JSON.parse(__node.readText(filename));
@@ -283,7 +432,8 @@ function parentDir(parent) {
 function _resolveFilename(request, parent) {
   const spec = String(request);
   if (isBuiltin(spec)) return spec;
-  return resolveFilename(spec, parentDir(parent));
+  // Like require.resolve, Node v22.16's _resolveFilename does not consult registerHooks.
+  return defaultResolveFilename(spec, parentDir(parent));
 }
 
 // Module._load(request, parent, isMain): resolve then load, returning the module's exports.
@@ -390,13 +540,37 @@ function getCompileCacheDir() {
 }
 function flushCompileCache() {}
 
-// Honest throwing stubs: the ESM loader-hook machinery (register/registerHooks) and the TypeScript
-// type-stripping transform do not exist in lumen, so we throw rather than silently pretend.
-function register() {
-  throw new Error("node:module register() (ESM loader hooks) is not supported in lumen");
+// registerHooks({ resolve, load }) — Node's SYNC module customization hooks, wired into the
+// resolve/load funnels above (see the "__registeredHooks" section). Returns { deregister }.
+// Covers CommonJS require(); ESM file imports go through the native loader and are not hooked.
+function registerHooks(hooks) {
+  if (hooks == null || typeof hooks !== "object") {
+    throw new TypeError(`Cannot destructure property 'resolve' of 'hooks' as it is ${hooks === null ? "null" : typeof hooks}.`);
+  }
+  const entry = { resolve: hooks.resolve, load: hooks.load };
+  for (const name of ["resolve", "load"]) {
+    if (entry[name] !== undefined && typeof entry[name] !== "function") {
+      const e = new TypeError(
+        `The "hooks.${name}" property must be of type function. Received type ${typeof entry[name]}`,
+      );
+      e.code = "ERR_INVALID_ARG_TYPE";
+      throw e;
+    }
+  }
+  __registeredHooks.push(entry);
+  return {
+    deregister() {
+      const i = __registeredHooks.indexOf(entry);
+      if (i >= 0) __registeredHooks.splice(i, 1);
+    },
+  };
 }
-function registerHooks() {
-  throw new Error("node:module registerHooks() is not supported in lumen");
+
+// Honest throwing stubs: the ASYNC loader-thread hook machinery (register) and the TypeScript
+// type-stripping transform do not exist in lumen, so we throw rather than silently pretend.
+// (For sync hooks, use registerHooks above.)
+function register() {
+  throw new Error("node:module register() (async ESM loader hooks) is not supported in lumen; module.registerHooks (the sync API) is");
 }
 function stripTypeScriptTypes() {
   throw new Error("node:module stripTypeScriptTypes() (TypeScript transform) is not supported in lumen");
