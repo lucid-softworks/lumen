@@ -235,7 +235,7 @@ function makeBuiltinEsmSource(name) {
 const __BUILTIN_NAMES = [
   "buffer", "path", "os", "fs", "module",
   "events", "util", "crypto", "querystring", "url", "net", "assert",
-  "string_decoder", "tty", "async_hooks", "zlib", "stream", "http", "https",
+  "string_decoder", "tty", "async_hooks", "zlib", "stream", "http", "https", "http2",
   "perf_hooks", "fs/promises", "child_process", "dns", "dns/promises",
   "v8", "inspector", "inspector/promises", "worker_threads", "readline",
   "readline/promises", "test", "tls", "process",

@@ -212,24 +212,112 @@ __builtins.set("process", globalThis.process);
 
 // ---- node:tls ---------------------------------------------------------------------------------
 // TLS cannot be built on std alone (no crypto/handshake stack) and lumen takes no third-party
-// crate, so — like node:net's sockets and fetch's https — the module exists (tools import it for
-// types / feature detection) but any attempt to actually establish a TLS connection throws.
+// crate, so — like node:net's sockets and fetch's https — anything that establishes a TLS
+// connection (connect/createServer/TLSSocket) throws. The pure pieces are real: the constants,
+// checkServerIdentity (RFC 6125 hostname/SAN matching), convertALPNProtocols (the length-prefixed
+// wire encoding), and getCiphers (the OpenSSL cipher enumeration).
 {
   const notSupported = function () {
     throw new Error("node:tls is not supported in lumen (TLS requires a crypto stack)");
   };
+
+  // Real: leftmost-label wildcard match (RFC 6125). "*.example.com" matches one label only.
+  function matchHostname(host, pattern) {
+    if (pattern === host) return true;
+    if (!pattern.startsWith("*.")) return false;
+    const dot = host.indexOf(".");
+    if (dot < 0) return false;
+    return host.slice(dot + 1) === pattern.slice(2);
+  }
+
+  // Real hostname/IP verification against a peer certificate's subjectAltName (falling back to the
+  // subject CN), returning undefined on success or an ERR_TLS_CERT_ALTNAME_INVALID Error on failure
+  // — the exact shape callers (and Node's own https client) check.
+  function checkServerIdentity(hostname, cert) {
+    hostname = String(hostname);
+    const net = __builtins.get("net");
+    const dnsNames = [];
+    const ips = [];
+    if (cert && cert.subjectaltname) {
+      for (const part of cert.subjectaltname.split(", ")) {
+        const idx = part.indexOf(":");
+        const kind = part.slice(0, idx);
+        const val = part.slice(idx + 1);
+        if (kind === "DNS") dnsNames.push(val);
+        else if (kind === "IP Address") ips.push(val);
+      }
+    }
+    if (dnsNames.length === 0 && ips.length === 0 && cert && cert.subject && cert.subject.CN) {
+      const cns = Array.isArray(cert.subject.CN) ? cert.subject.CN : [cert.subject.CN];
+      for (const cn of cns) dnsNames.push(cn);
+    }
+    let valid;
+    if (net.isIP(hostname)) valid = ips.includes(hostname);
+    else { const host = hostname.toLowerCase(); valid = dnsNames.some((n) => matchHostname(host, n.toLowerCase())); }
+    if (valid) return undefined;
+
+    const altStr = cert && cert.subjectaltname
+      ? cert.subjectaltname
+      : [...dnsNames.map((d) => `DNS:${d}`), ...ips.map((ip) => `IP Address:${ip}`)].join(", ");
+    const err = new Error(`Hostname/IP does not match certificate's altnames: Host: ${hostname}. is not in the cert's altnames: ${altStr}`);
+    err.name = "Error";
+    err.reason = `Host: ${hostname}. is not in the cert's altnames: ${altStr}`;
+    err.host = hostname;
+    err.cert = cert;
+    err.code = "ERR_TLS_CERT_ALTNAME_INVALID";
+    return err;
+  }
+
+  // Real: encode ALPN protocol names as the length-prefixed wire format; mutate `context.ALPNProtocols`.
+  function convertALPNProtocols(protocols, context) {
+    let buf;
+    if (Array.isArray(protocols)) {
+      let total = 0;
+      const encoded = protocols.map((p) => Buffer.from(String(p), "utf8"));
+      for (const e of encoded) total += 1 + e.length;
+      buf = Buffer.alloc(total);
+      let off = 0;
+      for (const e of encoded) {
+        buf[off++] = e.length;
+        for (let i = 0; i < e.length; i++) buf[off + i] = e[i];
+        off += e.length;
+      }
+    } else if (protocols instanceof Uint8Array) {
+      buf = Buffer.from(protocols);
+    } else {
+      buf = Buffer.alloc(0);
+    }
+    if (context) context.ALPNProtocols = buf;
+  }
+
+  // The OpenSSL cipher enumeration (pure data). Real list, lowercased, as Node returns it.
+  const CIPHERS = ["aes128-gcm-sha256", "aes128-sha", "aes128-sha256", "aes256-gcm-sha384", "aes256-sha", "aes256-sha256", "dhe-psk-aes128-cbc-sha", "dhe-psk-aes128-cbc-sha256", "dhe-psk-aes128-gcm-sha256", "dhe-psk-aes256-cbc-sha", "dhe-psk-aes256-cbc-sha384", "dhe-psk-aes256-gcm-sha384", "dhe-psk-chacha20-poly1305", "dhe-rsa-aes128-gcm-sha256", "dhe-rsa-aes128-sha", "dhe-rsa-aes128-sha256", "dhe-rsa-aes256-gcm-sha384", "dhe-rsa-aes256-sha", "dhe-rsa-aes256-sha256", "dhe-rsa-chacha20-poly1305", "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-ecdsa-aes128-sha", "ecdhe-ecdsa-aes128-sha256", "ecdhe-ecdsa-aes256-gcm-sha384", "ecdhe-ecdsa-aes256-sha", "ecdhe-ecdsa-aes256-sha384", "ecdhe-ecdsa-chacha20-poly1305", "ecdhe-psk-aes128-cbc-sha", "ecdhe-psk-aes128-cbc-sha256", "ecdhe-psk-aes256-cbc-sha", "ecdhe-psk-aes256-cbc-sha384", "ecdhe-psk-chacha20-poly1305", "ecdhe-rsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-sha", "ecdhe-rsa-aes128-sha256", "ecdhe-rsa-aes256-gcm-sha384", "ecdhe-rsa-aes256-sha", "ecdhe-rsa-aes256-sha384", "ecdhe-rsa-chacha20-poly1305", "psk-aes128-cbc-sha", "psk-aes128-cbc-sha256", "psk-aes128-gcm-sha256", "psk-aes256-cbc-sha", "psk-aes256-cbc-sha384", "psk-aes256-gcm-sha384", "psk-chacha20-poly1305", "rsa-psk-aes128-cbc-sha", "rsa-psk-aes128-cbc-sha256", "rsa-psk-aes128-gcm-sha256", "rsa-psk-aes256-cbc-sha", "rsa-psk-aes256-cbc-sha384", "rsa-psk-aes256-gcm-sha384", "rsa-psk-chacha20-poly1305", "srp-aes-128-cbc-sha", "srp-aes-256-cbc-sha", "srp-rsa-aes-128-cbc-sha", "srp-rsa-aes-256-cbc-sha", "tls_aes_128_ccm_8_sha256", "tls_aes_128_ccm_sha256", "tls_aes_128_gcm_sha256", "tls_aes_256_gcm_sha384", "tls_chacha20_poly1305_sha256"];
+
   __builtins.set("tls", {
+    // socket-dependent (honest throwing stubs)
     connect: notSupported,
     createServer: notSupported,
-    createSecureContext: () => ({}),
-    checkServerIdentity: () => undefined,
     TLSSocket: notSupported,
     Server: notSupported,
+    // createSecurePair is deprecated in Node and only made sense atop a real socket pair.
+    createSecurePair: function () { throw new Error("tls.createSecurePair is deprecated and not supported in lumen"); },
+    // context objects: shells (no OpenSSL context underneath, but constructing is inert)
+    createSecureContext: () => ({}),
     SecureContext: function () {},
-    rootCertificates: [],
+    // real, transport-free
+    checkServerIdentity,
+    convertALPNProtocols,
+    getCiphers: () => CIPHERS.slice(),
+    // No CA trust store is bundled, so getCACertificates yields an empty set (not fake certs).
+    getCACertificates: () => [],
+    rootCertificates: Object.freeze([]),
+    // real constants
+    CLIENT_RENEG_LIMIT: 3,
+    CLIENT_RENEG_WINDOW: 600,
+    DEFAULT_CIPHERS: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA",
+    DEFAULT_ECDH_CURVE: "auto",
     DEFAULT_MIN_VERSION: "TLSv1.2",
     DEFAULT_MAX_VERSION: "TLSv1.3",
-    DEFAULT_ECDH_CURVE: "auto",
   });
 }
 

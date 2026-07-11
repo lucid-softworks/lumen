@@ -123,18 +123,8 @@ __builtins.set("perf_hooks", {
   });
 }
 
-// ---- node:net ---------------------------------------------------------------------------------
-// Only the address helpers server code inspects (trust-proxy, x-forwarded-for). A real Socket/
-// Server would need the raw sockets lumen doesn't expose to JS.
-{
-  const v4 = /^(\d{1,3}\.){3}\d{1,3}$/;
-  const v6 = /^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$/i;
-  const isIPv4 = (s) => v4.test(s) && s.split(".").every((n) => Number(n) <= 255);
-  const isIPv6 = (s) => v6.test(s) && s.includes("::") ? s.split("::").length <= 2 : v6.test(s);
-  const isIP = (s) => (isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0);
-  const notImpl = () => { throw new Error("node:net sockets are not supported in lumen"); };
-  __builtins.set("net", { isIP, isIPv4, isIPv6, Socket: notImpl, Server: notImpl, createConnection: notImpl, connect: notImpl, createServer: notImpl });
-}
+// node:net now lives in its own glue file (net.js) — its surface grew past the "small shim" bar
+// (BlockList, SocketAddress, auto-select-family flags).
 
 // ---- node:assert ------------------------------------------------------------------------------
 {

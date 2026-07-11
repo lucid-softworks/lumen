@@ -245,18 +245,116 @@ function notImplementedClient() {
   throw new Error("node:http client (request/get) is not implemented in lumen; use the global fetch()");
 }
 
+// ---- header validators (real; Node-shaped error codes) ----------------------------------------
+// RFC 7230 token chars; matches Node's checkIsHttpToken.
+const HTTP_TOKEN = /^[\^_`a-zA-Z\-0-9!#$%&'*+.|~]+$/;
+// A control char (other than tab) anywhere in a header value is invalid.
+const INVALID_HEADER_CHAR = /[^\t\x20-\x7e\x80-\xff]/;
+function validateHeaderName(name, label) {
+  if (typeof name !== "string" || name === "" || !HTTP_TOKEN.test(name)) {
+    const err = new TypeError(`${label || "Header name"} must be a valid HTTP token ["${name}"]`);
+    err.code = "ERR_INVALID_HTTP_TOKEN";
+    throw err;
+  }
+}
+function validateHeaderValue(name, value) {
+  if (value === undefined) {
+    const err = new TypeError(`Invalid value "${value}" for header "${name}"`);
+    err.code = "ERR_HTTP_INVALID_HEADER_VALUE";
+    throw err;
+  }
+  if (INVALID_HEADER_CHAR.test(String(value))) {
+    const err = new TypeError(`Invalid character in header content ["${name}"]`);
+    err.code = "ERR_INVALID_CHAR";
+    throw err;
+  }
+}
+
+// ---- OutgoingMessage / ClientRequest ----------------------------------------------------------
+// Node's ServerResponse extends OutgoingMessage (the header-management Writable base). ServerResponse
+// above is self-contained (to avoid perturbing the working server path), so OutgoingMessage is a
+// standalone base exported for the class surface / instanceof checks. ClientRequest drives an
+// outbound request, which needs a socket lumen doesn't expose — constructing it throws honestly.
+class OutgoingMessage extends Writable {
+  constructor() {
+    super();
+    this.headersSent = false;
+    this.finished = false;
+    this.sendDate = true;
+    this._headers = new Map();
+  }
+  setHeader(name, value) { validateHeaderName(name); this._headers.set(String(name).toLowerCase(), { name: String(name), value }); return this; }
+  getHeader(name) { const h = this._headers.get(String(name).toLowerCase()); return h ? h.value : undefined; }
+  getHeaderNames() { return [...this._headers.values()].map((h) => h.name.toLowerCase()); }
+  getHeaders() { const out = Object.create(null); for (const h of this._headers.values()) out[h.name.toLowerCase()] = h.value; return out; }
+  hasHeader(name) { return this._headers.has(String(name).toLowerCase()); }
+  removeHeader(name) { this._headers.delete(String(name).toLowerCase()); }
+  setTimeout(_ms, cb) { if (cb) this.once("timeout", cb); return this; }
+}
+class ClientRequest extends OutgoingMessage {
+  constructor() {
+    super();
+    notImplementedClient();
+  }
+}
+
+// The internal connection listener wires a raw socket into the request pipeline — not available
+// without JS sockets. Exported (Node exposes it) but honest.
+function _connectionListener() {
+  throw new Error("node:http _connectionListener is not supported in lumen (raw sockets are not exposed to JS)");
+}
+
+// setMaxIdleHTTPParsers tunes the parser free-list; lumen keeps no such pool, so this is a no-op
+// that still validates like Node (accepts a number).
+function setMaxIdleHTTPParsers(_max) { /* no-op: lumen keeps no HTTP parser free-list */ }
+
+// Client-side Agent: constructing is fine (config/pooling metadata), but there is no socket pool to
+// drive, so any real request through it goes via notImplementedClient at request time.
+class Agent extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    this.options = { ...options };
+    this.maxSockets = options.maxSockets ?? Infinity;
+    this.maxFreeSockets = options.maxFreeSockets ?? 256;
+    this.keepAlive = options.keepAlive ?? false;
+    this.sockets = {};
+    this.freeSockets = {};
+    this.requests = {};
+    this.protocol = "http:";
+  }
+  createConnection() { notImplementedClient(); }
+  getName() { return "localhost:"; }
+  destroy() {}
+}
+const globalAgent = new Agent();
+
+// WebSocket family: re-export the web globals so `http.WebSocket` etc. resolve (Node re-exports the
+// same globals). Missing ones fall back to a named stub class so the key still exists.
+const WebSocket = globalThis.WebSocket || class WebSocket {};
+const MessageEvent = globalThis.MessageEvent || class MessageEvent {};
+const CloseEvent = globalThis.CloseEvent || class CloseEvent {};
+
 const http = {
   createServer,
   Server,
   IncomingMessage,
   ServerResponse,
+  OutgoingMessage,
+  ClientRequest,
   STATUS_CODES,
   METHODS,
   request: notImplementedClient,
   get: notImplementedClient,
-  Agent: class Agent {},
-  globalAgent: {},
+  Agent,
+  globalAgent,
   maxHeaderSize: 16384,
+  validateHeaderName,
+  validateHeaderValue,
+  setMaxIdleHTTPParsers,
+  _connectionListener,
+  WebSocket,
+  MessageEvent,
+  CloseEvent,
 };
 
 __builtins.set("http", http);
@@ -268,6 +366,6 @@ __builtins.set("https", {
   createServer,
   request: notImplementedClient,
   get: notImplementedClient,
-  Agent: http.Agent,
-  globalAgent: {},
+  Agent,
+  globalAgent: new Agent(),
 });
