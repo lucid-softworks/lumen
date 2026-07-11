@@ -1223,6 +1223,352 @@ function x509SpkiDer(certDer) {
   return certDer.subarray(cert.start + tbs.start + spki.hstart, cert.start + tbs.start + spki.end);
 }
 
+// ---- MGF1 + RSA (PKCS#1 v1.5, PSS, OAEP) --------------------------------------------------------
+
+function mgf1(seed, len, reg) {
+  const out = new Uint8Array(len);
+  let off = 0;
+  let counter = 0;
+  while (off < len) {
+    const block = reg.fn(concatBytes(seed, Uint8Array.of(
+      (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff)));
+    const n = Math.min(block.length, len - off);
+    out.set(block.subarray(0, n), off);
+    off += n;
+    counter++;
+  }
+  return out;
+}
+function xorBytes(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = a[i] ^ b[i];
+  return out;
+}
+
+// DigestInfo prefixes for EMSA-PKCS1-v1_5 (DER of AlgorithmIdentifier + OCTET STRING header).
+const DIGEST_INFO_PREFIX = {
+  md5: Uint8Array.from([0x30, 0x20, 0x30, 0x0c, 0x06, 0x08, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x05, 0x05, 0x00, 0x04, 0x10]),
+  sha1: Uint8Array.from([0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14]),
+  sha256: Uint8Array.from([0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20]),
+  sha384: Uint8Array.from([0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30]),
+  sha512: Uint8Array.from([0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40]),
+};
+function rsaModLen(key) { return Math.ceil(bitLength(key.n) / 8); }
+// Public op (encrypt / verify): m^e mod n.
+function rsaEP(key, m) {
+  if (m >= key.n) throw new Error("RSA: data too large for the modulus");
+  return modPow(m, key.e, key.n);
+}
+// Private op (decrypt / sign) using the CRT parameters when the key carries them.
+function rsaDP(key, c) {
+  if (c >= key.n) throw new Error("RSA: data too large for the modulus");
+  if (key.p && key.q && key.dp && key.dq && key.qi) {
+    const m1 = modPow(c, key.dp, key.p);
+    const m2 = modPow(c, key.dq, key.q);
+    const h = amod(key.qi * (m1 - m2), key.p);
+    return amod(m2 + h * key.q, key.n);
+  }
+  return modPow(c, key.d, key.n);
+}
+function rsaPkcs1v15Pad(digestName, hashBytes, emLen) {
+  const prefix = DIGEST_INFO_PREFIX[digestName];
+  if (!prefix) throw new Error(`RSA PKCS#1 v1.5 digest '${digestName}' is not supported in lumen`);
+  const T = concatBytes(prefix, hashBytes);
+  if (emLen < T.length + 11) throw new Error("RSA: modulus too short for this digest");
+  const ps = new Uint8Array(emLen - T.length - 3).fill(0xff);
+  return concatAll([Uint8Array.of(0x00, 0x01), ps, Uint8Array.of(0x00), T]);
+}
+function emsaPssEncode(mHash, emBits, reg, sLen) {
+  const hLen = reg.outLen;
+  const emLen = Math.ceil(emBits / 8);
+  if (emLen < hLen + sLen + 2) throw new Error("RSA-PSS: salt too long for the modulus");
+  const salt = sLen > 0 ? Uint8Array.from(randomBytes(sLen)) : new Uint8Array(0);
+  const H = reg.fn(concatAll([new Uint8Array(8), mHash, salt]));
+  const DB = concatAll([new Uint8Array(emLen - sLen - hLen - 2), Uint8Array.of(0x01), salt]);
+  const maskedDB = xorBytes(DB, mgf1(H, emLen - hLen - 1, reg));
+  const bits = 8 * emLen - emBits;
+  if (bits > 0) maskedDB[0] &= 0xff >> bits;
+  return concatAll([maskedDB, H, Uint8Array.of(0xbc)]);
+}
+// sLen === -1 means auto-detect (Node's RSA_PSS_SALTLEN_AUTO verify default).
+function emsaPssVerify(mHash, em, emBits, reg, sLen) {
+  const hLen = reg.outLen;
+  const emLen = em.length;
+  if (emLen < hLen + 2) return false;
+  if (em[emLen - 1] !== 0xbc) return false;
+  const maskedDB = em.subarray(0, emLen - hLen - 1);
+  const H = em.subarray(emLen - hLen - 1, emLen - 1);
+  const bits = 8 * emLen - emBits;
+  if (bits > 0 && (maskedDB[0] & (0xff << (8 - bits)) & 0xff) !== 0) return false;
+  const DB = xorBytes(maskedDB, mgf1(H, emLen - hLen - 1, reg));
+  if (bits > 0) DB[0] &= 0xff >> bits;
+  let saltStart;
+  if (sLen === -1) {
+    let i = 0;
+    while (i < DB.length && DB[i] === 0) i++;
+    if (i >= DB.length || DB[i] !== 0x01) return false;
+    saltStart = i + 1;
+  } else {
+    saltStart = DB.length - sLen;
+    for (let i = 0; i < saltStart - 1; i++) if (DB[i] !== 0) return false;
+    if (DB[saltStart - 1] !== 0x01) return false;
+  }
+  const salt = DB.subarray(saltStart);
+  const H2 = reg.fn(concatAll([new Uint8Array(8), mHash, salt]));
+  for (let i = 0; i < hLen; i++) if (H[i] !== H2[i]) return false;
+  return true;
+}
+function pssSaltLenForSign(opts, reg, key) {
+  const sl = opts.saltLength;
+  if (sl === undefined || sl === constants.RSA_PSS_SALTLEN_DIGEST) return reg.outLen;
+  if (sl === constants.RSA_PSS_SALTLEN_MAX_SIGN) return Math.ceil((bitLength(key.n) - 1) / 8) - reg.outLen - 2;
+  return sl;
+}
+function rsaOaepEncrypt(key, msg, reg, label) {
+  const k = rsaModLen(key);
+  const hLen = reg.outLen;
+  if (msg.length > k - 2 * hLen - 2) throw new Error("RSA-OAEP: message too long");
+  const lHash = reg.fn(label || new Uint8Array(0));
+  const DB = concatAll([lHash, new Uint8Array(k - msg.length - 2 * hLen - 2), Uint8Array.of(0x01), msg]);
+  const seed = Uint8Array.from(randomBytes(hLen));
+  const maskedDB = xorBytes(DB, mgf1(seed, k - hLen - 1, reg));
+  const maskedSeed = xorBytes(seed, mgf1(maskedDB, hLen, reg));
+  const em = concatAll([Uint8Array.of(0x00), maskedSeed, maskedDB]);
+  return bigIntToBytesBE(rsaEP(key, bytesToBigIntBE(em)), k);
+}
+function rsaOaepDecrypt(key, ct, reg, label) {
+  const k = rsaModLen(key);
+  const hLen = reg.outLen;
+  const em = bigIntToBytesBE(rsaDP(key, bytesToBigIntBE(ct)), k);
+  const lHash = reg.fn(label || new Uint8Array(0));
+  if (em[0] !== 0x00) throw new Error("RSA-OAEP: decryption error");
+  const maskedSeed = em.subarray(1, 1 + hLen);
+  const maskedDB = em.subarray(1 + hLen);
+  const seed = xorBytes(maskedSeed, mgf1(maskedDB, hLen, reg));
+  const DB = xorBytes(maskedDB, mgf1(seed, k - hLen - 1, reg));
+  for (let i = 0; i < hLen; i++) if (DB[i] !== lHash[i]) throw new Error("RSA-OAEP: decryption error");
+  let i = hLen;
+  while (i < DB.length && DB[i] === 0x00) i++;
+  if (i >= DB.length || DB[i] !== 0x01) throw new Error("RSA-OAEP: decryption error");
+  return Uint8Array.from(DB.subarray(i + 1));
+}
+function rsaPkcs1Encrypt(key, msg) {
+  const k = rsaModLen(key);
+  if (msg.length > k - 11) throw new Error("RSA-PKCS1: message too long");
+  const ps = new Uint8Array(k - msg.length - 3);
+  for (let i = 0; i < ps.length; i++) { let b = 0; while (b === 0) b = randomBytes(1)[0]; ps[i] = b; }
+  const em = concatAll([Uint8Array.of(0x00, 0x02), ps, Uint8Array.of(0x00), msg]);
+  return bigIntToBytesBE(rsaEP(key, bytesToBigIntBE(em)), k);
+}
+// (No rsaPkcs1Decrypt: Node v22 removed PKCS#1 v1.5 private decryption — Marvin attack — and
+// privateDecrypt matches that refusal exactly.)
+
+// ---- probable primes (Miller-Rabin over BigInt) -------------------------------------------------
+
+const SMALL_PRIMES = (() => {
+  const out = [];
+  const sieve = new Uint8Array(4096);
+  for (let i = 2; i < 4096; i++) {
+    if (!sieve[i]) { out.push(BigInt(i)); for (let j = i * i; j < 4096; j += i) sieve[j] = 1; }
+  }
+  return out;
+})();
+function randomBigIntBits(bits) {
+  const bytes = Math.ceil(bits / 8);
+  const b = Uint8Array.from(randomBytes(bytes));
+  b[0] &= 0xff >> (bytes * 8 - bits);
+  return bytesToBigIntBE(b);
+}
+function millerRabinRound(n, d, r, a) {
+  let x = modPow(a, d, n);
+  if (x === 1n || x === n - 1n) return true;
+  for (let j = 1n; j < r; j++) {
+    x = (x * x) % n;
+    if (x === n - 1n) return true;
+  }
+  return false;
+}
+function isProbablePrime(n, rounds) {
+  if (n < 2n) return false;
+  for (const sp of SMALL_PRIMES) {
+    if (n === sp) return true;
+    if (n % sp === 0n) return false;
+  }
+  let d = n - 1n;
+  let r = 0n;
+  while ((d & 1n) === 0n) { d >>= 1n; r++; }
+  // A fixed base-2 round first: it rejects almost all composites before the random rounds.
+  if (!millerRabinRound(n, d, r, 2n)) return false;
+  const nBits = bitLength(n);
+  for (let i = 0; i < rounds; i++) {
+    const a = 2n + randomBigIntBits(nBits) % (n - 3n);
+    if (!millerRabinRound(n, d, r, a)) return false;
+  }
+  return true;
+}
+function randomPrime(bits, safe) {
+  if (!Number.isInteger(bits) || bits < 2) throw new RangeError("prime size must be an integer >= 2 bits");
+  for (;;) {
+    let cand = randomBigIntBits(bits);
+    cand |= 1n;
+    cand |= 1n << BigInt(bits - 1);
+    if (bits >= 3) cand |= 1n << BigInt(bits - 2); // full-size products for RSA
+    if (safe) {
+      if ((cand & 3n) !== 3n) continue; // safe primes are ≡ 3 (mod 4)
+      if (isProbablePrime((cand - 1n) >> 1n, 8) && isProbablePrime(cand, 20)) return cand;
+    } else if (isProbablePrime(cand, 20)) {
+      return cand;
+    }
+  }
+}
+
+function checkPrimeSync(candidate, options) {
+  let n;
+  if (typeof candidate === "bigint") n = candidate;
+  else n = bytesToBigIntBE(toBytes(candidate));
+  const checks = options && options.checks ? options.checks : 40;
+  return isProbablePrime(n, checks);
+}
+function checkPrime(candidate, options, cb) {
+  if (typeof options === "function") { cb = options; options = undefined; }
+  if (typeof cb !== "function") throw new TypeError("callback must be a function");
+  let res, err;
+  try { res = checkPrimeSync(candidate, options); } catch (e) { err = e; }
+  queueMicrotask(() => (err ? cb(err) : cb(null, res)));
+}
+function generatePrimeSync(size, options) {
+  options = options || {};
+  if (options.add !== undefined || options.rem !== undefined) {
+    throw new Error("generatePrime options 'add'/'rem' are not supported in lumen");
+  }
+  const p = randomPrime(size, !!options.safe);
+  if (options.bigint) return p;
+  return bigIntToBytesBE(p, Math.ceil(size / 8)).buffer; // Node returns an ArrayBuffer
+}
+function generatePrime(size, options, cb) {
+  if (typeof options === "function") { cb = options; options = undefined; }
+  if (typeof cb !== "function") throw new TypeError("callback must be a function");
+  let res, err;
+  try { res = generatePrimeSync(size, options); } catch (e) { err = e; }
+  queueMicrotask(() => (err ? cb(err) : cb(null, res)));
+}
+
+// ---- RSA key generation -------------------------------------------------------------------------
+// Miller-Rabin probable primes over BigInt. Correct but slow for large moduli (pure JS bignum, no
+// Montgomery ladder in the engine yet): 2048-bit generation can take tens of seconds — documented,
+// accepted; sign/verify on imported 2048-bit keys is fast enough for real use.
+
+function generateRsa(bits, publicExponent) {
+  if (!Number.isInteger(bits) || bits < 512 || bits > 8192) {
+    throw new RangeError("RSA modulusLength must be an integer in [512, 8192]");
+  }
+  const e = BigInt(publicExponent === undefined ? 65537 : publicExponent);
+  const pbits = bits >> 1;
+  const qbits = bits - pbits;
+  for (;;) {
+    const p = randomPrime(pbits, false);
+    const q = randomPrime(qbits, false);
+    if (p === q) continue;
+    const n = p * q;
+    if (bitLength(n) !== bits) continue;
+    const phi = (p - 1n) * (q - 1n);
+    let d;
+    try { d = modInv(e, phi); } catch (_e) { continue; }
+    const [hi, lo] = p > q ? [p, q] : [q, p];
+    return {
+      kind: "rsa", n, e, d,
+      p: hi, q: lo,
+      dp: amod(d, hi - 1n), dq: amod(d, lo - 1n), qi: modInv(lo, hi),
+    };
+  }
+}
+
+// ---- public-key encryption ------------------------------------------------------------------------
+
+function oaepReg(opts) { return resolveHash(normalizeDigest(opts.oaepHash || "sha1")); }
+function oaepLabel(opts) { return opts.oaepLabel !== undefined ? toBytes(opts.oaepLabel) : undefined; }
+function publicEncrypt(keyLike, buffer) {
+  const opts = keyOptionsFrom(keyLike);
+  const struct = createPublicKey(keyLike)._asym;
+  if (struct.kind !== "rsa") throw new Error("publicEncrypt: only RSA keys are supported in lumen");
+  const data = toBytes(buffer);
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_OAEP_PADDING : opts.padding;
+  if (padding === constants.RSA_PKCS1_OAEP_PADDING) return Buffer.from(rsaOaepEncrypt(struct, data, oaepReg(opts), oaepLabel(opts)));
+  if (padding === constants.RSA_PKCS1_PADDING) return Buffer.from(rsaPkcs1Encrypt(struct, data));
+  throw new Error(`publicEncrypt: padding ${padding} is not supported in lumen`);
+}
+function privateDecrypt(keyLike, buffer) {
+  const opts = keyOptionsFrom(keyLike);
+  const struct = createPrivateKey(keyLike)._asym;
+  if (struct.kind !== "rsa") throw new Error("privateDecrypt: only RSA keys are supported in lumen");
+  const data = toBytes(buffer);
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_OAEP_PADDING : opts.padding;
+  if (padding === constants.RSA_PKCS1_OAEP_PADDING) return Buffer.from(rsaOaepDecrypt(struct, data, oaepReg(opts), oaepLabel(opts)));
+  if (padding === constants.RSA_PKCS1_PADDING) {
+    // Match Node v22 exactly: PKCS#1 v1.5 private decryption was removed (Marvin attack).
+    throw new TypeError("RSA_PKCS1_PADDING is no longer supported for private decryption");
+  }
+  throw new Error(`privateDecrypt: padding ${padding} is not supported in lumen`);
+}
+function privateEncrypt(keyLike, buffer) {
+  const struct = createPrivateKey(keyLike)._asym;
+  if (struct.kind !== "rsa") throw new Error("privateEncrypt: only RSA keys are supported in lumen");
+  const k = rsaModLen(struct);
+  const msg = toBytes(buffer);
+  if (msg.length > k - 11) throw new Error("privateEncrypt: message too long");
+  const ps = new Uint8Array(k - msg.length - 3).fill(0xff);
+  const em = concatAll([Uint8Array.of(0x00, 0x01), ps, Uint8Array.of(0x00), msg]);
+  return Buffer.from(bigIntToBytesBE(rsaDP(struct, bytesToBigIntBE(em)), k));
+}
+function publicDecrypt(keyLike, buffer) {
+  const struct = createPublicKey(keyLike)._asym;
+  if (struct.kind !== "rsa") throw new Error("publicDecrypt: only RSA keys are supported in lumen");
+  const k = rsaModLen(struct);
+  const em = bigIntToBytesBE(rsaEP(struct, bytesToBigIntBE(toBytes(buffer))), k);
+  if (em[0] !== 0x00 || em[1] !== 0x01) throw new Error("publicDecrypt: decryption error");
+  let i = 2;
+  while (i < em.length && em[i] === 0xff) i++;
+  if (i >= em.length || em[i] !== 0x00) throw new Error("publicDecrypt: decryption error");
+  return Buffer.from(em.subarray(i + 1));
+}
+
+// ---- streaming Sign / Verify classes --------------------------------------------------------------
+
+class Sign {
+  constructor(algorithm) {
+    this._algo = normalizeDigest(algorithm);
+    resolveHash(this._algo); // validate eagerly, like Node
+    this._chunks = [];
+  }
+  update(data, encoding) { this._chunks.push(toBytes(data, encoding)); return this; }
+  sign(keyLike, encoding) {
+    let total = 0;
+    for (const c of this._chunks) total += c.length;
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of this._chunks) { all.set(c, off); off += c.length; }
+    const out = signDigest(this._algo, all, keyLike);
+    return encoding && encoding !== "buffer" ? out.toString(encoding) : out;
+  }
+}
+class Verify {
+  constructor(algorithm) {
+    this._algo = normalizeDigest(algorithm);
+    resolveHash(this._algo);
+    this._chunks = [];
+  }
+  update(data, encoding) { this._chunks.push(toBytes(data, encoding)); return this; }
+  verify(keyLike, signature, encoding) {
+    let total = 0;
+    for (const c of this._chunks) total += c.length;
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of this._chunks) { all.set(c, off); off += c.length; }
+    const sig = typeof signature === "string" ? Buffer.from(signature, encoding || "hex") : toBytes(signature);
+    return verifyDigest(this._algo, all, keyLike, sig);
+  }
+}
+
 // ---- sign / verify ------------------------------------------------------------------------------
 
 // Extra options (padding, saltLength, dsaEncoding …) ride along on the key argument, as in Node.
@@ -1266,9 +1612,41 @@ function verifyDigest(algorithm, data, keyLike, signature) {
   if (struct.kind === "ec") return ecdsaVerifyHash(struct, mHash, sig, opts);
   throw new Error(`crypto.verify: unsupported key type '${struct.kind}'`);
 }
-// RSA and ECDSA land in later tiers; keep the throws precise until then.
-function rsaSignHash() { throw new Error("node:crypto RSA sign is not supported in lumen (no RSA primitive available)"); }
-function rsaVerifyHash() { throw new Error("node:crypto RSA verify is not supported in lumen (no RSA primitive available)"); }
+function rsaSignHash(struct, digestName, reg, mHash, opts) {
+  if (struct.d === undefined) throw new Error("crypto.sign: an RSA private key is required");
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_PADDING : opts.padding;
+  if (padding === constants.RSA_PKCS1_PSS_PADDING) {
+    const emBits = bitLength(struct.n) - 1;
+    const em = emsaPssEncode(mHash, emBits, reg, pssSaltLenForSign(opts, reg, struct));
+    return bigIntToBytesBE(rsaDP(struct, bytesToBigIntBE(em)), rsaModLen(struct));
+  }
+  if (padding !== constants.RSA_PKCS1_PADDING) throw new Error(`crypto.sign: RSA padding ${padding} is not supported in lumen`);
+  const k = rsaModLen(struct);
+  const em = rsaPkcs1v15Pad(digestName, mHash, k);
+  return bigIntToBytesBE(rsaDP(struct, bytesToBigIntBE(em)), k);
+}
+function rsaVerifyHash(struct, digestName, reg, mHash, sig, opts) {
+  const k = rsaModLen(struct);
+  if (sig.length !== k) return false;
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_PADDING : opts.padding;
+  let m;
+  try { m = rsaEP(struct, bytesToBigIntBE(sig)); } catch (_e) { return false; }
+  if (padding === constants.RSA_PKCS1_PSS_PADDING) {
+    const emBits = bitLength(struct.n) - 1;
+    const em = bigIntToBytesBE(m, Math.ceil(emBits / 8));
+    let sLen = opts.saltLength;
+    if (sLen === undefined || sLen === constants.RSA_PSS_SALTLEN_AUTO) sLen = -1; // auto-detect
+    else if (sLen === constants.RSA_PSS_SALTLEN_DIGEST) sLen = reg.outLen;
+    return emsaPssVerify(mHash, em, emBits, reg, sLen);
+  }
+  if (padding !== constants.RSA_PKCS1_PADDING) throw new Error(`crypto.verify: RSA padding ${padding} is not supported in lumen`);
+  const em = bigIntToBytesBE(m, k);
+  const expect = rsaPkcs1v15Pad(digestName, mHash, k);
+  let diff = 0;
+  for (let i = 0; i < k; i++) diff |= em[i] ^ expect[i];
+  return diff === 0;
+}
+// ECDSA lands with the EC tier; keep the throws precise until then.
 function ecdsaSignHash() { throw new Error("node:crypto ECDSA sign is not supported in lumen (no EC signing primitive available)"); }
 function ecdsaVerifyHash() { throw new Error("node:crypto ECDSA verify is not supported in lumen (no EC signing primitive available)"); }
 
@@ -1306,7 +1684,13 @@ function generateEd25519() {
 function generateKeyPairStruct(type, options) {
   const t = String(type).toLowerCase();
   if (t === "ed25519") return generateEd25519();
-  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519 only)`);
+  if (t === "rsa") {
+    if (!options || !Number.isInteger(options.modulusLength)) {
+      throw new TypeError("options.modulusLength is required for RSA key generation");
+    }
+    return generateRsa(options.modulusLength, options.publicExponent);
+  }
+  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519, rsa)`);
 }
 function generateKeyPairSync(type, options) {
   const pair = makeKeyPair(generateKeyPairStruct(type, options));
@@ -1418,18 +1802,18 @@ const crypto = {
   Decipher: notImpl("Decipher"),
   Decipheriv: notImpl("Decipheriv"),
 
-  // -- real: one-shot sign/verify (Ed25519; RSA/ECDSA land with their tiers) --
+  // -- real: sign/verify (Ed25519 + RSA PKCS#1 v1.5/PSS; ECDSA lands with the EC tier) --
   sign: cryptoSign,
   verify: cryptoVerify,
-  // -- stubs: streaming Sign/Verify + RSA encryption (RSA/ECDSA tier not landed yet) --
-  createSign: notImpl("createSign"),
-  createVerify: notImpl("createVerify"),
-  Sign: notImpl("Sign"),
-  Verify: notImpl("Verify"),
-  privateEncrypt: notImpl("privateEncrypt"),
-  privateDecrypt: notImpl("privateDecrypt"),
-  publicEncrypt: notImpl("publicEncrypt"),
-  publicDecrypt: notImpl("publicDecrypt"),
+  createSign: (algorithm) => new Sign(algorithm),
+  createVerify: (algorithm) => new Verify(algorithm),
+  Sign,
+  Verify,
+  // -- real: RSA encryption (OAEP + PKCS#1 v1.5) --
+  privateEncrypt,
+  privateDecrypt,
+  publicEncrypt,
+  publicDecrypt,
 
   // -- real: asymmetric key management (ASN.1 DER/PEM/JWK, pure JS) --
   createPublicKey,
@@ -1451,11 +1835,11 @@ const crypto = {
   scrypt: notImpl("scrypt"),
   scryptSync: notImpl("scryptSync"),
 
-  // -- stubs: primes (no bignum primitive) --
-  checkPrime: notImpl("checkPrime"),
-  checkPrimeSync: notImpl("checkPrimeSync"),
-  generatePrime: notImpl("generatePrime"),
-  generatePrimeSync: notImpl("generatePrimeSync"),
+  // -- real: probable primes (Miller-Rabin over BigInt) --
+  checkPrime,
+  checkPrimeSync,
+  generatePrime,
+  generatePrimeSync,
 
   // -- stubs: X.509 / legacy SPKAC --
   X509Certificate: notImpl("X509Certificate"),
