@@ -2,18 +2,215 @@
 // use, not a full implementation; gaps throw clearly rather than silently misbehaving.
 
 // ---- node:perf_hooks --------------------------------------------------------------------------
-// The web `performance` global, plus a no-op PerformanceObserver (lumen has no entry buffer).
-__builtins.set("perf_hooks", {
-  performance: globalThis.performance,
-  PerformanceObserver: class PerformanceObserver {
-    constructor(cb) { this._cb = cb; }
-    observe() {}
-    disconnect() {}
-    takeRecords() { return []; }
-  },
-  PerformanceEntry: class PerformanceEntry {},
-  monitorEventLoopDelay: () => ({ enable() {}, disable() {}, percentile: () => 0, reset() {} }),
-});
+// The web `performance` global, extended with a real mark/measure entry buffer that dispatches to
+// PerformanceObserver. lumen's global `performance` has now()/timeOrigin but no user-timing API, so
+// we add mark/measure/getEntries here and wire them to observers — marks and measures are real.
+// The observer machinery for entry types lumen cannot produce (gc, http, resource…) simply never
+// fires, which is the honest behavior for a runtime that emits no such entries.
+{
+  const perf = globalThis.performance;
+  const now = () => perf.now();
+
+  const buffer = []; // all recorded PerformanceEntry objects
+  const observers = new Set(); // live PerformanceObserver instances
+
+  class PerformanceEntry {
+    constructor(name, entryType, startTime, duration) {
+      this.name = name;
+      this.entryType = entryType;
+      this.startTime = startTime;
+      this.duration = duration;
+    }
+    toJSON() {
+      return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration };
+    }
+  }
+  class PerformanceMark extends PerformanceEntry {
+    constructor(name, options) {
+      super(name, "mark", options && options.startTime !== undefined ? options.startTime : now(), 0);
+      this.detail = (options && options.detail) ?? null;
+    }
+  }
+  class PerformanceMeasure extends PerformanceEntry {
+    constructor(name, startTime, duration, detail) {
+      super(name, "measure", startTime, duration);
+      this.detail = detail ?? null;
+    }
+  }
+  class PerformanceResourceTiming extends PerformanceEntry {
+    constructor(name, startTime, duration) {
+      super(name, "resource", startTime ?? 0, duration ?? 0);
+    }
+  }
+
+  class PerformanceObserverEntryList {
+    constructor(entries) { this._entries = entries; }
+    getEntries() { return this._entries.slice(); }
+    getEntriesByName(name, type) {
+      return this._entries.filter((e) => e.name === name && (type === undefined || e.entryType === type));
+    }
+    getEntriesByType(type) { return this._entries.filter((e) => e.entryType === type); }
+  }
+
+  class PerformanceObserver {
+    constructor(callback) {
+      this._callback = callback;
+      this._types = new Set();
+      this._pending = [];
+    }
+    observe(options = {}) {
+      const types = options.entryTypes || (options.type ? [options.type] : []);
+      for (const t of types) this._types.add(t);
+      observers.add(this);
+      if (options.buffered) {
+        const matching = buffer.filter((e) => this._types.has(e.entryType));
+        if (matching.length) {
+          this._pending.push(...matching);
+          queueMicrotask(() => this._flush());
+        }
+      }
+    }
+    disconnect() {
+      observers.delete(this);
+      this._types.clear();
+      this._pending = [];
+    }
+    takeRecords() {
+      const records = this._pending;
+      this._pending = [];
+      return records;
+    }
+    _deliver(entry) {
+      this._pending.push(entry);
+      queueMicrotask(() => this._flush());
+    }
+    _flush() {
+      if (this._pending.length === 0) return;
+      const list = new PerformanceObserverEntryList(this._pending);
+      this._pending = [];
+      this._callback(list, this);
+    }
+  }
+  PerformanceObserver.supportedEntryTypes = ["mark", "measure", "resource"];
+
+  function record(entry) {
+    buffer.push(entry);
+    for (const obs of observers) {
+      if (obs._types.has(entry.entryType)) obs._deliver(entry);
+    }
+    return entry;
+  }
+
+  // Augment the global `performance` with the user-timing API if it isn't already present.
+  if (typeof perf.mark !== "function") {
+    perf.mark = function mark(name, options) {
+      return record(new PerformanceMark(name, options));
+    };
+    perf.measure = function measure(name, startOrOptions, endMark) {
+      let start, end;
+      if (startOrOptions && typeof startOrOptions === "object") {
+        start = resolveMark(startOrOptions.start);
+        end = startOrOptions.end !== undefined ? resolveMark(startOrOptions.end) : now();
+        if (startOrOptions.duration !== undefined && startOrOptions.start !== undefined) {
+          end = start + startOrOptions.duration;
+        }
+        return record(new PerformanceMeasure(name, start, end - start, startOrOptions.detail));
+      }
+      start = startOrOptions !== undefined ? resolveMark(startOrOptions) : 0;
+      end = endMark !== undefined ? resolveMark(endMark) : now();
+      return record(new PerformanceMeasure(name, start, end - start));
+    };
+    perf.clearMarks = function clearMarks(name) {
+      for (let i = buffer.length - 1; i >= 0; i--) {
+        if (buffer[i].entryType === "mark" && (name === undefined || buffer[i].name === name)) buffer.splice(i, 1);
+      }
+    };
+    perf.clearMeasures = function clearMeasures(name) {
+      for (let i = buffer.length - 1; i >= 0; i--) {
+        if (buffer[i].entryType === "measure" && (name === undefined || buffer[i].name === name)) buffer.splice(i, 1);
+      }
+    };
+    perf.getEntries = () => buffer.slice();
+    perf.getEntriesByName = (name, type) =>
+      buffer.filter((e) => e.name === name && (type === undefined || e.entryType === type));
+    perf.getEntriesByType = (type) => buffer.filter((e) => e.entryType === type);
+    perf.clearResourceTimings = () => {
+      for (let i = buffer.length - 1; i >= 0; i--) if (buffer[i].entryType === "resource") buffer.splice(i, 1);
+    };
+  }
+
+  function resolveMark(nameOrTime) {
+    if (typeof nameOrTime === "number") return nameOrTime;
+    for (let i = buffer.length - 1; i >= 0; i--) {
+      if (buffer[i].entryType === "mark" && buffer[i].name === nameOrTime) return buffer[i].startTime;
+    }
+    throw new Error(`The "${nameOrTime}" performance mark has not been set`);
+  }
+
+  // A simple, real recordable histogram (used by monitorEventLoopDelay and createHistogram).
+  function makeHistogram() {
+    let samples = [];
+    return {
+      record(value) { samples.push(Number(value)); },
+      recordDelta() {},
+      enable() { return true; },
+      disable() { return true; },
+      reset() { samples = []; },
+      get count() { return samples.length; },
+      get min() { return samples.length ? Math.min(...samples) : 0; },
+      get max() { return samples.length ? Math.max(...samples) : 0; },
+      get mean() { return samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : 0; },
+      get stddev() {
+        if (samples.length < 2) return 0;
+        const m = samples.reduce((a, b) => a + b, 0) / samples.length;
+        return Math.sqrt(samples.reduce((a, b) => a + (b - m) ** 2, 0) / samples.length);
+      },
+      get exceeds() { return 0; },
+      percentile(p) {
+        if (samples.length === 0) return 0;
+        const sorted = samples.slice().sort((a, b) => a - b);
+        const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
+        return sorted[Math.max(0, idx)];
+      },
+      get percentiles() { return new Map(); },
+    };
+  }
+
+  // The V8 perf-milestone constants Node exposes. lumen isn't V8, so these are the documented
+  // enum values (their numeric identity is what code compares against), with no live milestones.
+  const constants = {
+    NODE_PERFORMANCE_GC_MAJOR: 4,
+    NODE_PERFORMANCE_GC_MINOR: 1,
+    NODE_PERFORMANCE_GC_INCREMENTAL: 8,
+    NODE_PERFORMANCE_GC_WEAKCB: 16,
+    NODE_PERFORMANCE_GC_FLAGS_NO: 0,
+    NODE_PERFORMANCE_GC_FLAGS_CONSTRUCT_RETAINED: 2,
+    NODE_PERFORMANCE_GC_FLAGS_FORCED: 4,
+    NODE_PERFORMANCE_GC_FLAGS_SYNCHRONOUS_PHANTOM_PROCESSING: 8,
+    NODE_PERFORMANCE_GC_FLAGS_ALL_AVAILABLE_GARBAGE: 16,
+    NODE_PERFORMANCE_GC_FLAGS_ALL_EXTERNAL_MEMORY: 32,
+    NODE_PERFORMANCE_GC_FLAGS_SCHEDULE_IDLE: 64,
+  };
+
+  __builtins.set("perf_hooks", {
+    performance: perf,
+    Performance: perf.constructor,
+    PerformanceEntry,
+    PerformanceMark,
+    PerformanceMeasure,
+    PerformanceResourceTiming,
+    PerformanceObserver,
+    PerformanceObserverEntryList,
+    constants,
+    createHistogram: () => makeHistogram(),
+    monitorEventLoopDelay: () => {
+      // lumen exposes no loop-lag signal, so this histogram stays empty; enable/disable/reset are
+      // real, the recorded delay is honestly zero.
+      const h = makeHistogram();
+      return h;
+    },
+  });
+}
 
 // ---- node:querystring -------------------------------------------------------------------------
 // Classic (non-percent-strict) parse/stringify. `qs`/body-parser can use `querystring` for simple

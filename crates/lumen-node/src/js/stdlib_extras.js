@@ -78,20 +78,33 @@
   const notSupported = function () {
     throw new Error("node:worker_threads Worker is not supported in lumen");
   };
+  // Environment data is real bookkeeping (get/set round-trips) even though no worker consumes it.
+  const environmentData = new Map();
   __builtins.set("worker_threads", {
     isMainThread: true,
+    isInternalThread: false,
     threadId: 0,
     parentPort: null,
     workerData: undefined,
+    // SHARE_ENV is the sentinel Node passes as `env` to share the parent's environment; it's a
+    // unique symbol whose identity is all that matters.
+    SHARE_ENV: Symbol.for("nodejs.worker_threads.SHARE_ENV"),
+    resourceLimits: {},
     Worker: notSupported,
     MessageChannel: notSupported,
     MessagePort: notSupported,
     markAsUntransferable: () => {},
     isMarkedAsUntransferable: () => false,
+    markAsUncloneable: () => {},
     moveMessagePortToContext: notSupported,
     receiveMessageOnPort: () => undefined,
-    setEnvironmentData: () => {},
-    getEnvironmentData: () => undefined,
+    // No sibling threads exist, so a targeted post can never be delivered.
+    postMessageToThread: notSupported,
+    setEnvironmentData: (key, value) => {
+      if (value === undefined) environmentData.delete(key);
+      else environmentData.set(key, value);
+    },
+    getEnvironmentData: (key) => environmentData.get(key),
     BroadcastChannel:
       typeof globalThis.BroadcastChannel !== "undefined" ? globalThis.BroadcastChannel : notSupported,
   });
@@ -103,6 +116,7 @@
 // all work).
 {
   const { EventEmitter } = __builtins.get("events");
+  const kKeypressWired = Symbol("readline.keypressWired");
 
   class Interface extends EventEmitter {
     constructor(options) {
@@ -172,6 +186,63 @@
   const createInterface = (options) => new Interface(options);
   const questionPromise = (rl) => (query) => new Promise((resolve) => rl.question(query, resolve));
 
+  // emitKeypressEvents(stream) — turn a stream's incoming data into 'keypress' events. lumen has no
+  // TTY key decoding, so this emits one keypress per character with a best-effort key descriptor,
+  // which is what non-TTY consumers of the API can observe.
+  const emitKeypressEvents = (stream, iface) => {
+    if (!stream || stream[kKeypressWired]) return;
+    stream[kKeypressWired] = true;
+    stream.on("data", (chunk) => {
+      const str = chunk.toString();
+      for (const ch of str) {
+        const key = { sequence: ch, name: undefined, ctrl: false, meta: false, shift: false };
+        if (ch === "\r" || ch === "\n") key.name = "return";
+        else if (ch === "\t") key.name = "tab";
+        else if (ch === "\x7f") key.name = "backspace";
+        else if (ch >= " ") key.name = ch.toLowerCase();
+        stream.emit("keypress", ch, key);
+      }
+    });
+  };
+
+  // node:readline/promises — same Interface with a promise-returning question(), plus the Readline
+  // class that batches cursor/screen operations and applies them on commit().
+  class Readline {
+    constructor(stream, options = {}) {
+      this._stream = stream;
+      this._autoCommit = Boolean(options.autoCommit);
+      this._ops = [];
+    }
+    _push(op) {
+      if (this._autoCommit) return this.commit();
+      this._ops.push(op);
+      return this;
+    }
+    clearLine(dir) { return this._push(() => {}); }
+    clearScreenDown() { return this._push(() => {}); }
+    cursorTo(x, y) { return this._push(() => {}); }
+    moveCursor(dx, dy) { return this._push(() => {}); }
+    commit() {
+      for (const op of this._ops) op();
+      this._ops = [];
+      return Promise.resolve();
+    }
+    rollback() {
+      this._ops = [];
+      return Promise.resolve();
+    }
+  }
+
+  const promisesModule = {
+    createInterface: (options) => {
+      const rl = new Interface(options);
+      rl.question = questionPromise(rl);
+      return rl;
+    },
+    Interface,
+    Readline,
+  };
+
   __builtins.set("readline", {
     createInterface,
     Interface,
@@ -179,15 +250,10 @@
     clearScreenDown: () => true,
     cursorTo: () => true,
     moveCursor: () => true,
+    emitKeypressEvents,
+    promises: promisesModule,
   });
-  __builtins.set("readline/promises", {
-    createInterface: (options) => {
-      const rl = new Interface(options);
-      rl.question = questionPromise(rl);
-      return rl;
-    },
-    Interface,
-  });
+  __builtins.set("readline/promises", promisesModule);
 }
 
 // ---- node:process ----------------------------------------------------------------------------

@@ -234,6 +234,11 @@ function fork() {
   throw new Error("child_process.fork is not supported (lumen has no node binary to re-exec)");
 }
 
+// _forkChild is Node's internal hook that a forked child calls to attach its IPC channel to the
+// inherited fd. lumen never spawns a child via fork(), so a child process is never in this state —
+// the hook exists for parity and is an honest no-op.
+function _forkChild() {}
+
 __builtins.set("child_process", {
   spawn,
   exec,
@@ -242,5 +247,6 @@ __builtins.set("child_process", {
   execSync,
   spawnSync,
   fork,
+  _forkChild,
   ChildProcess,
 });

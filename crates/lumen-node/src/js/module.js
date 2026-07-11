@@ -239,6 +239,7 @@ const __BUILTIN_NAMES = [
   "perf_hooks", "fs/promises", "child_process", "dns", "dns/promises",
   "v8", "inspector", "inspector/promises", "worker_threads", "readline",
   "readline/promises", "test", "tls", "process",
+  "diagnostics_channel", "domain", "trace_events",
 ];
 const __esmBuiltinSources = {};
 for (const name of __BUILTIN_NAMES) {
