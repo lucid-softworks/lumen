@@ -523,4 +523,6 @@ impl Runtime {
 }
 
 #[cfg(test)]
+mod crypto_asym_tests;
+#[cfg(test)]
 mod tests;
