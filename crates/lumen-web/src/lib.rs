@@ -92,6 +92,7 @@ pub fn extension() -> Extension {
                     "connect" (3) => websocket::op_ws_connect,
                     "send" (2) => websocket::op_ws_send,
                     "close" (3) => websocket::op_ws_close,
+                    "upgrade" (5) => websocket::op_ws_upgrade,
                 ],
             ),
             (

@@ -754,16 +754,97 @@ function spawnSync(cmd, options) {
 }
 
 // ---- serve (Bun HTTP server over Lumen.serve) -------------------------------------------------
-// Bun.serve({ fetch, port, hostname }) → a server object. The fetch handler gets (request, server)
-// and returns a Response, matching Lumen.serve's WinterCG dispatch. Caveat: WebSocket upgrade
-// (options.websocket) and per-route `routes` config are not supported.
+// Bun.serve({ fetch, port, hostname, websocket }) → a server object. The fetch handler gets
+// (request, server) and returns a Response, matching Lumen.serve's WinterCG dispatch. WebSocket
+// upgrade is real: server.upgrade(req, { data, headers }) hands the accepted socket to the native
+// RFC 6455 machinery (Lumen.upgradeWebSocket), and the `websocket` handlers {open, message, close}
+// drive Bun-shaped ServerWebSocket objects with send/close/terminate + in-process pub/sub
+// (subscribe/publish topic map, shared with server.publish). Caveats vs Bun: no backpressure
+// (send never returns -1 and `drain` never fires), no permessage-deflate, ping/pong handlers are
+// not called (pings are answered at the protocol layer), and per-route `routes` config is not
+// supported.
 function serve(options) {
   options = options || {};
   let fetchHandler = options.fetch;
+  let wsHandlers = options.websocket;
   if (typeof fetchHandler !== "function") throw new TypeError("Bun.serve requires a `fetch` handler function");
-  if (options.websocket) throw new Error("Bun.serve WebSocket upgrade is not supported in lumen");
   let server;
-  const lu = globalThis.Lumen.serve((request) => fetchHandler(request, server), {
+
+  // ---- WebSocket support (over Lumen.upgradeWebSocket) ----
+  const topics = new Map(); // topic -> Set<ServerWebSocket>
+  const liveSockets = new Set();
+  const binaryTypeOf = () => (wsHandlers && wsHandlers.binaryType) || "nodebuffer";
+  const toBinary = (u8) => {
+    const t = binaryTypeOf();
+    if (t === "arraybuffer") return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+    if (t === "uint8array") return u8;
+    return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength); // "nodebuffer" (Bun's default)
+  };
+  const call = (name, ...args) => {
+    if (wsHandlers && typeof wsHandlers[name] === "function") {
+      try { wsHandlers[name](...args); } catch (err) { console.error(err); }
+    }
+  };
+  const publishTo = (topic, data, except) => {
+    const subs = topics.get(String(topic));
+    if (!subs || subs.size === 0) return 0;
+    const bytes = typeof data === "string" ? Buffer.byteLength(data) : toU8(data).byteLength;
+    let sent = 0;
+    for (const peer of subs) {
+      if (peer === except) continue;
+      if (peer.readyState === 1) { peer._handle.send(typeof data === "string" ? data : toU8(data)); sent++; }
+    }
+    return sent ? bytes : 0;
+  };
+  const makeServerWebSocket = (handle, data) => {
+    const ws = {
+      data,
+      remoteAddress: handle.remoteAddress,
+      readyState: 1, // OPEN (the 101 is written before upgrade() returns)
+      get binaryType() { return binaryTypeOf(); },
+      send(payload, _compress) {
+        if (ws.readyState !== 1) return 0;
+        const out = typeof payload === "string" ? payload : toU8(payload);
+        const ok = handle.send(out);
+        return ok ? (typeof out === "string" ? Buffer.byteLength(out) : out.byteLength) : 0;
+      },
+      sendText(s, compress) { return ws.send(String(s), compress); },
+      sendBinary(b, compress) { return ws.send(toU8(b), compress); },
+      close(code, reason) {
+        if (ws.readyState >= 2) return;
+        ws.readyState = 2; // CLOSING; the peer's echo (or socket teardown) fires the close event
+        handle.close(code, reason);
+        // Bun reports CLOSED immediately after a local close().
+        ws.readyState = 3;
+      },
+      terminate() { ws.close(1006, ""); },
+      subscribe(topic) {
+        topic = String(topic);
+        let set = topics.get(topic);
+        if (!set) topics.set(topic, (set = new Set()));
+        set.add(ws);
+      },
+      unsubscribe(topic) {
+        const set = topics.get(String(topic));
+        if (set) { set.delete(ws); if (set.size === 0) topics.delete(String(topic)); }
+      },
+      isSubscribed(topic) {
+        const set = topics.get(String(topic));
+        return !!set && set.has(ws);
+      },
+      // ws.publish excludes the publisher itself (server.publish includes everyone).
+      publish(topic, payload, _compress) { return publishTo(topic, payload, ws); },
+      publishText(topic, s) { return ws.publish(topic, String(s)); },
+      publishBinary(topic, b) { return ws.publish(topic, toU8(b)); },
+      ping() { return 0; }, // protocol-layer pings aren't exposed; accepted as a no-op
+      pong() { return 0; },
+      cork(cb) { return typeof cb === "function" ? cb(ws) : undefined; },
+      _handle: handle,
+    };
+    return ws;
+  };
+
+  const lu = globalThis.Lumen.serve((request, info) => fetchHandler(request, server), {
     hostname: typeof options.hostname === "string" ? options.hostname : "0.0.0.0",
     port: typeof options.port === "number" ? options.port : 3000,
     onError: typeof options.error === "function" ? options.error : undefined,
@@ -773,14 +854,41 @@ function serve(options) {
     hostname: lu.hostname,
     development: !!options.development,
     pendingRequests: 0,
-    pendingWebSockets: 0,
+    get pendingWebSockets() { return liveSockets.size; },
     get url() { return new URL(`http://${lu.hostname}:${lu.port}/`); },
     stop(_closeActive) { return lu.shutdown(); },
-    reload(newOptions) { if (newOptions && typeof newOptions.fetch === "function") fetchHandler = newOptions.fetch; return server; },
+    reload(newOptions) {
+      if (newOptions && typeof newOptions.fetch === "function") fetchHandler = newOptions.fetch;
+      if (newOptions && newOptions.websocket) wsHandlers = newOptions.websocket;
+      return server;
+    },
     fetch(req) { return fetchHandler(typeof req === "string" ? new Request(req) : req, server); },
     ref() {}, unref() {},
     requestIP() { return null },
-    upgrade() { return false; },
+    // server.publish(topic, data): every subscriber, including the would-be publisher.
+    publish(topic, data, _compress) { return publishTo(topic, data, null); },
+    subscriberCount(topic) { const s = topics.get(String(topic)); return s ? s.size : 0; },
+    upgrade(request, opts = {}) {
+      if (!wsHandlers || typeof wsHandlers !== "object") {
+        const err = new TypeError('To enable websocket support, set the "websocket" object in Bun.serve({})');
+        err.code = "ERR_INVALID_ARG_TYPE";
+        throw err;
+      }
+      const handle = globalThis.Lumen.upgradeWebSocket(request, { headers: opts.headers });
+      if (!handle) return false; // not a WebSocket handshake
+      const ws = makeServerWebSocket(handle, opts.data);
+      liveSockets.add(ws);
+      handle.onmessage = (payload, isBinary) => call("message", ws, isBinary ? toBinary(payload) : payload);
+      handle.onclose = (code, reason) => {
+        ws.readyState = 3;
+        liveSockets.delete(ws);
+        for (const set of topics.values()) set.delete(ws);
+        call("close", ws, code, reason);
+      };
+      // Bun fires open() asynchronously, after the fetch handler returns.
+      queueMicrotask(() => call("open", ws));
+      return true;
+    },
   };
   return server;
 }
