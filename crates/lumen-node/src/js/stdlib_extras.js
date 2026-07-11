@@ -662,6 +662,227 @@ __builtins.set("sys", __builtins.get("util"));
   for (const m of EMITTER_METHODS) {
     if (typeof proc[m] !== "function") proc[m] = EventEmitter.prototype[m];
   }
+
+  // ---- fuller node:process surface ----------------------------------------------------------
+  // The Rust layer (lumen-runtime/process.rs) already supplies argv/env/platform/pid/arch,
+  // cwd/exit/nextTick, stdout/stderr, hrtime/uptime, and the real OS-identity calls (uid/gid/ppid,
+  // kill/umask/chdir/abort). Everything below is JS-expressible: derived facts, honest zero-data
+  // metrics, and Node-shaped stubs for surfaces lumen can't back with real data. Nothing here
+  // fabricates plausible-but-false numbers — unmeasured metrics report 0 / [] and unsupported
+  // operations throw.
+
+  // EventEmitter bookkeeping fields Node exposes as own keys (methods above lazily init these too).
+  if (proc._events === undefined) {
+    proc._events = Object.create(null);
+    proc._eventsCount = 0;
+    proc._maxListeners = undefined;
+  }
+
+  // argv0/execPath/title are stamped by the Rust data-prop pass (which, unlike this glue, runs
+  // after argv is populated). execArgv — the runtime flags before the script — is empty for lumen.
+  proc.execArgv = [];
+
+  // Plain data slots (all settable, matching Node).
+  proc.exitCode = undefined;
+  proc.debugPort = 9229;
+  proc.domain = null;
+  proc.moduleLoadList = [];
+  proc.config = { target_defaults: {}, variables: {} };
+  proc.sourceMapsEnabled = false;
+  proc.allowedNodeEnvironmentFlags = new Set();
+
+  // cwd/exit/nextTick are defined by the Rust op layer as non-enumerable; Node exposes them as
+  // own-enumerable keys, so re-stamp the descriptor (they are configurable).
+  for (const k of ["cwd", "nextTick"]) {
+    const d = Object.getOwnPropertyDescriptor(proc, k);
+    if (d && !d.enumerable && d.configurable) {
+      Object.defineProperty(proc, k, { value: proc[k], enumerable: true, configurable: true, writable: true });
+    }
+  }
+
+  // exit() honors process.exitCode when called without an explicit code; reallyExit is the raw op.
+  const nativeExit = proc.exit;
+  proc.reallyExit = nativeExit;
+  Object.defineProperty(proc, "exit", {
+    value: function (code) {
+      const c = code !== undefined && code !== null ? code
+        : (proc.exitCode !== undefined && proc.exitCode !== null ? proc.exitCode : 0);
+      return nativeExit(c);
+    },
+    enumerable: true, configurable: true, writable: true,
+  });
+
+  // Real: print the Node-style warning line to stderr and emit a 'warning' event with an Error.
+  proc.emitWarning = function (warning, options) {
+    let type = "Warning", code, detail;
+    if (typeof options === "string") {
+      type = options;
+    } else if (options && typeof options === "object") {
+      if (options.type) type = options.type;
+      code = options.code;
+      detail = options.detail;
+    }
+    let err;
+    if (warning instanceof Error) {
+      err = warning;
+    } else {
+      err = new Error(String(warning));
+      err.name = type;
+    }
+    if (code !== undefined) err.code = code;
+    let line = "(node:" + proc.pid + ") ";
+    if (code !== undefined) line += "[" + code + "] ";
+    line += (err.name || type) + ": " + err.message;
+    proc.stderr.write(line + "\n");
+    if (detail) proc.stderr.write(String(detail) + "\n");
+    proc.emit("warning", err);
+  };
+
+  // Real: bridge to the builtin-module registry (getBuiltinModule('fs') === require('fs')).
+  proc.getBuiltinModule = function (id) {
+    const name = typeof id === "string" && id.startsWith("node:") ? id.slice(5) : id;
+    return __builtins.has(name) ? __builtins.get(name) : undefined;
+  };
+
+  // Real: parse a .env file (default ".env") and assign into process.env. Throws if unreadable.
+  proc.loadEnvFile = function (path) {
+    const fs = __builtins.get("fs");
+    const text = fs.readFileSync(path == null ? ".env" : path, "utf8");
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line[0] === "#") continue;
+      const eq = line.indexOf("=");
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      if (!key) continue;
+      let val = line.slice(eq + 1).trim();
+      const q = val[0];
+      if ((q === '"' || q === "'") && val[val.length - 1] === q) val = val.slice(1, -1);
+      proc.env[key] = val;
+    }
+  };
+
+  // Real: dlopen a native addon into module.exports via the N-API loader (dylib.rs / napi.rs).
+  proc.dlopen = function (module, filename) {
+    module.exports = globalThis.__node.loadNativeAddon(filename);
+    return module.exports;
+  };
+
+  // Real state, no real source-map support yet: toggle the flag setSourceMapsEnabled reads back.
+  proc.setSourceMapsEnabled = function (val) { proc.sourceMapsEnabled = !!val; };
+
+  // Honest zero-data metrics: lumen doesn't instrument memory/CPU, so these report 0 rather than
+  // fabricating figures. Shapes match Node so callers that destructure them don't crash.
+  const memoryUsage = () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
+  memoryUsage.rss = () => 0;
+  proc.memoryUsage = memoryUsage;
+  proc.availableMemory = () => 0;
+  proc.constrainedMemory = () => 0;
+  proc.cpuUsage = () => ({ user: 0, system: 0 });
+  proc.resourceUsage = () => ({
+    userCPUTime: 0, systemCPUTime: 0, maxRSS: 0, sharedMemorySize: 0, unsharedDataSize: 0,
+    unsharedStackSize: 0, minorPageFault: 0, majorPageFault: 0, swappedOut: 0, fsRead: 0,
+    fsWrite: 0, ipcSent: 0, ipcReceived: 0, signalsCount: 0, voluntaryContextSwitches: 0,
+    involuntaryContextSwitches: 0,
+  });
+  proc.getActiveResourcesInfo = () => [];
+
+  // Honest build-feature booleans (false where lumen genuinely lacks the capability, e.g. tls).
+  proc.features = {
+    inspector: false, debug: false, uv: false, ipv6: true,
+    tls_alpn: false, tls_sni: false, tls_ocsp: false, tls: false, cached_builtins: true,
+  };
+
+  proc.release = { name: "node", lts: undefined, sourceUrl: "", headersUrl: "" };
+
+  // Node-shaped diagnostic-report namespace; lumen writes no reports, so the writers are stubs.
+  proc.report = {
+    compact: false, directory: "", filename: "", signal: "SIGUSR2",
+    reportOnFatalError: false, reportOnSignal: false, reportOnUncaughtException: false,
+    excludeEnv: false, excludeNetwork: false,
+    getReport: () => ({}),
+    writeReport: () => "",
+  };
+
+  // lumen imposes no permission model, so every capability is genuinely permitted.
+  proc.permission = { has: () => true };
+
+  // Honest no-ops: lumen has no exit-time finalization hooks to register against.
+  proc.finalization = { register: () => {}, registerBeforeExit: () => {}, unregister: () => {} };
+
+  // Modern Node throws for internal bindings; lumen exposes none.
+  proc.binding = function (name) {
+    throw new Error("process.binding('" + name + "') is not supported in lumen");
+  };
+  proc._linkedBinding = proc.binding;
+
+  // Not supported: replacing the process image / changing OS identity can't be done honestly
+  // without the underlying syscall, and silently "succeeding" would misrepresent the result.
+  proc.execve = function () { throw new Error("process.execve is not supported in lumen"); };
+  const unsupportedId = (name) => function () {
+    throw new Error("process." + name + " is not supported in lumen");
+  };
+  for (const s of ["setuid", "setgid", "seteuid", "setegid", "setgroups", "initgroups"]) {
+    proc[s] = unsupportedId(s);
+  }
+  // getgroups: lumen doesn't enumerate supplementary groups; [] is the honest empty answer.
+  if (typeof proc.getgroups !== "function") proc.getgroups = () => [];
+
+  // Real state tracking (the callback isn't routed anywhere yet, but registration is honest).
+  let uncaughtCb = null;
+  proc.setUncaughtExceptionCaptureCallback = function (cb) {
+    if (cb !== null && typeof cb !== "function") {
+      throw new TypeError('The "fn" argument must be of type function or null');
+    }
+    if (cb !== null && uncaughtCb !== null) {
+      throw new Error("`process.setUncaughtExceptionCaptureCallback()` was called while a capture callback was already active");
+    }
+    uncaughtCb = cb;
+  };
+  proc.hasUncaughtExceptionCaptureCallback = () => uncaughtCb !== null;
+
+  // Real: the deprecated process.assert.
+  proc.assert = function (value, message) {
+    if (!value) throw new Error("assertion failed" + (message ? ": " + message : ""));
+  };
+
+  // No-ops: process-level ref/unref have no handle to keep the loop alive here.
+  proc.ref = () => {};
+  proc.unref = () => {};
+
+  // stdin: a real (empty) Readable so `.pipe`/`.on('data')`/`.read()` exist; it yields EOF at once
+  // because lumen wires no stdin source. openStdin resumes and returns it (legacy alias).
+  const streamMod = __builtins.get("stream");
+  let stdin;
+  if (streamMod && streamMod.Readable) {
+    stdin = new streamMod.Readable({ read() { this.push(null); } });
+  } else {
+    stdin = {
+      on: () => stdin, once: () => stdin, removeListener: () => stdin,
+      read: () => null, resume: () => stdin, pause: () => stdin, setEncoding: () => stdin,
+    };
+  }
+  stdin.isTTY = false;
+  stdin.fd = 0;
+  Object.defineProperty(proc, "stdin", { value: stdin, enumerable: true, configurable: true });
+  proc.openStdin = function () { if (stdin.resume) stdin.resume(); return stdin; };
+
+  // Semi-internal underscore surface Node exposes as own keys. Honest no-ops / empty collectors;
+  // _rawDebug writes straight to stderr (its one real behavior).
+  proc._getActiveHandles = () => [];
+  proc._getActiveRequests = () => [];
+  proc._rawDebug = (...a) => { proc.stderr.write(a.join(" ") + "\n"); };
+  proc._tickCallback = () => {};
+  proc._fatalException = () => false;
+  proc._exiting = false;
+  proc._kill = (pid, sig) => proc.kill(pid, sig);
+  proc._eval = undefined;
+  proc._print_eval = false;
+  proc._preload_modules = [];
+  proc._debugProcess = () => {};
+  proc._debugEnd = () => {};
+  proc._startProfilerIdleNotifier = () => {};
+  proc._stopProfilerIdleNotifier = () => {};
 }
 
 // The `process` global as an importable module (`import process from 'node:process'`).

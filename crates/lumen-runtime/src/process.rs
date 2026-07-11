@@ -34,6 +34,15 @@ pub(crate) fn extension() -> Extension {
                     "writeStdout" (1) => op_write_stdout,
                     "writeStderr" (1) => op_write_stderr,
                     "hrtime" (0) => op_hrtime,
+                    "chdir" (1) => op_chdir,
+                    "abort" (0) => op_abort,
+                    "kill" (2) => op_kill,
+                    "umask" (1) => op_umask,
+                    "getuid" (0) => op_getuid,
+                    "geteuid" (0) => op_geteuid,
+                    "getgid" (0) => op_getgid,
+                    "getegid" (0) => op_getegid,
+                    "getppid" (0) => op_getppid,
                 ],
             ),
         ],
@@ -81,8 +90,36 @@ const JS_INIT: &str = r#"(() => {
   hrtime.bigint = () => { const t = raw(); return BigInt(t[0]) * 1000000000n + BigInt(t[1]); };
   process.hrtime = hrtime;
 
+  // Seconds (fractional) since process start, from the same monotonic clock hrtime uses.
+  process.uptime = () => { const t = raw(); return t[0] + t[1] / 1e9; };
+
   process.version = "v20.11.0";
   process.versions = { node: "20.11.0", lumen: "0.1.1", v8: "0.0.0" };
+
+  // Real OS-identity / control surface over the native ops. These need the (about-to-be-deleted)
+  // `__proc` namespace, so they are wired here rather than in the lumen-node JS glue.
+  process.chdir = proc.chdir;
+  process.abort = proc.abort;
+  process.umask = proc.umask;
+  process.ppid = proc.getppid();
+  // getuid/getgid/geteuid/getegid are POSIX-only; the ops return undefined off unix (where Node
+  // omits these entirely). We keep them defined but honest — `undefined` when the OS can't answer.
+  const uid = proc.getuid(), gid = proc.getgid();
+  if (uid !== undefined) {
+    process.getuid = proc.getuid;
+    process.geteuid = proc.geteuid;
+    process.getgid = proc.getgid;
+    process.getegid = proc.getegid;
+  }
+  // Portable signal numbers (identical on Linux/macOS); named signals outside this set fall back
+  // to SIGTERM's number so `process.kill(pid)` still delivers a terminating signal.
+  const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGALRM: 14, SIGTERM: 15 };
+  const rawKill = proc.kill;
+  process.kill = (pid, sig = "SIGTERM") => {
+    const n = typeof sig === "number" ? sig : (SIGNALS[sig] ?? 15);
+    rawKill(pid | 0, n);
+    return true;
+  };
 })();"#;
 
 /// The data properties (`argv`, `env`, `platform`) — snapshots taken at startup, like Node's.
@@ -95,9 +132,23 @@ pub(crate) fn install_data_props(engine: &mut Engine) {
         _ => unreachable!("install() defined the process namespace"),
     };
 
+    let argv0_str = std::env::args().next().unwrap_or_else(|| "lumen".to_string());
     let argv: Vec<Value> = std::env::args().map(Value::from_string).collect();
     let argv = ctx.make_array(argv);
     let _ = ctx.set_member(&process, "argv", argv);
+
+    // argv0/execPath mirror argv[0] (the running binary), like Node. These are set here rather
+    // than in the JS glue because the glue runs before this data-prop pass, so argv isn't ready
+    // there yet. `title` defaults to the executable's basename (settable afterwards).
+    let _ = ctx.set_member(&process, "argv0", Value::from_string(argv0_str.clone()));
+    let _ = ctx.set_member(&process, "execPath", Value::from_string(argv0_str.clone()));
+    let title = argv0_str
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("lumen")
+        .to_string();
+    let _ = ctx.set_member(&process, "title", Value::from_string(title));
 
     let env = ctx.new_object();
     let env = Value::Obj(env);
@@ -182,4 +233,126 @@ fn op_next_tick(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Va
     let extra: Vec<Value> = args.iter().skip(1).cloned().collect();
     CallbackQueue::enqueue(ctx.op_state(), callback, extra);
     Ok(Value::Undefined)
+}
+
+/// `(dir)` — change the process working directory (`std::env::set_current_dir`). Cross-platform,
+/// no FFI. Throws with the OS error on failure (matching `process.chdir`).
+fn op_chdir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let dir = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    match std::env::set_current_dir(&dir) {
+        Ok(()) => Ok(Value::Undefined),
+        Err(e) => Err(ctx.make_error("Error", format!("ENOENT: chdir '{dir}': {e}"))),
+    }
+}
+
+/// `process.abort()` — terminate immediately (SIGABRT, core dump where enabled). `std::process::abort`
+/// is the real thing; never returns.
+fn op_abort(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    std::process::abort();
+}
+
+/// `(pid, signal)` — deliver `signal` to `pid` via libc `kill(2)`. Real on unix; a no-op that
+/// reports failure elsewhere (lumen ships unix-first). The JS wrapper maps signal names to numbers.
+#[cfg(unix)]
+fn op_kill(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let pid = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as i32;
+    let sig = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))? as i32;
+    let rc = unsafe { ffi::kill(pid, sig) };
+    if rc == 0 {
+        Ok(Value::Undefined)
+    } else {
+        Err(ctx.make_error("Error", format!("kill {pid} failed (errno set)")))
+    }
+}
+#[cfg(not(unix))]
+fn op_kill(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "process.kill is not supported on this platform"))
+}
+
+/// `([mask])` — read (no-arg, via the standard read-then-restore) or set the file-mode creation
+/// mask through libc `umask(2)`. Returns the previous mask. Unix-only; returns 0 off unix.
+#[cfg(unix)]
+fn op_umask(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let prev = match args.first() {
+        Some(v) if !matches!(v, Value::Undefined) => {
+            let m = ctx.coerce_number(v)? as u32;
+            unsafe { ffi::umask(m) }
+        }
+        // No argument: umask(2) has no pure read, so set-to-0-then-restore is the canonical idiom
+        // (this is exactly why Node deprecated the read form).
+        _ => {
+            let cur = unsafe { ffi::umask(0) };
+            unsafe { ffi::umask(cur) };
+            cur
+        }
+    };
+    Ok(Value::Num((prev & 0o7777) as f64))
+}
+#[cfg(not(unix))]
+fn op_umask(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(0.0))
+}
+
+// Process-identity getters. POSIX-only; off unix they return `undefined` and the JS_INIT wiring
+// leaves `process.getuid` &c. undefined, matching Node (which does not define them on Windows).
+#[cfg(unix)]
+fn op_getuid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(unsafe { ffi::getuid() } as f64))
+}
+#[cfg(unix)]
+fn op_geteuid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(unsafe { ffi::geteuid() } as f64))
+}
+#[cfg(unix)]
+fn op_getgid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(unsafe { ffi::getgid() } as f64))
+}
+#[cfg(unix)]
+fn op_getegid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(unsafe { ffi::getegid() } as f64))
+}
+#[cfg(unix)]
+fn op_getppid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(unsafe { ffi::getppid() } as f64))
+}
+#[cfg(not(unix))]
+fn op_getuid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Undefined)
+}
+#[cfg(not(unix))]
+fn op_geteuid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Undefined)
+}
+#[cfg(not(unix))]
+fn op_getgid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Undefined)
+}
+#[cfg(not(unix))]
+fn op_getegid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Undefined)
+}
+#[cfg(not(unix))]
+fn op_getppid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
+    // getppid is meaningless without the unix parent model; 0 is the honest "unknown".
+    Ok(Value::Num(0.0))
+}
+
+/// Raw libc identity/control calls. Same category as `dylib.rs`'s dlopen FFI: these symbols live
+/// in libc, which std already links into every Rust program, so no third-party dependency is added.
+#[cfg(unix)]
+mod ffi {
+    use std::os::raw::{c_int, c_uint};
+    extern "C" {
+        pub fn getuid() -> c_uint;
+        pub fn geteuid() -> c_uint;
+        pub fn getgid() -> c_uint;
+        pub fn getegid() -> c_uint;
+        pub fn getppid() -> c_int;
+        pub fn kill(pid: c_int, sig: c_int) -> c_int;
+        // mode_t is 16-bit on macOS / 32-bit on Linux; c_uint is ABI-safe for both (small values,
+        // masked on the way out). Passing/returning through a register truncates harmlessly.
+        pub fn umask(mask: c_uint) -> c_uint;
+    }
 }
