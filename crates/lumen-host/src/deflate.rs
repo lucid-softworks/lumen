@@ -32,8 +32,14 @@ fn crc32_table() -> [u32; 256] {
 }
 
 pub fn crc32(data: &[u8]) -> u32 {
+    crc32_from(0, data)
+}
+
+/// CRC-32 continued from a prior checksum `seed` (0 to start fresh) — the form `node:zlib.crc32`
+/// exposes so callers can chain checksums across chunks.
+pub fn crc32_from(seed: u32, data: &[u8]) -> u32 {
     let table = crc32_table();
-    let mut crc = 0xffff_ffffu32;
+    let mut crc = seed ^ 0xffff_ffff;
     for &byte in data {
         crc = table[((crc ^ byte as u32) & 0xff) as usize] ^ (crc >> 8);
     }

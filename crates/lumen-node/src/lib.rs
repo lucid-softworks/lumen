@@ -85,6 +85,7 @@ pub fn extension() -> Extension {
                     "inflateRaw" (1) => op_zlib_inflate_raw,
                     "gzip" (1) => op_zlib_gzip,
                     "gunzip" (1) => op_zlib_gunzip,
+                    "crc32" (2) => op_zlib_crc32,
                 ],
             ),
             ("__child", child::CHILD_OPS),
@@ -93,6 +94,7 @@ pub fn extension() -> Extension {
                 ops![
                     "lookup" (4) => dns::op_lookup,
                     "resolve" (4) => dns::op_resolve,
+                    "getServers" (0) => dns::op_get_servers,
                 ],
             ),
         ],
@@ -730,4 +732,13 @@ fn op_zlib_gzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
 }
 fn op_zlib_gunzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
     zlib_decompress_op(ctx, a, lumen_host::deflate::gzip_decompress)
+}
+/// `__zlib.crc32(bytes, seed)` — CRC-32 of `bytes`, optionally continued from `seed`.
+fn op_zlib_crc32(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let v = a.first().unwrap_or(&Value::Undefined);
+    let Some(bytes) = ctx.typed_array_bytes(v) else {
+        return Err(ctx.make_error("TypeError", "zlib.crc32 expects a Buffer/TypedArray"));
+    };
+    let seed = a.get(1).and_then(|v| v.as_num_opt()).unwrap_or(0.0) as u32;
+    Ok(Value::Num(lumen_host::deflate::crc32_from(seed, &bytes) as f64))
 }

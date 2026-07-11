@@ -104,6 +104,17 @@ pub fn op_resolve(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, 
     Ok(Value::Undefined)
 }
 
+/// `__dns.getServers()` — the nameserver addresses from `/etc/resolv.conf`, as strings, for
+/// `dns.getServers()` / the default `Resolver`'s initial server list. Reading the file is cheap,
+/// so this stays synchronous rather than going through the blocking pool.
+pub fn op_get_servers(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let items = resolv_nameservers()
+        .into_iter()
+        .map(|ip| Value::from_string(ip.to_string()))
+        .collect();
+    Ok(ctx.make_array(items))
+}
+
 /// The numeric DNS type code for a Node record-type string.
 fn qtype_code(rrtype: &str) -> Option<u16> {
     Some(match rrtype {

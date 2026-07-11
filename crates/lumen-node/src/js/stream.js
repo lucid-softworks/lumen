@@ -210,6 +210,7 @@ class Writable extends Stream {
 class Duplex extends Readable {
   constructor(opts = {}) {
     super(opts);
+    // Mirror Writable's state (including `tail`, which write()/end() chain on to serialize writes).
     this._writableState = { ended: false, finished: false, destroyed: false, corked: 0, errored: null, tail: Promise.resolve() };
     this.writable = true;
     if (typeof opts.write === "function") this._write = opts.write;

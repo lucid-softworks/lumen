@@ -489,8 +489,10 @@ __builtins.set("tty", {
 }
 
 // ---- node:zlib --------------------------------------------------------------------------------
-// Real gzip/deflate over the shared DEFLATE codec (__zlib native ops). Sync, async-callback, and
-// Transform-stream (createGzip/…) forms. Brotli is not implemented (no Brotli codec).
+// Real gzip/deflate/crc32 over the shared DEFLATE codec (__zlib native ops): sync, async-callback,
+// and Transform-stream (Gzip/createGzip/…) forms, plus the full constants/codes tables. Brotli and
+// Zstd have no codec, so their functions/classes exist (feature detection and `promisify` work)
+// but throw (sync) or reject (async) when actually invoked, rather than emit wrong bytes.
 {
   const codecs = {
     gzip: __zlib.gzip, gunzip: __zlib.gunzip,
@@ -498,69 +500,185 @@ __builtins.set("tty", {
     deflateRaw: __zlib.deflateRaw, inflateRaw: __zlib.inflateRaw,
   };
 
-  const sync = (fn) => (input) => Buffer.from(fn(input instanceof Uint8Array ? input : Buffer.from(input)));
+  const toBuf = (input, enc) => (input instanceof Uint8Array ? input : Buffer.from(input, enc));
+  const sync = (fn) => (input) => Buffer.from(fn(toBuf(input)));
   const asyncOf = (syncFn) => (input, opts, cb) => {
     if (typeof opts === "function") cb = opts;
     queueMicrotask(() => {
       try {
-        const out = syncFn(input);
-        cb(null, out);
+        cb(null, syncFn(input));
       } catch (e) {
         cb(e);
       }
     });
   };
-  // A Transform that buffers input and (de)compresses it whole on flush (the codec is one-shot).
-  // `stream` (node:stream) is looked up lazily: shims.js loads before stream.js.
-  const stream = (syncFn) => () => {
-    const Transform = __builtins.get("stream").Transform;
-    const chunks = [];
-    return new Transform({
-      transform(chunk, enc, next) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc));
-        next();
-      },
-      flush(done) {
-        try {
-          this.push(syncFn(Buffer.concat(chunks)));
-          done();
-        } catch (e) {
-          done(e);
-        }
+
+  const zlib = {};
+
+  // A Transform subclass that buffers input and (de)compresses it whole on flush (the codec is
+  // one-shot). `stream` (node:stream) is resolved lazily on first construction: shims.js loads
+  // before stream.js, so the class can't `extends Transform` until the user actually needs it.
+  const defineStreamClass = (className, syncFn) => {
+    Object.defineProperty(zlib, className, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        const Transform = __builtins.get("stream").Transform;
+        const cls = class extends Transform {
+          constructor(options) {
+            super(options);
+            this._chunks = [];
+          }
+          _transform(chunk, enc, next) {
+            this._chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, enc));
+            next();
+          }
+          _flush(done) {
+            try {
+              this.push(syncFn(Buffer.concat(this._chunks)));
+              done();
+            } catch (e) {
+              done(e);
+            }
+          }
+        };
+        Object.defineProperty(zlib, className, {
+          value: cls,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+        return cls;
       },
     });
   };
 
-  const zlib = { constants: {} };
   for (const [name, fn] of Object.entries(codecs)) {
     const cap = name[0].toUpperCase() + name.slice(1);
     const syncFn = sync(fn);
     zlib[`${name}Sync`] = syncFn;
     zlib[name] = asyncOf(syncFn);
-    // create<Gzip|Gunzip|Deflate|Inflate|DeflateRaw|InflateRaw>
-    zlib[`create${cap}`] = stream(syncFn);
+    // Gzip / Gunzip / Deflate / Inflate / DeflateRaw / InflateRaw (+ their create* factories).
+    defineStreamClass(cap, syncFn);
+    zlib[`create${cap}`] = (options) => new zlib[cap](options);
   }
-  // Aliases Node exposes.
+  // Aliases Node exposes: `unzip` auto-detects gzip vs. zlib framing — our gunzip covers gzip.
   zlib.unzipSync = zlib.gunzipSync;
   zlib.unzip = zlib.gunzip;
-  zlib.createUnzip = zlib.createGunzip;
-  // Brotli is not implemented (a from-scratch Brotli codec, with its 120 KB static dictionary, is
-  // a large detour; gzip covers the common case). The functions exist — so `promisify(brotli…)`
-  // and feature detection work — but reject/throw when actually invoked, rather than silently
-  // producing wrong bytes.
-  const brotliError = () => new Error("node:zlib Brotli is not supported in lumen");
-  const brotliThrow = () => {
-    throw brotliError();
+  defineStreamClass("Unzip", zlib.gunzipSync);
+  zlib.createUnzip = (options) => new zlib.Unzip(options);
+
+  // Real CRC-32 (Node's zlib.crc32(data[, value])), chainable via the optional seed.
+  zlib.crc32 = (data, value = 0) => __zlib.crc32(toBuf(data), value >>> 0);
+
+  // Unsupported codecs (no Brotli/Zstd implementation): the API surface exists so feature
+  // detection and `promisify` work, but every real call throws (sync) or rejects (async) rather
+  // than producing bogus output.
+  const makeUnsupported = (label) => {
+    const err = () => new Error(`node:zlib ${label} is not supported in lumen`);
+    return {
+      throwFn: () => {
+        throw err();
+      },
+      asyncFn: (input, opts, cb) => {
+        if (typeof opts === "function") cb = opts;
+        queueMicrotask(() => cb(err()));
+      },
+      klass: class {
+        constructor() {
+          throw err();
+        }
+      },
+    };
   };
-  const brotliAsync = (input, opts, cb) => {
-    if (typeof opts === "function") cb = opts;
-    queueMicrotask(() => cb(brotliError()));
+  const brotli = makeUnsupported("Brotli");
+  const zstd = makeUnsupported("Zstd");
+  Object.assign(zlib, {
+    BrotliCompress: brotli.klass,
+    BrotliDecompress: brotli.klass,
+    createBrotliCompress: brotli.throwFn,
+    createBrotliDecompress: brotli.throwFn,
+    brotliCompressSync: brotli.throwFn,
+    brotliDecompressSync: brotli.throwFn,
+    brotliCompress: brotli.asyncFn,
+    brotliDecompress: brotli.asyncFn,
+    ZstdCompress: zstd.klass,
+    ZstdDecompress: zstd.klass,
+    createZstdCompress: zstd.throwFn,
+    createZstdDecompress: zstd.throwFn,
+    zstdCompressSync: zstd.throwFn,
+    zstdDecompressSync: zstd.throwFn,
+    zstdCompress: zstd.asyncFn,
+    zstdDecompress: zstd.asyncFn,
+  });
+
+  // The full constants table Node exposes (copied verbatim from Node v22), and the bidirectional
+  // return-code map (`codes[Z_OK] === 0` and `codes[0] === "Z_OK"`).
+  zlib.constants = {
+    Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5,
+    Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
+    Z_MEM_ERROR: -4, Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6, Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1,
+    Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1, Z_FILTERED: 1, Z_HUFFMAN_ONLY: 2, Z_RLE: 3,
+    Z_FIXED: 4, Z_DEFAULT_STRATEGY: 0, ZLIB_VERNUM: 4865, DEFLATE: 1, INFLATE: 2, GZIP: 3,
+    GUNZIP: 4, DEFLATERAW: 5, INFLATERAW: 6, UNZIP: 7, BROTLI_DECODE: 8, BROTLI_ENCODE: 9,
+    ZSTD_DECOMPRESS: 11, ZSTD_COMPRESS: 10, Z_MIN_WINDOWBITS: 8, Z_MAX_WINDOWBITS: 15,
+    Z_DEFAULT_WINDOWBITS: 15, Z_MIN_CHUNK: 64, Z_MAX_CHUNK: null, Z_DEFAULT_CHUNK: 16384,
+    Z_MIN_MEMLEVEL: 1, Z_MAX_MEMLEVEL: 9, Z_DEFAULT_MEMLEVEL: 8, Z_MIN_LEVEL: -1, Z_MAX_LEVEL: 9,
+    Z_DEFAULT_LEVEL: -1, BROTLI_OPERATION_PROCESS: 0, BROTLI_OPERATION_FLUSH: 1,
+    BROTLI_OPERATION_FINISH: 2, BROTLI_OPERATION_EMIT_METADATA: 3, BROTLI_PARAM_MODE: 0,
+    BROTLI_MODE_GENERIC: 0, BROTLI_MODE_TEXT: 1, BROTLI_MODE_FONT: 2, BROTLI_DEFAULT_MODE: 0,
+    BROTLI_PARAM_QUALITY: 1, BROTLI_MIN_QUALITY: 0, BROTLI_MAX_QUALITY: 11,
+    BROTLI_DEFAULT_QUALITY: 11, BROTLI_PARAM_LGWIN: 2, BROTLI_MIN_WINDOW_BITS: 10,
+    BROTLI_MAX_WINDOW_BITS: 24, BROTLI_LARGE_MAX_WINDOW_BITS: 30, BROTLI_DEFAULT_WINDOW: 22,
+    BROTLI_PARAM_LGBLOCK: 3, BROTLI_MIN_INPUT_BLOCK_BITS: 16, BROTLI_MAX_INPUT_BLOCK_BITS: 24,
+    BROTLI_PARAM_DISABLE_LITERAL_CONTEXT_MODELING: 4, BROTLI_PARAM_SIZE_HINT: 5,
+    BROTLI_PARAM_LARGE_WINDOW: 6, BROTLI_PARAM_NPOSTFIX: 7, BROTLI_PARAM_NDIRECT: 8,
+    BROTLI_DECODER_RESULT_ERROR: 0, BROTLI_DECODER_RESULT_SUCCESS: 1,
+    BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT: 2, BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT: 3,
+    BROTLI_DECODER_PARAM_DISABLE_RING_BUFFER_REALLOCATION: 0, BROTLI_DECODER_PARAM_LARGE_WINDOW: 1,
+    BROTLI_DECODER_NO_ERROR: 0, BROTLI_DECODER_SUCCESS: 1, BROTLI_DECODER_NEEDS_MORE_INPUT: 2,
+    BROTLI_DECODER_NEEDS_MORE_OUTPUT: 3, BROTLI_DECODER_ERROR_FORMAT_EXUBERANT_NIBBLE: -1,
+    BROTLI_DECODER_ERROR_FORMAT_RESERVED: -2, BROTLI_DECODER_ERROR_FORMAT_EXUBERANT_META_NIBBLE: -3,
+    BROTLI_DECODER_ERROR_FORMAT_SIMPLE_HUFFMAN_ALPHABET: -4,
+    BROTLI_DECODER_ERROR_FORMAT_SIMPLE_HUFFMAN_SAME: -5, BROTLI_DECODER_ERROR_FORMAT_CL_SPACE: -6,
+    BROTLI_DECODER_ERROR_FORMAT_HUFFMAN_SPACE: -7, BROTLI_DECODER_ERROR_FORMAT_CONTEXT_MAP_REPEAT: -8,
+    BROTLI_DECODER_ERROR_FORMAT_BLOCK_LENGTH_1: -9, BROTLI_DECODER_ERROR_FORMAT_BLOCK_LENGTH_2: -10,
+    BROTLI_DECODER_ERROR_FORMAT_TRANSFORM: -11, BROTLI_DECODER_ERROR_FORMAT_DICTIONARY: -12,
+    BROTLI_DECODER_ERROR_FORMAT_WINDOW_BITS: -13, BROTLI_DECODER_ERROR_FORMAT_PADDING_1: -14,
+    BROTLI_DECODER_ERROR_FORMAT_PADDING_2: -15, BROTLI_DECODER_ERROR_FORMAT_DISTANCE: -16,
+    BROTLI_DECODER_ERROR_DICTIONARY_NOT_SET: -19, BROTLI_DECODER_ERROR_INVALID_ARGUMENTS: -20,
+    BROTLI_DECODER_ERROR_ALLOC_CONTEXT_MODES: -21, BROTLI_DECODER_ERROR_ALLOC_TREE_GROUPS: -22,
+    BROTLI_DECODER_ERROR_ALLOC_CONTEXT_MAP: -25, BROTLI_DECODER_ERROR_ALLOC_RING_BUFFER_1: -26,
+    BROTLI_DECODER_ERROR_ALLOC_RING_BUFFER_2: -27, BROTLI_DECODER_ERROR_ALLOC_BLOCK_TYPE_TREES: -30,
+    BROTLI_DECODER_ERROR_UNREACHABLE: -31, ZSTD_e_continue: 0, ZSTD_e_flush: 1, ZSTD_e_end: 2,
+    ZSTD_fast: 1, ZSTD_dfast: 2, ZSTD_greedy: 3, ZSTD_lazy: 4, ZSTD_lazy2: 5, ZSTD_btlazy2: 6,
+    ZSTD_btopt: 7, ZSTD_btultra: 8, ZSTD_btultra2: 9, ZSTD_c_compressionLevel: 100,
+    ZSTD_c_windowLog: 101, ZSTD_c_hashLog: 102, ZSTD_c_chainLog: 103, ZSTD_c_searchLog: 104,
+    ZSTD_c_minMatch: 105, ZSTD_c_targetLength: 106, ZSTD_c_strategy: 107,
+    ZSTD_c_enableLongDistanceMatching: 160, ZSTD_c_ldmHashLog: 161, ZSTD_c_ldmMinMatch: 162,
+    ZSTD_c_ldmBucketSizeLog: 163, ZSTD_c_ldmHashRateLog: 164, ZSTD_c_contentSizeFlag: 200,
+    ZSTD_c_checksumFlag: 201, ZSTD_c_dictIDFlag: 202, ZSTD_c_nbWorkers: 400, ZSTD_c_jobSize: 401,
+    ZSTD_c_overlapLog: 402, ZSTD_d_windowLogMax: 100, ZSTD_CLEVEL_DEFAULT: 3,
+    ZSTD_error_no_error: 0, ZSTD_error_GENERIC: 1, ZSTD_error_prefix_unknown: 10,
+    ZSTD_error_version_unsupported: 12, ZSTD_error_frameParameter_unsupported: 14,
+    ZSTD_error_frameParameter_windowTooLarge: 16, ZSTD_error_corruption_detected: 20,
+    ZSTD_error_checksum_wrong: 22, ZSTD_error_literals_headerWrong: 24,
+    ZSTD_error_dictionary_corrupted: 30, ZSTD_error_dictionary_wrong: 32,
+    ZSTD_error_dictionaryCreation_failed: 34, ZSTD_error_parameter_unsupported: 40,
+    ZSTD_error_parameter_combination_unsupported: 41, ZSTD_error_parameter_outOfBound: 42,
+    ZSTD_error_tableLog_tooLarge: 44, ZSTD_error_maxSymbolValue_tooLarge: 46,
+    ZSTD_error_maxSymbolValue_tooSmall: 48, ZSTD_error_stabilityCondition_notRespected: 50,
+    ZSTD_error_stage_wrong: 60, ZSTD_error_init_missing: 62, ZSTD_error_memory_allocation: 64,
+    ZSTD_error_workSpace_tooSmall: 66, ZSTD_error_dstSize_tooSmall: 70,
+    ZSTD_error_srcSize_wrong: 72, ZSTD_error_dstBuffer_null: 74,
+    ZSTD_error_noForwardProgress_destFull: 80, ZSTD_error_noForwardProgress_inputEmpty: 82,
   };
-  zlib.createBrotliCompress = brotliThrow;
-  zlib.createBrotliDecompress = brotliThrow;
-  zlib.brotliCompressSync = brotliThrow;
-  zlib.brotliDecompressSync = brotliThrow;
-  zlib.brotliCompress = brotliAsync;
-  zlib.brotliDecompress = brotliAsync;
+  zlib.codes = {
+    "-6": "Z_VERSION_ERROR", "-5": "Z_BUF_ERROR", "-4": "Z_MEM_ERROR", "-3": "Z_DATA_ERROR",
+    "-2": "Z_STREAM_ERROR", "-1": "Z_ERRNO", 0: "Z_OK", 1: "Z_STREAM_END", 2: "Z_NEED_DICT",
+    Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
+    Z_MEM_ERROR: -4, Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6,
+  };
+
   __builtins.set("zlib", zlib);
 }
