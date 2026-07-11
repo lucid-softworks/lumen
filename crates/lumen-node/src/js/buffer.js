@@ -235,5 +235,105 @@ class Buffer extends Uint8Array {
   }
 }
 
+// Node deprecated SlowBuffer (it used to return an un-pooled Buffer); we never pool, so it is just
+// an un-pooled allocation.
+function SlowBuffer(length) {
+  return Buffer.allocUnsafeSlow(length);
+}
+
+// Coerce the ArrayBuffer/TypedArray/DataView inputs that isAscii/isUtf8 accept into a byte view,
+// throwing Node's ERR_INVALID_ARG_TYPE for anything else (notably strings, which Node rejects).
+function bytesOf(input, name) {
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  const err = new TypeError(
+    `The "${name}" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received ${typeof input}`,
+  );
+  err.code = "ERR_INVALID_ARG_TYPE";
+  throw err;
+}
+
+function isAscii(input) {
+  const b = bytesOf(input, "input");
+  for (let i = 0; i < b.length; i++) if (b[i] > 0x7f) return false;
+  return true;
+}
+
+// A real UTF-8 validator: walks the byte stream, rejecting overlong forms, surrogate code points,
+// out-of-range code points, and truncated/misaligned continuation bytes.
+function isUtf8(input) {
+  const b = bytesOf(input, "input");
+  const n = b.length;
+  let i = 0;
+  while (i < n) {
+    const c = b[i];
+    if (c < 0x80) { i++; continue; }
+    let extra, min, cp;
+    if ((c & 0xe0) === 0xc0) { extra = 1; min = 0x80; cp = c & 0x1f; }
+    else if ((c & 0xf0) === 0xe0) { extra = 2; min = 0x800; cp = c & 0x0f; }
+    else if ((c & 0xf8) === 0xf0) { extra = 3; min = 0x10000; cp = c & 0x07; }
+    else return false;
+    if (i + extra >= n) return false;
+    for (let j = 1; j <= extra; j++) {
+      const cc = b[i + j];
+      if ((cc & 0xc0) !== 0x80) return false;
+      cp = (cp << 6) | (cc & 0x3f);
+    }
+    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+    i += extra + 1;
+  }
+  return true;
+}
+
+// Re-encode bytes from one encoding to another by round-tripping through a JS string. Covers every
+// pair the Buffer codec already supports; unknown encodings throw a Node-shaped ERR_UNKNOWN_ENCODING
+// (Node itself surfaces an ICU error here, but an explicit unknown-encoding throw is the honest
+// signal on an engine without ICU's transcoder).
+function transcode(source, fromEnc, toEnc) {
+  if (!ArrayBuffer.isView(source) && !(source instanceof ArrayBuffer)) {
+    const err = new TypeError('The "source" argument must be an instance of Buffer or Uint8Array.');
+    err.code = "ERR_INVALID_ARG_TYPE";
+    throw err;
+  }
+  for (const enc of [fromEnc, toEnc]) {
+    if (!Buffer.isEncoding(enc)) {
+      const err = new Error(`Unknown encoding: ${enc}`);
+      err.code = "ERR_UNKNOWN_ENCODING";
+      throw err;
+    }
+  }
+  const bytes =
+    source instanceof ArrayBuffer
+      ? new Uint8Array(source)
+      : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+  return new Buffer(bytesFromString(stringFromBytes(bytes, fromEnc), toEnc));
+}
+
+// lumen has no URL.createObjectURL registry, so every blob: id is unknown — which is exactly the
+// value Node returns for an unregistered/expired id.
+function resolveObjectURL(_id) {
+  return undefined;
+}
+
+const kMaxLength = 9007199254740991;
+const kStringMaxLength = 536870888;
+
 globalThis.Buffer = Buffer;
-__builtins.set("buffer", { Buffer, constants: {} });
+__builtins.set("buffer", {
+  Buffer,
+  SlowBuffer,
+  // Node exposes MAX_LENGTH/MAX_STRING_LENGTH here too (mirrors the k* aliases below).
+  constants: { MAX_LENGTH: kMaxLength, MAX_STRING_LENGTH: kStringMaxLength },
+  kMaxLength,
+  kStringMaxLength,
+  INSPECT_MAX_BYTES: 50,
+  // Reuse the web globals by identity rather than redefining them (lumen-web installs these).
+  atob: globalThis.atob,
+  btoa: globalThis.btoa,
+  Blob: globalThis.Blob,
+  File: globalThis.File,
+  isAscii,
+  isUtf8,
+  transcode,
+  resolveObjectURL,
+});

@@ -7,12 +7,254 @@
 {
   const te = new TextEncoder();
   const td = new TextDecoder();
-  // A genuine round-trip codec. It is not V8's private wire format (that is engine-internal and
-  // not portable anyway) — it serializes the JSON-representable object graph, which is what tools
-  // that call v8.serialize for caching actually rely on.
-  const serialize = (value) => Buffer.from(te.encode(JSON.stringify(value)));
-  const deserialize = (buffer) => JSON.parse(td.decode(buffer));
 
+  // A genuine structured-clone-style codec over Buffer. It is NOT V8's private wire format (that is
+  // engine-internal and not portable), but it is self-consistent: serialize -> deserialize round-
+  // trips the object graph, including the reference types JSON drops (Map/Set/Date/BigInt/typed
+  // arrays/ArrayBuffer) and shared/circular references. Format is a 2-byte header then tagged
+  // values; container tags register the object before recursing so cycles resolve via back-refs.
+  const TAG = {
+    UNDEFINED: 0, NULL: 1, TRUE: 2, FALSE: 3, NUMBER: 4, STRING: 5, BIGINT: 6,
+    ARRAY: 7, OBJECT: 8, MAP: 9, SET: 10, DATE: 11, REGEXP: 12,
+    ARRAYBUFFER: 13, TYPEDARRAY: 14, BUFFER: 15, REF: 16,
+  };
+  // Ordered so an index survives round-trips; BUFFER is handled separately (it is Uint8Array too).
+  const VIEW_CTORS = [
+    Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+    Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array, DataView,
+  ];
+  const scratch = new DataView(new ArrayBuffer(8));
+
+  class Serializer {
+    constructor() {
+      this._bytes = [];
+      this._ids = new Map();
+      this._nextId = 0;
+    }
+    _byte(b) { this._bytes.push(b & 0xff); }
+    writeHeader() { this._byte(0xff); this._byte(0x0f); }
+    writeUint32(v) {
+      this._byte(v); this._byte(v >>> 8); this._byte(v >>> 16); this._byte(v >>> 24);
+    }
+    writeUint64(v) {
+      const lo = Number(BigInt(v) & 0xffffffffn);
+      const hi = Number((BigInt(v) >> 32n) & 0xffffffffn);
+      this.writeUint32(lo); this.writeUint32(hi);
+    }
+    writeDouble(v) {
+      scratch.setFloat64(0, v, true);
+      for (let i = 0; i < 8; i++) this._byte(scratch.getUint8(i));
+    }
+    writeRawBytes(bytes) { for (let i = 0; i < bytes.length; i++) this._byte(bytes[i]); }
+    _writeString(str) {
+      const enc = te.encode(str);
+      this.writeUint32(enc.length);
+      this.writeRawBytes(enc);
+    }
+    transferArrayBuffer() {}
+    _setTreatArrayBufferViewsAsHostObjects() {}
+    _writeHostObject() {
+      const err = new Error("Unserializable host object");
+      err.code = "ERR_CANNOT_TRANSFER_OBJECT";
+      throw err;
+    }
+    _ref(obj) {
+      if (this._ids.has(obj)) { this._byte(TAG.REF); this.writeUint32(this._ids.get(obj)); return true; }
+      this._ids.set(obj, this._nextId++);
+      return false;
+    }
+    writeValue(value) {
+      const t = typeof value;
+      if (value === undefined) return this._byte(TAG.UNDEFINED);
+      if (value === null) return this._byte(TAG.NULL);
+      if (t === "boolean") return this._byte(value ? TAG.TRUE : TAG.FALSE);
+      if (t === "number") { this._byte(TAG.NUMBER); return this.writeDouble(value); }
+      if (t === "string") { this._byte(TAG.STRING); return this._writeString(value); }
+      if (t === "bigint") { this._byte(TAG.BIGINT); return this._writeString(value.toString()); }
+      if (t !== "object" && t !== "function") {
+        const err = new Error(`Unsupported value type: ${t}`);
+        err.code = "ERR_CANNOT_TRANSFER_OBJECT";
+        throw err;
+      }
+      if (this._ref(value)) return;
+      if (Array.isArray(value)) {
+        this._byte(TAG.ARRAY);
+        this.writeUint32(value.length);
+        for (let i = 0; i < value.length; i++) this.writeValue(value[i]);
+        return;
+      }
+      if (value instanceof Date) { this._byte(TAG.DATE); return this.writeDouble(value.getTime()); }
+      if (value instanceof RegExp) {
+        this._byte(TAG.REGEXP); this._writeString(value.source); return this._writeString(value.flags);
+      }
+      if (value instanceof Map) {
+        this._byte(TAG.MAP);
+        this.writeUint32(value.size);
+        for (const [k, v] of value) { this.writeValue(k); this.writeValue(v); }
+        return;
+      }
+      if (value instanceof Set) {
+        this._byte(TAG.SET);
+        this.writeUint32(value.size);
+        for (const v of value) this.writeValue(v);
+        return;
+      }
+      if (value instanceof ArrayBuffer) {
+        this._byte(TAG.ARRAYBUFFER);
+        const view = new Uint8Array(value);
+        this.writeUint32(view.length);
+        return this.writeRawBytes(view);
+      }
+      if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+        this._byte(TAG.BUFFER);
+        this.writeUint32(value.length);
+        return this.writeRawBytes(value);
+      }
+      if (ArrayBuffer.isView(value)) {
+        this._byte(TAG.TYPEDARRAY);
+        this._byte(VIEW_CTORS.indexOf(value.constructor));
+        const raw = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        this.writeUint32(raw.length);
+        return this.writeRawBytes(raw);
+      }
+      // Plain object: own enumerable string keys (Symbols are dropped, as in structured clone).
+      this._byte(TAG.OBJECT);
+      const keys = Object.keys(value);
+      this.writeUint32(keys.length);
+      for (const k of keys) { this._writeString(k); this.writeValue(value[k]); }
+    }
+    releaseBuffer() { return Buffer.from(this._bytes); }
+  }
+
+  // DefaultSerializer is the class serialize() uses; it differs from Serializer only in how it
+  // treats host objects (here: the base behavior is already correct for our surface).
+  class DefaultSerializer extends Serializer {}
+
+  class Deserializer {
+    constructor(buffer) {
+      this._buf = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+      this._view = new DataView(this._buf.buffer, this._buf.byteOffset, this._buf.byteLength);
+      this._pos = 0;
+      this._objs = [];
+    }
+    readHeader() { this._pos += 2; return 0x0f; }
+    getWireFormatVersion() { return 0x0f; }
+    readUint32() {
+      const v = this._view.getUint32(this._pos, true);
+      this._pos += 4;
+      return v;
+    }
+    readUint64() {
+      const lo = BigInt(this.readUint32());
+      const hi = BigInt(this.readUint32());
+      return Number((hi << 32n) | lo);
+    }
+    readDouble() {
+      const v = this._view.getFloat64(this._pos, true);
+      this._pos += 8;
+      return v;
+    }
+    readRawBytes(len) {
+      const out = this._buf.subarray(this._pos, this._pos + len);
+      this._pos += len;
+      return out;
+    }
+    _readString() {
+      const len = this.readUint32();
+      return td.decode(this.readRawBytes(len));
+    }
+    transferArrayBuffer() {}
+    _readHostObject() {
+      throw new Error("Unserializable host object");
+    }
+    readValue() {
+      const tag = this._buf[this._pos++];
+      switch (tag) {
+        case TAG.UNDEFINED: return undefined;
+        case TAG.NULL: return null;
+        case TAG.TRUE: return true;
+        case TAG.FALSE: return false;
+        case TAG.NUMBER: return this.readDouble();
+        case TAG.STRING: return this._readString();
+        case TAG.BIGINT: return BigInt(this._readString());
+        case TAG.REF: return this._objs[this.readUint32()];
+        case TAG.ARRAY: {
+          const n = this.readUint32();
+          const arr = [];
+          this._objs.push(arr);
+          for (let i = 0; i < n; i++) arr.push(this.readValue());
+          return arr;
+        }
+        case TAG.OBJECT: {
+          const n = this.readUint32();
+          const obj = {};
+          this._objs.push(obj);
+          for (let i = 0; i < n; i++) { const k = this._readString(); obj[k] = this.readValue(); }
+          return obj;
+        }
+        case TAG.MAP: {
+          const n = this.readUint32();
+          const map = new Map();
+          this._objs.push(map);
+          for (let i = 0; i < n; i++) { const k = this.readValue(); map.set(k, this.readValue()); }
+          return map;
+        }
+        case TAG.SET: {
+          const n = this.readUint32();
+          const set = new Set();
+          this._objs.push(set);
+          for (let i = 0; i < n; i++) set.add(this.readValue());
+          return set;
+        }
+        case TAG.DATE: { const d = new Date(this.readDouble()); this._objs.push(d); return d; }
+        case TAG.REGEXP: {
+          const re = new RegExp(this._readString(), this._readString());
+          this._objs.push(re);
+          return re;
+        }
+        case TAG.ARRAYBUFFER: {
+          const n = this.readUint32();
+          const ab = this.readRawBytes(n).slice().buffer;
+          this._objs.push(ab);
+          return ab;
+        }
+        case TAG.BUFFER: {
+          const n = this.readUint32();
+          const b = Buffer.from(this.readRawBytes(n));
+          this._objs.push(b);
+          return b;
+        }
+        case TAG.TYPEDARRAY: {
+          const kind = this._buf[this._pos++];
+          const n = this.readUint32();
+          const bytes = this.readRawBytes(n).slice();
+          const Ctor = VIEW_CTORS[kind];
+          const view = Ctor === DataView ? new DataView(bytes.buffer) : new Ctor(bytes.buffer);
+          this._objs.push(view);
+          return view;
+        }
+        default:
+          throw new Error(`v8.deserialize: unknown tag ${tag}`);
+      }
+    }
+  }
+
+  class DefaultDeserializer extends Deserializer {}
+
+  const serialize = (value) => {
+    const s = new DefaultSerializer();
+    s.writeHeader();
+    s.writeValue(value);
+    return s.releaseBuffer();
+  };
+  const deserialize = (buffer) => {
+    const d = new DefaultDeserializer(buffer);
+    d.readHeader();
+    return d.readValue();
+  };
+
+  // lumen exposes no V8 heap accounting, so the numeric fields are honest zeros in Node's shape
+  // (rather than invented figures). Field names and count match Node v22 exactly.
   const HEAP_LIMIT = 2 * 1024 * 1024 * 1024;
   const getHeapStatistics = () => ({
     total_heap_size: 0,
@@ -26,19 +268,113 @@
     does_zap_garbage: 0,
     number_of_native_contexts: 1,
     number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
   });
+  const HEAP_SPACES = [
+    "read_only_space", "new_space", "old_space", "code_space", "shared_space",
+    "trusted_space", "new_large_object_space", "large_object_space",
+    "code_large_object_space", "shared_large_object_space", "trusted_large_object_space",
+  ];
+  const getHeapSpaceStatistics = () =>
+    HEAP_SPACES.map((space_name) => ({
+      space_name,
+      space_size: 0,
+      space_used_size: 0,
+      space_available_size: 0,
+      physical_space_size: 0,
+    }));
+  const getHeapCodeStatistics = () => ({
+    code_and_metadata_size: 0,
+    bytecode_and_metadata_size: 0,
+    external_script_source_size: 0,
+    cpu_profiler_metadata_size: 0,
+  });
+  const getCppHeapStatistics = () => ({
+    committed_size_bytes: 0,
+    resident_size_bytes: 0,
+    used_size_bytes: 0,
+    space_statistics: [],
+    type_names: [],
+    detail_level: "brief",
+  });
+
+  // A real byte-level check: whether the string is representable in a single-byte (latin1) form.
+  const isStringOneByteRepresentation = (str) => {
+    if (typeof str !== "string") {
+      const err = new TypeError('The "content" argument must be of type string.');
+      err.code = "ERR_INVALID_ARG_TYPE";
+      throw err;
+    }
+    for (let i = 0; i < str.length; i++) if (str.charCodeAt(i) > 0xff) return false;
+    return true;
+  };
+
+  // Not backed by V8's build hash; a stable tag so callers that only compare it for equality across
+  // a single process (compile-cache guards) behave consistently.
+  const cachedDataVersionTag = () => 0x6c756d65;
+
+  // Inert GC profiler: lumen surfaces no GC event stream, so a session records nothing.
+  class GCProfiler {
+    start() { this._start = Date.now(); }
+    stop() {
+      return { version: 1, startTime: this._start || Date.now(), statistics: [], endTime: Date.now() };
+    }
+  }
+
+  const notSupported = (what) => () => {
+    throw new Error(`node:v8 ${what} is not supported in lumen`);
+  };
+
+  // promiseHooks: lumen has no promise-lifecycle hook plumbing. Shaped like Node's; each registrar
+  // is a no-op that returns the standard "stop" function.
+  const noopStop = () => {};
+  const promiseHooks = {
+    createHook: () => noopStop,
+    onInit: () => noopStop,
+    onBefore: () => noopStop,
+    onAfter: () => noopStop,
+    onSettled: () => noopStop,
+  };
+
+  // startupSnapshot: we never build a V8 startup snapshot, so callbacks are inert and
+  // isBuildingSnapshot is always false — the honest state for a non-snapshotting process.
+  const startupSnapshot = {
+    addDeserializeCallback: () => {},
+    addSerializeCallback: () => {},
+    setDeserializeMainFunction: () => {},
+    isBuildingSnapshot: () => false,
+  };
 
   __builtins.set("v8", {
     serialize,
     deserialize,
+    Serializer,
+    Deserializer,
+    DefaultSerializer,
+    DefaultDeserializer,
     getHeapStatistics,
-    getHeapSpaceStatistics: () => [],
-    getHeapCodeStatistics: () => ({}),
+    getHeapSpaceStatistics,
+    getHeapCodeStatistics,
+    getCppHeapStatistics,
+    isStringOneByteRepresentation,
+    cachedDataVersionTag,
+    GCProfiler,
+    promiseHooks,
+    startupSnapshot,
     // A non-V8 engine has no V8 flags to set — the honest result is a no-op.
     setFlagsFromString: () => {},
-    getHeapSnapshot: () => {
-      throw new Error("node:v8 heap snapshots are not supported in lumen");
-    },
+    // No snapshot-on-near-heap-limit mechanism exists here; registering a limit is a no-op.
+    setHeapSnapshotNearHeapLimit: () => {},
+    // Coverage collection is not wired up (no NODE_V8_COVERAGE sink); these are the inert no-ops
+    // Node itself uses when coverage is disabled.
+    takeCoverage: () => {},
+    stopCoverage: () => {},
+    // Heap introspection (walking live objects / writing .heapsnapshot) is unbackable without V8.
+    queryObjects: notSupported("queryObjects"),
+    getHeapSnapshot: notSupported("heap snapshots"),
+    writeHeapSnapshot: notSupported("heap snapshots"),
   });
 }
 
