@@ -22,7 +22,6 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "buffer.js", wrap: false },
     GlueFile { name: "path.js", wrap: false },
     GlueFile { name: "os.js", wrap: false },
-    GlueFile { name: "fs.js", wrap: false },
     GlueFile { name: "events.js", wrap: true },
     GlueFile { name: "diagnostics_channel.js", wrap: true },
     GlueFile { name: "domain.js", wrap: true },
@@ -32,6 +31,9 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "shims.js", wrap: true },
     GlueFile { name: "stream.js", wrap: true },
     GlueFile { name: "net.js", wrap: true },
+    // fs.js is unwrapped (shares the outer scope) but its ReadStream/WriteStream/StatWatcher
+    // extend the `stream`/`events` builtins, so it must load after them.
+    GlueFile { name: "fs.js", wrap: false },
     GlueFile { name: "http.js", wrap: true },
     GlueFile { name: "http2.js", wrap: true },
     GlueFile { name: "child_process.js", wrap: true },

@@ -63,6 +63,10 @@ pub fn extension() -> Extension {
                     "access" (1) => op_access,
                     "chmod" (2) => op_chmod,
                     "mkdtemp" (1) => op_mkdtemp,
+                    "link" (2) => op_link,
+                    "utimes" (3) => op_utimes,
+                    "lutimes" (3) => op_lutimes,
+                    "statfs" (1) => op_statfs,
                 ],
             ),
             (
@@ -442,6 +446,165 @@ fn op_mkdtemp(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Valu
         }
     }
     Err(ctx.make_error("Error", format!("mkdtemp '{prefix}': exhausted candidates")))
+}
+
+/// `link(existingPath, newPath)` — create a hard link.
+fn op_link(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let existing = arg_path(ctx, args)?;
+    let new = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    match std::fs::hard_link(&existing, &new) {
+        Ok(()) => Ok(Value::Undefined),
+        Err(e) => Err(fs_error(ctx, "link", &existing, &e)),
+    }
+}
+
+/// `utimes(path, atimeSec, mtimeSec)` / `lutimes(...)` — set access/modification times.
+/// Backed by the BSD `utimes(2)`/`lutimes(2)` (present on macOS and glibc Linux); a clean
+/// ENOSYS error elsewhere. `lutimes` acts on the link itself rather than its target.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    #[cfg(target_os = "macos")]
+    tv_usec: i32,
+    #[cfg(target_os = "linux")]
+    tv_usec: i64,
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn timeval_from_secs(secs: f64) -> Timeval {
+    let s = secs.floor();
+    let usec = ((secs - s) * 1_000_000.0).round();
+    Timeval {
+        tv_sec: s as i64,
+        tv_usec: usec as _,
+    }
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+extern "C" {
+    fn utimes(path: *const std::os::raw::c_char, times: *const Timeval) -> i32;
+    fn lutimes(path: *const std::os::raw::c_char, times: *const Timeval) -> i32;
+}
+
+fn set_times(ctx: &mut Ctx, args: &[Value], follow: bool, op: &str) -> Result<Value, Value> {
+    let p = arg_path(ctx, args)?;
+    let atime = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))?;
+    let mtime = ctx.coerce_number(args.get(2).unwrap_or(&Value::Undefined))?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let c_path = match std::ffi::CString::new(p.clone()) {
+            Ok(c) => c,
+            Err(_) => return Err(ctx.make_error("Error", "path contains a NUL byte")),
+        };
+        let times = [timeval_from_secs(atime), timeval_from_secs(mtime)];
+        // SAFETY: `c_path` is a valid NUL-terminated string; `times` is a 2-element array.
+        let rc = unsafe {
+            if follow {
+                utimes(c_path.as_ptr(), times.as_ptr())
+            } else {
+                lutimes(c_path.as_ptr(), times.as_ptr())
+            }
+        };
+        if rc != 0 {
+            return Err(fs_error(ctx, op, &p, &std::io::Error::last_os_error()));
+        }
+        Ok(Value::Undefined)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (atime, mtime, follow, op);
+        let err = ctx.make_error("Error", format!("ENOSYS: {op} is not supported on this platform, {op} '{p}'"));
+        let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
+        Err(err)
+    }
+}
+
+fn op_utimes(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    set_times(ctx, args, true, "utime")
+}
+
+fn op_lutimes(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    set_times(ctx, args, false, "lutime")
+}
+
+/// `statfs(path)` — filesystem statistics via `statvfs(3)`. Returns the fields Node's
+/// `fs.statfs` reports (`type`, `bsize`, `blocks`, `bfree`, `bavail`, `files`, `ffree`);
+/// `type` is 0 because `statvfs` carries no filesystem-type magic. Backed on macOS and Linux;
+/// a clean ENOSYS error elsewhere. The trailing padding keeps our buffer at least as large as
+/// the platform's `struct statvfs`, so the call can never write out of bounds.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct Statvfs {
+    f_bsize: u64,
+    f_frsize: u64,
+    f_blocks: u32,
+    f_bfree: u32,
+    f_bavail: u32,
+    f_files: u32,
+    f_ffree: u32,
+    f_favail: u32,
+    f_fsid: u64,
+    f_flag: u64,
+    f_namemax: u64,
+    _pad: [u64; 8],
+}
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct Statvfs {
+    f_bsize: u64,
+    f_frsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: u64,
+    f_flag: u64,
+    f_namemax: u64,
+    _pad: [u64; 8],
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+extern "C" {
+    fn statvfs(path: *const std::os::raw::c_char, buf: *mut Statvfs) -> i32;
+}
+
+fn op_statfs(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let p = arg_path(ctx, args)?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let c_path = match std::ffi::CString::new(p.clone()) {
+            Ok(c) => c,
+            Err(_) => return Err(ctx.make_error("Error", "path contains a NUL byte")),
+        };
+        let mut buf: std::mem::MaybeUninit<Statvfs> = std::mem::MaybeUninit::zeroed();
+        // SAFETY: `c_path` is NUL-terminated; `buf` is a zeroed struct at least as large as the
+        // platform's `struct statvfs` (extra trailing padding), so the write stays in bounds.
+        let rc = unsafe { statvfs(c_path.as_ptr(), buf.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(fs_error(ctx, "statfs", &p, &std::io::Error::last_os_error()));
+        }
+        let s = unsafe { buf.assume_init() };
+        let o = Value::Obj(ctx.new_object());
+        let set = |k: &str, v: f64, ctx: &mut Ctx| {
+            let _ = ctx.set_member(&o, k, Value::Num(v));
+        };
+        set("type", 0.0, ctx);
+        set("bsize", s.f_bsize as f64, ctx);
+        set("blocks", s.f_blocks as f64, ctx);
+        set("bfree", s.f_bfree as f64, ctx);
+        set("bavail", s.f_bavail as f64, ctx);
+        set("files", s.f_files as f64, ctx);
+        set("ffree", s.f_ffree as f64, ctx);
+        Ok(o)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let err = ctx.make_error("Error", format!("ENOSYS: statfs is not supported on this platform, statfs '{p}'"));
+        let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
+        Err(err)
+    }
 }
 
 /// One object of OS facts the JS `os` shim reads (snapshotted like Node's are). `hostname`
