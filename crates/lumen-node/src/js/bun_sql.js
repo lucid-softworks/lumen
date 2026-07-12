@@ -76,7 +76,7 @@
     if (postgres) return makePostgresClient(postgres, options);
     const filename = sqliteFilename(url, options);
     if (filename === null || (options.adapter && options.adapter !== "sqlite")) {
-      const error = new Error("Bun.SQL PostgreSQL and MySQL transports are not supported in lumen yet");
+      const error = new Error("Bun.SQL MySQL transport is not supported in lumen yet");
       error.code = "ERR_SQL_UNSUPPORTED_ADAPTER";
       throw error;
     }

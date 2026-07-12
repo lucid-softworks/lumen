@@ -37,6 +37,7 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
         console.log("reserve", reserved === sql, typeof reserved.release);
         await sql.close();
         try { await sql`SELECT 1`; } catch (error) { console.log("closed", error.message); }
+        try { Bun.SQL("mysql://user:password@localhost/database"); } catch (error) { console.log("unsupported", error.code, error.message); }
       })();
     "#;
     match runtime.eval(source).expect("source parses") {
@@ -53,6 +54,7 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
             "transaction 3 Updated",
             "reserve true function",
             "closed SQL client is closed",
+            "unsupported ERR_SQL_UNSUPPORTED_ADAPTER Bun.SQL MySQL transport is not supported in lumen yet",
         ]
     );
 }
