@@ -4,6 +4,7 @@
 //!   lumen-cli                          repl when stdin is a terminal, else eval stdin
 //!   lumen-cli repl                     repl explicitly (even when piped — for scripting it)
 //!   lumen-cli <file.js> [args...]      run a script to loop quiescence
+//!   lumen-cli --typecheck <file.ts>    typecheck with tsc, then run
 //!   lumen-cli -e '<code>'              evaluate a string
 //!   lumen-cli -v | --version           print the version
 //!   --tier=interp|bytecode, --tier-threshold=N   select the engine execution tier
@@ -20,6 +21,7 @@ fn main() {
     let mut eval_source = None;
     let mut file = None;
     let mut force_repl = false;
+    let mut typecheck = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -36,11 +38,13 @@ fn main() {
                 Some(code) => eval_source = Some(code),
                 None => die(2, "-e expects code"),
             }
+        } else if a == "--typecheck" {
+            typecheck = true;
         } else if a == "repl" && file.is_none() {
             force_repl = true;
         } else if a == "-h" || a == "--help" {
             println!(
-                "usage: lumen-cli [repl | file.js [args...] | -e code] [--tier=interp|bytecode]"
+                "usage: lumen-cli [repl | file.js [args...] | -e code] [--typecheck] [--tier=interp|bytecode]"
             );
             return;
         } else if a == "-v" || a == "--version" {
@@ -67,6 +71,11 @@ fn main() {
         if !std::path::Path::new(&path).is_file() {
             die(2, &format!("cannot read {path}: not a file"));
         }
+        if typecheck {
+            if let Err(error) = typecheck_file(std::path::Path::new(&path)) {
+                die(1, &error);
+            }
+        }
         // ESM vs CommonJS like Node: .mjs -> module, .cjs -> commonjs, .js -> the nearest
         // package.json "type". A module runs through the import graph; CJS as `require.main`.
         let result = if is_esm_entry(&path) {
@@ -91,6 +100,41 @@ fn main() {
         }
         run_source(&mut runtime, &src);
     }
+}
+
+fn typecheck_file(entry: &std::path::Path) -> Result<(), String> {
+    let config = find_upward(entry.parent(), "tsconfig.json");
+    let compiler = std::env::var_os("LUMEN_TSC")
+        .map(std::path::PathBuf::from)
+        .or_else(|| find_upward(entry.parent(), &format!("node_modules/.bin/tsc{}", std::env::consts::EXE_SUFFIX)))
+        .unwrap_or_else(|| std::path::PathBuf::from("tsc"));
+    let mut command = std::process::Command::new(&compiler);
+    command.arg("--noEmit");
+    if let Some(config) = config {
+        command.arg("--project").arg(config);
+    } else {
+        command.arg(entry);
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("cannot run TypeScript compiler {}: {error}", compiler.display()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("TypeScript typecheck failed with {status}"))
+    }
+}
+
+fn find_upward(start: Option<&std::path::Path>, relative: &str) -> Option<std::path::PathBuf> {
+    let mut directory = start;
+    while let Some(current) = directory {
+        let candidate = current.join(relative);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        directory = current.parent();
+    }
+    None
 }
 
 /// Evaluate + loop to quiescence; uncaught top-level throws exit 1 (console output already
