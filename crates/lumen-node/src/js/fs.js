@@ -2,9 +2,7 @@
 // (lumen-fs) plus the `__node` filesystem ops (real stat metadata, rm, rename, copy, …).
 // readFile returns a string with an encoding argument, else a Buffer.
 
-const nativeFs = fs;
-
-// Node's `Stats`. Built from the raw fields `__node.stat`/`lstat`/`fs.fstatSync` return.
+// Node's `Stats`. Built from the raw fields `__node.stat`/`lstat`/native fstat return.
 class Stats {
   constructor(raw) {
     this.dev = raw.dev; this.ino = raw.ino; this.mode = raw.mode; this.nlink = raw.nlink;
@@ -119,18 +117,18 @@ const nodeFs = {
     if (typeof path === "number") { nodeFs.writeSync(path, buf, 0, undefined, null); return; }
     // Write raw bytes via a handle so binary content is preserved (the string op re-encodes UTF-8).
     const flag = (options && options.flag) || "w";
-    const fd = fs.openSync(toPath(path), flagToMode(flag));
-    try { fs.pwriteSync(fd, buf, -1); } finally { fs.closeSync(fd); }
+    const fd = __fs_native.openSync(toPath(path), flagToMode(flag));
+    try { __fs_native.pwriteSync(fd, buf, -1); } finally { __fs_native.closeSync(fd); }
   },
   appendFileSync(path, data, options) {
     const enc = encOf(options);
     const buf = toBuffer(data, enc);
     if (typeof path === "number") { nodeFs.writeSync(path, buf); return; }
-    const fd = fs.openSync(toPath(path), "a");
-    try { fs.pwriteSync(fd, buf, -1); } finally { fs.closeSync(fd); }
+    const fd = __fs_native.openSync(toPath(path), "a");
+    try { __fs_native.pwriteSync(fd, buf, -1); } finally { __fs_native.closeSync(fd); }
   },
   existsSync(path) {
-    try { return fs.existsSync(toPath(path)); } catch { return false; }
+    try { return __fs_native.existsSync(toPath(path)); } catch { return false; }
   },
   mkdirSync(path, options) {
     return __node.mkdir(toPath(path), !!(options && options.recursive));
@@ -146,11 +144,11 @@ const nodeFs = {
     if (options && options.withFileTypes) {
       return __node.readdirTypes(p).map(([name, kind]) => makeDirent(name, kind, p));
     }
-    const names = fs.readdirSync(p);
+    const names = __fs_native.readdirSync(p);
     return encOf(options) === "buffer" ? names.map((n) => Buffer.from(n, "utf8")) : names;
   },
   unlinkSync(path) {
-    fs.unlinkSync(toPath(path));
+    __fs_native.unlinkSync(toPath(path));
   },
   renameSync(from, to) {
     __node.rename(toPath(from), toPath(to));
@@ -198,27 +196,27 @@ const nodeFs = {
 
   // ---- file-descriptor ops ----
   openSync(path, flags, mode) {
-    return __fs_fdmeta.openSync(toPath(path), flagToMode(flags));
+    return __fs_native.openSync(toPath(path), flagToMode(flags));
   },
   closeSync(fd) {
-    __fs_fdmeta.closeSync(fd);
+    __fs_native.closeSync(fd);
   },
   fstatSync(fd) {
-    return makeStats(fs.fstatSync(fd));
+    return makeStats(__fs_native.fstatSync(fd));
   },
   ftruncateSync(fd, len) {
-    fs.ftruncateSync(fd, Number(len) || 0);
+    __fs_native.ftruncateSync(fd, Number(len) || 0);
   },
   truncateSync(path, len) {
     if (typeof path === "number") return nodeFs.ftruncateSync(path, len);
     const fd = nodeFs.openSync(path, "r+");
     try { nodeFs.ftruncateSync(fd, len); } finally { nodeFs.closeSync(fd); }
   },
-  fsyncSync(fd) { fs.fsyncSync(fd); },
-  fdatasyncSync(fd) { fs.fdatasyncSync(fd); },
-  fchmodSync(fd, mode) { __fs_fdmeta.fchmodSync(fd, Number(mode) || 0); },
+  fsyncSync(fd) { __fs_native.fsyncSync(fd); },
+  fdatasyncSync(fd) { __fs_native.fdatasyncSync(fd); },
+  fchmodSync(fd, mode) { __fs_native.fchmodSync(fd, Number(mode) || 0); },
   futimesSync(fd, atime, mtime) {
-    fs.futimesSync(fd, toUnixSeconds(atime), toUnixSeconds(mtime));
+    __fs_native.futimesSync(fd, toUnixSeconds(atime), toUnixSeconds(mtime));
   },
   // Read a whole file descriptor to a Buffer, from position 0 (helper for readFileSync(fd)).
   readvBytes(fd) {
@@ -226,7 +224,7 @@ const nodeFs = {
     let total = 0;
     let pos = 0;
     while (true) {
-      const bytes = fs.preadSync(fd, 65536, pos);
+      const bytes = __fs_native.preadSync(fd, 65536, pos);
       if (bytes.length === 0) break;
       chunks.push(Buffer.from(bytes));
       total += bytes.length;
@@ -245,7 +243,7 @@ const nodeFs = {
     offset = offset || 0;
     if (length == null) length = buffer.length - offset;
     const pos = position == null ? -1 : position;
-    const bytes = fs.preadSync(fd, length, pos);
+    const bytes = __fs_native.preadSync(fd, length, pos);
     buffer.set(bytes, offset);
     return bytes.length;
   },
@@ -253,20 +251,20 @@ const nodeFs = {
     if (typeof data === "string") {
       const position = a == null ? -1 : a;
       const bytes = Buffer.from(data, b || "utf8");
-      return fs.pwriteSync(fd, bytes, position);
+      return __fs_native.pwriteSync(fd, bytes, position);
     }
     const buf = toBuffer(data);
     let offset = a || 0;
     let length = b == null ? buf.length - offset : b;
     const position = c == null ? -1 : c;
     const slice = buf.subarray(offset, offset + length);
-    return fs.pwriteSync(fd, slice, position);
+    return __fs_native.pwriteSync(fd, slice, position);
   },
   readvSync(fd, buffers, position) {
     let total = 0;
     let pos = position == null ? -1 : position;
     for (const buf of buffers) {
-      const bytes = fs.preadSync(fd, buf.length, pos);
+      const bytes = __fs_native.preadSync(fd, buf.length, pos);
       if (bytes.length === 0) break;
       buf.set(bytes, 0);
       total += bytes.length;
@@ -278,7 +276,7 @@ const nodeFs = {
     let total = 0;
     let pos = position == null ? -1 : position;
     for (const buf of buffers) {
-      const n = fs.pwriteSync(fd, buf, pos);
+      const n = __fs_native.pwriteSync(fd, buf, pos);
       total += n;
       if (pos >= 0) pos += n;
     }
@@ -287,7 +285,7 @@ const nodeFs = {
 
   chownSync(path, uid, gid) { __node.chown(toPath(path), Number(uid), Number(gid)); },
   lchownSync(path, uid, gid) { __node.lchown(toPath(path), Number(uid), Number(gid)); },
-  fchownSync(fd, uid, gid) { __fs_fdmeta.fchownSync(fd, Number(uid), Number(gid)); },
+  fchownSync(fd, uid, gid) { __fs_native.fchownSync(fd, Number(uid), Number(gid)); },
   lchmodSync(path, mode) { __node.lchmod(toPath(path), Number(mode) || 0); },
 };
 nodeFs.realpathSync.native = nodeFs.realpathSync;
@@ -423,7 +421,7 @@ function cpSyncImpl(src, dest, opts) {
   if (srcStat.isDirectory()) {
     if (!o.recursive) throw fsError("EISDIR", "cp", src, "recursive option not set for a directory");
     nodeFs.mkdirSync(dest, { recursive: true });
-    for (const entry of fs.readdirSync(toPath(src))) {
+    for (const entry of __fs_native.readdirSync(toPath(src))) {
       cpSyncImpl(p.join(toPath(src), entry), p.join(toPath(dest), entry), o);
     }
     return;
@@ -659,7 +657,7 @@ class ReadStream extends StreamMod.Readable {
       while (this.pos <= this._end) {
         let want = this._chunk;
         if (this._end !== Infinity) want = Math.min(want, this._end - this.pos + 1);
-        const bytes = fs.preadSync(this.fd, want, this.pos);
+        const bytes = __fs_native.preadSync(this.fd, want, this.pos);
         if (bytes.length === 0) break;
         this.pos += bytes.length;
         this.bytesRead += bytes.length;
@@ -716,7 +714,7 @@ class WriteStream extends StreamMod.Writable {
     try {
       const buf = toBuffer(chunk, encoding || this._encoding);
       const pos = this.pos == null ? -1 : this.pos;
-      const n = fs.pwriteSync(this.fd, buf, pos);
+      const n = __fs_native.pwriteSync(this.fd, buf, pos);
       this.bytesWritten += n;
       if (this.pos != null) this.pos += n;
       cb();
