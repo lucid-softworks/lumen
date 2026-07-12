@@ -487,8 +487,7 @@ function httpsGet(input, options, cb) {
   req.end();
   return req;
 }
-// https twin: same client, default protocol https:. fetch surfaces the honest "no TLS" error when
-// the request actually goes out over https.
+// https twin: same client, default protocol https:. fetch uses lumen's verified TLS backend.
 class HttpsClientRequest extends ClientRequest {}
 HttpsClientRequest._defaultProtocol = "https:";
 

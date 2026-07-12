@@ -1,7 +1,7 @@
 # WinterTC "Minimum Common Web Platform API" op crate: Event/AbortController, TextEncoder/
 # TextDecoder, atob/btoa, structuredClone, URL/URLSearchParams, performance.now, crypto
-# (getRandomValues/randomUUID/subtle.digest), fetch (http only — TLS can't be done in std and
-# is not implemented; https rejects with a clear error). Pure-JS pieces ship as js_init glue;
+# (getRandomValues/randomUUID/subtle.digest), fetch (HTTP and verified HTTPS through a dynamically
+# loaded system OpenSSL). Pure-JS pieces ship as js_init glue;
 # Rust backs the parsing/crypto/network ops. See lib.rs for the conformance checklist.
 [package]
 name = "lumen-web"
@@ -13,6 +13,7 @@ publish = false
 
 [dependencies]
 lumen-host = { path = "../lumen-host" }
+lumen-tls = { path = "../lumen-tls" }
 
 # Build-only: used by build.rs to parse the JS glue and emit its AST snapshot (no runtime dep).
 [build-dependencies]

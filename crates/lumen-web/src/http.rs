@@ -1,8 +1,7 @@
 //! A blocking HTTP/1.1 client on `std::net::TcpStream`, run on the threadpool by the fetch
 //! op. `Connection: close` per request (no pooling), Content-Length and chunked bodies,
-//! redirects followed up to 5 hops. **`https:` is rejected**: TLS cannot be built on std and
-//! a from-scratch implementation is a project of its own — STOP-AND-FLAG per the workspace
-//! dependency policy; plain-`http` fetch is what exists until that's explicitly authorized.
+//! redirects followed up to 5 hops. HTTPS uses lumen-tls's dynamically loaded system OpenSSL
+//! backend with CA and hostname verification; no TLS crate is linked into the workspace.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -36,14 +35,7 @@ pub(crate) fn request(
     for _ in 0..=MAX_REDIRECTS {
         let u = url::parse(&target, None)?;
         match u.scheme.as_str() {
-            "http" => {}
-            "https" => {
-                return Err(
-                    "fetch: https is not supported yet (TLS cannot be implemented on std \
-                     alone; http URLs work)"
-                        .to_string(),
-                )
-            }
+            "http" | "https" => {}
             other => return Err(format!("fetch: unsupported scheme '{other}'")),
         }
         let response = one_request(&method, &u, headers, body.as_deref())?;
@@ -88,7 +80,7 @@ fn one_request(
     headers: &[(String, String)],
     body: Option<&[u8]>,
 ) -> Result<HttpResponse, String> {
-    let port = u.port.unwrap_or(80);
+    let port = u.port.unwrap_or(if u.scheme == "https" { 443 } else { 80 });
     let host_header = match u.port {
         Some(p) => format!("{}:{}", u.host, p),
         None => u.host.clone(),
@@ -122,7 +114,12 @@ fn one_request(
     }
     req.push_str("\r\n");
 
-    let mut stream = stream;
+    let mut stream: Box<dyn ReadWrite> = if u.scheme == "https" {
+        Box::new(lumen_tls::TlsStream::connect(stream, u.host.trim_matches(['[', ']']))
+            .map_err(|error| format!("fetch '{}': {error}", u.href()))?)
+    } else {
+        Box::new(stream)
+    };
     stream
         .write_all(req.as_bytes())
         .and_then(|()| body.map_or(Ok(()), |b| stream.write_all(b)))
@@ -169,6 +166,9 @@ fn one_request(
         url: String::new(), // stamped by the redirect loop
     })
 }
+
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
 
 fn read_body(
     reader: &mut impl BufRead,
@@ -235,11 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn https_is_rejected_with_guidance() {
-        let err = match request("GET", "https://example.com/", &[], None) {
-            Err(e) => e,
-            Ok(_) => panic!("https should be rejected"),
-        };
-        assert!(err.contains("TLS"), "{err}");
+    #[ignore = "requires external network and a system OpenSSL trust store"]
+    fn https_uses_verified_tls() {
+        let response = request("GET", "https://example.com/", &[], None).unwrap();
+        assert_eq!(response.status, 200);
     }
 }

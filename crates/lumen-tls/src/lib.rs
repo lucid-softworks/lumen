@@ -33,6 +33,8 @@ type SslWrite = unsafe extern "C" fn(*mut Ssl, *const c_void, c_int) -> c_int;
 type SslShutdown = unsafe extern "C" fn(*mut Ssl) -> c_int;
 type SslGetError = unsafe extern "C" fn(*const Ssl, c_int) -> c_int;
 type VerifyResult = unsafe extern "C" fn(*const Ssl) -> c_long;
+type ErrGetError = unsafe extern "C" fn() -> u64;
+type ErrErrorString = unsafe extern "C" fn(u64, *mut c_char, usize);
 
 struct Api {
     _ssl_lib: Library,
@@ -52,6 +54,8 @@ struct Api {
     ssl_shutdown: SslShutdown,
     ssl_get_error: SslGetError,
     verify_result: VerifyResult,
+    err_get_error: ErrGetError,
+    err_error_string: ErrErrorString,
 }
 
 impl Api {
@@ -81,6 +85,8 @@ impl Api {
                 ssl_shutdown: ssl.function("SSL_shutdown")?,
                 ssl_get_error: ssl.function("SSL_get_error")?,
                 verify_result: ssl.function("SSL_get_verify_result")?,
+                err_get_error: crypto.function("ERR_get_error")?,
+                err_error_string: crypto.function("ERR_error_string_n")?,
                 _ssl_lib: ssl,
                 _crypto_lib: crypto,
             })
@@ -124,8 +130,9 @@ impl TlsStream {
         let result = unsafe { (api.ssl_connect)(ssl) };
         if result != 1 {
             let code = unsafe { (api.ssl_get_error)(ssl, result) };
+            let detail = api.error_queue();
             unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
-            return Err(format!("TLS handshake failed (SSL error {code})"));
+            return Err(format!("TLS handshake failed (SSL error {code}: {detail})"));
         }
         let verify = unsafe { (api.verify_result)(ssl) };
         if verify != 0 {
@@ -137,7 +144,21 @@ impl TlsStream {
 
     fn io_error(&self, result: c_int) -> std::io::Error {
         let code = unsafe { (self.api.ssl_get_error)(self.ssl, result) };
-        std::io::Error::other(format!("OpenSSL I/O error {code}"))
+        std::io::Error::other(format!("OpenSSL I/O error {code}: {}", self.api.error_queue()))
+    }
+}
+
+impl Api {
+    fn error_queue(&self) -> String {
+        let mut messages = Vec::new();
+        loop {
+            let code = unsafe { (self.err_get_error)() };
+            if code == 0 { break; }
+            let mut buffer = [0i8; 256];
+            unsafe { (self.err_error_string)(code, buffer.as_mut_ptr(), buffer.len()) };
+            messages.push(unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned());
+        }
+        if messages.is_empty() { "no OpenSSL detail".into() } else { messages.join("; ") }
     }
 }
 

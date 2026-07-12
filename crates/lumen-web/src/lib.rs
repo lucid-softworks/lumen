@@ -14,8 +14,8 @@
 //! - [x] `performance.now()` (+`timeOrigin`), `navigator.userAgent`
 //! - [x] `crypto.getRandomValues` / `crypto.randomUUID` (`/dev/urandom` via std::fs — no
 //!   syscalls, no crates), `crypto.subtle.digest` (SHA-256 only)
-//! - [x] `fetch` / `Headers` / `Request` / `Response` — **http only**: TLS cannot be built on
-//!   std and is not implemented (STOP-AND-FLAG); https rejects with a clear error
+//! - [x] `fetch` / `Headers` / `Request` / `Response` — HTTP and certificate-verified HTTPS
+//!   through the dynamically loaded system OpenSSL backend
 //! - [~] `Lumen.serve` — an HTTP/1.1 *server* (not a WinterTC API; follows the cross-runtime
 //!   `serve((request) => Response)` convention of Deno/Bun/Workers). v1 is single-accept,
 //!   `Connection: close`, buffered bodies, http only — see `server.rs` for what's deferred.
