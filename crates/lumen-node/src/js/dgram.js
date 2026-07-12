@@ -101,7 +101,8 @@ class Socket extends EventEmitter {
         const msg = await new Promise((resolve, reject) => __udp.recv(id, resolve, reject));
         if (msg === null || this._id === null) return; // closed
         const { data, address, port, family, size } = msg;
-        this.emit("message", Buffer.from(data), { address, family, port, size });
+        const packet = Buffer.from(data), info = { address, family, port, size };
+        setTimeout(() => { if (this._id !== null) this.emit("message", packet, info); }, 0);
       }
     })().catch((e) => {
       if (this._id !== null) this.emit("error", e);
