@@ -3,10 +3,12 @@
 //! Node ecosystem (morgan et al.) to log and time; the fuller `node:process` surface is layered
 //! on in lumen-node.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::time::Instant;
 
-use lumen_host::{ops, CallbackQueue, Ctx, Engine, Extension, OpState, Value};
+use lumen_host::{
+    ops, CallbackQueue, CompletionSender, Ctx, Engine, Extension, OpState, TaskRegistry, Value,
+};
 
 use crate::console::ConsoleOut;
 
@@ -33,6 +35,7 @@ pub(crate) fn extension() -> Extension {
                 ops![
                     "writeStdout" (1) => op_write_stdout,
                     "writeStderr" (1) => op_write_stderr,
+                    "readStdin" (2) => op_read_stdin,
                     "hrtime" (0) => op_hrtime,
                     "chdir" (1) => op_chdir,
                     "abort" (0) => op_abort,
@@ -57,6 +60,7 @@ pub(crate) fn extension() -> Extension {
 /// ecosystem branches on it for feature detection; `versions.lumen` records the real engine.
 const JS_INIT: &str = r#"(() => {
   const proc = globalThis.__proc;
+  const readStdin = proc.readStdin;
   delete globalThis.__proc;
   const process = globalThis.process;
 
@@ -76,6 +80,7 @@ const JS_INIT: &str = r#"(() => {
   });
   Object.defineProperty(process, "stdout", { value: makeStream(proc.writeStdout, 1), enumerable: true, configurable: true });
   Object.defineProperty(process, "stderr", { value: makeStream(proc.writeStderr, 2), enumerable: true, configurable: true });
+  Object.defineProperty(process, "_readStdin", { value: readStdin, configurable: true });
 
   const raw = proc.hrtime;
   const hrtime = (prev) => {
@@ -182,6 +187,52 @@ fn op_write_stdout(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value,
 fn op_write_stderr(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     write_raw(ctx, args, true)
 }
+
+/// `(resolve, reject)` — read one chunk from the process's stdin without blocking the loop.
+fn op_read_stdin(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let (resolve, reject) = match (args.first(), args.get(1)) {
+        (Some(resolve), Some(reject)) if resolve.is_callable() && reject.is_callable() => {
+            (resolve.clone(), reject.clone())
+        }
+        _ => return Err(ctx.make_error("TypeError", "readStdin expects resolve and reject functions")),
+    };
+    let id = ctx
+        .host_mut::<TaskRegistry>()
+        .expect("runtime installs task registry")
+        .register(resolve, Some(reject), decode_stdin_read);
+    let sender = ctx
+        .op_state()
+        .get::<CompletionSender>()
+        .expect("runtime installs completion sender")
+        .clone();
+    sender.run_blocking(id, || {
+        let mut buf = vec![0u8; 65_536];
+        let result = std::io::stdin()
+            .read(&mut buf)
+            .map(|n| {
+                buf.truncate(n);
+                buf
+            })
+            .map_err(|e| format!("stdin read: {e}"));
+        Box::new(result)
+    });
+    Ok(Value::Undefined)
+}
+
+fn decode_stdin_read(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    match *payload
+        .downcast::<Result<Vec<u8>, String>>()
+        .expect("stdin read payload")
+    {
+        Ok(bytes) if bytes.is_empty() => Ok(vec![Value::Null]),
+        Ok(bytes) => Ok(vec![ctx.make_uint8array(&bytes)?]),
+        Err(message) => Err(ctx.make_error("Error", message)),
+    }
+}
+
 fn write_raw(ctx: &mut Ctx, args: &[Value], to_err: bool) -> Result<Value, Value> {
     let arg = args.first().unwrap_or(&Value::Undefined);
     let bytes = match ctx.typed_array_bytes(arg) {

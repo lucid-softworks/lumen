@@ -850,12 +850,35 @@ __builtins.set("sys", __builtins.get("util"));
   proc.ref = () => {};
   proc.unref = () => {};
 
-  // stdin: a real (empty) Readable so `.pipe`/`.on('data')`/`.read()` exist; it yields EOF at once
-  // because lumen wires no stdin source. openStdin resumes and returns it (legacy alias).
+  // stdin: an on-demand Readable over the runtime's blocking stdin op. Reads begin only when the
+  // stream consumer asks for data, so an unused stdin never holds the event loop open.
   const streamMod = __builtins.get("stream");
   let stdin;
   if (streamMod && streamMod.Readable) {
-    stdin = new streamMod.Readable({ read() { this.push(null); } });
+    stdin = new streamMod.Readable({ read() {} });
+    let pumping = false;
+    const pump = async () => {
+      try {
+        for (;;) {
+          const chunk = await new Promise((resolve, reject) => proc._readStdin(resolve, reject));
+          if (chunk === null) {
+            stdin.push(null);
+            return;
+          }
+          stdin.push(Buffer.from(chunk));
+        }
+      } catch (error) {
+        stdin.destroy(error);
+      }
+    };
+    const resume = stdin.resume;
+    stdin.resume = function () {
+      if (!pumping) {
+        pumping = true;
+        pump();
+      }
+      return resume.call(this);
+    };
   } else {
     stdin = {
       on: () => stdin, once: () => stdin, removeListener: () => stdin,
