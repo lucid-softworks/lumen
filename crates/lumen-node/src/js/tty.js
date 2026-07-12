@@ -9,13 +9,21 @@
       this.fd = Number(fd);
       this.isTTY = false;
       this.isRaw = false;
-      const input = process.stdin;
+      this._input = process.stdin;
+      this._wired = false;
+    }
+    _wire() {
+      if (this._wired) return;
+      this._wired = true;
+      const input = this._input;
       if (input && typeof input.on === "function") {
         input.on("data", chunk => this.push(chunk));
         input.on("end", () => this.push(null));
         input.on("error", error => this.destroy(error));
       }
     }
+    on(event, listener) { if (event === "data" || event === "readable") this._wire(); return super.on(event, listener); }
+    addListener(event, listener) { return this.on(event, listener); }
     setRawMode(mode) { this.isRaw = !!mode; return this; }
   }
 
