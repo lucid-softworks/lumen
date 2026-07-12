@@ -890,6 +890,82 @@ __builtins.set("sys", __builtins.get("util"));
   Object.defineProperty(proc, "stdin", { value: stdin, enumerable: true, configurable: true });
   proc.openStdin = function () { if (stdin.resume) stdin.resume(); return stdin; };
 
+  // child_process.fork IPC. Lumen has no extra inherited fd, so fork reserves stdin and frames
+  // messages with a control-prefixed JSON line; ordinary stdout lines remain ordinary stdout.
+  const IPC_PREFIX = "\x1eLUMEN_IPC ";
+  let forkIpcStarted = false;
+  let forkConnected = false;
+  let forkPending = "";
+  const isForkChild = () => proc.env && proc.env.LUMEN_FORK_IPC === "1";
+  const startForkIpc = () => {
+    if (forkIpcStarted || !isForkChild()) return;
+    forkIpcStarted = true;
+    forkConnected = true;
+    stdin.on("data", (chunk) => {
+      forkPending += Buffer.from(chunk).toString("utf8");
+      for (;;) {
+        const newline = forkPending.indexOf("\n");
+        if (newline < 0) break;
+        const line = forkPending.slice(0, newline);
+        forkPending = forkPending.slice(newline + 1);
+        if (!line.startsWith(IPC_PREFIX)) continue;
+        try {
+          proc.emit("message", JSON.parse(line.slice(IPC_PREFIX.length)), null);
+        } catch (error) {
+          proc.emit("error", error);
+        }
+      }
+    });
+    stdin.on("end", () => {
+      if (!forkConnected) return;
+      forkConnected = false;
+      proc.emit("disconnect");
+    });
+  };
+  const forkSend = (message, sendHandle, options, callback) => {
+    if (typeof sendHandle === "function") callback = sendHandle;
+    else if (typeof options === "function") callback = options;
+    if (sendHandle != null && typeof sendHandle !== "function") {
+      const error = new Error("child_process.fork handle transfer is not supported in lumen");
+      if (callback) queueMicrotask(() => callback(error)); else throw error;
+      return false;
+    }
+    startForkIpc();
+    if (!forkConnected) return false;
+    try {
+      proc.stdout.write(IPC_PREFIX + JSON.stringify(message === undefined ? null : message) + "\n");
+      if (callback) queueMicrotask(() => callback(null));
+      return true;
+    } catch (error) {
+      if (callback) queueMicrotask(() => callback(error)); else throw error;
+      return false;
+    }
+  };
+  Object.defineProperty(proc, "send", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (!isForkChild()) return undefined;
+      startForkIpc();
+      return forkSend;
+    },
+  });
+  Object.defineProperty(proc, "connected", {
+    enumerable: true,
+    configurable: true,
+    get() { return isForkChild() ? forkConnected : undefined; },
+  });
+  proc.disconnect = function () {
+    if (!isForkChild() || !forkConnected) return;
+    forkConnected = false;
+    queueMicrotask(() => proc.emit("disconnect"));
+  };
+  const processOn = proc.on;
+  proc.on = proc.addListener = function (event, listener) {
+    if (event === "message" || event === "disconnect") startForkIpc();
+    return processOn.call(this, event, listener);
+  };
+
   // Semi-internal underscore surface Node exposes as own keys. Honest no-ops / empty collectors;
   // _rawDebug writes straight to stderr (its one real behavior).
   proc._getActiveHandles = () => [];

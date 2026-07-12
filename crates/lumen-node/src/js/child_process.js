@@ -1,10 +1,11 @@
 // node:child_process over the __child native ops (real std::process subprocesses). spawn returns a
 // ChildProcess (EventEmitter) whose stdout/stderr are Readable node streams pumped by one-shot
 // reads and whose stdin is a Writable; exec*/spawnSync build on that or the synchronous execSync
-// op. `kill()` sends SIGKILL (std can't send arbitrary signals). `fork` is not supported (there is
-// no node binary to re-exec).
+// op. `kill()` sends SIGKILL (std can't send arbitrary signals). `fork` re-execs the current Lumen
+// binary and carries JSON-framed IPC over its piped stdin/stdout.
 
 const EventEmitter = __builtins.get("events");
+const IPC_PREFIX = "\x1eLUMEN_IPC ";
 
 // Normalize the stdio option to a 3-tuple of "pipe" | "inherit" | "ignore".
 function normalizeStdio(stdio) {
@@ -25,17 +26,39 @@ function envPairs(env) {
   return Object.keys(env).map((k) => [k, String(env[k])]);
 }
 
-function makeReadable(childId, which) {
+function makeReadable(childId, which, onIpcMessage) {
   const { Readable } = __builtins.get("stream");
   const stream = new Readable({ read() {} });
+  let pending = "";
   (async () => {
     for (;;) {
       const chunk = await new Promise((resolve, reject) => __child.read(childId, which, resolve, reject));
       if (chunk === null) {
+        if (pending) stream.push(Buffer.from(pending));
         stream.push(null);
         return;
       }
-      stream.push(Buffer.from(chunk));
+      if (!onIpcMessage) {
+        stream.push(Buffer.from(chunk));
+        continue;
+      }
+      pending += Buffer.from(chunk).toString("utf8");
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) break;
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        if (line.startsWith(IPC_PREFIX)) {
+          try {
+            onIpcMessage(JSON.parse(line.slice(IPC_PREFIX.length)));
+          } catch (error) {
+            stream.destroy(error);
+            return;
+          }
+        } else {
+          stream.push(Buffer.from(line + "\n"));
+        }
+      }
     }
   })().catch((e) => stream.destroy(e));
   return stream;
@@ -56,7 +79,7 @@ function makeWritable(childId) {
 }
 
 class ChildProcess extends EventEmitter {
-  constructor(childId, pid, stdio) {
+  constructor(childId, pid, stdio, onIpcMessage) {
     super();
     this._id = childId;
     this.pid = pid;
@@ -64,9 +87,10 @@ class ChildProcess extends EventEmitter {
     this.exitCode = null;
     this.signalCode = null;
     this.stdin = stdio[0] === "pipe" ? makeWritable(childId) : null;
-    this.stdout = stdio[1] === "pipe" ? makeReadable(childId, 1) : null;
+    this.stdout = stdio[1] === "pipe" ? makeReadable(childId, 1, onIpcMessage) : null;
     this.stderr = stdio[2] === "pipe" ? makeReadable(childId, 2) : null;
     this.stdio = [this.stdin, this.stdout, this.stderr];
+    this.connected = typeof onIpcMessage === "function";
     queueMicrotask(() => this.emit("spawn"));
     new Promise((resolve, reject) => __child.wait(childId, resolve, reject)).then(
       (code) => {
@@ -91,6 +115,39 @@ class ChildProcess extends EventEmitter {
     // ref/unref per request, so both must be real.
     __child.unref(this._id);
   }
+  send(message, sendHandle, options, callback) {
+    if (typeof sendHandle === "function") callback = sendHandle;
+    else if (typeof options === "function") callback = options;
+    if (sendHandle != null && typeof sendHandle !== "function") {
+      const error = new Error("child_process.fork handle transfer is not supported in lumen");
+      if (callback) queueMicrotask(() => callback(error));
+      else throw error;
+      return false;
+    }
+    if (!this.connected || !this.stdin) {
+      const error = new Error("IPC channel is closed");
+      error.code = "ERR_IPC_CHANNEL_CLOSED";
+      if (callback) queueMicrotask(() => callback(error));
+      else this.emit("error", error);
+      return false;
+    }
+    let frame;
+    try {
+      frame = IPC_PREFIX + JSON.stringify(message === undefined ? null : message) + "\n";
+    } catch (error) {
+      if (callback) queueMicrotask(() => callback(error));
+      else throw error;
+      return false;
+    }
+    this.stdin.write(frame, callback);
+    return true;
+  }
+  disconnect() {
+    if (!this.connected) return;
+    this.connected = false;
+    if (this.stdin) this.stdin.end();
+    queueMicrotask(() => this.emit("disconnect"));
+  }
 }
 
 function spawn(command, args, options) {
@@ -108,7 +165,12 @@ function spawn(command, args, options) {
   }
   const stdio = normalizeStdio(options.stdio);
   const info = __child.spawn(cmd, argv, options.cwd, envPairs(options.env), stdio);
-  return new ChildProcess(info.childId, info.pid, stdio);
+  let child;
+  const onIpcMessage = options._ipc
+    ? (message) => child.emit("message", message, null)
+    : undefined;
+  child = new ChildProcess(info.childId, info.pid, stdio, onIpcMessage);
+  return child;
 }
 
 // Collect a ChildProcess's stdout/stderr and invoke a Node-style callback.
@@ -230,13 +292,22 @@ function spawnSync(command, args, options) {
   return makeSyncResult(res, options.encoding);
 }
 
-function fork() {
-  throw new Error("child_process.fork is not supported (lumen has no node binary to re-exec)");
+function fork(modulePath, args, options) {
+  if (!Array.isArray(args)) {
+    options = args;
+    args = [];
+  }
+  options = options || {};
+  const env = { ...process.env, ...(options.env || {}), LUMEN_FORK_IPC: "1" };
+  return spawn(process.execPath, [String(modulePath), ...(args || []).map(String)], {
+    ...options,
+    env,
+    stdio: ["pipe", "pipe", options.silent ? "pipe" : "inherit"],
+    _ipc: true,
+  });
 }
 
-// _forkChild is Node's internal hook that a forked child calls to attach its IPC channel to the
-// inherited fd. lumen never spawns a child via fork(), so a child process is never in this state —
-// the hook exists for parity and is an honest no-op.
+// The child-side channel is installed by the process bootstrap in stdlib_extras.js.
 function _forkChild() {}
 
 __builtins.set("child_process", {
