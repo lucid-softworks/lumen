@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,6 +11,9 @@ pub const TLS_OPS: &[OpDecl] = ops![
     "read" (3) => op_read,
     "write" (4) => op_write,
     "close" (1) => op_close,
+    "listen" (4) => op_listen,
+    "accept" (3) => op_accept,
+    "closeServer" (1) => op_close_server,
 ];
 
 struct Entry {
@@ -22,6 +25,16 @@ struct Entry {
 pub struct TlsRegistry {
     next: u64,
     sockets: std::collections::HashMap<u64, Entry>,
+    next_listener: u64,
+    listeners: std::collections::HashMap<u64, ListenerEntry>,
+}
+
+struct ListenerEntry {
+    listener: Arc<TcpListener>,
+    closed: Arc<AtomicBool>,
+    local: SocketAddr,
+    certificate: Arc<Vec<u8>>,
+    private_key: Arc<Vec<u8>>,
 }
 
 struct Connected {
@@ -77,7 +90,11 @@ fn op_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Valu
 
 fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
     let connected = *payload.downcast::<Result<Connected, String>>().expect("TLS connect payload");
-    let Connected { stream, local, peer, protocol, cipher } = connected.map_err(|message| ctx.make_error("Error", message))?;
+    register_connected(ctx, connected.map_err(|message| ctx.make_error("Error", message))?)
+}
+
+fn register_connected(ctx: &mut Ctx, connected: Connected) -> Result<Vec<Value>, Value> {
+    let Connected { stream, local, peer, protocol, cipher } = connected;
     let registry = ctx.host_mut::<TlsRegistry>().expect("TLS registry");
     let id = registry.next;
     registry.next += 1;
@@ -87,6 +104,85 @@ fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resu
         Value::from_string(peer.ip().to_string()), Value::Num(peer.port() as f64),
         Value::from_string(protocol), Value::from_string(cipher),
     ])
+}
+
+fn op_listen(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let host = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let port = args.get(1).and_then(Value::as_num_opt).unwrap_or(0.0) as u16;
+    let certificate = ctx.typed_array_bytes(args.get(2).unwrap_or(&Value::Undefined))
+        .ok_or_else(|| ctx.make_error("TypeError", "TLS server certificate must be bytes"))?;
+    let private_key = ctx.typed_array_bytes(args.get(3).unwrap_or(&Value::Undefined))
+        .ok_or_else(|| ctx.make_error("TypeError", "TLS server private key must be bytes"))?;
+    let listener = TcpListener::bind((if host.is_empty() { "0.0.0.0" } else { &host }, port))
+        .map_err(|error| ctx.make_error("Error", format!("TLS listen: {error}")))?;
+    let local = listener.local_addr().map_err(|error| ctx.make_error("Error", error.to_string()))?;
+    let registry = ctx.host_mut::<TlsRegistry>().expect("TLS registry");
+    let id = registry.next_listener;
+    registry.next_listener += 1;
+    registry.listeners.insert(id, ListenerEntry {
+        listener: Arc::new(listener), closed: Arc::new(AtomicBool::new(false)), local,
+        certificate: Arc::new(certificate), private_key: Arc::new(private_key),
+    });
+    let result = Value::Obj(ctx.new_object());
+    let _ = ctx.set_member(&result, "serverId", Value::Num(id as f64));
+    let _ = ctx.set_member(&result, "address", Value::from_string(local.ip().to_string()));
+    let _ = ctx.set_member(&result, "port", Value::Num(local.port() as f64));
+    Ok(result)
+}
+
+enum AcceptResult { Connected(Connected), Closed, Error(String) }
+
+fn op_accept(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u64;
+    let (resolve, reject) = callbacks(ctx, args.get(1), args.get(2))?;
+    let found = ctx.host_mut::<TlsRegistry>().and_then(|registry| registry.listeners.get(&id)).map(|entry| (
+        entry.listener.clone(), entry.closed.clone(), entry.certificate.clone(), entry.private_key.clone()
+    ));
+    let Some((listener, closed, certificate, private_key)) = found else {
+        CallbackQueue::enqueue(ctx.op_state(), resolve, vec![Value::Null]);
+        return Ok(Value::Undefined);
+    };
+    let task = ctx.host_mut::<TaskRegistry>().expect("task registry").register(resolve, Some(reject), decode_accept);
+    completions(ctx).run_blocking(task, move || {
+        let result = match listener.accept() {
+            Ok((tcp, peer)) if !closed.load(Ordering::SeqCst) => {
+                let local = tcp.local_addr().unwrap_or_else(|_| listener.local_addr().unwrap());
+                tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
+                match lumen_tls::TlsStream::accept(tcp, &certificate, &private_key) {
+                    Ok(stream) => {
+                        let protocol = stream.protocol();
+                        let cipher = stream.cipher();
+                        AcceptResult::Connected(Connected { stream, local, peer, protocol, cipher })
+                    }
+                    Err(error) => AcceptResult::Error(error),
+                }
+            }
+            _ => AcceptResult::Closed,
+        };
+        Box::new(result)
+    });
+    Ok(Value::Undefined)
+}
+
+fn decode_accept(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
+    match *payload.downcast::<AcceptResult>().expect("TLS accept payload") {
+        AcceptResult::Connected(connected) => register_connected(ctx, connected),
+        AcceptResult::Closed => Ok(vec![Value::Null]),
+        AcceptResult::Error(message) => Err(ctx.make_error("Error", message)),
+    }
+}
+
+fn op_close_server(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u64;
+    let entry = ctx.host_mut::<TlsRegistry>().and_then(|registry| registry.listeners.remove(&id));
+    if let Some(entry) = entry {
+        entry.closed.store(true, Ordering::SeqCst);
+        let address = if entry.local.ip().is_unspecified() {
+            SocketAddr::new(if entry.local.is_ipv6() { IpAddr::V6(Ipv6Addr::LOCALHOST) } else { IpAddr::V4(Ipv4Addr::LOCALHOST) }, entry.local.port())
+        } else { entry.local };
+        let _ = TcpStream::connect_timeout(&address, Duration::from_millis(100));
+    }
+    Ok(Value::Undefined)
 }
 
 fn op_read(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {

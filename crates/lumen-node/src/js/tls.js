@@ -3,6 +3,7 @@
 {
   const base = __builtins.get("tls");
   const { Duplex } = __builtins.get("stream");
+  const EventEmitter = __builtins.get("events");
 
   class TLSSocket extends Duplex {
     constructor(socket, options = {}) {
@@ -30,6 +31,7 @@
       this._cipher = null;
       this._closeEmitted = false;
       this._sawEof = false;
+      this._serverSide = false;
     }
 
     _connect(options, callback) {
@@ -43,24 +45,29 @@
       new Promise((resolve, reject) => __tls.connect(host, port, servername, (...descriptor) => resolve(descriptor), reject)).then(
         descriptor => {
           if (this.destroyed) { __tls.close(descriptor[0]); return; }
-          this._id = descriptor[0];
-          this.localAddress = descriptor[1];
-          this.localPort = descriptor[2];
-          this.remoteAddress = descriptor[3];
-          this.remotePort = descriptor[4];
-          this._protocol = descriptor[5];
-          this._cipher = descriptor[6];
-          this.connecting = false;
-          this.pending = false;
-          this.authorized = true;
+          this._adopt(descriptor);
           this.emit("connect");
           this.emit("secureConnect");
           this.emit("ready");
-          this._pump();
         },
         error => this.destroy(error),
       );
       return this;
+    }
+
+    _adopt(descriptor, serverSide = false) {
+      this._id = descriptor[0];
+      this.localAddress = descriptor[1];
+      this.localPort = descriptor[2];
+      this.remoteAddress = descriptor[3];
+      this.remotePort = descriptor[4];
+      this._protocol = descriptor[5];
+      this._cipher = descriptor[6];
+      this.connecting = false;
+      this.pending = false;
+      this.authorized = true;
+      this._serverSide = serverSide;
+      this._pump();
     }
 
     async _pump() {
@@ -86,7 +93,10 @@
       __tls.write(this._id, bytes, length => { this.bytesWritten += length; callback(); }, callback);
     }
 
-    _final(callback) { callback(); }
+    _final(callback) {
+      callback();
+      if (this._serverSide) this._finishClose();
+    }
 
     destroy(error) {
       if (this.destroyed) return this;
@@ -151,5 +161,76 @@
     return new TLSSocket()._connect(options, callback);
   }
 
-  __builtins.set("tls", { ...base, connect, TLSSocket });
+  class SecureContext {
+    constructor(options = {}) { this.context = { ...options }; }
+  }
+  function createSecureContext(options) { return new SecureContext(options); }
+
+  class Server extends EventEmitter {
+    constructor(options, listener) {
+      super();
+      if (typeof options === "function") { listener = options; options = {}; }
+      this.options = options || {};
+      this._id = null;
+      this._address = null;
+      this.listening = false;
+      this._connections = new Set();
+      if (listener) this.on("secureConnection", listener);
+    }
+    listen(...args) {
+      let port = 0, host = "0.0.0.0", callback;
+      if (args[0] && typeof args[0] === "object") {
+        port = Number(args[0].port || 0);
+        host = String(args[0].host || host);
+        callback = typeof args[1] === "function" ? args[1] : undefined;
+      } else {
+        port = Number(args[0] || 0);
+        if (typeof args[1] === "string") host = args[1];
+        callback = args.find(value => typeof value === "function");
+      }
+      if (callback) this.once("listening", callback);
+      const context = this.options.secureContext && this.options.secureContext.context || this.options;
+      const cert = Array.isArray(context.cert) ? context.cert[0] : context.cert;
+      const key = Array.isArray(context.key) ? context.key[0] : context.key;
+      if (cert == null || key == null) throw new TypeError("tls.createServer requires cert and key options");
+      const info = __tls.listen(host, port, Buffer.from(cert), Buffer.from(key));
+      this._id = info.serverId;
+      this._address = { address: info.address, port: info.port, family: info.address.includes(":") ? "IPv6" : "IPv4" };
+      this.listening = true;
+      queueMicrotask(() => this.emit("listening"));
+      this._acceptLoop();
+      return this;
+    }
+    async _acceptLoop() {
+      while (this._id !== null) {
+        try {
+          const descriptor = await new Promise((resolve, reject) => __tls.accept(this._id, (...values) => resolve(values.length ? values : null), reject));
+          if (!descriptor || this._id === null) return;
+          const socket = new TLSSocket();
+          socket._adopt(descriptor, true);
+          this._connections.add(socket);
+          socket.once("close", () => this._connections.delete(socket));
+          this.emit("secureConnection", socket);
+        } catch (error) {
+          if (this._id !== null) this.emit("tlsClientError", error);
+        }
+      }
+    }
+    address() { return this._address; }
+    close(callback) {
+      if (callback) this.once("close", callback);
+      const id = this._id;
+      this._id = null;
+      this.listening = false;
+      if (id !== null) __tls.closeServer(id);
+      queueMicrotask(() => this.emit("close"));
+      return this;
+    }
+    getConnections(callback) { queueMicrotask(() => callback(null, this._connections.size)); return this; }
+    ref() { return this; }
+    unref() { return this; }
+  }
+  function createServer(options, listener) { return new Server(options, listener); }
+
+  __builtins.set("tls", { ...base, connect, TLSSocket, Server, createServer, SecureContext, createSecureContext });
 }
