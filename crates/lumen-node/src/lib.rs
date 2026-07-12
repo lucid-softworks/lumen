@@ -32,6 +32,7 @@ mod dylib;
 mod ffi;
 mod napi;
 mod net;
+mod password;
 mod sqlite;
 
 /// The runtime's blocking-work spawner (threadpool), for async ops.
@@ -134,6 +135,7 @@ pub fn extension() -> Extension {
             ("__net", net::NET_OPS),
             ("__udp", net::UDP_OPS),
             ("__crypto", crypto::CRYPTO_OPS),
+            ("__password", password::PASSWORD_OPS),
             ("__sqlite", sqlite::SQLITE_OPS),
             (
                 "__dns",
