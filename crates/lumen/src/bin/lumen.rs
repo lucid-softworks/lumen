@@ -1,5 +1,6 @@
 //! Minimal shell: evaluate JS files in one engine, printing console output as it appears.
 //! Usage: lumen [--module] [--tier=interp|bytecode|jit] [--tier-threshold=N] [file.js ...]
+//!        lumen -h | --help       print the help menu (all flags and env vars)
 //!        lumen -v | --version    print the version
 //!
 //! With no files, reads from stdin: an interactive REPL when stdin is a terminal (one realm
@@ -26,6 +27,10 @@ fn main() {
     let args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|a| {
+            if a == "-h" || a == "--help" {
+                print_help();
+                std::process::exit(0);
+            }
             if a == "-v" || a == "--version" {
                 // The nightly workflow sets LUMEN_VERSION_SUFFIX to "-nightly (<short sha>)".
                 println!(
@@ -110,6 +115,46 @@ fn main() {
             }
         }
     }
+}
+
+/// Print the `--help` menu: every flag the shell parses plus the runtime env vars it honours.
+/// Keep this in sync with the argument loop in `main` and the tier env vars read by the engine.
+fn print_help() {
+    let version = env!("CARGO_PKG_VERSION");
+    print!(
+        "\
+lumen {version} — a JavaScript engine
+
+Usage:
+  lumen [options] [file.js ...]   evaluate each file in one engine
+  lumen [options] < script.js     evaluate stdin as one script
+  lumen [-i] [options]            interactive REPL (default when stdin is a tty)
+
+Options:
+  -h, --help              Print this help and exit
+  -v, --version           Print the version and exit
+      --module            Evaluate each file as an ES module (relative imports
+                          resolve against the importing file on disk)
+  -i, --interactive       Force the REPL even when stdin is not a terminal
+      --tier=TIER         Execution tier: interp | bytecode | jit
+                          (default: jit; falls back to the bytecode VM where the
+                          JIT is unavailable)
+      --tier-threshold=N  Calls before an eligible function tiers up to a
+                          compiled tier; 0 = immediately (default: 8)
+
+Environment:
+  LUMEN_TIER=TIER         Default execution tier (--tier overrides it)
+  LUMEN_TIER_THRESHOLD=N  Default tier-up threshold (--tier-threshold overrides it)
+
+Diagnostics (env, unstable):
+  LUMEN_TIER_LOG=1        Report the AST construct a compile bail came from
+  LUMEN_JIT_DUMP=SUBSTR   Dump the op stream of JIT'd chunks whose slot names match
+  LUMEN_JIT_CODEDUMP=SUB  Dump the finished machine code of matching chunks (hex)
+  LUMEN_JIT_OPSTAT=1      Tally ops that reach the JIT slow path (top at exit; =2 pinpoints sites)
+  LUMEN_JIT_CALLSTAT=1    Tally calls that reach the inline-cache call helper
+  LUMEN_JIT_LOOPLOG=1     Trace JIT loop back-edge compilation
+"
+    );
 }
 
 /// Interactive prompt: one engine (realm) for the whole session. Input that parses but for
