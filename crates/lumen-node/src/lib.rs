@@ -34,6 +34,7 @@ mod napi;
 mod net;
 mod password;
 mod sqlite;
+mod tls;
 
 /// The runtime's blocking-work spawner (threadpool), for async ops.
 fn spawn_handle(ctx: &mut Ctx) -> SpawnHandle {
@@ -134,6 +135,7 @@ pub fn extension() -> Extension {
             ("__child", child::CHILD_OPS),
             ("__net", net::NET_OPS),
             ("__udp", net::UDP_OPS),
+            ("__tls", tls::TLS_OPS),
             ("__crypto", crypto::CRYPTO_OPS),
             ("__password", password::PASSWORD_OPS),
             ("__sqlite", sqlite::SQLITE_OPS),
@@ -150,6 +152,7 @@ pub fn extension() -> Extension {
             state.put(child::ChildRegistry::default());
             state.put(net::NetRegistry::default());
             state.put(net::DgramRegistry::default());
+            state.put(tls::TlsRegistry::default());
         }),
         js_init: Some(JS_GLUE),
         js_init_snapshot: Some(JS_GLUE_SNAPSHOT),

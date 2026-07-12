@@ -34,6 +34,9 @@ type SslWrite = unsafe extern "C" fn(*mut Ssl, *const c_void, c_int) -> c_int;
 type SslShutdown = unsafe extern "C" fn(*mut Ssl) -> c_int;
 type SslGetError = unsafe extern "C" fn(*const Ssl, c_int) -> c_int;
 type VerifyResult = unsafe extern "C" fn(*const Ssl) -> c_long;
+type SslGetVersion = unsafe extern "C" fn(*const Ssl) -> *const c_char;
+type SslGetCipher = unsafe extern "C" fn(*const Ssl) -> *const c_void;
+type CipherGetName = unsafe extern "C" fn(*const c_void) -> *const c_char;
 type ErrGetError = unsafe extern "C" fn() -> u64;
 type ErrErrorString = unsafe extern "C" fn(u64, *mut c_char, usize);
 
@@ -55,6 +58,9 @@ struct Api {
     ssl_shutdown: SslShutdown,
     ssl_get_error: SslGetError,
     verify_result: VerifyResult,
+    ssl_get_version: SslGetVersion,
+    ssl_get_cipher: SslGetCipher,
+    cipher_get_name: CipherGetName,
     err_get_error: ErrGetError,
     err_error_string: ErrErrorString,
 }
@@ -86,6 +92,9 @@ impl Api {
                 ssl_shutdown: ssl.function("SSL_shutdown")?,
                 ssl_get_error: ssl.function("SSL_get_error")?,
                 verify_result: ssl.function("SSL_get_verify_result")?,
+                ssl_get_version: ssl.function("SSL_get_version")?,
+                ssl_get_cipher: ssl.function("SSL_get_current_cipher")?,
+                cipher_get_name: ssl.function("SSL_CIPHER_get_name")?,
                 err_get_error: crypto.function("ERR_get_error")?,
                 err_error_string: crypto.function("ERR_error_string_n")?,
                 _ssl_lib: ssl,
@@ -149,6 +158,18 @@ impl TlsStream {
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.stream.set_read_timeout(timeout)
+    }
+
+    pub fn protocol(&self) -> String {
+        let value = unsafe { (self.api.ssl_get_version)(self.ssl) };
+        if value.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned() }
+    }
+
+    pub fn cipher(&self) -> String {
+        let cipher = unsafe { (self.api.ssl_get_cipher)(self.ssl) };
+        if cipher.is_null() { return String::new(); }
+        let value = unsafe { (self.api.cipher_get_name)(cipher) };
+        if value.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned() }
     }
 
     fn io_error(&self, result: c_int) -> std::io::Error {
