@@ -649,14 +649,15 @@ __builtins.set("tty", {
 }
 
 // ---- node:zlib --------------------------------------------------------------------------------
-// Real gzip/deflate/Brotli/crc32 over shared native codec ops: sync, async-callback, and
-// Transform-stream forms, plus the full constants/codes tables. Zstd remains an honest stub.
+// Real gzip/deflate/Brotli/Zstd/crc32 over shared native codec ops: sync, async-callback, and
+// Transform-stream forms, plus the full constants/codes tables.
 {
   const codecs = {
     gzip: __zlib.gzip, gunzip: __zlib.gunzip,
     deflate: __zlib.deflate, inflate: __zlib.inflate,
     deflateRaw: __zlib.deflateRaw, inflateRaw: __zlib.inflateRaw,
     brotliCompress: __zlib.brotliCompress, brotliDecompress: __zlib.brotliDecompress,
+    zstdCompress: __zlib.zstdCompress, zstdDecompress: __zlib.zstdDecompress,
   };
 
   const toBuf = (input, enc) => (input instanceof Uint8Array ? input : Buffer.from(input, enc));
@@ -729,38 +730,6 @@ __builtins.set("tty", {
 
   // Real CRC-32 (Node's zlib.crc32(data[, value])), chainable via the optional seed.
   zlib.crc32 = (data, value = 0) => __zlib.crc32(toBuf(data), value >>> 0);
-
-  // Unsupported codecs: the API surface exists so feature
-  // detection and `promisify` work, but every real call throws (sync) or rejects (async) rather
-  // than producing bogus output.
-  const makeUnsupported = (label) => {
-    const err = () => new Error(`node:zlib ${label} is not supported in lumen`);
-    return {
-      throwFn: () => {
-        throw err();
-      },
-      asyncFn: (input, opts, cb) => {
-        if (typeof opts === "function") cb = opts;
-        queueMicrotask(() => cb(err()));
-      },
-      klass: class {
-        constructor() {
-          throw err();
-        }
-      },
-    };
-  };
-  const zstd = makeUnsupported("Zstd");
-  Object.assign(zlib, {
-    ZstdCompress: zstd.klass,
-    ZstdDecompress: zstd.klass,
-    createZstdCompress: zstd.throwFn,
-    createZstdDecompress: zstd.throwFn,
-    zstdCompressSync: zstd.throwFn,
-    zstdDecompressSync: zstd.throwFn,
-    zstdCompress: zstd.asyncFn,
-    zstdDecompress: zstd.asyncFn,
-  });
 
   // The full constants table Node exposes (copied verbatim from Node v22), and the bidirectional
   // return-code map (`codes[Z_OK] === 0` and `codes[0] === "Z_OK"`).

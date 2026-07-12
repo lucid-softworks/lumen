@@ -1318,6 +1318,20 @@ const throwClass = (name) => class { constructor() { throw new Error(`${name} is
 // bun:ffi is registered before this module; Bun.FFI is the same live surface.
 const FFI = __builtins.get("bun:ffi");
 
+// ---- Zstandard --------------------------------------------------------------------------------
+function zstdCompressSync(input) {
+  return Uint8Array.from(__zlib.zstdCompress(toU8(input)));
+}
+function zstdDecompressSync(input) {
+  return Uint8Array.from(__zlib.zstdDecompress(toU8(input)));
+}
+function zstdCompress(input) {
+  return Promise.resolve().then(() => zstdCompressSync(input));
+}
+function zstdDecompress(input) {
+  return Promise.resolve().then(() => zstdDecompressSync(input));
+}
+
 // ---- semver -----------------------------------------------------------------------------------
 // node-semver-compatible satisfies() and order(). Supports ^ ~ x-ranges hyphen-ranges and the
 // comparison operators, with the standard prerelease-tag ordering and gating.
@@ -1500,10 +1514,10 @@ const Bun = {
   SQL: throwClass("Bun.SQL"),
   sql: undefined,
   postgres: notImpl("Bun.postgres"),
-  zstdCompressSync: notImpl("Bun.zstdCompressSync (no zstd codec)"),
-  zstdDecompressSync: notImpl("Bun.zstdDecompressSync (no zstd codec)"),
-  zstdCompress: notImpl("Bun.zstdCompress (no zstd codec)"),
-  zstdDecompress: notImpl("Bun.zstdDecompress (no zstd codec)"),
+  zstdCompressSync,
+  zstdDecompressSync,
+  zstdCompress,
+  zstdDecompress,
 };
 
 // `redis`/`s3`/`sql` are lazy throwing getters in Bun; expose them as throwing accessors so the
