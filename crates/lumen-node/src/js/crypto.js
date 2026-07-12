@@ -922,6 +922,90 @@ function diffieHellman(options) {
   throw new Error("diffieHellman keys must use the same supported curve");
 }
 
+const MODP14_HEX = "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aacaa68ffffffffffffffff";
+
+function dhBigInt(value, encoding) {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return BigInt(value);
+  return bytesToBigIntBE(toBytes(value, encoding));
+}
+class DiffieHellman {
+  constructor(prime, generator = 2) {
+    this._prime = prime;
+    this._generator = generator;
+    this._private = null;
+    this._public = null;
+    this.verifyError = 0;
+  }
+  generateKeys(encoding) {
+    if (this._private === null) {
+      const size = Math.ceil(bitLength(this._prime) / 8);
+      do {
+        this._private = 2n + bytesToBigIntBE(randomBytes(size)) % (this._prime - 3n);
+      } while (this._private <= 1n);
+    }
+    this._public = modPow(this._generator, this._private, this._prime);
+    return this.getPublicKey(encoding);
+  }
+  computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
+    if (this._private === null) throw new Error("No private key - did you forget to generate one?");
+    const other = dhBigInt(otherPublicKey, inputEncoding);
+    if (other <= 1n || other >= this._prime - 1n) throw new Error("Supplied key is too small");
+    const bytes = Buffer.from(bigIntToBytesBE(modPow(other, this._private, this._prime), Math.ceil(bitLength(this._prime) / 8)));
+    return outputEncoding ? bytes.toString(outputEncoding) : bytes;
+  }
+  getPrime(encoding) {
+    const bytes = Buffer.from(bigIntToBytesBE(this._prime, Math.ceil(bitLength(this._prime) / 8)));
+    return encoding ? bytes.toString(encoding) : bytes;
+  }
+  getGenerator(encoding) {
+    const bytes = Buffer.from(bigIntToBytesBE(this._generator));
+    return encoding ? bytes.toString(encoding) : bytes;
+  }
+  getPublicKey(encoding) {
+    if (this._public === null) throw new Error("No public key - did you forget to generate one?");
+    const bytes = Buffer.from(bigIntToBytesBE(this._public, Math.ceil(bitLength(this._prime) / 8)));
+    return encoding ? bytes.toString(encoding) : bytes;
+  }
+  getPrivateKey(encoding) {
+    if (this._private === null) throw new Error("No private key - did you forget to generate one?");
+    const bytes = Buffer.from(bigIntToBytesBE(this._private));
+    return encoding ? bytes.toString(encoding) : bytes;
+  }
+  setPublicKey(key, encoding) { this._public = dhBigInt(key, encoding); }
+  setPrivateKey(key, encoding) {
+    const value = dhBigInt(key, encoding);
+    if (value <= 1n || value >= this._prime - 1n) throw new RangeError("Private key is not valid for specified group");
+    this._private = value;
+    this._public = modPow(this._generator, value, this._prime);
+  }
+}
+class DiffieHellmanGroup extends DiffieHellman {
+  constructor(name) {
+    const normalized = String(name).toLowerCase();
+    if (normalized !== "modp14") {
+      throw new Error(`Unknown DH group '${name}' (lumen supports modp14)`);
+    }
+    super(BigInt(`0x${MODP14_HEX}`), 2n);
+  }
+}
+function createDiffieHellman(prime, primeEncoding, generator, generatorEncoding) {
+  if (typeof prime === "number") {
+    const p = generatePrimeSync(prime, { bigint: true, safe: true });
+    return new DiffieHellman(p, typeof primeEncoding === "number" ? BigInt(primeEncoding) : 2n);
+  }
+  if (typeof primeEncoding === "number" || typeof primeEncoding === "bigint") {
+    generator = primeEncoding;
+    primeEncoding = undefined;
+  }
+  const p = dhBigInt(prime, primeEncoding);
+  const g = generator === undefined ? 2n : dhBigInt(generator, generatorEncoding);
+  if (p <= 4n || g <= 1n || g >= p) throw new RangeError("Invalid Diffie-Hellman parameters");
+  return new DiffieHellman(p, g);
+}
+function createDiffieHellmanGroup(name) { return new DiffieHellmanGroup(name); }
+function getDiffieHellman(name) { return new DiffieHellmanGroup(name); }
+
 // ---- Ed25519 (RFC 8032) / X25519 (RFC 7748) -----------------------------------------------------
 
 const ED_P = (1n << 255n) - 19n;
@@ -2347,16 +2431,15 @@ const crypto = {
   createPrivateKey,
   generateKeyPair,
   generateKeyPairSync,
-  // -- real: P-256 ECDH and KeyObject diffieHellman (P-256/X25519) --
+  // -- real: finite-field DH, P-256 ECDH, and KeyObject diffieHellman (P-256/X25519) --
+  DiffieHellman,
+  DiffieHellmanGroup,
   ECDH,
+  createDiffieHellman,
+  createDiffieHellmanGroup,
   createECDH,
+  getDiffieHellman,
   diffieHellman,
-  // -- stubs: finite-field Diffie-Hellman --
-  DiffieHellman: notImpl("DiffieHellman"),
-  DiffieHellmanGroup: notImpl("DiffieHellmanGroup"),
-  createDiffieHellman: notImpl("createDiffieHellman"),
-  createDiffieHellmanGroup: notImpl("createDiffieHellmanGroup"),
-  getDiffieHellman: notImpl("getDiffieHellman"),
 
   // -- real: probable primes (Miller-Rabin over BigInt) --
   checkPrime,
