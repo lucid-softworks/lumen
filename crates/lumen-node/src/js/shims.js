@@ -649,15 +649,14 @@ __builtins.set("tty", {
 }
 
 // ---- node:zlib --------------------------------------------------------------------------------
-// Real gzip/deflate/crc32 over the shared DEFLATE codec (__zlib native ops): sync, async-callback,
-// and Transform-stream (Gzip/createGzip/…) forms, plus the full constants/codes tables. Brotli and
-// Zstd have no codec, so their functions/classes exist (feature detection and `promisify` work)
-// but throw (sync) or reject (async) when actually invoked, rather than emit wrong bytes.
+// Real gzip/deflate/Brotli/crc32 over shared native codec ops: sync, async-callback, and
+// Transform-stream forms, plus the full constants/codes tables. Zstd remains an honest stub.
 {
   const codecs = {
     gzip: __zlib.gzip, gunzip: __zlib.gunzip,
     deflate: __zlib.deflate, inflate: __zlib.inflate,
     deflateRaw: __zlib.deflateRaw, inflateRaw: __zlib.inflateRaw,
+    brotliCompress: __zlib.brotliCompress, brotliDecompress: __zlib.brotliDecompress,
   };
 
   const toBuf = (input, enc) => (input instanceof Uint8Array ? input : Buffer.from(input, enc));
@@ -731,7 +730,7 @@ __builtins.set("tty", {
   // Real CRC-32 (Node's zlib.crc32(data[, value])), chainable via the optional seed.
   zlib.crc32 = (data, value = 0) => __zlib.crc32(toBuf(data), value >>> 0);
 
-  // Unsupported codecs (no Brotli/Zstd implementation): the API surface exists so feature
+  // Unsupported codecs: the API surface exists so feature
   // detection and `promisify` work, but every real call throws (sync) or rejects (async) rather
   // than producing bogus output.
   const makeUnsupported = (label) => {
@@ -751,17 +750,8 @@ __builtins.set("tty", {
       },
     };
   };
-  const brotli = makeUnsupported("Brotli");
   const zstd = makeUnsupported("Zstd");
   Object.assign(zlib, {
-    BrotliCompress: brotli.klass,
-    BrotliDecompress: brotli.klass,
-    createBrotliCompress: brotli.throwFn,
-    createBrotliDecompress: brotli.throwFn,
-    brotliCompressSync: brotli.throwFn,
-    brotliDecompressSync: brotli.throwFn,
-    brotliCompress: brotli.asyncFn,
-    brotliDecompress: brotli.asyncFn,
     ZstdCompress: zstd.klass,
     ZstdDecompress: zstd.klass,
     createZstdCompress: zstd.throwFn,
