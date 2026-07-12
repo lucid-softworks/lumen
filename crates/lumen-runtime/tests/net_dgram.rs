@@ -422,8 +422,7 @@ fn dgram_errors_and_option_paths() {
             u.setMulticastLoopback(true);
             u.addMembership("224.0.0.114");
             u.dropMembership("224.0.0.114");
-            try { u.setMulticastInterface("0.0.0.0"); }
-            catch (e) { console.log("mcast iface honest:", /not supported in lumen/.test(e.message)); }
+            console.log("mcast iface:", u.setMulticastInterface("0.0.0.0") === u);
             try { u.setTTL(0); } catch (e) { console.log("ttl range:", e.code); }
             u.close(() => {
                 try { u.send("x", 9, "127.0.0.1"); }
@@ -438,7 +437,7 @@ fn dgram_errors_and_option_paths() {
             "bad type: ERR_SOCKET_BAD_TYPE",
             "ttl: 32",
             "mttl: 2",
-            "mcast iface honest: true",
+            "mcast iface: true",
             "ttl range: ERR_OUT_OF_RANGE",
             "send after close: ERR_SOCKET_DGRAM_NOT_RUNNING",
         ]
