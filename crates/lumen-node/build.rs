@@ -38,6 +38,7 @@ const JS_FILES: &[GlueFile] = &[
     // extend the `stream`/`events` builtins, so it must load after them.
     GlueFile { name: "fs.js", wrap: false },
     GlueFile { name: "http.js", wrap: true },
+    GlueFile { name: "http2_codec.js", wrap: true },
     GlueFile { name: "http2.js", wrap: true },
     GlueFile { name: "child_process.js", wrap: true },
     GlueFile { name: "dns.js", wrap: true },
