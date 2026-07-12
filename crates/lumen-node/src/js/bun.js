@@ -1,8 +1,8 @@
 // The `bun` module and the `Bun` global (same object identity: require("bun") === globalThis.Bun).
 // Parity target is Bun v1.2.21's require("bun") surface. Everything backable by lumen's existing
 // node: glue (zlib/crypto/child_process/fs/url/util/dns) or the WHATWG globals is implemented for
-// real; anything that needs a native client lumen doesn't have (postgres, s3, redis, raw TCP/UDP
-// sockets) is an honest throwing stub rather than a wrong answer.
+// real; anything that needs a native client lumen doesn't have (postgres, s3, redis) is an honest
+// throwing stub rather than a wrong answer.
 //
 // This block is wrapped (build.rs wrap:true) so its top-level names stay private. It loads right
 // before module.js so require("bun") resolves through CORE, and can reach the sibling builtins via
@@ -17,6 +17,8 @@ const nodeUrl = __builtins.get("url");
 const nodeUtil = __builtins.get("util");
 const nodePath = __builtins.get("path");
 const nodeDns = __builtins.get("dns");
+const nodeNet = __builtins.get("net");
+const nodeDgram = __builtins.get("dgram");
 
 // ---- byte helpers -----------------------------------------------------------------------------
 function toU8(x) {
@@ -1390,6 +1392,93 @@ function zstdDecompress(input) {
   return Promise.resolve().then(() => zstdDecompressSync(input));
 }
 
+// ---- TCP / UDP sockets ------------------------------------------------------------------------
+function attachBunSocket(socket, handlers, data) {
+  socket.data = data;
+  let lastError;
+  if (handlers.data) socket.on("data", chunk => handlers.data(socket, chunk));
+  if (handlers.drain) socket.on("drain", () => handlers.drain(socket));
+  if (handlers.timeout) socket.on("timeout", () => handlers.timeout(socket));
+  if (handlers.end) socket.on("end", () => handlers.end(socket));
+  socket.on("error", error => {
+    lastError = error;
+    if (handlers.error) handlers.error(socket, error);
+  });
+  if (handlers.close) socket.on("close", () => handlers.close(socket, lastError));
+  return socket;
+}
+function bunConnect(options) {
+  if (!options || typeof options !== "object") return Promise.reject(new TypeError("Bun.connect options are required"));
+  const handlers = options.socket || {};
+  return new Promise((resolve, reject) => {
+    const socket = attachBunSocket(new nodeNet.Socket(), handlers, options.data);
+    let settled = false;
+    socket.once("connect", () => {
+      settled = true;
+      if (handlers.open) handlers.open(socket);
+      resolve(socket);
+    });
+    socket.once("error", error => {
+      if (!settled) {
+        if (handlers.connectError) handlers.connectError(socket, error);
+        reject(error);
+      }
+    });
+    socket.connect({ host: options.hostname || options.host || "localhost", port: options.port });
+  });
+}
+function bunListen(options) {
+  if (!options || typeof options !== "object") throw new TypeError("Bun.listen options are required");
+  const handlers = options.socket || {};
+  let socketData = options.data;
+  const server = nodeNet.createServer(socket => {
+    attachBunSocket(socket, handlers, socketData);
+    if (handlers.open) handlers.open(socket);
+  });
+  server.data = options.data;
+  server.stop = function () { this.close(); };
+  server.reload = function (next) {
+    if (next && next.socket) Object.assign(handlers, next.socket);
+    if (next && Object.prototype.hasOwnProperty.call(next, "data")) {
+      socketData = next.data;
+      server.data = next.data;
+    }
+    return server;
+  };
+  Object.defineProperty(server, "port", { enumerable: true, get() { const a = this.address(); return a && a.port; } });
+  Object.defineProperty(server, "hostname", { enumerable: true, get() { const a = this.address(); return a && a.address; } });
+  server.listen({ host: options.hostname || "0.0.0.0", port: options.port || 0, exclusive: !!options.exclusive });
+  return server;
+}
+function bunUdpSocket(options = {}) {
+  const handlers = options.socket || {};
+  const family = options.hostname && String(options.hostname).includes(":") ? "udp6" : "udp4";
+  return new Promise((resolve, reject) => {
+    const socket = nodeDgram.createSocket(family);
+    socket.data = options.data;
+    socket.on("message", (message, rinfo) => {
+      if (handlers.data) handlers.data(socket, message, rinfo.port, rinfo.address);
+    });
+    socket.on("error", error => {
+      if (handlers.error) handlers.error(socket, error);
+      reject(error);
+    });
+    socket.once("listening", () => {
+      if (handlers.open) handlers.open(socket);
+      resolve(socket);
+    });
+    const rawSend = socket.send.bind(socket);
+    socket.send = function (data, port, address) {
+      const bytes = toU8(data);
+      rawSend(bytes, port, address);
+      return bytes.length;
+    };
+    Object.defineProperty(socket, "port", { enumerable: true, get() { return this.address().port; } });
+    Object.defineProperty(socket, "hostname", { enumerable: true, get() { return this.address().address; } });
+    socket.bind(options.port || 0, options.hostname || "0.0.0.0");
+  });
+}
+
 // ---- semver -----------------------------------------------------------------------------------
 // node-semver-compatible satisfies() and order(). Supports ^ ~ x-ranges hyphen-ranges and the
 // comparison operators, with the standard prerelease-tag ordering and gating.
@@ -1560,9 +1649,9 @@ const Bun = {
   build: notImpl("Bun.build"),
   Transpiler: throwClass("Bun.Transpiler"),
   FileSystemRouter: throwClass("Bun.FileSystemRouter"),
-  connect: notImpl("Bun.connect (raw TCP sockets)"),
-  listen: notImpl("Bun.listen (raw TCP sockets)"),
-  udpSocket: notImpl("Bun.udpSocket (raw UDP sockets)"),
+  connect: bunConnect,
+  listen: bunListen,
+  udpSocket: bunUdpSocket,
   Cookie: throwClass("Bun.Cookie"),
   CookieMap: throwClass("Bun.CookieMap"),
   RedisClient: throwClass("Bun.RedisClient"),
