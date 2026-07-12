@@ -1,12 +1,12 @@
-//! WebSocket (RFC 6455) on `std::net::TcpStream`: a *client* (the upgrade sibling of the fetch
+//! WebSocket (RFC 6455) over plain TCP or verified TLS: a *client* (the upgrade sibling of the fetch
 //! client in `http.rs`, driving the `WebSocket` global in `js/websocket.js`) plus a *server-side
 //! adopt* (`op_ws_upgrade`), which takes a connection accepted by the HTTP server in `server.rs`,
 //! answers the 101 handshake, and runs it through the same registry/read-loop with unmasked
 //! outgoing frames — backing `Lumen.upgradeWebSocket` and Bun.serve's `websocket` option.
 //!
 //! ## How it runs on the loop
-//! Same re-arm pattern as the HTTP server: `connect` runs the TCP dial + HTTP upgrade handshake
-//! on a pool thread and comes back as a completion; the completion decoder stores the write half,
+//! Same re-arm pattern as the HTTP server: `connect` runs the TCP/TLS dial + HTTP upgrade handshake
+//! on a pool thread and comes back as a completion; the completion decoder stores the shared stream,
 //! fires the socket's JS dispatch (`"open"`), and arms a reader task. Each reader task blocks
 //! until ONE complete message (transparently answering pings and swallowing pongs), returns it as
 //! a completion — which re-arms the next read — and carries the fragmentation-capable reader back
@@ -15,7 +15,6 @@
 //! server's v1 notes).
 //!
 //! ## What's intentionally missing (v1)
-//! - **`wss:`** — rejected with the same guidance as fetch's `https:` (no TLS on std alone).
 //! - **permessage-deflate** and other extensions (`extensions` is always `""`).
 //! - **Backpressure**: `send` writes synchronously; `bufferedAmount` is 0 once `send` returns.
 
@@ -183,9 +182,33 @@ fn read_raw_frame(r: &mut impl Read, max: usize) -> Result<RawFrame, WsError> {
 /// The reader half: owns the read stream plus cross-message fragmentation state, and a write
 /// handle for transparent ping→pong replies. Moves into each pool read task and back out
 /// through its completion.
+trait WsStream: Read + Write + Send {}
+impl<T: Read + Write + Send> WsStream for T {}
+
+#[derive(Clone)]
+struct SharedStream(Arc<Mutex<Box<dyn WsStream>>>);
+impl Read for SharedStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.0.lock().unwrap().read(buffer);
+        match result {
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+                std::thread::yield_now();
+                Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "WebSocket read should retry"))
+            }
+            other => other,
+        }
+    }
+}
+impl Write for SharedStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buffer)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.0.lock().unwrap().flush() }
+}
+
 pub(crate) struct WsReader {
-    stream: BufReader<TcpStream>,
-    writer: Arc<Mutex<TcpStream>>,
+    stream: BufReader<SharedStream>,
+    writer: SharedStream,
     mask_seed: u64,
     /// true = we are the CLIENT end (mask outgoing pongs); false = server end (never mask).
     masked: bool,
@@ -213,8 +236,7 @@ impl WsReader {
                     } else {
                         encode_frame_unmasked(0xA, &frame.payload)
                     };
-                    let w = self.writer.lock().unwrap();
-                    (&*w).write_all(&pong).map_err(|e| WsError::Io(e.to_string()))?;
+                    self.writer.write_all(&pong).map_err(|e| WsError::Io(e.to_string()))?;
                 }
                 0xA => {} // unsolicited pong: ignore (§5.5.3)
                 0x8 => {
@@ -276,7 +298,7 @@ pub(crate) struct WsRegistry {
 
 struct WsEntry {
     /// Write half; `None` until the handshake completes.
-    writer: Option<Arc<Mutex<TcpStream>>>,
+    writer: Option<SharedStream>,
     /// One close frame ever goes out (ours or the echo of theirs).
     close_sent: Arc<AtomicBool>,
     /// Stops the read re-arm after close/error delivery.
@@ -294,7 +316,7 @@ struct ConnectResult {
 }
 
 struct ConnectedSocket {
-    stream: TcpStream,
+    stream: Box<dyn WsStream>,
     protocol: String,
 }
 
@@ -328,14 +350,7 @@ pub(crate) fn op_ws_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
 
     let u = url::parse(&target, None).map_err(|e| ctx.make_error("SyntaxError", e))?;
     match u.scheme.as_str() {
-        "ws" => {}
-        "wss" => {
-            return Err(ctx.make_error(
-                "Error",
-                "WebSocket: wss is not supported yet (TLS cannot be implemented on std alone; \
-                 ws URLs work)",
-            ))
-        }
+        "ws" | "wss" => {}
         other => {
             return Err(ctx.make_error("SyntaxError", format!("WebSocket: unsupported scheme '{other}'")))
         }
@@ -385,11 +400,15 @@ pub(crate) fn op_ws_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
 /// Dial + HTTP/1.1 upgrade (RFC 6455 §4.1/§4.2). Returns the open stream and the negotiated
 /// subprotocol ("" when none).
 fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket, String> {
-    let port = u.port.unwrap_or(80);
+    let port = u.port.unwrap_or(if u.scheme == "wss" { 443 } else { 80 });
     let host = u.host.trim_matches(['[', ']']);
-    let stream = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;
-    stream.set_nodelay(true).ok();
-    stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
+    let tcp = TcpStream::connect((host, port)).map_err(|e| format!("connect: {e}"))?;
+    tcp.set_nodelay(true).ok();
+    tcp.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
+    tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
+    let mut stream: Box<dyn WsStream> = if u.scheme == "wss" {
+        Box::new(lumen_tls::TlsStream::connect(tcp, host)?)
+    } else { Box::new(tcp) };
 
     let host_header = if u.port.is_some() && u.port != Some(80) {
         format!("{}:{}", u.host, port)
@@ -406,7 +425,7 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
         req.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
     }
     req.push_str("\r\n");
-    (&stream).write_all(req.as_bytes()).map_err(|e| format!("handshake write: {e}"))?;
+    stream.write_all(req.as_bytes()).map_err(|e| format!("handshake write: {e}"))?;
 
     // Read the 101 response head. BufReader over a clone would over-read into the frame stream,
     // so read byte-wise until CRLFCRLF (the head is tiny).
@@ -416,8 +435,7 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
         if head.len() > 64 << 10 {
             return Err("handshake response too large".into());
         }
-        (&stream)
-            .read_exact(&mut byte)
+        stream.read_exact(&mut byte)
             .map_err(|e| format!("handshake read: {e}"))?;
         head.push(byte[0]);
     }
@@ -470,20 +488,17 @@ fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resu
             Ok(vec![Value::from_string("error".into()), Value::from_string(msg)])
         }
         Ok(ConnectedSocket { stream, protocol }) => {
-            let write_half = stream.try_clone().map_err(|e| {
-                ctx.make_error("Error", format!("WebSocket: socket clone failed: {e}"))
-            })?;
-            let writer = Arc::new(Mutex::new(write_half));
+            let writer = SharedStream(Arc::new(Mutex::new(stream)));
             let mask_seed = {
                 let reg = ws_registry(ctx);
                 let Some(entry) = reg.socks.get_mut(&id) else {
                     return Ok(vec![Value::from_string("close".into()), Value::Num(1006.0)]);
                 };
-                entry.writer = Some(Arc::clone(&writer));
+                entry.writer = Some(writer.clone());
                 entry.mask_seed
             };
             let reader = WsReader {
-                stream: BufReader::new(stream),
+                stream: BufReader::new(writer.clone()),
                 writer,
                 mask_seed,
                 masked: true,
@@ -547,10 +562,8 @@ fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
                     } else {
                         encode_frame_unmasked(0x8, &payload)
                     };
-                    if let Ok(guard) = w.lock() {
-                        let _ = (&*guard).write_all(&frame);
-                        let _ = guard.shutdown(std::net::Shutdown::Both);
-                    }
+                    let mut writer = w.clone();
+                    let _ = writer.write_all(&frame);
                 }
             }
             Ok(vec![
@@ -570,10 +583,8 @@ fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
                     } else {
                         encode_frame_unmasked(0x8, &payload)
                     };
-                    if let Ok(guard) = w.lock() {
-                        let _ = (&*guard).write_all(&frame);
-                        let _ = guard.shutdown(std::net::Shutdown::Both);
-                    }
+                    let mut writer = w.clone();
+                    let _ = writer.write_all(&frame);
                 }
             }
             Ok(vec![
@@ -619,7 +630,7 @@ pub(crate) fn op_ws_send(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<
             .masked
             .then(|| (e.mask_seed >> 24).to_be_bytes()[4..8].try_into().unwrap());
         match &e.writer {
-            Some(w) => (Arc::clone(w), mask),
+            Some(w) => (w.clone(), mask),
             None => return Err(ctx.make_error("Error", "send before open")),
         }
     };
@@ -627,9 +638,8 @@ pub(crate) fn op_ws_send(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<
         Some(m) => encode_frame(opcode, &bytes, m),
         None => encode_frame_unmasked(opcode, &bytes),
     };
-    let guard = writer.lock().unwrap();
-    (&*guard)
-        .write_all(&frame)
+    let mut writer = writer;
+    writer.write_all(&frame)
         .map_err(|e| ctx.make_error("Error", format!("WebSocket send: {e}")))?;
     Ok(Value::Bool(true))
 }
@@ -658,15 +668,14 @@ pub(crate) fn op_ws_close(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result
         }
         (e.writer.clone(), e.masked)
     };
-    if let Some(w) = writer {
+    if let Some(mut w) = writer {
         let payload = close_payload(code, &reason);
         let frame = if masked {
             encode_frame(0x8, &payload, [0x1f, 0x2e, 0x3d, 0x4c])
         } else {
             encode_frame_unmasked(0x8, &payload)
         };
-        let guard = w.lock().unwrap();
-        let _ = (&*guard).write_all(&frame);
+        let _ = w.write_all(&frame);
     }
     Ok(Value::Undefined)
 }
@@ -738,10 +747,7 @@ pub(crate) fn op_ws_upgrade(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
         .write_all(resp.as_bytes())
         .map_err(|e| ctx.make_error("Error", format!("WebSocket upgrade: handshake write: {e}")))?;
 
-    let write_half = stream
-        .try_clone()
-        .map_err(|e| ctx.make_error("Error", format!("WebSocket upgrade: socket clone failed: {e}")))?;
-    let writer = Arc::new(Mutex::new(write_half));
+    let writer = SharedStream(Arc::new(Mutex::new(Box::new(stream))));
 
     let id = {
         let reg = ws_registry(ctx);
@@ -750,7 +756,7 @@ pub(crate) fn op_ws_upgrade(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
         reg.socks.insert(
             id,
             WsEntry {
-                writer: Some(Arc::clone(&writer)),
+                writer: Some(writer.clone()),
                 close_sent: Arc::new(AtomicBool::new(false)),
                 dead: false,
                 dispatch,
@@ -762,7 +768,7 @@ pub(crate) fn op_ws_upgrade(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
     };
 
     let reader = WsReader {
-        stream: BufReader::new(stream),
+        stream: BufReader::new(writer.clone()),
         writer,
         mask_seed: 0,
         masked: false,

@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_int, c_long, c_void};
+use std::time::Duration;
 
 type SslMethod = c_void;
 type SslCtx = c_void;
@@ -146,8 +147,15 @@ impl TlsStream {
         Ok(Self { stream, api, context, ssl })
     }
 
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+
     fn io_error(&self, result: c_int) -> std::io::Error {
         let code = unsafe { (self.api.ssl_get_error)(self.ssl, result) };
+        if matches!(code, 2 | 3 | 5) {
+            return std::io::Error::new(std::io::ErrorKind::Interrupted, "TLS operation should retry");
+        }
         std::io::Error::other(format!("OpenSSL I/O error {code}: {}", self.api.error_queue()))
     }
 }
