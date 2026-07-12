@@ -355,6 +355,27 @@ function which(cmd, options) {
   return null;
 }
 
+function openInEditor(path, options = {}) {
+  path = String(path);
+  if (path.startsWith("file:")) path = nodeUrl.fileURLToPath(path);
+  path = nodePath.resolve(path);
+  const configured = options.editor || proc.env.VISUAL || proc.env.EDITOR;
+  if (!configured) throw new Error("Bun.openInEditor could not detect an editor from VISUAL or EDITOR");
+  const parts = String(configured).trim().split(/\s+/), command = parts.shift();
+  const line = options.line === undefined ? undefined : Math.max(1, Number(options.line) || 1);
+  const column = options.column === undefined ? undefined : Math.max(1, Number(options.column) || 1);
+  const name = nodePath.basename(command).toLowerCase();
+  if (["code", "code-insiders", "codium", "cursor", "vscode"].includes(name)) {
+    parts.push("--goto", `${path}${line ? `:${line}${column ? `:${column}` : ""}` : ""}`);
+  } else if (["subl", "sublime", "sublime_text"].includes(name)) {
+    parts.push(`${path}${line ? `:${line}${column ? `:${column}` : ""}` : ""}`);
+  } else {
+    if (line) parts.push(`+${line}`);
+    parts.push(path);
+  }
+  nodeChild.spawn(command, parts, { stdio: "ignore" }).unref();
+}
+
 // ---- zlib one-shots (Bun returns Uint8Array) --------------------------------------------------
 const gzipSync = (data) => new Uint8Array(nodeZlib.gzipSync(Buffer.from(toU8(data))));
 const gunzipSync = (data) => new Uint8Array(nodeZlib.gunzipSync(Buffer.from(toU8(data))));
@@ -1702,7 +1723,7 @@ const Bun = {
 
   // honest stubs
   password, secrets, CSRF, FFI,
-  openInEditor: notImpl("Bun.openInEditor"),
+  openInEditor,
   mmap: notImpl("Bun.mmap"),
   generateHeapSnapshot: notImpl("Bun.generateHeapSnapshot"),
   plugin: notImpl("Bun.plugin"),
