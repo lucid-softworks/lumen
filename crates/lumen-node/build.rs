@@ -44,6 +44,7 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "child_process.js", wrap: true },
     GlueFile { name: "dns.js", wrap: true },
     GlueFile { name: "stdlib_extras.js", wrap: true },
+    GlueFile { name: "tty.js", wrap: true },
     GlueFile { name: "tls.js", wrap: true },
     // Loaded after stdlib_extras so the real implementation replaces its compatibility stub.
     GlueFile { name: "worker_threads.js", wrap: true },
