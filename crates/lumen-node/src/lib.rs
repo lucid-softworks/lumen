@@ -92,6 +92,8 @@ pub fn extension() -> Extension {
                     "inflateRaw" (1) => op_zlib_inflate_raw,
                     "gzip" (1) => op_zlib_gzip,
                     "gunzip" (1) => op_zlib_gunzip,
+                    "brotliCompress" (1) => op_zlib_brotli_compress,
+                    "brotliDecompress" (1) => op_zlib_brotli_decompress,
                     "crc32" (2) => op_zlib_crc32,
                 ],
             ),
@@ -869,6 +871,12 @@ fn op_zlib_gzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
 }
 fn op_zlib_gunzip(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
     zlib_decompress_op(ctx, a, lumen_host::deflate::gzip_decompress)
+}
+fn op_zlib_brotli_compress(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    zlib_compress_op(ctx, a, lumen_host::brotli::brotli_compress)
+}
+fn op_zlib_brotli_decompress(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    zlib_decompress_op(ctx, a, lumen_host::brotli::brotli_decompress)
 }
 /// `__zlib.crc32(bytes, seed)` — CRC-32 of `bytes`, optionally continued from `seed`.
 fn op_zlib_crc32(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
