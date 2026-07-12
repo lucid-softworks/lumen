@@ -1,7 +1,7 @@
 // The `bun` module and the `Bun` global (same object identity: require("bun") === globalThis.Bun).
 // Parity target is Bun v1.2.21's require("bun") surface. Everything backable by lumen's existing
 // node: glue (zlib/crypto/child_process/fs/url/util/dns) or the WHATWG globals is implemented for
-// real; anything that needs a native client lumen doesn't have (postgres, s3) is an honest
+// real; anything that still needs a native client lumen doesn't have (postgres) is an honest
 // throwing stub rather than a wrong answer.
 //
 // This block is wrapped (build.rs wrap:true) so its top-level names stay private. It loads right

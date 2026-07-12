@@ -7,8 +7,9 @@
 // both directions. Not constant-time (correctness-first, not an HSM). Native code adds the
 // SHA-512 family, scrypt ROMix, and symmetric AES ciphers
 // aes-{128,192,256}-{ecb,cbc,ctr,gcm} via createCipheriv/createDecipheriv (PKCS#7 padding,
-// streaming update/final, GCM AAD + auth tags). DH/ECDH, ECDSA, X.509, and non-AES ciphers
-// remain honest throwing stubs.
+// streaming update/final, GCM AAD + auth tags). Finite-field DH, P-256 ECDH/ECDSA, RSA
+// PKCS#1/PSS/OAEP, prime generation, and X.509 parsing are also implemented. Non-AES ciphers and
+// legacy OpenSSL engine/SPKAC APIs remain honest throwing stubs.
 
 const webCrypto = globalThis.crypto;
 
@@ -2607,9 +2608,9 @@ const crypto = {
   Decipheriv,
 
   // -- real: introspection / config --
-  // getCiphers lists exactly the cipher set lumen actually implements; no named curves exist.
+  // Introspection lists exactly the cipher and named-curve sets lumen implements.
   getCiphers: () => Object.keys(CIPHERS).slice().sort(),
-  getCurves: () => [],
+  getCurves: () => ["P-256", "prime256v1", "secp256r1"],
   getCipherInfo,
   getFips: () => 0,
   setFips: (v) => { if (v) throw new Error("FIPS mode is not supported in lumen"); },
