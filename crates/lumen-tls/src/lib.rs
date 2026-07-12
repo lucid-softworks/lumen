@@ -19,6 +19,7 @@ type Ssl = c_void;
 
 type InitSsl = unsafe extern "C" fn(u64, *const c_void) -> c_int;
 type ClientMethod = unsafe extern "C" fn() -> *const SslMethod;
+type ServerMethod = unsafe extern "C" fn() -> *const SslMethod;
 type CtxNew = unsafe extern "C" fn(*const SslMethod) -> *mut SslCtx;
 type CtxFree = unsafe extern "C" fn(*mut SslCtx);
 type CtxDefaultPaths = unsafe extern "C" fn(*mut SslCtx) -> c_int;
@@ -34,6 +35,13 @@ type SslWrite = unsafe extern "C" fn(*mut Ssl, *const c_void, c_int) -> c_int;
 type SslShutdown = unsafe extern "C" fn(*mut Ssl) -> c_int;
 type SslGetError = unsafe extern "C" fn(*const Ssl, c_int) -> c_int;
 type VerifyResult = unsafe extern "C" fn(*const Ssl) -> c_long;
+type SslAccept = unsafe extern "C" fn(*mut Ssl) -> c_int;
+type BioNewMem = unsafe extern "C" fn(*const c_void, c_int) -> *mut c_void;
+type BioFree = unsafe extern "C" fn(*mut c_void) -> c_int;
+type PemRead = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *const c_void, *mut c_void) -> *mut c_void;
+type CtxUseObject = unsafe extern "C" fn(*mut SslCtx, *mut c_void) -> c_int;
+type CtxCheckKey = unsafe extern "C" fn(*const SslCtx) -> c_int;
+type ObjectFree = unsafe extern "C" fn(*mut c_void);
 type SslGetVersion = unsafe extern "C" fn(*const Ssl) -> *const c_char;
 type SslGetCipher = unsafe extern "C" fn(*const Ssl) -> *const c_void;
 type CipherGetName = unsafe extern "C" fn(*const c_void) -> *const c_char;
@@ -53,6 +61,7 @@ struct Api {
     ssl_ctrl: SslCtrl,
     ssl_set_host: SslSetHost,
     ssl_connect: SslConnect,
+    ssl_accept: SslAccept,
     ssl_read: SslRead,
     ssl_write: SslWrite,
     ssl_shutdown: SslShutdown,
@@ -61,6 +70,15 @@ struct Api {
     ssl_get_version: SslGetVersion,
     ssl_get_cipher: SslGetCipher,
     cipher_get_name: CipherGetName,
+    bio_new_mem: BioNewMem,
+    bio_free: BioFree,
+    pem_read_cert: PemRead,
+    pem_read_key: PemRead,
+    ctx_use_cert: CtxUseObject,
+    ctx_use_key: CtxUseObject,
+    ctx_check_key: CtxCheckKey,
+    cert_free: ObjectFree,
+    key_free: ObjectFree,
     err_get_error: ErrGetError,
     err_error_string: ErrErrorString,
 }
@@ -87,6 +105,7 @@ impl Api {
                 ssl_ctrl: ssl.function("SSL_ctrl")?,
                 ssl_set_host: ssl.function("SSL_set1_host")?,
                 ssl_connect: ssl.function("SSL_connect")?,
+                ssl_accept: ssl.function("SSL_accept")?,
                 ssl_read: ssl.function("SSL_read")?,
                 ssl_write: ssl.function("SSL_write")?,
                 ssl_shutdown: ssl.function("SSL_shutdown")?,
@@ -95,6 +114,15 @@ impl Api {
                 ssl_get_version: ssl.function("SSL_get_version")?,
                 ssl_get_cipher: ssl.function("SSL_get_current_cipher")?,
                 cipher_get_name: ssl.function("SSL_CIPHER_get_name")?,
+                bio_new_mem: crypto.function("BIO_new_mem_buf")?,
+                bio_free: crypto.function("BIO_free")?,
+                pem_read_cert: crypto.function("PEM_read_bio_X509")?,
+                pem_read_key: crypto.function("PEM_read_bio_PrivateKey")?,
+                ctx_use_cert: ssl.function("SSL_CTX_use_certificate")?,
+                ctx_use_key: ssl.function("SSL_CTX_use_PrivateKey")?,
+                ctx_check_key: ssl.function("SSL_CTX_check_private_key")?,
+                cert_free: crypto.function("X509_free")?,
+                key_free: crypto.function("EVP_PKEY_free")?,
                 err_get_error: crypto.function("ERR_get_error")?,
                 err_error_string: crypto.function("ERR_error_string_n")?,
                 _ssl_lib: ssl,
@@ -156,6 +184,54 @@ impl TlsStream {
         Ok(Self { stream, api, context, ssl })
     }
 
+    pub fn accept(stream: TcpStream, certificate_pem: &[u8], private_key_pem: &[u8]) -> Result<Self, String> {
+        let api = Api::load()?;
+        let method: ServerMethod = unsafe { api._ssl_lib.function("TLS_server_method")? };
+        let context = unsafe { (api.ctx_new)(method()) };
+        if context.is_null() { return Err("SSL_CTX_new failed".into()); }
+        let certificate = match api.read_pem(certificate_pem, true) {
+            Ok(value) => value,
+            Err(error) => { unsafe { (api.ctx_free)(context) }; return Err(error); }
+        };
+        let private_key = match api.read_pem(private_key_pem, false) {
+            Ok(value) => value,
+            Err(error) => {
+                unsafe { (api.cert_free)(certificate); (api.ctx_free)(context); }
+                return Err(error);
+            }
+        };
+        let configured = unsafe {
+            let ok = (api.ctx_use_cert)(context, certificate) == 1
+                && (api.ctx_use_key)(context, private_key) == 1
+                && (api.ctx_check_key)(context) == 1;
+            (api.cert_free)(certificate);
+            (api.key_free)(private_key);
+            ok
+        };
+        if !configured {
+            let detail = api.error_queue();
+            unsafe { (api.ctx_free)(context) };
+            return Err(format!("TLS certificate/private key configuration failed: {detail}"));
+        }
+        let ssl = unsafe { (api.ssl_new)(context) };
+        if ssl.is_null() {
+            unsafe { (api.ctx_free)(context) };
+            return Err("SSL_new failed".into());
+        }
+        if unsafe { (api.ssl_set_fd)(ssl, stream.as_raw_fd()) } != 1 {
+            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            return Err("failed to configure TLS server socket".into());
+        }
+        let result = unsafe { (api.ssl_accept)(ssl) };
+        if result != 1 {
+            let code = unsafe { (api.ssl_get_error)(ssl, result) };
+            let detail = api.error_queue();
+            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            return Err(format!("TLS server handshake failed (SSL error {code}: {detail})"));
+        }
+        Ok(Self { stream, api, context, ssl })
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.stream.set_read_timeout(timeout)
     }
@@ -182,6 +258,19 @@ impl TlsStream {
 }
 
 impl Api {
+    fn read_pem(&self, bytes: &[u8], certificate: bool) -> Result<*mut c_void, String> {
+        let length = c_int::try_from(bytes.len()).map_err(|_| "PEM input is too large".to_string())?;
+        let bio = unsafe { (self.bio_new_mem)(bytes.as_ptr() as *const _, length) };
+        if bio.is_null() { return Err("BIO_new_mem_buf failed".into()); }
+        let value = unsafe {
+            let value = if certificate { (self.pem_read_cert)(bio, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut()) }
+                else { (self.pem_read_key)(bio, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut()) };
+            (self.bio_free)(bio);
+            value
+        };
+        if value.is_null() { Err(format!("invalid PEM: {}", self.error_queue())) } else { Ok(value) }
+    }
+
     fn error_queue(&self) -> String {
         let mut messages = Vec::new();
         loop {
@@ -267,6 +356,46 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
     #[test]
     fn loads_verified_client_api() { Api::load().expect("system OpenSSL should load"); }
+
+    #[test]
+    fn accepts_local_tls_connection() {
+        if Command::new("openssl").arg("version").output().is_err() { return; }
+        let directory = std::env::temp_dir().join(format!("lumen-tls-server-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&directory).unwrap();
+        let certificate = directory.join("cert.pem");
+        let key = directory.join("key.pem");
+        let generated = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes"])
+            .arg("-keyout").arg(&key).arg("-out").arg(&certificate)
+            .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+            .output().unwrap();
+        assert!(generated.status.success());
+        let cert_bytes = std::fs::read(&certificate).unwrap();
+        let key_bytes = std::fs::read(&key).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let mut tls = TlsStream::accept(tcp, &cert_bytes, &key_bytes).unwrap();
+            let mut request = [0u8; 4];
+            tls.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            tls.write_all(b"pong").unwrap();
+        });
+        let mut client = Command::new("openssl")
+            .args(["s_client", "-quiet", "-connect", &format!("127.0.0.1:{port}"), "-servername", "localhost", "-CAfile"])
+            .arg(&certificate).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        client.stdin.as_mut().unwrap().write_all(b"ping").unwrap();
+        let output = client.wait_with_output().unwrap();
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(directory);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"pong");
+    }
 }
