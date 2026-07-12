@@ -157,15 +157,8 @@ Run scripts / open a REPL through the runtime:
 cargo build --release -p lumen-cli
 ./target/release/lumen-cli                 # REPL (or: lumen-cli repl)
 ./target/release/lumen-cli file.js [args]  # run a script to loop quiescence
-./target/release/lumen-cli file.cts        # run CommonJS TypeScript with erasable types
-./target/release/lumen-cli --typecheck file.cts # run tsc --noEmit first, then execute
 ./target/release/lumen-cli -e 'code'       # evaluate a string
 ```
-
-`--typecheck` uses `LUMEN_TSC` when set, otherwise the nearest `node_modules/.bin/tsc`, then
-`tsc` on `PATH`. A nearby `tsconfig.json` is checked as a project; without one, the entry file is
-checked directly. TypeScript syntax that requires code generation, such as enums and namespaces,
-is not executable yet.
 
 The engine also ships a minimal standalone shell (the test262 host, no runtime/host APIs):
 
