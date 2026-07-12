@@ -2,6 +2,8 @@
 // (lumen-fs) plus the `__node` filesystem ops (real stat metadata, rm, rename, copy, …).
 // readFile returns a string with an encoding argument, else a Buffer.
 
+const nativeFs = fs;
+
 // Node's `Stats`. Built from the raw fields `__node.stat`/`lstat`/`fs.fstatSync` return.
 class Stats {
   constructor(raw) {
@@ -196,10 +198,10 @@ const nodeFs = {
 
   // ---- file-descriptor ops ----
   openSync(path, flags, mode) {
-    return fs.openSync(toPath(path), flagToMode(flags));
+    return __fs_fdmeta.openSync(toPath(path), flagToMode(flags));
   },
   closeSync(fd) {
-    fs.closeSync(fd);
+    __fs_fdmeta.closeSync(fd);
   },
   fstatSync(fd) {
     return makeStats(fs.fstatSync(fd));
@@ -214,7 +216,7 @@ const nodeFs = {
   },
   fsyncSync(fd) { fs.fsyncSync(fd); },
   fdatasyncSync(fd) { fs.fdatasyncSync(fd); },
-  fchmodSync(fd, mode) { fs.fchmodSync(fd, Number(mode) || 0); },
+  fchmodSync(fd, mode) { __fs_fdmeta.fchmodSync(fd, Number(mode) || 0); },
   futimesSync(fd, atime, mtime) {
     fs.futimesSync(fd, toUnixSeconds(atime), toUnixSeconds(mtime));
   },
@@ -283,11 +285,10 @@ const nodeFs = {
     return total;
   },
 
-  // ---- unsupported-without-syscall stubs (honest throws, never silent) ----
-  chownSync(path, uid, gid) { throw fsError("ENOSYS", "chown", toPath(path), "chown is not supported"); },
-  lchownSync(path, uid, gid) { throw fsError("ENOSYS", "lchown", toPath(path), "lchown is not supported"); },
-  fchownSync(fd, uid, gid) { throw fsError("ENOSYS", "fchown", null, "fchown is not supported"); },
-  lchmodSync(path, mode) { throw fsError("ENOSYS", "lchmod", toPath(path), "lchmod is not supported"); },
+  chownSync(path, uid, gid) { __node.chown(toPath(path), Number(uid), Number(gid)); },
+  lchownSync(path, uid, gid) { __node.lchown(toPath(path), Number(uid), Number(gid)); },
+  fchownSync(fd, uid, gid) { __fs_fdmeta.fchownSync(fd, Number(uid), Number(gid)); },
+  lchmodSync(path, mode) { __node.lchmod(toPath(path), Number(mode) || 0); },
 };
 nodeFs.realpathSync.native = nodeFs.realpathSync;
 

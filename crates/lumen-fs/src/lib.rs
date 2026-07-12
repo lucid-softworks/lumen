@@ -50,6 +50,7 @@ pub fn extension() -> Extension {
                     "fsyncSync" (1) => op_fsync_sync,
                     "fdatasyncSync" (1) => op_fdatasync_sync,
                     "fchmodSync" (2) => op_fchmod_sync,
+                    "fchownSync" (3) => op_fchown_sync,
                     "futimesSync" (3) => op_futimes_sync,
                 ],
             ),
@@ -58,6 +59,15 @@ pub fn extension() -> Extension {
                 ops![
                     "read" (3) => op_read_async,
                     "write" (4) => op_write_async,
+                ],
+            ),
+            (
+                "__fs_fdmeta",
+                ops![
+                    "openSync" (2) => op_open_sync,
+                    "closeSync" (1) => op_close_sync,
+                    "fchmodSync" (2) => op_fchmod_sync,
+                    "fchownSync" (3) => op_fchown_sync,
                 ],
             ),
         ],
@@ -389,6 +399,21 @@ fn op_fchmod_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, 
         .set_permissions(perms)
         .map_err(|e| io_error(ctx, "fchmod", "fd", e))?;
     Ok(Value::Undefined)
+}
+
+fn op_fchown_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let uid = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))? as u32;
+    let gid = ctx.coerce_number(args.get(2).unwrap_or(&Value::Undefined))? as u32;
+    let handle = fd_handle(ctx, args)?;
+    #[cfg(unix)]
+    {
+        let result = std::os::unix::fs::fchown(&*handle.borrow(), Some(uid), Some(gid))
+            .map(|()| Value::Undefined)
+            .map_err(|error| io_error(ctx, "fchown", "fd", error));
+        result
+    }
+    #[cfg(not(unix))]
+    { let _ = (uid, gid, handle); Err(ctx.make_error("Error", "ENOSYS: fchown is not supported on this platform")) }
 }
 
 /// `futimesSync(fd, atimeSec, mtimeSec)` — set access/modification times on an open handle.

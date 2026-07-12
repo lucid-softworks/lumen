@@ -69,6 +69,9 @@ pub fn extension() -> Extension {
                     "symlink" (2) => op_symlink,
                     "access" (1) => op_access,
                     "chmod" (2) => op_chmod,
+                    "chown" (3) => op_chown,
+                    "lchown" (3) => op_lchown,
+                    "lchmod" (2) => op_lchmod,
                     "mkdtemp" (1) => op_mkdtemp,
                     "link" (2) => op_link,
                     "utimes" (3) => op_utimes,
@@ -485,6 +488,47 @@ fn op_chmod(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value>
         Err(e) => Err(fs_error(ctx, "chmod", &p, &e)),
     }
 }
+
+#[cfg(unix)]
+fn ownership_path(ctx: &mut Ctx, args: &[Value], op: &str, follow: bool) -> Result<Value, Value> {
+    let path = arg_path(ctx, args)?;
+    let uid = args.get(1).and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    let gid = args.get(2).and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    let result = if follow {
+        std::os::unix::fs::chown(&path, Some(uid), Some(gid))
+    } else {
+        std::os::unix::fs::lchown(&path, Some(uid), Some(gid))
+    };
+    result.map(|()| Value::Undefined).map_err(|error| fs_error(ctx, op, &path, &error))
+}
+
+fn op_chown(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    #[cfg(unix)] { ownership_path(ctx, args, "chown", true) }
+    #[cfg(not(unix))] { let _ = args; Err(ctx.make_error("Error", "ENOSYS: chown is not supported on this platform")) }
+}
+
+fn op_lchown(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    #[cfg(unix)] { ownership_path(ctx, args, "lchown", false) }
+    #[cfg(not(unix))] { let _ = args; Err(ctx.make_error("Error", "ENOSYS: lchown is not supported on this platform")) }
+}
+
+fn op_lchmod(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let path = arg_path(ctx, args)?;
+    let mode = args.get(1).and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(std::ffi::OsStr::new(&path).as_bytes())
+            .map_err(|_| ctx.make_error("TypeError", "path must not contain NUL bytes"))?;
+        if unsafe { lchmod(c_path.as_ptr(), mode) } == 0 { Ok(Value::Undefined) }
+        else { Err(fs_error(ctx, "lchmod", &path, &std::io::Error::last_os_error())) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = mode; Err(ctx.make_error("Error", format!("ENOSYS: lchmod is not supported on this platform, lchmod '{path}'"))) }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" { fn lchmod(path: *const std::os::raw::c_char, mode: u32) -> i32; }
 
 /// `mkdtemp(prefix)` — create a uniquely-named temp directory and return its path. Uniqueness
 /// comes from the OS-assigned pid plus a monotonically bumped counter (no RNG dependency).
