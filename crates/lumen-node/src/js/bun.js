@@ -1373,7 +1373,66 @@ const password = {
 
 // ---- honest throwing stubs (no backing engine capability) -------------------------------------
 const secrets = { get: notImpl("Bun.secrets.get"), set: notImpl("Bun.secrets.set"), delete: notImpl("Bun.secrets.delete") };
-const CSRF = { generate: notImpl("Bun.CSRF.generate"), verify: notImpl("Bun.CSRF.verify") };
+const csrfDefaultSecret = nodeCrypto.randomBytes(32);
+function csrfEncoding(value) {
+  value = value || "base64url";
+  if (!["base64", "base64url", "hex"].includes(value)) throw new TypeError(`Unsupported CSRF encoding '${value}'`);
+  return value;
+}
+function csrfAlgorithm(value) {
+  value = String(value || "sha256").toLowerCase();
+  if (!["sha256", "sha384", "sha512", "sha512-256"].includes(value)) {
+    throw new Error(`Bun.CSRF algorithm '${value}' is not supported in lumen`);
+  }
+  return value;
+}
+function writeU64BE(buffer, offset, value) {
+  value = Number(value);
+  const high = Math.floor(value / 0x100000000);
+  const low = value >>> 0;
+  for (let i = 3; i >= 0; i--) buffer[offset + 3 - i] = (high >>> (i * 8)) & 0xff;
+  for (let i = 3; i >= 0; i--) buffer[offset + 7 - i] = (low >>> (i * 8)) & 0xff;
+}
+function readU64BE(buffer, offset) {
+  let high = 0, low = 0;
+  for (let i = 0; i < 4; i++) high = high * 256 + buffer[offset + i];
+  for (let i = 4; i < 8; i++) low = low * 256 + buffer[offset + i];
+  return high * 0x100000000 + low;
+}
+const CSRF = {
+  generate(secret, options = {}) {
+    const algorithm = csrfAlgorithm(options.algorithm);
+    const encoding = csrfEncoding(options.encoding);
+    const expiresIn = options.expiresIn === undefined ? 86400000 : Number(options.expiresIn);
+    if (!Number.isFinite(expiresIn) || expiresIn < 0) throw new RangeError("CSRF expiresIn must be a non-negative number");
+    const header = Buffer.alloc(32);
+    writeU64BE(header, 0, Date.now());
+    header.set(nodeCrypto.randomBytes(16), 8);
+    writeU64BE(header, 24, expiresIn);
+    const key = secret === undefined ? csrfDefaultSecret : String(secret);
+    const mac = nodeCrypto.createHmac(algorithm, key).update(header).digest();
+    return Buffer.concat([header, mac]).toString(encoding);
+  },
+  verify(token, options = {}) {
+    try {
+      const algorithm = csrfAlgorithm(options.algorithm);
+      const encoding = csrfEncoding(options.encoding);
+      const bytes = Buffer.from(String(token), encoding);
+      const digestLength = nodeCrypto.createHmac(algorithm, "").digest().length;
+      if (bytes.length !== 32 + digestLength) return false;
+      const header = bytes.subarray(0, 32);
+      const key = options.secret === undefined ? csrfDefaultSecret : String(options.secret);
+      const expected = nodeCrypto.createHmac(algorithm, key).update(header).digest();
+      if (!nodeCrypto.timingSafeEqual(expected, bytes.subarray(32))) return false;
+      const created = readU64BE(header, 0);
+      const embeddedAge = readU64BE(header, 24);
+      const maxAge = options.maxAge === undefined ? embeddedAge : Number(options.maxAge);
+      return maxAge === 0 || (Date.now() >= created && Date.now() - created <= maxAge);
+    } catch (_) {
+      return false;
+    }
+  },
+};
 const throwClass = (name) => class { constructor() { throw new Error(`${name} is not supported in lumen`); } };
 // bun:ffi is registered before this module; Bun.FFI is the same live surface.
 const FFI = __builtins.get("bun:ffi");
