@@ -42,6 +42,7 @@
     const date = options.date instanceof Date ? options.date : new Date();
     const time = timestamp(date), day = time.slice(0, 8), scope = `${day}/${config.region}/s3/aws4_request`;
     const url = objectUrl(config, key), host = url.host;
+    for (const [name, value] of Object.entries(options.query || {})) if (value !== undefined) url.searchParams.set(name, String(value));
     const headers = { host };
     if (options.type) headers["content-type"] = String(options.type);
     if (options.acl) headers["x-amz-acl"] = String(options.acl);
@@ -80,6 +81,35 @@
     return Buffer.from(String(data));
   }
 
+  function xmlDecode(value) {
+    return value.replace(/&(?:lt|gt|amp|quot|apos);/g, entity => ({ "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"', "&apos;": "'" })[entity]);
+  }
+  function parseXml(source) {
+    const root = { name: "", text: "", children: [] }, stack = [root];
+    let offset = 0;
+    while (offset < source.length) {
+      const open = source.indexOf("<", offset);
+      if (open < 0) { stack[stack.length - 1].text += xmlDecode(source.slice(offset)); break; }
+      if (open > offset) stack[stack.length - 1].text += xmlDecode(source.slice(offset, open));
+      if (source.startsWith("<!--", open)) { const end = source.indexOf("-->", open + 4); if (end < 0) throw new Error("Invalid S3 XML comment"); offset = end + 3; continue; }
+      const close = source.indexOf(">", open + 1);
+      if (close < 0) throw new Error("Invalid S3 XML response");
+      const token = source.slice(open + 1, close).trim();
+      if (token[0] === "?" || token[0] === "!") { offset = close + 1; continue; }
+      if (token[0] === "/") stack.pop();
+      else {
+        const selfClosing = token.endsWith("/"), name = token.replace(/\/$/, "").split(/\s+/, 1)[0];
+        const node = { name, text: "", children: [] };
+        stack[stack.length - 1].children.push(node);
+        if (!selfClosing) stack.push(node);
+      }
+      offset = close + 1;
+    }
+    return root.children[0] || root;
+  }
+  function xmlChildren(node, name) { return node.children.filter(child => child.name === name); }
+  function xmlText(node, name) { const child = node.children.find(value => value.name === name); return child ? child.text.trim() : undefined; }
+
   class S3File extends Blob {
     constructor(client, key, options = {}) { super([], options); this.client = client; this.key = String(key); }
     get name() { return this.key; }
@@ -115,7 +145,18 @@
     unlink(key, options) { return this.delete(key, options); }
     async exists(key, options = {}) { return (await this._request("HEAD", key, undefined, options)).status !== 404; }
     async stat(key, options = {}) { const response = await this._request("HEAD", key, undefined, options); if (response.status === 404) return null; return { etag: response.headers.get("etag"), lastModified: new Date(response.headers.get("last-modified")), size: Number(response.headers.get("content-length") || 0), type: response.headers.get("content-type") || "application/octet-stream" }; }
+    async list(options = {}) {
+      const query = { "list-type": 2, prefix: options.prefix, delimiter: options.delimiter, "max-keys": options.maxKeys, "start-after": options.startAfter, "continuation-token": options.continuationToken, "fetch-owner": options.fetchOwner ? "true" : undefined };
+      const response = await this._request("GET", "", undefined, { ...options, query });
+      const root = parseXml(await response.text());
+      const contents = xmlChildren(root, "Contents").map(node => {
+        const ownerNode = xmlChildren(node, "Owner")[0];
+        return { key: xmlText(node, "Key"), lastModified: new Date(xmlText(node, "LastModified")), etag: xmlText(node, "ETag"), size: Number(xmlText(node, "Size") || 0), storageClass: xmlText(node, "StorageClass"), owner: ownerNode ? { id: xmlText(ownerNode, "ID"), displayName: xmlText(ownerNode, "DisplayName") } : undefined };
+      });
+      return { name: xmlText(root, "Name"), prefix: xmlText(root, "Prefix") || "", delimiter: xmlText(root, "Delimiter"), maxKeys: Number(xmlText(root, "MaxKeys") || 0), keyCount: Number(xmlText(root, "KeyCount") || contents.length), isTruncated: xmlText(root, "IsTruncated") === "true", continuationToken: xmlText(root, "ContinuationToken"), nextContinuationToken: xmlText(root, "NextContinuationToken"), startAfter: xmlText(root, "StartAfter"), contents, commonPrefixes: xmlChildren(root, "CommonPrefixes").map(node => ({ prefix: xmlText(node, "Prefix") })) };
+    }
   }
+  S3Client.list = function (options = {}, config = {}) { return new S3Client(config).list(options); };
   for (const name of ["write", "delete", "unlink", "exists", "stat", "presign"]) {
     S3Client[name] = function (key, data, options) {
       if (name === "write") return new S3Client(options || {}).write(key, data, options || {});

@@ -61,7 +61,11 @@ fn s3_client_executes_signed_object_lifecycle() {
         let signed = true;
         const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
           signed = signed && request.headers.get("authorization").startsWith("AWS4-HMAC-SHA256 ");
-          const key = new URL(request.url).pathname;
+          const url = new URL(request.url), key = url.pathname;
+          if (url.searchParams.get("list-type") === "2") {
+            signed = signed && url.searchParams.get("prefix") === "folder/" && url.searchParams.get("max-keys") === "2";
+            return new Response(`<?xml version="1.0"?><ListBucketResult><Name>bucket</Name><Prefix>folder/</Prefix><MaxKeys>2</MaxKeys><KeyCount>1</KeyCount><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>folder/a&amp;b.txt</Key><LastModified>2025-01-07T00:19:10Z</LastModified><ETag>&quot;list-etag&quot;</ETag><Size>7</Size><StorageClass>STANDARD</StorageClass><Owner><ID>owner-id</ID><DisplayName>Owner</DisplayName></Owner></Contents><CommonPrefixes><Prefix>folder/sub/</Prefix></CommonPrefixes></ListBucketResult>`, { status: 200 });
+          }
           if (request.method === "PUT") { objects.set(key, await request.text()); return new Response("", { status: 200 }); }
           if (request.method === "DELETE") { objects.delete(key); return new Response("", { status: 204 }); }
           if (!objects.has(key)) return new Response("", { status: 404 });
@@ -75,6 +79,8 @@ fn s3_client_executes_signed_object_lifecycle() {
           console.log("exists", await client.exists("folder/item.txt"));
           const stat = await client.stat("folder/item.txt");
           console.log("stat", stat.size, stat.etag, stat.type);
+          const listed = await client.list({ prefix: "folder/", maxKeys: 2, fetchOwner: true });
+          console.log("list", listed.name, listed.isTruncated, listed.nextContinuationToken, listed.contents[0].key, listed.contents[0].owner.displayName, listed.commonPrefixes[0].prefix);
           console.log("read", await file.text());
           await client.delete("folder/item.txt");
           console.log("deleted", await client.exists("folder/item.txt"), signed);
@@ -87,6 +93,6 @@ fn s3_client_executes_signed_object_lifecycle() {
     }
     assert_eq!(
         String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
-        ["write 5 true", "exists true", "stat 5 \"etag\" text/plain", "read hello", "deleted false true"]
+        ["write 5 true", "exists true", "stat 5 \"etag\" text/plain", "list bucket true next folder/a&b.txt Owner folder/sub/", "read hello", "deleted false true"]
     );
 }
