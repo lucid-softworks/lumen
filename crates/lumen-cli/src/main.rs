@@ -114,7 +114,8 @@ fn is_esm_entry(path: &str) -> bool {
     let p = std::path::Path::new(path);
     match p.extension().and_then(|e| e.to_str()) {
         Some("mjs") => true,
-        Some("cjs") => false,
+        Some("cjs" | "cts") => false,
+        Some("mts") => true,
         // JSX files use ESM imports (`import React …`); run them through the module graph so the
         // runtime's `.jsx` transpile hook applies.
         Some("jsx") => true,

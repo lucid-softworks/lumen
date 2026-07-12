@@ -10,7 +10,7 @@ const path = __builtins.get("path");
 const CORE = new Set([...__builtins.keys()]);
 const cache = new Map(); // resolved filename -> module
 
-const EXTENSIONS = [".js", ".json", ".cjs", ".node"];
+const EXTENSIONS = [".js", ".json", ".cjs", ".ts", ".cts", ".node"];
 
 function isCoreSpecifier(spec) {
   if (spec === "bun" || spec.startsWith("bun:")) return CORE.has(spec) ? spec : null;
@@ -316,11 +316,9 @@ function runMain(filename) {
   };
   mainModule = module;
   cache.set(resolved, module);
-  const dirname = path.dirname(resolved);
-  const require = makeRequire(dirname, module);
-  const source = __node.readText(resolved).replace(/^#!.*/, "");
-  const wrapper = new Function("exports", "require", "module", "__filename", "__dirname", source);
-  wrapper.call(module.exports, module.exports, require, module, resolved, dirname);
+  const ext = path.extname(resolved);
+  const handler = Module._extensions[ext] || Module._extensions[".js"];
+  handler(module, resolved);
   module.loaded = true;
   return module.exports;
 }
@@ -381,6 +379,12 @@ function wrap(source) {
 const _extensions = {
   ".js": function (module, filename) {
     compileCommonJS(module, filename, __node.readText(filename));
+  },
+  ".ts": function (module, filename) {
+    compileCommonJS(module, filename, stripTypeScriptTypes(__node.readText(filename), { sourceUrl: filename }));
+  },
+  ".cts": function (module, filename) {
+    compileCommonJS(module, filename, stripTypeScriptTypes(__node.readText(filename), { sourceUrl: filename }));
   },
   ".json": function (module, filename) {
     module.exports = JSON.parse(__node.readText(filename));
