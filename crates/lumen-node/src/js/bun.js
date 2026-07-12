@@ -1721,7 +1721,7 @@ const Bun = {
   s3: undefined,
   SQL: globalThis.__lumenSQL.SQL,
   sql: undefined,
-  postgres: notImpl("Bun.postgres"),
+  postgres: undefined,
   zstdCompressSync,
   zstdDecompressSync,
   zstdCompress,
@@ -1744,9 +1744,27 @@ Object.defineProperty(Bun, "s3", {
 });
 
 let defaultSqlClient;
+function defaultSqlURL() {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  if (process.env.MYSQL_URL) return process.env.MYSQL_URL;
+  return process.env.POSTGRES_URL || process.env.PGURL || process.env.PG_URL || "postgres://localhost/postgres";
+}
 Object.defineProperty(Bun, "sql", {
   enumerable: true, configurable: true,
-  get() { if (!defaultSqlClient) defaultSqlClient = new Bun.SQL(process.env.DATABASE_URL || "postgres://localhost/postgres"); return defaultSqlClient; },
+  get() { if (!defaultSqlClient) defaultSqlClient = new Bun.SQL(defaultSqlURL()); return defaultSqlClient; },
+});
+
+let defaultPostgresClient;
+Object.defineProperty(Bun, "postgres", {
+  enumerable: true, configurable: true,
+  get() {
+    if (!defaultPostgresClient) {
+      const url = process.env.POSTGRES_URL || process.env.PGURL || process.env.PG_URL ||
+        (/^postgres(?:ql)?:/i.test(process.env.DATABASE_URL || "") ? process.env.DATABASE_URL : "postgres://localhost/postgres");
+      defaultPostgresClient = new Bun.SQL(url);
+    }
+    return defaultPostgresClient;
+  },
 });
 
 __builtins.set("bun", Bun);

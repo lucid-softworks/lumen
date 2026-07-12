@@ -21,7 +21,7 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
     let source = r#"
       (async () => {
         const sql = Bun.SQL("sqlite://:memory:");
-        console.log("shape", sql instanceof Bun.SQL, typeof sql, sql.options.adapter);
+        console.log("shape", sql instanceof Bun.SQL, typeof sql, sql.options.adapter, typeof Bun.postgres, Bun.postgres.options.adapter);
         await sql.unsafe("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active INTEGER)");
         const inserted = await sql`INSERT INTO users ${sql({ id: 1, name: "Alice", active: 1 })}`;
         console.log("insert", inserted.count, inserted.lastInsertRowid);
@@ -46,7 +46,7 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
     assert_eq!(
         String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
         [
-            "shape true function sqlite",
+            "shape true function sqlite function postgres",
             "insert 1 1",
             "rows [{\"id\":1,\"name\":\"Alice\"},{\"id\":3,\"name\":\"Cara\"}]",
             "values [[\"Alice\"],[\"Bob\"],[\"Cara\"]]",
