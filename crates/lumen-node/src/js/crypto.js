@@ -1741,9 +1741,66 @@ function rsaVerifyHash(struct, digestName, reg, mHash, sig, opts) {
   for (let i = 0; i < k; i++) diff |= em[i] ^ expect[i];
   return diff === 0;
 }
-// ECDSA lands with the EC tier; keep the throws precise until then.
-function ecdsaSignHash() { throw new Error("node:crypto ECDSA sign is not supported in lumen (no EC signing primitive available)"); }
-function ecdsaVerifyHash() { throw new Error("node:crypto ECDSA verify is not supported in lumen (no EC signing primitive available)"); }
+function ecdsaHashInt(C, hash) {
+  return bytesToBigIntBE(hash.length > C.size ? hash.subarray(0, C.size) : hash);
+}
+function ecdsaEncoding(opts) {
+  const encoding = opts.dsaEncoding === undefined ? "der" : String(opts.dsaEncoding);
+  if (encoding !== "der" && encoding !== "ieee-p1363") {
+    throw new TypeError(`Invalid ECDSA signature encoding '${encoding}'`);
+  }
+  return encoding;
+}
+function ecdsaSignatureEncode(C, r, s, encoding) {
+  if (encoding === "ieee-p1363") {
+    return concatAll([bigIntToBytesBE(r, C.size), bigIntToBytesBE(s, C.size)]);
+  }
+  return derSeq([derIntFromBig(r), derIntFromBig(s)]);
+}
+function ecdsaSignatureDecode(C, signature, encoding) {
+  if (encoding === "ieee-p1363") {
+    if (signature.length !== C.size * 2) return null;
+    return [bytesToBigIntBE(signature.subarray(0, C.size)), bytesToBigIntBE(signature.subarray(C.size))];
+  }
+  try {
+    const seq = derRead(signature, 0);
+    if (seq.tag !== 0x30 || seq.end !== signature.length) return null;
+    const parts = derChildren(seq.content);
+    if (parts.length !== 2 || parts[0].tag !== 0x02 || parts[1].tag !== 0x02) return null;
+    return [bytesToBigIntBE(parts[0].content), bytesToBigIntBE(parts[1].content)];
+  } catch (_error) {
+    return null;
+  }
+}
+function ecdsaSignHash(struct, mHash, opts) {
+  if (struct.d === undefined) throw new Error("crypto.sign: an EC private key is required");
+  const C = curveByName(struct.curve);
+  const z = ecdsaHashInt(C, mHash);
+  for (;;) {
+    const k = bytesToBigIntBE(randomBytes(C.size)) % C.n;
+    if (k === 0n) continue;
+    const point = ecToAffine(C, ecMul(C, k, ecG(C)));
+    const r = point[0] % C.n;
+    if (r === 0n) continue;
+    const s = amod(modInv(k, C.n) * (z + r * struct.d), C.n);
+    if (s === 0n) continue;
+    return ecdsaSignatureEncode(C, r, s, ecdsaEncoding(opts));
+  }
+}
+function ecdsaVerifyHash(struct, mHash, signature, opts) {
+  const C = curveByName(struct.curve);
+  const decoded = ecdsaSignatureDecode(C, signature, ecdsaEncoding(opts));
+  if (!decoded) return false;
+  const [r, s] = decoded;
+  if (r <= 0n || r >= C.n || s <= 0n || s >= C.n) return false;
+  let Q;
+  try { Q = ecPointDecode(C, struct.point); } catch (_error) { return false; }
+  const w = modInv(s, C.n);
+  const u1 = amod(ecdsaHashInt(C, mHash) * w, C.n);
+  const u2 = amod(r * w, C.n);
+  const point = ecToAffine(C, ecAdd(C, ecMul(C, u1, ecG(C)), ecMul(C, u2, Q)));
+  return point !== null && amod(point[0], C.n) === r;
+}
 
 function cryptoSign(algorithm, data, key, cb) {
   if (typeof cb === "function") {
@@ -1776,6 +1833,12 @@ function generateEd25519() {
   const seed = Uint8Array.from(randomBytes(32));
   return { kind: "ed25519", seed, pub: ed25519PubFromSeed(seed) };
 }
+function generateEc(options) {
+  const C = curveByName(options && options.namedCurve);
+  let d;
+  do { d = bytesToBigIntBE(randomBytes(C.size)) % C.n; } while (d === 0n);
+  return { kind: "ec", curve: C.name, d, point: ecPubFromPriv(C, d) };
+}
 function generateKeyPairStruct(type, options) {
   const t = String(type).toLowerCase();
   if (t === "ed25519") return generateEd25519();
@@ -1785,7 +1848,8 @@ function generateKeyPairStruct(type, options) {
     }
     return generateRsa(options.modulusLength, options.publicExponent);
   }
-  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519, rsa)`);
+  if (t === "ec") return generateEc(options);
+  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519, rsa, ec)`);
 }
 function generateKeyPairSync(type, options) {
   const pair = makeKeyPair(generateKeyPairStruct(type, options));
