@@ -213,6 +213,21 @@ fn process_basics() {
 }
 
 #[test]
+fn process_execve_validates_and_reports_os_errors() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        console.log(typeof process.execve);
+        try { process.execve(1, [], {}); } catch (error) { console.log(error.name); }
+        try { process.execve("/definitely/not/a/lumen/executable", ["missing"], {}); }
+        catch (error) { console.log(error.message.startsWith("execve failed:")); }
+        "#,
+    );
+    assert_eq!(out.lines(), ["function", "TypeError", "true"]);
+}
+
+#[test]
 fn async_await_settles_before_loop_exit() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

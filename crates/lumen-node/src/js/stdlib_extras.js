@@ -778,7 +778,6 @@ __builtins.set("sys", __builtins.get("util"));
 
   // Not supported: replacing the process image / changing OS identity can't be done honestly
   // without the underlying syscall, and silently "succeeding" would misrepresent the result.
-  proc.execve = function () { throw new Error("process.execve is not supported in lumen"); };
   const unsupportedId = (name) => function () {
     throw new Error("process." + name + " is not supported in lumen");
   };

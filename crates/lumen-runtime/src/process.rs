@@ -46,6 +46,7 @@ pub(crate) fn extension() -> Extension {
                     "getgid" (0) => op_getgid,
                     "getegid" (0) => op_getegid,
                     "getppid" (0) => op_getppid,
+                    "execve" (3) => op_execve,
                 ],
             ),
         ],
@@ -61,6 +62,7 @@ pub(crate) fn extension() -> Extension {
 const JS_INIT: &str = r#"(() => {
   const proc = globalThis.__proc;
   const readStdin = proc.readStdin;
+  const rawExecve = proc.execve;
   delete globalThis.__proc;
   const process = globalThis.process;
 
@@ -107,6 +109,15 @@ const JS_INIT: &str = r#"(() => {
   process.abort = proc.abort;
   process.umask = proc.umask;
   process.ppid = proc.getppid();
+  process.execve = (file, args, env) => {
+    if (typeof file !== "string") throw new TypeError('The "file" argument must be of type string');
+    if (!Array.isArray(args)) throw new TypeError('The "args" argument must be an Array');
+    if (env === null || typeof env !== "object" || Array.isArray(env)) throw new TypeError('The "env" argument must be an object');
+    const argv = args.map(value => String(value));
+    const entries = Object.keys(env).filter(key => env[key] !== undefined).map(key => `${key}=${String(env[key])}`);
+    if ([file, ...argv, ...entries].some(value => value.includes("\0"))) throw new TypeError("execve arguments may not contain null bytes");
+    return rawExecve(file, argv.join("\0"), entries.join("\0"));
+  };
   // getuid/getgid/geteuid/getegid are POSIX-only; the ops return undefined off unix (where Node
   // omits these entirely). We keep them defined but honest — `undefined` when the OS can't answer.
   const uid = proc.getuid(), gid = proc.getgid();
@@ -368,6 +379,29 @@ fn op_getegid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
 fn op_getppid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
     Ok(Value::Num(unsafe { ffi::getppid() } as f64))
 }
+
+#[cfg(unix)]
+fn op_execve(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let argv = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let env = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string();
+    let path = CString::new(path).map_err(|_| ctx.make_error("TypeError", "execve path contains a null byte"))?;
+    let argv = argv.split('\0').filter(|value| !value.is_empty()).map(CString::new).collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ctx.make_error("TypeError", "execve argument contains a null byte"))?;
+    let env = env.split('\0').filter(|value| !value.is_empty()).map(CString::new).collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ctx.make_error("TypeError", "execve environment contains a null byte"))?;
+    let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|value| value.as_ptr()).collect(); argv_ptrs.push(std::ptr::null());
+    let mut env_ptrs: Vec<*const c_char> = env.iter().map(|value| value.as_ptr()).collect(); env_ptrs.push(std::ptr::null());
+    unsafe { ffi::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()); }
+    Err(ctx.make_error("Error", format!("execve failed: {}", std::io::Error::last_os_error())))
+}
+#[cfg(not(unix))]
+fn op_execve(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "process.execve is not supported on this platform"))
+}
 #[cfg(not(unix))]
 fn op_getuid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
     Ok(Value::Undefined)
@@ -394,7 +428,7 @@ fn op_getppid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
 /// in libc, which std already links into every Rust program, so no third-party dependency is added.
 #[cfg(unix)]
 mod ffi {
-    use std::os::raw::{c_int, c_uint};
+    use std::os::raw::{c_char, c_int, c_uint};
     extern "C" {
         pub fn getuid() -> c_uint;
         pub fn geteuid() -> c_uint;
@@ -405,5 +439,6 @@ mod ffi {
         // mode_t is 16-bit on macOS / 32-bit on Linux; c_uint is ABI-safe for both (small values,
         // masked on the way out). Passing/returning through a register truncates harmlessly.
         pub fn umask(mask: c_uint) -> c_uint;
+        pub fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> c_int;
     }
 }
