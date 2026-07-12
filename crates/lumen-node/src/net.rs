@@ -74,6 +74,8 @@ pub const UDP_OPS: &[OpDecl] = ops![
     "setMulticastLoopback" (2) => op_udp_set_multicast_loop,
     "addMembership" (3) => op_udp_add_membership,
     "dropMembership" (3) => op_udp_drop_membership,
+    "getBufferSize" (2) => op_udp_get_buffer_size,
+    "setBufferSize" (3) => op_udp_set_buffer_size,
     "udpRef" (2) => op_udp_ref,
 ];
 
@@ -1038,6 +1040,123 @@ fn op_udp_ref(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
         }
     }
     Ok(Value::Undefined)
+}
+
+fn op_udp_get_buffer_size(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let sid = arg_u64(args, 0);
+    let receive = matches!(args.get(1), Some(Value::Bool(true)));
+    let socket = ctx
+        .host_mut::<DgramRegistry>()
+        .and_then(|registry| registry.sockets.get(&sid))
+        .map(|entry| entry.socket.clone())
+        .ok_or_else(|| ctx.make_error("Error", "dgram: unknown socket"))?;
+    socket_buffer_size(&socket, receive)
+        .map(|size| Value::Num(size as f64))
+        .map_err(|error| net_error_value(ctx, &net_err("getsockopt", &error, None)))
+}
+
+fn op_udp_set_buffer_size(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let sid = arg_u64(args, 0);
+    let receive = matches!(args.get(1), Some(Value::Bool(true)));
+    let size = arg_u64(args, 2).min(i32::MAX as u64) as i32;
+    let socket = ctx
+        .host_mut::<DgramRegistry>()
+        .and_then(|registry| registry.sockets.get(&sid))
+        .map(|entry| entry.socket.clone())
+        .ok_or_else(|| ctx.make_error("Error", "dgram: unknown socket"))?;
+    set_socket_buffer_size(&socket, receive, size)
+        .map(|()| Value::Undefined)
+        .map_err(|error| net_error_value(ctx, &net_err("setsockopt", &error, None)))
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn socket_buffer_size(socket: &UdpSocket, receive: bool) -> std::io::Result<i32> {
+    use std::os::fd::AsRawFd;
+
+    #[cfg(target_os = "linux")]
+    const SOL_SOCKET: i32 = 1;
+    #[cfg(target_os = "linux")]
+    const SO_RCVBUF: i32 = 8;
+    #[cfg(target_os = "linux")]
+    const SO_SNDBUF: i32 = 7;
+    #[cfg(target_os = "macos")]
+    const SOL_SOCKET: i32 = 0xffff;
+    #[cfg(target_os = "macos")]
+    const SO_RCVBUF: i32 = 0x1002;
+    #[cfg(target_os = "macos")]
+    const SO_SNDBUF: i32 = 0x1001;
+
+    extern "C" {
+        fn getsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *mut std::os::raw::c_void,
+            length: *mut u32,
+        ) -> i32;
+    }
+    let mut value = 0i32;
+    let mut length = std::mem::size_of::<i32>() as u32;
+    // SAFETY: the socket fd is live and both output pointers reference initialized writable values.
+    let result = unsafe {
+        getsockopt(
+            socket.as_raw_fd(),
+            SOL_SOCKET,
+            if receive { SO_RCVBUF } else { SO_SNDBUF },
+            &mut value as *mut i32 as *mut _,
+            &mut length,
+        )
+    };
+    if result == 0 { Ok(value) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn set_socket_buffer_size(socket: &UdpSocket, receive: bool, size: i32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    #[cfg(target_os = "linux")]
+    const SOL_SOCKET: i32 = 1;
+    #[cfg(target_os = "linux")]
+    const SO_RCVBUF: i32 = 8;
+    #[cfg(target_os = "linux")]
+    const SO_SNDBUF: i32 = 7;
+    #[cfg(target_os = "macos")]
+    const SOL_SOCKET: i32 = 0xffff;
+    #[cfg(target_os = "macos")]
+    const SO_RCVBUF: i32 = 0x1002;
+    #[cfg(target_os = "macos")]
+    const SO_SNDBUF: i32 = 0x1001;
+
+    extern "C" {
+        fn setsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *const std::os::raw::c_void,
+            length: u32,
+        ) -> i32;
+    }
+    // SAFETY: the socket fd is live and the input pointer references a valid i32.
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_fd(),
+            SOL_SOCKET,
+            if receive { SO_RCVBUF } else { SO_SNDBUF },
+            &size as *const i32 as *const _,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
+fn socket_buffer_size(_socket: &UdpSocket, _receive: bool) -> std::io::Result<i32> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "socket buffer sizes are unavailable"))
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
+fn set_socket_buffer_size(_socket: &UdpSocket, _receive: bool, _size: i32) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "socket buffer sizes are unavailable"))
 }
 
 // ---- IPV6_UNICAST_HOPS via setsockopt (std exposes no IPv6 hop-limit setter) --------------------

@@ -257,10 +257,20 @@ class Socket extends EventEmitter {
   }
   ref() { if (this._id !== null) __udp.udpRef(this._id, false); return this; }
   unref() { if (this._id !== null) __udp.udpRef(this._id, true); return this; }
-  getRecvBufferSize() { throw new Error("dgram.getRecvBufferSize is not supported in lumen (std exposes no SO_RCVBUF getter)"); }
-  getSendBufferSize() { throw new Error("dgram.getSendBufferSize is not supported in lumen (std exposes no SO_SNDBUF getter)"); }
-  setRecvBufferSize() { throw new Error("dgram.setRecvBufferSize is not supported in lumen (std exposes no SO_RCVBUF setter)"); }
-  setSendBufferSize() { throw new Error("dgram.setSendBufferSize is not supported in lumen (std exposes no SO_SNDBUF setter)"); }
+  getRecvBufferSize() { this._ensureBound(); return this._op("getBufferSize", true); }
+  getSendBufferSize() { this._ensureBound(); return this._op("getBufferSize", false); }
+  setRecvBufferSize(size) { return this._setBufferSize(true, size); }
+  setSendBufferSize(size) { return this._setBufferSize(false, size); }
+  _setBufferSize(receive, size) {
+    size = Number(size);
+    if (!Number.isInteger(size) || size <= 0 || size > 0x7fffffff) {
+      const error = new RangeError(`The value of "size" is out of range. It must be a positive integer. Received ${size}`);
+      error.code = "ERR_OUT_OF_RANGE";
+      throw error;
+    }
+    this._ensureBound();
+    this._op("setBufferSize", receive, size);
+  }
 }
 
 function createSocket(type, listener) {
