@@ -1,7 +1,7 @@
 // The `bun` module and the `Bun` global (same object identity: require("bun") === globalThis.Bun).
 // Parity target is Bun v1.2.21's require("bun") surface. Everything backable by lumen's existing
 // node: glue (zlib/crypto/child_process/fs/url/util/dns) or the WHATWG globals is implemented for
-// real; anything that needs a native client lumen doesn't have (postgres, s3, redis) is an honest
+// real; anything that needs a native client lumen doesn't have (postgres, s3) is an honest
 // throwing stub rather than a wrong answer.
 //
 // This block is wrapped (build.rs wrap:true) so its top-level names stay private. It loads right
@@ -1654,7 +1654,7 @@ const Bun = {
   udpSocket: bunUdpSocket,
   Cookie: throwClass("Bun.Cookie"),
   CookieMap: throwClass("Bun.CookieMap"),
-  RedisClient: throwClass("Bun.RedisClient"),
+  RedisClient: globalThis.__lumenRedisClient,
   redis: undefined,
   S3Client: throwClass("Bun.S3Client"),
   s3: undefined,
@@ -1667,9 +1667,18 @@ const Bun = {
   zstdDecompress,
 };
 
-// `redis`/`s3`/`sql` are lazy throwing getters in Bun; expose them as throwing accessors so the
-// keys are present but touching them fails honestly rather than reading `undefined`.
-for (const k of ["redis", "s3", "sql"]) {
+let defaultRedisClient;
+Object.defineProperty(Bun, "redis", {
+  enumerable: true, configurable: true,
+  get() {
+    if (!defaultRedisClient) defaultRedisClient = new Bun.RedisClient();
+    return defaultRedisClient;
+  },
+});
+
+// `s3`/`sql` are lazy throwing getters in Bun; the keys are present, but touching them fails
+// honestly rather than reading `undefined`.
+for (const k of ["s3", "sql"]) {
   Object.defineProperty(Bun, k, {
     enumerable: true, configurable: true,
     get() { throw new Error(`Bun.${k} is not supported in lumen`); },
