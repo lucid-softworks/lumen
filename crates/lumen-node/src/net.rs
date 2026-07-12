@@ -72,6 +72,7 @@ pub const UDP_OPS: &[OpDecl] = ops![
     "setTTL" (2) => op_udp_set_ttl,
     "setMulticastTTL" (2) => op_udp_set_multicast_ttl,
     "setMulticastLoopback" (2) => op_udp_set_multicast_loop,
+    "setMulticastInterface" (2) => op_udp_set_multicast_interface,
     "addMembership" (3) => op_udp_add_membership,
     "dropMembership" (3) => op_udp_drop_membership,
     "getBufferSize" (2) => op_udp_get_buffer_size,
@@ -959,6 +960,54 @@ fn op_udp_set_multicast_loop(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result
             s.set_multicast_loop_v4(on)
         }
     })
+}
+
+fn op_udp_set_multicast_interface(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let sid = arg_u64(args, 0);
+    let interface = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    with_udp(ctx, sid, "setMulticastInterface", |socket, kind6| {
+        set_multicast_interface(socket, kind6, &interface)
+    })
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn set_multicast_interface(socket: &UdpSocket, kind6: bool, interface: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    const IPPROTO_IP: i32 = 0;
+    const IPPROTO_IPV6: i32 = 41;
+    #[cfg(target_os = "linux")]
+    const IP_MULTICAST_IF: i32 = 32;
+    #[cfg(target_os = "macos")]
+    const IP_MULTICAST_IF: i32 = 9;
+    #[cfg(target_os = "linux")]
+    const IPV6_MULTICAST_IF: i32 = 17;
+    #[cfg(target_os = "macos")]
+    const IPV6_MULTICAST_IF: i32 = 9;
+    extern "C" {
+        fn setsockopt(socket: i32, level: i32, name: i32, value: *const std::os::raw::c_void, length: u32) -> i32;
+    }
+    let (level, option, value) = if kind6 {
+        let index = interface.trim_start_matches('%').parse::<u32>().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPv6 multicast interface must be a numeric index")
+        })?;
+        (IPPROTO_IPV6, IPV6_MULTICAST_IF, index)
+    } else {
+        let address = interface.parse::<Ipv4Addr>().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPv4 multicast interface must be an IPv4 address")
+        })?;
+        (IPPROTO_IP, IP_MULTICAST_IF, u32::from_ne_bytes(address.octets()))
+    };
+    // SAFETY: the socket fd is live and value points to a valid 32-bit socket-option payload.
+    let result = unsafe {
+        setsockopt(socket.as_raw_fd(), level, option, &value as *const u32 as *const _, std::mem::size_of::<u32>() as u32)
+    };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
+fn set_multicast_interface(_socket: &UdpSocket, _kind6: bool, _interface: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "multicast interface selection is unavailable"))
 }
 
 fn parse_v4(s: &str) -> Result<Ipv4Addr, ()> {

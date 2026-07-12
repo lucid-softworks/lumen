@@ -239,8 +239,10 @@ class Socket extends EventEmitter {
     return ttl;
   }
   setMulticastLoopback(flag) { this._op("setMulticastLoopback", !!flag); return !!flag; }
-  setMulticastInterface() {
-    throw new Error("dgram.setMulticastInterface is not supported in lumen (std exposes no IP_MULTICAST_IF setter)");
+  setMulticastInterface(multicastInterface) {
+    this._ensureBound();
+    this._op("setMulticastInterface", String(multicastInterface));
+    return this;
   }
   addMembership(multicastAddress, multicastInterface) {
     this._ensureBound();
