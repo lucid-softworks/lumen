@@ -326,13 +326,254 @@ function connect(authority, options, listener) {
   if (typeof options === "function") { listener = options; options = {}; }
   return new ClientHttp2Session(authority, options || {}, listener);
 }
-// Server request/response objects only exist attached to a live session. Exported for the class
-// surface / instanceof, but constructing one directly has no transport to bind to.
+
+class ServerHttp2Stream extends Duplex {
+  constructor(session, id, headers) {
+    super({});
+    this.session = session;
+    this.id = id;
+    this.headers = headers;
+    this.sentHeaders = undefined;
+    this.headersSent = false;
+    this.closed = false;
+    this.destroyed = false;
+    this.rstCode = 0;
+  }
+
+  respond(headers = {}, options = {}) {
+    if (this.headersSent) throw new Error("Response headers already sent");
+    const normalized = { ...headers };
+    if (normalized[":status"] === undefined) normalized[":status"] = 200;
+    this.sentHeaders = normalized;
+    this.headersSent = true;
+    this.session._sendHeaders(this.id, normalized, !!options.endStream);
+    return this;
+  }
+
+  additionalHeaders(headers) { this.session._sendHeaders(this.id, headers, false); }
+
+  _write(chunk, encoding, callback) {
+    if (!this.headersSent) this.respond();
+    const bytes = chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.from(String(chunk), encoding || "utf8");
+    this.session._sendData(this.id, bytes, false, callback);
+  }
+
+  _final(callback) {
+    if (!this.headersSent) this.respond();
+    this.session._sendData(this.id, Buffer.alloc(0), true, callback);
+  }
+
+  close(code = constants.NGHTTP2_NO_ERROR, callback) {
+    if (callback) this.once("close", callback);
+    if (!this.closed) {
+      this.rstCode = code >>> 0;
+      const payload = Buffer.alloc(4);
+      payload.writeUInt32BE(this.rstCode, 0);
+      this.session._writeFrame(3, 0, this.id, payload);
+      this._close();
+    }
+    return this;
+  }
+
+  _remoteEnd() { if (!this.readableEnded) this.push(null); }
+  _close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.session._streams.delete(this.id);
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
+class ServerHttp2Session extends EventEmitter {
+  constructor(server, socket, options = {}) {
+    super();
+    this.type = constants.NGHTTP2_SESSION_SERVER;
+    this.server = server;
+    this.socket = socket;
+    this.encrypted = !!socket.encrypted;
+    this.connecting = false;
+    this.closed = false;
+    this.destroyed = false;
+    this.localSettings = { ...getDefaultSettings(), ...(options.settings || {}) };
+    this.remoteSettings = getDefaultSettings();
+    this._decoder = new codec.FrameDecoder();
+    this._hpack = new codec.Hpack();
+    this._streams = new Map();
+    this._continuation = null;
+    this._preface = Buffer.alloc(0);
+    socket.on("data", chunk => this._receive(chunk));
+    socket.on("error", error => this._fail(error));
+    socket.on("close", () => this._socketClosed());
+    this._writeFrame(4, 0, 0, getPackedSettings(this.localSettings));
+  }
+
+  _receive(chunk) {
+    if (this._preface !== null) {
+      this._preface = Buffer.concat([this._preface, Buffer.from(chunk)]);
+      if (this._preface.length < 24) return;
+      const expected = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+      if (this._preface.subarray(0, 24).toString() !== expected) { this._fail(new Error("invalid HTTP/2 client preface")); return; }
+      chunk = this._preface.subarray(24);
+      this._preface = null;
+    }
+    let frames;
+    try { frames = this._decoder.push(chunk); }
+    catch (error) { this._fail(error); return; }
+    for (const frame of frames) {
+      try { this._handleFrame(frame); }
+      catch (error) { this._fail(error); return; }
+    }
+  }
+
+  _handleFrame(frame) {
+    if (frame.type === 4) {
+      if (!(frame.flags & 1)) {
+        this.remoteSettings = { ...this.remoteSettings, ...getUnpackedSettings(frame.payload) };
+        this._writeFrame(4, 1, 0, Buffer.alloc(0));
+        this.emit("remoteSettings", this.remoteSettings);
+      } else this.emit("localSettings", this.localSettings);
+      return;
+    }
+    if (frame.type === 6) {
+      if (frame.payload.length !== 8) throw new Error("invalid HTTP/2 PING frame");
+      if (!(frame.flags & 1)) this._writeFrame(6, 1, 0, frame.payload);
+      else this.emit("ping", frame.payload);
+      return;
+    }
+    if (frame.type === 7) { this.closed = true; this.socket.end(); return; }
+    if (frame.type === 1 || frame.type === 9) {
+      if (frame.type === 1) this._continuation = { streamId: frame.streamId, chunks: [], endStream: !!(frame.flags & 1) };
+      if (!this._continuation || this._continuation.streamId !== frame.streamId) throw new Error("invalid HTTP/2 CONTINUATION sequence");
+      this._continuation.chunks.push(frame.payload);
+      if (frame.flags & 4) {
+        const headers = this._hpack.decode(Buffer.concat(this._continuation.chunks));
+        const endStream = this._continuation.endStream;
+        this._continuation = null;
+        let serverStream = this._streams.get(frame.streamId);
+        if (!serverStream) {
+          serverStream = new ServerHttp2Stream(this, frame.streamId, headers);
+          this._streams.set(frame.streamId, serverStream);
+          this.server.emit("stream", serverStream, headers, frame.flags, {});
+          this.server._emitRequest(serverStream, headers);
+        } else serverStream.emit("trailers", headers, frame.flags);
+        if (endStream) serverStream._remoteEnd();
+      }
+      return;
+    }
+    const serverStream = this._streams.get(frame.streamId);
+    if (!serverStream) return;
+    if (frame.type === 0) {
+      serverStream.push(frame.payload);
+      if (frame.flags & 1) serverStream._remoteEnd();
+    } else if (frame.type === 3) {
+      serverStream.rstCode = frame.payload.readUInt32BE(0);
+      serverStream.emit("aborted");
+      serverStream._close();
+    }
+  }
+
+  _sendHeaders(streamId, headers, endStream) {
+    const block = this._hpack.encode(headers);
+    const max = this.remoteSettings.maxFrameSize || 16384;
+    let offset = 0, first = true;
+    do {
+      const end = Math.min(offset + max, block.length);
+      const final = end === block.length;
+      this._writeFrame(first ? 1 : 9, (final ? 4 : 0) | (first && endStream ? 1 : 0), streamId, block.subarray(offset, end));
+      first = false;
+      offset = end;
+    } while (offset < block.length);
+  }
+
+  _sendData(streamId, bytes, endStream, callback) {
+    const max = this.remoteSettings.maxFrameSize || 16384;
+    let offset = 0;
+    do {
+      const end = Math.min(offset + max, bytes.length);
+      this._writeFrame(0, end === bytes.length && endStream ? 1 : 0, streamId, bytes.subarray(offset, end));
+      offset = end;
+    } while (offset < bytes.length);
+    queueMicrotask(callback);
+  }
+
+  _writeFrame(type, flags, streamId, payload) { if (!this.destroyed) this.socket.write(codec.encodeFrame(type, flags, streamId, payload)); }
+  close(callback) { if (callback) this.once("close", callback); this.closed = true; this._writeFrame(7, 0, 0, Buffer.alloc(8)); this.socket.end(); return this; }
+  destroy(error) { this._fail(error); return this; }
+  ref() { this.socket.ref(); return this; }
+  unref() { this.socket.unref(); return this; }
+  _fail(error) { if (this.destroyed) return; this.destroyed = true; this.socket.destroy(); if (error) this.server.emit("sessionError", error, this); }
+  _socketClosed() { this.destroyed = true; for (const value of this._streams.values()) value._close(); this.emit("close"); }
+}
+
 class Http2ServerRequest extends Readable {
-  constructor() { super(); notSupported(); }
+  constructor(stream, headers) {
+    super({});
+    this.stream = stream;
+    this.headers = headers;
+    this.rawHeaders = Object.entries(headers).flat();
+    this.method = headers[":method"];
+    this.url = headers[":path"];
+    this.authority = headers[":authority"];
+    this.socket = stream.session.socket;
+    stream.on("data", chunk => this.push(chunk));
+    stream.on("end", () => this.push(null));
+    stream.on("aborted", () => this.emit("aborted"));
+  }
 }
 class Http2ServerResponse extends Writable {
-  constructor() { super(); notSupported(); }
+  constructor(stream) {
+    super({});
+    this.stream = stream;
+    this.statusCode = 200;
+    this.headersSent = false;
+    this._headers = {};
+  }
+  setHeader(name, value) { this._headers[String(name).toLowerCase()] = value; }
+  getHeader(name) { return this._headers[String(name).toLowerCase()]; }
+  getHeaders() { return { ...this._headers }; }
+  hasHeader(name) { return String(name).toLowerCase() in this._headers; }
+  removeHeader(name) { delete this._headers[String(name).toLowerCase()]; }
+  writeHead(statusCode, headers) { this.statusCode = statusCode; if (headers) Object.assign(this._headers, headers); this._sendHeaders(); return this; }
+  _sendHeaders() { if (!this.headersSent) { this.headersSent = true; this.stream.respond({ ":status": this.statusCode, ...this._headers }); } }
+  _write(chunk, encoding, callback) { this._sendHeaders(); this.stream._write(chunk, encoding, callback); }
+  _final(callback) { this._sendHeaders(); this.stream._final(callback); }
+}
+
+class Http2Server extends EventEmitter {
+  constructor(options = {}, requestListener, secure = false) {
+    super();
+    if (typeof options === "function") { requestListener = options; options = {}; }
+    this.options = options || {};
+    this._secure = secure;
+    this._server = null;
+    if (requestListener) this.on("request", requestListener);
+  }
+  listen(...args) {
+    const transport = __builtins.get(this._secure ? "tls" : "net");
+    this._server = transport.createServer(this.options, socket => {
+      const session = new ServerHttp2Session(this, socket, this.options);
+      this.emit("session", session);
+    });
+    for (const event of ["listening", "close", "error"]) this._server.on(event, (...values) => this.emit(event, ...values));
+    this._server.listen(...args);
+    return this;
+  }
+  _emitRequest(stream, headers) {
+    if (!this.listenerCount("request")) return;
+    this.emit("request", new Http2ServerRequest(stream, headers), new Http2ServerResponse(stream));
+  }
+  address() { return this._server && this._server.address(); }
+  close(callback) { if (!this._server) { if (callback) queueMicrotask(callback); return this; } this._server.close(callback); return this; }
+  getConnections(callback) { return this._server.getConnections(callback); }
+  ref() { if (this._server) this._server.ref(); return this; }
+  unref() { if (this._server) this._server.unref(); return this; }
+}
+
+function createServer(options, listener) { return new Http2Server(options, listener, false); }
+function createSecureServer() {
+  const error = new Error("Secure HTTP/2 servers require TLS ALPN selection, which lumen does not provide yet");
+  error.code = "ERR_HTTP2_ALPN_UNAVAILABLE";
+  throw error;
 }
 
 __builtins.set("http2", {
@@ -342,13 +583,15 @@ __builtins.set("http2", {
   getDefaultSettings,
   getPackedSettings,
   getUnpackedSettings,
-  // server sessions are the remaining transport-dependent surface
-  createServer: notSupported,
-  createSecureServer: notSupported,
+  createServer,
+  createSecureServer,
   connect,
   performServerHandshake: notSupported,
   Http2ServerRequest,
   Http2ServerResponse,
   ClientHttp2Session,
   ClientHttp2Stream,
+  ServerHttp2Session,
+  ServerHttp2Stream,
+  Http2Server,
 });
