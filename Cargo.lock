@@ -118,6 +118,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-tls"
+version = "0.1.2"
+
+[[package]]
 name = "lumen-typescript"
 version = "0.1.2"
 
