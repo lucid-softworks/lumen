@@ -1707,7 +1707,7 @@ const Bun = {
   plugin: notImpl("Bun.plugin"),
   build: notImpl("Bun.build"),
   Transpiler: throwClass("Bun.Transpiler"),
-  FileSystemRouter: throwClass("Bun.FileSystemRouter"),
+  FileSystemRouter: globalThis.__lumenFileSystemRouter,
   connect: bunConnect,
   listen: bunListen,
   udpSocket: bunUdpSocket,

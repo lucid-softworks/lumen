@@ -55,6 +55,7 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "bun_sqlite.js", wrap: true },
     GlueFile { name: "bun_redis.js", wrap: true },
     GlueFile { name: "bun_cookies.js", wrap: true },
+    GlueFile { name: "bun_router.js", wrap: true },
     GlueFile { name: "bun.js", wrap: true },
     GlueFile { name: "typescript_strip.js", wrap: true },
     GlueFile { name: "module.js", wrap: false },
