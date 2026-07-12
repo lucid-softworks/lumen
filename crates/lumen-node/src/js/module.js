@@ -566,15 +566,11 @@ function registerHooks(hooks) {
   };
 }
 
-// Honest throwing stubs: the ASYNC loader-thread hook machinery (register) and the TypeScript
-// type-stripping transform do not exist in lumen, so we throw rather than silently pretend.
-// (For sync hooks, use registerHooks above.)
+// The async loader-thread hook machinery remains unavailable. For sync hooks, use registerHooks.
 function register() {
   throw new Error("node:module register() (async ESM loader hooks) is not supported in lumen; module.registerHooks (the sync API) is");
 }
-function stripTypeScriptTypes() {
-  throw new Error("node:module stripTypeScriptTypes() (TypeScript transform) is not supported in lumen");
-}
+const stripTypeScriptTypes = globalThis.__lumenStripTypeScriptTypes;
 
 // Node's `require('module')` is the Module constructor itself, with every named export hung off it
 // as a static (so require('module') === require('module').Module). Mirror that exactly.
