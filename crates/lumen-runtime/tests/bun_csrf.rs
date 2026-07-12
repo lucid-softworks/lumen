@@ -28,7 +28,7 @@ fn csrf_tokens_interoperate_with_bun_and_reject_tampering() {
         const token = Bun.CSRF.generate("secret", { expiresIn: 0 });
         console.log("generated", token.length, Bun.CSRF.verify(token, { secret: "secret" }),
                     Bun.CSRF.verify(token, { secret: "wrong" }));
-        const changed = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+        const changed = token.slice(0, 40) + (token[40] === "A" ? "B" : "A") + token.slice(41);
         console.log("tampered", Bun.CSRF.verify(changed, { secret: "secret" }));
         const hex = Bun.CSRF.generate("secret", { encoding: "hex", algorithm: "sha512" });
         console.log("sha512", hex.length, Bun.CSRF.verify(hex, { secret: "secret", encoding: "hex", algorithm: "sha512" }));
