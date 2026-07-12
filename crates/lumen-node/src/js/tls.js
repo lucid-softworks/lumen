@@ -197,7 +197,8 @@
       const cert = Array.isArray(context.cert) ? context.cert[0] : context.cert;
       const key = Array.isArray(context.key) ? context.key[0] : context.key;
       if (cert == null || key == null) throw new TypeError("tls.createServer requires cert and key options");
-      const info = __tls.listen(host, port, Buffer.from(cert), Buffer.from(key));
+      const alpn = (context.ALPNProtocols || []).map(value => Buffer.isBuffer(value) ? value.toString() : String(value)).join(",");
+      const info = __tls.listen(host, port, Buffer.from(cert), Buffer.from(key), alpn);
       this._id = info.serverId;
       this._address = { address: info.address, port: info.port, family: info.address.includes(":") ? "IPv6" : "IPv4" };
       this.listening = true;

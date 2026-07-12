@@ -47,6 +47,8 @@ type SslGetCipher = unsafe extern "C" fn(*const Ssl) -> *const c_void;
 type CipherGetName = unsafe extern "C" fn(*const c_void) -> *const c_char;
 type SslSetAlpn = unsafe extern "C" fn(*mut Ssl, *const u8, u32) -> c_int;
 type SslGetAlpn = unsafe extern "C" fn(*const Ssl, *mut *const u8, *mut u32);
+type AlpnSelectCallback = unsafe extern "C" fn(*mut Ssl, *mut *const u8, *mut u8, *const u8, u32, *mut c_void) -> c_int;
+type CtxSetAlpnSelect = unsafe extern "C" fn(*mut SslCtx, Option<AlpnSelectCallback>, *mut c_void);
 type ErrGetError = unsafe extern "C" fn() -> u64;
 type ErrErrorString = unsafe extern "C" fn(u64, *mut c_char, usize);
 
@@ -74,6 +76,7 @@ struct Api {
     cipher_get_name: CipherGetName,
     ssl_set_alpn: SslSetAlpn,
     ssl_get_alpn: SslGetAlpn,
+    ctx_set_alpn_select: CtxSetAlpnSelect,
     bio_new_mem: BioNewMem,
     bio_free: BioFree,
     pem_read_cert: PemRead,
@@ -120,6 +123,7 @@ impl Api {
                 cipher_get_name: ssl.function("SSL_CIPHER_get_name")?,
                 ssl_set_alpn: ssl.function("SSL_set_alpn_protos")?,
                 ssl_get_alpn: ssl.function("SSL_get0_alpn_selected")?,
+                ctx_set_alpn_select: ssl.function("SSL_CTX_set_alpn_select_cb")?,
                 bio_new_mem: crypto.function("BIO_new_mem_buf")?,
                 bio_free: crypto.function("BIO_free")?,
                 pem_read_cert: crypto.function("PEM_read_bio_X509")?,
@@ -143,6 +147,36 @@ pub struct TlsStream {
     api: Api,
     context: *mut SslCtx,
     ssl: *mut Ssl,
+    _alpn_config: Option<Box<AlpnConfig>>,
+}
+
+struct AlpnConfig(Vec<Vec<u8>>);
+
+unsafe extern "C" fn select_alpn(
+    _ssl: *mut Ssl,
+    output: *mut *const u8,
+    output_length: *mut u8,
+    input: *const u8,
+    input_length: u32,
+    argument: *mut c_void,
+) -> c_int {
+    if input.is_null() || argument.is_null() { return 3; }
+    let offered = unsafe { std::slice::from_raw_parts(input, input_length as usize) };
+    let configured = unsafe { &*(argument as *const AlpnConfig) };
+    for protocol in &configured.0 {
+        let mut offset = 0;
+        while offset < offered.len() {
+            let length = offered[offset] as usize;
+            offset += 1;
+            if offset + length > offered.len() { return 2; }
+            if &offered[offset..offset + length] == protocol {
+                unsafe { *output = protocol.as_ptr(); *output_length = protocol.len() as u8; }
+                return 0;
+            }
+            offset += length;
+        }
+    }
+    3
 }
 
 // The stream owns its OpenSSL objects and is moved as one unit between blocking worker tasks. It
@@ -205,10 +239,14 @@ impl TlsStream {
             unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
             return Err(format!("TLS certificate verification failed ({verify})"));
         }
-        Ok(Self { stream, api, context, ssl })
+        Ok(Self { stream, api, context, ssl, _alpn_config: None })
     }
 
     pub fn accept(stream: TcpStream, certificate_pem: &[u8], private_key_pem: &[u8]) -> Result<Self, String> {
+        Self::accept_with_alpn(stream, certificate_pem, private_key_pem, &[])
+    }
+
+    pub fn accept_with_alpn(stream: TcpStream, certificate_pem: &[u8], private_key_pem: &[u8], protocols: &[String]) -> Result<Self, String> {
         let api = Api::load()?;
         let method: ServerMethod = unsafe { api._ssl_lib.function("TLS_server_method")? };
         let context = unsafe { (api.ctx_new)(method()) };
@@ -237,6 +275,18 @@ impl TlsStream {
             unsafe { (api.ctx_free)(context) };
             return Err(format!("TLS certificate/private key configuration failed: {detail}"));
         }
+        let mut alpn_config = if protocols.is_empty() {
+            None
+        } else {
+            let values = protocols.iter().map(|protocol| {
+                if protocol.is_empty() || protocol.len() > u8::MAX as usize { Err("TLS ALPN protocol names must contain 1 to 255 bytes".to_string()) }
+                else { Ok(protocol.as_bytes().to_vec()) }
+            }).collect::<Result<Vec<_>, _>>()?;
+            Some(Box::new(AlpnConfig(values)))
+        };
+        if let Some(config) = &mut alpn_config {
+            unsafe { (api.ctx_set_alpn_select)(context, Some(select_alpn), config.as_mut() as *mut AlpnConfig as *mut c_void) };
+        }
         let ssl = unsafe { (api.ssl_new)(context) };
         if ssl.is_null() {
             unsafe { (api.ctx_free)(context) };
@@ -253,7 +303,7 @@ impl TlsStream {
             unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
             return Err(format!("TLS server handshake failed (SSL error {code}: {detail})"));
         }
-        Ok(Self { stream, api, context, ssl })
+        Ok(Self { stream, api, context, ssl, _alpn_config: alpn_config })
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {

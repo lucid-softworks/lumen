@@ -11,7 +11,7 @@ pub const TLS_OPS: &[OpDecl] = ops![
     "read" (3) => op_read,
     "write" (4) => op_write,
     "close" (1) => op_close,
-    "listen" (4) => op_listen,
+    "listen" (5) => op_listen,
     "accept" (3) => op_accept,
     "closeServer" (1) => op_close_server,
 ];
@@ -35,6 +35,7 @@ struct ListenerEntry {
     local: SocketAddr,
     certificate: Arc<Vec<u8>>,
     private_key: Arc<Vec<u8>>,
+    alpn: Arc<Vec<String>>,
 }
 
 struct Connected {
@@ -118,6 +119,8 @@ fn op_listen(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
         .ok_or_else(|| ctx.make_error("TypeError", "TLS server certificate must be bytes"))?;
     let private_key = ctx.typed_array_bytes(args.get(3).unwrap_or(&Value::Undefined))
         .ok_or_else(|| ctx.make_error("TypeError", "TLS server private key must be bytes"))?;
+    let alpn: Vec<String> = ctx.coerce_string(args.get(4).unwrap_or(&Value::Undefined))?.to_string()
+        .split(',').filter(|value| !value.is_empty()).map(str::to_string).collect();
     let listener = TcpListener::bind((if host.is_empty() { "0.0.0.0" } else { &host }, port))
         .map_err(|error| ctx.make_error("Error", format!("TLS listen: {error}")))?;
     let local = listener.local_addr().map_err(|error| ctx.make_error("Error", error.to_string()))?;
@@ -127,6 +130,7 @@ fn op_listen(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
     registry.listeners.insert(id, ListenerEntry {
         listener: Arc::new(listener), closed: Arc::new(AtomicBool::new(false)), local,
         certificate: Arc::new(certificate), private_key: Arc::new(private_key),
+        alpn: Arc::new(alpn),
     });
     let result = Value::Obj(ctx.new_object());
     let _ = ctx.set_member(&result, "serverId", Value::Num(id as f64));
@@ -141,9 +145,9 @@ fn op_accept(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
     let id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u64;
     let (resolve, reject) = callbacks(ctx, args.get(1), args.get(2))?;
     let found = ctx.host_mut::<TlsRegistry>().and_then(|registry| registry.listeners.get(&id)).map(|entry| (
-        entry.listener.clone(), entry.closed.clone(), entry.certificate.clone(), entry.private_key.clone()
+        entry.listener.clone(), entry.closed.clone(), entry.certificate.clone(), entry.private_key.clone(), entry.alpn.clone()
     ));
-    let Some((listener, closed, certificate, private_key)) = found else {
+    let Some((listener, closed, certificate, private_key, alpn)) = found else {
         CallbackQueue::enqueue(ctx.op_state(), resolve, vec![Value::Null]);
         return Ok(Value::Undefined);
     };
@@ -153,7 +157,7 @@ fn op_accept(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
             Ok((tcp, peer)) if !closed.load(Ordering::SeqCst) => {
                 let local = tcp.local_addr().unwrap_or_else(|_| listener.local_addr().unwrap());
                 tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
-                match lumen_tls::TlsStream::accept(tcp, &certificate, &private_key) {
+                match lumen_tls::TlsStream::accept_with_alpn(tcp, &certificate, &private_key, &alpn) {
                     Ok(stream) => {
                         let protocol = stream.protocol();
                         let cipher = stream.cipher();

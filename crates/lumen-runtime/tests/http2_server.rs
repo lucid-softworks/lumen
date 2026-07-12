@@ -72,3 +72,59 @@ fn server_handles_multiplexed_node_requests() {
     assert!(child_lines.contains(&"/two /two:PAYLOAD".to_string()), "{child_lines:?}");
     assert_eq!(String::from_utf8(out.0.borrow().clone()).unwrap().trim(), "streams 2");
 }
+
+#[test]
+fn secure_server_negotiates_h2_with_node_client() {
+    if Command::new("node").arg("--version").output().is_err()
+        || Command::new("openssl").arg("version").output().is_err()
+    {
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("lumen-http2-server-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let certificate = directory.join("cert.pem");
+    let key = directory.join("key.pem");
+    let generated = Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes"])
+        .arg("-keyout").arg(&key).arg("-out").arg(&certificate)
+        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+        .output().unwrap();
+    assert!(generated.status.success());
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let client = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let source = format!(r#"
+          const http2 = require("node:http2");
+          const client = http2.connect("https://localhost:{port}", {{ rejectUnauthorized: false }});
+          client.on("connect", () => console.log("alpn", client.socket.alpnProtocol));
+          const request = client.request({{ ":path": "/secure" }});
+          let body = "";
+          request.on("data", chunk => body += chunk);
+          request.on("end", () => {{ console.log("body", body); client.close(); }});
+          request.end();
+        "#);
+        Command::new("node").args(["-e", &source]).output().unwrap()
+    });
+
+    let mut runtime = Runtime::new();
+    runtime.engine().ctx().op_state().put(ConsoleOut {
+        out: Box::new(Captured::default()), err: Box::new(Captured::default()),
+    });
+    let source = format!(r#"
+        const fs = require("node:fs"), http2 = require("node:http2");
+        const server = http2.createSecureServer({{
+          cert: fs.readFileSync({certificate:?}), key: fs.readFileSync({key:?})
+        }}, (request, response) => {{ response.end("secure:" + request.url); server.close(); }});
+        server.listen({port}, "127.0.0.1");
+    "#);
+    match runtime.eval(&source).expect("source parses") {
+        Completion::Value(_) => {}
+        Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
+    }
+    let child = client.join().unwrap();
+    let _ = std::fs::remove_dir_all(directory);
+    assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
+    assert_eq!(String::from_utf8(child.stdout).unwrap().lines().collect::<Vec<_>>(), ["alpn h2", "body secure:/secure"]);
+}

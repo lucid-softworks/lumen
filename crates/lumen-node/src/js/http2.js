@@ -570,10 +570,8 @@ class Http2Server extends EventEmitter {
 }
 
 function createServer(options, listener) { return new Http2Server(options, listener, false); }
-function createSecureServer() {
-  const error = new Error("Secure HTTP/2 servers require TLS ALPN selection, which lumen does not provide yet");
-  error.code = "ERR_HTTP2_ALPN_UNAVAILABLE";
-  throw error;
+function createSecureServer(options = {}, listener) {
+  return new Http2Server({ ...options, ALPNProtocols: ["h2"] }, listener, true);
 }
 
 __builtins.set("http2", {
