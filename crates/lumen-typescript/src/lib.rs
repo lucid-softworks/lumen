@@ -48,6 +48,69 @@ pub struct Property {
     pub ty: Type,
 }
 
+/// Whether a value of `source` can be assigned to a location of `target`.
+///
+/// Named references are intentionally nominal until declaration binding resolves them. Built-in
+/// `Array<T>` is normalized against `T[]`; user aliases are resolved by the checker before this
+/// function is called.
+pub fn is_assignable(source: &Type, target: &Type) -> bool {
+    if source == target || matches!(source, Type::Never | Type::Any) || matches!(target, Type::Any | Type::Unknown) {
+        return true;
+    }
+    match (source, target) {
+        (_, Type::Union(targets)) => targets.iter().any(|target| is_assignable(source, target)),
+        (Type::Union(sources), _) => sources.iter().all(|source| is_assignable(source, target)),
+        (_, Type::Intersection(targets)) => targets.iter().all(|target| is_assignable(source, target)),
+        (Type::Intersection(sources), _) => sources.iter().any(|source| is_assignable(source, target)),
+        (Type::StringLiteral(_), Type::String) => true,
+        (Type::NumberLiteral(_), Type::Number) => true,
+        (Type::Undefined, Type::Void) => true,
+        (Type::Array(source), Type::Array(target)) => is_assignable(source, target),
+        (Type::Reference { name, arguments }, Type::Array(target)) if name == "Array" && arguments.len() == 1 => {
+            is_assignable(&arguments[0], target)
+        }
+        (Type::Array(source), Type::Reference { name, arguments }) if name == "Array" && arguments.len() == 1 => {
+            is_assignable(source, &arguments[0])
+        }
+        (
+            Type::Reference { name: source_name, arguments: source_arguments },
+            Type::Reference { name: target_name, arguments: target_arguments },
+        ) => {
+            source_name == target_name
+                && source_arguments.len() == target_arguments.len()
+                && source_arguments.iter().zip(target_arguments).all(|(source, target)| is_assignable(source, target))
+        }
+        (Type::Tuple(sources), Type::Tuple(targets)) => {
+            sources.len() == targets.len()
+                && sources.iter().zip(targets).all(|(source, target)| is_assignable(source, target))
+        }
+        (Type::Tuple(sources), Type::Array(target)) => sources.iter().all(|source| is_assignable(source, target)),
+        (Type::Object(sources), Type::Object(targets)) => object_assignable(sources, targets),
+        (
+            Type::Function { parameters: source_parameters, returns: source_return },
+            Type::Function { parameters: target_parameters, returns: target_return },
+        ) => {
+            source_parameters.len() == target_parameters.len()
+                // Parameter positions are contravariant; returns are covariant.
+                && source_parameters.iter().zip(target_parameters).all(|(source, target)| is_assignable(target, source))
+                && is_assignable(source_return, target_return)
+        }
+        _ => false,
+    }
+}
+
+fn object_assignable(source: &[Property], target: &[Property]) -> bool {
+    target.iter().all(|expected| {
+        let actual = source.iter().find(|property| property.name == expected.name);
+        match actual {
+            Some(actual) => {
+                (!actual.optional || expected.optional) && is_assignable(&actual.ty, &expected.ty)
+            }
+            None => expected.optional,
+        }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Kind {
     Ident(String),
@@ -327,5 +390,33 @@ mod tests {
     fn reports_source_location() {
         let error = parse_type_expression("{\n value number\n}").unwrap_err();
         assert_eq!((error.code, error.span.line), (1005, 2));
+    }
+
+    #[test]
+    fn checks_structural_object_and_union_assignability() {
+        let source = parse_type_expression("{ id: 1; name: 'lumen'; extra: boolean }").unwrap();
+        let target = parse_type_expression("{ id: number; name?: string }").unwrap();
+        assert!(is_assignable(&source, &target));
+        assert!(is_assignable(
+            &Type::StringLiteral("ok".into()),
+            &parse_type_expression("number | string").unwrap()
+        ));
+        assert!(!is_assignable(&Type::Boolean, &target));
+    }
+
+    #[test]
+    fn checks_arrays_tuples_and_function_variance() {
+        assert!(is_assignable(
+            &parse_type_expression("[1, 2]").unwrap(),
+            &parse_type_expression("number[]").unwrap()
+        ));
+        assert!(is_assignable(
+            &parse_type_expression("(value: number | string) => 'ok'").unwrap(),
+            &parse_type_expression("(value: number) => string").unwrap()
+        ));
+        assert!(!is_assignable(
+            &parse_type_expression("(value: number) => string").unwrap(),
+            &parse_type_expression("(value: number | string) => string").unwrap()
+        ));
     }
 }
