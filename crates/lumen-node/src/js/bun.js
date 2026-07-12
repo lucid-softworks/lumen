@@ -519,6 +519,7 @@ function file(path, options) {
 }
 
 async function write(dest, data) {
+  if (dest instanceof globalThis.__lumenS3.S3File) return dest.write(data);
   const path = dest instanceof BunFile ? dest._path : resolvePathArg(dest);
   let bytes;
   if (typeof data === "string") bytes = Buffer.from(data, "utf8");
@@ -1715,7 +1716,8 @@ const Bun = {
   CookieMap: globalThis.__lumenBunCookies.CookieMap,
   RedisClient: globalThis.__lumenRedisClient,
   redis: undefined,
-  S3Client: throwClass("Bun.S3Client"),
+  S3Client: globalThis.__lumenS3.S3Client,
+  S3File: globalThis.__lumenS3.S3File,
   s3: undefined,
   SQL: throwClass("Bun.SQL"),
   sql: undefined,
@@ -1735,9 +1737,14 @@ Object.defineProperty(Bun, "redis", {
   },
 });
 
-// `s3`/`sql` are lazy throwing getters in Bun; the keys are present, but touching them fails
-// honestly rather than reading `undefined`.
-for (const k of ["s3", "sql"]) {
+let defaultS3Client;
+Object.defineProperty(Bun, "s3", {
+  enumerable: true, configurable: true,
+  get() { if (!defaultS3Client) defaultS3Client = new Bun.S3Client(); return defaultS3Client; },
+});
+
+// `sql` is a lazy throwing getter in Bun; the key is present, but touching it fails honestly.
+for (const k of ["sql"]) {
   Object.defineProperty(Bun, k, {
     enumerable: true, configurable: true,
     get() { throw new Error(`Bun.${k} is not supported in lumen`); },
