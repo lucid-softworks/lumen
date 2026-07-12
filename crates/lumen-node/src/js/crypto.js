@@ -819,9 +819,15 @@ function ecPointEncode(C, aff) {
   return concatAll([Uint8Array.of(4), bigIntToBytesBE(aff[0], C.size), bigIntToBytesBE(aff[1], C.size)]);
 }
 function ecPointDecode(C, bytes) {
-  if (bytes[0] === 0x04 && bytes.length === 1 + 2 * C.size) {
+  if ((bytes[0] === 0x04 || bytes[0] === 0x06 || bytes[0] === 0x07) && bytes.length === 1 + 2 * C.size) {
     const x = bytesToBigIntBE(bytes.subarray(1, 1 + C.size));
     const y = bytesToBigIntBE(bytes.subarray(1 + C.size));
+    if (x >= C.p || y >= C.p || amod(y * y - x * x * x - C.a * x - C.b, C.p) !== 0n) {
+      throw new Error("crypto: EC point is not on the curve");
+    }
+    if (bytes[0] >= 0x06 && (y & 1n) !== BigInt(bytes[0] & 1)) {
+      throw new Error("crypto: invalid hybrid EC point encoding");
+    }
     return [x, y, 1n];
   }
   if ((bytes[0] === 0x02 || bytes[0] === 0x03) && bytes.length === 1 + C.size) {
@@ -835,6 +841,86 @@ function ecPointDecode(C, bytes) {
   throw new Error("crypto: unsupported EC point encoding");
 }
 function ecPubFromPriv(C, d) { return ecPointEncode(C, ecToAffine(C, ecMul(C, d, ecG(C)))); }
+function ecPointEncodeFormat(C, point, format) {
+  const aff = ecToAffine(C, point);
+  if (!aff) throw new Error("crypto: EC point at infinity");
+  const x = bigIntToBytesBE(aff[0], C.size);
+  const y = bigIntToBytesBE(aff[1], C.size);
+  const f = format === undefined ? "uncompressed" : String(format).toLowerCase();
+  if (f === "compressed") return concatAll([Uint8Array.of(Number(2n | (aff[1] & 1n))), x]);
+  if (f === "hybrid") return concatAll([Uint8Array.of(Number(6n | (aff[1] & 1n))), x, y]);
+  if (f === "uncompressed") return concatAll([Uint8Array.of(4), x, y]);
+  throw new TypeError(`Invalid EC point conversion form '${format}'`);
+}
+
+class ECDH {
+  constructor(curve) {
+    this._curve = curveByName(curve);
+    this._private = null;
+    this._public = null;
+  }
+  generateKeys(encoding, format) {
+    let bytes;
+    do {
+      bytes = randomBytes(this._curve.size);
+      this._private = bytesToBigIntBE(bytes) % this._curve.n;
+    } while (this._private === 0n);
+    this._public = ecMul(this._curve, this._private, ecG(this._curve));
+    return this.getPublicKey(encoding, format);
+  }
+  computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
+    if (this._private === null) throw new Error("Private key is not set");
+    const bytes = toBytes(otherPublicKey, inputEncoding);
+    const shared = ecToAffine(this._curve, ecMul(this._curve, this._private, ecPointDecode(this._curve, bytes)));
+    if (!shared) throw new Error("Failed to compute ECDH key");
+    const secret = Buffer.from(bigIntToBytesBE(shared[0], this._curve.size));
+    return outputEncoding ? secret.toString(outputEncoding) : secret;
+  }
+  getPrivateKey(encoding) {
+    if (this._private === null) throw new Error("Private key is not set");
+    const key = Buffer.from(bigIntToBytesBE(this._private, this._curve.size));
+    return encoding ? key.toString(encoding) : key;
+  }
+  getPublicKey(encoding, format) {
+    if (!this._public) throw new Error("Public key is not set");
+    const key = Buffer.from(ecPointEncodeFormat(this._curve, this._public, format));
+    return encoding ? key.toString(encoding) : key;
+  }
+  setPrivateKey(privateKey, encoding) {
+    const d = bytesToBigIntBE(toBytes(privateKey, encoding));
+    if (d <= 0n || d >= this._curve.n) throw new RangeError("Private key is not valid for specified curve");
+    this._private = d;
+    this._public = ecMul(this._curve, d, ecG(this._curve));
+  }
+  setPublicKey(publicKey, encoding) {
+    this._public = ecPointDecode(this._curve, toBytes(publicKey, encoding));
+  }
+  static convertKey(key, curve, inputEncoding, outputEncoding, format) {
+    const C = curveByName(curve);
+    const converted = Buffer.from(ecPointEncodeFormat(C, ecPointDecode(C, toBytes(key, inputEncoding)), format));
+    return outputEncoding ? converted.toString(outputEncoding) : converted;
+  }
+}
+function createECDH(curve) { return new ECDH(curve); }
+
+function diffieHellman(options) {
+  if (!options || !(options.privateKey instanceof KeyObject) || !(options.publicKey instanceof KeyObject)) {
+    throw new TypeError("diffieHellman requires privateKey and publicKey KeyObjects");
+  }
+  const priv = options.privateKey._asym;
+  const pub = options.publicKey._asym;
+  if (priv.kind === "ec" && pub.kind === "ec") {
+    if (priv.d === undefined) throw new Error("diffieHellman privateKey does not contain a private key");
+    const C = curveByName(priv.curve);
+    const shared = ecToAffine(C, ecMul(C, priv.d, ecPointDecode(C, pub.point)));
+    if (!shared) throw new Error("Failed to compute ECDH key");
+    return Buffer.from(bigIntToBytesBE(shared[0], C.size));
+  }
+  if (priv.kind === "x25519" && pub.kind === "x25519" && priv.priv) {
+    return Buffer.from(x25519Scalar(priv.priv, pub.pub));
+  }
+  throw new Error("diffieHellman keys must use the same supported curve");
+}
 
 // ---- Ed25519 (RFC 8032) / X25519 (RFC 7748) -----------------------------------------------------
 
@@ -2197,15 +2283,16 @@ const crypto = {
   createPrivateKey,
   generateKeyPair,
   generateKeyPairSync,
-  // -- stubs: Diffie-Hellman / ECDH (no bignum/EC primitive) --
+  // -- real: P-256 ECDH and KeyObject diffieHellman (P-256/X25519) --
+  ECDH,
+  createECDH,
+  diffieHellman,
+  // -- stubs: finite-field Diffie-Hellman --
   DiffieHellman: notImpl("DiffieHellman"),
   DiffieHellmanGroup: notImpl("DiffieHellmanGroup"),
-  ECDH: notImpl("ECDH"),
   createDiffieHellman: notImpl("createDiffieHellman"),
   createDiffieHellmanGroup: notImpl("createDiffieHellmanGroup"),
-  createECDH: notImpl("createECDH"),
   getDiffieHellman: notImpl("getDiffieHellman"),
-  diffieHellman: notImpl("diffieHellman"),
 
   // -- real: probable primes (Miller-Rabin over BigInt) --
   checkPrime,
