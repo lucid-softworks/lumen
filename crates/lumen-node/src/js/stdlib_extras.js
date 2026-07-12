@@ -778,14 +778,6 @@ __builtins.set("sys", __builtins.get("util"));
 
   // Not supported: replacing the process image / changing OS identity can't be done honestly
   // without the underlying syscall, and silently "succeeding" would misrepresent the result.
-  const unsupportedId = (name) => function () {
-    throw new Error("process." + name + " is not supported in lumen");
-  };
-  for (const s of ["setuid", "setgid", "seteuid", "setegid", "setgroups", "initgroups"]) {
-    proc[s] = unsupportedId(s);
-  }
-  // getgroups: lumen doesn't enumerate supplementary groups; [] is the honest empty answer.
-  if (typeof proc.getgroups !== "function") proc.getgroups = () => [];
 
   // Real state tracking (the callback isn't routed anywhere yet, but registration is honest).
   let uncaughtCb = null;

@@ -78,7 +78,7 @@
     if (mysql) return makeMySQLClient(mysql, options);
     const filename = sqliteFilename(url, options);
     if (filename === null || (options.adapter && options.adapter !== "sqlite")) {
-      const error = new Error("Bun.SQL MySQL transport is not supported in lumen yet");
+      const error = new Error("Bun.SQL could not determine a supported database adapter");
       error.code = "ERR_SQL_UNSUPPORTED_ADAPTER";
       throw error;
     }

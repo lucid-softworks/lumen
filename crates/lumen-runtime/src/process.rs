@@ -47,6 +47,13 @@ pub(crate) fn extension() -> Extension {
                     "getegid" (0) => op_getegid,
                     "getppid" (0) => op_getppid,
                     "execve" (3) => op_execve,
+                    "setuid" (1) => op_setuid,
+                    "seteuid" (1) => op_seteuid,
+                    "setgid" (1) => op_setgid,
+                    "setegid" (1) => op_setegid,
+                    "getgroups" (0) => op_getgroups,
+                    "setgroups" (1) => op_setgroups,
+                    "initgroups" (2) => op_initgroups,
                 ],
             ),
         ],
@@ -126,6 +133,16 @@ const JS_INIT: &str = r#"(() => {
     process.geteuid = proc.geteuid;
     process.getgid = proc.getgid;
     process.getegid = proc.getegid;
+    process.setuid = proc.setuid;
+    process.seteuid = proc.seteuid;
+    process.setgid = proc.setgid;
+    process.setegid = proc.setegid;
+    process.getgroups = proc.getgroups;
+    process.setgroups = groups => {
+      if (!Array.isArray(groups)) throw new TypeError('The "groups" argument must be an Array');
+      return proc.setgroups(groups.map(group => Number(group)).join(","));
+    };
+    process.initgroups = (user, extraGroup) => proc.initgroups(String(user), Number(extraGroup));
   }
   // Portable signal numbers (identical on Linux/macOS); named signals outside this set fall back
   // to SIGTERM's number so `process.kill(pid)` still delivers a terminating signal.
@@ -398,6 +415,56 @@ fn op_execve(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     unsafe { ffi::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()); }
     Err(ctx.make_error("Error", format!("execve failed: {}", std::io::Error::last_os_error())))
 }
+
+#[cfg(unix)]
+fn identity_result(ctx: &mut Ctx, rc: i32, name: &str) -> Result<Value, Value> {
+    if rc == 0 { Ok(Value::Undefined) } else { Err(ctx.make_error("Error", format!("{name} failed: {}", std::io::Error::last_os_error()))) }
+}
+#[cfg(unix)]
+fn op_setuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setuid(id) }, "setuid") }
+#[cfg(unix)]
+fn op_seteuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::seteuid(id) }, "seteuid") }
+#[cfg(unix)]
+fn op_setgid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setgid(id) }, "setgid") }
+#[cfg(unix)]
+fn op_setegid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setegid(id) }, "setegid") }
+#[cfg(unix)]
+fn op_getgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    let count = unsafe { ffi::getgroups(0, std::ptr::null_mut()) };
+    if count < 0 { return Err(ctx.make_error("Error", format!("getgroups failed: {}", std::io::Error::last_os_error()))); }
+    let mut groups = vec![0u32; count as usize];
+    let count = unsafe { ffi::getgroups(count, groups.as_mut_ptr()) };
+    if count < 0 { return Err(ctx.make_error("Error", format!("getgroups failed: {}", std::io::Error::last_os_error()))); }
+    groups.truncate(count as usize); Ok(ctx.make_array(groups.into_iter().map(|id| Value::Num(id as f64)).collect()))
+}
+#[cfg(unix)]
+fn op_setgroups(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let text = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let groups = if text.is_empty() { Vec::new() } else { text.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>().map_err(|_| ctx.make_error("TypeError", "group ids must be numbers"))? };
+    identity_result(ctx, unsafe { ffi::setgroups(groups.len(), groups.as_ptr()) }, "setgroups")
+}
+#[cfg(unix)]
+fn op_initgroups(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    use std::ffi::CString;
+    let user = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let user = CString::new(user).map_err(|_| ctx.make_error("TypeError", "user contains a null byte"))?;
+    let group = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))? as u32;
+    identity_result(ctx, unsafe { ffi::initgroups(user.as_ptr(), group) }, "initgroups")
+}
+#[cfg(not(unix))]
+fn op_setuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setuid is not supported on this platform")) }
+#[cfg(not(unix))]
+fn op_seteuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "seteuid is not supported on this platform")) }
+#[cfg(not(unix))]
+fn op_setgid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setgid is not supported on this platform")) }
+#[cfg(not(unix))]
+fn op_setegid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setegid is not supported on this platform")) }
+#[cfg(not(unix))]
+fn op_getgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Ok(ctx.make_array(Vec::new())) }
+#[cfg(not(unix))]
+fn op_setgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setgroups is not supported on this platform")) }
+#[cfg(not(unix))]
+fn op_initgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "initgroups is not supported on this platform")) }
 #[cfg(not(unix))]
 fn op_execve(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
     Err(ctx.make_error("Error", "process.execve is not supported on this platform"))
@@ -440,5 +507,12 @@ mod ffi {
         // masked on the way out). Passing/returning through a register truncates harmlessly.
         pub fn umask(mask: c_uint) -> c_uint;
         pub fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> c_int;
+        pub fn setuid(uid: c_uint) -> c_int;
+        pub fn seteuid(uid: c_uint) -> c_int;
+        pub fn setgid(gid: c_uint) -> c_int;
+        pub fn setegid(gid: c_uint) -> c_int;
+        pub fn getgroups(size: c_int, groups: *mut c_uint) -> c_int;
+        pub fn setgroups(size: usize, groups: *const c_uint) -> c_int;
+        pub fn initgroups(user: *const c_char, group: c_uint) -> c_int;
     }
 }

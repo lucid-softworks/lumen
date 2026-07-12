@@ -207,9 +207,10 @@ fn process_basics() {
         console.log(typeof process.cwd(), process.cwd().length > 0);
         console.log(Array.isArray(process.argv), typeof process.argv[0]);
         console.log(typeof process.env, typeof process.platform);
+        console.log(typeof process.setuid, typeof process.setgid, Array.isArray(process.getgroups()));
         "#,
     );
-    assert_eq!(out.lines(), ["string true", "true string", "object string"]);
+    assert_eq!(out.lines(), ["string true", "true string", "object string", "function function true"]);
 }
 
 #[test]
