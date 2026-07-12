@@ -57,6 +57,7 @@ const JS_FILES: &[GlueFile] = &[
     GlueFile { name: "bun_ffi.js", wrap: true },
     GlueFile { name: "bun_jsc.js", wrap: true },
     GlueFile { name: "bun_sqlite.js", wrap: true },
+    GlueFile { name: "bun_sql.js", wrap: true },
     GlueFile { name: "bun_redis.js", wrap: true },
     GlueFile { name: "bun_cookies.js", wrap: true },
     GlueFile { name: "bun_router.js", wrap: true },

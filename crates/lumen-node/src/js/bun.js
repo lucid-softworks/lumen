@@ -1719,7 +1719,7 @@ const Bun = {
   S3Client: globalThis.__lumenS3.S3Client,
   S3File: globalThis.__lumenS3.S3File,
   s3: undefined,
-  SQL: throwClass("Bun.SQL"),
+  SQL: globalThis.__lumenSQL.SQL,
   sql: undefined,
   postgres: notImpl("Bun.postgres"),
   zstdCompressSync,
@@ -1743,13 +1743,11 @@ Object.defineProperty(Bun, "s3", {
   get() { if (!defaultS3Client) defaultS3Client = new Bun.S3Client(); return defaultS3Client; },
 });
 
-// `sql` is a lazy throwing getter in Bun; the key is present, but touching it fails honestly.
-for (const k of ["sql"]) {
-  Object.defineProperty(Bun, k, {
-    enumerable: true, configurable: true,
-    get() { throw new Error(`Bun.${k} is not supported in lumen`); },
-  });
-}
+let defaultSqlClient;
+Object.defineProperty(Bun, "sql", {
+  enumerable: true, configurable: true,
+  get() { if (!defaultSqlClient) defaultSqlClient = new Bun.SQL(process.env.DATABASE_URL || "postgres://localhost/postgres"); return defaultSqlClient; },
+});
 
 __builtins.set("bun", Bun);
 
