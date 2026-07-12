@@ -461,46 +461,6 @@ __builtins.set("sys", __builtins.get("util"));
   __builtins.set("stream/consumers", { arrayBuffer, blob, buffer, json, text });
 }
 
-// ---- node:worker_threads ----------------------------------------------------------------------
-// lumen runs a single engine on one loop thread; a Worker would need a second engine on another
-// thread with structured message passing (not yet built). We report main-thread state honestly and
-// throw a clear error if code actually tries to spawn a worker, rather than faking one.
-{
-  const notSupported = function () {
-    throw new Error("node:worker_threads Worker is not supported in lumen");
-  };
-  // Environment data is real bookkeeping (get/set round-trips) even though no worker consumes it.
-  const environmentData = new Map();
-  __builtins.set("worker_threads", {
-    isMainThread: true,
-    isInternalThread: false,
-    threadId: 0,
-    parentPort: null,
-    workerData: undefined,
-    // SHARE_ENV is the sentinel Node passes as `env` to share the parent's environment; it's a
-    // unique symbol whose identity is all that matters.
-    SHARE_ENV: Symbol.for("nodejs.worker_threads.SHARE_ENV"),
-    resourceLimits: {},
-    Worker: notSupported,
-    MessageChannel: notSupported,
-    MessagePort: notSupported,
-    markAsUntransferable: () => {},
-    isMarkedAsUntransferable: () => false,
-    markAsUncloneable: () => {},
-    moveMessagePortToContext: notSupported,
-    receiveMessageOnPort: () => undefined,
-    // No sibling threads exist, so a targeted post can never be delivered.
-    postMessageToThread: notSupported,
-    setEnvironmentData: (key, value) => {
-      if (value === undefined) environmentData.delete(key);
-      else environmentData.set(key, value);
-    },
-    getEnvironmentData: (key) => environmentData.get(key),
-    BroadcastChannel:
-      typeof globalThis.BroadcastChannel !== "undefined" ? globalThis.BroadcastChannel : notSupported,
-  });
-}
-
 // ---- node:readline ----------------------------------------------------------------------------
 // A real line reader over an input stream (the interactive cursor/history features a TTY would
 // provide are absent — lumen runs behind pipes — but line events, question(), and async iteration
