@@ -1448,7 +1448,43 @@ const password = {
 };
 
 // ---- honest throwing stubs (no backing engine capability) -------------------------------------
-const secrets = { get: notImpl("Bun.secrets.get"), set: notImpl("Bun.secrets.set"), delete: notImpl("Bun.secrets.delete") };
+function secretOptions(options, needsValue) {
+  if (!options || typeof options !== "object") throw new TypeError("Bun.secrets expects an options object");
+  const service = String(options.service || ""), name = String(options.name || "");
+  if (!service || !name) throw new TypeError("Bun.secrets service and name must be non-empty strings");
+  const value = needsValue ? String(options.value === undefined ? "" : options.value) : undefined;
+  return { service, name, value };
+}
+function secretCommand(action, options) {
+  const item = secretOptions(options, action === "set");
+  if (proc.platform === "darwin") {
+    const command = "/usr/bin/security";
+    const args = action === "get" ? ["find-generic-password", "-s", item.service, "-a", item.name, "-w"]
+      : action === "set" ? ["add-generic-password", "-U", "-s", item.service, "-a", item.name, "-w", item.value]
+      : ["delete-generic-password", "-s", item.service, "-a", item.name];
+    const result = nodeChild.spawnSync(command, args);
+    if (result.status === 0) return action === "get" ? Buffer.from(result.stdout).toString("utf8").replace(/\r?\n$/, "") : true;
+    if ((action === "get" || action === "delete") && [44, 45].includes(result.status)) return action === "get" ? null : false;
+    throw new Error(`macOS Keychain ${action} failed: ${Buffer.from(result.stderr || []).toString("utf8").trim()}`);
+  }
+  if (proc.platform === "linux") {
+    const command = which("secret-tool");
+    if (!command) throw new Error("Bun.secrets requires secret-tool and a Secret Service provider on Linux");
+    const args = action === "get" ? ["lookup", "service", item.service, "name", item.name]
+      : action === "set" ? ["store", `--label=${item.service}`, "service", item.service, "name", item.name]
+      : ["clear", "service", item.service, "name", item.name];
+    const result = nodeChild.spawnSync(command, args, action === "set" ? { input: item.value } : undefined);
+    if (result.status === 0) return action === "get" ? Buffer.from(result.stdout).toString("utf8").replace(/\r?\n$/, "") || null : true;
+    if (action === "get" || action === "delete") return action === "get" ? null : false;
+    throw new Error(`Secret Service ${action} failed: ${Buffer.from(result.stderr || []).toString("utf8").trim()}`);
+  }
+  throw new Error(`Bun.secrets is not supported on ${proc.platform}`);
+}
+const secrets = {
+  get: options => Promise.resolve().then(() => secretCommand("get", options)),
+  set: options => Promise.resolve().then(() => secretCommand("set", options)),
+  delete: options => Promise.resolve().then(() => secretCommand("delete", options)),
+};
 const csrfDefaultSecret = nodeCrypto.randomBytes(32);
 function csrfEncoding(value) {
   value = value || "base64url";
