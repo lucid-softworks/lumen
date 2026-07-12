@@ -74,6 +74,8 @@
     if (url && typeof url === "object") { options = url; url = options.url || options.filename; }
     const postgres = url && globalThis.__lumenPostgres.pgConfig(url, options);
     if (postgres) return makePostgresClient(postgres, options);
+    const mysql = url && globalThis.__lumenMySQL.mysqlConfig(url, options);
+    if (mysql) return makeMySQLClient(mysql, options);
     const filename = sqliteFilename(url, options);
     if (filename === null || (options.adapter && options.adapter !== "sqlite")) {
       const error = new Error("Bun.SQL MySQL transport is not supported in lumen yet");
@@ -136,6 +138,33 @@
     sql.array = values => fragment(Array.from(values), []);
     sql.begin = async callback => {
       await sql.unsafe("BEGIN");
+      try { const value = await callback(sql); await sql.unsafe("COMMIT"); return value; }
+      catch (error) { await sql.unsafe("ROLLBACK"); throw error; }
+    };
+    sql.transaction = sql.begin;
+    sql.reserve = async () => { sql.release = () => {}; return sql; };
+    sql.close = async () => { sql._closed = true; await connection.close(); };
+    sql.flush = async () => {};
+    return sql;
+  }
+
+  function makeMySQLClient(config, options) {
+    const connection = new globalThis.__lumenMySQL.MySqlConnection(config);
+    function sql(first, ...values) {
+      if (Array.isArray(first) && Object.prototype.hasOwnProperty.call(first, "raw")) return new SQLQuery(sql, first, values);
+      return fragment(first, values.map(String));
+    }
+    Object.setPrototypeOf(sql, SQL.prototype);
+    sql.options = { ...options, adapter: "mysql" };
+    sql._closed = false;
+    sql._execute = (compiled, mode) => {
+      if (sql._closed) throw new Error("SQL client is closed");
+      return connection.query(compiled.text, compiled.params.slice(), mode);
+    };
+    sql.unsafe = (text, params = []) => new SQLQuery(sql, String(text), params, true);
+    sql.array = values => fragment(Array.from(values), []);
+    sql.begin = async callback => {
+      await sql.unsafe("START TRANSACTION");
       try { const value = await callback(sql); await sql.unsafe("COMMIT"); return value; }
       catch (error) { await sql.unsafe("ROLLBACK"); throw error; }
     };
