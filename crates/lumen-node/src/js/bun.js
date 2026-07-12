@@ -1,8 +1,8 @@
 // The `bun` module and the `Bun` global (same object identity: require("bun") === globalThis.Bun).
 // Parity target is Bun v1.2.21's require("bun") surface. Everything backable by lumen's existing
 // node: glue (zlib/crypto/child_process/fs/url/util/dns) or the WHATWG globals is implemented for
-// real; anything that needs a codec/native client lumen doesn't have (zstd, argon2/bcrypt, ffi,
-// postgres, s3, redis, raw TCP/UDP sockets) is an honest throwing stub rather than a wrong answer.
+// real; anything that needs a native client lumen doesn't have (postgres, s3, redis, raw TCP/UDP
+// sockets) is an honest throwing stub rather than a wrong answer.
 //
 // This block is wrapped (build.rs wrap:true) so its top-level names stay private. It loads right
 // before module.js so require("bun") resolves through CORE, and can reach the sibling builtins via
@@ -1304,14 +1304,72 @@ const unsafe = {
   mimallocDump: notImpl("Bun.unsafe.mimallocDump"),
 };
 
-// ---- honest throwing stubs (no backing engine capability) -------------------------------------
+// ---- password hashing -------------------------------------------------------------------------
+function passwordOptions(options) {
+  if (options === undefined) options = {};
+  if (typeof options === "string") options = { algorithm: options };
+  if (options === null || typeof options !== "object") {
+    throw new TypeError("Bun.password options must be an object or algorithm string");
+  }
+  const algorithm = String(options.algorithm || "argon2id").toLowerCase();
+  if (!["argon2id", "argon2i", "argon2d", "bcrypt"].includes(algorithm)) {
+    throw new TypeError(`Unsupported password hashing algorithm '${algorithm}'`);
+  }
+  const integer = (name, fallback, min, max) => {
+    const value = options[name] === undefined ? fallback : options[name];
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new RangeError(`${name} must be an integer between ${min} and ${max}`);
+    }
+    return value;
+  };
+  if (algorithm === "bcrypt") {
+    return { algorithm, memoryCost: 0, timeCost: 0, cost: integer("cost", 10, 4, 31) };
+  }
+  return {
+    algorithm,
+    memoryCost: integer("memoryCost", 65536, 1, 0xffffffff),
+    timeCost: integer("timeCost", 2, 1, 0xffffffff),
+    cost: 0,
+  };
+}
+function passwordHashSync(input, options) {
+  const p = passwordOptions(options);
+  return __password.hashSync(toU8(input), p.algorithm, p.memoryCost, p.timeCost, p.cost);
+}
+function passwordHash(input, options) {
+  let p;
+  let bytes;
+  try {
+    p = passwordOptions(options);
+    bytes = toU8(input);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    __password.hash(bytes, p.algorithm, p.memoryCost, p.timeCost, p.cost, resolve, reject);
+  });
+}
+function passwordVerifySync(input, hash) {
+  return __password.verifySync(toU8(input), String(hash));
+}
+function passwordVerify(input, hash) {
+  let bytes;
+  try {
+    bytes = toU8(input);
+    hash = String(hash);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => __password.verify(bytes, hash, resolve, reject));
+}
 const password = {
-  hash: notImpl("Bun.password.hash (argon2/bcrypt)"),
-  verify: notImpl("Bun.password.verify (argon2/bcrypt)"),
-  hashSync: notImpl("Bun.password.hashSync (argon2/bcrypt)"),
-  verifySync: notImpl("Bun.password.verifySync (argon2/bcrypt)"),
-  needsRehash: notImpl("Bun.password.needsRehash"),
+  hash: passwordHash,
+  verify: passwordVerify,
+  hashSync: passwordHashSync,
+  verifySync: passwordVerifySync,
 };
+
+// ---- honest throwing stubs (no backing engine capability) -------------------------------------
 const secrets = { get: notImpl("Bun.secrets.get"), set: notImpl("Bun.secrets.set"), delete: notImpl("Bun.secrets.delete") };
 const CSRF = { generate: notImpl("Bun.CSRF.generate"), verify: notImpl("Bun.CSRF.verify") };
 const throwClass = (name) => class { constructor() { throw new Error(`${name} is not supported in lumen`); } };

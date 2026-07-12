@@ -7,6 +7,7 @@ const __bunhash = globalThis.__bunhash;
 const __child = globalThis.__child;
 const __ffi = globalThis.__ffi;
 const __crypto = globalThis.__crypto;
+const __password = globalThis.__password;
 delete globalThis.__node;
 delete globalThis.__os;
 delete globalThis.__zlib;
@@ -14,6 +15,7 @@ delete globalThis.__bunhash;
 delete globalThis.__child;
 delete globalThis.__ffi;
 delete globalThis.__crypto;
+delete globalThis.__password;
 
 // Node's `global` is an alias for the global object.
 if (typeof globalThis.global === "undefined") {
