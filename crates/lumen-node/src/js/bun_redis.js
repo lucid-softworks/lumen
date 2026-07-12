@@ -2,6 +2,7 @@
 // state machine and incremental parser can be tested and maintained independently.
 {
   const net = __builtins.get("net");
+  const tls = __builtins.get("tls");
   const INCOMPLETE = Symbol("incomplete RESP value");
 
   function findLineEnd(buffer, start) {
@@ -88,16 +89,22 @@
       if (this._connecting) return this._connecting;
       let target;
       try { target = new URL(this.url); } catch (error) { return Promise.reject(error); }
-      if (target.protocol !== "redis:") {
-        return Promise.reject(new Error("Bun.RedisClient TLS and Unix sockets are not supported in lumen"));
-      }
+      if (target.protocol !== "redis:" && target.protocol !== "rediss:") return Promise.reject(new TypeError(`Unsupported Redis protocol ${target.protocol}`));
       this._connecting = new Promise((resolve, reject) => {
-        const socket = this._socket = net.connect(Number(target.port || 6379), target.hostname);
+        const secure = target.protocol === "rediss:";
+        const tlsOptions = this.options.tls && typeof this.options.tls === "object" ? this.options.tls : this.options;
+        const connectOptions = {
+          host: target.hostname,
+          port: Number(target.port || (secure ? 6380 : 6379)),
+          servername: tlsOptions.servername || target.hostname,
+          rejectUnauthorized: tlsOptions.rejectUnauthorized !== false,
+        };
+        const socket = this._socket = secure ? tls.connect(connectOptions) : net.connect(connectOptions);
         socket.on("data", chunk => {
           this._buffer = Buffer.concat([this._buffer, Buffer.from(chunk)]);
           this._drainResponses();
         });
-        socket.once("connect", async () => {
+        socket.once(secure ? "secureConnect" : "connect", async () => {
           this.connected = true;
           try {
             if (target.password) {

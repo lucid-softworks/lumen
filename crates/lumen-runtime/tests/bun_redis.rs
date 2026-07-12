@@ -1,6 +1,7 @@
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::rc::Rc;
+use std::process::{Command, Stdio};
 
 use lumen_runtime::{Completion, ConsoleOut, Runtime};
 
@@ -134,4 +135,50 @@ fn redis_convenience_methods_encode_arguments_and_convert_results() {
         lines,
         ["converted [true,false,{\"a\":\"1\",\"b\":\"2\"}]", "encoded true true true"]
     );
+}
+
+#[test]
+fn redis_client_connects_over_tls() {
+    if Command::new("openssl").arg("version").output().is_err()
+        || Command::new("node").arg("--version").output().is_err()
+    {
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("lumen-redis-tls-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let certificate = directory.join("cert.pem");
+    let key = directory.join("key.pem");
+    let generated = Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes"])
+        .arg("-keyout").arg(&key).arg("-out").arg(&certificate)
+        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
+        .output().unwrap();
+    assert!(generated.status.success());
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let server_source = format!(r#"
+      const fs = require("node:fs"), tls = require("node:tls");
+      const server = tls.createServer({{
+        cert: fs.readFileSync({certificate:?}), key: fs.readFileSync({key:?})
+      }}, socket => socket.once("data", () => socket.end("+PONG\r\n")));
+      server.listen({port}, "127.0.0.1", () => console.log("ready"));
+      server.on("secureConnection", socket => socket.on("close", () => server.close()));
+    "#);
+    let mut server = Command::new("node").args(["-e", &server_source])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut ready = String::new();
+    BufReader::new(server.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), "ready");
+    let lines = run(&format!(r#"
+        (async () => {{
+          const redis = new Bun.RedisClient("rediss://localhost:{port}", {{ tls: {{ rejectUnauthorized: false }} }});
+          console.log("secure", await redis.ping());
+          redis.close();
+        }})();
+    "#));
+    let status = server.wait().unwrap();
+    let _ = std::fs::remove_dir_all(directory);
+    assert!(status.success());
+    assert_eq!(lines, ["secure PONG"]);
 }
