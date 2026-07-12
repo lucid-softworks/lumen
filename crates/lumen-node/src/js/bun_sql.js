@@ -19,7 +19,7 @@
           text += fragment.text; params.push(...fragment.params);
         } else if (value instanceof SQLQuery) {
           const nested = value._compile(); text += nested.text; params.push(...nested.params);
-        } else { text += "?"; params.push(value); }
+        } else { text += "\x01"; params.push(value); }
       }
       return { text, params };
     }
@@ -48,17 +48,17 @@
     if (Array.isArray(value)) {
       if (value.length && value[0] && typeof value[0] === "object" && !Array.isArray(value[0])) {
         const columns = item.columns.length ? item.columns : Object.keys(value[0]);
-        const params = [], rows = value.map(row => `(${columns.map(column => { params.push(row[column]); return "?"; }).join(", ")})`);
+        const params = [], rows = value.map(row => `(${columns.map(column => { params.push(row[column]); return "\x01"; }).join(", ")})`);
         return { text: `(${columns.map(quoteIdentifier).join(", ")}) VALUES ${rows.join(", ")}`, params };
       }
-      return { text: `(${value.map(() => "?").join(", ")})`, params: value.slice() };
+      return { text: `(${value.map(() => "\x01").join(", ")})`, params: value.slice() };
     }
     if (value && typeof value === "object") {
       const columns = item.columns.length ? item.columns : Object.keys(value), params = columns.map(column => value[column]);
-      if (update) return { text: columns.map(column => `${quoteIdentifier(column)} = ?`).join(", "), params };
-      return { text: `(${columns.map(quoteIdentifier).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`, params };
+      if (update) return { text: columns.map(column => `${quoteIdentifier(column)} = \x01`).join(", "), params };
+      return { text: `(${columns.map(quoteIdentifier).join(", ")}) VALUES (${columns.map(() => "\x01").join(", ")})`, params };
     }
-    return { text: "?", params: [value] };
+    return { text: "\x01", params: [value] };
   }
 
   function sqliteFilename(url, options) {
@@ -72,6 +72,8 @@
 
   function makeClient(url, options = {}) {
     if (url && typeof url === "object") { options = url; url = options.url || options.filename; }
+    const postgres = url && globalThis.__lumenPostgres.pgConfig(url, options);
+    if (postgres) return makePostgresClient(postgres, options);
     const filename = sqliteFilename(url, options);
     if (filename === null || (options.adapter && options.adapter !== "sqlite")) {
       const error = new Error("Bun.SQL PostgreSQL and MySQL transports are not supported in lumen yet");
@@ -92,7 +94,7 @@
     sql._closed = false;
     sql._execute = (compiled, mode) => {
       if (sql._closed) throw new Error("SQL client is closed");
-      const statement = database.prepare(compiled.text);
+      const statement = database.prepare(compiled.text.replace(/\x01/g, "?"));
       try {
         if (mode === "values") return statement.values(...compiled.params);
         if (/^\s*(?:SELECT|PRAGMA|WITH|EXPLAIN)\b|\bRETURNING\b/i.test(compiled.text)) return statement.all(...compiled.params);
@@ -111,6 +113,35 @@
     sql.transaction = sql.begin;
     sql.reserve = async () => { sql.release = () => {}; return sql; };
     sql.close = async () => { if (!sql._closed) { sql._closed = true; database.close(); } };
+    sql.flush = async () => {};
+    return sql;
+  }
+
+  function makePostgresClient(config, options) {
+    const connection = new globalThis.__lumenPostgres.PgConnection(config);
+    function sql(first, ...values) {
+      if (Array.isArray(first) && Object.prototype.hasOwnProperty.call(first, "raw")) return new SQLQuery(sql, first, values);
+      return fragment(first, values.map(String));
+    }
+    Object.setPrototypeOf(sql, SQL.prototype);
+    sql.options = { ...options, adapter: "postgres" };
+    sql._closed = false;
+    sql._execute = (compiled, mode) => {
+      if (sql._closed) throw new Error("SQL client is closed");
+      let index = 0;
+      const text = compiled.text.replace(/\x01/g, () => `$${++index}`);
+      return connection.query(text, compiled.params, mode);
+    };
+    sql.unsafe = (text, params = []) => new SQLQuery(sql, String(text), params, true);
+    sql.array = values => fragment(Array.from(values), []);
+    sql.begin = async callback => {
+      await sql.unsafe("BEGIN");
+      try { const value = await callback(sql); await sql.unsafe("COMMIT"); return value; }
+      catch (error) { await sql.unsafe("ROLLBACK"); throw error; }
+    };
+    sql.transaction = sql.begin;
+    sql.reserve = async () => { sql.release = () => {}; return sql; };
+    sql.close = async () => { sql._closed = true; await connection.close(); };
     sql.flush = async () => {};
     return sql;
   }
