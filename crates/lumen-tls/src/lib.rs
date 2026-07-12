@@ -101,6 +101,10 @@ pub struct TlsStream {
     ssl: *mut Ssl,
 }
 
+// The stream owns its OpenSSL objects and is moved as one unit between blocking worker tasks. It
+// is never accessed concurrently; OpenSSL permits an SSL connection to move between OS threads.
+unsafe impl Send for TlsStream {}
+
 impl TlsStream {
     pub fn connect(stream: TcpStream, hostname: &str) -> Result<Self, String> {
         let api = Api::load()?;
