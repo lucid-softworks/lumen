@@ -1,11 +1,9 @@
-// node:http2 — the transport-free surface. Lumen has no HTTP/2 transport (it needs the raw TLS/TCP
-// socket + framing layer lumen doesn't expose to JS), so createServer/createSecureServer/connect and
-// the server request/response objects are honest throwing stubs. The pure pieces are real: the full
-// constants table (copied from Node), the default-settings struct, the SETTINGS-frame pack/unpack
-// codec (RFC 7540 §6.5.1 — id:u16 + value:u32 per setting), and the sensitiveHeaders symbol.
+// node:http2 core constants, settings codecs, and session API.
 
 const stream = __builtins.get("stream");
-const { Readable, Writable } = stream;
+const { Duplex, Readable, Writable } = stream;
+const EventEmitter = __builtins.get("events");
+const codec = globalThis.__lumenHttp2Codec;
 
 // Full HTTP/2 constants table, copied verbatim from Node v22 (pure data — nghttp2 error codes,
 // frame flags, settings ids, default settings, canonical header/method/status name maps).
@@ -85,9 +83,242 @@ function getUnpackedSettings(buf) {
   return out;
 }
 
-// No HTTP/2 transport: the session/server/connect surface is honest.
 function notSupported() {
-  throw new Error("node:http2 is not supported in lumen (no HTTP/2 transport — raw sockets/TLS framing are not exposed to JS)");
+  throw new Error("HTTP/2 servers are not supported in lumen yet");
+}
+
+class ClientHttp2Stream extends Duplex {
+  constructor(session, id, headers, options = {}) {
+    super({});
+    this.session = session;
+    this.id = id;
+    this.sentHeaders = headers;
+    this.rstCode = 0;
+    this.closed = false;
+    this.destroyed = false;
+    this._headersEnded = !!options.endStream;
+  }
+
+  _write(chunk, encoding, callback) {
+    if (this.closed || this._headersEnded) { callback(new Error("HTTP/2 stream is not writable")); return; }
+    const bytes = chunk instanceof Uint8Array ? Buffer.from(chunk) : Buffer.from(String(chunk), encoding || "utf8");
+    this.session._sendData(this.id, bytes, false, callback);
+  }
+
+  _final(callback) {
+    if (!this._headersEnded && !this.closed) this.session._sendData(this.id, Buffer.alloc(0), true, callback);
+    else callback();
+  }
+
+  close(code = constants.NGHTTP2_NO_ERROR, callback) {
+    if (callback) this.once("close", callback);
+    if (!this.closed) {
+      this.rstCode = code >>> 0;
+      const payload = Buffer.alloc(4);
+      payload.writeUInt32BE(this.rstCode, 0);
+      this.session._writeFrame(3, 0, this.id, payload);
+      this._finish();
+    }
+    return this;
+  }
+
+  _finish() {
+    if (this.closed) return;
+    this.closed = true;
+    this.push(null);
+    this.session._streams.delete(this.id);
+    queueMicrotask(() => this.emit("close"));
+  }
+}
+
+class ClientHttp2Session extends EventEmitter {
+  constructor(authority, options = {}, listener) {
+    super();
+    if (listener) this.once("connect", listener);
+    this.type = constants.NGHTTP2_SESSION_CLIENT;
+    this.connecting = true;
+    this.closed = false;
+    this.destroyed = false;
+    this.encrypted = false;
+    this.localSettings = { ...getDefaultSettings(), ...(options.settings || {}) };
+    this.remoteSettings = getDefaultSettings();
+    this._decoder = new codec.FrameDecoder();
+    this._hpack = new codec.Hpack();
+    this._streams = new Map();
+    this._pending = [];
+    this._nextStreamId = 1;
+    this._continuation = null;
+
+    const target = new URL(String(authority));
+    if (target.protocol !== "http:") {
+      const error = new Error("HTTPS HTTP/2 requires TLS ALPN support, which lumen does not provide yet");
+      error.code = "ERR_HTTP2_ALPN_UNAVAILABLE";
+      throw error;
+    }
+    const port = target.port ? Number(target.port) : 80;
+    this.origin = target.origin;
+    const net = __builtins.get("net");
+    this.socket = options.createConnection ? options.createConnection(target, options) : net.connect({ host: target.hostname, port });
+    this.socket.on("data", chunk => this._receive(chunk));
+    this.socket.on("error", error => this._fail(error));
+    this.socket.on("close", () => this._socketClosed());
+    this.socket.once("connect", () => this._connected());
+  }
+
+  _connected() {
+    if (this.destroyed) return;
+    this.socket.write(Buffer.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
+    this._writeFrame(4, 0, 0, getPackedSettings(this.localSettings));
+    this.connecting = false;
+    const pending = this._pending;
+    this._pending = [];
+    for (const send of pending) send();
+    this.emit("connect", this, this.socket);
+  }
+
+  request(headers = {}, options = {}) {
+    if (this.closed || this.destroyed) throw new Error("HTTP/2 session is closed");
+    const id = this._nextStreamId;
+    this._nextStreamId += 2;
+    const normalized = { ...headers };
+    if (normalized[":method"] === undefined) normalized[":method"] = "GET";
+    if (normalized[":path"] === undefined) normalized[":path"] = "/";
+    if (normalized[":scheme"] === undefined) normalized[":scheme"] = "http";
+    if (normalized[":authority"] === undefined) normalized[":authority"] = this.origin.slice(7);
+    const clientStream = new ClientHttp2Stream(this, id, normalized, options);
+    this._streams.set(id, clientStream);
+    const send = () => this._sendHeaders(id, normalized, !!options.endStream);
+    if (this.connecting) this._pending.push(send); else send();
+    return clientStream;
+  }
+
+  _sendHeaders(streamId, headers, endStream) {
+    const block = this._hpack.encode(headers);
+    const max = this.remoteSettings.maxFrameSize || 16384;
+    let offset = 0, first = true;
+    do {
+      const end = Math.min(offset + max, block.length);
+      const final = end === block.length;
+      const flags = (final ? 4 : 0) | (first && endStream ? 1 : 0);
+      this._writeFrame(first ? 1 : 9, flags, streamId, block.subarray(offset, end));
+      first = false;
+      offset = end;
+    } while (offset < block.length);
+  }
+
+  _sendData(streamId, bytes, endStream, callback) {
+    const max = this.remoteSettings.maxFrameSize || 16384;
+    let offset = 0;
+    do {
+      const end = Math.min(offset + max, bytes.length);
+      const final = end === bytes.length;
+      this._writeFrame(0, final && endStream ? 1 : 0, streamId, bytes.subarray(offset, end));
+      offset = end;
+    } while (offset < bytes.length);
+    queueMicrotask(callback);
+  }
+
+  _writeFrame(type, flags, streamId, payload) {
+    if (!this.destroyed) this.socket.write(codec.encodeFrame(type, flags, streamId, payload));
+  }
+
+  _receive(chunk) {
+    let frames;
+    try { frames = this._decoder.push(chunk); }
+    catch (error) { this._fail(error); return; }
+    for (const frame of frames) {
+      try { this._handleFrame(frame); }
+      catch (error) { this._fail(error); return; }
+    }
+  }
+
+  _handleFrame(frame) {
+    if (frame.type === 4) {
+      if (!(frame.flags & 1)) {
+        this.remoteSettings = { ...this.remoteSettings, ...getUnpackedSettings(frame.payload) };
+        this._decoder.maxFrameSize = this.localSettings.maxFrameSize;
+        this._writeFrame(4, 1, 0, Buffer.alloc(0));
+        this.emit("remoteSettings", this.remoteSettings);
+      } else this.emit("localSettings", this.localSettings);
+      return;
+    }
+    if (frame.type === 6) {
+      if (frame.payload.length !== 8) throw new Error("invalid HTTP/2 PING frame");
+      if (!(frame.flags & 1)) this._writeFrame(6, 1, 0, frame.payload);
+      else this.emit("ping", frame.payload);
+      return;
+    }
+    if (frame.type === 7) {
+      this.closed = true;
+      const lastStreamID = frame.payload.length >= 4 ? frame.payload.readUInt32BE(0) & 0x7fffffff : 0;
+      const errorCode = frame.payload.length >= 8 ? frame.payload.readUInt32BE(4) : constants.NGHTTP2_PROTOCOL_ERROR;
+      this.emit("goaway", errorCode, lastStreamID, frame.payload.subarray(8));
+      return;
+    }
+    const clientStream = this._streams.get(frame.streamId);
+    if (!clientStream) return;
+    if (frame.type === 1 || frame.type === 9) {
+      if (frame.type === 1) this._continuation = { streamId: frame.streamId, chunks: [] };
+      if (!this._continuation || this._continuation.streamId !== frame.streamId) throw new Error("invalid HTTP/2 CONTINUATION sequence");
+      this._continuation.chunks.push(frame.payload);
+      if (frame.flags & 4) {
+        const headers = this._hpack.decode(Buffer.concat(this._continuation.chunks));
+        this._continuation = null;
+        clientStream.emit(clientStream._responded ? "trailers" : "response", headers, frame.flags);
+        clientStream._responded = true;
+      }
+      if (frame.flags & 1) clientStream._finish();
+    } else if (frame.type === 0) {
+      clientStream.push(frame.payload);
+      if (frame.flags & 1) clientStream._finish();
+    } else if (frame.type === 3) {
+      clientStream.rstCode = frame.payload.readUInt32BE(0);
+      clientStream.emit("aborted");
+      clientStream._finish();
+    }
+  }
+
+  ping(payload, callback) {
+    if (typeof payload === "function") { callback = payload; payload = Buffer.alloc(8); }
+    payload = Buffer.from(payload || Buffer.alloc(8));
+    if (payload.length !== 8) throw new RangeError("HTTP/2 ping payload must be 8 bytes");
+    if (callback) this.once("ping", response => callback(null, 0, response));
+    this._writeFrame(6, 0, 0, payload);
+    return true;
+  }
+
+  close(callback) {
+    if (callback) this.once("close", callback);
+    if (!this.closed) {
+      this.closed = true;
+      this._writeFrame(7, 0, 0, Buffer.alloc(8));
+      this.socket.end();
+    }
+    return this;
+  }
+
+  destroy(error) { this._fail(error); return this; }
+  ref() { this.socket.ref(); return this; }
+  unref() { this.socket.unref(); return this; }
+
+  _fail(error) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    for (const clientStream of this._streams.values()) clientStream._finish();
+    this.socket.destroy();
+    if (error) queueMicrotask(() => this.emit("error", error));
+  }
+
+  _socketClosed() {
+    if (!this.destroyed) this.destroyed = true;
+    for (const clientStream of this._streams.values()) clientStream._finish();
+    this.emit("close");
+  }
+}
+
+function connect(authority, options, listener) {
+  if (typeof options === "function") { listener = options; options = {}; }
+  return new ClientHttp2Session(authority, options || {}, listener);
 }
 // Server request/response objects only exist attached to a live session. Exported for the class
 // surface / instanceof, but constructing one directly has no transport to bind to.
@@ -105,11 +336,13 @@ __builtins.set("http2", {
   getDefaultSettings,
   getPackedSettings,
   getUnpackedSettings,
-  // transport-dependent (honest throwing stubs)
+  // server sessions are the remaining transport-dependent surface
   createServer: notSupported,
   createSecureServer: notSupported,
-  connect: notSupported,
+  connect,
   performServerHandshake: notSupported,
   Http2ServerRequest,
   Http2ServerResponse,
+  ClientHttp2Session,
+  ClientHttp2Stream,
 });
