@@ -1,6 +1,7 @@
 // HTTP/2 binary framing and HPACK without transport concerns. The session layer in http2.js uses
-// this codec over net/TLS streams. Huffman strings are rejected until the RFC 7541 table lands.
+// this codec over net/TLS streams.
 {
+  const huffman = globalThis.__lumenHpackHuffman;
   const STATIC = [null,
     [":authority", ""], [":method", "GET"], [":method", "POST"], [":path", "/"], [":path", "/index.html"],
     [":scheme", "http"], [":scheme", "https"], [":status", "200"], [":status", "204"], [":status", "206"],
@@ -76,13 +77,16 @@
 
   function encodeString(value) {
     const bytes = Buffer.from(String(value), "utf8");
+    const encoded = huffman.encode(bytes);
+    if (encoded.length < bytes.length) return Buffer.concat([encodeInteger(encoded.length, 7, 0x80), encoded]);
     return Buffer.concat([encodeInteger(bytes.length, 7), bytes]);
   }
   function decodeString(bytes, offset) {
-    if (bytes[offset] & 0x80) { const error = new Error("HPACK Huffman strings are not supported in lumen yet"); error.code = "ERR_HTTP2_COMPRESSION_ERROR"; throw error; }
+    const compressed = !!(bytes[offset] & 0x80);
     const [length, start] = decodeInteger(bytes, offset, 7);
     if (start + length > bytes.length) throw new Error("truncated HPACK string");
-    return [bytes.subarray(start, start + length).toString("utf8"), start + length];
+    const value = bytes.subarray(start, start + length);
+    return [(compressed ? huffman.decode(value) : value).toString("utf8"), start + length];
   }
 
   class Hpack {

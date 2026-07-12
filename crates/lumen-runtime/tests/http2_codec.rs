@@ -45,9 +45,16 @@ fn frames_and_hpack_round_trip_and_reject_invalid_input() {
         console.log("headers", values[":method"], values[":path"],
                     values["content-type"], values["x-test"]);
 
+        const huffman = globalThis.__lumenHpackHuffman;
+        const encodedText = huffman.encode(Buffer.from("www.example.com"));
+        console.log("huffman", encodedText.toString("hex"), huffman.decode(encodedText).toString());
+        const everyByte = Buffer.alloc(256);
+        for (let i = 0; i < everyByte.length; i++) everyByte[i] = i;
+        console.log("huffman-bytes", huffman.decode(huffman.encode(everyByte)).equals(everyByte));
+
         try { new codec.FrameDecoder(4).push(frame); }
         catch (error) { console.log("frame-error", error.code); }
-        try { new codec.Hpack().decode(Buffer.from([0, 0x81, 0])); }
+        try { huffman.decode(Buffer.from([0xff])); }
         catch (error) { console.log("hpack-error", error.code); }
     "#;
     match runtime.eval(source).expect("source parses") {
@@ -66,6 +73,8 @@ fn frames_and_hpack_round_trip_and_reject_invalid_input() {
             "frame 1 5 16909060 hello",
             "integer 1f9a0a 1337,3",
             "headers GET / text/plain yes",
+            "huffman f1e3c2e5f23a6ba0ab90f4ff www.example.com",
+            "huffman-bytes true",
             "frame-error ERR_HTTP2_FRAME_SIZE_ERROR",
             "hpack-error ERR_HTTP2_COMPRESSION_ERROR",
         ]
