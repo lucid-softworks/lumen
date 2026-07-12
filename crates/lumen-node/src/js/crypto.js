@@ -1402,6 +1402,213 @@ function x509SpkiDer(certDer) {
   return certDer.subarray(cert.start + tbs.start + spki.hstart, cert.start + tbs.start + spki.end);
 }
 
+const X509_NAME_OIDS = {
+  "2.5.4.3": "CN", "2.5.4.6": "C", "2.5.4.7": "L", "2.5.4.8": "ST",
+  "2.5.4.10": "O", "2.5.4.11": "OU", "1.2.840.113549.1.9.1": "emailAddress",
+};
+const X509_SIGNATURE_OIDS = {
+  "1.2.840.113549.1.1.5": "sha1",
+  "1.2.840.113549.1.1.11": "sha256",
+  "1.2.840.113549.1.1.12": "sha384",
+  "1.2.840.113549.1.1.13": "sha512",
+  "1.2.840.10045.4.3.2": "sha256",
+  "1.2.840.10045.4.3.3": "sha384",
+  "1.2.840.10045.4.3.4": "sha512",
+};
+function x509String(node) {
+  if (node.tag === 0x1e) {
+    let out = "";
+    for (let i = 0; i + 1 < node.content.length; i += 2) {
+      out += String.fromCharCode((node.content[i] << 8) | node.content[i + 1]);
+    }
+    return out;
+  }
+  return new TextDecoder().decode(node.content);
+}
+function x509Name(node) {
+  const fields = [];
+  for (const set of derChildren(node.content)) {
+    for (const sequence of derChildren(set.content)) {
+      const pair = derChildren(sequence.content);
+      if (pair.length < 2 || pair[0].tag !== 0x06) continue;
+      const oid = decodeOID(pair[0].content);
+      const name = X509_NAME_OIDS[oid] || oid;
+      fields.push(`${name}=${x509String(pair[1]).replace(/\n/g, "\\n")}`);
+    }
+  }
+  return fields.join("\n");
+}
+function x509Date(node) {
+  const text = x509String(node);
+  let year, offset;
+  if (node.tag === 0x17) {
+    const short = Number(text.slice(0, 2));
+    year = short >= 50 ? 1900 + short : 2000 + short;
+    offset = 2;
+  } else if (node.tag === 0x18) {
+    year = Number(text.slice(0, 4));
+    offset = 4;
+  } else {
+    throw new Error("X509: unsupported validity time encoding");
+  }
+  const month = Number(text.slice(offset, offset + 2)) - 1;
+  const day = Number(text.slice(offset + 2, offset + 4));
+  const hour = Number(text.slice(offset + 4, offset + 6));
+  const minute = Number(text.slice(offset + 6, offset + 8));
+  const second = Number(text.slice(offset + 8, offset + 10));
+  return new Date(Date.UTC(year, month, day, hour, minute, second));
+}
+function x509DateString(date) {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const two = value => String(value).padStart(2, "0");
+  return `${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2, " ")} ${two(date.getUTCHours())}:${two(date.getUTCMinutes())}:${two(date.getUTCSeconds())} ${date.getUTCFullYear()} GMT`;
+}
+function x509Fingerprint(bytes, digest) {
+  return Buffer.from(resolveHash(digest).fn(bytes)).toString("hex").toUpperCase().match(/../g).join(":");
+}
+function x509Ip(bytes) {
+  if (bytes.length === 4) return Array.from(bytes).join(".");
+  if (bytes.length === 16) {
+    const groups = [];
+    for (let i = 0; i < 16; i += 2) groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+    return groups.join(":");
+  }
+  return Buffer.from(bytes).toString("hex");
+}
+function x509Extensions(fields) {
+  const result = { ca: false, altNames: [] };
+  const wrapper = fields.find(field => field.tag === 0xa3);
+  if (!wrapper) return result;
+  let extensions;
+  try {
+    const sequence = derChildren(wrapper.content)[0];
+    extensions = derChildren(sequence.content);
+  } catch (_error) {
+    return result;
+  }
+  for (const extension of extensions) {
+    try {
+      const parts = derChildren(extension.content);
+      const oid = decodeOID(parts[0].content);
+      const value = parts[parts.length - 1];
+      if (value.tag !== 0x04) continue;
+      const inner = derRead(value.content, 0);
+      if (oid === "2.5.29.19" && inner.tag === 0x30) {
+        const constraints = derChildren(inner.content);
+        result.ca = constraints.some(node => node.tag === 0x01 && node.content[0] !== 0);
+      } else if (oid === "2.5.29.17" && inner.tag === 0x30) {
+        for (const name of derChildren(inner.content)) {
+          if (name.tag === 0x82) result.altNames.push({ type: "DNS", value: x509String(name) });
+          else if (name.tag === 0x81) result.altNames.push({ type: "email", value: x509String(name) });
+          else if (name.tag === 0x87) result.altNames.push({ type: "IP Address", value: x509Ip(name.content) });
+        }
+      }
+    } catch (_error) {
+      // Unknown or malformed non-critical extensions do not invalidate the parsed certificate.
+    }
+  }
+  return result;
+}
+function x509PublicJwk(key) {
+  const jwk = key.export({ format: "jwk" });
+  delete jwk.d; delete jwk.p; delete jwk.q; delete jwk.dp; delete jwk.dq; delete jwk.qi;
+  return JSON.stringify(jwk);
+}
+
+class X509Certificate {
+  constructor(buffer) {
+    let der;
+    if (typeof buffer === "string" || (buffer instanceof Uint8Array && Buffer.from(buffer).toString("utf8").includes("BEGIN CERTIFICATE"))) {
+      const decoded = pemDecode(typeof buffer === "string" ? buffer : Buffer.from(buffer).toString("utf8"));
+      if (decoded.label !== "CERTIFICATE") throw new Error("X509: expected a CERTIFICATE PEM block");
+      der = decoded.der;
+    } else {
+      der = toBytes(buffer);
+    }
+    this.raw = Buffer.from(der);
+    const cert = derRead(der, 0);
+    if (cert.tag !== 0x30 || cert.end !== der.length) throw new Error("X509: invalid certificate DER");
+    const outer = derChildren(cert.content);
+    if (outer.length !== 3) throw new Error("X509: invalid certificate structure");
+    const tbs = outer[0];
+    const fields = derChildren(tbs.content);
+    let i = fields[0].tag === 0xa0 ? 1 : 0;
+    const serial = fields[i++];
+    i++; // TBS signature algorithm
+    const issuer = fields[i++];
+    const validity = derChildren(fields[i++].content);
+    const subject = fields[i++];
+    const spki = fields[i++];
+    this.serialNumber = Buffer.from(serial.content).toString("hex").replace(/^00/, "").toUpperCase() || "00";
+    this.issuer = x509Name(issuer);
+    this.subject = x509Name(subject);
+    this.validFromDate = x509Date(validity[0]);
+    this.validToDate = x509Date(validity[1]);
+    this.validFrom = x509DateString(this.validFromDate);
+    this.validTo = x509DateString(this.validToDate);
+    this.fingerprint = x509Fingerprint(der, "sha1");
+    this.fingerprint256 = x509Fingerprint(der, "sha256");
+    this.fingerprint512 = x509Fingerprint(der, "sha512");
+    const spkiDer = tbs.content.subarray(spki.hstart, spki.end);
+    this.publicKey = createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+    const extensions = x509Extensions(fields.slice(i));
+    this.ca = extensions.ca;
+    this.keyUsage = undefined;
+    this._altNames = extensions.altNames;
+    this.subjectAltName = extensions.altNames.length
+      ? extensions.altNames.map(name => `${name.type}:${name.value}`).join(", ")
+      : undefined;
+    this.infoAccess = undefined;
+    this.issuerCertificate = undefined;
+    this._tbs = tbs.content.length === 0 ? new Uint8Array(0) : cert.content.subarray(tbs.hstart, tbs.end);
+    const algorithm = derChildren(outer[1].content);
+    this._signatureAlgorithm = algorithm[0] && algorithm[0].tag === 0x06
+      ? X509_SIGNATURE_OIDS[decodeOID(algorithm[0].content)]
+      : undefined;
+    this._signature = outer[2].tag === 0x03 ? outer[2].content.subarray(1) : new Uint8Array(0);
+  }
+  checkIssued(otherCert) {
+    if (!(otherCert instanceof X509Certificate)) throw new TypeError("checkIssued expects an X509Certificate");
+    return this.issuer === otherCert.subject;
+  }
+  checkPrivateKey(privateKey) {
+    try { return x509PublicJwk(createPublicKey(privateKey)) === x509PublicJwk(this.publicKey); }
+    catch (_error) { return false; }
+  }
+  verify(publicKey) {
+    if (!this._signatureAlgorithm) return false;
+    return cryptoVerify(this._signatureAlgorithm, this._tbs, publicKey, this._signature);
+  }
+  checkHost(name) {
+    const host = String(name).toLowerCase();
+    let candidates = this._altNames.filter(item => item.type === "DNS").map(item => item.value);
+    if (candidates.length === 0) {
+      const cn = this.subject.split("\n").find(field => field.startsWith("CN="));
+      if (cn) candidates = [cn.slice(3)];
+    }
+    for (const candidate of candidates) {
+      const pattern = candidate.toLowerCase();
+      if (pattern === host) return name;
+      if (pattern.startsWith("*.") && host.endsWith(pattern.slice(1)) && host.split(".").length === pattern.split(".").length) {
+        return name;
+      }
+    }
+    return undefined;
+  }
+  checkEmail(email) {
+    const target = String(email).toLowerCase();
+    const match = this._altNames.find(item => item.type === "email" && item.value.toLowerCase() === target);
+    return match ? email : undefined;
+  }
+  checkIP(ip) {
+    const target = String(ip).toLowerCase();
+    const match = this._altNames.find(item => item.type === "IP Address" && item.value.toLowerCase() === target);
+    return match ? ip : undefined;
+  }
+  toString() { return pemEncode("CERTIFICATE", this.raw); }
+  toJSON() { return this.toString(); }
+}
+
 // ---- MGF1 + RSA (PKCS#1 v1.5, PSS, OAEP) --------------------------------------------------------
 
 function mgf1(seed, len, reg) {
@@ -2446,8 +2653,9 @@ const crypto = {
   checkPrimeSync,
   generatePrime,
   generatePrimeSync,
-  // -- stubs: X.509 / legacy SPKAC --
-  X509Certificate: notImpl("X509Certificate"),
+  // -- real: X.509 certificate parsing and signature verification --
+  X509Certificate,
+  // -- stub: legacy SPKAC --
   Certificate: notImpl("Certificate"),
 
   // -- stubs: engines --
