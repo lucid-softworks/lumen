@@ -2,8 +2,7 @@
 // node:http request/response bodies and the body-parser/raw-body consumers: flowing-mode Readable
 // (push/'data'/'end', pause/resume, pipe, setEncoding, async iteration), Writable (write/end,
 // 'finish'/'drain'), and Duplex/Transform/PassThrough composed from them. Bodies here are already
-// fully buffered by the http bridge, so there is no real backpressure — write() always accepts.
-// Not implemented: object mode highWaterMark accounting, cork batching, byte-exact read(n).
+// fully buffered by the http bridge, but stream state still follows Node's buffering contracts.
 
 const EventEmitter = __builtins.get("events");
 
@@ -12,12 +11,16 @@ class Stream extends EventEmitter {}
 class Readable extends Stream {
   constructor(opts = {}) {
     super();
-    this._readableState = { flowing: null, ended: false, endEmitted: false, buffer: [], encoding: null, destroyed: false, reading: false, errored: null };
+    const objectMode = !!(opts.objectMode || opts.readableObjectMode);
+    this._readableState = { flowing: null, ended: false, endEmitted: false, buffer: [], length: 0, objectMode, highWaterMark: opts.highWaterMark === undefined ? getDefaultHighWaterMark(objectMode) : Number(opts.highWaterMark), encoding: null, destroyed: false, reading: false, errored: null };
     this.readable = true;
     if (opts.encoding) this.setEncoding(opts.encoding);
     if (typeof opts.read === "function") this._read = opts.read;
   }
   _read() {}
+  get readableLength() { return this._readableState.length; }
+  get readableHighWaterMark() { return this._readableState.highWaterMark; }
+  get readableObjectMode() { return this._readableState.objectMode; }
 
   push(chunk) {
     const state = this._readableState;
@@ -29,14 +32,36 @@ class Readable extends Stream {
     if (state.destroyed) return false;
     if (state.encoding && chunk instanceof Uint8Array) chunk = Buffer.from(chunk).toString(state.encoding);
     if (state.flowing) this.emit("data", chunk);
-    else state.buffer.push(chunk);
-    return true;
+    else { state.buffer.push(chunk); state.length += state.objectMode ? 1 : chunk.length; this.emit("readable"); }
+    return state.length < state.highWaterMark;
   }
 
-  read() {
+  read(size) {
     const state = this._readableState;
+    if (state.objectMode) {
+      if (state.buffer.length === 0) return null;
+      state.length--;
+      const value = state.buffer.shift();
+      maybeEmitEnd(this);
+      return value;
+    }
+    let wanted = size === undefined || size === null ? state.length : Number(size);
+    if (!Number.isInteger(wanted) || wanted < 0) throw new RangeError("The value of size is out of range");
+    if (wanted === 0) { maybeEmitEnd(this); return null; }
+    if (state.length < wanted) {
+      if (!state.ended) return null;
+      wanted = state.length;
+    }
     if (state.buffer.length === 0) return null;
-    const chunk = state.buffer.shift();
+    const chunks = [];
+    let remaining = wanted;
+    while (remaining > 0 && state.buffer.length) {
+      const chunk = state.buffer[0];
+      if (chunk.length <= remaining) { chunks.push(state.buffer.shift()); remaining -= chunk.length; }
+      else { chunks.push(chunk.slice(0, remaining)); state.buffer[0] = chunk.slice(remaining); remaining = 0; }
+    }
+    state.length -= wanted;
+    const chunk = state.encoding ? chunks.join("") : Buffer.concat(chunks.map(value => Buffer.from(value)), wanted);
     maybeEmitEnd(this);
     return chunk;
   }
@@ -128,7 +153,11 @@ class Readable extends Stream {
 
 function flow(stream) {
   const state = stream._readableState;
-  while (state.flowing && state.buffer.length) stream.emit("data", state.buffer.shift());
+  while (state.flowing && state.buffer.length) {
+    const chunk = state.buffer.shift();
+    state.length -= state.objectMode ? 1 : chunk.length;
+    stream.emit("data", chunk);
+  }
   maybeEmitEnd(stream);
 }
 
@@ -147,9 +176,10 @@ class Writable extends Stream {
     super();
     // `tail` serializes _write calls so writes complete in order and end() can wait for them
     // (an async _write — e.g. a subprocess stdin write — must finish before _final closes it).
-    this._writableState = { ended: false, finished: false, destroyed: false, corked: 0, errored: null, tail: Promise.resolve() };
+    this._writableState = writableState(opts);
     this.writable = true;
     if (typeof opts.write === "function") this._write = opts.write;
+    if (typeof opts.writev === "function") this._writev = opts.writev;
     if (typeof opts.final === "function") this._final = opts.final;
   }
   _write(chunk, encoding, cb) { cb(); }
@@ -162,17 +192,24 @@ class Writable extends Stream {
       if (cb) queueMicrotask(() => cb(err)); else this.emit("error", err);
       return false;
     }
-    state.tail = state.tail.then(
-      () =>
-        new Promise((resolve) => {
-          this._write(chunk, encoding, (err) => {
-            if (err) this.emit("error", err);
-            if (cb) cb(err);
-            resolve();
-          });
-        }),
-    );
-    return true;
+    const length = state.objectMode ? 1 : (chunk && chunk.length !== undefined ? chunk.length : Buffer.byteLength(String(chunk), encoding || "utf8"));
+    state.length += length;
+    const entry = { chunk, encoding, cb, length };
+    if (state.corked) state.corkBuffer.push(entry); else queueWrite(this, entry);
+    if (state.length >= state.highWaterMark) state.needDrain = true;
+    return !state.needDrain;
+  }
+
+  _queueBatch(entries) {
+    const state = this._writableState;
+    if (entries.length > 1 && typeof this._writev === "function") {
+      state.tail = state.tail.then(() => new Promise(resolve => {
+        this._writev(entries.map(entry => ({ chunk: entry.chunk, encoding: entry.encoding })), err => {
+          for (const entry of entries) completeWrite(this, entry, err);
+          resolve();
+        });
+      }));
+    } else for (const entry of entries) queueWrite(this, entry);
   }
 
   end(chunk, encoding, cb) {
@@ -181,6 +218,7 @@ class Writable extends Stream {
     const state = this._writableState;
     if (chunk != null) this.write(chunk, encoding);
     state.ended = true;
+    if (state.corked) { state.corked = 0; const entries = state.corkBuffer.splice(0); this._queueBatch(entries); }
     // Wait for all queued writes to drain, then run _final (e.g. close the child's stdin).
     state.tail.then(() => {
       if (state.finished) return;
@@ -192,8 +230,15 @@ class Writable extends Stream {
   }
 
   cork() { this._writableState.corked++; }
-  uncork() { if (this._writableState.corked) this._writableState.corked--; }
+  uncork() {
+    const state = this._writableState;
+    if (state.corked) state.corked--;
+    if (!state.corked && state.corkBuffer.length) this._queueBatch(state.corkBuffer.splice(0));
+  }
   setDefaultEncoding() { return this; }
+  get writableLength() { return this._writableState.length; }
+  get writableHighWaterMark() { return this._writableState.highWaterMark; }
+  get writableObjectMode() { return this._writableState.objectMode; }
 
   destroy(err) {
     const state = this._writableState;
@@ -206,19 +251,41 @@ class Writable extends Stream {
   }
 }
 
+function writableState(opts) {
+  const objectMode = !!(opts.objectMode || opts.writableObjectMode);
+  return { ended: false, finished: false, destroyed: false, corked: 0, corkBuffer: [], errored: null, tail: Promise.resolve(), objectMode, highWaterMark: opts.highWaterMark === undefined ? getDefaultHighWaterMark(objectMode) : Number(opts.highWaterMark), length: 0, needDrain: false };
+}
+function queueWrite(stream, entry) {
+  const state = stream._writableState;
+  state.tail = state.tail.then(() => new Promise(resolve => {
+    stream._write(entry.chunk, entry.encoding, err => { completeWrite(stream, entry, err); resolve(); });
+  }));
+}
+function completeWrite(stream, entry, error) {
+  const state = stream._writableState;
+  state.length -= entry.length;
+  if (error) stream.emit("error", error);
+  if (entry.cb) entry.cb(error);
+  if (state.needDrain && state.length < state.highWaterMark) { state.needDrain = false; queueMicrotask(() => stream.emit("drain")); }
+}
+
 // Duplex: readable + writable. Compose by inheriting Readable and copying Writable's methods.
 class Duplex extends Readable {
   constructor(opts = {}) {
     super(opts);
     // Mirror Writable's state (including `tail`, which write()/end() chain on to serialize writes).
-    this._writableState = { ended: false, finished: false, destroyed: false, corked: 0, errored: null, tail: Promise.resolve() };
+    this._writableState = writableState(opts);
     this.writable = true;
     if (typeof opts.write === "function") this._write = opts.write;
+    if (typeof opts.writev === "function") this._writev = opts.writev;
     if (typeof opts.final === "function") this._final = opts.final;
   }
 }
-for (const m of ["_write", "write", "end", "cork", "uncork", "setDefaultEncoding"]) {
+for (const m of ["_write", "write", "_queueBatch", "end", "cork", "uncork", "setDefaultEncoding"]) {
   Duplex.prototype[m] = Writable.prototype[m];
+}
+for (const name of ["writableLength", "writableHighWaterMark", "writableObjectMode"]) {
+  Object.defineProperty(Duplex.prototype, name, Object.getOwnPropertyDescriptor(Writable.prototype, name));
 }
 
 class Transform extends Duplex {
