@@ -84,7 +84,7 @@ function getUnpackedSettings(buf) {
 }
 
 function notSupported() {
-  throw new Error("HTTP/2 servers are not supported in lumen yet");
+  throw new Error("http2.performServerHandshake is not supported in lumen; use createServer or createSecureServer");
 }
 
 class ClientHttp2Stream extends Duplex {
