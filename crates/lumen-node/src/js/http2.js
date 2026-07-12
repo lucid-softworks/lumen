@@ -150,19 +150,25 @@ class ClientHttp2Session extends EventEmitter {
     this._continuation = null;
 
     const target = new URL(String(authority));
-    if (target.protocol !== "http:") {
-      const error = new Error("HTTPS HTTP/2 requires TLS ALPN support, which lumen does not provide yet");
-      error.code = "ERR_HTTP2_ALPN_UNAVAILABLE";
-      throw error;
-    }
-    const port = target.port ? Number(target.port) : 80;
+    if (target.protocol !== "http:" && target.protocol !== "https:") throw new TypeError(`Unsupported HTTP/2 protocol ${target.protocol}`);
+    this.encrypted = target.protocol === "https:";
+    const port = target.port ? Number(target.port) : this.encrypted ? 443 : 80;
     this.origin = target.origin;
-    const net = __builtins.get("net");
-    this.socket = options.createConnection ? options.createConnection(target, options) : net.connect({ host: target.hostname, port });
+    const transport = this.encrypted ? __builtins.get("tls") : __builtins.get("net");
+    const socketOptions = this.encrypted
+      ? { ...options, host: target.hostname, port, servername: options.servername || target.hostname, ALPNProtocols: ["h2"] }
+      : { host: target.hostname, port };
+    this.socket = options.createConnection ? options.createConnection(target, options) : transport.connect(socketOptions);
     this.socket.on("data", chunk => this._receive(chunk));
     this.socket.on("error", error => this._fail(error));
     this.socket.on("close", () => this._socketClosed());
-    this.socket.once("connect", () => this._connected());
+    this.socket.once(this.encrypted ? "secureConnect" : "connect", () => {
+      if (this.encrypted && this.socket.alpnProtocol !== "h2") {
+        const error = new Error(`HTTP/2 ALPN negotiation failed (received ${this.socket.alpnProtocol || "none"})`);
+        error.code = "ERR_HTTP2_ALPN_NEGOTIATION_FAILED";
+        this._fail(error);
+      } else this._connected();
+    });
   }
 
   _connected() {
@@ -183,8 +189,8 @@ class ClientHttp2Session extends EventEmitter {
     const normalized = { ...headers };
     if (normalized[":method"] === undefined) normalized[":method"] = "GET";
     if (normalized[":path"] === undefined) normalized[":path"] = "/";
-    if (normalized[":scheme"] === undefined) normalized[":scheme"] = "http";
-    if (normalized[":authority"] === undefined) normalized[":authority"] = this.origin.slice(7);
+    if (normalized[":scheme"] === undefined) normalized[":scheme"] = this.encrypted ? "https" : "http";
+    if (normalized[":authority"] === undefined) normalized[":authority"] = new URL(this.origin).host;
     const clientStream = new ClientHttp2Stream(this, id, normalized, options);
     this._streams.set(id, clientStream);
     const send = () => this._sendHeaders(id, normalized, !!options.endStream);

@@ -7,7 +7,7 @@ use std::time::Duration;
 use lumen_host::{ops, CallbackQueue, CompletionSender, Ctx, OpDecl, TaskRegistry, Value};
 
 pub const TLS_OPS: &[OpDecl] = ops![
-    "connect" (5) => op_connect,
+    "connect" (7) => op_connect,
     "read" (3) => op_read,
     "write" (4) => op_write,
     "close" (1) => op_close,
@@ -43,6 +43,7 @@ struct Connected {
     peer: SocketAddr,
     protocol: String,
     cipher: String,
+    alpn: String,
 }
 
 fn callbacks(ctx: &mut Ctx, resolve: Option<&Value>, reject: Option<&Value>) -> Result<(Value, Value), Value> {
@@ -60,7 +61,10 @@ fn op_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Valu
     let host = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
     let port = args.get(1).and_then(Value::as_num_opt).unwrap_or(443.0) as u16;
     let servername = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string();
-    let (resolve, reject) = callbacks(ctx, args.get(3), args.get(4))?;
+    let alpn: Vec<String> = ctx.coerce_string(args.get(3).unwrap_or(&Value::Undefined))?.to_string()
+        .split(',').filter(|value| !value.is_empty()).map(str::to_string).collect();
+    let verify_peer = !matches!(args.get(4), Some(Value::Bool(false)));
+    let (resolve, reject) = callbacks(ctx, args.get(5), args.get(6))?;
     let task = ctx.host_mut::<TaskRegistry>().expect("task registry").register(resolve, Some(reject), decode_connect);
     completions(ctx).run_blocking(task, move || {
         let result = (|| -> Result<Connected, String> {
@@ -73,10 +77,11 @@ fn op_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Valu
                         tcp.set_write_timeout(Some(Duration::from_secs(30))).ok();
                         let local = tcp.local_addr().map_err(|error| error.to_string())?;
                         let peer = tcp.peer_addr().map_err(|error| error.to_string())?;
-                        let stream = lumen_tls::TlsStream::connect(tcp, &servername)?;
+                        let stream = lumen_tls::TlsStream::connect_with_options(tcp, &servername, &alpn, verify_peer)?;
                         let protocol = stream.protocol();
                         let cipher = stream.cipher();
-                        return Ok(Connected { stream, local, peer, protocol, cipher });
+                        let alpn = stream.alpn_protocol();
+                        return Ok(Connected { stream, local, peer, protocol, cipher, alpn });
                     }
                     Err(error) => last_error = Some(error),
                 }
@@ -94,7 +99,7 @@ fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resu
 }
 
 fn register_connected(ctx: &mut Ctx, connected: Connected) -> Result<Vec<Value>, Value> {
-    let Connected { stream, local, peer, protocol, cipher } = connected;
+    let Connected { stream, local, peer, protocol, cipher, alpn } = connected;
     let registry = ctx.host_mut::<TlsRegistry>().expect("TLS registry");
     let id = registry.next;
     registry.next += 1;
@@ -102,7 +107,7 @@ fn register_connected(ctx: &mut Ctx, connected: Connected) -> Result<Vec<Value>,
     Ok(vec![
         Value::Num(id as f64), Value::from_string(local.ip().to_string()), Value::Num(local.port() as f64),
         Value::from_string(peer.ip().to_string()), Value::Num(peer.port() as f64),
-        Value::from_string(protocol), Value::from_string(cipher),
+        Value::from_string(protocol), Value::from_string(cipher), Value::from_string(alpn),
     ])
 }
 
@@ -152,7 +157,8 @@ fn op_accept(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
                     Ok(stream) => {
                         let protocol = stream.protocol();
                         let cipher = stream.cipher();
-                        AcceptResult::Connected(Connected { stream, local, peer, protocol, cipher })
+                        let alpn = stream.alpn_protocol();
+                        AcceptResult::Connected(Connected { stream, local, peer, protocol, cipher, alpn })
                     }
                     Err(error) => AcceptResult::Error(error),
                 }

@@ -39,10 +39,12 @@
       if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError(`Invalid TLS port ${options.port}`);
       const host = String(options.host || "localhost");
       const servername = String(options.servername || host);
+      this._rejectUnauthorized = options.rejectUnauthorized !== false;
       this.servername = servername;
       if (callback) this.once("secureConnect", callback);
       this.connecting = true;
-      new Promise((resolve, reject) => __tls.connect(host, port, servername, (...descriptor) => resolve(descriptor), reject)).then(
+      const alpn = (options.ALPNProtocols || []).map(value => Buffer.isBuffer(value) ? value.toString() : String(value)).join(",");
+      new Promise((resolve, reject) => __tls.connect(host, port, servername, alpn, options.rejectUnauthorized !== false, (...descriptor) => resolve(descriptor), reject)).then(
         descriptor => {
           if (this.destroyed) { __tls.close(descriptor[0]); return; }
           this._adopt(descriptor);
@@ -63,9 +65,11 @@
       this.remotePort = descriptor[4];
       this._protocol = descriptor[5];
       this._cipher = descriptor[6];
+      this.alpnProtocol = descriptor[7] || false;
       this.connecting = false;
       this.pending = false;
-      this.authorized = true;
+      this.authorized = this._rejectUnauthorized !== false;
+      this.authorizationError = this.authorized ? null : "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
       this._serverSide = serverSide;
       this._pump();
     }
