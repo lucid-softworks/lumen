@@ -12,9 +12,10 @@
 //! which is what makes slot storage sound. TDZ is represented by `Value::Empty` in the slot —
 //! reads check it and throw the same ReferenceError the tree-walker would.
 //!
-//! Tier selection (see `Interp::tier`): `interp` (default — this module is never entered),
-//! `bytecode` (compile at `tier_threshold` calls; 0 = immediately). Selectable via the `LUMEN_TIER`
-//! / `LUMEN_TIER_THRESHOLD` env vars, the CLI's `--tier`, or `Engine::set_tier`.
+//! Tier selection (see `Interp::tier`): `jit` (default), `bytecode`, or `interp` (this module is
+//! never entered — the tree-walker runs). Compiled tiers kick in at `tier_threshold` calls (0 =
+//! immediately). Selectable via the `LUMEN_TIER` / `LUMEN_TIER_THRESHOLD` env vars, the CLI's
+//! `--tier`, or `Engine::set_tier`.
 
 use std::rc::Rc;
 

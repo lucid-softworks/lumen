@@ -21,8 +21,10 @@ A lexer, parser, and **three execution tiers**:
   *register chains* that keep runs of arithmetic entirely in FP registers. On other
   platforms the JIT tier degrades to the bytecode VM.
 
-Tier selection: `--tier=interp|bytecode|jit` (interp is the default). Functions tier up
-after a call-count threshold — immediately if the body contains a loop.
+Tier selection: `--tier=interp|bytecode|jit` (**jit is the default**; where the JIT is
+unavailable it degrades to the bytecode VM). Functions tier up after a call-count threshold —
+immediately if the body contains a loop. Force the reference tree-walker with `--tier=interp`
+(or `LUMEN_TIER=interp`).
 
 The language surface: generators and `async`/`await` running on stackful coroutines (async
 bodies suspend on the bytecode VM itself), full `RegExp` (including `\p{…}` and inline
@@ -42,7 +44,7 @@ baked offset is *measured at runtime* against the live types and fails closed to
 helper if anything doesn't hold) and in the N-API addon loader's `dlopen` bridge.
 
 **Passes 100% of [tc39/test262](https://github.com/tc39/test262): 53,400/53,400** (including
-annexB, intl402, and staging) — on the default tier and under `LUMEN_TIER=jit`.
+annexB, intl402, and staging) — on the default JIT tier and under `LUMEN_TIER=interp`.
 
 Extracted from — and used by — the [lucid-softworks/browser](https://github.com/lucid-softworks/browser)
 engine as its JS backend (`backend-lumen`), with full git history.
