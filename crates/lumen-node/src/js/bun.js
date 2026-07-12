@@ -376,6 +376,60 @@ function openInEditor(path, options = {}) {
   nodeChild.spawn(command, parts, { stdio: "ignore" }).unref();
 }
 
+function plugin(definition) {
+  if (!definition || typeof definition !== "object" || typeof definition.setup !== "function") {
+    throw new TypeError("Bun.plugin expects an object with a setup function");
+  }
+  const resolveRules = [], loadRules = [];
+  const addRule = (list, options, callback, name) => {
+    if (!options || !(options.filter instanceof RegExp)) throw new TypeError(`${name} requires a RegExp filter`);
+    if (options.namespace && options.namespace !== "file") throw new Error(`${name} namespaces require Bun.build and are not supported by the runtime loader`);
+    if (typeof callback !== "function") throw new TypeError(`${name} callback must be a function`);
+    list.push({ filter: options.filter, callback });
+  };
+  const builder = {
+    onResolve: (options, callback) => addRule(resolveRules, options, callback, "onResolve"),
+    onLoad: (options, callback) => addRule(loadRules, options, callback, "onLoad"),
+    config: { target: "bun" },
+  };
+  const register = () => {
+    const module = __builtins.get("module");
+    return module.registerHooks({
+      resolve(specifier, context, nextResolve) {
+        for (const rule of resolveRules) {
+          rule.filter.lastIndex = 0;
+          if (!rule.filter.test(specifier)) continue;
+          const importer = context.parentURL && context.parentURL.startsWith("file:") ? nodeUrl.fileURLToPath(context.parentURL) : "";
+          const result = rule.callback({ path: specifier, importer, namespace: "file", resolveDir: importer ? nodePath.dirname(importer) : proc.cwd(), kind: "require-call" });
+          if (isThenable(result)) throw new Error("Bun.plugin onResolve callbacks must be synchronous in the runtime loader");
+          if (result && result.path) {
+            const path = nodePath.isAbsolute(result.path) ? result.path : nodePath.resolve(result.resolveDir || proc.cwd(), result.path);
+            return { url: nodeUrl.pathToFileURL(path).href, shortCircuit: true };
+          }
+        }
+        return nextResolve(specifier, context);
+      },
+      load(url, context, nextLoad) {
+        const path = url.startsWith("file:") ? nodeUrl.fileURLToPath(url) : url;
+        for (const rule of loadRules) {
+          rule.filter.lastIndex = 0;
+          if (!rule.filter.test(path)) continue;
+          const result = rule.callback({ path, namespace: "file", loader: context.format });
+          if (isThenable(result)) throw new Error("Bun.plugin onLoad callbacks must be synchronous in the runtime loader");
+          if (result && result.contents !== undefined) {
+            const loader = result.loader || "js";
+            if (!["js", "jsx", "json"].includes(loader)) throw new Error(`Bun.plugin loader '${loader}' is not supported by the runtime loader`);
+            return { format: loader === "json" ? "json" : "commonjs", source: result.contents, shortCircuit: true };
+          }
+        }
+        return nextLoad(url, context);
+      },
+    });
+  };
+  const setup = definition.setup(builder);
+  return isThenable(setup) ? setup.then(register) : register();
+}
+
 // ---- zlib one-shots (Bun returns Uint8Array) --------------------------------------------------
 const gzipSync = (data) => new Uint8Array(nodeZlib.gzipSync(Buffer.from(toU8(data))));
 const gunzipSync = (data) => new Uint8Array(nodeZlib.gunzipSync(Buffer.from(toU8(data))));
@@ -1726,7 +1780,7 @@ const Bun = {
   openInEditor,
   mmap: notImpl("Bun.mmap"),
   generateHeapSnapshot: notImpl("Bun.generateHeapSnapshot"),
-  plugin: notImpl("Bun.plugin"),
+  plugin,
   build: notImpl("Bun.build"),
   Transpiler: throwClass("Bun.Transpiler"),
   FileSystemRouter: globalThis.__lumenFileSystemRouter,
