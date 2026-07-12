@@ -28,6 +28,9 @@ pub mod deflate;
 /// Brotli (RFC 7932) codec (std-only), for node:zlib brotli* APIs.
 pub mod brotli;
 
+/// Zstandard (RFC 8878) codec (std-only), for node:zlib zstd* and Bun.zstd* APIs.
+pub mod zstd;
+
 /// One native op: a named native function with its JS arity.
 #[derive(Clone, Copy)]
 pub struct OpDecl {
