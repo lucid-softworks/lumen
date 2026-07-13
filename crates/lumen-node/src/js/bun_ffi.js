@@ -196,6 +196,32 @@
     return { symbols: out, close: () => {} };
   };
 
+  // Runtime C compilation through the host C compiler. Bun embeds TinyCC; lumen deliberately
+  // uses the installed toolchain but preserves the synchronous API and the same symbol binder.
+  const cc = (options) => {
+    if (!options || typeof options !== "object") throw new TypeError("bun:ffi cc expects an options object");
+    let source = options.source;
+    if (source instanceof URL) source = source.protocol === "file:" ? source.pathname : String(source);
+    else if (source && typeof source === "object" && typeof source.name === "string") source = source.name;
+    if (typeof source !== "string") throw new TypeError("bun:ffi cc options.source must be a file path");
+    const args = [];
+    const flags = options.flags === undefined ? [] : Array.isArray(options.flags) ? options.flags : [options.flags];
+    for (const flag of flags) args.push(String(flag));
+    for (const name of Object.keys(options.define || {})) {
+      const value = options.define[name];
+      args.push(value === undefined || value === "" ? `-D${name}` : `-D${name}=${value}`);
+    }
+    for (const library of options.library || []) args.push(`-l${library}`);
+    const path = __ffi.cc(source, args.join("\0"));
+    const library = dlopen(path, options.symbols || {});
+    const close = library.close;
+    library.close = () => {
+      close();
+      try { __builtins.get("fs").unlinkSync(path); } catch {}
+    };
+    return library;
+  };
+
   const unsupported = (what, why) => () => {
     throw new Error(`bun:ffi ${what} is not supported in lumen${why ? ` (${why})` : ""}`);
   };
@@ -214,7 +240,7 @@
     toBuffer,
     dlopen,
     linkSymbols,
-    cc: unsupported("cc", "runtime C compilation needs a toolchain bridge"),
+    cc,
     viewSource: unsupported("viewSource", "no JIT source to disassemble"),
     native: {
       // Bun's internal fast-path hooks; the public dlopen/JSCallback above are the supported entry.

@@ -200,10 +200,37 @@ fn ffi_fixture_abi_shapes_and_callback() {
 }
 
 #[test]
+fn ffi_cc_compiles_and_links_c_at_runtime() {
+    if c_compiler().is_none() {
+        eprintln!("no C compiler available; skipping bun:ffi cc test");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("lumen_ffi_cc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("scale.c");
+    std::fs::write(&source, "int scale(int value) { return value * FACTOR; }\n").unwrap();
+    let path = source.to_string_lossy().replace('\\', "\\\\");
+    let out = run(&format!(
+        r#"
+        const {{ cc, FFIType: F }} = require("bun:ffi");
+        const lib = cc({{
+          source: "{path}",
+          define: {{ FACTOR: "7" }},
+          symbols: {{ scale: {{ args: [F.i32], returns: F.i32 }} }},
+        }});
+        console.log("cc", lib.symbols.scale(6));
+        lib.close();
+        "#
+    ));
+    assert_eq!(out.lines().collect::<Vec<_>>(), ["cc 42"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn ffi_honest_throws() {
     let out = run(
         r#"
-        const { dlopen, FFIType: F, JSCallback, cc, viewSource } = require("bun:ffi");
+        const { dlopen, FFIType: F, JSCallback, viewSource } = require("bun:ffi");
         const libc = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
         const lib = dlopen(libc, { strlen: { args: [F.ptr], returns: F.u64 } });
         const check = (label, fn) => { try { fn(); console.log(label, "NO-THROW"); } catch (e) { console.log(label, e.message); } };
@@ -211,7 +238,6 @@ fn ffi_honest_throws() {
         check("strArg", () => lib.symbols.strlen("hello"));
         // float-typed JSCallback is unsupported
         check("floatCb", () => new JSCallback(() => 0, { args: [F.f64], returns: F.i32 }));
-        check("cc", () => cc({}));
         check("viewSource", () => viewSource());
         "#,
     );
@@ -220,5 +246,4 @@ fn ffi_honest_throws() {
         "got: {out}"
     );
     assert!(out.contains("floatCb") && out.contains("floating-point"), "got: {out}");
-    assert!(out.contains("cc") && out.contains("not supported in lumen"), "got: {out}");
 }

@@ -119,6 +119,7 @@ pub fn extension() -> Extension {
                     "toBuffer" (3) => ffi::op_to_buffer,
                     "registerCallback" (3) => ffi::op_register_callback,
                     "unregisterCallback" (1) => ffi::op_unregister_callback,
+                    "cc" (2) => ffi::op_cc,
                 ],
             ),
             (

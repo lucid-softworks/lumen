@@ -30,6 +30,8 @@
 
 use std::cell::Cell;
 use std::os::raw::c_void;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lumen_host::{Ctx, Value};
 
@@ -318,6 +320,68 @@ pub fn op_dlclose(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Val
         *slot = None;
     }
     Ok(Value::Undefined)
+}
+
+/// Compile one C translation unit into a temporary shared library using the host toolchain.
+/// Arguments are already tokenized by the JS layer and NUL-separated, so no shell is involved.
+pub fn op_cc(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let source = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    if !std::path::Path::new(&source).is_file() {
+        return Err(ctx.make_error("Error", format!("bun:ffi cc source not found: {source}")));
+    }
+    let extra = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let extra: Vec<&str> = extra.split('\0').filter(|arg| !arg.is_empty()).collect();
+    let extension = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(windows) {
+        "dll"
+    } else {
+        "so"
+    };
+    let output = std::env::temp_dir().join(format!(
+        "lumen-ffi-cc-{}-{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+        extension
+    ));
+    let mut candidates = Vec::new();
+    if let Ok(cc) = std::env::var("CC") {
+        if !cc.is_empty() {
+            candidates.push(cc);
+        }
+    }
+    candidates.extend(["cc".to_string(), "clang".to_string()]);
+    let mut failures = Vec::new();
+    for compiler in candidates {
+        let mut command = Command::new(&compiler);
+        #[cfg(target_os = "macos")]
+        command.args(["-dynamiclib", "-fPIC", "-undefined", "dynamic_lookup"]);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        command.args(["-shared", "-fPIC"]);
+        #[cfg(windows)]
+        command.arg("-shared");
+        command.arg("-O2").arg(&source).args(&extra).arg("-o").arg(&output);
+        match command.output() {
+            Ok(result) if result.status.success() => {
+                return Ok(Value::from_string(output.to_string_lossy().into_owned()));
+            }
+            Ok(result) => failures.push(format!(
+                "{compiler}: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            )),
+            Err(error) => failures.push(format!("{compiler}: {error}")),
+        }
+    }
+    let _ = std::fs::remove_file(&output);
+    Err(ctx.make_error(
+        "Error",
+        format!("bun:ffi cc failed: {}", failures.join("; ")),
+    ))
 }
 
 /// `__ffi.call(fnPtr, retCode, [argCodes], [args])` — marshal, trampoline, and marshal back.
