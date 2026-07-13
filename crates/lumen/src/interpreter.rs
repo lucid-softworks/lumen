@@ -763,6 +763,8 @@ pub(crate) struct InterpLayout {
     /// `string_proto` (a `Gc` = one stored `Rc` pointer): the GetMethod template resolves
     /// string-primitive receivers against the ACTIVE realm's String.prototype through this.
     pub string_proto: usize,
+    /// Canonical Function.prototype, used to validate the ordinary `instanceof` fast path.
+    pub function_proto: usize,
     pub valid: bool,
 }
 
@@ -830,6 +832,7 @@ pub(crate) fn interp_layout(i: &mut Interp) -> InterpLayout {
         fp_len_word: fp.1,
         fp_cap_word: fp.2,
         string_proto: off(&i.string_proto as *const _ as usize),
+        function_proto: off(&i.function_proto as *const _ as usize),
         valid: true,
     }
 }

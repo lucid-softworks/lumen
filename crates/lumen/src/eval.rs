@@ -6380,6 +6380,53 @@ impl Interp {
         Ok(Value::Bool(self.ordinary_has_instance(r, l)?))
     }
 
+    /// Execute `instanceof` and seed the JIT's narrow ordinary-constructor cache. Filling is
+    /// observationally inert: the real abstract operation still runs on every miss, and the
+    /// generated hit revalidates every fact captured here before touching the operand stack.
+    pub(crate) fn instanceof_ic(
+        &mut self,
+        l: &Value,
+        r: &Value,
+        cache: &std::cell::Cell<crate::bytecode::IcState>,
+    ) -> Result<Value, Abrupt> {
+        let key = crate::builtins::well_known_key(self, "hasInstance");
+        let fill = match (key.as_deref(), r) {
+            (Some(key), Value::Obj(o)) if self.ordinary_get_ptr(Rc::as_ptr(o) as usize) => {
+                let b = o.borrow();
+                if b.is_constructor
+                    && matches!(b.exotic, Exotic::None)
+                    && b.ic_plain.get()
+                    && b.proto
+                        .as_ref()
+                        .is_some_and(|p| Rc::ptr_eq(p, &self.function_proto))
+                    && !b.props.contains(key)
+                {
+                    b.props.prototype_slot().and_then(|slot| {
+                        let prop = b.props.get("prototype")?;
+                        (!prop.accessor() && matches!(prop.value(), Value::Obj(_)))
+                            .then_some((b.props.shape(), slot))
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let out = self.instanceof(l, r)?;
+        if let Some((shape, slot)) = fill {
+            cache.set(crate::bytecode::IcState {
+                recv_shape: shape,
+                holder_shape: shape,
+                slot,
+                depth: 0,
+                mid_ok: 0,
+                mid_shape: 0,
+                mid2_shape: 0,
+            });
+        }
+        Ok(out)
+    }
+
     /// OrdinaryHasInstance(C, O): unwrap bound functions to their target, then test whether `C`'s
     /// `prototype` appears on `O`'s prototype chain.
     pub(crate) fn ordinary_has_instance(&mut self, c: &Value, o: &Value) -> Result<bool, Abrupt> {

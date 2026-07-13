@@ -147,6 +147,23 @@ fn instanceof_default_intrinsic_and_override() {
         run("function C(){} var calls=0; var p=new Proxy({}, {getPrototypeOf(){calls++;return C.prototype}}); [(p instanceof C),calls].join(',')"),
         "true,1"
     );
+    // Warm the JIT cache, then mutate facts that shapes do and do not encode. Replacing the
+    // prototype value preserves A's shape and must still be observed; adding @@hasInstance
+    // changes it and must deopt to the user hook.
+    assert_eq!(
+        run_jit(
+            "function A(){} var o=new A();
+             function hit(v, C){ return v instanceof C; }
+             for(var i=0;i<1000;i++) hit(o,A);
+             var before=hit(o,A);
+             A.prototype={};
+             var after=hit(o,A), calls=0;
+             Object.defineProperty(A, Symbol.hasInstance,
+               {value:function(v){calls++;return v===o;}, configurable:true});
+             [before,after,hit(o,A),calls].join(',')"
+        ),
+        "true,false,true,1"
+    );
 }
 
 #[test]

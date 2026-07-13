@@ -517,6 +517,10 @@ pub enum Op {
     NotEq,
     StrictEq,
     StrictNotEq,
+    /// `lhs instanceof rhs`, with one shape cache for the overwhelmingly common ordinary
+    /// constructor case. The JIT additionally validates the live constructor/prototype chain;
+    /// misses retain the complete `@@hasInstance` semantics through the generic executor.
+    InstanceOf(u32),
     /// Any other binary operator (`**`, `in`, `instanceof`) via the interpreter, op in names.
     GenBin(u32),
     Neg,
@@ -2282,6 +2286,14 @@ impl Compiler {
         for _ in 0..PROP_IC_WAYS {
             self.caches.push(std::cell::Cell::new(IcState::EMPTY));
         }
+        idx
+    }
+    /// Reserve one cache cell for an op whose generated template has a single stable shape.
+    /// Unlike property sites, `instanceof` does not need four polymorphic ways; keeping this
+    /// separate avoids paying 96 bytes per source occurrence.
+    fn new_single_cache(&mut self) -> u32 {
+        let idx = self.caches.len() as u32;
+        self.caches.push(std::cell::Cell::new(IcState::EMPTY));
         idx
     }
     /// Reserve a fresh name-cache slot for a free-name op.
@@ -4053,6 +4065,7 @@ impl Compiler {
                     "!=" => Op::NotEq,
                     "===" => Op::StrictEq,
                     "!==" => Op::StrictNotEq,
+                    "instanceof" => Op::InstanceOf(self.new_single_cache()),
                     other => {
                         let i = self.name_idx(other);
                         Op::GenBin(i)
@@ -5194,6 +5207,12 @@ fn run_vm(
             Op::NotEq => bin_cmp(i, &mut *stack, "!=", |a, b| a != b)?,
             Op::StrictEq => bin_cmp(i, &mut *stack, "===", |a, b| a == b)?,
             Op::StrictNotEq => bin_cmp(i, &mut *stack, "!==", |a, b| a != b)?,
+            Op::InstanceOf(c) => {
+                let b = pop!();
+                let a = pop!();
+                let v = i.instanceof_ic(&a, &b, &chunk.caches[c as usize])?;
+                stack.push(v);
+            }
             Op::GenBin(n) => {
                 let b = pop!();
                 let a = pop!();
@@ -5983,6 +6002,7 @@ impl Chunk {
             | Op::NotEq
             | Op::StrictEq
             | Op::StrictNotEq
+            | Op::InstanceOf(_)
             | Op::GenBin(_) => (2, 1),
             Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void => (1, 1),
             Op::TypeofName(_) => (0, 1),
@@ -7252,6 +7272,12 @@ unsafe fn jit_exec_inner(
         Op::NotEq => jit_bin_cmp(i, sp, "!=", |a, b| a != b)?,
         Op::StrictEq => jit_bin_cmp(i, sp, "===", |a, b| a == b)?,
         Op::StrictNotEq => jit_bin_cmp(i, sp, "!==", |a, b| a != b)?,
+        Op::InstanceOf(c) => {
+            let b = pop!();
+            let a = pop!();
+            let v = i.instanceof_ic(&a, &b, &chunk.caches[c as usize])?;
+            push!(v);
+        }
         Op::GenBin(n) => {
             let b = pop!();
             let a = pop!();

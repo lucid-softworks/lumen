@@ -198,6 +198,7 @@ pub struct JitLayout {
     pub obj_proto: usize,
     pub obj_props: usize,
     pub obj_exotic: usize,
+    pub obj_is_constructor: usize,
     pub props_shape: usize,
     /// The `entries` `Vec` within `Props`.
     pub props_entries: usize,
@@ -362,6 +363,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         obj_ic_plain: offset_of!(Object, ic_plain),
         obj_props: offset_of!(Object, props),
         obj_exotic: offset_of!(Object, exotic),
+        obj_is_constructor: offset_of!(Object, is_constructor),
         props_shape: offset_of!(Props, shape),
         props_entries: offset_of!(Props, entries),
         vec_ptr_off: vec_ptr_off.unwrap_or(0),
@@ -1832,6 +1834,11 @@ impl Props {
             }
         }
         self.find(key).map(|i| &self.entries[i].1)
+    }
+    /// The memoized own `prototype` slot, for guarded constructor fast paths.
+    #[inline]
+    pub(crate) fn prototype_slot(&self) -> Option<u32> {
+        self.find("prototype").map(|slot| slot as u32)
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
         if let Some(n) = canonical_index(key) {

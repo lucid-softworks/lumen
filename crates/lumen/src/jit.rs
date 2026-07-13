@@ -1435,6 +1435,16 @@ pub fn compile(
                     None,
                 );
             }
+            Op::InstanceOf(cache) if rc_ok && instanceof_inlinable(layout, ilayout) => {
+                emit_instanceof_inline(
+                    &mut a,
+                    layout,
+                    ilayout,
+                    chunk.jit_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                );
+            }
             Op::Not if fast & 131072 != 0 && eq_inlinable(layout) => {
                 emit_not_inline(&mut a, layout, pc as u32, l_unwind);
             }
@@ -3337,6 +3347,176 @@ fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.obj_ic_plain < 4096
         && crate::lstr::LEN_OFF.is_multiple_of(4)
         && crate::lstr::LEN_OFF / 4 < 4096
+}
+
+/// Gate for the ordinary-constructor `instanceof` template. The current heap property layout is
+/// NaN-boxed; require that exact form so decoding `.prototype` remains fail-closed if storage is
+/// changed again.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn instanceof_inlinable(
+    layout: &crate::value::JitLayout,
+    il: &crate::interpreter::InterpLayout,
+) -> bool {
+    let sh = layout.obj_props + layout.props_shape;
+    let en = layout.obj_props + layout.props_entries + layout.vec_ptr_off;
+    let enl = layout.obj_props + layout.props_entries + layout.vec_len_off;
+    layout.valid
+        && il.valid
+        && layout.entry_accessor == layout.entry_value + 8
+        && layout.obj_from_rc < 4096
+        && layout.obj_proto.is_multiple_of(8)
+        && layout.obj_proto / 8 < 4096
+        && layout.obj_exotic < 4096
+        && layout.obj_ic_plain < 4096
+        && layout.obj_is_constructor < 4096
+        && sh.is_multiple_of(4)
+        && sh / 4 < 4096
+        && en.is_multiple_of(8)
+        && en / 8 < 4096
+        && enl.is_multiple_of(8)
+        && enl / 8 < 4096
+        && layout.entry_accessor < 4096
+        && layout.entry_value < 256
+        && layout.rc_strong_off < 256
+        && layout.entry_size < 0x1_0000
+        && il.function_proto.is_multiple_of(8)
+        && il.function_proto / 8 < 4096
+}
+
+/// Inline the default OrdinaryHasInstance case. A single cache cell proves that the RHS still
+/// has the key set observed by the checked path (notably, no own `@@hasInstance`); live guards
+/// additionally validate constructor identity facts and decode its current `.prototype` value.
+/// The LHS prototype walk is raw only while the realm-wide proxy latch remains clear. Every miss
+/// occurs before stack/refcount mutation and therefore cleanly replays through `jit_exec`.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_instanceof_inline(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    il: &crate::interpreter::InterpLayout,
+    cache_ptr: usize,
+    pc: u32,
+    l_unwind: usize,
+) {
+    use crate::bytecode::{IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT};
+    let slow = a.new_label();
+    let done = a.new_label();
+    let ptr_same = a.new_label();
+    let refs_ok = a.new_label();
+    let walk = a.new_label();
+    let yes = a.new_label();
+    let no = a.new_label();
+    let have = a.new_label();
+    let strong = layout.rc_strong_off as i32;
+    let sh = (layout.obj_props + layout.props_shape) as u32;
+    let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
+    let enl = (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32;
+
+    // Both operands must be objects, and no proxy-like object may participate anywhere in the
+    // chain. x10/x11 retain the two stored Rc pointers until the final balanced decrements.
+    a.ldurb(9, 20, -32);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldurb(9, 20, -16);
+    a.cmp_imm_w(9, 8);
+    a.b_cond(C_NE, slow);
+    a.ldr_imm(9, 19, 32); // ctx.inline_ic_safe
+    a.ldrb_imm(9, 9, 0);
+    a.cbz(9, false, slow);
+    a.ldur(10, 20, -24);
+    a.ldur(11, 20, -8);
+
+    // Popping the two Values must not run a destructor. Alias-aware validation mirrors the
+    // equality template: the same Rc needs three live strong refs before subtracting two.
+    a.cmp_reg_x(10, 11);
+    a.b_cond(C_EQ, ptr_same);
+    a.ldur(14, 10, strong);
+    a.cmp_imm_x(14, 1);
+    a.b_cond(C_LS, slow);
+    a.ldur(15, 11, strong);
+    a.cmp_imm_x(15, 1);
+    a.b_cond(C_LS, slow);
+    a.b(refs_ok);
+    a.bind(ptr_same);
+    a.ldur(14, 10, strong);
+    a.cmp_imm_x(14, 2);
+    a.b_cond(C_LS, slow);
+    a.bind(refs_ok);
+
+    // RHS: ordinary/plain constructor, canonical Function.prototype, and cached shape.
+    a.add_imm(12, 11, layout.obj_from_rc as u32);
+    a.ldrb_imm(9, 12, layout.obj_exotic as u32);
+    a.cmp_imm_w(9, layout.exotic_none_tag as u32);
+    a.b_cond(C_NE, slow);
+    a.ldrb_imm(9, 12, layout.obj_ic_plain as u32);
+    a.cbz(9, false, slow);
+    a.ldrb_imm(9, 12, layout.obj_is_constructor as u32);
+    a.cbz(9, false, slow);
+    a.ldr_imm(14, 12, layout.obj_proto as u32);
+    a.ldr_imm(15, 19, 72); // ctx.interp
+    a.ldr_imm(15, 15, il.function_proto as u32);
+    a.cmp_reg_x(14, 15);
+    a.b_cond(C_NE, slow);
+    a.mov_imm64(13, cache_ptr as u64);
+    a.ldrb_imm(9, 13, IC_OFF_DEPTH);
+    a.cmp_imm_w(9, 0);
+    a.b_cond(C_NE, slow);
+    a.ldr_w_imm(14, 12, sh);
+    a.ldr_w_imm(15, 13, IC_OFF_RECV_SHAPE);
+    a.cmp_reg_w(14, 15);
+    a.b_cond(C_NE, slow);
+
+    // Resolve the cached own `.prototype` slot defensively, require a data property holding an
+    // object, and untag its stored Rc pointer from the packed heap value.
+    a.ldr_w_imm(13, 13, IC_OFF_SLOT);
+    a.ldr_imm(14, 12, enl);
+    a.cmp_reg_x(13, 14);
+    a.b_cond(C_HS, slow);
+    a.ldr_imm(15, 12, en);
+    a.mov_imm64(16, layout.entry_size as u64);
+    a.madd(15, 13, 16, 15);
+    guard_prop_data(a, 9, 15, layout.entry_accessor as u32, slow);
+    a.ldur(15, 15, layout.entry_value as i32);
+    a.lsr_imm(16, 15, 48);
+    a.movz(17, (crate::value::PACK_OBJ >> 48) as u32, 0);
+    a.cmp_reg_x(16, 17);
+    a.b_cond(C_NE, slow);
+    a.lsl_imm(15, 15, 16);
+    a.lsr_imm(15, 15, 16); // x15 = target prototype stored Rc pointer
+
+    // Walk lhs.[[Prototype]] until target or null. Cycles are rejected by SetPrototypeOf, and
+    // the proxy latch above makes every hop a direct Object::proto read.
+    a.mov(12, 10);
+    a.bind(walk);
+    a.add_imm(12, 12, layout.obj_from_rc as u32);
+    a.ldr_imm(12, 12, layout.obj_proto as u32);
+    a.cbz(12, true, no);
+    a.cmp_reg_x(12, 15);
+    a.b_cond(C_EQ, yes);
+    a.b(walk);
+    a.bind(yes);
+    a.movz(9, 1, 0);
+    a.b(have);
+    a.bind(no);
+    a.movz(9, 0, 0);
+    a.bind(have);
+
+    // Commit: all guards have passed. Drop both object handles without reaching zero, replace
+    // the two inputs with one Bool, and leave the stack in the normal binary-op shape.
+    a.ldur(14, 10, strong);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 10, strong);
+    a.ldur(14, 11, strong);
+    a.sub_imm(14, 14, 1);
+    a.stur(14, 11, strong);
+    a.sub_imm(20, 20, 32);
+    a.movz(10, 3, 0);
+    a.stur(10, 20, 0);
+    a.sturb(9, 20, 1);
+    a.add_imm(20, 20, 16);
+    a.b(done);
+    a.bind(slow);
+    emit_exec(a, pc, l_unwind);
+    a.bind(done);
 }
 
 /// Inline own-property store (`this.x = v`, statement position → `SetPropDrop`): the machine-code
