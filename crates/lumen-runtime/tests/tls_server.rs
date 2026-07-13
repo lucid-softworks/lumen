@@ -84,7 +84,8 @@ fn tls_client_upgrades_a_paused_tcp_socket() {
       server.listen({port}, "127.0.0.1", () => {{
         const raw = new net.Socket({{ _deferRead: true }});
         raw.connect({port}, "127.0.0.1", () => {{
-          const secure = tls.connect({{ socket: raw, servername: "localhost", rejectUnauthorized: false }}, () => secure.write("ping"));
+          const secure = new tls.TLSSocket(raw, {{ servername: "localhost", rejectUnauthorized: false }});
+          secure.once("secureConnect", () => secure.write("ping"));
           secure.on("data", data => {{ console.log(data.toString()); secure.end(); server.close(); }});
         }});
       }});

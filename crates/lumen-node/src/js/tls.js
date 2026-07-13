@@ -7,10 +7,7 @@
 
   class TLSSocket extends Duplex {
     constructor(socket, options = {}) {
-      if (socket && typeof socket === "object" && typeof socket.write === "function") {
-        throw new Error("TLSSocket wrapping an existing net.Socket is not supported in lumen; use tls.connect(options)");
-      }
-      if (socket && typeof socket === "object" && !options) options = socket;
+      const wrappedSocket = socket && typeof socket === "object" && typeof socket.write === "function" ? socket : null;
       super({});
       this._id = null;
       this.connecting = false;
@@ -32,6 +29,7 @@
       this._closeEmitted = false;
       this._sawEof = false;
       this._serverSide = false;
+      if (wrappedSocket) this._upgrade(wrappedSocket, options);
     }
 
     _connect(options, callback) {
