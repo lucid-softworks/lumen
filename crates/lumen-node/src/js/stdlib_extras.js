@@ -737,8 +737,8 @@ __builtins.set("sys", __builtins.get("util"));
   const memoryUsage = () => ({ rss: metrics()[0], heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
   memoryUsage.rss = () => metrics()[0];
   proc.memoryUsage = memoryUsage;
-  proc.availableMemory = () => 0;
-  proc.constrainedMemory = () => 0;
+  proc.availableMemory = () => metrics()[14];
+  proc.constrainedMemory = () => metrics()[15];
   proc.cpuUsage = (previous) => {
     const m = metrics();
     const current = { user: m[2], system: m[3] };

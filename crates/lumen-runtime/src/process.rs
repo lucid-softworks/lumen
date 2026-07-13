@@ -304,12 +304,19 @@ fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Val
     let usage = unsafe { usage.assume_init() };
     let micros = |time: ffi::TimeVal| time.sec * 1_000_000 + time.usec;
     #[cfg(target_os = "macos")]
-    let (rss_bytes, max_rss_kib) = (usage.max_rss, usage.max_rss / 1024);
+    let max_rss_kib = usage.max_rss / 1024;
     #[cfg(not(target_os = "macos"))]
-    let (rss_bytes, max_rss_kib) = (usage.max_rss * 1024, usage.max_rss);
+    let max_rss_kib = usage.max_rss;
+    let rss_bytes = current_rss_bytes().unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        { usage.max_rss as u64 }
+        #[cfg(not(target_os = "macos"))]
+        { (usage.max_rss as u64) * 1024 }
+    });
+    let (available_memory, constrained_memory) = system_memory(rss_bytes);
     Ok(ctx.make_array(
         [
-            rss_bytes,
+            rss_bytes as i64,
             max_rss_kib,
             micros(usage.user),
             micros(usage.system),
@@ -323,12 +330,60 @@ fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Val
             usage.signals,
             usage.voluntary_switches,
             usage.involuntary_switches,
+            available_memory as i64,
+            constrained_memory as i64,
         ]
         .into_iter()
         .map(|value| Value::Num(value as f64))
         .collect(),
     ))
 }
+
+#[cfg(target_os = "linux")]
+fn current_rss_bytes() -> Option<u64> {
+    let pages = std::fs::read_to_string("/proc/self/statm").ok()?.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    Some(pages * 4096)
+}
+
+#[cfg(target_os = "macos")]
+fn current_rss_bytes() -> Option<u64> {
+    let mut info = ffi::RUsageInfoV2::default();
+    let result = unsafe { ffi::proc_pid_rusage(std::process::id() as i32, 2, (&mut info as *mut ffi::RUsageInfoV2).cast()) };
+    (result == 0).then_some(info.resident_size)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn current_rss_bytes() -> Option<u64> { None }
+
+#[cfg(target_os = "linux")]
+fn system_memory(rss: u64) -> (u64, u64) {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let value = |name: &str| meminfo.lines().find(|line| line.starts_with(name))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(0) * 1024;
+    let total = value("MemTotal:");
+    let host_available = value("MemAvailable:");
+    let raw_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()
+        .or_else(|| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok());
+    let limit = raw_limit.as_deref().and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|limit| *limit > 0 && *limit < total);
+    let constrained = limit.unwrap_or(0);
+    let available = limit.map_or(host_available, |limit| host_available.min(limit.saturating_sub(rss)));
+    (available, constrained)
+}
+
+#[cfg(target_os = "macos")]
+fn system_memory(rss: u64) -> (u64, u64) {
+    let total = ffi::sysctl_u64("hw.memsize").unwrap_or(0);
+    let pages = ffi::sysctl_u64("vm.page_free_count").unwrap_or(0)
+        + ffi::sysctl_u64("vm.page_inactive_count").unwrap_or(0)
+        + ffi::sysctl_u64("vm.page_purgeable_count").unwrap_or(0);
+    let page_size = ffi::sysctl_u64("hw.pagesize").unwrap_or(4096);
+    (pages.saturating_mul(page_size).min(total.saturating_sub(rss)), 0)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn system_memory(_rss: u64) -> (u64, u64) { (0, 0) }
 
 #[cfg(not(unix))]
 fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
@@ -575,8 +630,35 @@ mod ffi {
         pub involuntary_switches: c_long,
     }
 
+    #[cfg(target_os = "macos")]
+    #[derive(Default)]
+    #[repr(C)]
+    pub struct RUsageInfoV2 {
+        pub uuid: [u8; 16], pub user_time: u64, pub system_time: u64,
+        pub pkg_idle_wkups: u64, pub interrupt_wkups: u64, pub pageins: u64,
+        pub wired_size: u64, pub resident_size: u64, pub phys_footprint: u64,
+        pub proc_start_abstime: u64, pub proc_exit_abstime: u64, pub child_user_time: u64,
+        pub child_system_time: u64, pub child_pkg_idle_wkups: u64,
+        pub child_interrupt_wkups: u64, pub child_pageins: u64, pub child_elapsed_abstime: u64,
+        pub diskio_bytesread: u64, pub diskio_byteswritten: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn sysctl_u64(name: &str) -> Option<u64> {
+        let name = std::ffi::CString::new(name).ok()?;
+        let mut value = 0_u64;
+        let mut size = std::mem::size_of_val(&value);
+        let result = unsafe { sysctlbyname(name.as_ptr(), (&mut value as *mut u64).cast(), &mut size, std::ptr::null_mut(), 0) };
+        (result == 0).then_some(value)
+    }
+
     extern "C" {
         pub fn getrusage(who: c_int, usage: *mut RUsage) -> c_int;
+        #[cfg(target_os = "macos")]
+        pub fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut std::ffi::c_void) -> c_int;
+        #[cfg(target_os = "macos")]
+        pub fn sysctlbyname(name: *const c_char, old: *mut std::ffi::c_void, old_len: *mut usize,
+            new: *mut std::ffi::c_void, new_len: usize) -> c_int;
         pub fn getuid() -> c_uint;
         pub fn geteuid() -> c_uint;
         pub fn getgid() -> c_uint;
