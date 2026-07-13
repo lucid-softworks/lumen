@@ -6331,6 +6331,23 @@ impl Interp {
         }
         // Defer to a `@@hasInstance` method if the RHS has one.
         if let Some(key) = crate::builtins::well_known_key(self, "hasInstance") {
+            // Ordinary functions inherit the immutable default handler directly from the
+            // canonical Function.prototype. Prove that shape without performing a generic
+            // prototype-chain property read: an own override or altered function prototype
+            // falls through, as do proxies and other side-table exotics.
+            let inherits_default = match r {
+                Value::Obj(o) if self.ordinary_get_ptr(Rc::as_ptr(o) as usize) => {
+                    let b = o.borrow();
+                    b.proto
+                        .as_ref()
+                        .is_some_and(|p| Rc::ptr_eq(p, &self.function_proto))
+                        && !b.props.contains(&key)
+                }
+                _ => false,
+            };
+            if inherits_default {
+                return Ok(Value::Bool(self.ordinary_has_instance(r, l)?));
+            }
             let handler = self.get_member(r, &key)?;
             if handler.is_callable() {
                 // The overwhelmingly common handler is the immutable intrinsic inherited from

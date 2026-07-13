@@ -2259,10 +2259,31 @@ fn install_species(it: &Interp, ctor: &Gc) {
 
 /// The internal property key for a well-known `Symbol.<name>`.
 pub(crate) fn well_known_key(it: &Interp, name: &str) -> Option<Rc<str>> {
-    it.wk_syms
-        .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, _, key)| key.clone())
+    // `install_symbol` mints these in this fixed order. Protocol dispatch is hot enough that a
+    // name scan here (notably every `instanceof`) is visible in native profiles.
+    let index = match name {
+        "iterator" => 0,
+        "asyncIterator" => 1,
+        "hasInstance" => 2,
+        "isConcatSpreadable" => 3,
+        "match" => 4,
+        "matchAll" => 5,
+        "replace" => 6,
+        "search" => 7,
+        "species" => 8,
+        "split" => 9,
+        "toPrimitive" => 10,
+        "toStringTag" => 11,
+        "unscopables" => 12,
+        "dispose" => 13,
+        "asyncDispose" => 14,
+        "metadata" => 15,
+        _ => return None,
+    };
+    it.wk_syms.get(index).and_then(|(n, _, key)| {
+        debug_assert_eq!(*n, name);
+        (*n == name).then(|| key.clone())
+    })
 }
 
 fn map_ptr(this: &Value) -> Option<usize> {
