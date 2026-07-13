@@ -721,7 +721,11 @@ impl Property {
 #[derive(Clone)]
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
-    index: crate::fasthash::FastMap<Rc<str>, usize>,
+    /// Allocated only after the small-map threshold is crossed. Keeping the empty hash table
+    /// inline cost every object 32 bytes even though nearly all objects stay on linear lookup;
+    /// boxing the rare large-map case also leaves room for compact dense-element storage without
+    /// growing `Object` out of its allocator size class.
+    index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
     /// This object serves (or once served) as some object's prototype: structural changes to it
     /// bump the global [`proto_epoch`], invalidating every property-*creation* inline cache
     /// (their fill-time chain walks proved "no hop shadows this name" — see
@@ -944,7 +948,7 @@ impl Props {
     pub(crate) fn new() -> Props {
         Props {
             entries: Vec::new(),
-            index: Default::default(),
+            index: None,
             shape: SHAPE_EMPTY,
             elems: Vec::new(),
             mirror: Vec::new(),
@@ -1218,8 +1222,8 @@ impl Props {
         self.note_structural();
         let slot = self.entries.len();
         let key = index_key(n as usize);
-        if !self.index.is_empty() {
-            self.index.insert(key.clone(), slot);
+        if let Some(index) = self.index.as_mut() {
+            index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
@@ -1250,8 +1254,8 @@ impl Props {
         self.note_structural();
         let (_, p) = self.entries.pop().unwrap();
         self.elems.pop();
-        if !self.index.is_empty() {
-            self.index.remove(&index_key(n as usize));
+        if let Some(index) = self.index.as_mut() {
+            index.remove(&index_key(n as usize));
         }
         if self.mirror_flags & MIRROR_OK != 0 {
             debug_assert_eq!(self.mirror.len(), self.elems.len() + 1);
@@ -1292,10 +1296,10 @@ impl Props {
                 return Some(s as usize);
             }
         }
-        let found = if self.index.is_empty() {
+        let found = if self.index.is_none() {
             self.entries.iter().position(|(k, _)| &**k == key)
         } else {
-            self.index.get(key).copied()
+            self.index.as_ref().and_then(|index| index.get(key).copied())
         };
         if let Some(s) = found {
             if key == "length" {
@@ -1308,9 +1312,11 @@ impl Props {
     }
     /// Build the hash index for every current entry (crossing the small-map threshold).
     fn build_index(&mut self) {
+        let mut index = Box::<crate::fasthash::FastMap<Rc<str>, usize>>::default();
         for (j, (k, _)) in self.entries.iter().enumerate() {
-            self.index.insert(k.clone(), j);
+            index.insert(k.clone(), j);
         }
+        self.index = Some(index);
     }
     pub(crate) fn get(&self, key: &str) -> Option<&Property> {
         self.find(key).map(|i| &self.entries[i].1)
@@ -1355,7 +1361,7 @@ impl Props {
     pub(crate) fn clear(&mut self) {
         self.note_structural();
         self.entries.clear();
-        self.index.clear();
+        self.index = None;
         self.elems.clear();
         self.mirror.clear();
         self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
@@ -1371,8 +1377,8 @@ impl Props {
     pub(crate) fn push_dense(&mut self, prop: Property) {
         let slot = self.entries.len();
         let key = index_key(slot);
-        if !self.index.is_empty() {
-            self.index.insert(key.clone(), slot);
+        if let Some(index) = self.index.as_mut() {
+            index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
@@ -1386,11 +1392,11 @@ impl Props {
     pub(crate) fn append_new(&mut self, key: Rc<str>, prop: Property, new_shape: u32) {
         self.note_structural();
         let slot = self.entries.len();
-        if !self.index.is_empty() {
-            self.index.insert(key.clone(), slot);
+        if let Some(index) = self.index.as_mut() {
+            index.insert(key.clone(), slot);
         } else if self.should_build_index(&key) {
             self.build_index();
-            self.index.insert(key.clone(), slot);
+            self.index.as_mut().unwrap().insert(key.clone(), slot);
         }
         self.shape = new_shape;
         self.entries.push((key, prop));
@@ -1417,11 +1423,11 @@ impl Props {
         } else {
             self.note_structural();
             let slot = self.entries.len();
-            if !self.index.is_empty() {
-                self.index.insert(key.clone(), slot);
+            if let Some(index) = self.index.as_mut() {
+                index.insert(key.clone(), slot);
             } else if self.should_build_index(&key) {
                 self.build_index();
-                self.index.insert(key.clone(), slot);
+                self.index.as_mut().unwrap().insert(key.clone(), slot);
             }
             // Extending the key sequence transitions to the (shared, memoized) child shape.
             // Array element keys don't (see `elem_mode`): array shapes track named keys only.
@@ -1452,7 +1458,7 @@ impl Props {
         self.entries.retain(|(k, _)| keep(k));
         self.len_slot.set(NO_SLOT);
         self.proto_slot.set(NO_SLOT);
-        self.index.clear();
+        self.index = None;
         if self.entries.len() > INDEX_THRESHOLD {
             self.build_index();
         }
@@ -1481,11 +1487,11 @@ impl Props {
         }
         self.len_slot.set(NO_SLOT);
         self.proto_slot.set(NO_SLOT);
-        if !self.index.is_empty() {
-            self.index.remove(key);
+        if let Some(index) = self.index.as_mut() {
+            index.remove(key);
             // Re-index everything after the removed slot.
             for (j, (k, _)) in self.entries.iter().enumerate().skip(i) {
-                self.index.insert(k.clone(), j);
+                index.insert(k.clone(), j);
             }
         }
         if self.mirror_flags & MIRROR_OK != 0 {
