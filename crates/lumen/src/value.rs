@@ -89,9 +89,9 @@ pub struct JitLayout {
     pub entry_size: usize,
     /// `Value` within an entry `(Rc<str>, Property)`.
     pub entry_value: usize,
-    /// `accessor` bool within an entry.
+    /// Descriptor flags byte within an entry (used to test `PROP_ACCESSOR`).
     pub entry_accessor: usize,
-    /// `writable` bool within an entry.
+    /// Descriptor flags byte within an entry (used to test `PROP_WRITABLE`).
     pub entry_writable: usize,
     /// `Exotic::None`'s discriminant byte (the inline path requires an ordinary object).
     pub exotic_none_tag: u8,
@@ -234,8 +234,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         str_data_off,
         key_probe_ok,
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
-        entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, accessor),
-        entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, writable),
+        entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
+        entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
         exotic_none_tag,
         exotic_array_tag,
         exotic_strwrap_tag,
@@ -647,25 +647,52 @@ pub enum TaIndex {
 }
 
 /// A property descriptor. A data property uses `value`/`writable`; an accessor uses the boxed
-/// getter/setter pair. Data properties vastly outnumber accessors, so the pair lives behind one
-/// pointer: Property is 40 bytes instead of 80, and a `Props` entry 56 instead of 96 — the
-/// entries array the interpreter chases on every IC hit holds nearly twice the properties per
-/// cache line.
-#[derive(Clone)]
+/// getter/setter pair. The low bits of `meta` hold the four descriptor flags; its aligned upper
+/// bits point to an accessor pair only for accessor properties. Thus ordinary properties are 32
+/// bytes and allocate no metadata, while still keeping the flags directly readable by the JIT.
 pub struct Property {
     pub value: Value,
-    acc: Option<Box<Accessors>>,
-    pub accessor: bool,
-    pub writable: bool,
-    pub enumerable: bool,
-    pub configurable: bool,
+    meta: usize,
 }
 
 /// The boxed getter/setter pair of an accessor property.
+#[repr(align(16))]
 #[derive(Clone, Default)]
 pub(crate) struct Accessors {
     pub get: Option<Value>,
     pub set: Option<Value>,
+}
+
+pub(crate) const PROP_ACCESSOR: usize = 1;
+pub(crate) const PROP_WRITABLE: usize = 2;
+pub(crate) const PROP_ENUMERABLE: usize = 4;
+pub(crate) const PROP_CONFIGURABLE: usize = 8;
+const PROP_FLAG_MASK: usize = 15;
+
+impl Clone for Property {
+    fn clone(&self) -> Self {
+        let flags = self.meta & PROP_FLAG_MASK;
+        let ptr = self.meta & !PROP_FLAG_MASK;
+        let meta = if ptr == 0 {
+            flags
+        } else {
+            let acc = unsafe { &*(ptr as *const Accessors) };
+            Box::into_raw(Box::new(acc.clone())) as usize | flags
+        };
+        Property {
+            value: self.value.clone(),
+            meta,
+        }
+    }
+}
+
+impl Drop for Property {
+    fn drop(&mut self) {
+        let ptr = self.meta & !PROP_FLAG_MASK;
+        if ptr != 0 {
+            unsafe { drop(Box::from_raw(ptr as *mut Accessors)) };
+        }
+    }
 }
 
 impl Property {
@@ -675,14 +702,10 @@ impl Property {
         enumerable: bool,
         configurable: bool,
     ) -> Property {
-        Property {
-            value,
-            acc: None,
-            accessor: false,
-            writable,
-            enumerable,
-            configurable,
-        }
+        let meta = (writable as usize) * PROP_WRITABLE
+            | (enumerable as usize) * PROP_ENUMERABLE
+            | (configurable as usize) * PROP_CONFIGURABLE;
+        Property { value, meta }
     }
     /// An accessor property (`accessor: true`, value `Undefined`, not writable).
     pub(crate) fn accessor_prop(
@@ -691,50 +714,106 @@ impl Property {
         enumerable: bool,
         configurable: bool,
     ) -> Property {
+        let flags = PROP_ACCESSOR
+            | (enumerable as usize) * PROP_ENUMERABLE
+            | (configurable as usize) * PROP_CONFIGURABLE;
+        let ptr = Box::into_raw(Box::new(Accessors { get, set })) as usize;
+        debug_assert_eq!(ptr & PROP_FLAG_MASK, 0);
         Property {
             value: Value::Undefined,
-            acc: Some(Box::new(Accessors { get, set })),
-            accessor: true,
-            writable: false,
-            enumerable,
-            configurable,
+            meta: ptr | flags,
         }
+    }
+    #[inline]
+    fn accessors(&self) -> Option<&Accessors> {
+        let ptr = self.meta & !PROP_FLAG_MASK;
+        (ptr != 0).then(|| unsafe { &*(ptr as *const Accessors) })
+    }
+    #[inline]
+    fn accessors_mut(&mut self) -> Option<&mut Accessors> {
+        let ptr = self.meta & !PROP_FLAG_MASK;
+        (ptr != 0).then(|| unsafe { &mut *(ptr as *mut Accessors) })
+    }
+    #[inline]
+    pub(crate) fn accessor(&self) -> bool {
+        self.meta & PROP_ACCESSOR != 0
+    }
+    #[inline]
+    pub(crate) fn writable(&self) -> bool {
+        self.meta & PROP_WRITABLE != 0
+    }
+    #[inline]
+    pub(crate) fn enumerable(&self) -> bool {
+        self.meta & PROP_ENUMERABLE != 0
+    }
+    #[inline]
+    pub(crate) fn configurable(&self) -> bool {
+        self.meta & PROP_CONFIGURABLE != 0
+    }
+    fn set_flag(&mut self, flag: usize, value: bool) {
+        if value {
+            self.meta |= flag;
+        } else {
+            self.meta &= !flag;
+        }
+    }
+    pub(crate) fn set_accessor(&mut self, value: bool) {
+        if !value {
+            self.clear_accessors();
+        }
+        self.set_flag(PROP_ACCESSOR, value);
+    }
+    pub(crate) fn set_writable(&mut self, value: bool) {
+        self.set_flag(PROP_WRITABLE, value);
+    }
+    pub(crate) fn set_enumerable(&mut self, value: bool) {
+        self.set_flag(PROP_ENUMERABLE, value);
+    }
+    pub(crate) fn set_configurable(&mut self, value: bool) {
+        self.set_flag(PROP_CONFIGURABLE, value);
+    }
+    pub(crate) fn into_value(mut self) -> Value {
+        std::mem::take(&mut self.value)
     }
     #[inline]
     pub(crate) fn getter(&self) -> Option<&Value> {
-        self.acc.as_ref().and_then(|a| a.get.as_ref())
+        self.accessors().and_then(|a| a.get.as_ref())
     }
     #[inline]
     pub(crate) fn setter(&self) -> Option<&Value> {
-        self.acc.as_ref().and_then(|a| a.set.as_ref())
+        self.accessors().and_then(|a| a.set.as_ref())
     }
     pub(crate) fn set_getter(&mut self, g: Option<Value>) {
-        match (&mut self.acc, g) {
-            (Some(a), g) => a.get = g,
-            (acc @ None, Some(g)) => {
-                *acc = Some(Box::new(Accessors {
-                    get: Some(g),
-                    set: None,
-                }))
-            }
-            (None, None) => {}
+        if let Some(a) = self.accessors_mut() {
+            a.get = g;
+        } else if let Some(g) = g {
+            let flags = self.meta & PROP_FLAG_MASK;
+            let ptr = Box::into_raw(Box::new(Accessors {
+                get: Some(g),
+                set: None,
+            })) as usize;
+            self.meta = ptr | flags;
         }
     }
     pub(crate) fn set_setter(&mut self, s: Option<Value>) {
-        match (&mut self.acc, s) {
-            (Some(a), s) => a.set = s,
-            (acc @ None, Some(s)) => {
-                *acc = Some(Box::new(Accessors {
-                    get: None,
-                    set: Some(s),
-                }))
-            }
-            (None, None) => {}
+        if let Some(a) = self.accessors_mut() {
+            a.set = s;
+        } else if let Some(s) = s {
+            let flags = self.meta & PROP_FLAG_MASK;
+            let ptr = Box::into_raw(Box::new(Accessors {
+                get: None,
+                set: Some(s),
+            })) as usize;
+            self.meta = ptr | flags;
         }
     }
     /// Drop the accessor pair (used when a define converts an accessor back to a data property).
     pub(crate) fn clear_accessors(&mut self) {
-        self.acc = None;
+        let ptr = self.meta & !PROP_FLAG_MASK;
+        if ptr != 0 {
+            unsafe { drop(Box::from_raw(ptr as *mut Accessors)) };
+            self.meta &= PROP_FLAG_MASK;
+        }
     }
     /// A default plain data property: writable, enumerable, configurable.
     pub(crate) fn plain(value: Value) -> Property {
@@ -1107,7 +1186,7 @@ impl Props {
         }
         let p = &self.entries[slot].1;
         match &p.value {
-            Value::Num(f) if !p.accessor && p.writable && f.to_bits() != MIRROR_HOLE => {
+            Value::Num(f) if !p.accessor() && p.writable() && f.to_bits() != MIRROR_HOLE => {
                 let f = *f;
                 if !f64_exact_i32(f) {
                     self.mirror_flags &= !MIRROR_ALL_I32;
@@ -1134,8 +1213,8 @@ impl Props {
         {
             let p = &self.entries[slot].1;
             let ok = matches!(&p.value, Value::Num(f) if f.to_bits() != MIRROR_HOLE)
-                && !p.accessor
-                && p.writable;
+                && !p.accessor()
+                && p.writable();
             if !ok {
                 self.mirror_invalidate();
                 return;
@@ -1174,7 +1253,7 @@ impl Props {
     pub(crate) fn set_index_value(&mut self, n: u32, v: Value) -> Result<(), Value> {
         if let Some(packed) = &mut self.packed {
             let Some(p) = packed.get_mut(n as usize) else { return Err(v) };
-            if matches!(p.value, Value::Empty) || p.accessor || !p.writable {
+            if matches!(p.value, Value::Empty) || p.accessor() || !p.writable() {
                 return Err(v);
             }
             p.value = v;
@@ -1187,7 +1266,7 @@ impl Props {
             return Err(v);
         }
         let p = &mut self.entries[slot as usize].1;
-        if p.accessor || !p.writable {
+        if p.accessor() || !p.writable() {
             return Err(v);
         }
         if self.mirror_flags & MIRROR_OK != 0 {
@@ -1307,11 +1386,11 @@ impl Props {
                 return None;
             }
             let p = packed.last()?;
-            if matches!(p.value, Value::Empty) || p.accessor || !p.configurable {
+            if matches!(p.value, Value::Empty) || p.accessor() || !p.configurable() {
                 return None;
             }
             self.note_structural();
-            return self.packed.as_mut().unwrap().pop().map(|p| p.value);
+            return self.packed.as_mut().unwrap().pop().map(Property::into_value);
         }
         if n as usize + 1 != self.elems.len() {
             return None;
@@ -1321,7 +1400,7 @@ impl Props {
             return None;
         }
         let p = &self.entries[slot as usize].1;
-        if p.accessor || !p.configurable {
+        if p.accessor() || !p.configurable() {
             return None;
         }
         self.note_structural();
@@ -1341,7 +1420,7 @@ impl Props {
                 }
             }
         }
-        Some(p.value)
+        Some(p.into_value())
     }
     /// The entry slot for `key`. Small maps (≤ [`INDEX_THRESHOLD`] entries — most objects) have
     /// no hash index at all: lookup is a short linear scan and inserts never hash or rehash.
@@ -1691,17 +1770,17 @@ impl Props {
 
     pub(crate) fn highest_nonconfig_index_from(&self, from: usize) -> Option<usize> {
         let packed = self.packed.iter().flat_map(|p| p.iter().enumerate()).filter_map(|(n, p)| {
-            (!matches!(p.value, Value::Empty) && !p.configurable && n >= from).then_some(n)
+            (!matches!(p.value, Value::Empty) && !p.configurable() && n >= from).then_some(n)
         });
         let entries = self.entries.iter().filter_map(|(k, p)| {
-            (!p.configurable).then(|| canonical_index(k).map(|n| n as usize)).flatten()
+            (!p.configurable()).then(|| canonical_index(k).map(|n| n as usize)).flatten()
                 .filter(|&n| n >= from)
         });
         packed.chain(entries).max()
     }
 
     pub(crate) fn integrity_ok(&self, frozen: bool) -> bool {
-        let valid = |p: &Property| !p.configurable && (!frozen || p.accessor || !p.writable);
+        let valid = |p: &Property| !p.configurable() && (!frozen || p.accessor() || !p.writable());
         self.packed.iter().flat_map(|p| p.iter())
             .filter(|p| !matches!(p.value, Value::Empty)).all(valid)
             && self.entries.iter().all(|(k, p)| {

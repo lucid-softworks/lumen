@@ -190,7 +190,7 @@ fn json_delete_prop(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Val
             .borrow()
             .props
             .get(key)
-            .map(|p| p.configurable)
+            .map(|p| p.configurable())
             .unwrap_or(true);
         if configurable {
             o.borrow_mut().props.remove(key);

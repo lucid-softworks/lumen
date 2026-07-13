@@ -1621,7 +1621,7 @@ impl Interp {
                     .into_iter()
                     .filter(|k| !Interp::is_sym_key(k) && !Interp::is_private_key(k))
                     .map(|k| {
-                        let e = b.props.get(&k).map(|p| p.enumerable).unwrap_or(false);
+                        let e = b.props.get(&k).map(|p| p.enumerable()).unwrap_or(false);
                         (k.to_string(), e)
                     })
                     .collect();
@@ -1908,7 +1908,7 @@ impl Interp {
             let b = self.global.borrow();
             if matches!(b.exotic, crate::value::Exotic::None) {
                 if let Some(p) = b.props.get(name) {
-                    if !p.accessor {
+                    if !p.accessor() {
                         let v = p.value.clone();
                         drop(b);
                         return Ok((v, None));
@@ -2039,7 +2039,7 @@ impl Interp {
         for k in keys {
             let live = with
                 .as_obj()
-                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable()));
             if live != Some(true) {
                 continue;
             }
@@ -2103,7 +2103,7 @@ impl Interp {
         // deletable eval-made one was deleted).
         let mut g = self.global.borrow_mut();
         if let Some(p) = g.props.get_mut(name) {
-            if p.writable && !p.accessor {
+            if p.writable() && !p.accessor() {
                 p.value = val;
             }
         } else if g.extensible {
@@ -2119,7 +2119,7 @@ impl Interp {
             _ => None,
         };
         match prop {
-            Some(p) if p.accessor => match p.getter() {
+            Some(p) if p.accessor() => match p.getter() {
                 Some(g) => self.call(g.clone(), base.clone(), &[]),
                 None => {
                     let shown = private_display(name);
@@ -2129,7 +2129,7 @@ impl Interp {
                     ))
                 }
             },
-            Some(p) => Ok(p.value),
+            Some(p) => Ok(p.into_value()),
             None => {
                 let shown = private_display(name);
                 Err(self.throw(
@@ -2155,7 +2155,7 @@ impl Interp {
             }
         };
         match prop {
-            Some(p) if p.accessor => {
+            Some(p) if p.accessor() => {
                 let Some(setter) = p.setter().cloned() else {
                     return Err(self.throw(
                         "TypeError",
@@ -2166,7 +2166,7 @@ impl Interp {
                 Ok(())
             }
             Some(p) => {
-                if !p.writable {
+                if !p.writable() {
                     return Err(self.throw(
                         "TypeError",
                         format!("private method {shown} is not writable"),
@@ -2298,7 +2298,7 @@ impl Interp {
                 if let Value::Obj(t) = &target {
                     let p = t.borrow().props.get(key).cloned();
                     if let Some(p) = p {
-                        if !p.configurable || !t.borrow().extensible {
+                        if !p.configurable() || !t.borrow().extensible {
                             return Err(self.throw(
                                 "TypeError",
                                 "proxy 'has' trap hid a non-configurable property",
@@ -2783,7 +2783,7 @@ impl Interp {
     fn define_accessor(&self, obj: &Gc, key: &str, get: Option<Value>, set: Option<Value>) {
         let mut b = obj.borrow_mut();
         if let Some(p) = b.props.get_mut(key) {
-            if p.accessor {
+            if p.accessor() {
                 if get.is_some() {
                     p.set_getter(get);
                 }
@@ -2831,8 +2831,8 @@ impl Interp {
             let keys = o.borrow().props.keys();
             for k in keys {
                 if let Some(p) = o.borrow_mut().props.get_mut(&k) {
-                    p.writable = false;
-                    p.configurable = false;
+                    p.set_writable(false);
+                    p.set_configurable(false);
                 }
             }
         }
@@ -3964,7 +3964,7 @@ impl Interp {
         let g = self.global.borrow();
         match g.props.get(name) {
             None => g.extensible,
-            Some(p) => p.configurable || (!p.accessor && p.writable && p.enumerable),
+            Some(p) => p.configurable() || (!p.accessor() && p.writable() && p.enumerable()),
         }
     }
 
@@ -3976,7 +3976,7 @@ impl Interp {
             .borrow()
             .props
             .get(name)
-            .map(|p| (p.configurable, !p.accessor));
+            .map(|p| (p.configurable(), !p.accessor()));
         match existing {
             Some((false, true)) => {
                 // A pre-existing non-configurable data property keeps its attributes; only its value
@@ -4577,7 +4577,7 @@ impl Interp {
     ) {
         let mut b = target.borrow_mut();
         if let Some(p) = b.props.get_mut(key) {
-            if p.accessor {
+            if p.accessor() {
                 if get.is_some() {
                     p.set_getter(get);
                 }
@@ -4958,7 +4958,7 @@ impl Interp {
                         .borrow()
                         .props
                         .get(&k)
-                        .map(|p| p.enumerable)
+                        .map(|p| p.enumerable())
                         .unwrap_or(false);
                     if enumerable {
                         let v = self.get_member(value, &k)?;
@@ -5420,7 +5420,7 @@ impl Interp {
                         .borrow()
                         .props
                         .get(prop)
-                        .map(|p| p.configurable)
+                        .map(|p| p.configurable())
                         .unwrap_or(true);
                     if configurable {
                         self.unmap_argument(Rc::as_ptr(o) as usize, prop);
@@ -5489,7 +5489,7 @@ impl Interp {
                                 .borrow()
                                 .props
                                 .get(name)
-                                .map(|p| p.configurable)
+                                .map(|p| p.configurable())
                                 .unwrap_or(true);
                             if configurable {
                                 o.borrow_mut().props.remove(name);
@@ -5502,7 +5502,7 @@ impl Interp {
                 }
                 // Fall back to a global-object property.
                 let g = self.global.clone();
-                let existing = g.borrow().props.get(name).map(|p| p.configurable);
+                let existing = g.borrow().props.get(name).map(|p| p.configurable());
                 match existing {
                     Some(true) => {
                         g.borrow_mut().props.remove(name);
@@ -5537,7 +5537,7 @@ impl Interp {
                     .borrow()
                     .props
                     .get(key)
-                    .map(|p| p.configurable)
+                    .map(|p| p.configurable())
                     .unwrap_or(true);
                 if configurable {
                     t.borrow_mut().props.remove(key);
@@ -5562,7 +5562,7 @@ impl Interp {
         if let Value::Obj(t) = &target {
             let p = t.borrow().props.get(key).cloned();
             if let Some(p) = p {
-                if !p.configurable {
+                if !p.configurable() {
                     return Err(self.throw(
                         "TypeError",
                         "proxy 'deleteProperty' removed a non-configurable property",
@@ -6614,7 +6614,7 @@ impl Interp {
                 b.is_constructor
                     || b.props
                         .get("prototype")
-                        .map(|p| !p.accessor)
+                        .map(|p| !p.accessor())
                         .unwrap_or(false)
             }
             // A bound function constructs exactly when its target does.

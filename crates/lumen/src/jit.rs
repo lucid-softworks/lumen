@@ -2107,6 +2107,22 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.entry_size < 0x1_0000
 }
 
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn guard_prop_data(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
+    a.ldrb_imm(reg, base, flags);
+    let bit = asm::logical_imm_w(crate::value::PROP_ACCESSOR as u32).unwrap();
+    a.logic_imm_w(0, reg, reg, bit);
+    a.cbnz(reg, false, slow);
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn guard_prop_writable(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
+    a.ldrb_imm(reg, base, flags);
+    let bit = asm::logical_imm_w(crate::value::PROP_WRITABLE as u32).unwrap();
+    a.logic_imm_w(0, reg, reg, bit);
+    a.cbz(reg, false, slow);
+}
+
 /// Inline shape-validated property load, unified over `GetProp` (`method == false`: pop the
 /// receiver, push the value in its slot) and `GetMethod` (`method == true`: the receiver stays —
 /// it is re-used as `this` — and the method pushes above it), and over IC depths 0..=2:
@@ -2428,8 +2444,7 @@ fn emit_prop_load_inline(
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
     a.bind(val);
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
+    guard_prop_data(a, 9, 15, ea, slow);
     a.ldurb(9, 15, ev); // w9 = value tag (kept live through the loads below)
     a.cmp_imm_w(9, 5);
     a.b_cond(C_EQ, slow);
@@ -3159,10 +3174,8 @@ fn emit_update_prop_inline(
     a.ldr_imm(15, 11, en);
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
-    a.ldrb_imm(9, 15, ew);
-    a.cbz(9, false, slow);
+    guard_prop_data(a, 9, 15, ea, slow);
+    guard_prop_writable(a, 9, 15, ew, slow);
     a.ldurb(9, 15, ev);
     a.cmp_imm_w(9, 4);
     a.b_cond(C_NE, slow);
@@ -3310,10 +3323,8 @@ fn emit_set_prop_inline(
         a.ldr_imm(15, 11, en);
         a.mov_imm64(16, es);
         a.madd(15, 13, 16, 15);
-        a.ldrb_imm(9, 15, ea);
-        a.cbnz(9, false, miss);
-        a.ldrb_imm(9, 15, ew);
-        a.cbz(9, false, miss);
+        guard_prop_data(a, 9, 15, ea, miss);
+        guard_prop_writable(a, 9, 15, ew, miss);
         // old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline
         // dec); BigInt or a last reference → helper. An old value that IS the receiver
         // (`o.x === o`) also bails: its dec and the receiver dec below hit the same counter,
@@ -3847,8 +3858,7 @@ fn emit_name_ic_value_ptr(
     a.ldr_imm(15, 14, g_en);
     a.mov_imm64(17, g_es);
     a.madd(15, 16, 17, 15);
-    a.ldrb_imm(14, 15, g_ea);
-    a.cbnz(14, false, slow);
+    guard_prop_data(a, 14, 15, g_ea, slow);
     a.add_imm(14, 15, g_ev); // x14 → the entry's Value
     let have = a.new_label();
     a.b(have);
@@ -3973,8 +3983,7 @@ fn emit_get_elem_inline(
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
     // 8. not an accessor
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
+    guard_prop_data(a, 9, 15, ea, slow);
     // 9. value tag: BigInt (5) is a compound payload — helper. Others copy (+ bump for 6..8).
     a.ldurb(9, 15, ev);
     a.cmp_imm_w(9, 5);
@@ -4191,10 +4200,8 @@ fn emit_set_elem_inline(
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
     // 8. data property, writable
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
-    a.ldrb_imm(9, 15, ew);
-    a.cbz(9, false, slow);
+    guard_prop_data(a, 9, 15, ea, slow);
+    guard_prop_writable(a, 9, 15, ew, slow);
     // 9. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
     //    BigInt or a last reference → helper. An old value that IS the receiver (`a[0] === a`)
     //    also bails: its dec plus the receiver dec below would take the shared counter to 0
@@ -4432,8 +4439,7 @@ fn emit_elem_local_keyed(
     a.mov_imm64(16, es);
     a.madd(15, 13, 16, 15);
     // 8. data property (+ writable for the set forms)
-    a.ldrb_imm(9, 15, ea);
-    a.cbnz(9, false, slow);
+    guard_prop_data(a, 9, 15, ea, slow);
     if get {
         // 9. value tag: BigInt → helper; commit: copy + bump, then place the result
         a.ldurb(9, 15, ev);
@@ -4469,8 +4475,7 @@ fn emit_elem_local_keyed(
             }
         }
     } else {
-        a.ldrb_imm(9, 15, ew);
-        a.cbz(9, false, slow);
+        guard_prop_writable(a, 9, 15, ew, slow);
         if kind == ElemLocalKind::SetKeep {
             // v is also the expression result: a BigInt can't clone inline.
             a.ldurb(9, 20, -24);
@@ -5107,11 +5112,9 @@ fn emit_chain(
                 a.ldr_imm(15, 11, en);
                 a.movz(9, es as u32, 0); // entry stride (< 65536; the key index in x9 is dead)
                 a.madd(15, 13, 9, 15);
-                a.ldrb_imm(9, 15, ea);
-                a.cbnz(9, false, guard!());
+                guard_prop_data(a, 9, 15, ea, guard!());
                 if is_set {
-                    a.ldrb_imm(9, 15, ew);
-                    a.cbz(9, false, guard!());
+                    guard_prop_writable(a, 9, 15, ew, guard!());
                     // old value: droppable inline, or bail (w14/x12 stay live to the dec)
                     a.ldrb_imm(14, 15, ev as u32);
                     a.cmp_imm_w(14, 5);
@@ -7013,8 +7016,7 @@ fn emit_loop_chain(
                         a.ldr_imm(15, $r, en);
                         a.movz(9, es as u32, 0);
                         a.madd(15, 13, 9, 15);
-                        a.ldrb_imm(9, 15, ea);
-                        a.cbnz(9, false, guard!());
+                        guard_prop_data(a, 9, 15, ea, guard!());
                     }};
                 }
 
@@ -7308,8 +7310,7 @@ fn emit_loop_chain(
                             }
                         } else {
                             elem_entry!(r);
-                            a.ldrb_imm(9, 15, ew);
-                            a.cbz(9, false, guard!());
+                            guard_prop_writable(a, 9, 15, ew, guard!());
                             a.ldrb_imm(14, 15, ev as u32);
                             a.cmp_imm_w(14, 5);
                             a.b_cond(C_EQ, guard!());

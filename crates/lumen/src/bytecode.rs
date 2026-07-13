@@ -5628,7 +5628,7 @@ impl Chunk {
                 return None;
             }
             let (_, p) = g.props.entry_at(ic.binding as u32 as usize)?;
-            if p.accessor {
+            if p.accessor() {
                 return None;
             }
             return Some(p.value.clone());
@@ -5728,7 +5728,7 @@ impl Chunk {
         }
         let slot = g.props.slot_of(&self.names[n as usize])?;
         let (_, p) = g.props.entry_at(slot)?;
-        if p.accessor {
+        if p.accessor() {
             return None;
         }
         let v = p.value.clone();

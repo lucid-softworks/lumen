@@ -2418,7 +2418,7 @@ impl Interp {
             return Some(Value::Num(f));
         }
         let p = b.props.get_index(n as u32)?;
-        if p.accessor {
+        if p.accessor() {
             return None;
         }
         Some(p.value.clone())
@@ -2665,7 +2665,7 @@ impl Interp {
             {
                 if depth == 0 {
                     if let Some((k, p)) = rb.props.entry_at(st.slot as usize) {
-                        if (!keychk || &**k == name) && !p.accessor {
+                        if (!keychk || &**k == name) && !p.accessor() {
                             return Some(p.value.clone());
                         }
                     }
@@ -2698,7 +2698,7 @@ impl Interp {
                         && hb.props.shape() == st.holder_shape
                     {
                         if let Some((k, p)) = hb.props.entry_at(st.slot as usize) {
-                            if (!keychk || &**k == name) && !p.accessor {
+                            if (!keychk || &**k == name) && !p.accessor() {
                                 return Some(p.value.clone());
                             }
                         }
@@ -2750,7 +2750,7 @@ impl Interp {
                 absent_ok = absent_ok && matches!(b.exotic, Exotic::None);
                 if let Some(slot) = b.props.slot_of(name) {
                     let (_, p) = b.props.entry_at(slot).unwrap();
-                    if p.accessor {
+                    if p.accessor() {
                         return None; // getter — must run through [[Get]]
                     }
                     let v = p.value.clone();
@@ -2882,7 +2882,7 @@ impl Interp {
         let Some(p) = b.props.get_mut(name) else {
             return Err(lval);
         };
-        if p.accessor || !p.writable {
+        if p.accessor() || !p.writable() {
             return Err(lval);
         }
         let same = matches!(&p.value, Value::Str(cur) if crate::lstr::LStr::ptr_eq(cur, lv));
@@ -2924,7 +2924,7 @@ impl Interp {
             let st = self.ic_way(cache, k).get();
             if st.depth == 0 && b.props.shape() == st.recv_shape {
                 if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
-                    if !p.accessor && p.writable {
+                    if !p.accessor() && p.writable() {
                         b.props.entry_at_mut(st.slot as usize).unwrap().1.value = v.clone();
                         return true;
                     }
@@ -2940,7 +2940,7 @@ impl Interp {
             let e = self.stub_cache[stub_slot(shape, name)].get();
             if e.name == name.as_ptr() as usize && e.st.recv_shape == shape && e.st.depth == 0 {
                 if let Some((_, p)) = b.props.entry_at(e.st.slot as usize) {
-                    if !p.accessor && p.writable {
+                    if !p.accessor() && p.writable() {
                         b.props.entry_at_mut(e.st.slot as usize).unwrap().1.value = v.clone();
                         self.ic_insert(cache, e.st);
                         return true;
@@ -2973,7 +2973,7 @@ impl Interp {
         match b.props.slot_of(name) {
             Some(slot) => {
                 let p = &b.props.entry_at(slot).unwrap().1;
-                if p.accessor || !p.writable {
+                if p.accessor() || !p.writable() {
                     return false; // setter, or non-writable (strict-throw) — slow path
                 }
                 let shape = b.props.shape();
@@ -3329,7 +3329,7 @@ impl Interp {
             let prop = {
                 let b = obj.borrow();
                 b.props.get(key).map(|p| {
-                    if p.accessor {
+                    if p.accessor() {
                         (true, p.getter().cloned(), Value::Undefined)
                     } else {
                         (false, None, p.value.clone())
@@ -3577,7 +3577,7 @@ impl Interp {
                     }
                     let prop = o.borrow().props.get(key).cloned();
                     if let Some(p) = prop {
-                        if p.accessor {
+                        if p.accessor() {
                             return match p.setter().cloned() {
                                 Some(setter) => {
                                     self.call(setter, receiver.clone(), &[value])?;
@@ -3745,7 +3745,7 @@ impl Interp {
             }
             let prop = o.borrow().props.get(key).cloned();
             if let Some(p) = prop {
-                if p.accessor {
+                if p.accessor() {
                     return match p.setter().cloned() {
                         Some(setter) => {
                             self.call(setter, receiver.clone(), &[value])?;
@@ -3764,7 +3764,7 @@ impl Interp {
                     };
                 }
                 if Rc::ptr_eq(&o, &obj) {
-                    if !p.writable {
+                    if !p.writable() {
                         if self.strict {
                             return Err(self.throw(
                                 "TypeError",
@@ -3775,7 +3775,7 @@ impl Interp {
                     }
                     break; // own writable data property — update below
                 }
-                if !p.writable {
+                if !p.writable() {
                     if self.strict {
                         return Err(self.throw(
                             "TypeError",
@@ -3839,7 +3839,7 @@ impl Interp {
                 let (accessor, writable) = {
                     let b = obj.borrow();
                     let pr = b.props.get(key).unwrap();
-                    (pr.accessor, pr.writable)
+                    (pr.accessor(), pr.writable())
                 };
                 if accessor || !writable {
                     if self.strict {
@@ -3892,7 +3892,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("length")
-                .map(|p| p.writable)
+                .map(|p| p.writable())
                 .unwrap_or(true);
             if !len_writable {
                 if self.strict {
@@ -3952,7 +3952,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("length")
-                .map(|p| p.writable)
+                .map(|p| p.writable())
                 .unwrap_or(true);
             if idx as usize >= len && !len_writable {
                 if self.strict {
@@ -5683,7 +5683,7 @@ impl Interp {
         let proto = {
             let b = o.borrow();
             match b.props.get("prototype") {
-                Some(p) if !p.accessor => match &p.value {
+                Some(p) if !p.accessor() => match &p.value {
                     Value::Obj(pp) => pp.clone(),
                     _ => return None,
                 },
@@ -7195,12 +7195,12 @@ impl Interp {
             _ => None,
         };
         if let Some(p) = prop {
-            if !p.configurable {
-                let bad = if p.accessor {
+            if !p.configurable() {
+                let bad = if p.accessor() {
                     matches!(p.getter(), None | Some(Value::Undefined))
                         && !matches!(result, Value::Undefined)
                 } else {
-                    !p.writable && !crate::builtins::same_value_pub(result, &p.value)
+                    !p.writable() && !crate::builtins::same_value_pub(result, &p.value)
                 };
                 if bad {
                     return Err(self.throw(
@@ -7226,11 +7226,11 @@ impl Interp {
             _ => None,
         };
         if let Some(p) = prop {
-            if !p.configurable {
-                let bad = if p.accessor {
+            if !p.configurable() {
+                let bad = if p.accessor() {
                     matches!(p.setter(), None | Some(Value::Undefined))
                 } else {
-                    !p.writable && !crate::builtins::same_value_pub(value, &p.value)
+                    !p.writable() && !crate::builtins::same_value_pub(value, &p.value)
                 };
                 if bad {
                     return Err(self.throw(
@@ -7274,7 +7274,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get(n.as_str())
-                .is_some_and(|p| !p.configurable);
+                .is_some_and(|p| !p.configurable());
             if self.global_env.borrow().vars.contains_key(n.as_str())
                 || self.global_var_names.contains(n)
                 || restricted
@@ -7298,7 +7298,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get(&**name)
-                .map(|p| (p.configurable, p.accessor, p.writable, p.enumerable));
+                .map(|p| (p.configurable(), p.accessor(), p.writable(), p.enumerable()));
             if !matches!(binding.value, Value::Undefined) {
                 // CanDeclareGlobalFunction.
                 let ok = match existing {
@@ -7338,7 +7338,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get(name.as_str())
-                .map(|p| (p.writable, p.configurable));
+                .map(|p| (p.writable(), p.configurable()));
             let is_func = !matches!(binding.value, Value::Undefined);
             match existing {
                 None => {

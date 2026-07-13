@@ -63,7 +63,7 @@ fn set_throw(i: &mut Interp, base: &Value, key: &str, value: Value) -> Result<()
         {
             let mut b = o.borrow_mut();
             if let Some(p) = b.props.get_mut(key) {
-                if !p.accessor && p.writable {
+                if !p.accessor() && p.writable() {
                     p.value = value;
                     return Ok(());
                 }
@@ -311,7 +311,7 @@ pub(crate) fn proxy_own_keys(
                         .borrow()
                         .props
                         .get(&k)
-                        .map(|p| p.configurable)
+                        .map(|p| p.configurable())
                         .unwrap_or(true);
                     (k.to_string(), conf)
                 })
@@ -682,7 +682,7 @@ pub(crate) fn proxy_gopd_value(
         if let Value::Obj(t) = target {
             let tprop = t.borrow().props.get(key).cloned();
             if let Some(p) = tprop {
-                if !p.configurable {
+                if !p.configurable() {
                     return Err(i.make_error(
                         "TypeError",
                         "gOPD trap reported undefined for a non-configurable property",
@@ -718,7 +718,7 @@ pub(crate) fn proxy_gopd_value(
     // enumerability and the data/accessor shape must all match (IsCompatiblePropertyDescriptor).
     if let Value::Obj(t) = target {
         if let Some(p) = t.borrow().props.get(key) {
-            if !p.configurable {
+            if !p.configurable() {
                 if !matches!(pd.configurable, Some(false)) {
                     return Err(i.make_error(
                         "TypeError",
@@ -726,7 +726,7 @@ pub(crate) fn proxy_gopd_value(
                     ));
                 }
                 if let Some(e) = pd.enumerable {
-                    if e != p.enumerable {
+                    if e != p.enumerable() {
                         return Err(i.make_error(
                             "TypeError",
                             format!("proxy can't report a different 'enumerable' for '{key}' when the target property is not configurable"),
@@ -735,19 +735,19 @@ pub(crate) fn proxy_gopd_value(
                 }
                 let reported_accessor = pd.get.is_some() || pd.set.is_some();
                 let reported_data = pd.value.is_some() || pd.writable.is_some();
-                if (reported_accessor && !p.accessor) || (reported_data && p.accessor) {
+                if (reported_accessor && !p.accessor()) || (reported_data && p.accessor()) {
                     return Err(i.make_error(
                         "TypeError",
                         format!("proxy can't report a differently-shaped descriptor for the non-configurable property '{key}'"),
                     ));
                 }
-                if !p.accessor && !p.writable && matches!(pd.writable, Some(true)) {
+                if !p.accessor() && !p.writable() && matches!(pd.writable, Some(true)) {
                     return Err(i.make_error(
                         "TypeError",
                         format!("proxy can't report a non-configurable, non-writable property '{key}' as writable"),
                     ));
                 }
-                if !p.accessor && !p.writable {
+                if !p.accessor() && !p.writable() {
                     if let Some(v) = &pd.value {
                         if !same_value(v, &p.value) {
                             return Err(i.make_error(
@@ -757,7 +757,7 @@ pub(crate) fn proxy_gopd_value(
                         }
                     }
                 }
-                if p.accessor {
+                if p.accessor() {
                     let same_fn = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
                         (Some(x), Some(y)) => same_value(x, y),
                         (None, None) => true,
@@ -791,13 +791,13 @@ pub(crate) fn proxy_gopd_value(
                     ));
                 }
                 Some(p) => {
-                    if p.configurable {
+                    if p.configurable() {
                         return Err(i.make_error(
                             "TypeError",
                             "gOPD trap reported non-configurable for a configurable target property",
                         ));
                     }
-                    if matches!(pd.writable, Some(false)) && !p.accessor && p.writable {
+                    if matches!(pd.writable, Some(false)) && !p.accessor() && p.writable() {
                         return Err(i.make_error(
                             "TypeError",
                             "gOPD trap reported non-writable for a writable target property",
@@ -834,7 +834,7 @@ fn proxy_key_enumerable(
         Ok(t.borrow()
             .props
             .get(key)
-            .map(|p| p.enumerable)
+            .map(|p| p.enumerable())
             .unwrap_or(false))
     } else {
         Ok(false)
@@ -916,7 +916,7 @@ fn proxy_define_property(
                 }
             }
             Some(p) => {
-                if setting_config_false && p.configurable {
+                if setting_config_false && p.configurable() {
                     return Err(i.throw(
                         "TypeError",
                         "proxy 'defineProperty' made a configurable target property non-configurable",
@@ -924,15 +924,15 @@ fn proxy_define_property(
                 }
                 // IsCompatiblePropertyDescriptor: a non-configurable target property can't be
                 // redefined as configurable, change enumerability, or switch shape.
-                if !p.configurable && matches!(pd.configurable, Some(true)) {
+                if !p.configurable() && matches!(pd.configurable, Some(true)) {
                     return Err(i.throw(
                         "TypeError",
                         "proxy 'defineProperty' made a non-configurable target property configurable",
                     ));
                 }
-                if !p.configurable {
+                if !p.configurable() {
                     if let Some(e) = pd.enumerable {
-                        if e != p.enumerable {
+                        if e != p.enumerable() {
                             return Err(i.throw(
                                 "TypeError",
                                 format!("proxy can't report a different 'enumerable' for '{key}' when the target property is not configurable"),
@@ -941,13 +941,13 @@ fn proxy_define_property(
                     }
                     let rep_acc = pd.get.is_some() || pd.set.is_some();
                     let rep_data = pd.value.is_some() || pd.writable.is_some();
-                    if (rep_acc && !p.accessor) || (rep_data && p.accessor) {
+                    if (rep_acc && !p.accessor()) || (rep_data && p.accessor()) {
                         return Err(i.throw(
                             "TypeError",
                             format!("proxy can't change the descriptor shape of the non-configurable property '{key}'"),
                         ));
                     }
-                    if p.accessor {
+                    if p.accessor() {
                         let same_fn = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
                             (Some(x), Some(y)) => same_value(x, y),
                             (None, None) => true,
@@ -967,7 +967,7 @@ fn proxy_define_property(
                         }
                     }
                 }
-                if !p.configurable && !p.accessor && !p.writable {
+                if !p.configurable() && !p.accessor() && !p.writable() {
                     if matches!(pd.writable, Some(true)) {
                         return Err(i.throw(
                             "TypeError",
@@ -985,9 +985,9 @@ fn proxy_define_property(
                     }
                 }
                 // Step 16.c: a non-configurable *writable* data target can't be reported non-writable.
-                if !p.configurable
-                    && !p.accessor
-                    && p.writable
+                if !p.configurable()
+                    && !p.accessor()
+                    && p.writable()
                     && matches!(pd.writable, Some(false))
                 {
                     return Err(i.throw(
@@ -1120,7 +1120,7 @@ fn enumerable_own_value_list(i: &mut Interp, o: &Value, entries: bool) -> Result
         for k in expandos {
             let enumerable = o
                 .as_obj()
-                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable()));
             if enumerable == Some(true) {
                 let v = ab(i.get_member(o, &k))?;
                 out.push(if entries {
@@ -1147,7 +1147,7 @@ fn enumerable_own_value_list(i: &mut Interp, o: &Value, entries: bool) -> Result
         for k in keys {
             let live = o
                 .as_obj()
-                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable));
+                .and_then(|obj| obj.borrow().props.get(&k).map(|p| p.enumerable()));
             if live != Some(true) {
                 continue;
             }
@@ -1265,7 +1265,7 @@ fn reflect_ordinary_set(
         };
         let own = obj.borrow().props.get(key).cloned();
         match own {
-            Some(p) if p.accessor => {
+            Some(p) if p.accessor() => {
                 return match p.setter().cloned() {
                     Some(setter) if setter.is_callable() => {
                         ab(i.call(setter, receiver.clone(), &[value]))?;
@@ -1275,7 +1275,7 @@ fn reflect_ordinary_set(
                 };
             }
             Some(p) => {
-                if !p.writable {
+                if !p.writable() {
                     return Ok(false);
                 }
                 return reflect_define_on_receiver(i, receiver, key, value);
@@ -1363,7 +1363,7 @@ pub(crate) fn reflect_define_on_receiver(
     }
     let existing = ro.borrow().props.get(key).cloned();
     match existing {
-        Some(ep) if ep.accessor || !ep.writable => Ok(false),
+        Some(ep) if ep.accessor() || !ep.writable() => Ok(false),
         Some(_) => {
             ro.borrow_mut().props.get_mut(key).unwrap().value = value;
             Ok(true)
@@ -1405,7 +1405,7 @@ pub(crate) fn reflect_ordinary_get(
         let ptr = Rc::as_ptr(&obj) as usize;
         if i.is_namespace(ptr) {
             if let Some(res) = i.namespace_own_property(ptr, key) {
-                return Ok(ab(res)?.value);
+                return Ok(ab(res)?.into_value());
             }
         }
         // A TypedArray's integer-indexed elements are own properties; a canonical-numeric
@@ -1419,13 +1419,13 @@ pub(crate) fn reflect_ordinary_get(
         }
         let own = obj.borrow().props.get(key).cloned();
         match own {
-            Some(p) if p.accessor => {
+            Some(p) if p.accessor() => {
                 return match p.getter().cloned() {
                     Some(g) if g.is_callable() => ab(i.call(g, receiver.clone(), &[])),
                     _ => Ok(Value::Undefined),
                 };
             }
-            Some(p) => return Ok(p.value),
+            Some(p) => return Ok(p.into_value()),
             None => {
                 let proto = obj.borrow().proto.clone();
                 match proto {
@@ -1456,7 +1456,7 @@ fn delete_or_throw(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Valu
             .borrow()
             .props
             .get(key)
-            .map(|p| p.configurable)
+            .map(|p| p.configurable())
             .unwrap_or(true);
         if !configurable {
             return Err(i.make_error("TypeError", format!("Cannot delete property '{key}'")));
@@ -1629,7 +1629,7 @@ fn set_integrity_level(i: &mut Interp, obj: &Value, freeze: bool) -> Result<bool
                 .borrow()
                 .props
                 .get(&key)
-                .map(|p| p.accessor)
+                .map(|p| p.accessor())
                 .unwrap_or(false)
         };
         let desc = i.new_object();
@@ -1746,7 +1746,7 @@ fn object_define_properties(
                 .borrow()
                 .props
                 .get(&key)
-                .map(|p| p.enumerable)
+                .map(|p| p.enumerable())
                 .unwrap_or(false)
         };
         if enumerable {
@@ -1931,7 +1931,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                 let b = o.borrow();
                 b.props
                     .get("lastIndex")
-                    .filter(|p| !p.accessor)
+                    .filter(|p| !p.accessor())
                     .map(|p| p.value.clone())
             }
             _ => None,
@@ -2345,7 +2345,7 @@ fn ordered_enum_keys(o: &Gc) -> Vec<Rc<str>> {
     b.props
         .ordered_keys()
         .into_iter()
-        .filter(|k| !Interp::is_sym_key(k) && b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+        .filter(|k| !Interp::is_sym_key(k) && b.props.get(k).map(|p| p.enumerable()).unwrap_or(false))
         .collect()
 }
 
@@ -2808,7 +2808,7 @@ fn promise_keyed_combinator(
                 let mut syms: Vec<String> = Vec::new();
                 for k in borrowed.props.ordered_keys() {
                     let Some(p) = borrowed.props.get(&k) else { continue };
-                    if !p.enumerable {
+                    if !p.enumerable() {
                         continue;
                     }
                     if Interp::is_sym_key(&k) {
@@ -3118,7 +3118,7 @@ fn install_object(it: &mut Interp) {
                 }
             } else if let Value::Obj(co) = &cur {
                 if let Some(p) = co.borrow().props.get(&key) {
-                    if p.accessor {
+                    if p.accessor() {
                         let f = if is_get {
                             p.getter().cloned()
                         } else {
@@ -3189,7 +3189,7 @@ fn install_object(it: &mut Interp) {
             .borrow()
             .props
             .get(&key)
-            .map(|p| p.enumerable)
+            .map(|p| p.enumerable())
             .unwrap_or(false);
         Ok(Value::Bool(e))
     });
@@ -3640,7 +3640,7 @@ fn install_object(it: &mut Interp) {
                 b.props
                     .ordered_keys()
                     .into_iter()
-                    .filter(|k| b.props.get(k).map(|p| p.enumerable).unwrap_or(false))
+                    .filter(|k| b.props.get(k).map(|p| p.enumerable()).unwrap_or(false))
                     .collect()
             };
             for k in keys {
@@ -3775,17 +3775,17 @@ fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool,
 
 /// Build a property descriptor from a JS descriptor object.
 /// Build a descriptor object (`{value, writable, enumerable, configurable}` or `{get, set, ...}`).
-fn descriptor_from_prop(i: &mut Interp, p: Property) -> Value {
+fn descriptor_from_prop(i: &mut Interp, mut p: Property) -> Value {
     let d = i.new_object();
-    if p.accessor {
+    if p.accessor() {
         set_data(&d, "get", p.getter().cloned().unwrap_or(Value::Undefined));
         set_data(&d, "set", p.setter().cloned().unwrap_or(Value::Undefined));
     } else {
-        set_data(&d, "value", p.value);
-        set_data(&d, "writable", Value::Bool(p.writable));
+        set_data(&d, "value", std::mem::take(&mut p.value));
+        set_data(&d, "writable", Value::Bool(p.writable()));
     }
-    set_data(&d, "enumerable", Value::Bool(p.enumerable));
-    set_data(&d, "configurable", Value::Bool(p.configurable));
+    set_data(&d, "enumerable", Value::Bool(p.enumerable()));
+    set_data(&d, "configurable", Value::Bool(p.configurable()));
     Value::Obj(d)
 }
 
@@ -4046,7 +4046,7 @@ fn define_own_property_ordinary(
                 .borrow()
                 .props
                 .get("length")
-                .map(|p| p.writable)
+                .map(|p| p.writable())
                 .unwrap_or(true)
         {
             return Ok(false);
@@ -4081,19 +4081,19 @@ fn define_own_property_ordinary(
         Some(p) => p,
     };
     // Redefining an existing property: a non-configurable property restricts what may change.
-    if !cur.configurable {
+    if !cur.configurable() {
         if d.configurable == Some(true) {
             return Ok(false);
         }
         if let Some(e) = d.enumerable {
-            if e != cur.enumerable {
+            if e != cur.enumerable() {
                 return Ok(false);
             }
         }
-        if d.is_accessor() != cur.accessor && (d.is_accessor() || d.is_data()) {
+        if d.is_accessor() != cur.accessor() && (d.is_accessor() || d.is_data()) {
             return Ok(false);
         }
-        if cur.accessor {
+        if cur.accessor() {
             if let Some(g) = &d.get {
                 if !same_value(g, cur.getter().unwrap_or(&Value::Undefined)) {
                     return Ok(false);
@@ -4104,7 +4104,7 @@ fn define_own_property_ordinary(
                     return Ok(false);
                 }
             }
-        } else if !cur.writable {
+        } else if !cur.writable() {
             if d.writable == Some(true) {
                 return Ok(false);
             }
@@ -4117,34 +4117,34 @@ fn define_own_property_ordinary(
     }
     // Apply the present fields.
     if d.is_accessor() {
-        cur.accessor = true;
+        cur.set_accessor(true);
         cur.value = Value::Undefined;
-        cur.writable = false;
+        cur.set_writable(false);
         if let Some(g) = d.get {
             cur.set_getter(opt_norm(Some(g)));
         }
         if let Some(s) = d.set {
             cur.set_setter(opt_norm(Some(s)));
         }
-    } else if d.is_data() || !cur.accessor {
-        if cur.accessor {
+    } else if d.is_data() || !cur.accessor() {
+        if cur.accessor() {
             cur.clear_accessors();
-            cur.accessor = false;
+            cur.set_accessor(false);
             cur.value = Value::Undefined;
-            cur.writable = false;
+            cur.set_writable(false);
         }
         if let Some(v) = d.value {
             cur.value = v;
         }
         if let Some(w) = d.writable {
-            cur.writable = w;
+            cur.set_writable(w);
         }
     }
     if let Some(e) = d.enumerable {
-        cur.enumerable = e;
+        cur.set_enumerable(e);
     }
     if let Some(c) = d.configurable {
-        cur.configurable = c;
+        cur.set_configurable(c);
     }
     o.borrow_mut().props.insert(key, cur);
     grow_array_length(i, o, array_index);
@@ -4159,7 +4159,7 @@ fn grow_array_length(i: &mut Interp, o: &Gc, array_index: Option<u32>) {
                 .borrow()
                 .props
                 .get("length")
-                .map(|p| p.writable)
+                .map(|p| p.writable())
                 .unwrap_or(true);
             o.borrow_mut().props.insert(
                 "length",
@@ -4185,7 +4185,7 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
                 .borrow()
                 .props
                 .get("length")
-                .map(|p| p.writable)
+                .map(|p| p.writable())
                 .unwrap_or(true);
             // No value: only a writable change.
             if let Some(w) = d.writable {
@@ -4230,7 +4230,7 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
         .borrow()
         .props
         .get("length")
-        .map(|p| p.writable)
+        .map(|p| p.writable())
         .unwrap_or(true);
     let old_len = i.array_length(o);
     if !len_writable && (new_len != old_len || matches!(d.writable, Some(true))) {
@@ -4254,7 +4254,7 @@ fn array_set_length(i: &mut Interp, o: &Gc, d: &PartialDesc) -> Result<bool, Abr
                 .borrow()
                 .props
                 .get(&idx.to_string())
-                .map(|p| p.configurable)
+                .map(|p| p.configurable())
                 .unwrap_or(true);
             if configurable {
                 o.borrow_mut().props.remove(&idx.to_string());
@@ -4358,7 +4358,7 @@ fn install_array(it: &mut Interp) {
         {
             let mut b = o.borrow_mut();
             let len = match b.props.length_property() {
-                Some(p) if !p.accessor && p.writable => match p.value {
+                Some(p) if !p.accessor() && p.writable() => match p.value {
                     Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
                         Some(n as u32)
                     }
@@ -4416,7 +4416,7 @@ fn install_array(it: &mut Interp) {
         {
             let mut b = o.borrow_mut();
             let len = match b.props.length_property() {
-                Some(p) if !p.accessor && p.writable => match p.value {
+                Some(p) if !p.accessor() && p.writable() => match p.value {
                     Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
                         Some(n as u32)
                     }
@@ -6421,7 +6421,7 @@ pub(crate) fn cdp_or_throw(
             matches!(b.exotic, Exotic::Array)
                 && b.extensible
                 && !b.props.contains(key)
-                && b.props.get("length").map(|p| p.writable).unwrap_or(true)
+                && b.props.get("length").map(|p| p.writable()).unwrap_or(true)
         };
         if fast {
             if let Ok(idx) = key.parse::<u64>() {
@@ -6734,7 +6734,7 @@ fn iterator_zip(i: &mut Interp, a: &[Value], keyed: bool) -> Result<Value, Value
             } else {
                 input
                     .as_obj()
-                    .and_then(|o| o.borrow().props.get(&k).map(|p| p.enumerable))
+                    .and_then(|o| o.borrow().props.get(&k).map(|p| p.enumerable()))
                     .unwrap_or(false)
             };
             if !enumerable {

@@ -156,7 +156,7 @@ pub(super) fn install_reflect(it: &mut Interp) {
                 .borrow()
                 .props
                 .get(&key)
-                .map(|p| p.configurable)
+                .map(|p| p.configurable())
                 .unwrap_or(true);
             if configurable {
                 o.borrow_mut().props.remove(&key);
