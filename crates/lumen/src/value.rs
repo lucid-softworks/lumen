@@ -1247,6 +1247,21 @@ impl Props {
         }
     }
 
+    /// Grow tiny property maps exactly: `Vec`'s default first allocation has room for four
+    /// 40-byte entries, while one- and two-property objects dominate real heaps. Past two entries
+    /// resume geometric growth so larger maps retain amortized insertion.
+    #[inline]
+    fn reserve_entry(&mut self) {
+        if self.entries.len() == self.entries.capacity() {
+            let additional = if self.entries.len() < 2 {
+                1
+            } else {
+                self.entries.len()
+            };
+            self.entries.reserve_exact(additional);
+        }
+    }
+
     /// Reserve the exact backing storage for a dense array whose initial length is known.
     /// `entries` needs one additional slot for the array's own `length` property. Numeric arrays
     /// also keep the raw-f64 mirror; object arrays invalidate it on their first element, so
@@ -1541,6 +1556,7 @@ impl Props {
         if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         }
+        self.reserve_entry();
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
         self.mirror_grow(0, slot);
@@ -1722,6 +1738,7 @@ impl Props {
         if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         }
+        self.reserve_entry();
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
         self.mirror_grow(0, slot);
@@ -1741,6 +1758,7 @@ impl Props {
             self.elems.index_mut().unwrap().insert(key.clone(), slot);
         }
         self.shape = new_shape;
+        self.reserve_entry();
         self.entries.push((key, prop));
         self.note_inserted(slot);
     }
@@ -1797,6 +1815,7 @@ impl Props {
             } else if &*key == "prototype" {
                 self.proto_slot.set(slot as u32);
             }
+            self.reserve_entry();
             self.entries.push((key, prop));
             self.note_inserted(slot);
         }
