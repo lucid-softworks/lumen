@@ -155,6 +155,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_make_object as *const () as usize,
         crate::bytecode::jit_set_prop as *const () as usize,
         crate::bytecode::jit_get_prop as *const () as usize,
+        crate::bytecode::jit_gc_poll as *const () as usize,
     ]
 }
 
@@ -180,7 +181,10 @@ pub const H_SET_PROP: usize = 11;
 /// Dedicated property-read entry (`GetProp`/`GetPropThis`/`GetPropLocal`/`GetMethod` misses):
 /// straight into `get_prop_ic`.
 pub const H_GET_PROP: usize = 12;
-pub const N_HELPERS: usize = 13;
+/// A due direct-call GC poll. Unlike falling through `H_CALL_HIT`, this only performs the poll;
+/// generated code then continues into the already-validated direct call.
+pub const H_GC_POLL: usize = 13;
+pub const N_HELPERS: usize = 14;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -2788,17 +2792,37 @@ fn emit_direct_call(
     a.mov_imm64(13, crate::interpreter::MAX_EVAL_DEPTH as u64);
     a.cmp_reg_x(11, 13); // w-load zero-extends; the compare stays 64-bit
     a.b_cond(C_HS, hit_slow);
-    a.ldr_w_imm(13, 14, il.gc_tick as u32);
-    a.add_imm(13, 13, 1);
-    let field15 = asm::logical_imm_w(15).unwrap();
-    a.logic_imm_w(0, 4, 13, field15); // and w4, w13, #15
-    a.cbz(4, false, hit_slow); // gc due → generic
     a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
     a.ldr_imm(17, 14, (il.fn_frames + il.fnf_cap_word) as u32);
     a.cmp_reg_x(16, 17);
     a.b_cond(C_HS, hit_slow);
     a.ldr_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
     a.cbz(7, true, hit_slow);
+
+    // Polling used to abandon the validated direct path every 16th call and make H_CALL_HIT
+    // repeat the whole call. Keep the exact polling cadence, but call only gc_check and resume.
+    // All remaining fallible gates were checked above, so after a successful poll we commit.
+    a.ldr_w_imm(13, 14, il.gc_tick as u32);
+    a.add_imm(13, 13, 1);
+    let field15 = asm::logical_imm_w(15).unwrap();
+    a.logic_imm_w(0, 4, 13, field15); // and w4, w13, #15
+    let poll_done = a.new_label();
+    a.cbnz(4, false, poll_done);
+    // x10 (callee Rc pointer) and x12 (CallIc pointer) are caller-saved but remain live below.
+    a.stp_pre(10, 12, -16);
+    a.mov(0, 19);
+    a.ldr_imm(16, 21, (H_GC_POLL * 8) as u32);
+    a.blr(16);
+    a.ldp_post(10, 12, 16);
+    a.cbnz(0, true, l_unwind);
+    // Reload the caller-saved gate results needed by the commit sequence.
+    a.ldr_imm(14, 19, 72);
+    a.ldr_w_imm(11, 14, il.depth as u32);
+    a.ldr_w_imm(13, 14, il.gc_tick as u32);
+    a.add_imm(13, 13, 1);
+    a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
+    a.ldr_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
+    a.bind(poll_done);
 
     // ---- mutations ----
     a.add_imm(11, 11, 1);
