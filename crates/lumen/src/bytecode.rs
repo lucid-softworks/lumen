@@ -1913,13 +1913,14 @@ fn plan_inlines_at(
                 skip!(idx, "dead callee")
             };
             let b = obj.borrow();
-            let crate::value::Callable::User(f, callee_env) = &b.call else {
+            let crate::value::Callable::User(user) = &b.call else {
                 continue;
             };
             // Free names are only spliceable when the callee closes directly over the global
             // scope: its LoadNames then resolve identically under the caller's chain, provided
             // the caller doesn't shadow them (checked per-name by the compiler at splice time).
-            let global_closure = Rc::ptr_eq(callee_env, global_env);
+            let global_closure = Rc::ptr_eq(&user.env, global_env);
+            let f = &user.func;
             if f.is_arrow || f.is_strict != caller.is_strict {
                 skip!(idx, "arrow/strictness");
             }

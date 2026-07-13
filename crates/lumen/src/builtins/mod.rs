@@ -2226,7 +2226,12 @@ fn is_constructor_value(v: &Value) -> bool {
             // A user function's constructability is determined by its shape: arrows, methods,
             // generators and async functions are never constructors (a generator still has a
             // `prototype` property, so the fallback below would misclassify it).
-            Callable::User(f, _) => !f.is_arrow && !f.is_method && !f.is_generator && !f.is_async,
+            Callable::User(user) => {
+                !user.func.is_arrow
+                    && !user.func.is_method
+                    && !user.func.is_generator
+                    && !user.func.is_async
+            }
             _ => b.is_constructor || b.props.contains("prototype"),
         }
     })

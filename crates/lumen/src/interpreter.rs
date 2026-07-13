@@ -2097,8 +2097,8 @@ impl Interp {
     ) -> Result<Value, Value> {
         match call {
             Callable::Native(f) => f(self, this, args),
-            Callable::NativeData(f) => {
-                let f = f.clone();
+            Callable::NativeData(data) => {
+                let f = data.func.clone();
                 f(self, this, args)
             }
             _ => unreachable!("dispatch_native on a non-native callable"),
@@ -2127,7 +2127,7 @@ impl Interp {
         let obj = Object::new(Some(self.function_proto.clone()));
         {
             let mut b = obj.borrow_mut();
-            b.call = Callable::NativeData(f);
+            b.call = Callable::NativeData(Rc::new(crate::value::NativeCallable { func: f }));
             b.props.insert(
                 "length",
                 Property::data(Value::Num(len as f64), false, false, true),
@@ -2313,7 +2313,7 @@ impl Interp {
         let obj = Object::new(Some(fn_proto));
         {
             let mut b = obj.borrow_mut();
-            b.call = Callable::User(func.clone(), env);
+            b.call = Callable::user(func.clone(), env);
             b.props = fn_map.clone();
         }
         if has_prototype {
@@ -3374,12 +3374,12 @@ impl Interp {
                     {
                         if let Value::Obj(r) = receiver {
                             let plain = match &r.borrow().call {
-                                Callable::User(f, _) => {
-                                    !f.is_strict
-                                        && !f.is_arrow
-                                        && !f.is_generator
-                                        && !f.is_async
-                                        && !f.is_method
+                                Callable::User(user) => {
+                                    !user.func.is_strict
+                                        && !user.func.is_arrow
+                                        && !user.func.is_generator
+                                        && !user.func.is_async
+                                        && !user.func.is_method
                                 }
                                 _ => false,
                             };
@@ -4283,8 +4283,8 @@ impl Interp {
     /// object's aliased parameter scope, and a class constructor's field-initializer environment.
     fn obj_scope_refs(&self, o: &Gc) -> Vec<Env> {
         let mut out = Vec::new();
-        if let Callable::User(_, env) = &o.borrow().call {
-            out.push(env.clone());
+        if let Callable::User(user) = &o.borrow().call {
+            out.push(user.env.clone());
         }
         let ptr = Rc::as_ptr(o) as usize;
         if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
@@ -4615,12 +4615,12 @@ impl Interp {
     /// rooted in; anything else is resolved by finding which realm's %Function.prototype% sits on
     /// its prototype chain.
     pub(crate) fn callee_realm_global(&self, obj: &Gc) -> Option<usize> {
-        if let Callable::User(_, env) = &obj.borrow().call {
+        if let Callable::User(user) = &obj.borrow().call {
             // Walk to the scope root by raw pointer — every hop is kept alive transitively by
             // `env` (which the callee's `call` field owns) and nothing mutates the parent links,
             // so this skips a refcount round-trip per hop on every construct/call that asks.
             let root = {
-                let mut cur: *const RefCell<Scope> = Rc::as_ptr(env);
+                let mut cur: *const RefCell<Scope> = Rc::as_ptr(&user.env);
                 loop {
                     let parent = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
                     match parent {
@@ -4729,7 +4729,7 @@ impl Interp {
         let saved_nt = self.new_target.clone();
         self.constructing = false;
         // An arrow inherits the enclosing new.target lexically — don't clear it for one.
-        if !matches!(&call, Callable::User(f, _) if f.is_arrow) {
+        if !matches!(&call, Callable::User(user) if user.func.is_arrow) {
             self.new_target = Value::Undefined;
         }
         let r = match call {
@@ -4737,7 +4737,7 @@ impl Interp {
             Callable::Native(_) | Callable::NativeData(_) => self
                 .dispatch_native(&call, this, args)
                 .map_err(Abrupt::Throw),
-            Callable::User(func, env) => {
+            Callable::User(user) => {
                 // A class constructor cannot be [[Call]]ed. (Empty-map guard: this runs on every
                 // single call, and most programs define no classes.)
                 if !self.class_info.is_empty()
@@ -4748,15 +4748,15 @@ impl Interp {
                         "Class constructor cannot be invoked without 'new'",
                     ));
                 }
-                self.call_user(&func, env, this, args, false, &obj)
+                self.call_user(&user.func, user.env.clone(), this, args, false, &obj)
             }
             Callable::Bound(bound) => {
                 let mut all = bound.args.clone();
                 all.extend_from_slice(args);
                 self.call(Value::Obj(bound.target), bound.this, &all)
             }
-            Callable::WrappedShadow { realm, target } => {
-                self.call_wrapped_shadow(realm, *target, args)
+            Callable::WrappedShadow(shadow) => {
+                self.call_wrapped_shadow(shadow.realm, (*shadow.target).clone(), args)
             }
             Callable::WrappedCross(cross) => {
                 let realm = cross.realm;
@@ -4768,8 +4768,8 @@ impl Interp {
                         self as *const Interp,
                         match &*target {
                             Value::Obj(o) => match &o.borrow().call {
-                                Callable::User(..) => "user",
-                                Callable::WrappedShadow { .. } => "wshadow",
+                                Callable::User(_) => "user",
+                                Callable::WrappedShadow(_) => "wshadow",
                                 Callable::WrappedCross(_) => "wcross",
                                 Callable::Native(_) | Callable::NativeData(_) => "native",
                                 _ => "other",
@@ -4920,10 +4920,7 @@ impl Interp {
         target: Value,
     ) -> Result<Value, Abrupt> {
         let f = Object::new(Some(self.function_proto.clone()));
-        f.borrow_mut().call = Callable::WrappedShadow {
-            realm,
-            target: Box::new(target.clone()),
-        };
+        f.borrow_mut().call = Callable::wrapped_shadow(realm, target.clone());
         // CopyNameAndLength: the Gets run in the realm that owns `target` (its proxy state
         // lives there); an abrupt Get is a TypeError of the calling realm.
         let bad = |i: &mut Interp| {
@@ -5176,7 +5173,7 @@ impl Interp {
             .expect("compiled arguments object requires an active function frame")
             .callee();
         let func = match &fn_obj.borrow().call {
-            Callable::User(f, _) => f.clone(),
+            Callable::User(user) => user.func.clone(),
             _ => unreachable!("compiled arguments object belongs to a user function"),
         };
         self.make_arguments_object(&func, args, scope, &fn_obj)
@@ -5345,8 +5342,10 @@ impl Interp {
                 let (fp, ep) = match &o.borrow().call {
                     // `under_with`: see the refusal in `call_jit_fast` — this retry runs a
                     // FRESH closure instance whose env was never vetted there.
-                    Callable::User(f, e) if !f.is_arrow && !e.borrow().under_with => {
-                        (Rc::as_ptr(f), Rc::as_ptr(e))
+                    Callable::User(user)
+                        if !user.func.is_arrow && !user.env.borrow().under_with =>
+                    {
+                        (Rc::as_ptr(&user.func), Rc::as_ptr(&user.env))
                     }
                     _ => return None,
                 };
@@ -5811,7 +5810,7 @@ impl Interp {
         genv: usize,
     ) -> Option<crate::bytecode::CallIc> {
         let (func, env) = match &o.borrow().call {
-            Callable::User(f, e) => (f.clone(), e.clone()),
+            Callable::User(user) => (user.func.clone(), user.env.clone()),
             _ => return None,
         };
         if func.is_arrow || func.is_method || func.is_generator || func.is_async {
@@ -5911,7 +5910,7 @@ impl Interp {
         }
         let Value::Obj(o) = callee else { return None };
         let (func, env) = match &o.borrow().call {
-            Callable::User(f, e) => (f.clone(), e.clone()),
+            Callable::User(user) => (user.func.clone(), user.env.clone()),
             _ => return None,
         };
         // Arrows inherit new.target lexically (the generic path skips the clear for them).
@@ -7145,10 +7144,14 @@ impl Interp {
                 self.new_target = saved_nt;
                 r
             }
-            Callable::User(func, env) => {
+            Callable::User(user) => {
                 // Arrows, concise methods, getters/setters, generators and async functions have no
                 // [[Construct]].
-                if func.is_arrow || func.is_method || func.is_generator || func.is_async {
+                if user.func.is_arrow
+                    || user.func.is_method
+                    || user.func.is_generator
+                    || user.func.is_async
+                {
                     return Err(self.throw("TypeError", "this function is not a constructor"));
                 }
                 // OrdinaryCreateFromConstructor: the new instance's prototype comes from
@@ -7181,7 +7184,14 @@ impl Interp {
                         _ => this_val,
                     })
                 } else {
-                    let ret = self.call_user(&func, env, this_val.clone(), args, true, &obj)?;
+                    let ret = self.call_user(
+                        &user.func,
+                        user.env.clone(),
+                        this_val.clone(),
+                        args,
+                        true,
+                        &obj,
+                    )?;
                     Ok(match ret {
                         Value::Obj(_) => ret,
                         _ => this_val,
@@ -7201,7 +7211,7 @@ impl Interp {
                 self.construct_nt(Value::Obj(bound.target), &all, nt)
             }
             Callable::None
-            | Callable::WrappedShadow { .. }
+            | Callable::WrappedShadow(_)
             | Callable::WrappedCross(_)
             | Callable::AccessorGet(_)
             | Callable::AccessorSet(_)

@@ -79,10 +79,12 @@ pub struct JitLayout {
     pub vec_ptr_off: usize,
     /// The length word within a `Vec` (probed like `vec_ptr_off`).
     pub vec_len_off: usize,
-    /// The nullable pointer to the boxed `elems` dense-element `Vec<u32>` within `Props`.
+    /// The nullable pointer to the shared boxed dense-buffer headers within `Props`.
     pub props_elems: usize,
-    /// The nullable pointer to the boxed `mirror` raw-f64 element `Vec` within `Props`.
-    pub props_mirror: usize,
+    /// The `elems` Vec header within the shared dense-buffer allocation.
+    pub dense_elems: usize,
+    /// The `mirror` Vec header within the shared dense-buffer allocation.
+    pub dense_mirror: usize,
     /// The `mirror_flags` byte within `Props`.
     pub props_mirror_flags: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
@@ -189,14 +191,14 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
         && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
 
-    // ThinVec is deliberately a transparent nullable pointer to a boxed Vec. The JIT first
-    // follows this pointer and then uses the probed Vec offsets above. Verify the niche rather
+    // DenseStorage is deliberately a transparent nullable pointer to boxed buffer headers. The
+    // JIT first follows this pointer and then uses the probed Vec offsets above. Verify the niche
     // than relying on it silently if a future compiler changes the representation.
-    let thin_some = ThinVec(Some(Box::new(vec![7u32])));
-    let thin_word = unsafe { *(&thin_some as *const ThinVec<u32> as *const usize) };
-    let thin_expected = thin_some.0.as_deref().unwrap() as *const Vec<u32> as usize;
-    let thin_none: ThinVec<u32> = ThinVec(None);
-    let thin_none_word = unsafe { *(&thin_none as *const ThinVec<u32> as *const usize) };
+    let thin_some = DenseStorage(Some(Box::new(DenseBuffers::default())));
+    let thin_word = unsafe { *(&thin_some as *const DenseStorage as *const usize) };
+    let thin_expected = thin_some.0.as_deref().unwrap() as *const DenseBuffers as usize;
+    let thin_none = DenseStorage(None);
+    let thin_none_word = unsafe { *(&thin_none as *const DenseStorage as *const usize) };
     let thin_vec_ok = thin_word == thin_expected && thin_none_word == 0;
 
     // Exotic::None / Exotic::Array discriminants (Exotic is repr(Rust); probe to be certain).
@@ -240,7 +242,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         vec_ptr_off: vec_ptr_off.unwrap_or(0),
         vec_len_off: vec_len_off.unwrap_or(0),
         props_elems: offset_of!(Props, elems),
-        props_mirror: offset_of!(Props, mirror),
+        dense_elems: offset_of!(DenseBuffers, elems),
+        dense_mirror: offset_of!(DenseBuffers, mirror),
         props_mirror_flags: offset_of!(Props, mirror_flags),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
         entry_key: offset_of!((Rc<str>, Property), 0),
@@ -330,17 +333,14 @@ pub enum Callable {
     None,
     Native(NativeFn),
     /// A native function carrying captured state (see [`NativeClosure`]).
-    NativeData(std::rc::Rc<NativeClosure>),
+    NativeData(Rc<NativeCallable>),
     /// An interpreted function: its AST plus the lexical environment it closed over.
-    User(Rc<Function>, Env),
+    User(Rc<UserCallable>),
     /// The result of `Function.prototype.bind`.
     Bound(Box<BoundCallable>),
     /// A ShadowRealm wrapped function: `target` is a callable inside the sub-realm identified by
     /// `realm` (its pointer). Calls marshal primitive args in and the primitive result out.
-    WrappedShadow {
-        realm: usize,
-        target: Box<Value>,
-    },
+    WrappedShadow(Rc<WrappedShadowCallable>),
     /// The inverse: a function living *inside* a ShadowRealm whose `target` is a callable of the
     /// host realm. `realm` is this sub-realm's key in the host's map and `parent` is the host
     /// interpreter's stable address (hosts are either the engine root or boxed sub-realms, both
@@ -348,13 +348,13 @@ pub enum Callable {
     WrappedCross(Box<WrappedCrossCallable>),
     /// An auto-accessor's synthesized getter: reads the private backing field (brand-checked) off
     /// the receiver.
-    AccessorGet(Rc<str>),
+    AccessorGet(Rc<Rc<str>>),
     /// An auto-accessor's synthesized setter: writes the private backing field (brand-checked).
-    AccessorSet(Rc<str>),
+    AccessorSet(Rc<Rc<str>>),
     /// A decorator `context.access.get`: returns `args[0][name]`.
-    PropGet(Rc<str>),
+    PropGet(Rc<Rc<str>>),
     /// A decorator `context.access.set`: performs `args[0][name] = args[1]`.
-    PropSet(Rc<str>),
+    PropSet(Rc<Rc<str>>),
 }
 
 /// Cold payloads boxed out of [`Callable`], so every non-callable ordinary object does not pay
@@ -366,6 +366,22 @@ pub struct BoundCallable {
     pub(crate) args: Vec<Value>,
 }
 
+pub struct NativeCallable {
+    pub(crate) func: Rc<NativeClosure>,
+}
+
+#[derive(Clone)]
+pub struct UserCallable {
+    pub(crate) func: Rc<Function>,
+    pub(crate) env: Env,
+}
+
+#[derive(Clone)]
+pub struct WrappedShadowCallable {
+    pub(crate) realm: usize,
+    pub(crate) target: Box<Value>,
+}
+
 #[derive(Clone)]
 pub struct WrappedCrossCallable {
     pub(crate) realm: usize,
@@ -374,6 +390,17 @@ pub struct WrappedCrossCallable {
 }
 
 impl Callable {
+    pub(crate) fn user(func: Rc<Function>, env: Env) -> Callable {
+        Callable::User(Rc::new(UserCallable { func, env }))
+    }
+
+    pub(crate) fn wrapped_shadow(realm: usize, target: Value) -> Callable {
+        Callable::WrappedShadow(Rc::new(WrappedShadowCallable {
+            realm,
+            target: Box::new(target),
+        }))
+    }
+
     pub(crate) fn bound(target: Gc, this: Value, args: Vec<Value>) -> Callable {
         Callable::Bound(Box::new(BoundCallable { target, this, args }))
     }
@@ -843,73 +870,150 @@ impl Property {
 /// Insertion-ordered string-keyed property map. A `Vec` of entries preserves order (good enough for
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
 #[derive(Clone, Default)]
-#[repr(transparent)]
-struct ThinVec<T>(Option<Box<Vec<T>>>);
+struct DenseBuffers {
+    index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
+    packed: Option<Box<Vec<Property>>>,
+    elems: Vec<u32>,
+    mirror: Vec<f64>,
+}
 
-impl<T> ThinVec<T> {
-    #[inline]
-    fn vec_mut(&mut self) -> &mut Vec<T> {
-        self.0.get_or_insert_with(|| Box::new(Vec::new()))
+struct EmptyDenseBuffers(DenseBuffers);
+// This one value contains only `None` and empty Vec dangling sentinels and is never mutated; no
+// non-Sync payload is reachable through it. Live DenseBuffers remain thread-local as before.
+unsafe impl Sync for EmptyDenseBuffers {}
+
+static EMPTY_DENSE_BUFFERS: EmptyDenseBuffers = EmptyDenseBuffers(DenseBuffers {
+    index: None,
+    packed: None,
+    elems: Vec::new(),
+    mirror: Vec::new(),
+});
+
+#[derive(Clone, Default)]
+#[repr(transparent)]
+struct DenseStorage(Option<Box<DenseBuffers>>);
+
+impl std::ops::Deref for DenseStorage {
+    type Target = DenseBuffers;
+    fn deref(&self) -> &DenseBuffers {
+        self.0.as_deref().unwrap_or(&EMPTY_DENSE_BUFFERS.0)
     }
+}
+
+impl DenseStorage {
     #[inline]
-    fn len(&self) -> usize {
-        self.0.as_deref().map_or(0, Vec::len)
+    fn buffers_mut(&mut self) -> &mut DenseBuffers {
+        self.0.get_or_insert_with(Default::default)
     }
-    #[inline]
-    fn get(&self, index: usize) -> Option<&T> {
-        self.0.as_deref().and_then(|v| v.get(index))
+    fn index_mut(
+        &mut self,
+    ) -> Option<&mut crate::fasthash::FastMap<Rc<str>, usize>> {
+        self.0.as_deref_mut()?.index.as_deref_mut()
     }
-    #[inline]
-    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.0.as_deref_mut().and_then(|v| v.get_mut(index))
+    fn packed_mut(&mut self) -> Option<&mut Vec<Property>> {
+        self.0.as_deref_mut()?.packed.as_deref_mut()
     }
-    fn reserve_exact(&mut self, additional: usize) {
-        if additional != 0 {
-            self.vec_mut().reserve_exact(additional);
+    fn set_index(
+        &mut self,
+        index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
+    ) {
+        if index.is_some() {
+            self.buffers_mut().index = index;
+        } else if let Some(d) = self.0.as_deref_mut() {
+            d.index = None;
+        }
+    }
+    fn set_packed(&mut self, packed: Option<Box<Vec<Property>>>) {
+        if packed.is_some() {
+            self.buffers_mut().packed = packed;
+        } else if let Some(d) = self.0.as_deref_mut() {
+            d.packed = None;
         }
     }
     #[inline]
-    fn push(&mut self, value: T) {
-        self.vec_mut().push(value);
+    fn len(&self) -> usize {
+        self.0.as_deref().map_or(0, |d| d.elems.len())
     }
     #[inline]
-    fn pop(&mut self) -> Option<T> {
-        self.0.as_deref_mut().and_then(Vec::pop)
+    fn get(&self, index: usize) -> Option<&u32> {
+        self.0.as_deref().and_then(|d| d.elems.get(index))
+    }
+    #[inline]
+    fn get_mut(&mut self, index: usize) -> Option<&mut u32> {
+        self.0.as_deref_mut().and_then(|d| d.elems.get_mut(index))
+    }
+    fn reserve_exact(&mut self, additional: usize) {
+        if additional != 0 {
+            self.buffers_mut().elems.reserve_exact(additional);
+        }
+    }
+    #[inline]
+    fn push(&mut self, value: u32) {
+        self.buffers_mut().elems.push(value);
+    }
+    #[inline]
+    fn pop(&mut self) -> Option<u32> {
+        self.0.as_deref_mut().and_then(|d| d.elems.pop())
     }
     fn clear(&mut self) {
         self.0 = None;
     }
-    fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
-        self.vec_mut().iter_mut()
+    fn clear_elems(&mut self) {
+        if let Some(d) = self.0.as_deref_mut() {
+            d.elems.clear();
+            d.mirror.clear();
+        }
     }
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.vec_mut().extend(iter);
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, u32> {
+        self.buffers_mut().elems.iter_mut()
+    }
+
+    fn mirror_reserve_exact(&mut self, additional: usize) {
+        if additional != 0 {
+            self.buffers_mut().mirror.reserve_exact(additional);
+        }
+    }
+    fn mirror_len(&self) -> usize {
+        self.0.as_deref().map_or(0, |d| d.mirror.len())
+    }
+    fn mirror_get(&self, index: usize) -> Option<&f64> {
+        self.0.as_deref().and_then(|d| d.mirror.get(index))
+    }
+    fn mirror_get_mut(&mut self, index: usize) -> Option<&mut f64> {
+        self.0.as_deref_mut().and_then(|d| d.mirror.get_mut(index))
+    }
+    fn mirror_push(&mut self, value: f64) {
+        self.buffers_mut().mirror.push(value);
+    }
+    fn mirror_pop(&mut self) -> Option<f64> {
+        self.0.as_deref_mut().and_then(|d| d.mirror.pop())
+    }
+    fn mirror_clear(&mut self) {
+        if let Some(d) = self.0.as_deref_mut() {
+            d.mirror.clear();
+        }
+    }
+    fn mirror_extend<I: IntoIterator<Item = f64>>(&mut self, iter: I) {
+        self.buffers_mut().mirror.extend(iter);
     }
 }
 
-impl<T> std::ops::Index<usize> for ThinVec<T> {
-    type Output = T;
-    fn index(&self, index: usize) -> &T {
-        self.get(index).expect("ThinVec index out of bounds")
+impl std::ops::Index<usize> for DenseStorage {
+    type Output = u32;
+    fn index(&self, index: usize) -> &u32 {
+        self.get(index).expect("dense index out of bounds")
     }
 }
 
-impl<T> std::ops::IndexMut<usize> for ThinVec<T> {
-    fn index_mut(&mut self, index: usize) -> &mut T {
-        self.get_mut(index).expect("ThinVec index out of bounds")
+impl std::ops::IndexMut<usize> for DenseStorage {
+    fn index_mut(&mut self, index: usize) -> &mut u32 {
+        self.get_mut(index).expect("dense index out of bounds")
     }
 }
 
 #[derive(Clone)]
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
-    /// Allocated only after the small-map threshold is crossed. Keeping the empty hash table
-    /// inline cost every object 32 bytes even though nearly all objects stay on linear lookup;
-    /// boxing keeps that rare large-map cost off ordinary objects.
-    index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
-    /// Dense properties without per-element key/slot metadata. Used for small numeric literals;
-    /// `Value::Empty` marks a hole. Named and far-index properties remain in `entries`.
-    packed: Option<Box<Vec<Property>>>,
     /// This object serves (or once served) as some object's prototype: structural changes to it
     /// bump the global [`proto_epoch`], invalidating every property-*creation* inline cache
     /// (their fill-time chain walks proved "no hop shadows this name" — see
@@ -922,11 +1026,11 @@ pub struct Props {
     /// new-key insert, to a fresh unique on a structural removal. Only consulted for non-exotic
     /// objects (arrays keep the key-compare path — same shape can mean different element counts).
     shape: u32,
-    /// Dense element map: `elems[n]` is the `entries` slot of canonical-index key `n`, or
-    /// `NO_SLOT`. Maintained for a (near-)contiguous prefix from 0 — a canonical key far past the
-    /// dense frontier lives only in `index` (see `note_inserted`). This is what makes `a[i]`
-    /// O(1) without hashing or stringifying the index (see `get_index`).
-    elems: ThinVec<u32>,
+    /// One nullable cold-sidecar pointer shared by the optional hash index, packed elements,
+    /// dense slot map and numeric mirror. Ordinary small named-property objects allocate none of
+    /// it. Within the sidecar, `elems[n]` is the `entries` slot of canonical-index key `n`, or
+    /// `NO_SLOT`; see `note_inserted` and `get_index`.
+    elems: DenseStorage,
     /// Raw-f64 read mirror of the dense elements. While `mirror_flags & MIRROR_OK`:
     /// `mirror.len() == elems.len()`, and for every `n`: `mirror[n]` is [`MIRROR_HOLE`] exactly
     /// when `elems[n]` names no element, else the element is a plain writable data property
@@ -935,7 +1039,6 @@ pub struct Props {
     /// entirely. Entries stay authoritative: fast writers dual-store through
     /// [`Props::set_index_value`]; any foreign `&mut` escape (`get_index_mut`, `get_mut` /
     /// `entry_at_mut` on an index key) invalidates the mirror instead of tracking it.
-    mirror: ThinVec<f64>,
     /// [`MIRROR_OK`] | [`MIRROR_ALL_I32`] | [`MIRROR_NO_HOLES`].
     mirror_flags: u8,
     /// Live hole count in `mirror` (descending array fills pad with holes and then fill them:
@@ -1132,11 +1235,8 @@ impl Props {
     pub(crate) fn new() -> Props {
         Props {
             entries: Vec::new(),
-            index: None,
-            packed: None,
             shape: SHAPE_EMPTY,
-            elems: ThinVec::default(),
-            mirror: ThinVec::default(),
+            elems: DenseStorage::default(),
             mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,
             mirror_holes: 0,
             proto_flag: std::cell::Cell::new(false),
@@ -1155,14 +1255,15 @@ impl Props {
         // Keep the range narrow so large numeric work arrays retain the JIT mirror fast path.
         if numeric && (8..=32).contains(&len) {
             self.entries.reserve_exact(1); // own `length`
-            self.packed = Some(Box::new(Vec::with_capacity(len)));
+            self.elems
+                .set_packed(Some(Box::new(Vec::with_capacity(len))));
             self.mirror_flags = 0;
         } else {
             self.entries.reserve_exact(len.saturating_add(1));
             self.elems.reserve_exact(len);
         }
-        if numeric && self.packed.is_none() {
-            self.mirror.reserve_exact(len);
+        if numeric && self.elems.packed.is_none() {
+            self.elems.mirror_reserve_exact(len);
         }
     }
 
@@ -1211,7 +1312,7 @@ impl Props {
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
     #[inline]
     pub(crate) fn get_index(&self, n: u32) -> Option<&Property> {
-        if let Some(packed) = &self.packed {
+        if let Some(packed) = &self.elems.packed {
             return packed.get(n as usize).filter(|p| !matches!(p.value, Value::Empty));
         }
         let slot = *self.elems.get(n as usize)?;
@@ -1226,10 +1327,11 @@ impl Props {
     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
         // A raw &mut escape can rewrite the value behind the mirror's back.
         self.mirror_invalidate();
-        if let Some(packed) = &mut self.packed {
+        let dense = self.elems.buffers_mut();
+        if let Some(packed) = &mut dense.packed {
             return packed.get_mut(n as usize).filter(|p| !matches!(p.value, Value::Empty));
         }
-        let slot = *self.elems.get(n as usize)?;
+        let slot = *dense.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
         }
@@ -1241,7 +1343,7 @@ impl Props {
     pub(crate) fn mirror_invalidate(&mut self) {
         if self.mirror_flags & MIRROR_OK != 0 {
             self.mirror_flags = 0;
-            self.mirror = ThinVec::default();
+            self.elems.mirror_clear();
         }
     }
 
@@ -1252,7 +1354,7 @@ impl Props {
         if self.mirror_flags & MIRROR_OK == 0 {
             return;
         }
-        if self.mirror.len() != self.elems.len() {
+        if self.elems.mirror_len() != self.elems.len() {
             // Lockstep was broken by a path this code doesn't know — fail safe.
             self.mirror_invalidate();
             return;
@@ -1270,7 +1372,7 @@ impl Props {
                         self.mirror_flags |= MIRROR_NO_HOLES;
                     }
                 }
-                self.mirror[n] = f;
+                *self.elems.mirror_get_mut(n).unwrap() = f;
             }
             _ => self.mirror_invalidate(),
         }
@@ -1296,11 +1398,11 @@ impl Props {
         if pads > 0 {
             self.mirror_flags &= !MIRROR_NO_HOLES;
             self.mirror_holes += pads as u32;
-            self.mirror
-                .extend(std::iter::repeat(f64::from_bits(MIRROR_HOLE)).take(pads));
+            self.elems
+                .mirror_extend(std::iter::repeat_n(f64::from_bits(MIRROR_HOLE), pads));
         }
-        self.mirror.push(0.0);
-        let n = self.mirror.len() - 1;
+        self.elems.mirror_push(0.0);
+        let n = self.elems.mirror_len() - 1;
         self.mirror_sync(n, slot, false); // freshly appended: never a pre-existing hole
     }
 
@@ -1312,7 +1414,7 @@ impl Props {
         if self.mirror_flags & MIRROR_OK == 0 {
             return None;
         }
-        let f = *self.mirror.get(n as usize)?;
+        let f = *self.elems.mirror_get(n as usize)?;
         if f.to_bits() == MIRROR_HOLE {
             return None;
         }
@@ -1324,7 +1426,7 @@ impl Props {
     /// generic path.
     #[inline]
     pub(crate) fn set_index_value(&mut self, n: u32, v: Value) -> Result<(), Value> {
-        if let Some(packed) = &mut self.packed {
+        if let Some(packed) = self.elems.packed_mut() {
             let Some(p) = packed.get_mut(n as usize) else { return Err(v) };
             if matches!(p.value, Value::Empty) || p.accessor() || !p.writable() {
                 return Err(v);
@@ -1349,7 +1451,7 @@ impl Props {
                         self.mirror_flags &= !MIRROR_ALL_I32;
                     }
                     // Lockstep holds whenever the flag does; guard anyway.
-                    match self.mirror.get_mut(n as usize) {
+                    match self.elems.mirror_get_mut(n as usize) {
                         Some(m) => *m = *f,
                         None => self.mirror_invalidate(),
                     }
@@ -1422,12 +1524,12 @@ impl Props {
     /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
     /// the gates don't hold; the caller runs the generic path.
     pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
-        if let Some(packed) = &self.packed {
+        if let Some(packed) = &self.elems.packed {
             if self.has_far.get() || !self.elem_mode.get() || n as usize != packed.len() {
                 return false;
             }
             self.note_structural();
-            self.packed.as_mut().unwrap().push(prop);
+            self.elems.packed_mut().unwrap().push(prop);
             return true;
         }
         if self.has_far.get() || !self.elem_mode.get() || n as usize != self.elems.len() {
@@ -1436,7 +1538,7 @@ impl Props {
         self.note_structural();
         let slot = self.entries.len();
         let key = index_key(n as usize);
-        if let Some(index) = self.index.as_mut() {
+        if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
@@ -1454,7 +1556,7 @@ impl Props {
         if self.has_far.get() || !self.elem_mode.get() {
             return None;
         }
-        if let Some(packed) = &self.packed {
+        if let Some(packed) = &self.elems.packed {
             if n as usize + 1 != packed.len() {
                 return None;
             }
@@ -1463,7 +1565,7 @@ impl Props {
                 return None;
             }
             self.note_structural();
-            return self.packed.as_mut().unwrap().pop().map(Property::into_value);
+            return self.elems.packed_mut().unwrap().pop().map(Property::into_value);
         }
         if n as usize + 1 != self.elems.len() {
             return None;
@@ -1479,12 +1581,12 @@ impl Props {
         self.note_structural();
         let (_, p) = self.entries.pop().unwrap();
         self.elems.pop();
-        if let Some(index) = self.index.as_mut() {
+        if let Some(index) = self.elems.index_mut() {
             index.remove(&index_key(n as usize));
         }
         if self.mirror_flags & MIRROR_OK != 0 {
-            debug_assert_eq!(self.mirror.len(), self.elems.len() + 1);
-            let m = self.mirror.pop();
+            debug_assert_eq!(self.elems.mirror_len(), self.elems.len() + 1);
+            let m = self.elems.mirror_pop();
             if m.map(f64::to_bits) == Some(MIRROR_HOLE) {
                 // (Unreachable while the slot was live, but keep the accounting exact.)
                 self.mirror_holes -= 1;
@@ -1521,10 +1623,10 @@ impl Props {
                 return Some(s as usize);
             }
         }
-        let found = if self.index.is_none() {
+        let found = if self.elems.index.is_none() {
             self.entries.iter().position(|(k, _)| &**k == key)
         } else {
-            self.index.as_ref().and_then(|index| index.get(key).copied())
+            self.elems.index.as_ref().and_then(|index| index.get(key).copied())
         };
         if let Some(s) = found {
             if key == "length" {
@@ -1541,7 +1643,7 @@ impl Props {
         for (j, (k, _)) in self.entries.iter().enumerate() {
             index.insert(k.clone(), j);
         }
-        self.index = Some(index);
+        self.elems.set_index(Some(index));
     }
     pub(crate) fn get(&self, key: &str) -> Option<&Property> {
         if let Some(n) = canonical_index(key) {
@@ -1553,10 +1655,10 @@ impl Props {
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
         if let Some(n) = canonical_index(key) {
-            if self.packed.as_ref().and_then(|p| p.get(n as usize))
+            if self.elems.packed.as_ref().and_then(|p| p.get(n as usize))
                 .is_some_and(|p| !matches!(p.value, Value::Empty))
             {
-                return self.packed.as_mut().and_then(|p| p.get_mut(n as usize));
+                return self.elems.packed_mut().and_then(|p| p.get_mut(n as usize));
             }
         }
         if key.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
@@ -1598,10 +1700,8 @@ impl Props {
     pub(crate) fn clear(&mut self) {
         self.note_structural();
         self.entries.clear();
-        self.index = None;
-        self.packed = None;
         self.elems.clear();
-        self.mirror.clear();
+        self.elems.mirror_clear();
         self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
         self.mirror_holes = 0;
         self.len_slot.set(NO_SLOT);
@@ -1613,13 +1713,13 @@ impl Props {
     /// key-string allocation. Only valid on a Props whose entries so far are exactly the dense
     /// elements 0..len.
     pub(crate) fn push_dense(&mut self, prop: Property) {
-        if let Some(packed) = &mut self.packed {
+        if let Some(packed) = self.elems.packed_mut() {
             packed.push(prop);
             return;
         }
         let slot = self.entries.len();
         let key = index_key(slot);
-        if let Some(index) = self.index.as_mut() {
+        if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
@@ -1634,11 +1734,11 @@ impl Props {
     pub(crate) fn append_new(&mut self, key: Rc<str>, prop: Property, new_shape: u32) {
         self.note_structural();
         let slot = self.entries.len();
-        if let Some(index) = self.index.as_mut() {
+        if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         } else if self.should_build_index(&key) {
             self.build_index();
-            self.index.as_mut().unwrap().insert(key.clone(), slot);
+            self.elems.index_mut().unwrap().insert(key.clone(), slot);
         }
         self.shape = new_shape;
         self.entries.push((key, prop));
@@ -1647,16 +1747,16 @@ impl Props {
 
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
-        if let (Some(n), Some(packed)) = (canonical_index(&key), self.packed.as_ref()) {
+        if let (Some(n), Some(packed)) = (canonical_index(&key), self.elems.packed.as_ref()) {
             let n = n as usize;
             if n < packed.len() {
                 self.note_structural();
-                self.packed.as_mut().unwrap()[n] = prop;
+                self.elems.packed_mut().unwrap()[n] = prop;
                 return;
             }
             if n <= packed.len() + 256 {
                 self.note_structural();
-                let packed = self.packed.as_mut().unwrap();
+                let packed = self.elems.packed_mut().unwrap();
                 packed.resize_with(n, || Property::plain(Value::Empty));
                 packed.push(prop);
                 return;
@@ -1669,7 +1769,7 @@ impl Props {
                 && key.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
             {
                 match canonical_index(&key) {
-                    Some(n) if (n as usize) < self.mirror.len() => {
+                    Some(n) if (n as usize) < self.elems.mirror_len() => {
                         // Replacing an existing entry: position n already had the element.
                         self.mirror_sync(n as usize, i, false)
                     }
@@ -1681,11 +1781,11 @@ impl Props {
         } else {
             self.note_structural();
             let slot = self.entries.len();
-            if let Some(index) = self.index.as_mut() {
+            if let Some(index) = self.elems.index_mut() {
                 index.insert(key.clone(), slot);
             } else if self.should_build_index(&key) {
                 self.build_index();
-                self.index.as_mut().unwrap().insert(key.clone(), slot);
+                self.elems.index_mut().unwrap().insert(key.clone(), slot);
             }
             // Extending the key sequence transitions to the (shared, memoized) child shape.
             // Array element keys don't (see `elem_mode`): array shapes track named keys only.
@@ -1709,25 +1809,24 @@ impl Props {
             Some(n) => (n as usize) < from,
             None => true,
         };
-        let packed_remove = self.packed.as_ref().is_some_and(|p| {
+        let packed_remove = self.elems.packed.as_ref().is_some_and(|p| {
             p.len() > from && p[from..].iter().any(|p| !matches!(p.value, Value::Empty))
         });
         if !packed_remove && self.entries.iter().all(|(k, _)| keep(k)) {
             return;
         }
         self.note_structural();
-        if let Some(packed) = &mut self.packed {
+        if let Some(packed) = self.elems.packed_mut() {
             packed.truncate(from);
         }
         self.entries.retain(|(k, _)| keep(k));
         self.len_slot.set(NO_SLOT);
         self.proto_slot.set(NO_SLOT);
-        self.index = None;
+        self.elems.set_index(None);
         if self.entries.len() > INDEX_THRESHOLD {
             self.build_index();
         }
-        self.elems.clear();
-        self.mirror.clear();
+        self.elems.clear_elems();
         self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
         self.mirror_holes = 0;
         for slot in 0..self.entries.len() {
@@ -1738,10 +1837,10 @@ impl Props {
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
-        if let (Some(n), Some(packed)) = (canonical_index(key), self.packed.as_ref()) {
+        if let (Some(n), Some(packed)) = (canonical_index(key), self.elems.packed.as_ref()) {
             if packed.get(n as usize).is_some_and(|p| !matches!(p.value, Value::Empty)) {
                 self.note_structural();
-                self.packed.as_mut().unwrap()[n as usize] = Property::plain(Value::Empty);
+                self.elems.packed_mut().unwrap()[n as usize] = Property::plain(Value::Empty);
                 return true;
             }
         }
@@ -1758,7 +1857,7 @@ impl Props {
         }
         self.len_slot.set(NO_SLOT);
         self.proto_slot.set(NO_SLOT);
-        if let Some(index) = self.index.as_mut() {
+        if let Some(index) = self.elems.index_mut() {
             index.remove(key);
             // Re-index everything after the removed slot.
             for (j, (k, _)) in self.entries.iter().enumerate().skip(i) {
@@ -1767,9 +1866,10 @@ impl Props {
         }
         if self.mirror_flags & MIRROR_OK != 0 {
             match canonical_index(key) {
-                Some(n) if (n as usize) < self.mirror.len() => {
-                    if self.mirror[n as usize].to_bits() != MIRROR_HOLE {
-                        self.mirror[n as usize] = f64::from_bits(MIRROR_HOLE);
+                Some(n) if (n as usize) < self.elems.mirror_len() => {
+                    if self.elems.mirror_get(n as usize).unwrap().to_bits() != MIRROR_HOLE {
+                        *self.elems.mirror_get_mut(n as usize).unwrap() =
+                            f64::from_bits(MIRROR_HOLE);
                         self.mirror_flags &= !MIRROR_NO_HOLES;
                         self.mirror_holes += 1;
                     }
@@ -1793,7 +1893,7 @@ impl Props {
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub(crate) fn keys(&self) -> Vec<Rc<str>> {
-        self.packed.iter().flat_map(|p| p.iter().enumerate())
+        self.elems.packed.iter().flat_map(|p| p.iter().enumerate())
             .filter(|(_, p)| !matches!(p.value, Value::Empty))
             .map(|(n, _)| index_key(n))
             .chain(self.entries.iter().map(|(k, _)| k.clone()))
@@ -1806,7 +1906,7 @@ impl Props {
         let mut ints: Vec<(u32, Rc<str>)> = Vec::new();
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
-        if let Some(packed) = &self.packed {
+        if let Some(packed) = &self.elems.packed {
             ints.extend(packed.iter().enumerate()
                 .filter(|(_, p)| !matches!(p.value, Value::Empty))
                 .map(|(n, _)| (n as u32, index_key(n))));
@@ -1836,13 +1936,13 @@ impl Props {
 
     /// Every live property value, including keyless packed elements (for GC tracing).
     pub(crate) fn values(&self) -> impl Iterator<Item = &Property> {
-        self.packed.iter().flat_map(|p| p.iter())
+        self.elems.packed.iter().flat_map(|p| p.iter())
             .filter(|p| !matches!(p.value, Value::Empty))
             .chain(self.entries.iter().map(|(_, p)| p))
     }
 
     pub(crate) fn highest_nonconfig_index_from(&self, from: usize) -> Option<usize> {
-        let packed = self.packed.iter().flat_map(|p| p.iter().enumerate()).filter_map(|(n, p)| {
+        let packed = self.elems.packed.iter().flat_map(|p| p.iter().enumerate()).filter_map(|(n, p)| {
             (!matches!(p.value, Value::Empty) && !p.configurable() && n >= from).then_some(n)
         });
         let entries = self.entries.iter().filter_map(|(k, p)| {
@@ -1854,7 +1954,7 @@ impl Props {
 
     pub(crate) fn integrity_ok(&self, frozen: bool) -> bool {
         let valid = |p: &Property| !p.configurable() && (!frozen || p.accessor() || !p.writable());
-        self.packed.iter().flat_map(|p| p.iter())
+        self.elems.packed.iter().flat_map(|p| p.iter())
             .filter(|p| !matches!(p.value, Value::Empty)).all(valid)
             && self.entries.iter().all(|(k, p)| {
                 crate::interpreter::Interp::is_private_key(k) || valid(p)

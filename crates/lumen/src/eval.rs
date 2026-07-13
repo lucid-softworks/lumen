@@ -4541,9 +4541,9 @@ impl Interp {
         {
             let mut b = o.borrow_mut();
             b.call = if is_get {
-                Callable::AccessorGet(backing.clone())
+                Callable::AccessorGet(Rc::new(backing.clone()))
             } else {
-                Callable::AccessorSet(backing.clone())
+                Callable::AccessorSet(Rc::new(backing.clone()))
             };
             let prefix = if is_get { "get " } else { "set " };
             b.props.insert(
@@ -4630,11 +4630,11 @@ impl Interp {
         };
         let access = self.new_object();
         if matches!(kind, "method" | "getter" | "field" | "accessor") {
-            let g = self.make_callable(Callable::PropGet(key_rc.clone()), "get", 1.0);
+            let g = self.make_callable(Callable::PropGet(Rc::new(key_rc.clone())), "get", 1.0);
             access.borrow_mut().props.insert("get", Property::plain(g));
         }
         if matches!(kind, "setter" | "field" | "accessor") {
-            let s = self.make_callable(Callable::PropSet(key_rc.clone()), "set", 2.0);
+            let s = self.make_callable(Callable::PropSet(Rc::new(key_rc.clone())), "set", 2.0);
             access.borrow_mut().props.insert("set", Property::plain(s));
         }
         let add_init = self.make_native("addInitializer", 1, dec_add_initializer);
@@ -4814,7 +4814,7 @@ impl Interp {
                 all.extend_from_slice(args);
                 self.run_constructor_on(&Value::Obj(bound.target), this, &all)
             }
-            Callable::User(func, cenv) => {
+            Callable::User(user) => {
                 // A base class initializes its fields before its body runs; a derived class does so
                 // inside its own `super()`.
                 if is_class && !derived {
@@ -4823,7 +4823,14 @@ impl Interp {
                 // A `super(...)` call is legal only directly within a *derived* constructor body.
                 let saved_super = self.super_call_ok;
                 self.super_call_ok = is_class && derived;
-                let r = self.call_user(&func, cenv, this.clone(), args, true, &obj);
+                let r = self.call_user(
+                    &user.func,
+                    user.env.clone(),
+                    this.clone(),
+                    args,
+                    true,
+                    &obj,
+                );
                 self.super_call_ok = saved_super;
                 r
             }
@@ -6609,7 +6616,12 @@ impl Interp {
         }
         let b = o.borrow();
         match &b.call {
-            Callable::User(f, _) => !(f.is_arrow || f.is_method || f.is_generator || f.is_async),
+            Callable::User(user) => {
+                !(user.func.is_arrow
+                    || user.func.is_method
+                    || user.func.is_generator
+                    || user.func.is_async)
+            }
             Callable::Native(_) | Callable::NativeData(_) => {
                 b.is_constructor
                     || b.props

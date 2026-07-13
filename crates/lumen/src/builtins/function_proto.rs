@@ -98,8 +98,8 @@ pub(super) fn install_function_proto(it: &mut Interp) {
         // A user function returns the source text it was parsed from; everything else
         // (natives, bound functions, proxies) renders as a native function carrying its name.
         if let Value::Obj(o) = &this {
-            if let Callable::User(f, _) = &o.borrow().call {
-                if let Some(src) = &f.source {
+            if let Callable::User(user) = &o.borrow().call {
+                if let Some(src) = &user.func.source {
                     return Ok(Value::from_string(src.to_string()));
                 }
             }
