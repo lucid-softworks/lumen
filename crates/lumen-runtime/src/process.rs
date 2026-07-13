@@ -54,6 +54,7 @@ pub(crate) fn extension() -> Extension {
                     "getgroups" (0) => op_getgroups,
                     "setgroups" (1) => op_setgroups,
                     "initgroups" (2) => op_initgroups,
+                    "metrics" (0) => op_metrics,
                 ],
             ),
         ],
@@ -70,6 +71,7 @@ const JS_INIT: &str = r#"(() => {
   const proc = globalThis.__proc;
   const readStdin = proc.readStdin;
   const rawExecve = proc.execve;
+  const metrics = proc.metrics;
   delete globalThis.__proc;
   const process = globalThis.process;
 
@@ -90,6 +92,7 @@ const JS_INIT: &str = r#"(() => {
   Object.defineProperty(process, "stdout", { value: makeStream(proc.writeStdout, 1), enumerable: true, configurable: true });
   Object.defineProperty(process, "stderr", { value: makeStream(proc.writeStderr, 2), enumerable: true, configurable: true });
   Object.defineProperty(process, "_readStdin", { value: readStdin, configurable: true });
+  Object.defineProperty(process, "_nativeMetrics", { value: metrics, configurable: true });
 
   const raw = proc.hrtime;
   const hrtime = (prev) => {
@@ -284,6 +287,51 @@ fn op_hrtime(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Valu
         Value::Num(e.as_secs() as f64),
         Value::Num(e.subsec_nanos() as f64),
     ]))
+}
+
+/// Real per-process CPU, resident-memory, and kernel resource counters from `getrusage(2)`.
+/// The compact array keeps the native boundary cheap; lumen-node assigns Node's public names.
+#[cfg(unix)]
+fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let mut usage = std::mem::MaybeUninit::<ffi::RUsage>::zeroed();
+    if unsafe { ffi::getrusage(ffi::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return Err(ctx.make_error(
+            "Error",
+            format!("getrusage failed: {}", std::io::Error::last_os_error()),
+        ));
+    }
+    let usage = unsafe { usage.assume_init() };
+    let micros = |time: ffi::TimeVal| time.sec * 1_000_000 + time.usec;
+    #[cfg(target_os = "macos")]
+    let (rss_bytes, max_rss_kib) = (usage.max_rss, usage.max_rss / 1024);
+    #[cfg(not(target_os = "macos"))]
+    let (rss_bytes, max_rss_kib) = (usage.max_rss * 1024, usage.max_rss);
+    Ok(ctx.make_array(
+        [
+            rss_bytes,
+            max_rss_kib,
+            micros(usage.user),
+            micros(usage.system),
+            usage.minor_faults,
+            usage.major_faults,
+            usage.swaps,
+            usage.block_inputs,
+            usage.block_outputs,
+            usage.messages_sent,
+            usage.messages_received,
+            usage.signals,
+            usage.voluntary_switches,
+            usage.involuntary_switches,
+        ]
+        .into_iter()
+        .map(|value| Value::Num(value as f64))
+        .collect(),
+    ))
+}
+
+#[cfg(not(unix))]
+fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(ctx.make_array(vec![Value::Num(0.0); 14]))
 }
 
 fn op_cwd(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
@@ -495,8 +543,39 @@ fn op_getppid(_ctx: &mut Ctx, _t: Value, _a: &[Value]) -> Result<Value, Value> {
 /// in libc, which std already links into every Rust program, so no third-party dependency is added.
 #[cfg(unix)]
 mod ffi {
-    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::raw::{c_char, c_int, c_long, c_uint};
+
+    pub const RUSAGE_SELF: c_int = 0;
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct TimeVal {
+        pub sec: c_long,
+        pub usec: c_long,
+    }
+
+    #[repr(C)]
+    pub struct RUsage {
+        pub user: TimeVal,
+        pub system: TimeVal,
+        pub max_rss: c_long,
+        pub shared_memory: c_long,
+        pub unshared_data: c_long,
+        pub unshared_stack: c_long,
+        pub minor_faults: c_long,
+        pub major_faults: c_long,
+        pub swaps: c_long,
+        pub block_inputs: c_long,
+        pub block_outputs: c_long,
+        pub messages_sent: c_long,
+        pub messages_received: c_long,
+        pub signals: c_long,
+        pub voluntary_switches: c_long,
+        pub involuntary_switches: c_long,
+    }
+
     extern "C" {
+        pub fn getrusage(who: c_int, usage: *mut RUsage) -> c_int;
         pub fn getuid() -> c_uint;
         pub fn geteuid() -> c_uint;
         pub fn getgid() -> c_uint;

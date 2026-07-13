@@ -731,20 +731,28 @@ __builtins.set("sys", __builtins.get("util"));
   // Real state, no real source-map support yet: toggle the flag setSourceMapsEnabled reads back.
   proc.setSourceMapsEnabled = function (val) { proc.sourceMapsEnabled = !!val; };
 
-  // Honest zero-data metrics: lumen doesn't instrument memory/CPU, so these report 0 rather than
-  // fabricating figures. Shapes match Node so callers that destructure them don't crash.
-  const memoryUsage = () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
-  memoryUsage.rss = () => 0;
+  // Native OS process counters. Heap-specific fields stay zero until the engine exposes allocator
+  // accounting, while RSS/CPU/resource counters are real getrusage(2) measurements.
+  const metrics = () => proc._nativeMetrics();
+  const memoryUsage = () => ({ rss: metrics()[0], heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 });
+  memoryUsage.rss = () => metrics()[0];
   proc.memoryUsage = memoryUsage;
   proc.availableMemory = () => 0;
   proc.constrainedMemory = () => 0;
-  proc.cpuUsage = () => ({ user: 0, system: 0 });
-  proc.resourceUsage = () => ({
-    userCPUTime: 0, systemCPUTime: 0, maxRSS: 0, sharedMemorySize: 0, unsharedDataSize: 0,
-    unsharedStackSize: 0, minorPageFault: 0, majorPageFault: 0, swappedOut: 0, fsRead: 0,
-    fsWrite: 0, ipcSent: 0, ipcReceived: 0, signalsCount: 0, voluntaryContextSwitches: 0,
-    involuntaryContextSwitches: 0,
-  });
+  proc.cpuUsage = (previous) => {
+    const m = metrics();
+    const current = { user: m[2], system: m[3] };
+    return previous ? { user: current.user - previous.user, system: current.system - previous.system } : current;
+  };
+  proc.resourceUsage = () => {
+    const m = metrics();
+    return {
+      userCPUTime: m[2], systemCPUTime: m[3], maxRSS: m[1], sharedMemorySize: 0,
+      unsharedDataSize: 0, unsharedStackSize: 0, minorPageFault: m[4], majorPageFault: m[5],
+      swappedOut: m[6], fsRead: m[7], fsWrite: m[8], ipcSent: m[9], ipcReceived: m[10],
+      signalsCount: m[11], voluntaryContextSwitches: m[12], involuntaryContextSwitches: m[13],
+    };
+  };
   proc.getActiveResourcesInfo = () => [];
 
   // Honest build-feature booleans (false where lumen genuinely lacks the capability, e.g. tls).

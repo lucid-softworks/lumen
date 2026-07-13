@@ -214,6 +214,23 @@ fn process_basics() {
 }
 
 #[test]
+fn process_reports_native_cpu_and_memory_metrics() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const memory = process.memoryUsage();
+        const cpu = process.cpuUsage();
+        const resources = process.resourceUsage();
+        console.log(memory.rss > 0, process.memoryUsage.rss() > 0);
+        console.log(cpu.user >= 0, cpu.system >= 0, cpu.user + cpu.system > 0);
+        console.log(resources.maxRSS > 0, resources.userCPUTime >= 0, resources.minorPageFault >= 0);
+        "#,
+    );
+    assert_eq!(out.lines(), ["true true", "true true true", "true true true"]);
+}
+
+#[test]
 fn process_execve_validates_and_reports_os_errors() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(
