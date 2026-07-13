@@ -763,20 +763,80 @@ __builtins.set("sys", __builtins.get("util"));
 
   proc.release = { name: "node", lts: undefined, sourceUrl: "", headersUrl: "" };
 
-  // Node-shaped diagnostic-report namespace; lumen writes no reports, so the writers are stubs.
-  proc.report = {
+  // Diagnostic reports with live process/runtime data. Native stacks and libuv handles are not
+  // available, but the report is useful and writable rather than an empty compatibility shell.
+  const report = {
     compact: false, directory: "", filename: "", signal: "SIGUSR2",
     reportOnFatalError: false, reportOnSignal: false, reportOnUncaughtException: false,
     excludeEnv: false, excludeNetwork: false,
-    getReport: () => ({}),
-    writeReport: () => "",
+    getReport(error) {
+      const now = new Date();
+      const stack = error && error.stack ? String(error.stack).split("\n") : [];
+      return {
+        header: {
+          reportVersion: 5, event: error ? "Exception" : "JavaScript API", trigger: "GetReport",
+          filename: null, dumpEventTime: now.toISOString(), dumpEventTimeStamp: now.getTime(),
+          processId: proc.pid, cwd: proc.cwd(), commandLine: proc.argv.slice(),
+          nodejsVersion: proc.version, wordSize: proc.arch.includes("64") || proc.arch === "arm64" ? 64 : 32,
+          arch: proc.arch, platform: proc.platform, componentVersions: { ...proc.versions },
+        },
+        javascriptStack: { message: error ? String(error) : "No stack.", stack, errorProperties: {} },
+        javascriptHeap: proc.memoryUsage(), resourceUsage: proc.resourceUsage(),
+        environmentVariables: report.excludeEnv ? {} : { ...proc.env },
+        userLimits: {}, sharedObjects: [], workers: [],
+      };
+    },
+    writeReport(filename, error) {
+      if (filename instanceof Error && error === undefined) { error = filename; filename = undefined; }
+      let target = filename || report.filename;
+      if (!target) {
+        const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+        target = `report.${stamp}.${proc.pid}.0.001.json`;
+      }
+      if (report.directory && !String(target).includes("/") && !String(target).includes("\\")) {
+        target = __builtins.get("path").join(report.directory, String(target));
+      }
+      const data = report.getReport(error);
+      data.header.filename = String(target);
+      const json = JSON.stringify(data, null, report.compact ? 0 : 2);
+      __builtins.get("fs").writeFileSync(target, json + (report.compact ? "" : "\n"));
+      return String(target);
+    },
   };
+  proc.report = report;
 
   // lumen imposes no permission model, so every capability is genuinely permitted.
   proc.permission = { has: () => true };
 
-  // Honest no-ops: lumen has no exit-time finalization hooks to register against.
-  proc.finalization = { register: () => {}, registerBeforeExit: () => {}, unregister: () => {} };
+  const finalizationRecords = new WeakMap();
+  const finalizer = new FinalizationRegistry((record) => {
+    if (record.active) record.callback(record.reference.deref(), "exit");
+  });
+  const registerFinalizer = (ref, callback, beforeExit) => {
+    if ((typeof ref !== "object" && typeof ref !== "function") || ref === null) {
+      throw new TypeError('The "ref" argument must be an object');
+    }
+    if (typeof callback !== "function") throw new TypeError('The "callback" argument must be a function');
+    const old = finalizationRecords.get(ref);
+    if (old) old.active = false;
+    const record = { active: true, callback, reference: new WeakRef(ref) };
+    finalizationRecords.set(ref, record);
+    finalizer.register(ref, record, ref);
+    if (beforeExit) proc.once("beforeExit", () => {
+      if (record.active) callback(record.reference.deref(), "beforeExit");
+    });
+  };
+  proc.finalization = {
+    register: (ref, callback) => registerFinalizer(ref, callback, false),
+    registerBeforeExit: (ref, callback) => registerFinalizer(ref, callback, true),
+    unregister(ref) {
+      const record = finalizationRecords.get(ref);
+      if (!record) return false;
+      record.active = false;
+      finalizationRecords.delete(ref);
+      return finalizer.unregister(ref);
+    },
+  };
 
   // Modern Node throws for internal bindings; lumen exposes none.
   proc.binding = function (name) {

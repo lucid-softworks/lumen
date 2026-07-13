@@ -231,6 +231,35 @@ fn process_reports_native_cpu_and_memory_metrics() {
 }
 
 #[test]
+fn process_diagnostic_reports_and_finalization_are_functional() {
+    let dir = TempDir::new("process-report");
+    let report_path = dir.path("report.json");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const fs = require("node:fs");
+            const generated = process.report.getReport(new Error("boom"));
+            console.log(generated.header.processId === process.pid, generated.javascriptStack.message.includes("boom"));
+            console.log(process.report.writeReport({report_path:?}).endsWith("report.json"));
+            const saved = JSON.parse(fs.readFileSync({report_path:?}, "utf8"));
+            console.log(saved.header.processId === process.pid, saved.resourceUsage.maxRSS > 0);
+
+            const ref = {{ tag: 1 }};
+            process.finalization.registerBeforeExit(ref, (value, event) => console.log(value.tag, event));
+            process.emit("beforeExit");
+            console.log(process.finalization.unregister(ref));
+            "#,
+        ),
+    );
+    assert_eq!(
+        out.lines(),
+        ["true true", "true", "true true", "1 beforeExit", "true"]
+    );
+}
+
+#[test]
 fn process_execve_validates_and_reports_os_errors() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(
