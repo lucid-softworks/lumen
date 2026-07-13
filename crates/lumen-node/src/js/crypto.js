@@ -2136,6 +2136,10 @@ function generateEd25519() {
   const seed = Uint8Array.from(randomBytes(32));
   return { kind: "ed25519", seed, pub: ed25519PubFromSeed(seed) };
 }
+function generateX25519() {
+  const priv = Uint8Array.from(randomBytes(32));
+  return { kind: "x25519", priv, pub: x25519PubFromPriv(priv) };
+}
 function generateEc(options) {
   const C = curveByName(options && options.namedCurve);
   let d;
@@ -2145,6 +2149,7 @@ function generateEc(options) {
 function generateKeyPairStruct(type, options) {
   const t = String(type).toLowerCase();
   if (t === "ed25519") return generateEd25519();
+  if (t === "x25519") return generateX25519();
   if (t === "rsa") {
     if (!options || !Number.isInteger(options.modulusLength)) {
       throw new TypeError("options.modulusLength is required for RSA key generation");
@@ -2152,7 +2157,7 @@ function generateKeyPairStruct(type, options) {
     return generateRsa(options.modulusLength, options.publicExponent);
   }
   if (t === "ec") return generateEc(options);
-  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519, rsa, ec)`);
+  throw new Error(`generateKeyPair type '${type}' is not supported in lumen (ed25519, x25519, rsa, ec)`);
 }
 function generateKeyPairSync(type, options) {
   const pair = makeKeyPair(generateKeyPairStruct(type, options));

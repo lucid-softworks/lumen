@@ -59,3 +59,42 @@ fn p256_ecdh_matches_node_vector() {
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
     assert_eq!(text.lines().collect::<Vec<_>>(), ["curves [\"P-256\",\"prime256v1\",\"secp256r1\"]", "secret true true", "convert true true", "keyobjects true"]);
 }
+
+#[test]
+fn generated_x25519_keys_exchange_secrets_and_export() {
+    let mut rt = Runtime::new();
+    let out = Captured::default();
+    rt.engine().ctx().op_state().put(ConsoleOut {
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
+    });
+
+    let source = r#"
+      const c = require("node:crypto");
+      const a = c.generateKeyPairSync("x25519");
+      const b = c.generateKeyPairSync("x25519", {
+        publicKeyEncoding: { format: "jwk" },
+        privateKeyEncoding: { format: "jwk" },
+      });
+      const bPrivate = c.createPrivateKey({ key: b.privateKey, format: "jwk" });
+      const bPublic = c.createPublicKey({ key: b.publicKey, format: "jwk" });
+      const ab = c.diffieHellman({ privateKey: a.privateKey, publicKey: bPublic });
+      const ba = c.diffieHellman({ privateKey: bPrivate, publicKey: a.publicKey });
+      console.log("sync", ab.length, ab.equals(ba), b.publicKey.crv, b.privateKey.d.length > 0);
+
+      c.generateKeyPair("x25519", (error, publicKey, privateKey) => {
+        const secret = c.diffieHellman({ privateKey, publicKey: a.publicKey });
+        console.log("async", error === null, secret.length);
+      });
+    "#;
+
+    match rt.eval(source).expect("X25519 script parses") {
+        Completion::Value(_) => {}
+        Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
+    }
+    let text = String::from_utf8(out.0.borrow().clone()).unwrap();
+    assert_eq!(text.lines().collect::<Vec<_>>(), [
+        "sync 32 true X25519 true",
+        "async true 32",
+    ]);
+}
