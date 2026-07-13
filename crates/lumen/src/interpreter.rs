@@ -1196,7 +1196,7 @@ pub const MAX_LIVE: i64 = 3_000_000;
 /// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
 pub const GC_TRIGGER: i64 = 200_000;
 /// Scope-registry entry count that arms a registry prune.
-const SCOPE_GC_TRIGGER: usize = 250_000;
+const SCOPE_GC_TRIGGER: usize = 65_536;
 
 /// Memory safety valves. lumen has no garbage collector and several built-ins iterate/allocate in
 /// proportion to a user-controlled `length`, so without these a single adversarial test (e.g.
@@ -2031,12 +2031,14 @@ impl Interp {
 
     pub fn make_array(&self, items: Vec<Value>) -> Value {
         let obj = Object::new(Some(self.array_proto.clone()));
+        let len = items.len();
+        let numeric = items.iter().all(|v| matches!(v, Value::Num(_)));
         {
-            let b = obj.borrow_mut();
+            let mut b = obj.borrow_mut();
             b.props.mark_array();
+            b.props.reserve_dense_exact(len, numeric);
         }
         obj.borrow_mut().exotic = Exotic::Array;
-        let len = items.len();
         {
             let mut b = obj.borrow_mut();
             for v in items {

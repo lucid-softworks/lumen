@@ -958,6 +958,18 @@ impl Props {
         }
     }
 
+    /// Reserve the exact backing storage for a dense array whose initial length is known.
+    /// `entries` needs one additional slot for the array's own `length` property. Numeric arrays
+    /// also keep the raw-f64 mirror; object arrays invalidate it on their first element, so
+    /// reserving mirror storage for those would be pure waste.
+    pub(crate) fn reserve_dense_exact(&mut self, len: usize, numeric: bool) {
+        self.entries.reserve_exact(len.saturating_add(1));
+        self.elems.reserve_exact(len);
+        if numeric {
+            self.mirror.reserve_exact(len);
+        }
+    }
+
     /// Mark this map as an array's (see `elem_mode`). One-way, set when the owning object
     /// becomes `Exotic::Array`.
     #[inline]
@@ -1175,6 +1187,25 @@ impl Props {
         }
     }
 
+    /// Whether adding `key` should create the string-key hash index. Dense array elements already
+    /// have O(1) lookup through `elems`, so counting them toward the generic-map threshold creates
+    /// a redundant hash table for every modest-sized array. Only named properties count toward
+    /// the threshold on arrays; once an index exists we continue maintaining all of its entries.
+    fn should_build_index(&self, key: &str) -> bool {
+        if !self.elem_mode.get() {
+            return self.entries.len() + 1 > INDEX_THRESHOLD;
+        }
+        if canonical_index(key).is_some() {
+            return false;
+        }
+        self.entries
+            .iter()
+            .filter(|(k, _)| canonical_index(k).is_none())
+            .count()
+            + 1
+            > INDEX_THRESHOLD
+    }
+
     /// Dense tail append: insert element `n` when `n` is exactly the dense frontier and no
     /// map-only ("far") canonical key exists — which together prove the key is absent, so the
     /// whole existence scan and key-string hashing of [`Props::insert`] can be skipped. Array
@@ -1188,9 +1219,6 @@ impl Props {
         let slot = self.entries.len();
         let key = index_key(n as usize);
         if !self.index.is_empty() {
-            self.index.insert(key.clone(), slot);
-        } else if slot + 1 > INDEX_THRESHOLD {
-            self.build_index();
             self.index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
@@ -1345,9 +1373,6 @@ impl Props {
         let key = index_key(slot);
         if !self.index.is_empty() {
             self.index.insert(key.clone(), slot);
-        } else if slot + 1 > INDEX_THRESHOLD {
-            self.build_index();
-            self.index.insert(key.clone(), slot);
         }
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
@@ -1363,7 +1388,7 @@ impl Props {
         let slot = self.entries.len();
         if !self.index.is_empty() {
             self.index.insert(key.clone(), slot);
-        } else if slot + 1 > INDEX_THRESHOLD {
+        } else if self.should_build_index(&key) {
             self.build_index();
             self.index.insert(key.clone(), slot);
         }
@@ -1394,7 +1419,7 @@ impl Props {
             let slot = self.entries.len();
             if !self.index.is_empty() {
                 self.index.insert(key.clone(), slot);
-            } else if slot + 1 > INDEX_THRESHOLD {
+            } else if self.should_build_index(&key) {
                 self.build_index();
                 self.index.insert(key.clone(), slot);
             }
