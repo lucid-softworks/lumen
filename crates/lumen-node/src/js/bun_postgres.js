@@ -149,18 +149,26 @@
         else if (message.type === "Z") return;
       }
     }
-    query(text, params, mode) {
-      const run = async () => { await this.connect(); return this._query(text, params, mode); };
+    query(text, params, mode, simple = false) {
+      const run = async () => { await this.connect(); return this._query(text, params, mode, simple); };
       const result = this.tail ? this.tail.then(run, run) : run();
       this.tail = result.then(() => {}, () => {}); return result;
     }
-    async _query(text, params, mode) {
+    async _query(text, params, mode, simple) {
+      if (simple) {
+        if (params.length) { const error = new Error("PostgreSQL simple queries cannot use parameters"); error.code = "ERR_POSTGRES_INVALID_QUERY_BINDING"; throw error; }
+        await this._write(packet("Q", cstring(text)));
+        return this._readRows(mode);
+      }
       const parse = Buffer.concat([Buffer.from([0]), cstring(text), i16(0)]);
       const values = params.map(parameter), bindParts = [Buffer.from([0, 0]), i16(0), i16(values.length)];
       for (const value of values) bindParts.push(value === null ? Buffer.from([0xff, 0xff, 0xff, 0xff]) : Buffer.concat([i32(Buffer.byteLength(value)), Buffer.from(value)]));
       bindParts.push(i16(0));
       const describe = Buffer.from([80, 0]), execute = Buffer.concat([Buffer.from([0]), i32(0)]);
       await this._write(Buffer.concat([packet("P", parse), packet("B", Buffer.concat(bindParts)), packet("D", describe), packet("E", execute), packet("S")]));
+      return this._readRows(mode);
+    }
+    async _readRows(mode) {
       let columns = [], rows = [], command = "", error;
       for (;;) {
         const message = await this._next();

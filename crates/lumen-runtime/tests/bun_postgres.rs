@@ -76,6 +76,8 @@ fn postgres_adapter_uses_extended_protocol_and_decodes_rows() {
         let mut row = Vec::new(); row.extend_from_slice(&3u16.to_be_bytes());
         for value in [b"42".as_slice(), b"Alice", b"t"] { row.extend_from_slice(&(value.len() as u32).to_be_bytes()); row.extend_from_slice(value); }
         send(&mut stream, b'D', &row); send(&mut stream, b'C', b"SELECT 1\0"); send(&mut stream, b'Z', b"I");
+        let (kind, query) = message(&mut stream); assert_eq!(kind, b'Q'); assert_eq!(&query[..query.len() - 1], b"SELECT 1; SELECT 2");
+        send(&mut stream, b'C', b"SELECT 1\0"); send(&mut stream, b'C', b"SELECT 1\0"); send(&mut stream, b'Z', b"I");
         assert_eq!(message(&mut stream).0, b'X');
     });
 
@@ -87,6 +89,8 @@ fn postgres_adapter_uses_extended_protocol_and_decodes_rows() {
         const sql = Bun.SQL("postgres://user:password@127.0.0.1:{port}/database?sslmode=disable");
         const rows = await sql`SELECT ${{42}}::int4 AS id, ${{"Alice"}}::text AS name, ${{true}}::bool AS active`;
         console.log("row", JSON.stringify(rows[0]), rows.command, rows.count);
+        const simple = await sql.unsafe("SELECT 1; SELECT 2").simple();
+        console.log("simple", simple.command, simple.count);
         await sql.close();
       }})();
     "#);
@@ -95,7 +99,7 @@ fn postgres_adapter_uses_extended_protocol_and_decodes_rows() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     peer.join().unwrap();
-    assert_eq!(String::from_utf8(out.0.borrow().clone()).unwrap().trim(), "row {\"id\":42,\"name\":\"Alice\",\"active\":true} SELECT 1");
+    assert_eq!(String::from_utf8(out.0.borrow().clone()).unwrap().trim(), "row {\"id\":42,\"name\":\"Alice\",\"active\":true} SELECT 1\nsimple SELECT 1");
 }
 
 #[test]

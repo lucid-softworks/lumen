@@ -5,7 +5,7 @@
   class SQLQuery {
     constructor(client, strings, values, unsafe = false) {
       this.client = client; this.strings = strings; this._values = values; this.unsafeQuery = unsafe;
-      this._promise = null; this._mode = "objects";
+      this._promise = null; this._mode = "objects"; this._simple = false;
     }
     _compile() {
       if (this.unsafeQuery) return { text: String(this.strings), params: this._values || [] };
@@ -24,14 +24,14 @@
       return { text, params };
     }
     _run() {
-      if (!this._promise) this._promise = Promise.resolve().then(() => this.client._execute(this._compile(), this._mode));
+      if (!this._promise) this._promise = Promise.resolve().then(() => this.client._execute(this._compile(), this._mode, this._simple));
       return this._promise;
     }
     execute() { this._run(); return this; }
     cancel() { return false; }
     values() { this._mode = "values"; return this; }
     raw() { return this.values(); }
-    simple() { return this; }
+    simple() { this._simple = true; return this; }
     then(resolve, reject) { return this._run().then(resolve, reject); }
     catch(reject) { return this._run().catch(reject); }
     finally(callback) { return this._run().finally(callback); }
@@ -128,11 +128,11 @@
     Object.setPrototypeOf(sql, SQL.prototype);
     sql.options = { ...options, adapter: "postgres" };
     sql._closed = false;
-    sql._execute = (compiled, mode) => {
+    sql._execute = (compiled, mode, simple) => {
       if (sql._closed) throw new Error("SQL client is closed");
       let index = 0;
       const text = compiled.text.replace(/\x01/g, () => `$${++index}`);
-      return connection.query(text, compiled.params, mode);
+      return connection.query(text, compiled.params, mode, simple);
     };
     sql.unsafe = (text, params = []) => new SQLQuery(sql, String(text), params, true);
     sql.array = values => fragment(Array.from(values), []);
