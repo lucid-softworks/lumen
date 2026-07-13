@@ -1451,6 +1451,7 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(match op { Op::SetPropDrop(n, _) => *n, _ => unreachable!() }),
                     pc as u32,
                     l_unwind,
                     PropRecv::Stack,
@@ -1465,6 +1466,7 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(match op { Op::SetPropThisDrop(n, _) => *n, _ => unreachable!() }),
                     pc as u32,
                     l_unwind,
                     PropRecv::This,
@@ -1480,6 +1482,7 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_name(match op { Op::SetPropLocalDrop(_, n, _) => *n, _ => unreachable!() }),
                     pc as u32,
                     l_unwind,
                     PropRecv::Slot(*s as u32 * 16),
@@ -3173,7 +3176,21 @@ fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// in-place defineProperty can flip attributes without changing the shape).
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
-    get_prop_inlinable(layout) && layout.entry_writable < 4096
+    let cap = layout.obj_props + layout.props_entries + layout.vec_cap_off;
+    get_prop_inlinable(layout)
+        && layout.entry_writable < 256
+        && layout.entry_accessor < 256
+        && layout.obj_extensible < 4096
+        && layout.obj_proto.is_multiple_of(8)
+        && layout.obj_proto / 8 < 4096
+        && layout.obj_props + layout.props_proto_flag < 4096
+        && layout.props_elems.is_multiple_of(8)
+        && layout.props_elems / 8 < 4096
+        && cap.is_multiple_of(8)
+        && cap / 8 < 4096
+        && layout.gc_data_off < 4096
+        && layout.entry_key + layout.str_ptr_word < 256
+        && layout.entry_key + layout.str_len_word < 256
 }
 
 /// Inline `this.x++` / `--` (`UpdateProp`): the read and the write both target the cached own
@@ -3509,6 +3526,7 @@ fn emit_set_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
     cache_ptr: usize,
+    name: &str,
     pc: u32,
     l_unwind: usize,
     recv: PropRecv,
@@ -3563,6 +3581,172 @@ fn emit_set_prop_inline(
     a.b_cond(C_NE, slow);
     a.ldrb_imm(9, 11, plain);
     a.cbz(9, false, slow);
+    // Creation IC: constructors repeatedly assign a named field to a fresh receiver whose map
+    // lacks it. Reuse the checked path's shape/epoch/prototype proof and append directly into
+    // already-reserved Vec capacity. Small named-only maps have no index/dense sidecar, so the
+    // append has no secondary structure to maintain and performs no allocation.
+    if layout.key_probe_ok
+        && !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name != "length"
+        && name != "prototype"
+    {
+        use crate::bytecode::{IC_CREATE, IC_OFF_HOLDER_SHAPE, IC_OFF_MID2_SHAPE, IC_OFF_MID_SHAPE};
+        let not_create = a.new_label();
+        let proto_ready = a.new_label();
+        let create_commit = a.new_label();
+        a.mov_imm64(12, cache_ptr as u64);
+        a.ldrb_imm(9, 12, IC_OFF_DEPTH);
+        a.cmp_imm_w(9, IC_CREATE as u32);
+        a.b_cond(C_NE, not_create);
+        a.ldr_w_imm(13, 11, sh);
+        a.ldr_w_imm(14, 12, IC_OFF_RECV_SHAPE);
+        a.cmp_reg_w(13, 14);
+        a.b_cond(C_NE, not_create);
+        // The receiver must remain extensible and unmarked as a prototype. The latter means
+        // append_new's note_structural would be a no-op, so no epoch bump is being skipped.
+        a.ldrb_imm(9, 11, layout.obj_extensible as u32);
+        a.cbz(9, false, not_create);
+        a.ldrb_imm(
+            9,
+            11,
+            (layout.obj_props + layout.props_proto_flag) as u32,
+        );
+        a.cbnz(9, false, not_create);
+        // Named-only small map: no DenseStorage sidecar/index, <=8 entries, and spare capacity.
+        a.ldr_imm(9, 11, (layout.obj_props + layout.props_elems) as u32);
+        a.cbnz(9, true, not_create);
+        let len_off = (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32;
+        let cap_off = (layout.obj_props + layout.props_entries + layout.vec_cap_off) as u32;
+        a.ldr_imm(13, 11, len_off);
+        a.cmp_imm_x(13, 8);
+        a.b_cond(C_HS, not_create);
+        a.ldr_imm(14, 11, cap_off);
+        a.cmp_reg_x(13, 14);
+        a.b_cond(C_HS, not_create);
+        // Same live global epoch recorded by the fill; saturation is never cacheable.
+        a.mov_imm64(16, crate::value::proto_epoch_ptr() as usize as u64);
+        a.ldr_w_imm(16, 16, 0);
+        a.ldr_w_imm(17, 12, IC_OFF_MID_SHAPE);
+        a.cmp_reg_w(16, 17);
+        a.b_cond(C_NE, not_create);
+        a.mov_imm64(9, u32::MAX as u64);
+        a.cmp_reg_w(16, 9);
+        a.b_cond(C_EQ, not_create);
+        // Cache stores Rc::as_ptr(proto); Object::proto stores the RcBox pointer. Convert the
+        // latter by the runtime-probed header size before comparing identity.
+        a.ldr_w_imm(14, 12, IC_OFF_SLOT);
+        a.ldr_w_imm(15, 12, IC_OFF_MID2_SHAPE);
+        a.lsl_imm(15, 15, 32);
+        a.logic_x(1, 14, 14, 15);
+        a.ldr_imm(16, 11, layout.obj_proto as u32);
+        a.cbz(16, true, proto_ready);
+        a.add_imm(16, 16, layout.gc_data_off as u32);
+        a.bind(proto_ready);
+        a.cmp_reg_x(14, 16);
+        a.b_cond(C_NE, not_create);
+        // BigInt packing owns compound storage; keep it on the checked path. All other Value
+        // variants can transfer their stack ownership directly into one packed word.
+        a.ldurb(9, 20, -16);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, not_create);
+        a.b(create_commit);
+
+        a.bind(create_commit);
+        // From here no branch can fail: compute the vacant entry and pack the incoming value.
+        a.ldr_imm(15, 11, en);
+        a.mov_imm64(16, es);
+        a.madd(15, 13, 16, 15);
+        a.ldur(16, 20, -8);
+        let packed = a.new_label();
+        let is_undefined = a.new_label();
+        let is_empty = a.new_label();
+        let is_null = a.new_label();
+        let is_bool = a.new_label();
+        let is_str = a.new_label();
+        let is_sym = a.new_label();
+        let is_obj = a.new_label();
+        for (tag, label) in [
+            (0, is_undefined),
+            (1, is_empty),
+            (2, is_null),
+            (3, is_bool),
+            (6, is_str),
+            (7, is_sym),
+            (8, is_obj),
+        ] {
+            a.cmp_imm_w(9, tag);
+            a.b_cond(C_EQ, label);
+        }
+        a.b(packed); // Number payload is already its packed representation.
+        for (label, bits) in [
+            (is_undefined, crate::value::PACK_UNDEFINED),
+            (is_empty, crate::value::PACK_EMPTY),
+            (is_null, crate::value::PACK_NULL),
+        ] {
+            a.bind(label);
+            a.mov_imm64(16, bits);
+            a.b(packed);
+        }
+        a.bind(is_bool);
+        a.ldurb(16, 20, -15);
+        a.mov_imm64(14, crate::value::PACK_BOOL);
+        a.logic_x(1, 16, 16, 14);
+        a.b(packed);
+        for (label, bits) in [
+            (is_str, crate::value::PACK_STR),
+            (is_sym, crate::value::PACK_SYM),
+            (is_obj, crate::value::PACK_OBJ),
+        ] {
+            a.bind(label);
+            a.mov_imm64(14, bits);
+            a.logic_x(1, 16, 16, 14);
+            a.b(packed);
+        }
+        a.bind(packed);
+        // Clone the site's pinned Rc<str> into the tuple entry, then install Property::plain.
+        let key_stored = name.as_ptr() as usize - layout.str_data_off;
+        a.mov_imm64(17, key_stored as u64);
+        a.ldur(14, 17, strong);
+        a.add_imm(14, 14, 1);
+        a.stur(14, 17, strong);
+        a.stur(
+            17,
+            15,
+            (layout.entry_key + layout.str_ptr_word) as i32,
+        );
+        a.mov_imm64(14, name.len() as u64);
+        a.stur(
+            14,
+            15,
+            (layout.entry_key + layout.str_len_word) as i32,
+        );
+        a.stur(16, 15, ev);
+        a.movz(
+            14,
+            (crate::value::PROP_WRITABLE
+                | crate::value::PROP_ENUMERABLE
+                | crate::value::PROP_CONFIGURABLE) as u32,
+            0,
+        );
+        a.stur(14, 15, ea as i32);
+        // Publish the entry by updating shape then length. No allocation or side structure is
+        // touched; the stack Value's refcounted payload ownership moved into the packed slot.
+        a.ldr_w_imm(14, 12, IC_OFF_HOLDER_SHAPE);
+        a.str_w_imm(14, 11, sh);
+        a.add_imm(13, 13, 1);
+        a.str_imm(13, 11, len_off);
+        if matches!(recv, PropRecv::Stack) {
+            a.ldur(9, 10, strong);
+            a.sub_imm(9, 9, 1);
+            a.stur(9, 10, strong);
+            a.sub_imm(20, 20, 32);
+        } else {
+            a.sub_imm(20, 20, 16);
+        }
+        a.b(done);
+        a.bind(not_create);
+    }
     // 3-8 per way (sites allocate PROP_IC_WAYS consecutive cells; the Rust fast path probes
     // all of them, so the template must too or a rotating store site helper-calls forever):
     // depth 0, shape match, slot bounds, data+writable, old-value droppability. Guard misses

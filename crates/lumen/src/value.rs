@@ -199,13 +199,17 @@ pub struct JitLayout {
     pub obj_props: usize,
     pub obj_exotic: usize,
     pub obj_is_constructor: usize,
+    pub obj_extensible: usize,
     pub props_shape: usize,
+    pub props_proto_flag: usize,
     /// The `entries` `Vec` within `Props`.
     pub props_entries: usize,
     /// The data-pointer word within a `Vec` (not necessarily offset 0 — RawVec layout is unstable).
     pub vec_ptr_off: usize,
     /// The length word within a `Vec` (probed like `vec_ptr_off`).
     pub vec_len_off: usize,
+    /// The capacity word within a `Vec` (probed alongside pointer and length).
+    pub vec_cap_off: usize,
     /// The nullable pointer to the shared boxed dense-buffer headers within `Props`.
     pub props_elems: usize,
     /// The `elems` Vec header within the shared dense-buffer allocation.
@@ -303,6 +307,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     };
     let vec_ptr_off = vwords.iter().position(|&w| w == vptr).map(|i| i * 8);
     let vec_len_off = vwords.iter().position(|&w| w == 1).map(|i| i * 8);
+    let vec_cap_off = vwords.iter().position(|&w| w == 3).map(|i| i * 8);
     // The element templates index a `Vec<u32>` (`Props::elems`) with the same offsets; verify the
     // layout really is per-Vec-struct, not per-element-type.
     let mut v32: Vec<u32> = Vec::with_capacity(3);
@@ -315,7 +320,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         )
     };
     let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
-        && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
+        && vec_len_off.is_some_and(|o| v32words[o / 8] == 1)
+        && vec_cap_off.is_some_and(|o| v32words[o / 8] == 3);
 
     // DenseStorage is deliberately a transparent nullable pointer to boxed buffer headers. The
     // JIT first follows this pointer and then uses the probed Vec offsets above. Verify the niche
@@ -353,6 +359,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         && niche_ok
         && vec_ptr_off.is_some()
         && vec_len_off.is_some()
+        && vec_cap_off.is_some()
         && vec32_ok
         && thin_vec_ok;
     JitLayout {
@@ -364,10 +371,13 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         obj_props: offset_of!(Object, props),
         obj_exotic: offset_of!(Object, exotic),
         obj_is_constructor: offset_of!(Object, is_constructor),
+        obj_extensible: offset_of!(Object, extensible),
         props_shape: offset_of!(Props, shape),
+        props_proto_flag: offset_of!(Props, proto_flag),
         props_entries: offset_of!(Props, entries),
         vec_ptr_off: vec_ptr_off.unwrap_or(0),
         vec_len_off: vec_len_off.unwrap_or(0),
+        vec_cap_off: vec_cap_off.unwrap_or(0),
         props_elems: offset_of!(Props, elems),
         dense_elems: offset_of!(DenseBuffers, elems),
         dense_mirror: offset_of!(DenseBuffers, mirror),
@@ -1257,6 +1267,12 @@ static PROTO_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 #[inline]
 pub(crate) fn proto_epoch() -> u32 {
     PROTO_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Stable address used by the ARM64 creation-IC template for the same relaxed epoch check.
+#[inline]
+pub(crate) fn proto_epoch_ptr() -> *const u32 {
+    PROTO_EPOCH.as_ptr()
 }
 
 /// Invalidate every property-creation inline cache (see [`PROTO_EPOCH`]).

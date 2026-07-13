@@ -167,6 +167,34 @@ fn instanceof_default_intrinsic_and_override() {
 }
 
 #[test]
+fn jit_constructor_creation_cache_deopts_on_prototype_changes() {
+    assert_eq!(
+        run_jit(
+            "function C(v){ this.x=v; this.y={v:v}; }
+             var last;
+             for(var i=0;i<1000;i++) last=new C(i);
+             var order=Object.keys(last).join(',');
+             var hits=0, p={set x(v){hits+=v;}};
+             C.prototype=p;
+             var changed=new C(7);
+             [last.x,last.y.v,order,hits,Object.hasOwn(changed,'x'),changed.y.v].join(':')"
+        ),
+        "999:999:x,y:7:false:7"
+    );
+    assert_eq!(
+        run_jit(
+            "function C(v){this.x=v;}
+             for(var i=0;i<1000;i++) new C(i);
+             var hits=0;
+             Object.defineProperty(C.prototype,'x',{set:function(v){hits+=v;},configurable:true});
+             var o=new C(9);
+             hits+':'+Object.hasOwn(o,'x')"
+        ),
+        "9:false"
+    );
+}
+
+#[test]
 fn class_methods_non_enumerable() {
     assert_eq!(run("class C { m(){} } Object.keys(new C()).length"), "0");
     assert_eq!(run("class C { get x(){ return 8; } } new C().x"), "8");
