@@ -325,7 +325,23 @@ pub struct Scope {
     /// Names declared *lexically* at this scope's own level (let/const/using/class). A function
     /// body scope holds both hoisted vars and body-level lexicals; a sloppy direct eval's
     /// var/lexical conflict check needs to tell them apart.
-    pub lexical_names: Vec<String>,
+    pub lexical_names: ScopeNames,
+}
+
+/// Lexical-name bookkeeping is only populated by direct eval, but every call allocates a scope.
+/// Keep the common empty case to one nullable pointer and materialize the Vec on first use.
+#[derive(Default)]
+#[repr(transparent)]
+pub struct ScopeNames(Option<Box<Vec<String>>>);
+
+impl ScopeNames {
+    pub fn push(&mut self, name: String) {
+        self.0.get_or_insert_with(Default::default).push(name);
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.0.as_deref().map_or(&[][..], Vec::as_slice).iter()
+    }
 }
 
 #[derive(Clone)]
@@ -414,7 +430,7 @@ pub fn new_scope(parent: Option<Env>) -> Env {
         under_with,
         var_boundary: false,
         catch_param: false,
-        lexical_names: Vec::new(),
+        lexical_names: ScopeNames::default(),
     }));
     register_scope(&e);
     e
@@ -433,7 +449,7 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
         under_with,
         var_boundary: true,
         catch_param: false,
-        lexical_names: Vec::new(),
+        lexical_names: ScopeNames::default(),
     }));
     register_scope(&e);
     e
@@ -450,7 +466,7 @@ pub fn new_catch_scope(parent: Env) -> Env {
         under_with,
         var_boundary: false,
         catch_param: true,
-        lexical_names: Vec::new(),
+        lexical_names: ScopeNames::default(),
     }));
     register_scope(&e);
     e
@@ -465,7 +481,7 @@ pub fn new_with_scope(parent: Env, obj: Value) -> Env {
         under_with: true,
         var_boundary: false,
         catch_param: false,
-        lexical_names: Vec::new(),
+        lexical_names: ScopeNames::default(),
     }));
     register_scope(&e);
     e

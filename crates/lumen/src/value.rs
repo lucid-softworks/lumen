@@ -79,9 +79,9 @@ pub struct JitLayout {
     pub vec_ptr_off: usize,
     /// The length word within a `Vec` (probed like `vec_ptr_off`).
     pub vec_len_off: usize,
-    /// The `elems` dense-element `Vec<u32>` within `Props`.
+    /// The nullable pointer to the boxed `elems` dense-element `Vec<u32>` within `Props`.
     pub props_elems: usize,
-    /// The `mirror` raw-f64 element `Vec` within `Props` (see [`Props::mirror`]).
+    /// The nullable pointer to the boxed `mirror` raw-f64 element `Vec` within `Props`.
     pub props_mirror: usize,
     /// The `mirror_flags` byte within `Props`.
     pub props_mirror_flags: usize,
@@ -189,6 +189,16 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let vec32_ok = vec_ptr_off.is_some_and(|o| v32words[o / 8] == v32ptr)
         && vec_len_off.is_some_and(|o| v32words[o / 8] == 1);
 
+    // ThinVec is deliberately a transparent nullable pointer to a boxed Vec. The JIT first
+    // follows this pointer and then uses the probed Vec offsets above. Verify the niche rather
+    // than relying on it silently if a future compiler changes the representation.
+    let thin_some = ThinVec(Some(Box::new(vec![7u32])));
+    let thin_word = unsafe { *(&thin_some as *const ThinVec<u32> as *const usize) };
+    let thin_expected = thin_some.0.as_deref().unwrap() as *const Vec<u32> as usize;
+    let thin_none: ThinVec<u32> = ThinVec(None);
+    let thin_none_word = unsafe { *(&thin_none as *const ThinVec<u32> as *const usize) };
+    let thin_vec_ok = thin_word == thin_expected && thin_none_word == 0;
+
     // Exotic::None / Exotic::Array discriminants (Exotic is repr(Rust); probe to be certain).
     let none = Exotic::None;
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
@@ -211,7 +221,12 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let binding_value = offset_of!(crate::interpreter::Binding, value);
     let binding_init = offset_of!(crate::interpreter::Binding, initialized);
 
-    let valid = strong_ok && niche_ok && vec_ptr_off.is_some() && vec_len_off.is_some() && vec32_ok;
+    let valid = strong_ok
+        && niche_ok
+        && vec_ptr_off.is_some()
+        && vec_len_off.is_some()
+        && vec32_ok
+        && thin_vec_ok;
     JitLayout {
         obj_from_rc,
         gc_data_off,
@@ -827,6 +842,64 @@ impl Property {
 
 /// Insertion-ordered string-keyed property map. A `Vec` of entries preserves order (good enough for
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
+#[derive(Clone, Default)]
+#[repr(transparent)]
+struct ThinVec<T>(Option<Box<Vec<T>>>);
+
+impl<T> ThinVec<T> {
+    #[inline]
+    fn vec_mut(&mut self) -> &mut Vec<T> {
+        self.0.get_or_insert_with(|| Box::new(Vec::new()))
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.as_deref().map_or(0, Vec::len)
+    }
+    #[inline]
+    fn get(&self, index: usize) -> Option<&T> {
+        self.0.as_deref().and_then(|v| v.get(index))
+    }
+    #[inline]
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.0.as_deref_mut().and_then(|v| v.get_mut(index))
+    }
+    fn reserve_exact(&mut self, additional: usize) {
+        if additional != 0 {
+            self.vec_mut().reserve_exact(additional);
+        }
+    }
+    #[inline]
+    fn push(&mut self, value: T) {
+        self.vec_mut().push(value);
+    }
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        self.0.as_deref_mut().and_then(Vec::pop)
+    }
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.vec_mut().iter_mut()
+    }
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.vec_mut().extend(iter);
+    }
+}
+
+impl<T> std::ops::Index<usize> for ThinVec<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        self.get(index).expect("ThinVec index out of bounds")
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for ThinVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        self.get_mut(index).expect("ThinVec index out of bounds")
+    }
+}
+
 #[derive(Clone)]
 pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
@@ -853,7 +926,7 @@ pub struct Props {
     /// `NO_SLOT`. Maintained for a (near-)contiguous prefix from 0 — a canonical key far past the
     /// dense frontier lives only in `index` (see `note_inserted`). This is what makes `a[i]`
     /// O(1) without hashing or stringifying the index (see `get_index`).
-    elems: Vec<u32>,
+    elems: ThinVec<u32>,
     /// Raw-f64 read mirror of the dense elements. While `mirror_flags & MIRROR_OK`:
     /// `mirror.len() == elems.len()`, and for every `n`: `mirror[n]` is [`MIRROR_HOLE`] exactly
     /// when `elems[n]` names no element, else the element is a plain writable data property
@@ -862,7 +935,7 @@ pub struct Props {
     /// entirely. Entries stay authoritative: fast writers dual-store through
     /// [`Props::set_index_value`]; any foreign `&mut` escape (`get_index_mut`, `get_mut` /
     /// `entry_at_mut` on an index key) invalidates the mirror instead of tracking it.
-    mirror: Vec<f64>,
+    mirror: ThinVec<f64>,
     /// [`MIRROR_OK`] | [`MIRROR_ALL_I32`] | [`MIRROR_NO_HOLES`].
     mirror_flags: u8,
     /// Live hole count in `mirror` (descending array fills pad with holes and then fill them:
@@ -1062,8 +1135,8 @@ impl Props {
             index: None,
             packed: None,
             shape: SHAPE_EMPTY,
-            elems: Vec::new(),
-            mirror: Vec::new(),
+            elems: ThinVec::default(),
+            mirror: ThinVec::default(),
             mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,
             mirror_holes: 0,
             proto_flag: std::cell::Cell::new(false),
@@ -1168,7 +1241,7 @@ impl Props {
     pub(crate) fn mirror_invalidate(&mut self) {
         if self.mirror_flags & MIRROR_OK != 0 {
             self.mirror_flags = 0;
-            self.mirror = Vec::new();
+            self.mirror = ThinVec::default();
         }
     }
 

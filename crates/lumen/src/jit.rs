@@ -3840,13 +3840,12 @@ fn emit_name_ic_value_ptr(
 /// writable-flag offsets the element templates bake in.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
-    let elp = layout.obj_props + layout.props_elems + layout.vec_ptr_off;
-    let ell = layout.obj_props + layout.props_elems + layout.vec_len_off;
+    let elems = layout.obj_props + layout.props_elems;
+    let mirror = layout.obj_props + layout.props_mirror;
     get_prop_inlinable(layout)
-        && elp.is_multiple_of(8)
-        && elp / 8 < 4096
-        && ell.is_multiple_of(8)
-        && ell / 8 < 4096
+        && [elems, mirror, layout.vec_ptr_off, layout.vec_len_off]
+            .into_iter()
+            .all(|off| off.is_multiple_of(8) && off / 8 < 4096)
         && layout.entry_writable < 4096
 }
 
@@ -3866,8 +3865,9 @@ fn emit_get_elem_inline(
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
-    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
-    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let el = (layout.obj_props + layout.props_elems) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
@@ -3912,8 +3912,7 @@ fn emit_get_elem_inline(
     let classic = a.new_label();
     let mirror_hit = a.new_label();
     let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
-    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
-    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let mirror = (layout.obj_props + layout.props_mirror) as u32;
     a.ldrb_imm(12, 11, mf);
     let mask = asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
         .unwrap();
@@ -3923,10 +3922,12 @@ fn emit_get_elem_inline(
         (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
     );
     a.b_cond(C_NE, classic);
-    a.ldr_imm(12, 11, ml);
-    a.cmp_reg_x(9, 12);
+    a.ldr_imm(12, 11, mirror);
+    a.cbz(12, true, classic);
+    a.ldr_imm(14, 12, vl);
+    a.cmp_reg_x(9, 14);
     a.b_cond(C_HS, classic);
-    a.ldr_imm(12, 11, mp);
+    a.ldr_imm(12, 12, vp);
     a.ldr_d_lsl3(0, 12, 9);
     a.movz(12, 4, 0);
     a.fmov_x_d(13, 0);
@@ -3934,11 +3935,13 @@ fn emit_get_elem_inline(
     a.b(mirror_hit); // a Num: skip the refcount-bump block
     a.bind(classic);
     // 5b. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
-    a.ldr_imm(12, 11, ell);
-    a.cmp_reg_x(9, 12);
+    a.ldr_imm(12, 11, el);
+    a.cbz(12, true, slow);
+    a.ldr_imm(14, 12, vl);
+    a.cmp_reg_x(9, 14);
     a.b_cond(C_HS, slow);
     // 6. slot = elems[n]; NO_SLOT (0xFFFF_FFFF) = hole → slow
-    a.ldr_imm(12, 11, elp);
+    a.ldr_imm(12, 12, vp);
     a.add_shifted(12, 12, 9, 2);
     a.ldr_w_imm(13, 12, 0);
     a.cmn_imm_w(13, 1);
@@ -4022,8 +4025,9 @@ fn emit_mirror_store(
     val: MirrorVal,
 ) {
     let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
-    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
-    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let mirror = (layout.obj_props + layout.props_mirror) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let done = a.new_label();
     let inval = a.new_label();
     a.ldrb_imm(13, base, mf);
@@ -4077,10 +4081,12 @@ fn emit_mirror_store(
         MirrorKey::Const(n) => a.mov_imm64(9, n as u64),
     }
     // Insurance bounds check, then the store.
-    a.ldr_imm(12, base, ml);
-    a.cmp_reg_x(9, 12);
+    a.ldr_imm(12, base, mirror);
+    a.cbz(12, true, inval);
+    a.ldr_imm(13, 12, vl);
+    a.cmp_reg_x(9, 13);
     a.b_cond(C_HS, inval);
-    a.ldr_imm(12, base, mp);
+    a.ldr_imm(12, 12, vp);
     a.add_shifted(12, 12, 9, 3);
     a.str_d_imm(dv, 12, 0);
     a.b(done);
@@ -4100,8 +4106,9 @@ fn emit_set_elem_inline(
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
-    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
-    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let el = (layout.obj_props + layout.props_elems) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
@@ -4149,11 +4156,13 @@ fn emit_set_elem_inline(
     a.ldrb_imm(12, 11, plain);
     a.cbz(12, false, slow);
     // 5. dense bounds
-    a.ldr_imm(12, 11, ell);
-    a.cmp_reg_x(9, 12);
+    a.ldr_imm(12, 11, el);
+    a.cbz(12, true, slow);
+    a.ldr_imm(14, 12, vl);
+    a.cmp_reg_x(9, 14);
     a.b_cond(C_HS, slow);
     // 6. slot = elems[n]; hole → slow
-    a.ldr_imm(12, 11, elp);
+    a.ldr_imm(12, 12, vp);
     a.add_shifted(12, 12, 9, 2);
     a.ldr_w_imm(13, 12, 0);
     a.cmn_imm_w(13, 1);
@@ -4295,8 +4304,9 @@ fn emit_elem_local_keyed(
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
-    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
-    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let el = (layout.obj_props + layout.props_elems) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
@@ -4361,8 +4371,7 @@ fn emit_elem_local_keyed(
     if get {
         // 5. mirror read: bounds + one indexed load of a known Num (see emit_get_elem_inline).
         let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
-        let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
-        let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+        let mirror = (layout.obj_props + layout.props_mirror) as u32;
         a.ldrb_imm(12, 11, mf);
         let mask =
             asm::logical_imm_w((crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32)
@@ -4373,10 +4382,12 @@ fn emit_elem_local_keyed(
             (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
         );
         a.b_cond(C_NE, classic);
-        a.ldr_imm(12, 11, ml);
-        a.cmp_reg_x(9, 12);
+        a.ldr_imm(12, 11, mirror);
+        a.cbz(12, true, classic);
+        a.ldr_imm(14, 12, vl);
+        a.cmp_reg_x(9, 14);
         a.b_cond(C_HS, classic);
-        a.ldr_imm(12, 11, mp);
+        a.ldr_imm(12, 12, vp);
         a.ldr_d_lsl3(1, 12, 9);
         a.movz(12, 4, 0);
         a.fmov_x_d(13, 1);
@@ -4385,11 +4396,13 @@ fn emit_elem_local_keyed(
     }
     a.bind(classic);
     // 5b. dense bounds
-    a.ldr_imm(12, 11, ell);
-    a.cmp_reg_x(9, 12);
+    a.ldr_imm(12, 11, el);
+    a.cbz(12, true, slow);
+    a.ldr_imm(14, 12, vl);
+    a.cmp_reg_x(9, 14);
     a.b_cond(C_HS, slow);
     // 6. slot = elems[n]; hole → slow
-    a.ldr_imm(12, 11, elp);
+    a.ldr_imm(12, 12, vp);
     a.add_shifted(12, 12, 9, 2);
     a.ldr_w_imm(13, 12, 0);
     a.cmn_imm_w(13, 1);
@@ -4740,13 +4753,13 @@ fn emit_chain(
     l_unwind: usize,
 ) {
     let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
-    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
-    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let mirror = (layout.obj_props + layout.props_mirror) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
-    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
-    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let el = (layout.obj_props + layout.props_elems) as u32;
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
@@ -4920,8 +4933,10 @@ fn emit_chain(
                                 (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
                             );
                             a.b_cond(C_NE, guard!());
-                            a.ldr_imm(mpreg, 11, mp);
-                            a.ldr_imm(mlreg, 11, ml);
+                            a.ldr_imm(12, 11, mirror);
+                            a.cbz(12, true, guard!());
+                            a.ldr_imm(mpreg, 12, vp);
+                            a.ldr_imm(mlreg, 12, vl);
                             rcache.push(RcEnt {
                                 off: xoff,
                                 base,
@@ -4951,7 +4966,9 @@ fn emit_chain(
                         a.ldr_d_lsl3(dk, mpreg, 9);
                         vregs.push((dk, false));
                     } else {
-                        a.ldr_imm(12, 11, elp);
+                        a.ldr_imm(12, 11, el);
+                        a.cbz(12, true, guard!());
+                        a.ldr_imm(12, 12, vp);
                         a.add_shifted(12, 12, 9, 2);
                         a.ldr_w_imm(13, 12, 0);
                         a.cmn_imm_w(13, 1);
@@ -5007,10 +5024,12 @@ fn emit_chain(
                         (crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES) as u32,
                     );
                     a.b_cond(C_NE, classic);
-                    a.ldr_imm(12, 11, ml);
-                    a.cmp_reg_x(9, 12);
+                    a.ldr_imm(12, 11, mirror);
+                    a.cbz(12, true, classic);
+                    a.ldr_imm(14, 12, vl);
+                    a.cmp_reg_x(9, 14);
                     a.b_cond(C_HS, classic);
-                    a.ldr_imm(12, 11, mp);
+                    a.ldr_imm(12, 12, vp);
                     a.ldr_d_lsl3(dk, 12, 9);
                     a.b(mirror_done);
                 } else {
@@ -5022,10 +5041,14 @@ fn emit_chain(
                     let ok_bit = asm::logical_imm_w(crate::value::MIRROR_OK as u32).unwrap();
                     a.logic_imm_w(0, 12, 12, ok_bit);
                     a.cbz(12, false, classic);
-                    a.ldr_imm(12, 11, ml);
-                    a.cmp_reg_x(9, 12);
+                    a.ldr_imm(12, 11, mirror);
+                    a.cbz(12, true, classic);
+                    a.ldr_imm(14, 12, vl);
+                    a.cmp_reg_x(9, 14);
                     a.b_cond(C_HS, classic);
-                    a.ldr_imm(12, 11, elp);
+                    a.ldr_imm(12, 11, el);
+                    a.cbz(12, true, classic);
+                    a.ldr_imm(12, 12, vp);
                     a.add_shifted(12, 12, 9, 2);
                     a.ldr_w_imm(13, 12, 0);
                     a.cmn_imm_w(13, 1);
@@ -5034,7 +5057,8 @@ fn emit_chain(
                     a.movz(14, es as u32, 0);
                     a.madd(15, 13, 14, 15);
                     a.stur_d(dv, 15, ev + 8);
-                    a.ldr_imm(12, 11, mp);
+                    a.ldr_imm(12, 11, mirror);
+                    a.ldr_imm(12, 12, vp);
                     a.str_d_lsl3(dv, 12, 9);
                     // Flag-first ALL_I32 upkeep (dv int-ness is unknown in this tier).
                     let i32_done = a.new_label();
@@ -5055,10 +5079,12 @@ fn emit_chain(
                     a.b(mirror_done);
                 }
                 a.bind(classic);
-                a.ldr_imm(12, 11, ell);
-                a.cmp_reg_x(9, 12);
+                a.ldr_imm(12, 11, el);
+                a.cbz(12, true, guard!());
+                a.ldr_imm(14, 12, vl);
+                a.cmp_reg_x(9, 14);
                 a.b_cond(C_HS, guard!());
-                a.ldr_imm(12, 11, elp);
+                a.ldr_imm(12, 12, vp);
                 a.add_shifted(12, 12, 9, 2);
                 a.ldr_w_imm(13, 12, 0);
                 a.cmn_imm_w(13, 1);
@@ -6637,8 +6663,9 @@ fn emit_loop_chain(
     let strong = layout.rc_strong_off as i32;
     let rcv = layout.obj_from_rc as u32;
     let ex = layout.obj_exotic as u32;
-    let elp = (layout.obj_props + layout.props_elems + layout.vec_ptr_off) as u32;
-    let ell = (layout.obj_props + layout.props_elems + layout.vec_len_off) as u32;
+    let el = (layout.obj_props + layout.props_elems) as u32;
+    let vp = layout.vec_ptr_off as u32;
+    let vl = layout.vec_len_off as u32;
     let en = (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32;
     let ev = layout.entry_value as i32;
     let ea = layout.entry_accessor as u32;
@@ -6648,8 +6675,7 @@ fn emit_loop_chain(
     let arr_tag = layout.exotic_array_tag as u32;
     let plain = layout.obj_ic_plain as u32;
     let mf = (layout.obj_props + layout.props_mirror_flags) as u32;
-    let mp = (layout.obj_props + layout.props_mirror + layout.vec_ptr_off) as u32;
-    let ml = (layout.obj_props + layout.props_mirror + layout.vec_len_off) as u32;
+    let mirror = (layout.obj_props + layout.props_mirror) as u32;
 
     let plain_h = a.new_label();
     let body_l = a.new_label();
@@ -6779,14 +6805,20 @@ fn emit_loop_chain(
         }
         // Pinned vector fields (stable for the whole region — helper-free vocabulary, and slim
         // stores never grow or reallocate).
-        if let Some(x) = rp.mlreg {
-            a.ldr_imm(x, r, ml);
-        }
-        if let Some(x) = rp.mpreg {
-            a.ldr_imm(x, r, mp);
+        if rp.mlreg.is_some() || rp.mpreg.is_some() {
+            a.ldr_imm(12, r, mirror);
+            a.cbz(12, true, pre_fail);
+            if let Some(x) = rp.mlreg {
+                a.ldr_imm(x, 12, vl);
+            }
+            if let Some(x) = rp.mpreg {
+                a.ldr_imm(x, 12, vp);
+            }
         }
         if let Some(x) = rp.elpreg {
-            a.ldr_imm(x, r, elp);
+            a.ldr_imm(12, r, el);
+            a.cbz(12, true, pre_fail);
+            a.ldr_imm(x, 12, vp);
         }
         if let Some(x) = rp.enreg {
             a.ldr_imm(x, r, en);
@@ -6955,10 +6987,12 @@ fn emit_loop_chain(
                 // Element lookup: key index in x9, receiver base in `r` → entry pointer in x15.
                 macro_rules! elem_entry {
                     ($r:expr) => {{
-                        a.ldr_imm(12, $r, ell);
-                        a.cmp_reg_x(9, 12);
+                        a.ldr_imm(12, $r, el);
+                        a.cbz(12, true, guard!());
+                        a.ldr_imm(14, 12, vl);
+                        a.cmp_reg_x(9, 14);
                         a.b_cond(C_HS, guard!());
-                        a.ldr_imm(12, $r, elp);
+                        a.ldr_imm(12, 12, vp);
                         a.add_shifted(12, 12, 9, 2);
                         a.ldr_w_imm(13, 12, 0);
                         a.cmn_imm_w(13, 1);
@@ -7113,16 +7147,20 @@ fn emit_loop_chain(
                                 match rp.mlreg {
                                     Some(x) => a.cmp_reg_x(9, x),
                                     None => {
-                                        a.ldr_imm(12, rp.reg, ml);
-                                        a.cmp_reg_x(9, 12);
+                                        a.ldr_imm(12, rp.reg, mirror);
+                                        a.cbz(12, true, guard!());
+                                        a.ldr_imm(14, 12, vl);
+                                        a.cmp_reg_x(9, 14);
                                     }
                                 }
                                 a.b_cond(C_HS, guard!());
                                 let mpr = match rp.mpreg {
                                     Some(x) => x,
                                     None => {
-                                        a.ldr_imm(12, rp.reg, mp);
-                                        12
+                                        a.ldr_imm(12, rp.reg, mirror);
+                                        a.cbz(12, true, guard!());
+                                        a.ldr_imm(14, 12, vp);
+                                        14
                                     }
                                 };
                                 if matches!(plan.kinds[idx], PushKind::I { .. }) {
@@ -7202,16 +7240,20 @@ fn emit_loop_chain(
                             match rp.mlreg {
                                 Some(x) => a.cmp_reg_x(9, x),
                                 None => {
-                                    a.ldr_imm(12, r, ml);
-                                    a.cmp_reg_x(9, 12);
+                                    a.ldr_imm(12, r, mirror);
+                                    a.cbz(12, true, guard!());
+                                    a.ldr_imm(14, 12, vl);
+                                    a.cmp_reg_x(9, 14);
                                 }
                             }
                             a.b_cond(C_HS, guard!());
                             let elpr = match rp.elpreg {
                                 Some(x) => x,
                                 None => {
-                                    a.ldr_imm(12, r, elp);
-                                    12
+                                    a.ldr_imm(12, r, el);
+                                    a.cbz(12, true, guard!());
+                                    a.ldr_imm(14, 12, vp);
+                                    14
                                 }
                             };
                             a.add_shifted(12, elpr, 9, 2);
@@ -7231,7 +7273,8 @@ fn emit_loop_chain(
                             match rp.mpreg {
                                 Some(x) => a.str_d_lsl3(2, x, 9),
                                 None => {
-                                    a.ldr_imm(12, r, mp);
+                                    a.ldr_imm(12, r, mirror);
+                                    a.ldr_imm(12, 12, vp);
                                     a.str_d_lsl3(2, 12, 9);
                                 }
                             }
