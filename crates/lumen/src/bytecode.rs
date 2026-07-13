@@ -3744,12 +3744,20 @@ impl Compiler {
                     Ok(true)
                 }
                 None => {
-                    if op != "=" {
-                        return Ok(false);
-                    }
-                    // StoreName already consumes the value without re-pushing it.
-                    self.named_expr(value, name)?;
                     let i = self.name_idx(name);
+                    if op == "=" {
+                        // StoreName already consumes the value without re-pushing it.
+                        self.named_expr(value, name)?;
+                    } else {
+                        // Resolve/read before the RHS, as compound assignment requires. Compiled
+                        // closures under `with` are rejected at entry and direct eval in this
+                        // body prevents compilation, so no nearer binding can appear between
+                        // this read and StoreName; re-resolution names the same Reference.
+                        let c = self.new_name_cache();
+                        self.emit(Op::LoadName(i, c));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
+                    }
                     self.emit(Op::StoreName(i));
                     Ok(true)
                 }
@@ -4406,12 +4414,17 @@ impl Compiler {
                     Ok(())
                 }
                 None => {
-                    if op != "=" {
-                        return Err(Bail);
-                    }
-                    self.named_expr(value, name)?;
-                    self.emit(Op::Dup);
                     let i = self.name_idx(name);
+                    if op == "=" {
+                        self.named_expr(value, name)?;
+                    } else {
+                        // See the discarded-assignment path above for the stable-Reference proof.
+                        let c = self.new_name_cache();
+                        self.emit(Op::LoadName(i, c));
+                        self.expr(value)?;
+                        self.emit_compound(op)?;
+                    }
+                    self.emit(Op::Dup);
                     self.emit(Op::StoreName(i));
                     Ok(())
                 }

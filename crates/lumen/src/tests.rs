@@ -2108,7 +2108,13 @@ fn compiled_update_free_name() {
       var g = 4;
       function outer() {
         let x = 7;
-        return function bump() { var old = x++; ++g; return old + ":" + x + ":" + g; };
+        return function bump() {
+          var old = x++;
+          ++g;
+          g += x;
+          var scaled = (g *= 2);
+          return old + ":" + x + ":" + g + ":" + scaled;
+        };
       }
       var bump = outer();
       bump() + "|" + bump();
@@ -2121,7 +2127,7 @@ fn compiled_update_free_name() {
             Completion::Value(v) => v,
             Completion::Throw { name, message } => panic!("threw {name}: {message}"),
         };
-        assert_eq!(got, "7:8:5|8:9:6");
+        assert_eq!(got, "7:8:26:26|8:9:72:72");
     }
 }
 
