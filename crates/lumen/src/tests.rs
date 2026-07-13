@@ -2132,6 +2132,35 @@ fn compiled_update_free_name() {
 }
 
 #[test]
+fn compiled_regexp_literal_is_fresh() {
+    let src = r#"
+      function make() { return /a+/gi; }
+      var a = make(), b = make();
+      a.lastIndex = 7;
+      (a !== b) + ":" + b.lastIndex + ":" + b.source + ":" + b.flags;
+    "#;
+    let stmts = crate::parser::parse_script(src, false).ok().expect("parse");
+    let func = stmts
+        .iter()
+        .find_map(|s| match s {
+            crate::ast::Stmt::FuncDecl(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function declaration");
+    assert!(crate::bytecode::compile(&func).is_some());
+    for tier in [crate::bytecode::Tier::Bytecode, crate::bytecode::Tier::Jit] {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = 0;
+        let got = match e.eval(src, false).expect("parse") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        };
+        assert_eq!(got, "true:0:a+:gi");
+    }
+}
+
+#[test]
 fn bytecode_compiles_labelled_loops() {
     // Labelled loops used to bail out of the compiler (falling back to the interpreter). They now
     // compile to the fast tier: assert `compile` actually produces a chunk rather than `None`.

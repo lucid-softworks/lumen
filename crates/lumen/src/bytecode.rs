@@ -553,6 +553,9 @@ pub enum Op {
     /// callee's hoisted vars start fresh on every pass through the site.
     ResetSlots(u16, u16),
     New(u16),
+    /// A regexp literal: source and flags indices in `names`. Each execution allocates a fresh
+    /// JS RegExp object while `Interp::regexp_programs` shares the immutable compiled matcher.
+    MakeRegExp(u32, u32),
     MakeArray(u16),
     /// Object literal: `count` plain data keys starting at names[start], values on the stack.
     MakeObject(u32, u16, u32),
@@ -4264,6 +4267,12 @@ impl Compiler {
                 self.emit(Op::New(args.len() as u16));
                 Ok(())
             }
+            Expr::Regex { body, flags } => {
+                let body = self.name_idx(body);
+                let flags = self.name_idx(flags);
+                self.emit(Op::MakeRegExp(body, flags));
+                Ok(())
+            }
             Expr::Array(elems) => {
                 for el in elems {
                     match el {
@@ -5321,6 +5330,12 @@ fn run_vm(
                 stack.truncate(at - 1);
                 stack.push(v);
             }
+            Op::MakeRegExp(body, flags) => {
+                stack.push(i.make_regexp(
+                    &chunk.names[body as usize],
+                    &chunk.names[flags as usize],
+                )?);
+            }
             Op::MakeArray(n) => {
                 let at = stack.len() - n as usize;
                 let items: Vec<Value> = stack.split_off(at);
@@ -5980,6 +5995,7 @@ impl Chunk {
             Op::LoadNameForCall(..) => (0, 2),
             Op::CallWithThis(argc, _) => (*argc as usize + 2, 1),
             Op::New(argc) => (*argc as usize + 1, 1),
+            Op::MakeRegExp(..) => (0, 1),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeObject(_, count, _) => (*count as usize, 1),
             Op::Throw | Op::Return => (1, 0),
@@ -7388,6 +7404,12 @@ unsafe fn jit_exec_inner(
             let v = i.construct(callee, args)?;
             *sp = jit_consume(*sp, argc + 1);
             push!(v);
+        }
+        Op::MakeRegExp(body, flags) => {
+            push!(i.make_regexp(
+                &chunk.names[body as usize],
+                &chunk.names[flags as usize],
+            )?);
         }
         Op::MakeArray(n) => {
             let n = n as usize;
