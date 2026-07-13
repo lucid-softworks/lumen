@@ -8,8 +8,8 @@
 // SHA-512 family, scrypt ROMix, and symmetric AES ciphers
 // aes-{128,192,256}-{ecb,cbc,ctr,gcm} via createCipheriv/createDecipheriv (PKCS#7 padding,
 // streaming update/final, GCM AAD + auth tags). Finite-field DH, P-256 ECDH/ECDSA, RSA
-// PKCS#1/PSS/OAEP, prime generation, and X.509 parsing are also implemented. Non-AES ciphers and
-// legacy OpenSSL engine/SPKAC APIs remain honest throwing stubs.
+// PKCS#1/PSS/OAEP, prime generation, X.509 parsing, and legacy SPKAC certificates are also
+// implemented. Non-AES ciphers and legacy OpenSSL engine selection remain honest throwing stubs.
 
 const webCrypto = globalThis.crypto;
 
@@ -1408,6 +1408,7 @@ const X509_NAME_OIDS = {
   "2.5.4.10": "O", "2.5.4.11": "OU", "1.2.840.113549.1.9.1": "emailAddress",
 };
 const X509_SIGNATURE_OIDS = {
+  "1.2.840.113549.1.1.4": "md5",
   "1.2.840.113549.1.1.5": "sha1",
   "1.2.840.113549.1.1.11": "sha256",
   "1.2.840.113549.1.1.12": "sha384",
@@ -1609,6 +1610,66 @@ class X509Certificate {
   toString() { return pemEncode("CERTIFICATE", this.raw); }
   toJSON() { return this.toString(); }
 }
+
+// SPKAC is a base64-encoded SignedPublicKeyAndChallenge sequence. Accepting DER as well is useful
+// for Buffer callers and mirrors OpenSSL's decoder once the outer base64 armor has been removed.
+function parseSpkac(input, encoding) {
+  let der = toBytes(input, encoding);
+  if (der[0] !== 0x30) {
+    let text = Buffer.from(der).toString("ascii").trim();
+    if (text.startsWith("SPKAC=")) text = text.slice(6).trim();
+    der = Buffer.from(text, "base64");
+  }
+  const outerNode = derRead(der, 0);
+  if (outerNode.tag !== 0x30 || outerNode.end !== der.length) throw new Error("SPKAC: invalid DER");
+  const outer = derChildren(outerNode.content);
+  if (outer.length !== 3 || outer[0].tag !== 0x30 || outer[1].tag !== 0x30 || outer[2].tag !== 0x03) {
+    throw new Error("SPKAC: invalid structure");
+  }
+  const publicKeyAndChallenge = outer[0];
+  const fields = derChildren(publicKeyAndChallenge.content);
+  if (fields.length !== 2 || fields[0].tag !== 0x30 || fields[1].tag !== 0x16) {
+    throw new Error("SPKAC: invalid public key and challenge");
+  }
+  const algorithm = derChildren(outer[1].content);
+  if (!algorithm[0] || algorithm[0].tag !== 0x06 || outer[2].content[0] !== 0) {
+    throw new Error("SPKAC: invalid signature");
+  }
+  return {
+    challenge: fields[1].content,
+    publicKeyDer: publicKeyAndChallenge.content.subarray(fields[0].hstart, fields[0].end),
+    signed: outerNode.content.subarray(publicKeyAndChallenge.hstart, publicKeyAndChallenge.end),
+    signatureAlgorithm: X509_SIGNATURE_OIDS[decodeOID(algorithm[0].content)],
+    signature: outer[2].content.subarray(1),
+  };
+}
+function certificateExportChallenge(spkac, encoding) {
+  try { return Buffer.from(parseSpkac(spkac, encoding).challenge); }
+  catch (_error) { return Buffer.alloc(0); }
+}
+function certificateExportPublicKey(spkac, encoding) {
+  try { return Buffer.from(pemEncode("PUBLIC KEY", parseSpkac(spkac, encoding).publicKeyDer)); }
+  catch (_error) { return Buffer.alloc(0); }
+}
+function certificateVerifySpkac(spkac, encoding) {
+  try {
+    const parsed = parseSpkac(spkac, encoding);
+    if (!parsed.signatureAlgorithm) return false;
+    const key = createPublicKey({ key: parsed.publicKeyDer, format: "der", type: "spki" });
+    return cryptoVerify(parsed.signatureAlgorithm, parsed.signed, key, parsed.signature);
+  } catch (_error) {
+    return false;
+  }
+}
+function Certificate() {
+  if (!(this instanceof Certificate)) return new Certificate();
+}
+Certificate.exportChallenge = certificateExportChallenge;
+Certificate.exportPublicKey = certificateExportPublicKey;
+Certificate.verifySpkac = certificateVerifySpkac;
+Certificate.prototype.exportChallenge = certificateExportChallenge;
+Certificate.prototype.exportPublicKey = certificateExportPublicKey;
+Certificate.prototype.verifySpkac = certificateVerifySpkac;
 
 // ---- MGF1 + RSA (PKCS#1 v1.5, PSS, OAEP) --------------------------------------------------------
 
@@ -2672,8 +2733,8 @@ const crypto = {
   generatePrimeSync,
   // -- real: X.509 certificate parsing and signature verification --
   X509Certificate,
-  // -- stub: legacy SPKAC --
-  Certificate: notImpl("Certificate"),
+  // -- real: legacy SPKAC parsing and verification --
+  Certificate,
 
   // -- stubs: engines --
   setEngine: notImpl("setEngine"),
