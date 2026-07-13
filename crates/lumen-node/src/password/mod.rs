@@ -44,7 +44,10 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
         for i in 16..80 {
             let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
             let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
         for i in 0..80 {
@@ -237,6 +240,10 @@ pub struct Argon2Params {
     /// 19 (0x13, current) or 16 (0x10, legacy; overwrite instead of XOR on later passes).
     pub version: u32,
     pub out_len: usize,
+    /// Optional secret input (the password-hashing "pepper" in RFC 9106 terminology).
+    pub secret: Vec<u8>,
+    /// Optional public context bound into the derived key.
+    pub associated_data: Vec<u8>,
 }
 
 /// One 1 KiB memory block, viewed as 128 little-endian u64s.
@@ -440,7 +447,7 @@ impl Argon2Instance<'_> {
     }
 }
 
-/// The full Argon2 function (no secret key / associated data — Bun exposes neither).
+/// The full Argon2 function, including the optional secret and associated-data inputs.
 pub fn argon2_hash(password: &[u8], salt: &[u8], params: &Argon2Params) -> Vec<u8> {
     let lanes = params.lanes.max(1) as usize;
     let memory = params.m_cost.max(8 * params.lanes) as usize;
@@ -464,8 +471,10 @@ pub fn argon2_hash(password: &[u8], salt: &[u8], params: &Argon2Params) -> Vec<u
     h0in.extend_from_slice(password);
     h0in.extend_from_slice(&(salt.len() as u32).to_le_bytes());
     h0in.extend_from_slice(salt);
-    h0in.extend_from_slice(&0u32.to_le_bytes()); // secret key length
-    h0in.extend_from_slice(&0u32.to_le_bytes()); // associated data length
+    h0in.extend_from_slice(&(params.secret.len() as u32).to_le_bytes());
+    h0in.extend_from_slice(&params.secret);
+    h0in.extend_from_slice(&(params.associated_data.len() as u32).to_le_bytes());
+    h0in.extend_from_slice(&params.associated_data);
     let h0 = blake2b(64, &h0in);
 
     let mut blocks = vec![Block::ZERO; mprime];
@@ -720,6 +729,8 @@ pub fn argon2_phc(password: &[u8], salt: &[u8], m: u32, t: u32, variant: Argon2V
         variant,
         version: 19,
         out_len: 32,
+        secret: Vec::new(),
+        associated_data: Vec::new(),
     };
     let tag = argon2_hash(password, salt, &params);
     format!(
@@ -753,10 +764,7 @@ fn argon2_verify(password: &[u8], hash: &str) -> Result<bool, PasswordError> {
     if it.next() != Some("") {
         return Err(inv);
     }
-    let variant = it
-        .next()
-        .and_then(Argon2Variant::from_phc)
-        .ok_or(inv)?;
+    let variant = it.next().and_then(Argon2Variant::from_phc).ok_or(inv)?;
     let mut part = it.next().ok_or(inv)?;
     let mut version = 19u32;
     if let Some(v) = part.strip_prefix("v=") {
@@ -793,6 +801,8 @@ fn argon2_verify(password: &[u8], hash: &str) -> Result<bool, PasswordError> {
         variant,
         version,
         out_len: tag.len(),
+        secret: Vec::new(),
+        associated_data: Vec::new(),
     };
     Ok(ct_eq(&argon2_hash(password, &salt, &params), &tag))
 }
@@ -822,7 +832,12 @@ pub fn verify_password(password: &[u8], hash: &str) -> Result<bool, PasswordErro
         return argon2_verify(password, hash);
     }
     let b = hash.as_bytes();
-    if b.len() > 3 && b[0] == b'$' && b[1] == b'2' && matches!(b[2], b'a' | b'b' | b'x' | b'y') && b[3] == b'$' {
+    if b.len() > 3
+        && b[0] == b'$'
+        && b[1] == b'2'
+        && matches!(b[2], b'a' | b'b' | b'x' | b'y')
+        && b[3] == b'$'
+    {
         return bcrypt_verify(password, hash);
     }
     Err(PasswordError::UnsupportedAlgorithm)
@@ -876,6 +891,8 @@ pub(crate) const PASSWORD_OPS: &[OpDecl] = ops![
     "verifySync" (2) => op_verify_sync,
     "hash" (7) => op_hash_async,
     "verify" (4) => op_verify_async,
+    "argon2Sync" (9) => op_argon2_sync,
+    "argon2" (11) => op_argon2_async,
 ];
 
 fn arg_bytes(ctx: &mut Ctx, args: &[Value], i: usize, who: &str) -> Result<Vec<u8>, Value> {
@@ -900,7 +917,12 @@ fn arg_u32(args: &[Value], i: usize) -> u32 {
 }
 
 /// The trailing `(resolve, reject)` pair the glue passes; anything else is a glue bug.
-fn settle_args(ctx: &mut Ctx, args: &[Value], i: usize, who: &str) -> Result<(Value, Value), Value> {
+fn settle_args(
+    ctx: &mut Ctx,
+    args: &[Value],
+    i: usize,
+    who: &str,
+) -> Result<(Value, Value), Value> {
     match (args.get(i), args.get(i + 1)) {
         (Some(res), Some(rej)) if res.is_callable() && rej.is_callable() => {
             Ok((res.clone(), rej.clone()))
@@ -936,9 +958,8 @@ fn op_hash_async(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> 
         .host_mut::<TaskRegistry>()
         .expect("runtime installs the registry")
         .register(resolve, Some(reject), decode_hash);
-    crate::spawn_handle(ctx).spawn_blocking(id, move || {
-        Box::new(hash_password(&pw, &alg, m, t, cost))
-    });
+    crate::spawn_handle(ctx)
+        .spawn_blocking(id, move || Box::new(hash_password(&pw, &alg, m, t, cost)));
     Ok(Value::Undefined)
 }
 
@@ -954,6 +975,53 @@ fn op_verify_async(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value
         Box::new(verify_password(&pw, &hash).map_err(|e| e.message().to_string()))
     });
     Ok(Value::Undefined)
+}
+
+fn argon2_args(
+    ctx: &mut Ctx,
+    a: &[Value],
+    who: &str,
+) -> Result<(Vec<u8>, Vec<u8>, Argon2Params), Value> {
+    let variant = Argon2Variant::from_phc(&arg_str(ctx, a, 0)?)
+        .ok_or_else(|| ctx.make_error("TypeError", format!("{who}: invalid Argon2 algorithm")))?;
+    let message = arg_bytes(ctx, a, 1, who)?;
+    let nonce = arg_bytes(ctx, a, 2, who)?;
+    let params = Argon2Params {
+        lanes: arg_u32(a, 3),
+        out_len: arg_u32(a, 4) as usize,
+        m_cost: arg_u32(a, 5),
+        t_cost: arg_u32(a, 6),
+        variant,
+        version: 19,
+        secret: arg_bytes(ctx, a, 7, who)?,
+        associated_data: arg_bytes(ctx, a, 8, who)?,
+    };
+    Ok((message, nonce, params))
+}
+
+fn op_argon2_sync(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (message, nonce, params) = argon2_args(ctx, a, "crypto.argon2Sync")?;
+    ctx.make_uint8array(&argon2_hash(&message, &nonce, &params))
+}
+
+fn op_argon2_async(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
+    let (message, nonce, params) = argon2_args(ctx, a, "crypto.argon2")?;
+    let (resolve, reject) = settle_args(ctx, a, 9, "crypto.argon2")?;
+    let id = ctx
+        .host_mut::<TaskRegistry>()
+        .expect("runtime installs the registry")
+        .register(resolve, Some(reject), decode_argon2);
+    crate::spawn_handle(ctx)
+        .spawn_blocking(id, move || Box::new(argon2_hash(&message, &nonce, &params)));
+    Ok(Value::Undefined)
+}
+
+fn decode_argon2(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    let bytes = *payload.downcast::<Vec<u8>>().expect("argon2 payload");
+    Ok(vec![ctx.make_uint8array(&bytes)?])
 }
 
 fn decode_hash(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
@@ -1039,7 +1107,10 @@ mod tests {
             hex(&blake2b(64, &p128)),
             "2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac333b040f19b0c4ddd11a61e24ac1fe0f10a039806c5dcc0da3d115"
         );
-        assert_eq!(hex(&blake2b(17, &p128)), "7ca092935197a0c95bbc183b11cf4879f6");
+        assert_eq!(
+            hex(&blake2b(17, &p128)),
+            "7ca092935197a0c95bbc183b11cf4879f6"
+        );
         // Incremental == one-shot across buffer boundaries.
         let mut inc = Blake2b::new(64);
         inc.update(&p300[..1]);
@@ -1061,7 +1132,9 @@ mod tests {
     #[test]
     fn b64_roundtrips() {
         for len in 0..40usize {
-            let data: Vec<u8> = (0..len as u8).map(|b| b.wrapping_mul(37).wrapping_add(9)).collect();
+            let data: Vec<u8> = (0..len as u8)
+                .map(|b| b.wrapping_mul(37).wrapping_add(9))
+                .collect();
             for alphabet in [B64_STD, B64_BCRYPT] {
                 let enc = b64_encode(&data, alphabet);
                 assert_eq!(b64_decode(&enc, alphabet).as_deref(), Some(&data[..]));
@@ -1159,10 +1232,30 @@ mod tests {
             variant: Argon2Variant::Argon2id,
             version: 19,
             out_len: 32,
+            secret: Vec::new(),
+            associated_data: Vec::new(),
         };
         let a = argon2_hash(b"pw", &[1u8; 16], &params(1));
         let b = argon2_hash(b"pw", &[1u8; 16], &params(8));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn argon2id_rfc9106_secret_and_associated_data_vector() {
+        let params = Argon2Params {
+            m_cost: 32,
+            t_cost: 3,
+            lanes: 4,
+            variant: Argon2Variant::Argon2id,
+            version: 19,
+            out_len: 32,
+            secret: vec![3; 8],
+            associated_data: vec![4; 12],
+        };
+        assert_eq!(
+            hex(&argon2_hash(&vec![1; 32], &vec![2; 16], &params)),
+            "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+        );
     }
 
     #[test]
@@ -1180,7 +1273,10 @@ mod tests {
             Err(PasswordError::InvalidEncoding)
         );
         assert_eq!(
-            verify_password(b"x", "$2b$99$......................!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"),
+            verify_password(
+                b"x",
+                "$2b$99$......................!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            ),
             Err(PasswordError::InvalidEncoding)
         );
         assert_eq!(

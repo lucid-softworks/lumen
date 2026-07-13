@@ -2628,6 +2628,52 @@ function scrypt(password, salt, keylen, options, callback) {
   queueMicrotask(() => (err ? callback(err) : callback(null, result)));
 }
 
+// ---- Argon2 (native RFC 9106 implementation shared with Bun.password) -------------------------
+
+function argon2Parameters(algorithm, parameters, who) {
+  if (typeof algorithm !== "string" || !["argon2d", "argon2i", "argon2id"].includes(algorithm)) {
+    throw new TypeError(`${who}: algorithm must be 'argon2d', 'argon2i', or 'argon2id'`);
+  }
+  if (parameters === null || typeof parameters !== "object") {
+    throw new TypeError(`${who}: parameters must be an object`);
+  }
+  const required = ["message", "nonce", "parallelism", "tagLength", "memory", "passes"];
+  for (const name of required) {
+    if (parameters[name] === undefined) throw new TypeError(`${who}: parameters.${name} is required`);
+  }
+  const message = Buffer.from(toBytes(parameters.message));
+  const nonce = Buffer.from(toBytes(parameters.nonce));
+  const integer = (name, min, max) => {
+    const value = parameters[name];
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new RangeError(`${who}: parameters.${name} must be an integer between ${min} and ${max}`);
+    }
+    return value;
+  };
+  const parallelism = integer("parallelism", 1, 0xffffff);
+  const tagLength = integer("tagLength", 4, 0xffffffff);
+  const memory = integer("memory", 8 * parallelism, 0xffffffff);
+  const passes = integer("passes", 1, 0xffffffff);
+  if (nonce.length < 8) throw new RangeError(`${who}: parameters.nonce must be at least 8 bytes`);
+  const secret = parameters.secret === undefined ? Buffer.alloc(0) : Buffer.from(toBytes(parameters.secret));
+  const associatedData = parameters.associatedData === undefined
+    ? Buffer.alloc(0)
+    : Buffer.from(toBytes(parameters.associatedData));
+  return [algorithm, message, nonce, parallelism, tagLength, memory, passes, secret, associatedData];
+}
+
+function argon2Sync(algorithm, parameters) {
+  return Buffer.from(__password.argon2Sync(...argon2Parameters(algorithm, parameters, "crypto.argon2Sync")));
+}
+
+function argon2(algorithm, parameters, callback) {
+  if (typeof callback !== "function") throw new TypeError("crypto.argon2: callback must be a function");
+  const args = argon2Parameters(algorithm, parameters, "crypto.argon2");
+  __password.argon2(...args,
+    (bytes) => callback(null, Buffer.from(bytes)),
+    (error) => callback(error));
+}
+
 // ---- honest stubs (no native primitive backs these) -------------------------------------------
 
 function notImpl(name) {
@@ -2668,6 +2714,8 @@ const constants = {
 // ---- module surface ---------------------------------------------------------------------------
 
 const crypto = {
+  argon2,
+  argon2Sync,
   // -- real: hashing / MAC / KDF --
   createHash: (algorithm) => new Hash(algorithm),
   createHmac: (algorithm, key) => new Hmac(algorithm, key),

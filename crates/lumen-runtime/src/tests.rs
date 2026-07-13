@@ -229,6 +229,26 @@ fn process_execve_validates_and_reports_os_errors() {
 }
 
 #[test]
+fn node_crypto_argon2_sync_and_async_match_rfc9106() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const { argon2, argon2Sync } = require("node:crypto");
+        const parameters = {
+          message: Buffer.alloc(32, 1), nonce: Buffer.alloc(16, 2),
+          parallelism: 4, tagLength: 32, memory: 32, passes: 3,
+          secret: Buffer.alloc(8, 3), associatedData: Buffer.alloc(12, 4),
+        };
+        const expected = "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659";
+        console.log(Object.keys(require("node:crypto")).length, argon2Sync("argon2id", parameters).toString("hex") === expected);
+        argon2("argon2id", parameters, (error, key) => console.log(error === null, key.toString("hex") === expected));
+        "#,
+    );
+    assert_eq!(out.lines(), ["67 true", "true true"]);
+}
+
+#[test]
 fn async_await_settles_before_loop_exit() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(
