@@ -598,10 +598,17 @@ pub struct Object {
 
 impl Object {
     pub(crate) fn new(proto: Option<Gc>) -> Gc {
+        Self::new_with_capacity(proto, 0)
+    }
+
+    /// Allocate an ordinary object's named-property vector at its known final size. Constructor
+    /// chunks derive a conservative straight-line field count, replacing the usual 1 → 2 → 4
+    /// growth sequence with one exact allocation. The hint lives on shared code, not instances.
+    pub(crate) fn new_with_capacity(proto: Option<Gc>, property_capacity: usize) -> Gc {
         LIVE_OBJECTS.with(|c| c.set(c.get() + 1));
         let obj = Rc::new(RefCell::new(Object {
             proto,
-            props: Props::new(),
+            props: Props::with_capacity(property_capacity),
             extensible: true,
             call: Callable::None,
             exotic: Exotic::None,
@@ -1373,8 +1380,12 @@ impl Default for Props {
 
 impl Props {
     pub(crate) fn new() -> Props {
+        Self::with_capacity(0)
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Props {
         Props {
-            entries: Vec::new(),
+            entries: Vec::with_capacity(capacity),
             shape: SHAPE_EMPTY,
             elems: DenseStorage::default(),
             mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,

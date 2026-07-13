@@ -607,6 +607,10 @@ pub struct Chunk {
     /// hoisting overwrites same-named params; replicated bug-for-bug — it is the oracle).
     var_force_resets: Vec<u16>,
     uses_this: bool,
+    /// Distinct `this.name = …` stores before the body's first control-flow split, capped small.
+    /// `new` uses this to reserve the instance property vector exactly once; it costs no bytes
+    /// per object and avoids retaining geometric-growth slack.
+    instance_capacity_hint: u8,
     /// Inner function templates for `MakeClosure`.
     funcs: Vec<Rc<Function>>,
     /// Captured bindings to seed into a fresh activation env at entry; empty = no activation
@@ -654,6 +658,10 @@ impl Chunk {
     /// Whether the body (or an inner arrow chain) reads `this`, so the caller must bind it.
     pub fn uses_this(&self) -> bool {
         self.uses_this || self.env_this
+    }
+
+    pub(crate) fn instance_capacity_hint(&self) -> usize {
+        self.instance_capacity_hint as usize
     }
     /// Whether calls need a real activation environment (captured locals / lexical `this`).
     fn makes_env(&self) -> bool {
@@ -1825,6 +1833,38 @@ fn compile_inner(
         }
     }
     c.emit(Op::ReturnUndef);
+    // Constructors in OO workloads overwhelmingly initialize a short, straight-line list of
+    // fields. Count distinct names only until control flow can make the estimate speculative,
+    // and decline large reservations: this is an allocation/memory optimization, not metadata
+    // proportional to object count.
+    let mut instance_names = [u32::MAX; 16];
+    let mut instance_capacity_hint = 0u8;
+    for op in &c.ops {
+        match op {
+            Op::SetPropThisDrop(name, _) => {
+                if !instance_names[..instance_capacity_hint as usize].contains(name) {
+                    if instance_capacity_hint == instance_names.len() as u8 {
+                        instance_capacity_hint = 0;
+                        break;
+                    }
+                    instance_names[instance_capacity_hint as usize] = *name;
+                    instance_capacity_hint += 1;
+                }
+            }
+            Op::Jump(..)
+            | Op::JumpIfFalse(..)
+            | Op::JumpIfFalsePeek(..)
+            | Op::JumpIfTruePeek(..)
+            | Op::JumpIfNotNullishPeek(..)
+            | Op::InlineGuard(..)
+            | Op::Throw
+            | Op::Return
+            | Op::ReturnUndef
+            | Op::Await
+            | Op::PushHandler(..) => break,
+            _ => {}
+        }
+    }
     Some(Rc::new(Chunk {
         ops: c.ops,
         consts: c.consts,
@@ -1835,6 +1875,7 @@ fn compile_inner(
         arguments_slot: c.arguments_slot,
         var_force_resets: c.var_force_resets,
         uses_this: c.uses_this,
+        instance_capacity_hint,
         funcs: c.funcs,
         cap_inits: c.cap_inits,
         env_this: c.env_this,

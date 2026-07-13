@@ -5738,7 +5738,10 @@ impl Interp {
                 _ => return None,
             }
         };
-        let this = crate::value::Object::new(Some(proto));
+        let this = crate::value::Object::new_with_capacity(
+            Some(proto),
+            unsafe { &*ic.chunk }.instance_capacity_hint(),
+        );
         let this_val = Value::Obj(this);
         // --- committed: identical shape to call_jit_cached's committed path ---
         self.depth += 1;
