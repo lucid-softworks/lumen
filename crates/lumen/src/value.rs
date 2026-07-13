@@ -1767,7 +1767,7 @@ impl Props {
     /// no hash index at all: lookup is a short linear scan and inserts never hash or rehash.
     /// The index is built once when a map grows past the threshold and is authoritative from
     /// then on (an emptied-but-once-large map keeps using it).
-    #[inline]
+    #[inline(always)]
     fn find(&self, key: &str) -> Option<usize> {
         // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
         // (every push/pop/length read; every `new`); their slots are memoized — answer without
@@ -2164,11 +2164,19 @@ impl Props {
 }
 
 /// A canonical array-index property key (`"0"`, `"42"` — decimal, no leading zeros, fits u32).
+#[inline(always)]
 pub(crate) fn canonical_index(k: &str) -> Option<u32> {
-    if k == "0" {
-        return Some(0);
+    let bytes = k.as_bytes();
+    let &first = bytes.first()?;
+    // Named properties dominate. Reject them after one byte instead of setting up the full
+    // iterator/parser path; this function sits in every generic property lookup.
+    if !first.is_ascii_digit() {
+        return None;
     }
-    if k.is_empty() || k.starts_with('0') || !k.bytes().all(|b| b.is_ascii_digit()) {
+    if first == b'0' {
+        return (bytes.len() == 1).then_some(0);
+    }
+    if !bytes[1..].iter().all(u8::is_ascii_digit) {
         return None;
     }
     k.parse::<u32>().ok().filter(|&n| n != u32::MAX)
