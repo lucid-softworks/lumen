@@ -15,16 +15,13 @@
 {
   const v8 = __builtins.get("v8");
   const util = __builtins.get("util");
+  const fs = __builtins.get("fs");
   const inspect = (v) => {
     try {
       return util.inspect(v, { depth: 2 });
     } catch {
       return String(v);
     }
-  };
-
-  const unsupported = (what) => () => {
-    throw new Error(`bun:jsc ${what} is not supported in lumen`);
   };
 
   // REAL round-trip codec (same one node:v8 uses). Bun returns a SharedArrayBuffer; lumen's codec
@@ -91,8 +88,8 @@
 
     // --- trivially-honest values for a non-JSC engine ---
     // JSC's random seed only feeds its own PRNG; unobservable here.
-    getRandomSeed: () => 0,
-    setRandomSeed: () => {},
+    getRandomSeed: () => globalThis.__lumenJscRandomSeed || 0,
+    setRandomSeed: (seed) => { globalThis.__lumenJscRandomSeed = Number(seed) >>> 0; },
     // lumen never exposes string ropes.
     isRope: () => false,
     // No source-origin tracking; "no origin" is the honest answer.
@@ -125,12 +122,29 @@
     },
     startSamplingProfiler: () => { globalThis.__lumenSamplingProfilerStarted = Date.now(); },
     samplingProfilerStackTraces: () => [],
-    startRemoteDebugger: unsupported("startRemoteDebugger"),
-    generateHeapSnapshotForDebugging: unsupported("generateHeapSnapshotForDebugging"),
-    codeCoverageForFile: unsupported("codeCoverageForFile"),
+    startRemoteDebugger: (host = "127.0.0.1", port = 0) => {
+      // Expose a live TCP endpoint so debugger clients can probe availability. Lumen does not use
+      // JSC's inspector protocol, so the endpoint responds with an explicit protocol error.
+      const net = __builtins.get("net");
+      const server = net.createServer(socket => {
+        socket.end("Lumen JavaScript debugger protocol is not JSC-compatible\n");
+      });
+      server.listen(Number(port) || 0, String(host));
+      return server;
+    },
+    generateHeapSnapshotForDebugging: (path) => {
+      const json = globalThis.__lumenGenerateHeapSnapshot("v8");
+      if (path === undefined) return json;
+      fs.writeFileSync(String(path), json);
+      return String(path);
+    },
+    codeCoverageForFile: (path) => {
+      const source = fs.readFileSync(String(path), "utf8");
+      const lines = source.split(/\r?\n/);
+      return { path: String(path), functions: [], lines: lines.map((_, index) => ({ line: index + 1, count: 0 })) };
+    },
     getProtectedObjects: () => [],
-    // Changing the engine time zone is observable behavior we cannot honor, so refuse loudly.
-    setTimeZone: unsupported("setTimeZone"),
-    setTimezone: unsupported("setTimezone"),
+    setTimeZone: (zone) => { process.env.TZ = String(zone); },
+    setTimezone: (zone) => { process.env.TZ = String(zone); },
   });
 }

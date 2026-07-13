@@ -149,7 +149,8 @@ const JS_INIT: &str = r#"(() => {
   }
   // Portable signal numbers (identical on Linux/macOS); named signals outside this set fall back
   // to SIGTERM's number so `process.kill(pid)` still delivers a terminating signal.
-  const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGALRM: 14, SIGTERM: 15 };
+  const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGABRT: 6, SIGFPE: 8,
+    SIGKILL: 9, SIGSEGV: 11, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15 };
   const rawKill = proc.kill;
   process.kill = (pid, sig = "SIGTERM") => {
     const n = typeof sig === "number" ? sig : (SIGNALS[sig] ?? 15);

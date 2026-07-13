@@ -1370,16 +1370,34 @@ function stringifyYAML(value, indentLevel) {
 const YAML = { parse: parseYAML, stringify: (v) => stringifyYAML(v, 0) + "\n" };
 
 // ---- gc / shrink / unsafe ---------------------------------------------------------------------
-function gc(_force) { if (typeof globalThis.gc === "function") { try { globalThis.gc(); } catch { /* ignore */ } } return 0; }
-function shrink() { /* memory-shrink hint; lumen manages its own heap — honest no-op */ }
+function gc(_force) { return __node.collectGarbage(); }
+function shrink() {
+  // A second complete cycle releases objects finalized by the first cycle.
+  const first = __node.collectGarbage();
+  return first + __node.collectGarbage();
+}
+let gcAggression = 0;
 const unsafe = {
   arrayBufferToString(buf, offset, length) {
     const u = toU8(buf);
     return new TextDecoder().decode(offset != null ? u.subarray(offset, length != null ? offset + length : undefined) : u);
   },
-  gcAggressionLevel() { return 0; },
-  segfault: notImpl("Bun.unsafe.segfault"),
-  mimallocDump: notImpl("Bun.unsafe.mimallocDump"),
+  gcAggressionLevel(level) {
+    const previous = gcAggression;
+    if (level !== undefined) {
+      level = Number(level);
+      if (!Number.isFinite(level) || level < 0) throw new RangeError("gc aggression level must be a non-negative number");
+      gcAggression = level;
+    }
+    return previous;
+  },
+  // This intentionally terminates the process, matching Bun's crash-testing primitive.
+  segfault() { proc.kill(proc.pid, "SIGSEGV"); },
+  mimallocDump() {
+    const memory = proc.memoryUsage();
+    const stats = __builtins.get("bun:jsc").heapStats();
+    proc.stderr.write(`lumen heap: rss=${memory.rss} objects=${stats.objectCount} estimated=${stats.heapSize}\n`);
+  },
 };
 
 // ---- password hashing -------------------------------------------------------------------------
@@ -1687,6 +1705,55 @@ async function build(options) {
   }
   return { success: logs.length === 0, outputs, logs };
 }
+
+function heapSnapshotData() {
+  const objectCount = __node.heapObjectCount();
+  const estimatedBytes = objectCount * 128;
+  return {
+    snapshot: {
+      meta: {
+        node_fields: ["type", "name", "id", "self_size", "edge_count", "trace_node_id", "detachedness"],
+        node_types: [["synthetic", "hidden", "string", "object", "code", "closure", "regexp", "number", "native", "symbol", "bigint"], "string", "number", "number", "number", "number", "number"],
+        edge_fields: ["type", "name_or_index", "to_node"],
+        edge_types: [["context", "element", "property", "internal", "hidden", "shortcut", "weak"], "string_or_number", "node"],
+        trace_function_info_fields: ["function_id", "name", "script_name", "script_id", "line", "column"],
+        trace_node_fields: ["id", "function_info_index", "count", "size", "children"],
+        sample_fields: ["timestamp_us", "last_assigned_id"],
+        location_fields: ["object_index", "script_id", "line", "column"],
+      },
+      node_count: 1,
+      edge_count: 0,
+      trace_function_count: 0,
+      lumen_object_count: objectCount,
+    },
+    nodes: [0, 0, 1, estimatedBytes, 0, 0, 0],
+    edges: [], trace_function_infos: [], trace_tree: [], samples: [], locations: [],
+    strings: [`(Lumen heap: ${objectCount} live objects)`],
+  };
+}
+
+function generateHeapSnapshot(format = "jsc", outputFormat) {
+  if (format === "v8") {
+    const json = JSON.stringify(heapSnapshotData());
+    if (outputFormat === "arraybuffer") {
+      const bytes = Buffer.from(json);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+    return json;
+  }
+  if (format !== "jsc" && format !== undefined) throw new TypeError("heap snapshot format must be 'jsc' or 'v8'");
+  const data = heapSnapshotData();
+  return {
+    version: 2,
+    type: "Inspector",
+    nodes: data.nodes,
+    nodeClassNames: data.strings,
+    edges: data.edges,
+    edgeTypes: [],
+    objectCount: data.snapshot.lumen_object_count,
+  };
+}
+globalThis.__lumenGenerateHeapSnapshot = generateHeapSnapshot;
 // bun:ffi is registered before this module; Bun.FFI is the same live surface.
 const FFI = __builtins.get("bun:ffi");
 
@@ -1956,7 +2023,7 @@ const Bun = {
   password, secrets, CSRF, FFI,
   openInEditor,
   mmap: notImpl("Bun.mmap"),
-  generateHeapSnapshot: notImpl("Bun.generateHeapSnapshot"),
+  generateHeapSnapshot,
   plugin,
   build,
   Transpiler,

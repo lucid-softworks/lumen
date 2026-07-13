@@ -329,6 +329,11 @@ fn bun_jsc_uses_live_heap_gc_and_microtask_instrumentation() {
         console.log(typeof profile.functions, Array.isArray(profile.stackTraces));
         let cycle = {}; cycle.self = cycle; cycle = null;
         console.log(jsc.fullGC() >= 0, Array.isArray(jsc.getProtectedObjects()));
+        const v8Snapshot = Bun.generateHeapSnapshot("v8");
+        const parsed = JSON.parse(v8Snapshot);
+        const jscSnapshot = Bun.generateHeapSnapshot();
+        console.log(parsed.snapshot.node_count === 1, parsed.snapshot.lumen_object_count > 0, jscSnapshot.objectCount > 0);
+        console.log(Bun.gc() >= 0, Bun.shrink() >= 0);
         "#,
     );
     assert_eq!(
@@ -339,6 +344,8 @@ fn bun_jsc_uses_live_heap_gc_and_microtask_instrumentation() {
             "true 42",
             "true",
             "string true",
+            "true true",
+            "true true true",
             "true true",
         ]
     );
