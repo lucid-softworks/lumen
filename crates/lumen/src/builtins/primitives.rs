@@ -415,11 +415,15 @@ pub(super) fn install_symbol(it: &mut Interp) {
     ] {
         // Reuse the descriptor if this Interp already minted it (a secondary realm): well-known
         // symbols are shared across realms.
-        let sym = match it.wk_syms.iter().find(|(n, _)| *n == name) {
-            Some((_, v)) => v.clone(),
+        let sym = match it.wk_syms.iter().find(|(n, _, _)| *n == name) {
+            Some((_, v, _)) => v.clone(),
             None => {
                 let s = it.new_symbol(Some(Rc::from(format!("Symbol.{name}").as_str())));
-                it.wk_syms.push((name, s.clone()));
+                let Value::Sym(data) = &s else {
+                    unreachable!("new_symbol must return a symbol")
+                };
+                let key: Rc<str> = Rc::from(Interp::sym_key(data));
+                it.wk_syms.push((name, s.clone(), key));
                 s
             }
         };

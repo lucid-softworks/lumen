@@ -2258,21 +2258,11 @@ fn install_species(it: &Interp, ctor: &Gc) {
 }
 
 /// The internal property key for a well-known `Symbol.<name>`.
-pub(crate) fn well_known_key(it: &Interp, name: &str) -> Option<String> {
-    // The intrinsic %Symbol% (immune to globalThis.Symbol tampering), else the global binding.
-    let sym = it
-        .extra_protos
-        .get("%SymbolCtor%")
-        .map(|o| Value::Obj(o.clone()))
-        .or_else(|| it.global.borrow().props.get("Symbol").map(|p| p.value()))?;
-    if let Value::Obj(o) = sym {
-        if let Some(p) = o.borrow().props.get(name) {
-            if let Value::Sym(d) = p.value() {
-                return Some(Interp::sym_key(&d));
-            }
-        }
-    }
-    None
+pub(crate) fn well_known_key(it: &Interp, name: &str) -> Option<Rc<str>> {
+    it.wk_syms
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, key)| key.clone())
 }
 
 fn map_ptr(this: &Value) -> Option<usize> {
@@ -7635,7 +7625,7 @@ pub(crate) fn async_gen_return_reject(
     i.finish_async_gen_step(key);
     Ok(Value::Undefined)
 }
-pub(crate) fn async_iterator_key(i: &Interp) -> Option<String> {
+pub(crate) fn async_iterator_key(i: &Interp) -> Option<Rc<str>> {
     well_known_key(i, "asyncIterator")
 }
 

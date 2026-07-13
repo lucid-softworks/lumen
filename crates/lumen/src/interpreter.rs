@@ -944,7 +944,10 @@ pub struct Interp {
     pub(crate) iterator_sym: Option<Rc<SymbolData>>,
     /// Well-known symbols, minted once per Interp — additional realms (`$262.createRealm()`) reuse
     /// them so `@@iterator` etc. have the same identity cross-realm, as the spec requires.
-    pub(crate) wk_syms: Vec<(&'static str, Value)>,
+    /// Well-known symbol descriptors and their internal property-map keys. The key is formatted
+    /// once when the symbol is minted; protocol dispatch clones this `Rc<str>` instead of
+    /// repeatedly walking `%Symbol%` and allocating `"\0{id}"` strings.
+    pub(crate) wk_syms: Vec<(&'static str, Value, Rc<str>)>,
     /// Set while a `?.` link in the current optional chain saw a nullish base, so the rest of the
     /// chain short-circuits to `undefined`. Reset at each `OptionalChain` boundary.
     pub(crate) short_circuit: bool,
