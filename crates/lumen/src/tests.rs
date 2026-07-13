@@ -208,6 +208,23 @@ fn function_constructor() {
 }
 
 #[test]
+fn function_apply_dense_and_observable_fallbacks() {
+    assert_eq!(run("Math.max.apply(null,[3,7,4])"), "7");
+    assert_eq!(
+        run("var hits=0,a=[1,2];Object.defineProperty(a,'1',{get(){hits++;return 9}});Math.max.apply(null,a)+','+hits"),
+        "9,1"
+    );
+    assert_eq!(
+        run("Array.prototype[1]=8;Math.max.apply(null,[3,,4])"),
+        "8"
+    );
+    assert_eq!(
+        run("function f(a){arguments[0]=9;return Math.max.apply(null,arguments)+','+a}f(1)"),
+        "9,9"
+    );
+}
+
+#[test]
 fn template_literals() {
     assert_eq!(run("`hello`"), "hello");
     assert_eq!(run("let x = 5; `x is ${x}`"), "x is 5");

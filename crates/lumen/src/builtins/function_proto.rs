@@ -28,8 +28,26 @@ pub(super) fn install_function_proto(it: &mut Interp) {
             Value::Obj(o) => {
                 let len = ab(i.checked_array_len(&o))?;
                 let mut v = Vec::with_capacity(len);
+                let direct_dense = i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+                    && !i.mapped_arguments.contains_key(&(Rc::as_ptr(&o) as usize));
                 for k in 0..len {
-                    v.push(ab(i.get_member(&Value::Obj(o.clone()), &k.to_string()))?);
+                    // Arrays and unmapped arguments objects overwhelmingly contain plain own
+                    // dense entries. Read those by slot: the generic path allocates a decimal
+                    // key and walks the prototype chain for every argument. Holes, accessors,
+                    // proxies, typed arrays, and mapped arguments retain full [[Get]] semantics.
+                    let own = direct_dense.then(|| {
+                        let b = o.borrow();
+                        b.props
+                            .get_index(k as u32)
+                            .filter(|p| !p.accessor())
+                            .map(|p| p.value())
+                    });
+                    match own.flatten() {
+                        Some(value) => v.push(value),
+                        None => v.push(ab(
+                            i.get_member(&Value::Obj(o.clone()), &k.to_string()),
+                        )?),
+                    }
                 }
                 v
             }
