@@ -1004,6 +1004,13 @@ pub struct Interp {
     pub(crate) data_views: crate::fasthash::FastMap<usize, (usize, usize, usize, bool)>,
     /// Compiled regular expressions, keyed by the RegExp object's pointer.
     pub(crate) regexps: crate::fasthash::FastMap<usize, Rc<crate::regex::Regex>>,
+    /// Immutable matcher programs shared by RegExp instances with the same source and flags.
+    /// A literal expression must still produce a fresh object (and therefore a fresh
+    /// `lastIndex`) each time it is evaluated, but recompiling its parser/bytecode and first-set
+    /// table is pure duplicate work. The outer map is bounded in `compiled_regexp` so code that
+    /// constructs unbounded dynamic patterns cannot retain them forever.
+    pub(crate) regexp_programs:
+        crate::fasthash::FastMap<String, crate::fasthash::FastMap<String, Rc<crate::regex::Regex>>>,
     /// Proxy `(target, handler)` pairs, keyed by the proxy object's pointer.
     pub(crate) proxies: crate::fasthash::FastMap<usize, (Value, Value)>,
     /// The active `new.target` for the function currently executing (Undefined outside a `new`).
@@ -1498,6 +1505,7 @@ impl Interp {
             shadow_realms: Default::default(),
             data_views: Default::default(),
             regexps: Default::default(),
+            regexp_programs: Default::default(),
             proxies: Default::default(),
             new_target: Value::Undefined,
             pending_new_target: Value::Undefined,
@@ -5143,6 +5151,22 @@ impl Interp {
             }
         }
         ao
+    }
+
+    /// Materialize the dedicated arguments slot of a compiled parameterless function. Compiled
+    /// chunks that need this object are kept off the moved-frame shortcut, so the ordinary call
+    /// frame is present and supplies the observable `callee` identity.
+    pub(crate) fn make_compiled_arguments_object(&mut self, args: &[Value], scope: &Env) -> Gc {
+        let fn_obj = self
+            .fn_frames
+            .last()
+            .expect("compiled arguments object requires an active function frame")
+            .callee();
+        let func = match &fn_obj.borrow().call {
+            Callable::User(f, _) => f.clone(),
+            _ => unreachable!("compiled arguments object belongs to a user function"),
+        };
+        self.make_arguments_object(&func, args, scope, &fn_obj)
     }
 
     /// OrdinaryCallBindThis for a compiled body, computed only when the body reads `this`. A

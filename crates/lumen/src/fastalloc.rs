@@ -27,9 +27,11 @@ const MAX_CLASS: usize = 1024;
 /// 16-byte class granularity (also the maximum supported alignment for cached blocks).
 const STEP: usize = 16;
 const NUM_CLASSES: usize = MAX_CLASS / STEP;
-/// Per-class cache bound. Worst case across every class is a few tens of MB per thread; in
-/// practice a handful of hot classes hold a few hundred KB.
-const CLASS_CAP: usize = 65536;
+/// Maximum cached storage for one size class. Keeping the bound in bytes rather than items is
+/// important: a 65,536-item limit allowed the 64 classes to retain just over 2 GiB per thread.
+/// This bounds the complete thread-local cache to 16 MiB while preserving a deeper free list for
+/// the small, hot allocation classes.
+const BYTES_PER_CLASS: usize = 256 * 1024;
 
 struct Cache {
     heads: [Cell<*mut u8>; NUM_CLASSES],
@@ -73,6 +75,11 @@ fn class_layout(class: usize) -> Layout {
     unsafe { Layout::from_size_align_unchecked((class + 1) * STEP, STEP) }
 }
 
+#[inline]
+fn class_cap(class: usize) -> usize {
+    BYTES_PER_CLASS / ((class + 1) * STEP)
+}
+
 /// See the module docs.
 pub struct ClassAlloc;
 
@@ -101,7 +108,7 @@ unsafe impl GlobalAlloc for ClassAlloc {
         if let Some(class) = class_of(layout.size(), layout.align()) {
             let cached = CACHE
                 .try_with(|c| {
-                    if c.counts[class].get() < CLASS_CAP {
+                    if c.counts[class].get() < class_cap(class) {
                         unsafe { *(ptr as *mut *mut u8) = c.heads[class].get() };
                         c.heads[class].set(ptr);
                         c.counts[class].set(c.counts[class].get() + 1);

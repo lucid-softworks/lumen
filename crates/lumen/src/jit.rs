@@ -7880,6 +7880,9 @@ pub fn run(
     let seed = n_params.min(args.len());
     slots.extend_from_slice(&args[..seed]);
     slots.resize(n_slots, Value::Undefined);
+    if let Some(s) = chunk.jit_arguments_slot() {
+        slots[s as usize] = Value::Obj(i.make_compiled_arguments_object(args, &env));
+    }
     for &s in chunk.jit_var_force_resets() {
         slots[s as usize] = Value::Undefined;
     }

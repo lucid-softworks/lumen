@@ -1830,6 +1830,17 @@ impl Interp {
         self.get_var_with(name, env).map(|(v, _)| v)
     }
 
+    /// Compiled `typeof freeName`: unlike an ordinary name load, an unresolved name produces the
+    /// string "undefined". A declared lexical still in its TDZ continues to throw.
+    pub(crate) fn typeof_name_vm(&mut self, name: &str, env: &Env) -> Result<Value, Abrupt> {
+        match self.get_var(name, env) {
+            Ok(v) if self.is_htmldda(&v) => Ok(Value::str("undefined")),
+            Ok(v) => Ok(Value::from_string(v.type_of().to_string())),
+            Err(e) if self.binding_in_tdz(name, env) => Err(e),
+            Err(_) => Ok(Value::str("undefined")),
+        }
+    }
+
     /// Resolve like [`Interp::get_var`], also yielding the `with` object the binding came from —
     /// the implicit call receiver for `f()` resolved through a with scope.
     pub(crate) fn get_var_with(
@@ -3606,8 +3617,7 @@ impl Interp {
         flags: &str,
         proto: Option<crate::value::Gc>,
     ) -> Result<Value, Abrupt> {
-        let re =
-            crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?;
+        let re = self.compiled_regexp(source, flags)?;
         let obj = Object::new(proto);
         let ptr = Rc::as_ptr(&obj) as usize;
         // source/flags/global/... are accessor getters on RegExp.prototype (computed from the
@@ -3617,8 +3627,39 @@ impl Interp {
             Property::data(Value::Num(0.0), true, false, false),
         );
         self.gc_pin(&obj);
-        self.regexps.insert(ptr, Rc::new(re));
+        self.regexps.insert(ptr, re);
         Ok(Value::Obj(obj))
+    }
+
+    /// Return the immutable matcher shared by every RegExp with this source/flag pair. Observable
+    /// state lives on the freshly allocated JS object, not in `Regex`, so sharing the program does
+    /// not share `lastIndex` or object identity.
+    fn compiled_regexp(
+        &mut self,
+        source: &str,
+        flags: &str,
+    ) -> Result<Rc<crate::regex::Regex>, Abrupt> {
+        if let Some(re) = self
+            .regexp_programs
+            .get(source)
+            .and_then(|by_flags| by_flags.get(flags))
+        {
+            return Ok(re.clone());
+        }
+        let re = Rc::new(
+            crate::regex::Regex::new(source, flags).map_err(|e| self.throw("SyntaxError", e))?,
+        );
+        // This is mainly a literal-site cache. Keep dynamic `RegExp(string)` workloads bounded;
+        // clearing at the limit is rare and avoids maintaining a second LRU data structure on the
+        // hot lookup path.
+        if self.regexp_programs.len() >= 256 {
+            self.regexp_programs.clear();
+        }
+        self.regexp_programs
+            .entry(source.to_owned())
+            .or_default()
+            .insert(flags.to_owned(), re.clone());
+        Ok(re)
     }
 
     /// Direct eval: a non-string argument is returned unchanged; a string is parsed and executed.

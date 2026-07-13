@@ -2003,6 +2003,75 @@ fn bytecode_property_inline_cache() {
 }
 
 #[test]
+fn compiled_parameterless_arguments_object() {
+    // Parameterless variadic helpers can keep `arguments` in a VM/JIT slot. The object is still
+    // fresh per call, exposes the real callee in sloppy code, poisons it in strict code, and
+    // carries all surplus arguments even though the compiled function has zero parameter slots.
+    let src = r#"
+      function collect() {
+        return arguments.length + ":" + arguments[0] + ":" + arguments[2] + ":" +
+          (arguments.callee === collect) + ":" + Array.prototype.join.call(arguments, ",");
+      }
+      function fresh() { return arguments; }
+      function strictArgs() { "use strict"; try { return arguments.callee; } catch (e) { return e.constructor.name; } }
+      collect("a", "b", "c") + "|" + (fresh() !== fresh()) + "|" + strictArgs();
+    "#;
+    for tier in [crate::bytecode::Tier::Bytecode, crate::bytecode::Tier::Jit] {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = 0;
+        let got = match e.eval(src, false).expect("parse") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        };
+        assert_eq!(got, "3:a:c:true:a,b,c|true|TypeError");
+    }
+}
+
+#[test]
+fn compiled_typeof_unresolved_name() {
+    for tier in [crate::bytecode::Tier::Bytecode, crate::bytecode::Tier::Jit] {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = 0;
+        let got = match e
+            .eval(
+                "function f(){ return typeof __missing_compiled_name; } f()",
+                false,
+            )
+            .expect("parse")
+        {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        };
+        assert_eq!(got, "undefined");
+    }
+}
+
+#[test]
+fn compiled_update_free_name() {
+    let src = r#"
+      var g = 4;
+      function outer() {
+        let x = 7;
+        return function bump() { var old = x++; ++g; return old + ":" + x + ":" + g; };
+      }
+      var bump = outer();
+      bump() + "|" + bump();
+    "#;
+    for tier in [crate::bytecode::Tier::Bytecode, crate::bytecode::Tier::Jit] {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = 0;
+        let got = match e.eval(src, false).expect("parse") {
+            Completion::Value(v) => v,
+            Completion::Throw { name, message } => panic!("threw {name}: {message}"),
+        };
+        assert_eq!(got, "7:8:5|8:9:6");
+    }
+}
+
+#[test]
 fn bytecode_compiles_labelled_loops() {
     // Labelled loops used to bail out of the compiler (falling back to the interpreter). They now
     // compile to the fast tier: assert `compile` actually produces a chunk rather than `None`.

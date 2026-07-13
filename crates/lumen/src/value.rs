@@ -407,7 +407,21 @@ impl Object {
             gc_mark: Cell::new(false),
             gc_internal: Cell::new(0),
         }));
-        GC_REGISTRY.with(|r| r.borrow_mut().push(Rc::downgrade(&obj)));
+        GC_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            reg.entries.push(Rc::downgrade(&obj));
+            // A dead Weak still owns the RcBox allocation. Workloads with heavy object churn but
+            // a small live set may never arm the cycle collector, so prune the weak registry on
+            // its own volume instead of allowing millions of dead boxes to accumulate.
+            if reg.entries.len() > reg.next_prune {
+                reg.entries.retain(|w| w.strong_count() > 0);
+                reg.next_prune = reg
+                    .entries
+                    .len()
+                    .saturating_mul(2)
+                    .max(GC_REGISTRY_PRUNE_TRIGGER);
+            }
+        });
         obj
     }
 }
@@ -422,8 +436,20 @@ impl Drop for Object {
 // The GC is a refcount-based cycle collector (lumen has no tracing GC). Every heap object is
 // registered (as a Weak) and the live count is maintained via Object::new / Drop. `Interp::gc_collect`
 // reclaims objects referenced only by other (also-unreachable) objects — see interpreter.rs.
+const GC_REGISTRY_PRUNE_TRIGGER: usize = 65_536;
+
+struct GcRegistry {
+    entries: Vec<Weak<RefCell<Object>>>,
+    next_prune: usize,
+}
+
 thread_local! {
-    static GC_REGISTRY: RefCell<Vec<Weak<RefCell<Object>>>> = const { RefCell::new(Vec::new()) };
+    static GC_REGISTRY: RefCell<GcRegistry> = const {
+        RefCell::new(GcRegistry {
+            entries: Vec::new(),
+            next_prune: GC_REGISTRY_PRUNE_TRIGGER,
+        })
+    };
     static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
 }
 
@@ -436,14 +462,19 @@ pub fn live_objects() -> i64 {
 pub fn gc_snapshot() -> Vec<Gc> {
     GC_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let mut live = Vec::with_capacity(reg.len());
-        reg.retain(|w| match w.upgrade() {
+        let mut live = Vec::with_capacity(reg.entries.len());
+        reg.entries.retain(|w| match w.upgrade() {
             Some(o) => {
                 live.push(o);
                 true
             }
             None => false,
         });
+        reg.next_prune = reg
+            .entries
+            .len()
+            .saturating_mul(2)
+            .max(GC_REGISTRY_PRUNE_TRIGGER);
         live
     })
 }

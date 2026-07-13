@@ -379,6 +379,8 @@ pub enum Op {
     StoreCapInit(u32),
     /// `++`/`--` on a captured local, in place (the env-homed `UpdateLocal`).
     UpdateCap(u32, UpdKind),
+    /// `++`/`--` on a free binding resolved through the closure/global environment.
+    UpdateName(u32, UpdKind),
     /// Create a closure over the current environment from `Chunk::funcs[fidx]`. The second
     /// operand names an anonymous function expression per NamedEvaluation (`names` index, or
     /// `u32::MAX` for none).
@@ -522,6 +524,8 @@ pub enum Op {
     Not,
     BitNot,
     Typeof,
+    /// `typeof freeName`: absent bindings yield "undefined", while lexical TDZ still throws.
+    TypeofName(u32),
     Void,
     Jump(u32),
     JumpIfFalse(u32),
@@ -595,6 +599,10 @@ pub struct Chunk {
     slot_names: Vec<Rc<str>>,
     /// Parameter positions map onto slots [0, n_params).
     n_params: usize,
+    /// Slot holding the ordinary function's materialized `arguments` object. Only compiled for
+    /// parameterless synchronous functions for now, avoiding mapped-parameter aliasing while
+    /// covering common variadic helpers.
+    arguments_slot: Option<u16>,
     /// Slots reset to undefined after parameter seeding (the tree-walker's `for`-head var
     /// hoisting overwrites same-named params; replicated bug-for-bug — it is the oracle).
     var_force_resets: Vec<u16>,
@@ -648,8 +656,14 @@ impl Chunk {
         self.uses_this || self.env_this
     }
     /// Whether calls need a real activation environment (captured locals / lexical `this`).
-    fn needs_env(&self) -> bool {
+    fn makes_env(&self) -> bool {
         !self.cap_inits.is_empty() || self.env_this
+    }
+
+    /// Whether the JIT-to-JIT moved-frame path must stand down. An `arguments` object observes
+    /// the call frame even though it does not itself require an activation scope.
+    fn needs_env(&self) -> bool {
+        self.makes_env() || self.arguments_slot.is_some()
     }
 
     /// Build the activation environment for one call: a fresh scope under `env` holding exactly
@@ -658,7 +672,7 @@ impl Chunk {
     /// captured — closures then capture the definition env directly, which resolves identically
     /// because none of their free names are outer locals.
     fn make_run_env(&self, i: &Interp, env: &Env, this_val: &Value, args: &[Value]) -> Env {
-        if !self.needs_env() {
+        if !self.makes_env() {
             return env.clone();
         }
         let act = crate::interpreter::new_var_scope(Some(env.clone()));
@@ -1614,12 +1628,18 @@ fn compile_inner(
     func: &Function,
     plan: &crate::fasthash::FastMap<u32, InlinePlanEntry>,
 ) -> Option<Rc<Chunk>> {
-    // Body facts the scanner already knows: `arguments` / `new.target` are observation channels
-    // into the activation that slots do not provide; `this` in an arrow is a free variable we
-    // do not model.
+    // Body facts the scanner already knows: `new.target` is an observation channel into the
+    // activation that slots do not provide; `this` / `arguments` in an arrow are free variables
+    // we do not model. Parameterless synchronous ordinary functions can materialize an unmapped
+    // arguments object into a dedicated slot (the common variadic-helper shape).
     let scan = func.scan_flags();
-    if scan & SCAN_ARGUMENTS != 0 || scan & SCAN_NEW_TARGET != 0 {
-        log_bail("fn", "arguments/new.target");
+    if scan & SCAN_NEW_TARGET != 0 {
+        log_bail("fn", "new.target");
+        return None;
+    }
+    let uses_arguments = scan & SCAN_ARGUMENTS != 0;
+    if uses_arguments && (func.is_arrow || func.is_async || !func.params.is_empty()) {
+        log_bail("fn", "arguments with arrow/async/parameters");
         return None;
     }
     if func.is_arrow && scan & SCAN_THIS != 0 {
@@ -1665,6 +1685,11 @@ fn compile_inner(
         plan_stack: vec![(plan.clone(), 0)],
         ..Compiler::default()
     };
+    if uses_arguments {
+        let slot = c.fresh_slot("arguments");
+        c.scope_bind("arguments", slot, false);
+        c.arguments_slot = Some(slot);
+    }
     // Captured once-per-call block `let`s home in the activation (TDZ from entry, initialized
     // by the declaring block's own StoreCapInit); CaptureScan proved no enclosing same-name
     // declaration and block-resolved references only, so the function-flat env map is
@@ -1807,6 +1832,7 @@ fn compile_inner(
         n_slots: c.slot_names.len(),
         slot_names: c.slot_names,
         n_params: c.n_params,
+        arguments_slot: c.arguments_slot,
         var_force_resets: c.var_force_resets,
         uses_this: c.uses_this,
         funcs: c.funcs,
@@ -1984,6 +2010,7 @@ struct Compiler {
     scopes: Vec<Vec<(String, u16, bool)>>,
     slot_names: Vec<Rc<str>>,
     n_params: usize,
+    arguments_slot: Option<u16>,
     var_force_resets: Vec<u16>,
     loops: Vec<LoopCtx>,
     /// Labels collected from an enclosing `Stmt::Labeled` chain, waiting to be attached to the next
@@ -4027,10 +4054,12 @@ impl Compiler {
                         self.emit(Op::Void);
                     }
                     "typeof" => {
-                        // `typeof freeName` must not throw on unresolved names — that path
-                        // stays in the oracle.
-                        if matches!(&**arg, Expr::Ident(n) if self.home(n).is_none()) {
-                            return Err(Bail);
+                        if let Expr::Ident(n) = &**arg {
+                            if self.home(n).is_none() {
+                                let name = self.name_idx(n);
+                                self.emit(Op::TypeofName(name));
+                                return Ok(());
+                            }
                         }
                         self.expr(arg)?;
                         self.emit(Op::Typeof);
@@ -4260,8 +4289,12 @@ impl Compiler {
                         self.emit(Op::UpdateCap(n, kind));
                         Ok(())
                     }
-                    // Const targets and free names (global counters) stay in the oracle.
-                    _ => Err(Bail),
+                    Some(Home::Slot(_, true)) | Some(Home::Env(true)) => Err(Bail),
+                    None => {
+                        let n = self.name_idx(name);
+                        self.emit(Op::UpdateName(n, kind));
+                        Ok(())
+                    }
                 }
             }
             Expr::Member {
@@ -4457,6 +4490,9 @@ pub fn run(
     let seed = chunk.n_params.min(args.len());
     slots.extend_from_slice(&args[..seed]);
     slots.resize(chunk.n_slots, Value::Undefined);
+    if let Some(s) = chunk.arguments_slot {
+        slots[s as usize] = Value::Obj(i.make_compiled_arguments_object(args, &env));
+    }
     for &s in &chunk.var_force_resets {
         slots[s as usize] = Value::Undefined;
     }
@@ -4688,6 +4724,11 @@ fn run_vm(
                     }
                     Ok(())
                 })?;
+            }
+            Op::UpdateName(n, kind) => {
+                let name = &chunk.names[n as usize];
+                let old = i.get_var(name, env)?;
+                step_and_store(i, stack, kind, old, |i, v| i.assign_free_name(name, v, env))?;
             }
             Op::MakeClosure(fidx, name_n) => {
                 let v = i.make_function(chunk.funcs[fidx as usize].clone(), env.clone());
@@ -5133,6 +5174,9 @@ fn run_vm(
                 let a = pop!();
                 let v = i.eval_unary_vm("typeof", a)?;
                 stack.push(v);
+            }
+            Op::TypeofName(n) => {
+                stack.push(i.typeof_name_vm(&chunk.names[n as usize], env)?);
             }
             Op::Void => {
                 pop!();
@@ -5648,7 +5692,7 @@ impl Chunk {
             // isn't shadowed here" on any later activation. Never valid for no-activation
             // chunks: their run env is a closure-instance-specific scope whose generation says
             // nothing about which names it holds.
-            if self.needs_env() {
+            if self.makes_env() {
                 if let Some(p) = &b.parent {
                     let pb = p.borrow();
                     if pb.with_obj.is_none() {
@@ -5711,6 +5755,9 @@ impl Chunk {
     }
     pub(crate) fn jit_frame(&self) -> (usize, usize) {
         (self.n_params, self.n_slots)
+    }
+    pub(crate) fn jit_arguments_slot(&self) -> Option<u16> {
+        self.arguments_slot
     }
     /// Whether calls run without an activation environment (nothing captured, no lexical
     /// `this`) — the precondition for the JIT→JIT fast call's moved-argument entry.
@@ -5814,7 +5861,7 @@ impl Chunk {
             | Op::StoreCap(_)
             | Op::StoreCapInit(_)
             | Op::StoreName(_) => (1, 0),
-            Op::UpdateLocal(_, k) | Op::UpdateCap(_, k) => (0, upd(k)),
+            Op::UpdateLocal(_, k) | Op::UpdateCap(_, k) | Op::UpdateName(_, k) => (0, upd(k)),
             Op::UpdateProp(_, _, k) => (1, upd(k)),
             Op::UpdateElem(k) => (2, upd(k)),
             Op::Tdz(_) => (0, 0),
@@ -5868,6 +5915,7 @@ impl Chunk {
             | Op::StrictNotEq
             | Op::GenBin(_) => (2, 1),
             Op::Neg | Op::Plus | Op::Not | Op::BitNot | Op::Typeof | Op::Void => (1, 1),
+            Op::TypeofName(_) => (0, 1),
             Op::Jump(_) => (0, 0),
             Op::InlineGuard(..) => (0, 0),
             Op::ResetSlots(..) => (0, 0),
@@ -6721,6 +6769,15 @@ unsafe fn jit_exec_inner(
                 push!(v);
             }
         }
+        Op::UpdateName(n, kind) => {
+            let name = &chunk.names[n as usize];
+            let old = i.get_var(name, env)?;
+            if let Some(v) = step_value(i, kind, old, |i, v| {
+                i.assign_free_name(name, v, env)
+            })? {
+                push!(v);
+            }
+        }
         Op::MakeClosure(fidx, name_n) => {
             let v = i.make_function(chunk.funcs[fidx as usize].clone(), env.clone());
             if name_n != u32::MAX {
@@ -7154,6 +7211,9 @@ unsafe fn jit_exec_inner(
             let a = pop!();
             let v = i.eval_unary_vm("typeof", a)?;
             push!(v);
+        }
+        Op::TypeofName(n) => {
+            push!(i.typeof_name_vm(&chunk.names[n as usize], env)?);
         }
         Op::Void => {
             pop!();
