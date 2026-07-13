@@ -1946,6 +1946,13 @@ function generateRsa(bits, publicExponent) {
 
 function oaepReg(opts) { return resolveHash(normalizeDigest(opts.oaepHash || "sha1")); }
 function oaepLabel(opts) { return opts.oaepLabel !== undefined ? toBytes(opts.oaepLabel) : undefined; }
+function rsaNoPadding(key, data, privateOperation) {
+  const k = rsaModLen(key);
+  if (data.length !== k) throw new Error("RSA_NO_PADDING requires data with the same size as the modulus");
+  const value = bytesToBigIntBE(data);
+  const transformed = privateOperation ? rsaDP(key, value) : rsaEP(key, value);
+  return bigIntToBytesBE(transformed, k);
+}
 function publicEncrypt(keyLike, buffer) {
   const opts = keyOptionsFrom(keyLike);
   const struct = createPublicKey(keyLike)._asym;
@@ -1954,6 +1961,7 @@ function publicEncrypt(keyLike, buffer) {
   const padding = opts.padding === undefined ? constants.RSA_PKCS1_OAEP_PADDING : opts.padding;
   if (padding === constants.RSA_PKCS1_OAEP_PADDING) return Buffer.from(rsaOaepEncrypt(struct, data, oaepReg(opts), oaepLabel(opts)));
   if (padding === constants.RSA_PKCS1_PADDING) return Buffer.from(rsaPkcs1Encrypt(struct, data));
+  if (padding === constants.RSA_NO_PADDING) return Buffer.from(rsaNoPadding(struct, data, false));
   throw new Error(`publicEncrypt: padding ${padding} is not supported in lumen`);
 }
 function privateDecrypt(keyLike, buffer) {
@@ -1967,23 +1975,34 @@ function privateDecrypt(keyLike, buffer) {
     // Match Node v22 exactly: PKCS#1 v1.5 private decryption was removed (Marvin attack).
     throw new TypeError("RSA_PKCS1_PADDING is no longer supported for private decryption");
   }
+  if (padding === constants.RSA_NO_PADDING) return Buffer.from(rsaNoPadding(struct, data, true));
   throw new Error(`privateDecrypt: padding ${padding} is not supported in lumen`);
 }
 function privateEncrypt(keyLike, buffer) {
+  const opts = keyOptionsFrom(keyLike);
   const struct = createPrivateKey(keyLike)._asym;
   if (struct.kind !== "rsa") throw new Error("privateEncrypt: only RSA keys are supported in lumen");
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_PADDING : opts.padding;
+  const data = toBytes(buffer);
+  if (padding === constants.RSA_NO_PADDING) return Buffer.from(rsaNoPadding(struct, data, true));
+  if (padding !== constants.RSA_PKCS1_PADDING) throw new Error(`privateEncrypt: padding ${padding} is not supported in lumen`);
   const k = rsaModLen(struct);
-  const msg = toBytes(buffer);
+  const msg = data;
   if (msg.length > k - 11) throw new Error("privateEncrypt: message too long");
   const ps = new Uint8Array(k - msg.length - 3).fill(0xff);
   const em = concatAll([Uint8Array.of(0x00, 0x01), ps, Uint8Array.of(0x00), msg]);
   return Buffer.from(bigIntToBytesBE(rsaDP(struct, bytesToBigIntBE(em)), k));
 }
 function publicDecrypt(keyLike, buffer) {
+  const opts = keyOptionsFrom(keyLike);
   const struct = createPublicKey(keyLike)._asym;
   if (struct.kind !== "rsa") throw new Error("publicDecrypt: only RSA keys are supported in lumen");
+  const padding = opts.padding === undefined ? constants.RSA_PKCS1_PADDING : opts.padding;
+  const data = toBytes(buffer);
+  if (padding === constants.RSA_NO_PADDING) return Buffer.from(rsaNoPadding(struct, data, false));
+  if (padding !== constants.RSA_PKCS1_PADDING) throw new Error(`publicDecrypt: padding ${padding} is not supported in lumen`);
   const k = rsaModLen(struct);
-  const em = bigIntToBytesBE(rsaEP(struct, bytesToBigIntBE(toBytes(buffer))), k);
+  const em = bigIntToBytesBE(rsaEP(struct, bytesToBigIntBE(data)), k);
   if (em[0] !== 0x00 || em[1] !== 0x01) throw new Error("publicDecrypt: decryption error");
   let i = 2;
   while (i < em.length && em[i] === 0xff) i++;
