@@ -44,6 +44,12 @@ fn streams_account_for_exact_reads_backpressure_and_corking() {
 
       const duplex = new Duplex({ objectMode: true, read() {}, write(_chunk, _encoding, callback) { callback(); } });
       console.log("duplex", duplex.readableObjectMode, duplex.writableObjectMode);
+
+      const oneShot = new Readable();
+      oneShot.once("data", chunk => console.log("once", chunk.toString()));
+      oneShot.on("end", () => console.log("once-end"));
+      oneShot.push(Buffer.from("fast"));
+      oneShot.push(null);
     "#;
     match runtime.eval(source).expect("source parses") {
         Completion::Value(_) => {}
@@ -57,6 +63,8 @@ fn streams_account_for_exact_reads_backpressure_and_corking() {
             "objects true false 2 true true",
             "pressure true false 4 3",
             "duplex true true",
+            "once fast",
+            "once-end",
             "drain 2",
             "batch 1 one+two",
             "finish abcd",

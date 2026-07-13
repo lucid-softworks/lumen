@@ -81,6 +81,11 @@ class Readable extends Stream {
     return res;
   }
   addListener(ev, fn) { return this.on(ev, fn); }
+  once(ev, fn) {
+    const res = super.once(ev, fn);
+    if (ev === "data" && this._readableState.flowing !== false) this.resume();
+    return res;
+  }
 
   resume() {
     const state = this._readableState;

@@ -330,7 +330,13 @@ fn net_unix_path_accept_and_cleanup() {
     let peer_path = path.clone();
     let peer = std::thread::spawn(move || {
         for _ in 0..100 {
-            if std::os::unix::net::UnixStream::connect(&peer_path).is_ok() { return; }
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&peer_path) {
+                stream.write_all(b"ping").unwrap();
+                let mut reply = [0; 4];
+                stream.read_exact(&mut reply).unwrap();
+                assert_eq!(&reply, b"pong");
+                return;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("connect to lumen Unix server at {}", peer_path.display());
@@ -342,8 +348,13 @@ fn net_unix_path_accept_and_cleanup() {
           const fs = require("node:fs"), net = require("node:net"), path = {path:?};
           const server = net.createServer(socket => {{
             console.log("accepted", socket.remoteAddress === undefined);
-            socket.destroy();
-            server.close(() => console.log("closed", fs.existsSync(path)));
+            socket.once("data", data => {{
+              console.log("received", data.toString());
+              socket.write("pong", () => {{
+                socket.destroy();
+                server.close(() => console.log("closed", fs.existsSync(path)));
+              }});
+            }});
           }});
           server.listen(path, () => {{
             console.log("listening", server.address() === path, fs.existsSync(path));
@@ -355,6 +366,7 @@ fn net_unix_path_accept_and_cleanup() {
     assert_eq!(out.lines(), [
         "listening true true",
         "accepted true",
+        "received ping",
         "closed false",
     ]);
 }
