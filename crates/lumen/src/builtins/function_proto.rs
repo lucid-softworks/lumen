@@ -75,11 +75,7 @@ pub(super) fn install_function_proto(it: &mut Interp) {
         };
         let obj = Object::new(bound_proto);
         let target_is_ctor = i.value_is_constructor(&this);
-        obj.borrow_mut().call = Callable::Bound {
-            target,
-            this: bound_this,
-            args: bound_args,
-        };
+        obj.borrow_mut().call = Callable::bound(target, bound_this, bound_args);
         // A bound function is a constructor exactly when its target is.
         obj.borrow_mut().is_constructor = target_is_ctor;
         obj.borrow_mut()

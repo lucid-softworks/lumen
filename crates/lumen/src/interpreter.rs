@@ -1303,7 +1303,7 @@ impl Interp {
         let string_proto = Object::new(Some(object_proto.clone()));
         let number_proto = Object::new(Some(object_proto.clone()));
         let boolean_proto = Object::new(Some(object_proto.clone()));
-        string_proto.borrow_mut().exotic = Exotic::StrWrap("".into());
+        string_proto.borrow_mut().exotic = Exotic::str_wrap("".into());
         number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
         boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
@@ -1430,7 +1430,7 @@ impl Interp {
         let boolean_proto = Object::new(Some(object_proto.clone()));
         // These prototypes are themselves wrapper exotics with default primitive data, so e.g.
         // `Number.prototype.valueOf()` / `Number.prototype == 0` work.
-        string_proto.borrow_mut().exotic = Exotic::StrWrap("".into());
+        string_proto.borrow_mut().exotic = Exotic::str_wrap("".into());
         number_proto.borrow_mut().exotic = Exotic::NumWrap(0.0);
         boolean_proto.borrow_mut().exotic = Exotic::BoolWrap(false);
         let symbol_proto = Object::new(Some(object_proto.clone()));
@@ -1578,7 +1578,7 @@ impl Interp {
             .cloned()
             .unwrap_or_else(|| self.error_protos["Error"].clone());
         let obj = Object::new(Some(proto));
-        obj.borrow_mut().exotic = Exotic::Error(self.capture_stack());
+        obj.borrow_mut().exotic = Exotic::error(self.capture_stack());
         let msg = message.into();
         if !msg.is_empty() {
             obj.borrow_mut()
@@ -4244,12 +4244,12 @@ impl Interp {
                 refs.push(p.clone());
             }
         }
-        if let Callable::Bound { target, this, args } = &b.call {
-            refs.push(target.clone());
-            if let Value::Obj(p) = this {
+        if let Callable::Bound(bound) = &b.call {
+            refs.push(bound.target.clone());
+            if let Value::Obj(p) = &bound.this {
                 refs.push(p.clone());
             }
-            for a in args {
+            for a in &bound.args {
                 if let Value::Obj(p) = a {
                     refs.push(p.clone());
                 }
@@ -4541,7 +4541,7 @@ impl Interp {
                 }
             }
             let bound = match &cur.borrow().call {
-                Callable::Bound { target, .. } => Some(target.clone()),
+                Callable::Bound(bound) => Some(bound.target.clone()),
                 _ => None,
             };
             match bound {
@@ -4719,23 +4719,18 @@ impl Interp {
                 }
                 self.call_user(&func, env, this, args, false, &obj)
             }
-            Callable::Bound {
-                target,
-                this: bthis,
-                args: bargs,
-            } => {
-                let mut all = bargs.clone();
+            Callable::Bound(bound) => {
+                let mut all = bound.args.clone();
                 all.extend_from_slice(args);
-                self.call(Value::Obj(target), bthis, &all)
+                self.call(Value::Obj(bound.target), bound.this, &all)
             }
             Callable::WrappedShadow { realm, target } => {
                 self.call_wrapped_shadow(realm, *target, args)
             }
-            Callable::WrappedCross {
-                realm,
-                parent,
-                target,
-            } => {
+            Callable::WrappedCross(cross) => {
+                let realm = cross.realm;
+                let parent = cross.parent;
+                let target = cross.target;
                 if std::env::var("LUMEN_DBG").is_ok() {
                     eprintln!(
                         "DBG cross enter realm={realm} parent={parent:x} self={:p} tkind={}",
@@ -4744,7 +4739,7 @@ impl Interp {
                             Value::Obj(o) => match &o.borrow().call {
                                 Callable::User(..) => "user",
                                 Callable::WrappedShadow { .. } => "wshadow",
-                                Callable::WrappedCross { .. } => "wcross",
+                                Callable::WrappedCross(_) => "wcross",
                                 Callable::Native(_) | Callable::NativeData(_) => "native",
                                 _ => "other",
                             },
@@ -5040,11 +5035,7 @@ impl Interp {
         target: Value,
     ) -> Value {
         let f = Object::new(Some(self.function_proto.clone()));
-        f.borrow_mut().call = Callable::WrappedCross {
-            realm,
-            parent,
-            target: Box::new(target),
-        };
+        f.borrow_mut().call = Callable::wrapped_cross(realm, parent, target);
         f.borrow_mut().props.insert(
             "length",
             Property::data(Value::Num(0.0), false, false, true),
@@ -6856,11 +6847,11 @@ impl Interp {
             },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call = Callable::Bound {
+        bound.borrow_mut().call = Callable::bound(
             target,
-            this: r.clone(),
-            args: vec![Value::Num(key as f64), r.clone()],
-        };
+            r.clone(),
+            vec![Value::Num(key as f64), r.clone()],
+        );
         Value::Obj(bound)
     }
 
@@ -6889,11 +6880,11 @@ impl Interp {
         );
         let bound = Object::new(Some(self.function_proto.clone()));
         // `args` carries the generator key (as a number marker) and the result promise.
-        bound.borrow_mut().call = Callable::Bound {
+        bound.borrow_mut().call = Callable::bound(
             target,
-            this: r.clone(),
-            args: vec![Value::Num(key as f64), r.clone()],
-        };
+            r.clone(),
+            vec![Value::Num(key as f64), r.clone()],
+        );
         Value::Obj(bound)
     }
 
@@ -6926,11 +6917,8 @@ impl Interp {
             },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call = Callable::Bound {
-            target,
-            this: promise.clone(),
-            args: vec![promise.clone()],
-        };
+        bound.borrow_mut().call =
+            Callable::bound(target, promise.clone(), vec![promise.clone()]);
         Value::Obj(bound)
     }
 
@@ -7169,25 +7157,21 @@ impl Interp {
                     })
                 }
             }
-            Callable::Bound {
-                target,
-                args: bargs,
-                ..
-            } => {
-                let mut all = bargs.clone();
+            Callable::Bound(bound) => {
+                let mut all = bound.args.clone();
                 all.extend_from_slice(args);
                 // BoundFunction [[Construct]]: if new.target is the bound function itself, use the
                 // bound target as new.target instead.
                 let nt = if self.strict_equals(&new_target, &callee) {
-                    Value::Obj(target.clone())
+                    Value::Obj(bound.target.clone())
                 } else {
                     new_target
                 };
-                self.construct_nt(Value::Obj(target), &all, nt)
+                self.construct_nt(Value::Obj(bound.target), &all, nt)
             }
             Callable::None
             | Callable::WrappedShadow { .. }
-            | Callable::WrappedCross { .. }
+            | Callable::WrappedCross(_)
             | Callable::AccessorGet(_)
             | Callable::AccessorSet(_)
             | Callable::PropGet(_)

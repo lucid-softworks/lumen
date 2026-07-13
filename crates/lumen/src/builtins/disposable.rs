@@ -123,17 +123,17 @@ fn adisp_reaction(
         },
     );
     let bound = Object::new(Some(i.function_proto.clone()));
-    bound.borrow_mut().call = Callable::Bound {
+    bound.borrow_mut().call = Callable::bound(
         target,
-        this: Value::Undefined,
-        args: vec![
+        Value::Undefined,
+        vec![
             list.clone(),
             Value::Num(idx as f64),
             result.clone(),
             Value::Bool(err.is_some()),
             err.clone().unwrap_or(Value::Undefined),
         ],
-    };
+    );
     Value::Obj(bound)
 }
 fn adisp_react_fulfil(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
@@ -326,11 +326,8 @@ pub(super) fn install_async_disposable_stack(it: &mut Interp) {
         } else {
             let target = i.make_native("", 0, ds_sync_dispose_wrapper);
             let bound = Object::new(Some(i.function_proto.clone()));
-            bound.borrow_mut().call = Callable::Bound {
-                target,
-                this: Value::Undefined,
-                args: vec![disp, v.clone()],
-            };
+            bound.borrow_mut().call =
+                Callable::bound(target, Value::Undefined, vec![disp, v.clone()]);
             i.make_array(vec![Value::Obj(bound), Value::Undefined])
         };
         ds_push(i, &this, entry)?;

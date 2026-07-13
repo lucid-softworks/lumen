@@ -1812,7 +1812,7 @@ fn ctor_realm_proto(i: &mut Interp, nt: &Value, default_proto: &str) -> Result<O
             }
         }
         let bound = match &ntobj.borrow().call {
-            Callable::Bound { target, .. } => Some(target.clone()),
+            Callable::Bound(bound) => Some(bound.target.clone()),
             _ => None,
         };
         match bound {
@@ -2581,11 +2581,7 @@ pub(crate) fn make_bound_len(
     let obj = Object::new(Some(i.function_proto.clone()));
     {
         let mut b = obj.borrow_mut();
-        b.call = Callable::Bound {
-            target: t,
-            this: Value::Undefined,
-            args: bound_args,
-        };
+        b.call = Callable::bound(t, Value::Undefined, bound_args);
         b.props.insert(
             "length",
             Property::data(Value::Num(length), false, false, true),
@@ -7963,7 +7959,7 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<crate::lstr::LStr, Value>
     match this {
         Value::Str(s) => Ok(s.clone()),
         Value::Obj(o) => match &o.borrow().exotic {
-            Exotic::StrWrap(s) => Ok(s.clone()),
+        Exotic::StrWrap(s) => Ok((**s).clone()),
             _ => ab(i.to_string(this)),
         },
         // String.prototype methods RequireObjectCoercible(this): null/undefined → TypeError.
@@ -8832,10 +8828,10 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
     let (proto, exotic) = match &v {
         Value::Num(n) => (i.number_proto.clone(), Exotic::NumWrap(*n)),
         Value::Bool(b) => (i.boolean_proto.clone(), Exotic::BoolWrap(*b)),
-        Value::Str(s) => (i.string_proto.clone(), Exotic::StrWrap(s.clone())),
+        Value::Str(s) => (i.string_proto.clone(), Exotic::str_wrap(s.clone())),
         Value::Sym(s) => (i.symbol_proto.clone(), Exotic::SymWrap(s.clone())),
         Value::BigInt(n) => match i.extra_protos.get("BigInt").cloned() {
-            Some(p) => (p, Exotic::BigIntWrap(n.clone())),
+            Some(p) => (p, Exotic::bigint_wrap(n.clone())),
             None => return v,
         },
         _ => return v,
@@ -8930,7 +8926,7 @@ fn string_this_value(i: &mut Interp, this: &Value) -> Result<Value, Value> {
     match this {
         Value::Str(s) => Ok(Value::Str(s.clone())),
         Value::Obj(o) => match &o.borrow().exotic {
-            Exotic::StrWrap(s) => Ok(Value::Str(s.clone())),
+            Exotic::StrWrap(s) => Ok(Value::Str((**s).clone())),
             _ => Err(i.make_error("TypeError", "not a String object")),
         },
         _ => Err(i.make_error("TypeError", "not a String object")),

@@ -194,7 +194,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
     let arr = Exotic::Array;
     let exotic_array_tag = unsafe { *(&arr as *const Exotic as *const u8) };
-    let sw = Exotic::StrWrap("".into());
+    let sw = Exotic::str_wrap("".into());
     let exotic_strwrap_tag = unsafe { *(&sw as *const Exotic as *const u8) };
 
     // Scope offsets for the inline LoadName template: Rc::as_ptr → RefCell<Scope> value →
@@ -319,11 +319,7 @@ pub enum Callable {
     /// An interpreted function: its AST plus the lexical environment it closed over.
     User(Rc<Function>, Env),
     /// The result of `Function.prototype.bind`.
-    Bound {
-        target: Gc,
-        this: Value,
-        args: Vec<Value>,
-    },
+    Bound(Box<BoundCallable>),
     /// A ShadowRealm wrapped function: `target` is a callable inside the sub-realm identified by
     /// `realm` (its pointer). Calls marshal primitive args in and the primitive result out.
     WrappedShadow {
@@ -334,11 +330,7 @@ pub enum Callable {
     /// host realm. `realm` is this sub-realm's key in the host's map and `parent` is the host
     /// interpreter's stable address (hosts are either the engine root or boxed sub-realms, both
     /// pinned in memory while any of their sub-realm objects exist).
-    WrappedCross {
-        realm: usize,
-        parent: usize,
-        target: Box<Value>,
-    },
+    WrappedCross(Box<WrappedCrossCallable>),
     /// An auto-accessor's synthesized getter: reads the private backing field (brand-checked) off
     /// the receiver.
     AccessorGet(Rc<str>),
@@ -348,6 +340,36 @@ pub enum Callable {
     PropGet(Rc<str>),
     /// A decorator `context.access.set`: performs `args[0][name] = args[1]`.
     PropSet(Rc<str>),
+}
+
+/// Cold payloads boxed out of [`Callable`], so every non-callable ordinary object does not pay
+/// for the largest function variants inline.
+#[derive(Clone)]
+pub struct BoundCallable {
+    pub(crate) target: Gc,
+    pub(crate) this: Value,
+    pub(crate) args: Vec<Value>,
+}
+
+#[derive(Clone)]
+pub struct WrappedCrossCallable {
+    pub(crate) realm: usize,
+    pub(crate) parent: usize,
+    pub(crate) target: Box<Value>,
+}
+
+impl Callable {
+    pub(crate) fn bound(target: Gc, this: Value, args: Vec<Value>) -> Callable {
+        Callable::Bound(Box::new(BoundCallable { target, this, args }))
+    }
+
+    pub(crate) fn wrapped_cross(realm: usize, parent: usize, target: Value) -> Callable {
+        Callable::WrappedCross(Box::new(WrappedCrossCallable {
+            realm,
+            parent,
+            target: Box::new(target),
+        }))
+    }
 }
 
 /// Exotic internal data for built-in object kinds (arrays, primitive wrappers). The wrapper
@@ -360,18 +382,32 @@ pub enum Exotic {
     Array,
     BoolWrap(bool),
     NumWrap(f64),
-    StrWrap(crate::lstr::LStr),
+    StrWrap(Box<crate::lstr::LStr>),
     SymWrap(Rc<SymbolData>),
-    BigIntWrap(crate::bigint::JsBigInt),
+    BigIntWrap(Box<crate::bigint::JsBigInt>),
     /// An error object. Carries the captured call-stack frames as a preformatted string (the
     /// `\n    at <fn>` lines, empty when thrown at top level), snapshotted at construction; the
     /// `Error.prototype.stack` getter prepends the live `name: message` head. name/message live as
     /// ordinary properties, and the tag lets `Error.prototype.toString` / the test262 runner
     /// recognise an error cheaply.
-    Error(Rc<str>),
+    Error(Box<Rc<str>>),
     /// An `arguments` exotic object (mapped index/parameter aliasing lives in
     /// `Interp::mapped_arguments`).
     Arguments,
+}
+
+impl Exotic {
+    pub(crate) fn str_wrap(value: crate::lstr::LStr) -> Exotic {
+        Exotic::StrWrap(Box::new(value))
+    }
+
+    pub(crate) fn bigint_wrap(value: crate::bigint::JsBigInt) -> Exotic {
+        Exotic::BigIntWrap(Box::new(value))
+    }
+
+    pub(crate) fn error(stack: Rc<str>) -> Exotic {
+        Exotic::Error(Box::new(stack))
+    }
 }
 
 pub struct Object {
@@ -415,11 +451,8 @@ impl Object {
             // its own volume instead of allowing millions of dead boxes to accumulate.
             if reg.entries.len() > reg.next_prune {
                 reg.entries.retain(|w| w.strong_count() > 0);
-                reg.next_prune = reg
-                    .entries
-                    .len()
-                    .saturating_mul(2)
-                    .max(GC_REGISTRY_PRUNE_TRIGGER);
+                let live = reg.entries.len();
+                reg.next_prune = live.saturating_add((live / 4).max(GC_REGISTRY_PRUNE_TRIGGER));
             }
         });
         obj
@@ -470,11 +503,8 @@ pub fn gc_snapshot() -> Vec<Gc> {
             }
             None => false,
         });
-        reg.next_prune = reg
-            .entries
-            .len()
-            .saturating_mul(2)
-            .max(GC_REGISTRY_PRUNE_TRIGGER);
+        let count = reg.entries.len();
+        reg.next_prune = count.saturating_add((count / 4).max(GC_REGISTRY_PRUNE_TRIGGER));
         live
     })
 }

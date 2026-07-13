@@ -483,7 +483,7 @@ fn this_bigint(i: &mut Interp, this: &Value) -> Result<crate::bigint::JsBigInt, 
     match this {
         Value::BigInt(n) => Ok(n.clone()),
         Value::Obj(o) => match &o.borrow().exotic {
-            Exotic::BigIntWrap(n) => Ok(n.clone()),
+            Exotic::BigIntWrap(n) => Ok((**n).clone()),
             _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),
         },
         _ => Err(i.make_error("TypeError", "BigInt method called on incompatible receiver")),

@@ -3338,11 +3338,8 @@ impl Interp {
             },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call = Callable::Bound {
-            target,
-            this: promise.clone(),
-            args: vec![Value::Obj(flag.clone())],
-        };
+        bound.borrow_mut().call =
+            Callable::bound(target, promise.clone(), vec![Value::Obj(flag.clone())]);
         // A promise resolving function has `length` 1 and an empty `name`.
         bound.borrow_mut().props.insert(
             "length",
@@ -4812,14 +4809,10 @@ impl Interp {
         match call {
             // A bound-function parent constructs through its target with the bound arguments
             // prepended (BoundFunction [[Construct]]).
-            Callable::Bound {
-                target,
-                args: bargs,
-                ..
-            } => {
-                let mut all = bargs.clone();
+            Callable::Bound(bound) => {
+                let mut all = bound.args.clone();
                 all.extend_from_slice(args);
-                self.run_constructor_on(&Value::Obj(target), this, &all)
+                self.run_constructor_on(&Value::Obj(bound.target), this, &all)
             }
             Callable::User(func, cenv) => {
                 // A base class initializes its fields before its body runs; a derived class does so
@@ -6357,8 +6350,8 @@ impl Interp {
             Value::Obj(x) if !matches!(x.borrow().call, Callable::None) => x.clone(),
             _ => return Ok(false),
         };
-        if let Callable::Bound { target, .. } = &co.borrow().call {
-            let target = Value::Obj(target.clone());
+        if let Callable::Bound(bound) = &co.borrow().call {
+            let target = Value::Obj(bound.target.clone());
             return self.ordinary_has_instance(&target, o);
         }
         let o_obj = match o {
@@ -6625,8 +6618,8 @@ impl Interp {
                         .unwrap_or(false)
             }
             // A bound function constructs exactly when its target does.
-            Callable::Bound { target, .. } => {
-                self.value_is_constructor(&Value::Obj(target.clone()))
+            Callable::Bound(bound) => {
+                self.value_is_constructor(&Value::Obj(bound.target.clone()))
             }
             _ => false,
         }
