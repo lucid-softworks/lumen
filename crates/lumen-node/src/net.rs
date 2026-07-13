@@ -37,6 +37,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+
 use lumen_host::{ops, CallbackQueue, CompletionSender, Ctx, OpDecl, TaskId, TaskRegistry, Value};
 
 /// A UDP recv poll interval: the recv thread wakes this often to notice `close()` and exit (std
@@ -47,6 +50,7 @@ const UDP_POLL: Duration = Duration::from_millis(200);
 
 pub const NET_OPS: &[OpDecl] = ops![
     "connect" (4) => op_connect,
+    "connectPath" (3) => op_connect_path,
     "read" (3) => op_read,
     "write" (4) => op_write,
     "endWritable" (1) => op_end_writable,
@@ -56,6 +60,7 @@ pub const NET_OPS: &[OpDecl] = ops![
     "address" (1) => op_address,
     "socketRef" (2) => op_socket_ref,
     "listen" (3) => op_listen,
+    "listenPath" (2) => op_listen_path,
     "accept" (3) => op_accept,
     "closeServer" (1) => op_close_server,
     "serverAddress" (1) => op_server_address,
@@ -100,61 +105,101 @@ struct ServerEntry {
 
 enum NetStream {
     Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
 }
 
 impl NetStream {
-    fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        match self { Self::Tcp(stream) => stream.local_addr() }
+    fn local_addr(&self) -> std::io::Result<Option<SocketAddr>> {
+        match self {
+            Self::Tcp(stream) => stream.local_addr().map(Some),
+            #[cfg(unix)]
+            Self::Unix(_) => Ok(None),
+        }
     }
 
-    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
-        match self { Self::Tcp(stream) => stream.peer_addr() }
+    fn peer_addr(&self) -> std::io::Result<Option<SocketAddr>> {
+        match self {
+            Self::Tcp(stream) => stream.peer_addr().map(Some),
+            #[cfg(unix)]
+            Self::Unix(_) => Ok(None),
+        }
     }
 
     fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
-        match self { Self::Tcp(stream) => stream.shutdown(how) }
+        match self {
+            Self::Tcp(stream) => stream.shutdown(how),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(how),
+        }
     }
 
     fn set_nodelay(&self, on: bool) -> std::io::Result<()> {
-        match self { Self::Tcp(stream) => stream.set_nodelay(on) }
+        match self {
+            Self::Tcp(stream) => stream.set_nodelay(on),
+            #[cfg(unix)]
+            Self::Unix(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "TCP_NODELAY is not available for Unix sockets")),
+        }
     }
 
-    fn tcp(&self) -> &TcpStream {
-        match self { Self::Tcp(stream) => stream }
+    fn tcp(&self) -> Option<&TcpStream> {
+        match self {
+            Self::Tcp(stream) => Some(stream),
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+        }
     }
 }
 
 impl Read for &NetStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self { NetStream::Tcp(stream) => (&*stream).read(buf) }
+        match self {
+            NetStream::Tcp(stream) => (&*stream).read(buf),
+            #[cfg(unix)]
+            NetStream::Unix(stream) => (&*stream).read(buf),
+        }
     }
 }
 
 impl Write for &NetStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self { NetStream::Tcp(stream) => (&*stream).write(buf) }
+        match self {
+            NetStream::Tcp(stream) => (&*stream).write(buf),
+            #[cfg(unix)]
+            NetStream::Unix(stream) => (&*stream).write(buf),
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        match self { NetStream::Tcp(stream) => (&*stream).flush() }
+        match self {
+            NetStream::Tcp(stream) => (&*stream).flush(),
+            #[cfg(unix)]
+            NetStream::Unix(stream) => (&*stream).flush(),
+        }
     }
 }
 
 enum NetListener {
     Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(UnixListener),
 }
 
 impl NetListener {
     fn accept(&self) -> std::io::Result<NetStream> {
         match self {
             Self::Tcp(listener) => listener.accept().map(|(stream, _)| NetStream::Tcp(stream)),
+            #[cfg(unix)]
+            Self::Unix(listener) => listener.accept().map(|(stream, _)| NetStream::Unix(stream)),
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ServerAddress {
     Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(String),
 }
 
 #[derive(Default)]
@@ -203,6 +248,7 @@ fn io_code(e: &std::io::Error) -> &'static str {
         BrokenPipe => "EPIPE",
         TimedOut => "ETIMEDOUT",
         PermissionDenied => "EACCES",
+        NotFound => "ENOENT",
         _ => match e.raw_os_error() {
             Some(32) => "EPIPE",
             Some(54) | Some(104) => "ECONNRESET",
@@ -229,11 +275,13 @@ fn net_err(syscall: &'static str, e: &std::io::Error, addr: Option<(String, u16)
 /// (`connect ECONNREFUSED 127.0.0.1:80`) with `code`/`syscall`/`address`/`port`.
 fn net_error_value(ctx: &mut Ctx, e: &NetErr) -> Value {
     let mut msg = format!("{} {}", e.syscall, e.code);
-    if let (Some(a), Some(p)) = (&e.address, e.port) {
+    if let Some(a) = &e.address {
         msg.push(' ');
         msg.push_str(a);
-        msg.push(':');
-        msg.push_str(&p.to_string());
+        if let Some(p) = e.port {
+            msg.push(':');
+            msg.push_str(&p.to_string());
+        }
     } else if e.code == "UNKNOWN" {
         msg = format!("{}: {}", e.syscall, e.message);
     }
@@ -314,14 +362,17 @@ fn register_stream(ctx: &mut Ctx, stream: NetStream) -> Result<Vec<Value>, Value
             pending: None,
         },
     );
-    Ok(vec![
-        Value::Num(id as f64),
-        Value::from_string(local.ip().to_string()),
-        Value::Num(local.port() as f64),
-        Value::from_string(peer.ip().to_string()),
-        Value::Num(peer.port() as f64),
-        Value::str(family_of(&peer)),
-    ])
+    match (local, peer) {
+        (Some(local), Some(peer)) => Ok(vec![
+            Value::Num(id as f64),
+            Value::from_string(local.ip().to_string()),
+            Value::Num(local.port() as f64),
+            Value::from_string(peer.ip().to_string()),
+            Value::Num(peer.port() as f64),
+            Value::str(family_of(&peer)),
+        ]),
+        _ => Ok(vec![Value::Num(id as f64), Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined]),
+    }
 }
 
 pub(crate) fn take_stream(ctx: &mut Ctx, id: u64) -> Result<TcpStream, Value> {
@@ -331,7 +382,13 @@ pub(crate) fn take_stream(ctx: &mut Ctx, id: u64) -> Result<TcpStream, Value> {
         .map_err(|_| ctx.make_error("Error", "TCP socket has an active read and cannot be upgraded to TLS"))?
     {
         NetStream::Tcp(stream) => Ok(stream),
+        #[cfg(unix)]
+        NetStream::Unix(_) => Err(ctx.make_error("Error", "Unix sockets cannot be upgraded to TLS")),
     }
+}
+
+fn path_err(syscall: &'static str, path: String, error: std::io::Error) -> NetErr {
+    NetErr { code: io_code(&error), syscall, message: error.to_string(), address: Some(path), port: None }
 }
 
 // ---- TCP client ops -----------------------------------------------------------------------------
@@ -388,6 +445,27 @@ fn decode_connect(
     match *payload.downcast::<Result<NetStream, NetErr>>().expect("connect payload") {
         Ok(stream) => register_stream(ctx, stream),
         Err(e) => Err(net_error_value(ctx, &e)),
+    }
+}
+
+fn op_connect_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let (resolve, reject) = take_resolve_reject(ctx, args.get(1), args.get(2))?;
+    #[cfg(unix)]
+    {
+        let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(resolve, Some(reject), decode_connect);
+        completions(ctx).run_blocking(id, move || {
+            let result = UnixStream::connect(&path)
+                .map(NetStream::Unix)
+                .map_err(|error| path_err("connect", path, error));
+            Box::new(result)
+        });
+        Ok(Value::Undefined)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (resolve, reject);
+        Err(ctx.make_error("Error", format!("Unix-domain sockets are not supported on this platform: {path}")))
     }
 }
 
@@ -534,7 +612,7 @@ fn op_set_keep_alive(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, 
     let Some(stream) = stream else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(set_keep_alive(stream.tcp(), on, (delay_ms / 1000.0) as i32)))
+    Ok(Value::Bool(stream.tcp().map(|tcp| set_keep_alive(tcp, on, (delay_ms / 1000.0) as i32)).unwrap_or(false)))
 }
 
 /// `(socketId)` — `socket.address()`; `null` if the socket is gone.
@@ -543,7 +621,7 @@ fn op_address(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
     let addr = ctx
         .host_mut::<NetRegistry>()
         .and_then(|r| r.sockets.get(&sid))
-        .and_then(|e| e.stream.local_addr().ok());
+        .and_then(|e| e.stream.local_addr().ok().flatten());
     Ok(match addr {
         Some(a) => addr_object(ctx, &a),
         None => Value::Null,
@@ -618,6 +696,33 @@ fn op_listen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     Ok(o)
 }
 
+fn op_listen_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    #[cfg(unix)]
+    {
+        let listener = UnixListener::bind(&path)
+            .map_err(|error| net_error_value(ctx, &path_err("listen", path.clone(), error)))?;
+        let reg = ctx.host_mut::<NetRegistry>().expect("net registry installed");
+        let id = reg.next_server;
+        reg.next_server += 1;
+        reg.servers.insert(id, ServerEntry {
+            listener: Arc::new(NetListener::Unix(listener)),
+            closed: Arc::new(AtomicBool::new(false)),
+            local_addr: ServerAddress::Unix(path.clone()),
+            unref: false,
+            pending: None,
+        });
+        let object = Value::Obj(ctx.new_object());
+        let _ = ctx.set_member(&object, "serverId", Value::Num(id as f64));
+        let _ = ctx.set_member(&object, "address", Value::from_string(path));
+        Ok(object)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(ctx.make_error("Error", format!("Unix-domain sockets are not supported on this platform: {path}")))
+    }
+}
+
 /// `(serverId, resolve, reject)` — accept one connection; resolves with a socket descriptor (see
 /// [`register_stream`]) or `null` once the server is closed.
 fn op_accept(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
@@ -684,19 +789,22 @@ fn op_close_server(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Va
         .host_mut::<NetRegistry>()
         .and_then(|r| r.servers.remove(&sid))
         .map(|e| (e.closed, e.local_addr));
-    if let Some((closed, ServerAddress::Tcp(local_addr))) = target {
+    if let Some((closed, local_addr)) = target {
         closed.store(true, Ordering::SeqCst);
-        let wake = if local_addr.ip().is_unspecified() {
-            let ip = if local_addr.is_ipv6() {
-                IpAddr::V6(Ipv6Addr::LOCALHOST)
-            } else {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            };
-            SocketAddr::new(ip, local_addr.port())
-        } else {
-            local_addr
-        };
-        let _ = TcpStream::connect(wake);
+        match local_addr {
+            ServerAddress::Tcp(local_addr) => {
+                let wake = if local_addr.ip().is_unspecified() {
+                    let ip = if local_addr.is_ipv6() { IpAddr::V6(Ipv6Addr::LOCALHOST) } else { IpAddr::V4(Ipv4Addr::LOCALHOST) };
+                    SocketAddr::new(ip, local_addr.port())
+                } else { local_addr };
+                let _ = TcpStream::connect(wake);
+            }
+            #[cfg(unix)]
+            ServerAddress::Unix(path) => {
+                let _ = UnixStream::connect(&path);
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
     Ok(Value::Undefined)
 }
@@ -707,9 +815,11 @@ fn op_server_address(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, 
     let addr = ctx
         .host_mut::<NetRegistry>()
         .and_then(|r| r.servers.get(&sid))
-        .map(|e| e.local_addr);
+        .map(|e| e.local_addr.clone());
     Ok(match addr {
         Some(ServerAddress::Tcp(a)) => addr_object(ctx, &a),
+        #[cfg(unix)]
+        Some(ServerAddress::Unix(path)) => Value::from_string(path),
         None => Value::Null,
     })
 }

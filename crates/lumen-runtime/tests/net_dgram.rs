@@ -3,10 +3,17 @@
 //! standing in for a foreign peer. All sockets bind port 0 on 127.0.0.1, so runs are parallel-safe.
 
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::rc::Rc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::time::Duration;
 
 use lumen_runtime::{Completion, ConsoleOut, Runtime};
+
+#[cfg(unix)]
+static NEXT_PATH: AtomicU64 = AtomicU64::new(1);
 
 /// A console sink the test can read back after the loop runs (same shape as the unit tests').
 #[derive(Clone, Default)]
@@ -309,6 +316,78 @@ fn net_address_math_still_real() {
         "#,
     );
     assert_eq!(out.lines(), ["4 6 0", "true false", "ipv6 8080"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn net_unix_path_accept_and_cleanup() {
+    let path = std::env::temp_dir().join(format!(
+        "lumen-net-{}-{}.sock",
+        std::process::id(),
+        NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+    ));
+    let _ = std::fs::remove_file(&path);
+    let peer_path = path.clone();
+    let peer = std::thread::spawn(move || {
+        for _ in 0..100 {
+            if std::os::unix::net::UnixStream::connect(&peer_path).is_ok() { return; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("connect to lumen Unix server at {}", peer_path.display());
+    });
+    let (mut rt, out) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(r#"
+          const fs = require("node:fs"), net = require("node:net"), path = {path:?};
+          const server = net.createServer(socket => {{
+            console.log("accepted", socket.remoteAddress === undefined);
+            socket.destroy();
+            server.close(() => console.log("closed", fs.existsSync(path)));
+          }});
+          server.listen(path, () => {{
+            console.log("listening", server.address() === path, fs.existsSync(path));
+          }});
+        "#),
+    );
+    peer.join().unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out.lines(), [
+        "listening true true",
+        "accepted true",
+        "closed false",
+    ]);
+}
+
+#[cfg(unix)]
+#[test]
+fn net_unix_path_client_writes_to_std_peer() {
+    let path = std::env::temp_dir().join(format!(
+        "lumen-net-peer-{}-{}.sock",
+        std::process::id(),
+        NEXT_PATH.fetch_add(1, Ordering::Relaxed),
+    ));
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = [0; 4];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"ping");
+    });
+    let (mut rt, out) = test_runtime();
+    eval_ok(&mut rt, &format!(r#"
+      const net = require("node:net");
+      const client = new net.Socket({{ _deferRead: true }});
+      client.connect({path:?}, () => {{
+        console.log("connected", client.remoteAddress === undefined);
+        client.write("ping");
+        setTimeout(() => client.destroy(), 20);
+      }});
+    "#));
+    peer.join().unwrap();
+    let _ = std::fs::remove_file(path);
+    assert_eq!(out.lines(), ["connected true"]);
 }
 
 // ---- node:dgram -------------------------------------------------------------------------------

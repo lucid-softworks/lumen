@@ -3,8 +3,8 @@
 // connect/createConnection/createServer all work for real against loopback and other runtimes.
 // Everything that is pure address math is also real: the IP validators, the BlockList
 // (CIDR/range/address matching), the SocketAddress value type, and the auto-select-family flags.
-// Nothing here is a stub — the only honest gaps are Unix-domain sockets (options.path / IPC:
-// __net binds TCP only) and options.fd wrapping, which throw clearly.
+// Unix-domain paths are real on Unix. Windows named pipes and options.fd wrapping remain honest
+// gaps because Rust std has no cross-platform named-pipe or owned-fd socket API.
 
 // ---- IP validators (also used by BlockList / SocketAddress) -----------------------------------
 const v4re = /^(\d{1,3}\.){3}\d{1,3}$/;
@@ -152,8 +152,8 @@ function getDefaultAutoSelectFamilyAttemptTimeout() { return autoSelectFamilyAtt
 const { Duplex } = __builtins.get("stream");
 const EventEmitter = __builtins.get("events");
 
-function ipcNotSupported(what) {
-  throw new Error(`node:net ${what} is not supported in lumen (only TCP sockets are implemented; no Unix-domain/IPC or fd wrapping)`);
+function fdNotSupported(what) {
+  throw new Error(`node:net ${what} is not supported in lumen (arbitrary OS fd wrapping is unavailable)`);
 }
 
 // Pump: one-shot reads re-armed after each completion (same pattern as child_process stdio). The
@@ -190,7 +190,7 @@ function pumpSocket(socket) {
 class Socket extends Duplex {
   constructor(options = {}) {
     if (options === null || typeof options !== "object") options = {};
-    if (options.fd !== undefined) ipcNotSupported("new Socket({ fd })");
+    if (options.fd !== undefined) fdNotSupported("new Socket({ fd })");
     super({});
     this._id = null;
     this.connecting = false;
@@ -246,7 +246,22 @@ class Socket extends Duplex {
       options = norm[0];
       cb = norm[1];
     }
-    if (options.path !== undefined) ipcNotSupported("connect({ path }) (Unix-domain sockets)");
+    if (options.path !== undefined) {
+      const path = String(options.path);
+      if (cb) this.once("connect", cb);
+      this.connecting = true;
+      new Promise((resolve, reject) => __net.connectPath(path, (...d) => resolve(d), reject)).then(
+        (desc) => {
+          if (this.destroyed) { __net.close(desc[0]); return; }
+          this._adopt(desc);
+          this._resetTimeout();
+          this.emit("connect");
+          this.emit("ready");
+        },
+        (err) => { this.connecting = false; this.destroy(err); },
+      );
+      return this;
+    }
     const port = Number(options.port);
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
       throw new RangeError(`"port" option should be >= 0 and < 65536. Received ${options.port}.`);
@@ -398,14 +413,15 @@ class Server extends EventEmitter {
       options = norm[0];
       cb = norm[1];
     }
-    if (options.path !== undefined) ipcNotSupported("listen({ path }) (Unix-domain sockets)");
     if (this.listening) throw new Error("Server is already listening");
     const port = options.port === undefined ? 0 : Number(options.port) | 0;
     const host = options.host !== undefined ? String(options.host) : "";
     if (cb) this.once("listening", cb);
     let info;
     try {
-      info = __net.listen(host, port, Number(options.backlog) || 0);
+      info = options.path !== undefined
+        ? __net.listenPath(String(options.path), Number(options.backlog) || 0)
+        : __net.listen(host, port, Number(options.backlog) || 0);
     } catch (err) {
       queueMicrotask(() => this.emit("error", err));
       return this;
@@ -425,7 +441,7 @@ class Server extends EventEmitter {
         const desc = await new Promise((resolve, reject) =>
           __net.accept(id, (...d) => resolve(d.length > 1 ? d : null), reject));
         if (desc === null || this._id === null) return; // closed
-        const socket = new Socket({ allowHalfOpen: this.allowHalfOpen });
+        const socket = new Socket({ allowHalfOpen: this.allowHalfOpen, _deferRead: true });
         socket._adopt(desc);
         this._connections.add(socket);
         socket.on("close", () => {
@@ -433,6 +449,8 @@ class Server extends EventEmitter {
           this._maybeEmitClose();
         });
         this.emit("connection", socket);
+        socket._deferRead = false;
+        pumpSocket(socket);
       }
     })().catch((e) => this.emit("error", e));
   }
