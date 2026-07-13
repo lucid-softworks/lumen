@@ -1893,6 +1893,13 @@ impl Interp {
         v.as_obj().map(|o| Rc::as_ptr(o) as usize)
     }
 
+    /// Whether `v` has Proxy exotic behavior. Hosts need this for Node's
+    /// `util.types.isProxy()`; exposing the predicate avoids leaking proxy targets or handlers.
+    pub fn is_proxy_value(&self, v: &Value) -> bool {
+        self.object_addr(v)
+            .is_some_and(|ptr| self.proxies.contains_key(&ptr))
+    }
+
     /// `Object.getPrototypeOf(v)` — the value's `[[Prototype]]` (`null` when there is none).
     pub fn prototype_of(&self, v: &Value) -> Value {
         match v.as_obj().and_then(|o| o.borrow().proto.clone()) {

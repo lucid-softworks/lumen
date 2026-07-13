@@ -58,6 +58,7 @@ pub fn extension() -> Extension {
                     "readBytes" (1) => op_read_bytes,
                     "realpath" (1) => op_realpath,
                     "loadNativeAddon" (1) => napi::op_load_addon,
+                    "isProxy" (1) => op_is_proxy,
                     "stat" (1) => op_stat,
                     "lstat" (1) => op_lstat,
                     "rm" (3) => op_rm,
@@ -176,6 +177,12 @@ fn arg_path(ctx: &mut Ctx, args: &[Value]) -> Result<String, Value> {
 fn op_is_file(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let p = arg_path(ctx, args)?;
     Ok(Value::Bool(Path::new(&p).is_file()))
+}
+
+fn op_is_proxy(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Bool(
+        ctx.is_proxy_value(args.first().unwrap_or(&Value::Undefined)),
+    ))
 }
 
 fn op_is_dir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {

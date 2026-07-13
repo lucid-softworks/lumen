@@ -249,6 +249,21 @@ fn node_crypto_argon2_sync_and_async_match_rfc9106() {
 }
 
 #[test]
+fn node_util_types_detects_proxies_and_key_objects() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const types = require("node:util/types");
+        const { createSecretKey } = require("node:crypto");
+        console.log(types.isProxy(new Proxy({}, {})), types.isProxy({}));
+        console.log(types.isKeyObject(createSecretKey("secret")), types.isKeyObject(Buffer.from("secret")));
+        "#,
+    );
+    assert_eq!(out.lines(), ["true false", "true false"]);
+}
+
+#[test]
 fn async_await_settles_before_loop_exit() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

@@ -195,11 +195,12 @@ const BOXED_TAGS = new Set(["Number", "String", "Boolean", "Symbol", "BigInt"]);
 const types = {
   // C++ external pointers have no JS representation in lumen, so nothing is ever an External.
   isExternal: () => false,
-  // Proxies are transparent to Object.prototype.toString and there is no engine hook to unwrap
-  // them, so membership is undetectable; report false rather than a fake positive.
-  isProxy: () => false,
-  // node:crypto exposes no KeyObject class in lumen, so a KeyObject can never exist here.
-  isKeyObject: () => false,
+  isProxy: (v) => __node.isProxy(v),
+  // crypto loads after util, so resolve the constructor lazily when the predicate is called.
+  isKeyObject: (v) => {
+    const crypto = __builtins.get("crypto");
+    return !!crypto && typeof crypto.KeyObject === "function" && v instanceof crypto.KeyObject;
+  },
 
   isDate: (v) => tagOf(v) === "Date",
   isRegExp: (v) => tagOf(v) === "RegExp",
