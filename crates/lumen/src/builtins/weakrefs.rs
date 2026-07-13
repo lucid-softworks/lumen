@@ -16,7 +16,7 @@ pub(super) fn install_weak_refs(it: &mut Interp) {
                 o.borrow()
                     .props
                     .get("\u{0}weakref-target")
-                    .map(|p| p.value.clone())
+                    .map(|p| p.value())
             })
             .unwrap_or(Value::Undefined))
     });

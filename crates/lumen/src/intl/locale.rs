@@ -3,7 +3,7 @@
 use super::{ab, coerce_options, def_getter, make_service};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 /// Whether a canonical tag is serviced by our (minimal) locale data.
 #[allow(dead_code)]
@@ -95,7 +95,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
         }
         let present = o.borrow().props.contains("__locale_kn");
         let is_false = matches!(
-            o.borrow().props.get("__locale_kn").map(|p| p.value.clone()),
+            o.borrow().props.get("__locale_kn").map(|p| p.value()),
             Some(Value::Str(s)) if &*s == "false"
         );
         Ok(Value::Bool(present && !is_false))
@@ -130,7 +130,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
             if !o.borrow().props.contains("__locale_tag") {
                 return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
             }
-            matches!(o.borrow().props.get("__locale_region").map(|p| p.value.clone()), Some(Value::Str(s)) if !s.is_empty())
+            matches!(o.borrow().props.get("__locale_region").map(|p| p.value()), Some(Value::Str(s)) if !s.is_empty())
         };
         if region {
             Ok(i.make_array(vec![Value::str("UTC")]))
@@ -176,7 +176,7 @@ fn info_list(
     if !o.borrow().props.contains("__locale_tag") {
         return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
     }
-    let kw = match o.borrow().props.get(slot_name).map(|p| p.value.clone()) {
+    let kw = match o.borrow().props.get(slot_name).map(|p| p.value()) {
         Some(Value::Str(s)) if !s.is_empty() => Some(s.to_string()),
         _ => None,
     };
@@ -191,7 +191,7 @@ fn slot(i: &mut Interp, this: &Value, name: &str) -> Result<String, Value> {
     let o = this
         .as_obj()
         .ok_or_else(|| i.make_error("TypeError", "not a Locale"))?;
-    match o.borrow().props.get(name).map(|p| p.value.clone()) {
+    match o.borrow().props.get(name).map(|p| p.value()) {
         Some(Value::Str(s)) => Ok(s.to_string()),
         _ => Err(i.make_error("TypeError", "receiver is not an Intl.Locale")),
     }
@@ -205,7 +205,7 @@ fn opt_slot(i: &mut Interp, this: &Value, name: &str) -> Result<Value, Value> {
     if !o.borrow().props.contains("__locale_tag") {
         return Err(i.make_error("TypeError", "receiver is not an Intl.Locale"));
     }
-    match o.borrow().props.get(name).map(|p| p.value.clone()) {
+    match o.borrow().props.get(name).map(|p| p.value()) {
         Some(Value::Str(s)) => Ok(Value::Str(s)),
         _ => Ok(Value::Undefined),
     }
@@ -240,12 +240,7 @@ fn locale_construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Val
     let mut base = match &tag_arg {
         Value::Str(s) => s.to_string(),
         Value::Obj(o) if o.borrow().props.contains("__locale_tag") => {
-            match o
-                .borrow()
-                .props
-                .get("__locale_tag")
-                .map(|p| p.value.clone())
-            {
+            match o.borrow().props.get("__locale_tag").map(|p| p.value()) {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => String::new(),
             }

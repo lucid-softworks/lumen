@@ -8,7 +8,7 @@ use super::{
 };
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "DisplayNames", 2, construct);
@@ -81,16 +81,11 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 
 fn of(i: &mut Interp, this: &Value, code: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__dn")?;
-    let kind = match o.borrow().props.get("__dn_type").map(|p| p.value.clone()) {
+    let kind = match o.borrow().props.get("__dn_type").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     };
-    let fallback = match o
-        .borrow()
-        .props
-        .get("__dn_fallback")
-        .map(|p| p.value.clone())
-    {
+    let fallback = match o.borrow().props.get("__dn_fallback").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "code".to_string(),
     };
@@ -266,7 +261,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

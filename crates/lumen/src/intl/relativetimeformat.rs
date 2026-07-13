@@ -5,7 +5,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Value};
+use crate::value::{Value, set_builtin, set_data};
 
 const UNITS: &[&str] = &[
     "year", "years", "quarter", "quarters", "month", "months", "week", "weeks", "day", "days",
@@ -181,12 +181,7 @@ fn format(
     to_parts: bool,
 ) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__rtf")?;
-    let numeric = match o
-        .borrow()
-        .props
-        .get("__rtf_numeric")
-        .map(|p| p.value.clone())
-    {
+    let numeric = match o.borrow().props.get("__rtf_numeric").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "always".to_string(),
     };
@@ -214,16 +209,11 @@ fn format(
     // "<n> <unit> temu", with the unit word chosen by CLDR plural category.
     let past = v < 0.0 || (v == 0.0 && v.is_sign_negative());
     let n = v.abs();
-    let style = match o.borrow().props.get("__rtf_style").map(|p| p.value.clone()) {
+    let style = match o.borrow().props.get("__rtf_style").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "long".to_string(),
     };
-    let locale = match o
-        .borrow()
-        .props
-        .get("__rtf_locale")
-        .map(|p| p.value.clone())
-    {
+    let locale = match o.borrow().props.get("__rtf_locale").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "en".to_string(),
     };
@@ -237,7 +227,7 @@ fn format(
     };
     // Format the number through NumberFormat so grouping and the numbering system apply. Polish uses
     // minimumGroupingDigits=2 ("min2" grouping): 1000 stays "1000", 123456 groups as "123 456".
-    let numbering = match o.borrow().props.get("__rtf_nu").map(|p| p.value.clone()) {
+    let numbering = match o.borrow().props.get("__rtf_nu").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "latn".to_string(),
     };
@@ -333,7 +323,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

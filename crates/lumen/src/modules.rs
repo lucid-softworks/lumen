@@ -14,7 +14,7 @@
 
 use crate::ast::*;
 use crate::builtins::make_bound_len;
-use crate::interpreter::{new_scope, Abrupt, Binding, Env, Interp};
+use crate::interpreter::{Abrupt, Binding, Env, Interp, new_scope};
 use crate::value::{Object, Property, Value};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -382,13 +382,13 @@ impl Interp {
                     return Err(self.throw(
                         "SyntaxError",
                         format!("the requested module provides an ambiguous export named '{name}'"),
-                    ))
+                    ));
                 }
                 Resolution::NotFound => {
                     return Err(self.throw(
                         "SyntaxError",
                         format!("the requested module does not provide an export named '{name}'"),
-                    ))
+                    ));
                 }
             }
         }
@@ -778,9 +778,9 @@ impl Interp {
             for (k, p) in src.props.iter() {
                 let mut p = p.clone();
                 if Interp::is_sym_key(k) {
-                    if let Value::Str(tag) = &p.value {
-                        if &**tag == "Module" {
-                            p.value = Value::from_string("Deferred Module".to_string());
+                    if let Value::Str(tag) = p.value() {
+                        if &*tag == "Module" {
+                            p.set_value(Value::from_string("Deferred Module".to_string()));
                         }
                     }
                 }
@@ -831,11 +831,11 @@ impl Interp {
                                 if dst.props.get(k).is_none() {
                                     let mut p = p.clone();
                                     if Interp::is_sym_key(k) {
-                                        if let Value::Str(tag) = &p.value {
-                                            if &**tag == "Module" {
-                                                p.value = Value::from_string(
+                                        if let Value::Str(tag) = p.value() {
+                                            if &*tag == "Module" {
+                                                p.set_value(Value::from_string(
                                                     "Deferred Module".to_string(),
-                                                );
+                                                ));
                                             }
                                         }
                                     }

@@ -103,7 +103,7 @@ pub(super) fn install_function_proto(it: &mut Interp) {
                     return Ok(Value::from_string(src.to_string()));
                 }
             }
-            let name = match o.borrow().props.get("name").map(|p| p.value.clone()) {
+            let name = match o.borrow().props.get("name").map(|p| p.value()) {
                 Some(Value::Str(n)) => n.to_string(),
                 _ => String::new(),
             };
@@ -190,13 +190,7 @@ pub(super) fn install_function_proto(it: &mut Interp) {
 /// the [[Prototype]] of the corresponding kind of function. Runs after Symbol so @@toStringTag works.
 pub(super) fn install_generator_function_ctors(it: &mut Interp) {
     let fp = it.function_proto.clone();
-    let function_ctor = match it
-        .global
-        .borrow()
-        .props
-        .get("Function")
-        .map(|p| p.value.clone())
-    {
+    let function_ctor = match it.global.borrow().props.get("Function").map(|p| p.value()) {
         Some(Value::Obj(o)) => o,
         _ => return,
     };

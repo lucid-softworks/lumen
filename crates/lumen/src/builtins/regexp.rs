@@ -391,7 +391,7 @@ fn regexp_legacy_get(i: &mut Interp, this: &Value, slot: &str) -> Result<Value, 
     let c = regexp_legacy_brand(i, this)?;
     // Materialize the deferred last-match state (if any) before reading.
     super::flush_regexp_legacy(i);
-    let v = c.borrow().props.get(slot).map(|p| p.value.clone());
+    let v = c.borrow().props.get(slot).map(|p| p.value());
     Ok(v.unwrap_or_else(|| Value::str("")))
 }
 
@@ -592,7 +592,7 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
         if !functional && !matches!(named, Value::Undefined) && !matches!(named, Value::Obj(_)) {
             match named {
                 Value::Null => {
-                    return Err(i.make_error("TypeError", "cannot convert null to object"))
+                    return Err(i.make_error("TypeError", "cannot convert null to object"));
                 }
                 other => named = box_primitive(i, other),
             }

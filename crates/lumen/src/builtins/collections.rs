@@ -664,7 +664,7 @@ pub(super) fn install_map_like(
             .borrow()
             .props
             .get(default)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap();
         proto
             .borrow_mut()
@@ -729,7 +729,7 @@ fn weak_brand_ptr(i: &mut Interp, this: &Value, want: &str) -> Result<usize, Val
         .ok_or_else(|| i.make_error("TypeError", "method called on incompatible receiver"))?;
     let kind = this
         .as_obj()
-        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value.clone()));
+        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value()));
     let ok = match &kind {
         Some(Value::Str(s)) if want == "Weak" => s.starts_with("Weak"),
         Some(Value::Str(s)) => &**s == want,

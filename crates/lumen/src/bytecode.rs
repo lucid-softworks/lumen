@@ -5632,7 +5632,7 @@ impl Chunk {
             if p.accessor() {
                 return None;
             }
-            return Some(p.value.clone());
+            return Some(p.value());
         }
         if ic.env & 2 != 0 {
             // Depth-1 mode (see NameIc): `env` is this chunk's fresh activation. Its expected
@@ -5732,7 +5732,7 @@ impl Chunk {
         if p.accessor() {
             return None;
         }
-        let v = p.value.clone();
+        let v = p.value();
         self.name_caches[c as usize].set(NameIc {
             env: Rc::as_ptr(env) as usize | 1,
             binding: ((g.props.shape() as u64) << 32) | slot as u64,

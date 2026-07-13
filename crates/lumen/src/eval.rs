@@ -1518,7 +1518,7 @@ impl Interp {
                 return Ok(s
                     .chars()
                     .map(|c| Value::from_string(c.to_string()))
-                    .collect())
+                    .collect());
             }
             Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => {
                 let len = self.checked_array_len(o)?;
@@ -1909,7 +1909,7 @@ impl Interp {
             if matches!(b.exotic, crate::value::Exotic::None) {
                 if let Some(p) = b.props.get(name) {
                     if !p.accessor() {
-                        let v = p.value.clone();
+                        let v = p.value();
                         drop(b);
                         return Ok((v, None));
                     }
@@ -2104,7 +2104,7 @@ impl Interp {
         let mut g = self.global.borrow_mut();
         if let Some(p) = g.props.get_mut(name) {
             if p.writable() && !p.accessor() {
-                p.value = val;
+                p.set_value(val);
             }
         } else if g.extensible {
             g.props.insert(name, Property::data(val, true, true, true));
@@ -2173,7 +2173,7 @@ impl Interp {
                     ));
                 }
                 if let Some(p) = o.borrow_mut().props.get_mut(name) {
-                    p.value = value;
+                    p.set_value(value);
                 }
                 Ok(())
             }
@@ -2548,11 +2548,7 @@ impl Interp {
                 let v = self.eval(inner, env);
                 let short = self.short_circuit;
                 self.short_circuit = saved;
-                if short {
-                    Ok(Value::Undefined)
-                } else {
-                    v
-                }
+                if short { Ok(Value::Undefined) } else { v }
             }
             Expr::Member {
                 obj,
@@ -2675,7 +2671,7 @@ impl Interp {
             }
         }
         if let Some(pr) = ao.borrow_mut().props.get_mut("length") {
-            pr.value = Value::Num(idx as f64);
+            pr.set_value(Value::Num(idx as f64));
         }
         Ok(arr)
     }
@@ -2707,7 +2703,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("name")
-                .map(|p| matches!(&p.value, Value::Str(s) if s.is_empty()))
+                .map(|p| matches!(p.value(), Value::Str(s) if s.is_empty()))
                 .unwrap_or(true);
             if empty {
                 o.borrow_mut().props.insert(
@@ -3982,7 +3978,7 @@ impl Interp {
                 // A pre-existing non-configurable data property keeps its attributes; only its value
                 // is replaced.
                 if let Some(p) = self.global.borrow_mut().props.get_mut(name) {
-                    p.value = value;
+                    p.set_value(value);
                 }
             }
             _ => {
@@ -4087,7 +4083,7 @@ impl Interp {
                         return Err(self.throw(
                             "TypeError",
                             "Class extends value does not have a valid prototype property",
-                        ))
+                        ));
                     }
                 };
                 (pp, Some(Value::Obj(pc.clone())))
@@ -4096,7 +4092,7 @@ impl Interp {
                 return Err(self.throw(
                     "TypeError",
                     "Class extends value is not a constructor or null",
-                ))
+                ));
             }
         };
         let derived = parent.is_some();
@@ -4683,7 +4679,7 @@ impl Interp {
                 _ => {
                     return Err(
                         self.throw("TypeError", "decorator must return a function or undefined")
-                    )
+                    );
                 }
             }
         }
@@ -4716,7 +4712,7 @@ impl Interp {
                     return Err(self.throw(
                         "TypeError",
                         "field decorator must return a function or undefined",
-                    ))
+                    ));
                 }
             }
         }
@@ -4772,7 +4768,7 @@ impl Interp {
                     return Err(self.throw(
                         "TypeError",
                         "accessor decorator must return an object or undefined",
-                    ))
+                    ));
                 }
             }
         }
@@ -4823,14 +4819,8 @@ impl Interp {
                 // A `super(...)` call is legal only directly within a *derived* constructor body.
                 let saved_super = self.super_call_ok;
                 self.super_call_ok = is_class && derived;
-                let r = self.call_user(
-                    &user.func,
-                    user.env.clone(),
-                    this.clone(),
-                    args,
-                    true,
-                    &obj,
-                );
+                let r =
+                    self.call_user(&user.func, user.env.clone(), this.clone(), args, true, &obj);
                 self.super_call_ok = saved_super;
                 r
             }
@@ -5183,8 +5173,11 @@ impl Interp {
             let mut b = obj.borrow_mut();
             b.props = map.clone();
             for slot in 0..count {
-                b.props.entry_at_mut(slot).expect("template slot").1.value =
-                    unsafe { base.add(slot).read() };
+                b.props
+                    .entry_at_mut(slot)
+                    .expect("template slot")
+                    .1
+                    .set_value(unsafe { base.add(slot).read() });
             }
         }
         Value::Obj(obj)
@@ -5213,7 +5206,11 @@ impl Interp {
             let mut b = obj.borrow_mut();
             b.props = map.clone();
             for (slot, v) in values.into_iter().enumerate() {
-                b.props.entry_at_mut(slot).expect("template slot").1.value = v;
+                b.props
+                    .entry_at_mut(slot)
+                    .expect("template slot")
+                    .1
+                    .set_value(v);
             }
         }
         Value::Obj(obj)
@@ -6014,7 +6011,7 @@ impl Interp {
                         } else {
                             a.powf(b)
                         },
-                    ))
+                    ));
                 }
                 "&" => return Ok(Value::Num((to_int32(a) & to_int32(b)) as f64)),
                 "|" => return Ok(Value::Num((to_int32(a) | to_int32(b)) as f64)),
@@ -6022,17 +6019,17 @@ impl Interp {
                 "<<" => {
                     return Ok(Value::Num(
                         to_int32(a).wrapping_shl(to_int32(b) as u32 & 31) as f64,
-                    ))
+                    ));
                 }
                 ">>" => {
                     return Ok(Value::Num(
                         (to_int32(a) >> (to_int32(b) as u32 & 31)) as f64,
-                    ))
+                    ));
                 }
                 ">>>" => {
                     return Ok(Value::Num(
                         ((to_int32(a) as u32) >> (to_int32(b) as u32 & 31)) as f64,
-                    ))
+                    ));
                 }
                 "<" => return Ok(Value::Bool(a < b)),
                 ">" => return Ok(Value::Bool(a > b)),
@@ -6413,11 +6410,11 @@ impl Interp {
             }
             Value::Num(n) => *n,
             Value::BigInt(_) => {
-                return Err(self.throw("TypeError", "Cannot convert a BigInt value to a number"))
+                return Err(self.throw("TypeError", "Cannot convert a BigInt value to a number"));
             }
             Value::Str(s) => parse_number(s),
             Value::Sym(_) => {
-                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a number"))
+                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a number"));
             }
             Value::Obj(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
@@ -6444,13 +6441,13 @@ impl Interp {
             Value::BigInt(n) => crate::lstr::LStr::from(n.to_string().as_str()),
             Value::Str(s) => s.clone(),
             Value::Sym(_) => {
-                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a string"))
+                return Err(self.throw("TypeError", "Cannot convert a Symbol value to a string"));
             }
             Value::Obj(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 match p {
                     Value::Obj(_) => {
-                        return Err(self.throw("TypeError", "cannot convert object to string"))
+                        return Err(self.throw("TypeError", "cannot convert object to string"));
                     }
                     other => self.to_string(&other)?,
                 }
@@ -6480,11 +6477,11 @@ impl Interp {
             .borrow()
             .props
             .get("Symbol")
-            .map(|p| p.value.clone())?;
+            .map(|p| p.value())?;
         if let Value::Obj(o) = sym {
             if let Some(p) = o.borrow().props.get(name) {
-                if let Value::Sym(d) = &p.value {
-                    return Some(Interp::sym_key(d));
+                if let Value::Sym(d) = p.value() {
+                    return Some(Interp::sym_key(&d));
                 }
             }
         }
@@ -6586,11 +6583,7 @@ impl Interp {
                 )
             }
         };
-        if neg {
-            format!("-{body}")
-        } else {
-            body
-        }
+        if neg { format!("-{body}") } else { body }
     }
 
     pub(crate) fn strict_equals(&self, a: &Value, b: &Value) -> bool {
@@ -6630,9 +6623,7 @@ impl Interp {
                         .unwrap_or(false)
             }
             // A bound function constructs exactly when its target does.
-            Callable::Bound(bound) => {
-                self.value_is_constructor(&Value::Obj(bound.target.clone()))
-            }
+            Callable::Bound(bound) => self.value_is_constructor(&Value::Obj(bound.target.clone())),
             _ => false,
         }
     }
@@ -6758,7 +6749,7 @@ fn default_constructor(derived: bool) -> Function {
         calls: std::cell::Cell::new(0),
         code: std::cell::OnceCell::new(),
         code2: std::cell::OnceCell::new(),
-            fn_maps: std::cell::OnceCell::new(),
+        fn_maps: std::cell::OnceCell::new(),
         name: None,
         params,
         body,

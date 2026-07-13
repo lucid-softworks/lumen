@@ -8,7 +8,7 @@ use super::{
     ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Segmenter", 0, construct);
@@ -184,11 +184,7 @@ fn grapheme_boundaries(s: &[u16]) -> Vec<(usize, bool)> {
         }
         // Fold cls[k] into the running state.
         ri_run = if b == Gcb::Ri {
-            if no_break {
-                ri_run + 1
-            } else {
-                1
-            }
+            if no_break { ri_run + 1 } else { 1 }
         } else {
             0
         };
@@ -333,12 +329,7 @@ fn is_word_cp(c: u32) -> bool {
 
 fn segment(i: &mut Interp, this: &Value, input: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__sg")?;
-    let granularity = match o
-        .borrow()
-        .props
-        .get("__sg_granularity")
-        .map(|p| p.value.clone())
-    {
+    let granularity = match o.borrow().props.get("__sg_granularity").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "grapheme".to_string(),
     };
@@ -412,7 +403,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

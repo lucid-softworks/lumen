@@ -97,7 +97,7 @@ pub(super) fn install_reflect(it: &mut Interp) {
                 return Err(i.make_error(
                     "TypeError",
                     "Reflect.getOwnPropertyDescriptor on non-object",
-                ))
+                ));
             }
         };
         let key = ab(i.to_property_key(&arg(a, 1)))?;
@@ -107,7 +107,7 @@ pub(super) fn install_reflect(it: &mut Interp) {
         // A mapped arguments index reports the live parameter value.
         if let Some(v) = i.mapped_arg_value(Rc::as_ptr(&o) as usize, &key) {
             if let Some(p) = o.borrow_mut().props.get_mut(&key) {
-                p.value = v;
+                p.set_value(v);
             }
         }
         // A TypedArray canonical numeric index reads from the buffer (out-of-range → undefined).

@@ -9,7 +9,7 @@ use super::{
     make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Value};
+use crate::value::{Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "ListFormat", 0, construct);
@@ -113,7 +113,7 @@ fn assemble_segments(parts: &[String], pats: [&'static str; 4]) -> Vec<(bool, St
 
 fn format(i: &mut Interp, this: &Value, list: &Value, to_parts: bool) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__lf")?;
-    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value.clone()) {
+    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     };
@@ -146,7 +146,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

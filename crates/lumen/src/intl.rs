@@ -4,7 +4,7 @@
 //! option coercion, locale negotiation — is complete; the per-locale data is a deliberate subset.
 
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, Gc, Object, Property, Value};
+use crate::value::{Gc, Object, Property, Value, set_builtin};
 use std::rc::Rc;
 
 mod collator;
@@ -86,7 +86,7 @@ pub fn install(it: &mut Interp) {
         "DurationFormat",
         "Locale",
     ] {
-        let ctor = intl.borrow().props.get(svc).map(|p| p.value.clone());
+        let ctor = intl.borrow().props.get(svc).map(|p| p.value());
         if let Some(Value::Obj(c)) = ctor {
             let key: &'static str = Box::leak(format!("%Intl.{svc}%").into_boxed_str());
             it.extra_protos.insert(key, c);
@@ -139,12 +139,7 @@ pub(crate) fn canonicalize_locale_list(
 fn process_locale_item(i: &mut Interp, item: &Value, seen: &mut Vec<String>) -> Result<(), Value> {
     let tag = match item {
         Value::Obj(o) if o.borrow().props.contains("__locale_tag") => {
-            match o
-                .borrow()
-                .props
-                .get("__locale_tag")
-                .map(|p| p.value.clone())
-            {
+            match o.borrow().props.get("__locale_tag").map(|p| p.value()) {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => String::new(),
             }
@@ -163,7 +158,7 @@ fn process_locale_item(i: &mut Interp, item: &Value, seen: &mut Vec<String>) -> 
                     return Err(i.make_error(
                         "RangeError",
                         format!("Incorrect locale information provided: {s}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -299,7 +294,7 @@ pub(crate) fn brand_slot_legacy(
         let symv = i
             .extra_protos
             .get("%IntlFallbackSymbol%")
-            .and_then(|h| h.borrow().props.get("sym").map(|p| p.value.clone()));
+            .and_then(|h| h.borrow().props.get("sym").map(|p| p.value()));
         if let Some(Value::Sym(sd)) = symv {
             if inherits_service_proto(i, o, proto_key) {
                 let key = crate::interpreter::Interp::sym_key(&sd);
@@ -355,7 +350,7 @@ pub(crate) fn legacy_chain(
         .borrow()
         .props
         .get("sym")
-        .map(|p| p.value.clone());
+        .map(|p| p.value());
     match symv {
         Some(Value::Sym(sd)) => {
             this_o.borrow_mut().props.insert(

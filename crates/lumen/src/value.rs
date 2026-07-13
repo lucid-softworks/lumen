@@ -42,6 +42,132 @@ pub enum Value {
     Obj(Gc) = 8,
 }
 
+// NaN-boxed storage used for long-lived property values. Execution still uses the ergonomic
+// `Value` enum while the migration is staged; packing at the heap boundary cuts each ordinary
+// property by eight bytes without coupling the experiment to every interpreter pattern match.
+#[repr(transparent)]
+struct PackedValue(u64);
+
+const PACK_PAYLOAD: u64 = 0x0000_ffff_ffff_ffff;
+pub(crate) const PACK_UNDEFINED: u64 = 0x7ff9_0000_0000_0000;
+pub(crate) const PACK_EMPTY: u64 = 0x7ffa_0000_0000_0000;
+pub(crate) const PACK_NULL: u64 = 0x7ffb_0000_0000_0000;
+pub(crate) const PACK_BOOL: u64 = 0x7ffc_0000_0000_0000;
+pub(crate) const PACK_BIGINT: u64 = 0x7ffd_0000_0000_0000;
+pub(crate) const PACK_STR: u64 = 0x7ffe_0000_0000_0000;
+pub(crate) const PACK_SYM: u64 = 0x7fff_0000_0000_0000;
+pub(crate) const PACK_OBJ: u64 = 0xfff9_0000_0000_0000;
+const PACK_CANON_NAN: u64 = 0x7ff8_0000_0000_0000;
+
+impl PackedValue {
+    #[inline]
+    fn tag(&self) -> u64 {
+        self.0 & !PACK_PAYLOAD
+    }
+
+    unsafe fn into_word<T>(value: T) -> u64 {
+        assert!(std::mem::size_of::<T>() <= std::mem::size_of::<usize>());
+        let value = std::mem::ManuallyDrop::new(value);
+        let mut word = 0usize;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &*value as *const T as *const u8,
+                &mut word as *mut usize as *mut u8,
+                std::mem::size_of::<T>(),
+            );
+        }
+        let word = word as u64;
+        assert_eq!(
+            word & !PACK_PAYLOAD,
+            0,
+            "pointer does not fit NaN-box payload"
+        );
+        word
+    }
+
+    unsafe fn clone_word<T: Clone>(&self) -> T {
+        assert!(std::mem::size_of::<T>() <= std::mem::size_of::<usize>());
+        let word = (self.0 & PACK_PAYLOAD) as usize;
+        let mut value = std::mem::MaybeUninit::<T>::uninit();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &word as *const usize as *const u8,
+                value.as_mut_ptr() as *mut u8,
+                std::mem::size_of::<T>(),
+            );
+            let value = std::mem::ManuallyDrop::new(value.assume_init());
+            T::clone(&value)
+        }
+    }
+
+    unsafe fn drop_word<T>(&mut self) {
+        assert!(std::mem::size_of::<T>() <= std::mem::size_of::<usize>());
+        let word = (self.0 & PACK_PAYLOAD) as usize;
+        let mut value = std::mem::MaybeUninit::<T>::uninit();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &word as *const usize as *const u8,
+                value.as_mut_ptr() as *mut u8,
+                std::mem::size_of::<T>(),
+            );
+            value.assume_init_drop();
+        }
+    }
+
+    fn pack(value: Value) -> PackedValue {
+        let bits = match value {
+            Value::Undefined => PACK_UNDEFINED,
+            Value::Empty => PACK_EMPTY,
+            Value::Null => PACK_NULL,
+            Value::Bool(v) => PACK_BOOL | v as u64,
+            Value::Num(v) => {
+                if v.is_nan() {
+                    PACK_CANON_NAN
+                } else {
+                    v.to_bits()
+                }
+            }
+            Value::BigInt(v) => PACK_BIGINT | unsafe { Self::into_word(v) },
+            Value::Str(v) => PACK_STR | unsafe { Self::into_word(v) },
+            Value::Sym(v) => PACK_SYM | unsafe { Self::into_word(v) },
+            Value::Obj(v) => PACK_OBJ | unsafe { Self::into_word(v) },
+        };
+        PackedValue(bits)
+    }
+
+    fn unpack(&self) -> Value {
+        match self.tag() {
+            PACK_UNDEFINED => Value::Undefined,
+            PACK_EMPTY => Value::Empty,
+            PACK_NULL => Value::Null,
+            PACK_BOOL => Value::Bool(self.0 & 1 != 0),
+            PACK_BIGINT => Value::BigInt(unsafe { self.clone_word() }),
+            PACK_STR => Value::Str(unsafe { self.clone_word() }),
+            PACK_SYM => Value::Sym(unsafe { self.clone_word() }),
+            PACK_OBJ => Value::Obj(unsafe { self.clone_word() }),
+            _ => Value::Num(f64::from_bits(self.0)),
+        }
+    }
+}
+
+impl Clone for PackedValue {
+    fn clone(&self) -> Self {
+        PackedValue::pack(self.unpack())
+    }
+}
+
+impl Drop for PackedValue {
+    fn drop(&mut self) {
+        match self.tag() {
+            PACK_BIGINT => unsafe { self.drop_word::<crate::bigint::JsBigInt>() },
+            PACK_STR => unsafe { self.drop_word::<crate::lstr::LStr>() },
+            PACK_SYM => unsafe { self.drop_word::<Rc<SymbolData>>() },
+            PACK_OBJ => unsafe { self.drop_word::<Gc>() },
+            _ => {}
+        }
+    }
+}
+
 /// A unique Symbol. Identity is the `id` (every `Symbol()` call gets a fresh one); `description` is
 /// the optional label. Well-known symbols (`Symbol.iterator`, …) are just pre-allocated instances.
 pub struct SymbolData {
@@ -132,8 +258,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     // and `as_ptr` minus the stored word gives the RcBox header size. Fails closed.
     let (str_len_word, str_ptr_word, str_data_off, key_probe_ok) = {
         let probe: Rc<str> = "probe_8B".into();
-        let words: [usize; 2] =
-            unsafe { std::mem::transmute_copy::<Rc<str>, [usize; 2]>(&probe) };
+        let words: [usize; 2] = unsafe { std::mem::transmute_copy::<Rc<str>, [usize; 2]>(&probe) };
         let data = probe.as_ptr() as usize;
         if words[0] == 8 && words[1] != 8 && data > words[1] && data - words[1] < 256 {
             (0usize, 8usize, data - words[1], true)
@@ -160,7 +285,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let rcbox_data = as_ptr - stored; // RcBox header (strong+weak) before the value
     let obj_from_rc = rcbox_data + refcell_value; // stored ptr → Object
     let rc_strong_off = 0usize; // strong count is the RcBox's first field
-                                // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
+    // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
     let strong_ok =
         unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
 
@@ -251,7 +376,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         str_ptr_word,
         str_data_off,
         key_probe_ok,
-        entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, value),
+        entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, packed),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
         entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
         exotic_none_tag,
@@ -693,7 +818,7 @@ pub enum TaIndex {
 /// bits point to an accessor pair only for accessor properties. Thus ordinary properties are 32
 /// bytes and allocate no metadata, while still keeping the flags directly readable by the JIT.
 pub struct Property {
-    pub value: Value,
+    packed: PackedValue,
     meta: usize,
 }
 
@@ -722,7 +847,7 @@ impl Clone for Property {
             Box::into_raw(Box::new(acc.clone())) as usize | flags
         };
         Property {
-            value: self.value.clone(),
+            packed: self.packed.clone(),
             meta,
         }
     }
@@ -747,7 +872,10 @@ impl Property {
         let meta = (writable as usize) * PROP_WRITABLE
             | (enumerable as usize) * PROP_ENUMERABLE
             | (configurable as usize) * PROP_CONFIGURABLE;
-        Property { value, meta }
+        Property {
+            packed: PackedValue::pack(value),
+            meta,
+        }
     }
     /// An accessor property (`accessor: true`, value `Undefined`, not writable).
     pub(crate) fn accessor_prop(
@@ -762,7 +890,7 @@ impl Property {
         let ptr = Box::into_raw(Box::new(Accessors { get, set })) as usize;
         debug_assert_eq!(ptr & PROP_FLAG_MASK, 0);
         Property {
-            value: Value::Undefined,
+            packed: PackedValue::pack(Value::Undefined),
             meta: ptr | flags,
         }
     }
@@ -815,7 +943,24 @@ impl Property {
         self.set_flag(PROP_CONFIGURABLE, value);
     }
     pub(crate) fn into_value(mut self) -> Value {
-        std::mem::take(&mut self.value)
+        self.take_value()
+    }
+    #[inline]
+    pub(crate) fn value(&self) -> Value {
+        self.packed.unpack()
+    }
+    #[inline]
+    pub(crate) fn set_value(&mut self, value: Value) {
+        self.packed = PackedValue::pack(value);
+    }
+    #[inline]
+    pub(crate) fn replace_value(&mut self, value: Value) -> Value {
+        let old = std::mem::replace(&mut self.packed, PackedValue::pack(value));
+        old.unpack()
+    }
+    #[inline]
+    pub(crate) fn take_value(&mut self) -> Value {
+        self.replace_value(Value::Undefined)
     }
     #[inline]
     pub(crate) fn getter(&self) -> Option<&Value> {
@@ -905,18 +1050,13 @@ impl DenseStorage {
     fn buffers_mut(&mut self) -> &mut DenseBuffers {
         self.0.get_or_insert_with(Default::default)
     }
-    fn index_mut(
-        &mut self,
-    ) -> Option<&mut crate::fasthash::FastMap<Rc<str>, usize>> {
+    fn index_mut(&mut self) -> Option<&mut crate::fasthash::FastMap<Rc<str>, usize>> {
         self.0.as_deref_mut()?.index.as_deref_mut()
     }
     fn packed_mut(&mut self) -> Option<&mut Vec<Property>> {
         self.0.as_deref_mut()?.packed.as_deref_mut()
     }
-    fn set_index(
-        &mut self,
-        index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
-    ) {
+    fn set_index(&mut self, index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>) {
         if index.is_some() {
             self.buffers_mut().index = index;
         } else if let Some(d) = self.0.as_deref_mut() {
@@ -1328,7 +1468,9 @@ impl Props {
     #[inline]
     pub(crate) fn get_index(&self, n: u32) -> Option<&Property> {
         if let Some(packed) = &self.elems.packed {
-            return packed.get(n as usize).filter(|p| !matches!(p.value, Value::Empty));
+            return packed
+                .get(n as usize)
+                .filter(|p| !matches!(p.value(), Value::Empty));
         }
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
@@ -1344,7 +1486,9 @@ impl Props {
         self.mirror_invalidate();
         let dense = self.elems.buffers_mut();
         if let Some(packed) = &mut dense.packed {
-            return packed.get_mut(n as usize).filter(|p| !matches!(p.value, Value::Empty));
+            return packed
+                .get_mut(n as usize)
+                .filter(|p| !matches!(p.value(), Value::Empty));
         }
         let slot = *dense.elems.get(n as usize)?;
         if slot == NO_SLOT {
@@ -1375,9 +1519,8 @@ impl Props {
             return;
         }
         let p = &self.entries[slot].1;
-        match &p.value {
+        match p.value() {
             Value::Num(f) if !p.accessor() && p.writable() && f.to_bits() != MIRROR_HOLE => {
-                let f = *f;
                 if !f64_exact_i32(f) {
                     self.mirror_flags &= !MIRROR_ALL_I32;
                 }
@@ -1402,7 +1545,7 @@ impl Props {
         // not pay a buffer allocation just to invalidate it.
         {
             let p = &self.entries[slot].1;
-            let ok = matches!(&p.value, Value::Num(f) if f.to_bits() != MIRROR_HOLE)
+            let ok = matches!(p.value(), Value::Num(f) if f.to_bits() != MIRROR_HOLE)
                 && !p.accessor()
                 && p.writable();
             if !ok {
@@ -1442,11 +1585,13 @@ impl Props {
     #[inline]
     pub(crate) fn set_index_value(&mut self, n: u32, v: Value) -> Result<(), Value> {
         if let Some(packed) = self.elems.packed_mut() {
-            let Some(p) = packed.get_mut(n as usize) else { return Err(v) };
-            if matches!(p.value, Value::Empty) || p.accessor() || !p.writable() {
+            let Some(p) = packed.get_mut(n as usize) else {
+                return Err(v);
+            };
+            if matches!(p.value(), Value::Empty) || p.accessor() || !p.writable() {
                 return Err(v);
             }
-            p.value = v;
+            p.set_value(v);
             return Ok(());
         }
         let Some(&slot) = self.elems.get(n as usize) else {
@@ -1475,7 +1620,7 @@ impl Props {
             }
         }
         let p = &mut self.entries[slot as usize].1;
-        p.value = v;
+        p.set_value(v);
         Ok(())
     }
 
@@ -1577,11 +1722,16 @@ impl Props {
                 return None;
             }
             let p = packed.last()?;
-            if matches!(p.value, Value::Empty) || p.accessor() || !p.configurable() {
+            if matches!(p.value(), Value::Empty) || p.accessor() || !p.configurable() {
                 return None;
             }
             self.note_structural();
-            return self.elems.packed_mut().unwrap().pop().map(Property::into_value);
+            return self
+                .elems
+                .packed_mut()
+                .unwrap()
+                .pop()
+                .map(Property::into_value);
         }
         if n as usize + 1 != self.elems.len() {
             return None;
@@ -1642,7 +1792,10 @@ impl Props {
         let found = if self.elems.index.is_none() {
             self.entries.iter().position(|(k, _)| &**k == key)
         } else {
-            self.elems.index.as_ref().and_then(|index| index.get(key).copied())
+            self.elems
+                .index
+                .as_ref()
+                .and_then(|index| index.get(key).copied())
         };
         if let Some(s) = found {
             if key == "length" {
@@ -1671,8 +1824,12 @@ impl Props {
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
         if let Some(n) = canonical_index(key) {
-            if self.elems.packed.as_ref().and_then(|p| p.get(n as usize))
-                .is_some_and(|p| !matches!(p.value, Value::Empty))
+            if self
+                .elems
+                .packed
+                .as_ref()
+                .and_then(|p| p.get(n as usize))
+                .is_some_and(|p| !matches!(p.value(), Value::Empty))
             {
                 return self.elems.packed_mut().and_then(|p| p.get_mut(n as usize));
             }
@@ -1829,7 +1986,7 @@ impl Props {
             None => true,
         };
         let packed_remove = self.elems.packed.as_ref().is_some_and(|p| {
-            p.len() > from && p[from..].iter().any(|p| !matches!(p.value, Value::Empty))
+            p.len() > from && p[from..].iter().any(|p| !matches!(p.value(), Value::Empty))
         });
         if !packed_remove && self.entries.iter().all(|(k, _)| keep(k)) {
             return;
@@ -1857,7 +2014,10 @@ impl Props {
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
         if let (Some(n), Some(packed)) = (canonical_index(key), self.elems.packed.as_ref()) {
-            if packed.get(n as usize).is_some_and(|p| !matches!(p.value, Value::Empty)) {
+            if packed
+                .get(n as usize)
+                .is_some_and(|p| !matches!(p.value(), Value::Empty))
+            {
                 self.note_structural();
                 self.elems.packed_mut().unwrap()[n as usize] = Property::plain(Value::Empty);
                 return true;
@@ -1912,8 +2072,11 @@ impl Props {
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub(crate) fn keys(&self) -> Vec<Rc<str>> {
-        self.elems.packed.iter().flat_map(|p| p.iter().enumerate())
-            .filter(|(_, p)| !matches!(p.value, Value::Empty))
+        self.elems
+            .packed
+            .iter()
+            .flat_map(|p| p.iter().enumerate())
+            .filter(|(_, p)| !matches!(p.value(), Value::Empty))
             .map(|(n, _)| index_key(n))
             .chain(self.entries.iter().map(|(k, _)| k.clone()))
             .filter(|k| !crate::interpreter::Interp::is_private_key(k))
@@ -1926,9 +2089,13 @@ impl Props {
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
         if let Some(packed) = &self.elems.packed {
-            ints.extend(packed.iter().enumerate()
-                .filter(|(_, p)| !matches!(p.value, Value::Empty))
-                .map(|(n, _)| (n as u32, index_key(n))));
+            ints.extend(
+                packed
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !matches!(p.value(), Value::Empty))
+                    .map(|(n, _)| (n as u32, index_key(n))),
+            );
         }
         for (k, _) in &self.entries {
             if crate::interpreter::Interp::is_private_key(k) {
@@ -1955,17 +2122,27 @@ impl Props {
 
     /// Every live property value, including keyless packed elements (for GC tracing).
     pub(crate) fn values(&self) -> impl Iterator<Item = &Property> {
-        self.elems.packed.iter().flat_map(|p| p.iter())
-            .filter(|p| !matches!(p.value, Value::Empty))
+        self.elems
+            .packed
+            .iter()
+            .flat_map(|p| p.iter())
+            .filter(|p| !matches!(p.value(), Value::Empty))
             .chain(self.entries.iter().map(|(_, p)| p))
     }
 
     pub(crate) fn highest_nonconfig_index_from(&self, from: usize) -> Option<usize> {
-        let packed = self.elems.packed.iter().flat_map(|p| p.iter().enumerate()).filter_map(|(n, p)| {
-            (!matches!(p.value, Value::Empty) && !p.configurable() && n >= from).then_some(n)
-        });
+        let packed = self
+            .elems
+            .packed
+            .iter()
+            .flat_map(|p| p.iter().enumerate())
+            .filter_map(|(n, p)| {
+                (!matches!(p.value(), Value::Empty) && !p.configurable() && n >= from).then_some(n)
+            });
         let entries = self.entries.iter().filter_map(|(k, p)| {
-            (!p.configurable()).then(|| canonical_index(k).map(|n| n as usize)).flatten()
+            (!p.configurable())
+                .then(|| canonical_index(k).map(|n| n as usize))
+                .flatten()
                 .filter(|&n| n >= from)
         });
         packed.chain(entries).max()
@@ -1973,11 +2150,16 @@ impl Props {
 
     pub(crate) fn integrity_ok(&self, frozen: bool) -> bool {
         let valid = |p: &Property| !p.configurable() && (!frozen || p.accessor() || !p.writable());
-        self.elems.packed.iter().flat_map(|p| p.iter())
-            .filter(|p| !matches!(p.value, Value::Empty)).all(valid)
-            && self.entries.iter().all(|(k, p)| {
-                crate::interpreter::Interp::is_private_key(k) || valid(p)
-            })
+        self.elems
+            .packed
+            .iter()
+            .flat_map(|p| p.iter())
+            .filter(|p| !matches!(p.value(), Value::Empty))
+            .all(valid)
+            && self
+                .entries
+                .iter()
+                .all(|(k, p)| crate::interpreter::Interp::is_private_key(k) || valid(p))
     }
 }
 

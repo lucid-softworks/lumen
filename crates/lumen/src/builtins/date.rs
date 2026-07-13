@@ -127,11 +127,7 @@ fn make_day(y: f64, m: f64, d: f64) -> f64 {
 
 fn make_date(day: f64, time: f64) -> f64 {
     let t = day * 86_400_000.0 + time;
-    if t.is_finite() {
-        t
-    } else {
-        f64::NAN
-    }
+    if t.is_finite() { t } else { f64::NAN }
 }
 
 /// TimeClip: NaN outside ±8.64e15 ms; -0 normalizes to +0.
@@ -474,7 +470,7 @@ fn date_ctor(i: &mut Interp, _t: Value, args: &[Value]) -> Result<Value, Value> 
         1 => match &args[0] {
             // A Date argument clones its time value directly (no valueOf call).
             Value::Obj(o) if o.borrow().props.contains("__date_ms") => {
-                match o.borrow().props.get("__date_ms").map(|p| p.value.clone()) {
+                match o.borrow().props.get("__date_ms").map(|p| p.value()) {
                     Some(Value::Num(n)) => n,
                     _ => f64::NAN,
                 }

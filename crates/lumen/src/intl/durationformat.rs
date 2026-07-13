@@ -9,7 +9,7 @@ use super::{
     ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 /// (plural, singular, index): years..nanoseconds.
 const UNITS: &[(&str, &str)] = &[
@@ -251,11 +251,7 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
             }
         }
         // A trailing number with no designator is invalid.
-        if buf.is_empty() {
-            Some(())
-        } else {
-            None
-        }
+        if buf.is_empty() { Some(()) } else { None }
     };
     consume(
         date_part,
@@ -360,7 +356,7 @@ fn read_duration(i: &mut Interp, v: &Value) -> Result<[f64; 10], Value> {
 }
 
 fn get_str(o: &Gc, k: &str) -> String {
-    match o.borrow().props.get(k).map(|p| p.value.clone()) {
+    match o.borrow().props.get(k).map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     }
@@ -412,7 +408,7 @@ fn partition(
     let locale = get_str(&o, "__df_locale");
     let base_style = get_str(&o, "__df_style");
     let numbering = get_str(&o, "__df_nu");
-    let frac_digits = match o.borrow().props.get("__df_frac").map(|p| p.value.clone()) {
+    let frac_digits = match o.borrow().props.get("__df_frac").map(|p| p.value()) {
         Some(Value::Num(n)) => Some(n as u32),
         _ => None,
     };
@@ -682,7 +678,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

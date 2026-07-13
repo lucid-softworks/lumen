@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Collator", 0, construct);
@@ -18,7 +18,7 @@ pub fn install(it: &mut Interp, ns: &Gc) {
 fn install_compare_getter(it: &mut Interp, proto: &Gc) {
     let g = it.make_native("get compare", 0, |i, this, _| {
         let o = brand_slot(i, &this, "__co")?;
-        if let Some(f) = o.borrow().props.get("__co_bound").map(|p| p.value.clone()) {
+        if let Some(f) = o.borrow().props.get("__co_bound").map(|p| p.value()) {
             return Ok(f);
         }
         let f = i.make_native("", 2, |i, that, a| {
@@ -175,13 +175,13 @@ fn construct(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
 
 fn compare(i: &mut Interp, this: &Value, a: &Value, b: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__co")?;
-    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value.clone()) {
+    let get = |k: &str| match o.borrow().props.get(k).map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     };
     let getb = |k: &str| {
         matches!(
-            o.borrow().props.get(k).map(|p| p.value.clone()),
+            o.borrow().props.get(k).map(|p| p.value()),
             Some(Value::Bool(true))
         )
     };
@@ -360,7 +360,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

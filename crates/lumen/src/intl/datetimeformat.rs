@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 use std::rc::Rc;
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's algorithm).
@@ -242,7 +242,7 @@ fn range_type_tag(i: &Interp, v: &Value) -> u8 {
 fn install_format_getter(it: &mut Interp, proto: &Gc) {
     let g = it.make_native("get format", 0, |i, this, _| {
         let o = crate::intl::brand_slot_legacy(i, &this, "__dtf", "Intl.DateTimeFormat")?;
-        if let Some(f) = o.borrow().props.get("__dtf_bound").map(|p| p.value.clone()) {
+        if let Some(f) = o.borrow().props.get("__dtf_bound").map(|p| p.value()) {
             return Ok(f);
         }
         let f = i.make_native("", 1, |i, that, a| {
@@ -628,7 +628,7 @@ fn ymd(ms: f64) -> (i64, u32, u32, u32, u32, u32, u32) {
     rem %= 60_000;
     let sec = (rem / 1000) as u32;
     let weekday = ((days % 7 + 4) % 7 + 7) as u32 % 7; // 0=Sun; 1970-01-01 was Thursday(4)
-                                                       // civil from days
+    // civil from days
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -681,7 +681,7 @@ fn dtf_ms_kind(i: &mut Interp, o: &Gc, date: &Value) -> Result<(f64, u8), Value>
                 .get(&ptr)
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "iso8601".to_string());
-            let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
+            let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value()) {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "iso8601".to_string(),
             };
@@ -770,7 +770,7 @@ fn do_format(i: &mut Interp, this: &Value, date: &Value) -> Result<String, Value
 
 /// The formatter's numbering system id (`latn` unless set).
 fn dtf_nu(o: &Gc) -> String {
-    match o.borrow().props.get("__dtf_nu").map(|p| p.value.clone()) {
+    match o.borrow().props.get("__dtf_nu").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "latn".to_string(),
     }
@@ -854,7 +854,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
     // An absolute instant (number/Date kind 0, Temporal.Instant kind 6) is shifted into the
     // formatter's time zone; Temporal wall-clock values (kinds 1-5) already carry their local time.
     let ms = if kind == 0 || kind == 6 {
-        match o.borrow().props.get("__dtf_tz").map(|p| p.value.clone()) {
+        match o.borrow().props.get("__dtf_tz").map(|p| p.value()) {
             Some(Value::Str(tz)) => {
                 let epoch_sec = (ms / 1000.0).floor() as i64;
                 let off_ms = crate::tz::offset_at(&tz, epoch_sec)
@@ -874,7 +874,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         day: d as u8,
     };
     // A non-Gregorian calendar renders its own numeric year/month/day via the calendar tables.
-    let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value.clone()) {
+    let dcal = match o.borrow().props.get("__dtf_ca").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "iso8601".to_string(),
     };
@@ -929,7 +929,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         if defaulted && kind == 2 && matches!(field, "year" | "month" | "day" | "era") {
             return None;
         }
-        let read = |key: &str| match o.borrow().props.get(key).map(|p| p.value.clone()) {
+        let read = |key: &str| match o.borrow().props.get(key).map(|p| p.value()) {
             Some(Value::Str(s)) => Some(s.to_string()),
             _ => None,
         };
@@ -952,12 +952,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
 
     // CLDR locale key for name lookups (zh splits by script).
     let cldr_loc = {
-        let loc = match o
-            .borrow()
-            .props
-            .get("__dtf_locale")
-            .map(|p| p.value.clone())
-        {
+        let loc = match o.borrow().props.get("__dtf_locale").map(|p| p.value()) {
             Some(Value::Str(s)) => s.to_string(),
             _ => "en".to_string(),
         };
@@ -1069,12 +1064,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         // Numeric date: field order and separator follow the locale's CLDR short pattern
         // (en: M/D/Y, de: D.M.Y, ja: Y/M/D, ...). Default is M/D/Y with "/".
         let lang = {
-            let loc = match o
-                .borrow()
-                .props
-                .get("__dtf_locale")
-                .map(|p| p.value.clone())
-            {
+            let loc = match o.borrow().props.get("__dtf_locale").map(|p| p.value()) {
                 Some(Value::Str(s)) => s.to_string(),
                 _ => "en".to_string(),
             };
@@ -1195,12 +1185,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         // An explicit dayPeriod field replaces the AM/PM marker with a flexible period word; a plain
         // AM/PM marker only appears alongside a 12-hour clock. When the hour cycle wasn't resolved
         // (a default formatter over a PlainTime), use the locale default (en is 12-hour, others 24).
-        let cycle = match o
-            .borrow()
-            .props
-            .get("__dtf_hourcycle")
-            .map(|p| p.value.clone())
-        {
+        let cycle = match o.borrow().props.get("__dtf_hourcycle").map(|p| p.value()) {
             Some(Value::Str(s)) => Some(s.to_string()),
             _ => None,
         };
@@ -1208,12 +1193,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             || match cycle.as_deref() {
                 Some("h11") | Some("h12") => true,
                 Some(_) => false,
-                None => match o
-                    .borrow()
-                    .props
-                    .get("__dtf_hour12")
-                    .map(|p| p.value.clone())
-                {
+                None => match o.borrow().props.get("__dtf_hour12").map(|p| p.value()) {
                     Some(Value::Bool(b)) => b,
                     _ => cldr_loc == "en",
                 },
@@ -1284,12 +1264,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
         }
         let frac_alone = has_frac && !(time_defaulted || get("__dtf_second").is_some());
         if frac_alone {
-            if let Some(Value::Num(fd)) = o
-                .borrow()
-                .props
-                .get("__dtf_fracsec")
-                .map(|p| p.value.clone())
-            {
+            if let Some(Value::Num(fd)) = o.borrow().props.get("__dtf_fracsec").map(|p| p.value()) {
                 let ms_frac = (ms.rem_euclid(1000.0)) as u32;
                 let digits = format!("{ms_frac:03}");
                 parts.push(("fractionalSecond", digits[..fd as usize].to_string()));
@@ -1301,12 +1276,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
             }
             parts.push(("second", format!("{s:02}")));
             // fractionalSecondDigits appends the leading digits of the millisecond fraction.
-            if let Some(Value::Num(fd)) = o
-                .borrow()
-                .props
-                .get("__dtf_fracsec")
-                .map(|p| p.value.clone())
-            {
+            if let Some(Value::Num(fd)) = o.borrow().props.get("__dtf_fracsec").map(|p| p.value()) {
                 let ms_frac = (ms.rem_euclid(1000.0)) as u32;
                 let digits = format!("{ms_frac:03}");
                 // The fractional separator is the numbering system's decimal symbol (arab: U+066B).
@@ -1330,7 +1300,7 @@ fn build_parts(o: &Gc, ms: f64, kind: u8) -> Vec<(&'static str, String)> {
 
     // Time-zone name (UTC only; the display form depends on the requested style).
     if let Some(style) = get("__dtf_tzname") {
-        let tz = match o.borrow().props.get("__dtf_tz").map(|p| p.value.clone()) {
+        let tz = match o.borrow().props.get("__dtf_tz").map(|p| p.value()) {
             Some(Value::Str(s)) => s.to_string(),
             _ => "UTC".to_string(),
         };
@@ -1416,11 +1386,7 @@ fn canon_utc_offset(s: &str) -> Option<String> {
 /// forms; only `narrow` noon differs).
 fn day_period_word(h: u32, width: &str) -> &'static str {
     if h == 12 {
-        if width == "narrow" {
-            "n"
-        } else {
-            "noon"
-        }
+        if width == "narrow" { "n" } else { "noon" }
     } else if h < 12 {
         "in the morning"
     } else if h < 18 {
@@ -1494,7 +1460,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = crate::intl::brand_slot_legacy(i, &this, "__dtf", "Intl.DateTimeFormat")?;
     let res = i.new_object();
     let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
-        if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {
+        if let Some(v) = o.borrow().props.get(slot).map(|p| p.value()) {
             set_data(res, k, v);
         }
         let _ = i;
@@ -1506,10 +1472,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     // hourCycle/hour12 are resolved internally for every formatter but only surface in
     // resolvedOptions when the resolved pattern actually shows an hour.
     if matches!(
-        o.borrow()
-            .props
-            .get("__dtf_hourshown")
-            .map(|p| p.value.clone()),
+        o.borrow().props.get("__dtf_hourshown").map(|p| p.value()),
         Some(Value::Bool(true))
     ) {
         put(i, &res, "hourCycle", "__dtf_hourcycle");

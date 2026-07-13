@@ -1613,7 +1613,7 @@ impl Interp {
             let callee = frame.callee();
             let name = {
                 let b = callee.borrow();
-                match b.props.get("name").map(|p| &p.value) {
+                match b.props.get("name").map(|p| p.value()) {
                     Some(Value::Str(s)) if !s.is_empty() => Some(s.to_string()),
                     _ => None,
                 }
@@ -2328,8 +2328,11 @@ impl Interp {
                 let mut pb = proto.borrow_mut();
                 pb.props = proto_map.as_ref().expect("prototype template").clone();
                 if !is_generator {
-                    pb.props.entry_at_mut(0).expect("constructor slot").1.value =
-                        Value::Obj(obj.clone());
+                    pb.props
+                        .entry_at_mut(0)
+                        .expect("constructor slot")
+                        .1
+                        .set_value(Value::Obj(obj.clone()));
                 }
             }
             obj.borrow_mut()
@@ -2337,7 +2340,7 @@ impl Interp {
                 .entry_at_mut(2)
                 .expect("prototype slot")
                 .1
-                .value = Value::Obj(proto);
+                .set_value(Value::Obj(proto));
         }
         if !is_arrow && !is_method && !is_async && !is_generator {
             obj.borrow_mut().is_constructor = true;
@@ -2437,7 +2440,7 @@ impl Interp {
         if p.accessor() {
             return None;
         }
-        Some(p.value.clone())
+        Some(p.value())
     }
 
     /// `o[n] = v` write fast path: overwrite an existing own writable dense data element.
@@ -2682,7 +2685,7 @@ impl Interp {
                 if depth == 0 {
                     if let Some((k, p)) = rb.props.entry_at(st.slot as usize) {
                         if (!keychk || &**k == name) && !p.accessor() {
-                            return Some(p.value.clone());
+                            return Some(p.value());
                         }
                     }
                 } else if let Some(pr) = rb.proto.as_ref() {
@@ -2715,7 +2718,7 @@ impl Interp {
                     {
                         if let Some((k, p)) = hb.props.entry_at(st.slot as usize) {
                             if (!keychk || &**k == name) && !p.accessor() {
-                                return Some(p.value.clone());
+                                return Some(p.value());
                             }
                         }
                     }
@@ -2769,7 +2772,7 @@ impl Interp {
                     if p.accessor() {
                         return None; // getter — must run through [[Get]]
                     }
-                    let v = p.value.clone();
+                    let v = p.value();
                     // An Array HOLDER's slot can't be trusted by shape alone: element entries
                     // occupy slots without transitioning the shape, so two same-shape arrays
                     // map the name at DIFFERENT slots. Cache it as a key-checked entry
@@ -2901,13 +2904,13 @@ impl Interp {
         if p.accessor() || !p.writable() {
             return Err(lval);
         }
-        let same = matches!(&p.value, Value::Str(cur) if crate::lstr::LStr::ptr_eq(cur, lv));
+        let same = matches!(p.value(), Value::Str(cur) if crate::lstr::LStr::ptr_eq(&cur, lv));
         if !same {
             return Err(lval);
         }
         // Take the slot's handle and release the stack copy: unique unless shared elsewhere
         // (then the grow-copy path runs once and the rebuilt handle is unique from here on).
-        let mut cur = match std::mem::replace(&mut p.value, Value::Undefined) {
+        let mut cur = match p.take_value() {
             Value::Str(s) => s,
             _ => unreachable!("checked above"),
         };
@@ -2915,7 +2918,7 @@ impl Interp {
         if !cur.append_in_place(x) {
             cur = cur.concat_grown(x);
         }
-        p.value = Value::Str(cur);
+        p.set_value(Value::Str(cur));
         Ok(())
     }
 
@@ -2941,7 +2944,11 @@ impl Interp {
             if st.depth == 0 && b.props.shape() == st.recv_shape {
                 if let Some((_, p)) = b.props.entry_at(st.slot as usize) {
                     if !p.accessor() && p.writable() {
-                        b.props.entry_at_mut(st.slot as usize).unwrap().1.value = v.clone();
+                        b.props
+                            .entry_at_mut(st.slot as usize)
+                            .unwrap()
+                            .1
+                            .set_value(v.clone());
                         return true;
                     }
                 }
@@ -2957,7 +2964,11 @@ impl Interp {
             if e.name == name.as_ptr() as usize && e.st.recv_shape == shape && e.st.depth == 0 {
                 if let Some((_, p)) = b.props.entry_at(e.st.slot as usize) {
                     if !p.accessor() && p.writable() {
-                        b.props.entry_at_mut(e.st.slot as usize).unwrap().1.value = v.clone();
+                        b.props
+                            .entry_at_mut(e.st.slot as usize)
+                            .unwrap()
+                            .1
+                            .set_value(v.clone());
                         self.ic_insert(cache, e.st);
                         return true;
                     }
@@ -2993,7 +3004,11 @@ impl Interp {
                     return false; // setter, or non-writable (strict-throw) — slow path
                 }
                 let shape = b.props.shape();
-                b.props.entry_at_mut(slot).unwrap().1.value = v.clone();
+                b.props
+                    .entry_at_mut(slot)
+                    .unwrap()
+                    .1
+                    .set_value(v.clone());
                 let st = crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,
@@ -3348,7 +3363,7 @@ impl Interp {
                     if p.accessor() {
                         (true, p.getter().cloned(), Value::Undefined)
                     } else {
-                        (false, None, p.value.clone())
+                        (false, None, p.value())
                     }
                 })
             };
@@ -3555,7 +3570,7 @@ impl Interp {
                         // configurable:false from defineProperty) must survive.
                         let mut b = o.borrow_mut();
                         if let Some(p) = b.props.get_mut(key) {
-                            p.value = value;
+                            p.set_value(value);
                         } else {
                             b.props
                                 .insert(key, crate::value::Property::data(value, true, true, true));
@@ -3867,7 +3882,7 @@ impl Interp {
                     return Ok(false);
                 }
                 if let Some(p) = obj.borrow_mut().props.get_mut(key) {
-                    p.value = value;
+                    p.set_value(value);
                 }
             } else {
                 if !obj.borrow().extensible {
@@ -3983,7 +3998,7 @@ impl Interp {
         // An existing element keeps its attributes; [[Set]] only updates the value.
         if obj.borrow().props.contains(key) {
             if let Some(p) = obj.borrow_mut().props.get_mut(key) {
-                p.value = value;
+                p.set_value(value);
             }
         } else {
             obj.borrow_mut().props.insert(key, Property::plain(value));
@@ -4066,7 +4081,7 @@ impl Interp {
         if let Some(info) = self.typed_arrays.get(&(Rc::as_ptr(obj) as usize)) {
             return self.ta_len(info).unwrap_or(0);
         }
-        match obj.borrow().props.length_property().map(|p| p.value.clone()) {
+        match obj.borrow().props.length_property().map(|p| p.value()) {
             Some(Value::Num(n)) => n as usize,
             _ => 0,
         }
@@ -4250,8 +4265,8 @@ impl Interp {
             refs.push(p.clone());
         }
         for prop in b.props.values() {
-            if let Value::Obj(p) = &prop.value {
-                refs.push(p.clone());
+            if let Value::Obj(p) = prop.value() {
+                refs.push(p);
             }
             if let Some(Value::Obj(p)) = prop.getter() {
                 refs.push(p.clone());
@@ -4707,7 +4722,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("__eval_realm")
-                .map(|p| p.value.clone());
+                .map(|p| p.value());
             if let Some(realm_g @ Value::Obj(_)) = realm_g {
                 return match args.first() {
                     Some(Value::Str(s)) => {
@@ -4820,7 +4835,7 @@ impl Interp {
                                         o.borrow()
                                             .props
                                             .get("message")
-                                            .map(|p| p.value.clone())
+                                            .map(|p| p.value())
                                             .and_then(|v| match v {
                                                 Value::Str(s) => Some(s.to_string()),
                                                 _ => None,
@@ -4862,7 +4877,7 @@ impl Interp {
     fn accessor_load(&mut self, this: &Value, key: &str) -> Result<Value, Abrupt> {
         match this {
             Value::Obj(o) if o.borrow().props.contains(key) => {
-                Ok(o.borrow().props.get(key).map(|p| p.value.clone()).unwrap())
+                Ok(o.borrow().props.get(key).map(|p| p.value()).unwrap())
             }
             _ => Err(self.throw(
                 "TypeError",
@@ -4876,7 +4891,7 @@ impl Interp {
         match this {
             Value::Obj(o) if o.borrow().props.contains(key) => {
                 if let Some(p) = o.borrow_mut().props.get_mut(key) {
-                    p.value = value;
+                    p.set_value(value);
                 }
                 Ok(Value::Undefined)
             }
@@ -5029,7 +5044,7 @@ impl Interp {
                                 o.borrow()
                                     .props
                                     .get("name")
-                                    .map(|p| p.value.clone())
+                                    .map(|p| p.value())
                                     .and_then(|v| match v {
                                         Value::Str(s) => Some(s.to_string()),
                                         _ => None,
@@ -5037,7 +5052,7 @@ impl Interp {
                                 o.borrow()
                                     .props
                                     .get("message")
-                                    .map(|p| p.value.clone())
+                                    .map(|p| p.value())
                                     .and_then(|v| match v {
                                         Value::Str(s) => Some(s.to_string()),
                                         _ => None,
@@ -5104,7 +5119,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("values")
-                .map(|p| p.value.clone());
+                .map(|p| p.value());
             if let Some(v) = values {
                 ao.borrow_mut()
                     .props
@@ -5713,8 +5728,8 @@ impl Interp {
         let proto = {
             let b = o.borrow();
             match b.props.get("prototype") {
-                Some(p) if !p.accessor() => match &p.value {
-                    Value::Obj(pp) => pp.clone(),
+                Some(p) if !p.accessor() => match p.value() {
+                    Value::Obj(pp) => pp,
                     _ => return None,
                 },
                 _ => return None,
@@ -6387,7 +6402,7 @@ impl Interp {
                 .borrow()
                 .props
                 .get("prototype")
-                .map(|p| p.value.clone());
+                .map(|p| p.value());
             let gen = self.run_generator(func, &body, param_seed, gen_proto);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
@@ -7241,7 +7256,7 @@ impl Interp {
                     matches!(p.getter(), None | Some(Value::Undefined))
                         && !matches!(result, Value::Undefined)
                 } else {
-                    !p.writable() && !crate::builtins::same_value_pub(result, &p.value)
+                    !p.writable() && !crate::builtins::same_value_pub(result, &p.value())
                 };
                 if bad {
                     return Err(self.throw(
@@ -7271,7 +7286,7 @@ impl Interp {
                 let bad = if p.accessor() {
                     matches!(p.setter(), None | Some(Value::Undefined))
                 } else {
-                    !p.writable() && !crate::builtins::same_value_pub(value, &p.value)
+                    !p.writable() && !crate::builtins::same_value_pub(value, &p.value())
                 };
                 if bad {
                     return Err(self.throw(
@@ -7398,7 +7413,7 @@ impl Interp {
                 }
                 Some((true, _)) if is_func => {
                     if let Some(p) = self.global.borrow_mut().props.get_mut(&name) {
-                        p.value = binding.value;
+                        p.set_value(binding.value);
                     }
                 }
                 _ => {}

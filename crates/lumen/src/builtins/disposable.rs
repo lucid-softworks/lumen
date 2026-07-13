@@ -15,7 +15,7 @@ fn ds_brand(i: &mut Interp, this: &Value, async_kind: bool) -> Result<Gc, Value>
     };
     let o = this_obj(this)
         .ok_or_else(|| i.make_error("TypeError", format!("receiver is not a {name}")))?;
-    let kind = o.borrow().props.get("__ds_kind").map(|p| p.value.clone());
+    let kind = o.borrow().props.get("__ds_kind").map(|p| p.value());
     match kind {
         Some(Value::Str(k)) if &*k == want => Ok(o),
         _ => Err(i.make_error("TypeError", format!("receiver is not a {name}"))),
@@ -45,7 +45,7 @@ fn ds_combine_error(i: &mut Interp, pending: Option<Value>, new: Value) -> Value
                 .borrow()
                 .props
                 .get("SuppressedError")
-                .map(|p| p.value.clone())
+                .map(|p| p.value())
                 .unwrap_or(Value::Undefined);
             i.construct(ctor, &[new.clone(), prev]).unwrap_or(new)
         }
@@ -258,7 +258,7 @@ pub(super) fn install_disposable_stack(it: &mut Interp) {
         Property::accessor_prop(Some(Value::Obj(disposed_getter)), None, false, true),
     );
     if let Some(key) = well_known_key(it, "dispose") {
-        let dispose = proto.borrow().props.get("dispose").map(|p| p.value.clone());
+        let dispose = proto.borrow().props.get("dispose").map(|p| p.value());
         if let Some(d) = dispose {
             proto.borrow_mut().props.insert(key, Property::builtin(d));
         }
@@ -402,11 +402,7 @@ pub(super) fn install_async_disposable_stack(it: &mut Interp) {
         Property::accessor_prop(Some(Value::Obj(disposed_getter)), None, false, true),
     );
     if let Some(key) = well_known_key(it, "asyncDispose") {
-        let d = proto
-            .borrow()
-            .props
-            .get("disposeAsync")
-            .map(|p| p.value.clone());
+        let d = proto.borrow().props.get("disposeAsync").map(|p| p.value());
         if let Some(d) = d {
             proto.borrow_mut().props.insert(key, Property::builtin(d));
         }

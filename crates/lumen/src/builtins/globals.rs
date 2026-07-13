@@ -23,25 +23,14 @@ pub(super) fn install_globals(it: &mut Interp) {
         Ok(Value::Num(parse_float(&s)))
     });
     // Number.parseInt / Number.parseFloat are the same functions as the globals.
-    if let Some(num) = it
-        .global
-        .borrow()
-        .props
-        .get("Number")
-        .map(|p| p.value.clone())
-    {
-        let pi = it
-            .global
-            .borrow()
-            .props
-            .get("parseInt")
-            .map(|p| p.value.clone());
+    if let Some(num) = it.global.borrow().props.get("Number").map(|p| p.value()) {
+        let pi = it.global.borrow().props.get("parseInt").map(|p| p.value());
         let pf = it
             .global
             .borrow()
             .props
             .get("parseFloat")
-            .map(|p| p.value.clone());
+            .map(|p| p.value());
         if let (Value::Obj(n), Some(pi), Some(pf)) = (num, pi, pf) {
             n.borrow_mut()
                 .props
@@ -198,11 +187,7 @@ fn parse_int(s: &str, mut radix: u32) -> f64 {
     if !any {
         return f64::NAN;
     }
-    if neg {
-        -acc
-    } else {
-        acc
-    }
+    if neg { -acc } else { acc }
 }
 
 fn parse_float(s: &str) -> f64 {

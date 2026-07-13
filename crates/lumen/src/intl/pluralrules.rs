@@ -8,7 +8,7 @@ use super::{
     ab, arg, canonicalize_locale_list, data, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Value};
+use crate::value::{Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "PluralRules", 0, construct);
@@ -178,13 +178,13 @@ fn read_digits_opt(
 
 fn select(i: &mut Interp, this: &Value, n: &Value) -> Result<Value, Value> {
     let o = brand_slot(i, this, "__pr")?;
-    let locale = match o.borrow().props.get("__pr_locale").map(|p| p.value.clone()) {
+    let locale = match o.borrow().props.get("__pr_locale").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "en".to_string(),
     };
     let x = ab(i.to_number(n))?;
     let compact = matches!(
-        o.borrow().props.get("__pr_notation").map(|p| p.value.clone()),
+        o.borrow().props.get("__pr_notation").map(|p| p.value()),
         Some(Value::Str(s)) if &*s == "compact"
     );
     let lang = locale.split('-').next().unwrap_or("en");
@@ -224,7 +224,7 @@ fn select_range(i: &mut Interp, this: &Value, start: &Value, end: &Value) -> Res
     if x.is_nan() || y.is_nan() {
         return Err(i.make_error("RangeError", "selectRange arguments must not be NaN"));
     }
-    let locale = match o.borrow().props.get("__pr_locale").map(|p| p.value.clone()) {
+    let locale = match o.borrow().props.get("__pr_locale").map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => "en".to_string(),
     };
@@ -244,7 +244,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get(k)
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined)
     };
     let res = i.new_object();

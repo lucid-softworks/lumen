@@ -5,7 +5,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{set_builtin, set_data, Gc, Value};
+use crate::value::{Gc, Value, set_builtin, set_data};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "NumberFormat", 0, construct);
@@ -142,12 +142,7 @@ fn install_format_getter(it: &mut Interp, proto: &Gc) {
     let g = it.make_native("get format", 0, |i, this, _| {
         let o = instance_unwrap(i, &this)?;
         // Cache a bound function on the instance so repeated reads return the same object.
-        if let Some(f) = o
-            .borrow()
-            .props
-            .get("__nf_boundformat")
-            .map(|p| p.value.clone())
-        {
+        if let Some(f) = o.borrow().props.get("__nf_boundformat").map(|p| p.value()) {
             return Ok(f);
         }
         let f = i.make_native("", 1, |i, that, a| format_number(i, &that, &arg(a, 0)));
@@ -661,13 +656,13 @@ fn instance_unwrap(i: &mut Interp, this: &Value) -> Result<Gc, Value> {
 }
 
 fn get_str(o: &Gc, k: &str) -> String {
-    match o.borrow().props.get(k).map(|p| p.value.clone()) {
+    match o.borrow().props.get(k).map(|p| p.value()) {
         Some(Value::Str(s)) => s.to_string(),
         _ => String::new(),
     }
 }
 fn get_num(o: &Gc, k: &str) -> Option<u32> {
-    match o.borrow().props.get(k).map(|p| p.value.clone()) {
+    match o.borrow().props.get(k).map(|p| p.value()) {
         Some(Value::Num(n)) => Some(n as u32),
         _ => None,
     }
@@ -1253,7 +1248,7 @@ fn assemble_number_exact(i: &mut Interp, o: &Gc, x: f64, exact: Option<ExactDec>
         .borrow()
         .props
         .get("__nf_grouping")
-        .map(|p| p.value.clone())
+        .map(|p| p.value())
         .unwrap_or(Value::str("auto"));
     // Locale number symbols (decimal separator, grouping separator + sizes).
     let locale = get_str(o, "__nf_locale");
@@ -1522,11 +1517,7 @@ fn unit_long_en(unit: &str, plural: bool) -> String {
         return format!("{} per {}", unit_long_en(a, plural), unit_long_en(b, false));
     }
     let name = unit.replace('-', " ");
-    if plural {
-        format!("{name}s")
-    } else {
-        name
-    }
+    if plural { format!("{name}s") } else { name }
 }
 
 /// Replace the ASCII digits of a formatted number with the glyphs of numbering system `nu` (a no-op
@@ -1902,7 +1893,7 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let o = instance_unwrap(i, &this)?;
     let res = i.new_object();
     let put = |i: &mut Interp, res: &Gc, k: &str, slot: &str| {
-        if let Some(v) = o.borrow().props.get(slot).map(|p| p.value.clone()) {
+        if let Some(v) = o.borrow().props.get(slot).map(|p| p.value()) {
             set_data(res, k, v);
         }
         let _ = i;
@@ -1937,12 +1928,12 @@ fn resolved_options(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
         o.borrow()
             .props
             .get("__nf_grouping")
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::str("auto")),
     );
     put(i, &res, "notation", "__nf_notation");
     // compactDisplay only appears when notation is compact.
-    if matches!(o.borrow().props.get("__nf_notation").map(|p| p.value.clone()), Some(Value::Str(s)) if &*s == "compact")
+    if matches!(o.borrow().props.get("__nf_notation").map(|p| p.value()), Some(Value::Str(s)) if &*s == "compact")
     {
         put(i, &res, "compactDisplay", "__nf_compactdisplay");
     }

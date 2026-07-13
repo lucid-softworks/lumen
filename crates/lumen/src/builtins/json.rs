@@ -338,12 +338,7 @@ fn json_str(
     }
     // A JSON.rawJSON object serializes as its stored raw text, verbatim.
     if let Value::Obj(o) = &value {
-        if let Some(Value::Str(raw)) = o
-            .borrow()
-            .props
-            .get("\u{0}raw_json")
-            .map(|p| p.value.clone())
-        {
+        if let Some(Value::Str(raw)) = o.borrow().props.get("\u{0}raw_json").map(|p| p.value()) {
             return Ok(Some(raw.to_string()));
         }
     }
@@ -356,7 +351,7 @@ fn json_str(
             Exotic::StrWrap(_) => value = Value::Str(ab(i.to_string(&value))?),
             Exotic::BoolWrap(b) => value = Value::Bool(b),
             Exotic::BigIntWrap(_) => {
-                return Err(i.make_error("TypeError", "Do not know how to serialize a BigInt"))
+                return Err(i.make_error("TypeError", "Do not know how to serialize a BigInt"));
             }
             _ => {}
         }
@@ -493,7 +488,7 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
                     _ => {
                         return Err(
                             i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")
-                        )
+                        );
                     }
                 }
             }
@@ -519,7 +514,9 @@ fn json_parse_value(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<V
                         break;
                     }
                     _ => {
-                        return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array"))
+                        return Err(
+                            i.make_error("SyntaxError", "Expected ',' or ']' in JSON array")
+                        );
                     }
                 }
             }
@@ -629,7 +626,7 @@ fn json_parse_recorded(
                     _ => {
                         return Err(
                             i.make_error("SyntaxError", "Expected ',' or '}' in JSON object")
-                        )
+                        );
                     }
                 }
             }
@@ -656,7 +653,9 @@ fn json_parse_recorded(
                         break;
                     }
                     _ => {
-                        return Err(i.make_error("SyntaxError", "Expected ',' or ']' in JSON array"))
+                        return Err(
+                            i.make_error("SyntaxError", "Expected ',' or ']' in JSON array")
+                        );
                     }
                 }
             }
@@ -747,7 +746,7 @@ fn json_parse_string(i: &mut Interp, chars: &[char], pos: &mut usize) -> Result<
             c if (c as u32) < 0x20 => {
                 return Err(
                     i.make_error("SyntaxError", "Unescaped control character in JSON string")
-                )
+                );
             }
             c => s.push(c),
         }

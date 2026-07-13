@@ -37,23 +37,13 @@ pub(super) fn install_shared_array_buffer(it: &mut Interp) {
     sab_getter(it, &proto, "maxByteLength", |i, this, _| {
         require_shared_buffer(i, &this)?;
         this.as_obj()
-            .and_then(|o| {
-                o.borrow()
-                    .props
-                    .get("__abMaxByteLength")
-                    .map(|p| p.value.clone())
-            })
+            .and_then(|o| o.borrow().props.get("__abMaxByteLength").map(|p| p.value()))
             .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))
     });
     sab_getter(it, &proto, "growable", |i, this, _| {
         require_shared_buffer(i, &this)?;
         this.as_obj()
-            .and_then(|o| {
-                o.borrow()
-                    .props
-                    .get("__abResizable")
-                    .map(|p| p.value.clone())
-            })
+            .and_then(|o| o.borrow().props.get("__abResizable").map(|p| p.value()))
             .ok_or_else(|| i.make_error("TypeError", "not a SharedArrayBuffer"))
     });
     // grow(newLength): only allowed for a growable buffer and only to a larger size.
@@ -111,7 +101,7 @@ pub(super) fn install_shared_array_buffer(it: &mut Interp) {
             .borrow()
             .props
             .get("SharedArrayBuffer")
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined);
         let ctor = species_constructor(i, &this, &sab_ctor)?;
         let new_buf = ab(i.construct(ctor, &[Value::Num(new_len as f64)]))?;
@@ -123,7 +113,7 @@ pub(super) fn install_shared_array_buffer(it: &mut Interp) {
                 return Err(i.make_error(
                     "TypeError",
                     "slice species did not create a SharedArrayBuffer",
-                ))
+                ));
             }
         };
         if nptr == ptr {
@@ -326,7 +316,7 @@ pub(super) fn install_array_buffer(it: &mut Interp) {
             o.borrow()
                 .props
                 .get("__abMaxByteLength")
-                .map(|pr| pr.value.clone())
+                .map(|pr| pr.value())
         }) {
             Some(v) => {
                 // A detached buffer reports 0.
@@ -341,12 +331,10 @@ pub(super) fn install_array_buffer(it: &mut Interp) {
     });
     ab_getter(it, &proto, "resizable", |i, this, _| {
         reject_shared_buffer(i, &this)?;
-        match this.as_obj().and_then(|o| {
-            o.borrow()
-                .props
-                .get("__abResizable")
-                .map(|pr| pr.value.clone())
-        }) {
+        match this
+            .as_obj()
+            .and_then(|o| o.borrow().props.get("__abResizable").map(|pr| pr.value()))
+        {
             Some(v) => Ok(v),
             None => Err(i.make_error("TypeError", "not an ArrayBuffer")),
         }
@@ -400,7 +388,7 @@ pub(super) fn install_array_buffer(it: &mut Interp) {
             .borrow()
             .props
             .get("ArrayBuffer")
-            .map(|p| p.value.clone())
+            .map(|p| p.value())
             .unwrap_or(Value::Undefined);
         let ctor = species_constructor(i, &this, &ab_ctor)?;
         let new_buf = ab(i.construct(ctor, &[Value::Num(new_len as f64)]))?;
@@ -796,11 +784,7 @@ fn rel_index(n: f64, len: usize) -> usize {
         return 0;
     }
     let n = if n.is_infinite() {
-        if n > 0.0 {
-            len as f64
-        } else {
-            0.0
-        }
+        if n > 0.0 { len as f64 } else { 0.0 }
     } else {
         n.trunc()
     };
@@ -998,11 +982,7 @@ fn ta_native(
             // coerces to 0); the default when absent is 0 (indexOf) / len-1 (lastIndexOf).
             let from = if args.len() >= 2 {
                 let n = ab(i.to_number(&arg(args, 1)))?;
-                if n.is_nan() {
-                    0.0
-                } else {
-                    n.trunc()
-                }
+                if n.is_nan() { 0.0 } else { n.trunc() }
             } else if last {
                 (len - 1) as f64
             } else {
@@ -1049,11 +1029,7 @@ fn ta_native(
             let from = match args.get(1) {
                 Some(v) if !matches!(v, Value::Undefined) => {
                     let n = ab(i.to_number(v))?;
-                    if n.is_nan() {
-                        0.0
-                    } else {
-                        n.trunc()
-                    }
+                    if n.is_nan() { 0.0 } else { n.trunc() }
                 }
                 _ => 0.0,
             };
@@ -1323,7 +1299,7 @@ fn ta_validate_created(
             return Err(i.make_error(
                 "TypeError",
                 "TypedArray constructor did not return a TypedArray",
-            ))
+            ));
         }
     };
     let actual_len = match i.ta_len(&new_info) {
@@ -1332,7 +1308,7 @@ fn ta_validate_created(
             return Err(i.make_error(
                 "TypeError",
                 "TypedArray destination is detached or out of bounds",
-            ))
+            ));
         }
     };
     if write && i.immutable_buffers.contains(&new_info.buffer) {
@@ -1355,7 +1331,7 @@ fn it_array_method(i: &Interp, method: &str) -> Value {
         .borrow()
         .props
         .get(method)
-        .map(|p| p.value.clone())
+        .map(|p| p.value())
         .unwrap_or(Value::Undefined)
 }
 macro_rules! ta_methods {
@@ -1435,7 +1411,7 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             // A resizable ArrayBuffer or a growable SharedArrayBuffer makes an auto-length view
             // length-tracking.
             let resizable = matches!(
-                o.borrow().props.get("__abResizable").map(|p| &p.value),
+                o.borrow().props.get("__abResizable").map(|p| p.value()),
                 Some(Value::Bool(true))
             );
             let len = match len_arg {
@@ -1563,11 +1539,7 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
         Value::Undefined => 0.0,
         v => {
             let n = ab(i.to_number(&v))?;
-            if n.is_nan() {
-                0.0
-            } else {
-                n.trunc()
-            }
+            if n.is_nan() { 0.0 } else { n.trunc() }
         }
     };
     if offset_n < 0.0 {
@@ -2066,7 +2038,7 @@ fn b64_decode_options(i: &mut Interp, opts: &Value) -> Result<(bool, Rc<str>), V
                 return Err(i.make_error(
                     "TypeError",
                     "lastChunkHandling must be 'loose', 'strict', or 'stop-before-partial'",
-                ))
+                ));
             }
         }
     } else {
@@ -2082,7 +2054,7 @@ pub(super) fn install_uint8_base64(it: &mut Interp) {
         .borrow()
         .props
         .get("Uint8Array")
-        .map(|p| p.value.clone())
+        .map(|p| p.value())
     {
         Some(Value::Obj(c)) => c,
         _ => return,

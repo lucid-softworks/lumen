@@ -64,7 +64,7 @@ fn set_throw(i: &mut Interp, base: &Value, key: &str, value: Value) -> Result<()
             let mut b = o.borrow_mut();
             if let Some(p) = b.props.get_mut(key) {
                 if !p.accessor() && p.writable() {
-                    p.value = value;
+                    p.set_value(value);
                     return Ok(());
                 }
             }
@@ -517,7 +517,7 @@ fn js_prevent_extensions(i: &mut Interp, obj: &Value) -> Result<bool, Value> {
                 .and_then(|b| b.as_obj())
                 .is_some_and(|b| {
                     matches!(
-                        b.borrow().props.get("__abResizable").map(|p| &p.value),
+                        b.borrow().props.get("__abResizable").map(|p| p.value()),
                         Some(Value::Bool(true))
                     )
                 });
@@ -749,7 +749,7 @@ pub(crate) fn proxy_gopd_value(
                 }
                 if !p.accessor() && !p.writable() {
                     if let Some(v) = &pd.value {
-                        if !same_value(v, &p.value) {
+                        if !same_value(v, &p.value()) {
                             return Err(i.make_error(
                                 "TypeError",
                                 format!("proxy must report the same value for the non-writable, non-configurable property '{key}'"),
@@ -976,7 +976,7 @@ fn proxy_define_property(
                     }
                     // A non-configurable, non-writable data property's value can't be changed.
                     if let Some(v) = &pd.value {
-                        if !i.strict_equals(v, &p.value) {
+                        if !i.strict_equals(v, &p.value()) {
                             return Err(i.throw(
                                 "TypeError",
                                 "proxy 'defineProperty' changed a non-configurable non-writable value",
@@ -1253,7 +1253,7 @@ fn reflect_ordinary_set(
                 match i.ta_index_kind(&info, key) {
                     TaIndex::Exotic => return Ok(true),
                     TaIndex::Element(_) => {
-                        return reflect_define_on_receiver(i, receiver, key, value)
+                        return reflect_define_on_receiver(i, receiver, key, value);
                     }
                     TaIndex::Ordinary => {}
                 }
@@ -1312,7 +1312,7 @@ pub(crate) fn reflect_define_on_receiver(
                 (
                     db.props.contains("get") || db.props.contains("set"),
                     matches!(
-                        db.props.get("writable").map(|p| &p.value),
+                        db.props.get("writable").map(|p| p.value()),
                         Some(Value::Bool(true))
                     ),
                 )
@@ -1365,7 +1365,7 @@ pub(crate) fn reflect_define_on_receiver(
     match existing {
         Some(ep) if ep.accessor() || !ep.writable() => Ok(false),
         Some(_) => {
-            ro.borrow_mut().props.get_mut(key).unwrap().value = value;
+            ro.borrow_mut().props.get_mut(key).unwrap().set_value(value);
             Ok(true)
         }
         None => {
@@ -1776,7 +1776,7 @@ fn create_list_from_array_like(i: &mut Interp, v: &Value) -> Result<Vec<Value>, 
             return Err(i.make_error(
                 "TypeError",
                 "CreateListFromArrayLike called on a non-object",
-            ))
+            ));
         }
     };
     let len = ab(i.to_length(&o))?;
@@ -1932,7 +1932,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
                 b.props
                     .get("lastIndex")
                     .filter(|p| !p.accessor())
-                    .map(|p| p.value.clone())
+                    .map(|p| p.value())
             }
             _ => None,
         };
@@ -2255,17 +2255,11 @@ pub(crate) fn well_known_key(it: &Interp, name: &str) -> Option<String> {
         .extra_protos
         .get("%SymbolCtor%")
         .map(|o| Value::Obj(o.clone()))
-        .or_else(|| {
-            it.global
-                .borrow()
-                .props
-                .get("Symbol")
-                .map(|p| p.value.clone())
-        })?;
+        .or_else(|| it.global.borrow().props.get("Symbol").map(|p| p.value()))?;
     if let Value::Obj(o) = sym {
         if let Some(p) = o.borrow().props.get(name) {
-            if let Value::Sym(d) = &p.value {
-                return Some(Interp::sym_key(d));
+            if let Value::Sym(d) = p.value() {
+                return Some(Interp::sym_key(&d));
             }
         }
     }
@@ -2306,8 +2300,8 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
         if let Value::Obj(co) = &c {
             let foreign_array = i.realms.values().any(|rs| {
                 matches!(
-                    rs.global.borrow().props.get("Array").map(|p| &p.value),
-                    Some(Value::Obj(ac)) if Rc::ptr_eq(ac, co)
+                    rs.global.borrow().props.get("Array").map(|p| p.value()),
+                    Some(Value::Obj(ac)) if Rc::ptr_eq(&ac, co)
                         && !Rc::ptr_eq(&rs.global, &i.global)
                 )
             });
@@ -2327,12 +2321,7 @@ fn array_species_create(i: &mut Interp, original: &Value, len: usize) -> Result<
     if matches!(c, Value::Undefined) {
         return make_sparse_array(i, len);
     }
-    let array_ctor = i
-        .global
-        .borrow()
-        .props
-        .get("Array")
-        .map(|p| p.value.clone());
+    let array_ctor = i.global.borrow().props.get("Array").map(|p| p.value());
     if let (Value::Obj(s), Some(Value::Obj(ac))) = (&c, &array_ctor) {
         if Rc::ptr_eq(s, ac) {
             return make_sparse_array(i, len);
@@ -2350,22 +2339,19 @@ fn ordered_enum_keys(o: &Gc) -> Vec<Rc<str>> {
     b.props
         .ordered_keys()
         .into_iter()
-        .filter(|k| !Interp::is_sym_key(k) && b.props.get(k).map(|p| p.enumerable()).unwrap_or(false))
+        .filter(|k| {
+            !Interp::is_sym_key(k) && b.props.get(k).map(|p| p.enumerable()).unwrap_or(false)
+        })
         .collect()
 }
 
 /// The property key for `@@toStringTag` (`Symbol.toStringTag`), if Symbol is installed.
 pub(crate) fn to_string_tag_key(i: &Interp) -> Option<String> {
-    let sym = i
-        .global
-        .borrow()
-        .props
-        .get("Symbol")
-        .map(|p| p.value.clone())?;
+    let sym = i.global.borrow().props.get("Symbol").map(|p| p.value())?;
     if let Value::Obj(o) = sym {
         if let Some(p) = o.borrow().props.get("toStringTag") {
-            if let Value::Sym(d) = &p.value {
-                return Some(Interp::sym_key(d));
+            if let Value::Sym(d) = p.value() {
+                return Some(Interp::sym_key(&d));
             }
         }
     }
@@ -2433,7 +2419,7 @@ fn coll_ptr_kind(i: &Interp, this: &Value, want: Option<&str>) -> Result<usize, 
     if !i.map_data.contains_key(&ptr) {
         return Err(err());
     }
-    let kind = o.borrow().props.get("__ck").map(|p| p.value.clone());
+    let kind = o.borrow().props.get("__ck").map(|p| p.value());
     let ok = match (&kind, want) {
         (Some(Value::Str(s)), Some(w)) => &**s == w,
         (Some(Value::Str(s)), None) => &**s == "Map" || &**s == "Set",
@@ -2492,7 +2478,7 @@ fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Valu
     coll_ptr(i, this)?; // brand check (a real Map/Set)
     let is_set = this
         .as_obj()
-        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value.clone()))
+        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value()))
         .map(|v| matches!(v, Value::Str(ref s) if &**s == "Set"))
         .unwrap_or(false);
     let key = if is_set {
@@ -2517,21 +2503,21 @@ fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Valu
 fn map_set_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let coll = this
         .as_obj()
-        .and_then(|o| o.borrow().props.get("__ci_coll").map(|p| p.value.clone()));
+        .and_then(|o| o.borrow().props.get("__ci_coll").map(|p| p.value()));
     let coll = match coll {
         Some(c) => c,
         None => return Err(i.make_error("TypeError", "not a Map/Set Iterator")),
     };
     let obj = this.as_obj().unwrap();
     let num = |o: &Gc, k: &str| -> f64 {
-        match o.borrow().props.get(k).map(|p| p.value.clone()) {
+        match o.borrow().props.get(k).map(|p| p.value()) {
             Some(Value::Num(n)) => n,
             _ => 0.0,
         }
     };
     // A once-exhausted iterator stays done, even if the collection later grows.
     if matches!(
-        obj.borrow().props.get("__ci_done").map(|p| &p.value),
+        obj.borrow().props.get("__ci_done").map(|p| p.value()),
         Some(Value::Bool(true))
     ) {
         return Ok(iter_result(i, Value::Undefined, true));
@@ -2746,7 +2732,7 @@ fn promise_all_element(i: &mut Interp, _this: Value, args: &[Value]) -> Result<V
     // [[AlreadyCalled]]: a second settlement of the same element is a no-op.
     if let Value::Obj(o) = &already {
         if matches!(
-            o.borrow().props.get("__called").map(|p| &p.value),
+            o.borrow().props.get("__called").map(|p| p.value()),
             Some(Value::Bool(true))
         ) {
             return Ok(Value::Undefined);
@@ -2812,7 +2798,9 @@ fn promise_keyed_combinator(
                 let mut strs: Vec<String> = Vec::new();
                 let mut syms: Vec<String> = Vec::new();
                 for k in borrowed.props.ordered_keys() {
-                    let Some(p) = borrowed.props.get(&k) else { continue };
+                    let Some(p) = borrowed.props.get(&k) else {
+                        continue;
+                    };
                     if !p.enumerable() {
                         continue;
                     }
@@ -2915,7 +2903,7 @@ fn promise_keyed_record(i: &mut Interp, args: &[Value], payload: Value) -> Resul
     let resolve_fn = arg(args, 3);
     if let Value::Obj(o) = &already {
         if matches!(
-            o.borrow().props.get("__called").map(|p| &p.value),
+            o.borrow().props.get("__called").map(|p| p.value()),
             Some(Value::Bool(true))
         ) {
             return Ok(Value::Undefined);
@@ -2969,7 +2957,7 @@ fn promise_settled(i: &mut Interp, args: &[Value], fulfilled: bool) -> Result<Va
     // The fulfill and reject functions for one index share this [[AlreadyCalled]] record.
     if let Value::Obj(o) = &already {
         if matches!(
-            o.borrow().props.get("__called").map(|p| &p.value),
+            o.borrow().props.get("__called").map(|p| p.value()),
             Some(Value::Bool(true))
         ) {
             return Ok(Value::Undefined);
@@ -3009,7 +2997,7 @@ fn promise_any_reject(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, V
     let reason = arg(a, 4);
     if let Value::Obj(o) = &already {
         if matches!(
-            o.borrow().props.get("__called").map(|p| &p.value),
+            o.borrow().props.get("__called").map(|p| p.value()),
             Some(Value::Bool(true))
         ) {
             return Ok(Value::Undefined);
@@ -3481,7 +3469,7 @@ fn install_object(it: &mut Interp) {
             Value::Obj(o) => Some(o),
             Value::Null => None,
             _ => {
-                return Err(i.make_error("TypeError", "Object.create proto must be object or null"))
+                return Err(i.make_error("TypeError", "Object.create proto must be object or null"));
             }
         };
         let obj = Object::new(proto);
@@ -3496,7 +3484,7 @@ fn install_object(it: &mut Interp) {
         let o = match arg(args, 0) {
             Value::Obj(o) => o,
             _ => {
-                return Err(i.make_error("TypeError", "Object.defineProperty called on non-object"))
+                return Err(i.make_error("TypeError", "Object.defineProperty called on non-object"));
             }
         };
         let key = ab(i.to_property_key(&arg(args, 1)))?;
@@ -3530,7 +3518,7 @@ fn install_object(it: &mut Interp) {
         // A mapped arguments index reports the live parameter value.
         if let Some(v) = i.mapped_arg_value(Rc::as_ptr(&o) as usize, &key) {
             if let Some(p) = o.borrow_mut().props.get_mut(&key) {
-                p.value = v;
+                p.set_value(v);
             }
         }
         // A TypedArray canonical numeric index is an own data property reading from the buffer; a
@@ -3786,7 +3774,7 @@ fn descriptor_from_prop(i: &mut Interp, mut p: Property) -> Value {
         set_data(&d, "get", p.getter().cloned().unwrap_or(Value::Undefined));
         set_data(&d, "set", p.setter().cloned().unwrap_or(Value::Undefined));
     } else {
-        set_data(&d, "value", std::mem::take(&mut p.value));
+        set_data(&d, "value", p.take_value());
         set_data(&d, "writable", Value::Bool(p.writable()));
     }
     set_data(&d, "enumerable", Value::Bool(p.enumerable()));
@@ -3925,11 +3913,7 @@ fn to_precision(n: f64, p: usize) -> String {
     } else {
         format!("0.{}{}", "0".repeat((-e - 1) as usize), digits)
     };
-    if neg {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if neg { format!("-{body}") } else { body }
 }
 
 fn opt_norm(v: Option<Value>) -> Option<Value> {
@@ -3957,7 +3941,7 @@ fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Resul
     if mapped {
         if let Some(cur) = i.mapped_arg_value(args_ptr, key) {
             if let Some(p) = o.borrow_mut().props.get_mut(key) {
-                p.value = cur;
+                p.set_value(cur);
             }
         }
         let allowed = define_own_property_ordinary(i, o, key, &d)?;
@@ -4003,7 +3987,7 @@ fn define_own_property_ordinary(
                     && !d.is_accessor()
                     && d.writable != Some(false)
                     && match &d.value {
-                        Some(v) => same_value(v, &cur.value),
+                        Some(v) => same_value(v, &cur.value()),
                         None => true,
                     };
                 Ok(ok)
@@ -4114,7 +4098,7 @@ fn define_own_property_ordinary(
                 return Ok(false);
             }
             if let Some(v) = &d.value {
-                if !same_value(v, &cur.value) {
+                if !same_value(v, &cur.value()) {
                     return Ok(false);
                 }
             }
@@ -4123,7 +4107,7 @@ fn define_own_property_ordinary(
     // Apply the present fields.
     if d.is_accessor() {
         cur.set_accessor(true);
-        cur.value = Value::Undefined;
+        cur.set_value(Value::Undefined);
         cur.set_writable(false);
         if let Some(g) = d.get {
             cur.set_getter(opt_norm(Some(g)));
@@ -4135,11 +4119,11 @@ fn define_own_property_ordinary(
         if cur.accessor() {
             cur.clear_accessors();
             cur.set_accessor(false);
-            cur.value = Value::Undefined;
+            cur.set_value(Value::Undefined);
             cur.set_writable(false);
         }
         if let Some(v) = d.value {
-            cur.value = v;
+            cur.set_value(v);
         }
         if let Some(w) = d.writable {
             cur.set_writable(w);
@@ -4363,7 +4347,7 @@ fn install_array(it: &mut Interp) {
         {
             let mut b = o.borrow_mut();
             let len = match b.props.length_property() {
-                Some(p) if !p.accessor() && p.writable() => match p.value {
+                Some(p) if !p.accessor() && p.writable() => match p.value() {
                     Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
                         Some(n as u32)
                     }
@@ -4383,11 +4367,15 @@ fn install_array(it: &mut Interp) {
                         }
                     }
                     // Sync length up to what actually landed (partial success still moved it).
-                    if !matches!(b.props.length_property().map(|p| &p.value),
-                                 Some(Value::Num(n)) if *n == len as f64)
+                    if !matches!(b.props.length_property().map(|p| p.value()),
+                                 Some(Value::Num(n)) if n == len as f64)
                     {
                         let s = b.props.slot_of("length").unwrap();
-                        b.props.entry_at_mut(s).unwrap().1.value = Value::Num(len as f64);
+                        b.props
+                            .entry_at_mut(s)
+                            .unwrap()
+                            .1
+                            .set_value(Value::Num(len as f64));
                     }
                     if ok {
                         return Ok(Value::Num(len as f64));
@@ -4416,12 +4404,11 @@ fn install_array(it: &mut Interp) {
         // Dense fast path (mirror of push's): take the last element straight off the entries
         // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
         // inline caches survive a pop (stack-discipline arrays live on push/pop).
-        if matches!(o.borrow().exotic, Exotic::Array)
-            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+        if matches!(o.borrow().exotic, Exotic::Array) && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
         {
             let mut b = o.borrow_mut();
             let len = match b.props.length_property() {
-                Some(p) if !p.accessor() && p.writable() => match p.value {
+                Some(p) if !p.accessor() && p.writable() => match p.value() {
                     Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
                         Some(n as u32)
                     }
@@ -4432,7 +4419,11 @@ fn install_array(it: &mut Interp) {
             if let Some(len) = len {
                 if let Some(v) = b.props.pop_last_element(len - 1) {
                     let s = b.props.slot_of("length").unwrap();
-                    b.props.entry_at_mut(s).unwrap().1.value = Value::Num((len - 1) as f64);
+                    b.props
+                        .entry_at_mut(s)
+                        .unwrap()
+                        .1
+                        .set_value(Value::Num((len - 1) as f64));
                     return Ok(v);
                 }
             }
@@ -4938,11 +4929,7 @@ fn install_array(it: &mut Interp) {
                 return Ok(Value::Num(-1.0));
             }
             let n = if n.is_nan() { 0 } else { n.trunc() as i64 };
-            if n >= 0 {
-                n.min(len - 1)
-            } else {
-                len + n
-            }
+            if n >= 0 { n.min(len - 1) } else { len + n }
         } else {
             len - 1
         };
@@ -5213,12 +5200,7 @@ fn install_array(it: &mut Interp) {
     });
     // `arr[Symbol.iterator]` is `Array.prototype.values`.
     if let Some(sym) = it.iterator_sym.clone() {
-        let values_fn = ap
-            .borrow()
-            .props
-            .get("values")
-            .map(|p| p.value.clone())
-            .unwrap();
+        let values_fn = ap.borrow().props.get("values").map(|p| p.value()).unwrap();
         ap.borrow_mut()
             .props
             .insert(Interp::sym_key(&sym), Property::builtin(values_fn));
@@ -5265,11 +5247,11 @@ fn install_array(it: &mut Interp) {
         loop {
             match &v {
                 Value::Obj(o) if matches!(o.borrow().exotic, Exotic::Array) => {
-                    return Ok(Value::Bool(true))
+                    return Ok(Value::Bool(true));
                 }
                 Value::Obj(_) => match proxy_pair(i, &v) {
                     Some((_, Value::Null)) => {
-                        return Err(i.make_error("TypeError", "proxy is revoked"))
+                        return Err(i.make_error("TypeError", "proxy is revoked"));
                     }
                     Some((target, _)) => v = target,
                     None => return Ok(Value::Bool(false)),
@@ -5734,7 +5716,7 @@ fn install_iterator(it: &mut Interp) {
                     return Err(i.make_error(
                         "TypeError",
                         "Reduce of empty iterator with no initial value",
-                    ))
+                    ));
                 }
             };
             k = 1.0;
@@ -5800,7 +5782,7 @@ fn install_iterator(it: &mut Interp) {
         fn wrap_slot(this: &Value, key: &str) -> Option<Value> {
             // [[Iterated]] internal-slot access: read own properties directly (no observable get).
             let o = this.as_obj()?;
-            let v = o.borrow().props.get(key).map(|p| p.value.clone());
+            let v = o.borrow().props.get(key).map(|p| p.value());
             v.filter(|v| !matches!(v, Value::Undefined))
         }
         it.def_method(&wrap_proto, "next", 0, |i, this, _a| {
@@ -5992,7 +5974,7 @@ fn install_iterator(it: &mut Interp) {
                 .borrow()
                 .props
                 .get("Iterator")
-                .map(|p| p.value.clone())
+                .map(|p| p.value())
                 .unwrap_or(Value::Undefined))
         });
         let getter_tag = it.make_native("get [Symbol.toStringTag]", 0, |_i, _t, _a| {
@@ -6183,33 +6165,22 @@ fn regexp_string_iterator_next(i: &mut Interp, this: Value, _a: &[Value]) -> Res
         .borrow()
         .props
         .get("__rsi_done")
-        .map(|p| matches!(p.value, Value::Bool(true)))
+        .map(|p| matches!(p.value(), Value::Bool(true)))
         .unwrap_or(true);
     if done {
         return Ok(i.iter_result_obj(Value::Undefined, true));
     }
-    let r = o.borrow().props.get("__rsi_regexp").unwrap().value.clone();
-    let s = match o
-        .borrow()
-        .props
-        .get("__rsi_string")
-        .map(|p| p.value.clone())
-    {
+    let r = o.borrow().props.get("__rsi_regexp").unwrap().value();
+    let s = match o.borrow().props.get("__rsi_string").map(|p| p.value()) {
         Some(Value::Str(s)) => s,
         _ => crate::lstr::LStr::from(""),
     };
     let global = matches!(
-        o.borrow()
-            .props
-            .get("__rsi_global")
-            .map(|p| p.value.clone()),
+        o.borrow().props.get("__rsi_global").map(|p| p.value()),
         Some(Value::Bool(true))
     );
     let unicode = matches!(
-        o.borrow()
-            .props
-            .get("__rsi_unicode")
-            .map(|p| p.value.clone()),
+        o.borrow().props.get("__rsi_unicode").map(|p| p.value()),
         Some(Value::Bool(true))
     );
     let m = regexp_exec_abstract(i, &r, s.clone())?;
@@ -6968,7 +6939,7 @@ fn zip_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
     let done = match &res {
         Err(_) => true,
         Ok(r) => matches!(r, Value::Obj(ro) if matches!(
-            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            ro.borrow().props.get("done").map(|p| p.value()),
             Some(Value::Bool(true))
         )),
     };
@@ -7127,7 +7098,7 @@ fn concat_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value
     let finished = match &res {
         Err(_) => true,
         Ok(r) => matches!(r, Value::Obj(ro) if matches!(
-            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            ro.borrow().props.get("done").map(|p| p.value()),
             Some(Value::Bool(true))
         )),
     };
@@ -7234,7 +7205,7 @@ fn iter_helper_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     let finished = match &res {
         Err(_) => true,
         Ok(r) => matches!(r, Value::Obj(ro) if matches!(
-            ro.borrow().props.get("done").map(|p| p.value.clone()),
+            ro.borrow().props.get("done").map(|p| p.value()),
             Some(Value::Bool(true))
         )),
     };
@@ -7420,14 +7391,14 @@ fn string_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
             return Err(i.make_error(
                 "TypeError",
                 "String Iterator next called on an incompatible receiver",
-            ))
+            ));
         }
     };
-    let s = match o.borrow().props.get("__si_str").map(|p| p.value.clone()) {
+    let s = match o.borrow().props.get("__si_str").map(|p| p.value()) {
         Some(Value::Str(s)) => s,
         _ => return Ok(i.iter_result_obj(Value::Undefined, true)),
     };
-    let idx = match o.borrow().props.get("__si_index").map(|p| p.value.clone()) {
+    let idx = match o.borrow().props.get("__si_index").map(|p| p.value()) {
         Some(Value::Num(n)) => n as usize,
         _ => 0,
     };
@@ -7727,19 +7698,11 @@ fn norm_index(n: f64, len: i64) -> i64 {
         return 0;
     }
     let i = if n.is_infinite() {
-        if n > 0.0 {
-            len
-        } else {
-            -len - 1
-        }
+        if n > 0.0 { len } else { -len - 1 }
     } else {
         n as i64
     };
-    if i < 0 {
-        (len + i).max(0)
-    } else {
-        i.min(len)
-    }
+    if i < 0 { (len + i).max(0) } else { i.min(len) }
 }
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
@@ -7964,7 +7927,7 @@ fn this_string(i: &mut Interp, this: &Value) -> Result<crate::lstr::LStr, Value>
     match this {
         Value::Str(s) => Ok(s.clone()),
         Value::Obj(o) => match &o.borrow().exotic {
-        Exotic::StrWrap(s) => Ok((**s).clone()),
+            Exotic::StrWrap(s) => Ok((**s).clone()),
             _ => ab(i.to_string(this)),
         },
         // String.prototype methods RequireObjectCoercible(this): null/undefined → TypeError.
@@ -8233,11 +8196,7 @@ fn install_string(it: &mut Interp) {
             Value::Undefined => size,
             v => {
                 let l = ab(i.to_number(&v))?;
-                if l.is_nan() {
-                    0
-                } else {
-                    (l as i64).max(0)
-                }
+                if l.is_nan() { 0 } else { (l as i64).max(0) }
             }
         };
         let count = len.min(size - start).max(0);
