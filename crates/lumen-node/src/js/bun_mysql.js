@@ -1,7 +1,7 @@
 // MySQL protocol 4.1 transport for Bun.SQL. Operations are serialized on one connection and
 // template values are converted to escaped SQL literals before COM_QUERY is sent.
 {
-  const net = __builtins.get("net"), crypto = __builtins.get("crypto");
+  const net = __builtins.get("net"), tls = __builtins.get("tls"), crypto = __builtins.get("crypto");
   const u16 = (b, o = 0) => b[o] + b[o + 1] * 256;
   const u24 = (b, o = 0) => b[o] + b[o + 1] * 256 + b[o + 2] * 65536;
   const u32 = (b, o = 0) => (b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 0x1000000) >>> 0;
@@ -98,9 +98,13 @@
       if (this.connected) return Promise.resolve(this);
       if (this.connecting) return this.connecting;
       this.connecting = new Promise((resolve, reject) => {
-        const socket = this.socket = new net.Socket();
-        socket.on("data", chunk => this._data(chunk)); socket.once("error", reject);
-        socket.connect(this.config.port, this.config.host, () => this._handshake().then(() => { this.connected = true; resolve(this); }, reject));
+        const socket = this.socket = new net.Socket({ _deferRead: this.config.tls });
+        if (!this.config.tls) socket.on("data", chunk => this._data(chunk));
+        socket.once("error", reject);
+        socket.connect(this.config.port, this.config.host, () => {
+          const start = this.config.tls ? this._primeRaw(socket) : Promise.resolve();
+          start.then(() => this._handshake()).then(() => { this.connected = true; resolve(this); }, reject);
+        });
       });
       return this.connecting;
     }
@@ -115,6 +119,13 @@
       }
     }
     _next() { if (this.packets.length) return Promise.resolve(this.packets.shift()); return new Promise(resolve => { this.waiter = resolve; }); }
+    async _primeRaw(socket) {
+      while (!this.packets.length) {
+        const chunk = await socket._readRaw();
+        if (chunk === null) throw new Error("MySQL server closed during handshake");
+        this._data(chunk);
+      }
+    }
     _write(sequence, payload) { return new Promise((resolve, reject) => this.socket.write(packet(sequence, payload), error => error ? reject(error) : resolve())); }
     async _handshake() {
       const greeting = await this._next(), bytes = greeting.payload;
@@ -130,10 +141,22 @@
       const scramble = Buffer.concat([Buffer.from(first), Buffer.from(second)]).subarray(0, Math.max(0, authLength - 1));
       let plugin = offset < bytes.length ? bytes.toString("utf8", offset, Math.max(offset, bytes.indexOf(0, offset))) : "mysql_native_password";
       if (!plugin) plugin = "mysql_native_password";
-      const flags = (1 | 4 | 8 | 0x200 | 0x2000 | 0x8000 | 0x20000 | 0x80000) & capabilities;
+      const flags = (1 | 4 | 8 | 0x200 | 0x800 | 0x2000 | 0x8000 | 0x20000 | 0x80000) & capabilities;
       const response = auth(plugin, this.config.password, scramble);
-      const payload = Buffer.concat([le32(flags), le32(0x1000000), Buffer.from([45]), Buffer.alloc(23), cstring(this.config.user), Buffer.from([response.length]), response, cstring(this.config.database), cstring(plugin)]);
-      await this._write(1, payload);
+      const prefix = Buffer.concat([le32(flags), le32(0x1000000), Buffer.from([45]), Buffer.alloc(23)]);
+      let sequence = 1;
+      if (this.config.tls) {
+        if (!(capabilities & 0x800)) { const error = new Error("MySQL server does not support TLS"); error.code = "ERR_MYSQL_TLS_NOT_AVAILABLE"; throw error; }
+        await this._write(sequence++, prefix);
+        const raw = this.socket;
+        this.socket = await new Promise((resolve, reject) => {
+          const secure = tls.connect({ socket: raw, servername: this.config.servername, rejectUnauthorized: this.config.rejectUnauthorized }, () => resolve(secure));
+          secure.once("error", reject);
+        });
+        this.socket.on("data", chunk => this._data(chunk));
+      }
+      const payload = Buffer.concat([prefix, cstring(this.config.user), Buffer.from([response.length]), response, cstring(this.config.database), cstring(plugin)]);
+      await this._write(sequence, payload);
       let result = await this._next();
       if (result.payload[0] === 0xfe && result.payload.length > 1) {
         const end = result.payload.indexOf(0, 1), switchedPlugin = result.payload.toString("utf8", 1, end);
@@ -142,7 +165,8 @@
       }
       if (result.payload[0] === 0x01 && result.payload[1] === 0x03) result = await this._next();
       if (result.payload[0] === 0x01 && result.payload[1] === 0x04) {
-        const error = new Error("MySQL caching_sha2_password full authentication requires TLS"); error.code = "ERR_MYSQL_TLS_REQUIRED"; throw error;
+        if (!this.config.tls) { const error = new Error("MySQL caching_sha2_password full authentication requires TLS"); error.code = "ERR_MYSQL_TLS_REQUIRED"; throw error; }
+        await this._write(result.sequence + 1, cstring(this.config.password)); result = await this._next();
       }
       if (result.payload[0] === 0xff) throw mysqlError(result.payload);
       if (result.payload[0] !== 0x00) throw new Error("Unexpected MySQL authentication response");
@@ -185,8 +209,9 @@
   function mysqlConfig(url, options = {}) {
     if (!/^mysql:/i.test(String(url))) return null;
     const target = new URL(String(url));
-    if (options.tls || target.searchParams.get("ssl") === "true") { const error = new Error("MySQL TLS negotiation is not supported in lumen yet"); error.code = "ERR_MYSQL_TLS_UNSUPPORTED"; throw error; }
-    return { host: target.hostname || "localhost", port: Number(target.port || 3306), user: decodeURIComponent(target.username || "root"), password: decodeURIComponent(target.password || ""), database: decodeURIComponent(target.pathname.slice(1) || "") };
+    const tlsOptions = options.tls && typeof options.tls === "object" ? options.tls : {};
+    const useTls = !!options.tls || target.searchParams.get("ssl") === "true" || target.searchParams.get("ssl-mode") === "required";
+    return { host: target.hostname || "localhost", port: Number(target.port || 3306), user: decodeURIComponent(target.username || "root"), password: decodeURIComponent(target.password || ""), database: decodeURIComponent(target.pathname.slice(1) || ""), tls: useTls, servername: tlsOptions.servername || target.hostname || "localhost", rejectUnauthorized: tlsOptions.rejectUnauthorized !== false };
   }
   Object.defineProperty(globalThis, "__lumenMySQL", { value: { MySqlConnection, mysqlConfig }, configurable: true });
 }
