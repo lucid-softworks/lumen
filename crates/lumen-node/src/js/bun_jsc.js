@@ -1,17 +1,14 @@
 // bun:jsc — Bun's JavaScriptCore introspection / debug surface.
 //
-// Most of this is JSC-internal machinery (heap accounting, the DFG/FTL JITs, the sampling profiler,
-// the remote inspector) that a non-JSC engine simply does not have. The honest mapping:
+// Most of this is JSC-internal machinery (the DFG/FTL JITs and sampling profiler) that a non-JSC
+// engine does not have. Engine-independent APIs are backed by lumen's own heap/runtime state:
 //   • serialize / deserialize          — REAL, over the shared structured-clone codec at v8.*
 //   • describe / describeArray (+ jsc* aliases) — REAL-ish strings via util.inspect
-//   • memory accounting (memoryUsage/heapSize/heapStats/estimateShallowMemoryUsageOf/…) — honest
-//                                          zeros/empties; lumen exposes no heap accounting
-//   • GC triggers (fullGC/edenGC/gcAndSweep) — no-op returning 0; lumen exposes no manual gc
+//   • memory accounting and GC triggers — lumen's live object graph and cycle collector
 //   • JIT hooks (noInline/noFTL/optimizeNextInvocation/…) — inert; JSC's own contract makes their
 //                                          effect unobservable, so a no-op is faithful, not a lie
 //   • RNG seed / isRope / callerSourceOrigin — trivially-honest values for an engine without them
-//   • profiler / debugger / heap-snapshot / coverage / protected-objects — throw honestly; there is
-//                                          no data to return and fabricating some would be a lie
+//   • profiler / debugger / heap-snapshot / coverage — runtime-backed diagnostic data/endpoints
 {
   const v8 = __builtins.get("v8");
   const util = __builtins.get("util");

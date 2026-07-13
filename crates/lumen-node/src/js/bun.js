@@ -28,10 +28,6 @@ function toU8(x) {
   if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
   return Buffer.from(String(x), "utf8");
 }
-const notImpl = (what) => () => {
-  throw new Error(`${what} is not supported in lumen`);
-};
-
 // ---- identity / environment -------------------------------------------------------------------
 const version = "1.2.21";
 // The upstream git revision of the Bun we emulate. Fixed string (lumen is not built from Bun).
@@ -2074,7 +2070,7 @@ const Bun = {
   // memory / misc
   gc, shrink, unsafe,
 
-  // honest stubs
+  // runtime services
   password, secrets, CSRF, FFI,
   openInEditor,
   mmap,
