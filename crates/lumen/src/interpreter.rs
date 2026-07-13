@@ -2991,13 +2991,15 @@ impl Interp {
             && b.extensible
         {
             let proto_ptr = b.proto.as_ref().map_or(0, |p| Rc::as_ptr(p) as usize);
-            let key = cache as *const std::cell::Cell<crate::bytecode::IcState> as usize;
-            if let Some((pp, _pin)) = self.creation_pins.get(&key) {
-                if *pp == proto_ptr {
-                    b.props
-                        .append_new(name.clone(), Property::plain(v.clone()), st.holder_shape);
-                    return true;
-                }
+            // Creation entries don't use the normal own-slot or depth-2-hop words. Encode the
+            // guarded prototype address directly in them, avoiding a hash-table lookup for every
+            // field of every constructed instance. `creation_pins` still owns the Weak that
+            // prevents allocator ABA; only its hot-path lookup disappears.
+            let cached_proto = (((st.mid2_shape as u64) << 32) | st.slot as u64) as usize;
+            if cached_proto == proto_ptr {
+                b.props
+                    .append_new(name.clone(), Property::plain(v.clone()), st.holder_shape);
+                return true;
             }
         }
         match b.props.slot_of(name) {
@@ -3107,13 +3109,13 @@ impl Interp {
         b.props.insert(name.clone(), Property::plain(v.clone()));
         cache.set(IcState {
             depth: IC_CREATE,
-            slot: 0,
+            slot: proto_ptr as u32,
             recv_shape,
             // The memoized child shape the insert just landed on: hits append straight to it.
             holder_shape: b.props.shape(),
             mid_ok: 0,
             mid_shape: crate::value::proto_epoch(),
-            mid2_shape: 0,
+            mid2_shape: ((proto_ptr as u64) >> 32) as u32,
         });
         let pin = cur.take().map(|p| Rc::downgrade(&p)).unwrap_or_default();
         self.creation_pins.insert(key, (proto_ptr, pin));
