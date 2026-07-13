@@ -20,6 +20,7 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
     });
     let source = r#"
       (async () => {
+        const fs = require("node:fs"), queryPath = `/tmp/lumen-sql-query-${process.pid}.sql`;
         const sql = Bun.SQL("sqlite://:memory:");
         console.log("shape", sql instanceof Bun.SQL, typeof sql, sql.options.adapter, typeof Bun.postgres, Bun.postgres.options.adapter);
         await sql.unsafe("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active INTEGER)");
@@ -30,6 +31,9 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
         const rows = await sql`SELECT id, name FROM ${sql("users")} WHERE id IN ${sql(ids)} ORDER BY id`;
         console.log("rows", JSON.stringify(rows));
         console.log("values", JSON.stringify(await sql`SELECT name FROM users ORDER BY id`.values()));
+        fs.writeFileSync(queryPath, "SELECT name FROM users WHERE id = ?");
+        console.log("file", JSON.stringify(await sql.file(queryPath, [1])));
+        fs.unlinkSync(queryPath);
         await sql`UPDATE users SET ${sql({ name: "Updated" })} WHERE id = ${2}`;
         try { await sql.begin(async tx => { await tx`INSERT INTO users (id, name) VALUES (${4}, ${"Rollback"})`; throw new Error("stop"); }); } catch (_) {}
         console.log("transaction", (await sql`SELECT count(*) AS count FROM users`)[0].count, (await sql`SELECT name FROM users WHERE id = 2`)[0].name);
@@ -37,6 +41,9 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
         console.log("reserve", reserved === sql, typeof reserved.release);
         await sql.close();
         try { await sql`SELECT 1`; } catch (error) { console.log("closed", error.message); }
+        const fileSql = Bun.SQL("file::memory:"), mysql = Bun.SQL("mysql2://user:pass@localhost/database");
+        console.log("detect", fileSql.options.adapter, mysql.options.adapter, typeof mysql.file);
+        await fileSql.close();
       })();
     "#;
     match runtime.eval(source).expect("source parses") {
@@ -50,9 +57,11 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
             "insert 1 1",
             "rows [{\"id\":1,\"name\":\"Alice\"},{\"id\":3,\"name\":\"Cara\"}]",
             "values [[\"Alice\"],[\"Bob\"],[\"Cara\"]]",
+            "file [{\"name\":\"Alice\"}]",
             "transaction 3 Updated",
             "reserve true function",
             "closed SQL client is closed",
+            "detect sqlite mysql function",
         ]
     );
 }

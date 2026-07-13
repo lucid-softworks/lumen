@@ -207,7 +207,7 @@
     async close() { if (this.socket) { await this._write(0, Buffer.from([1])); this.socket.end(); } this.connected = false; }
   }
   function mysqlConfig(url, options = {}) {
-    if (!/^mysql:/i.test(String(url))) return null;
+    if (!/^(?:mysql2?|mariadb):/i.test(String(url))) return null;
     const target = new URL(String(url));
     const tlsOptions = options.tls && typeof options.tls === "object" ? options.tls : {};
     const useTls = !!options.tls || target.searchParams.get("ssl") === "true" || target.searchParams.get("ssl-mode") === "required";

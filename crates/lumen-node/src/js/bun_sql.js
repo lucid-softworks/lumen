@@ -1,6 +1,7 @@
 // Bun.SQL SQLite adapter over bun:sqlite. PostgreSQL/MySQL transports are added separately.
 {
   const { Database, SQLiteError } = __builtins.get("bun:sqlite");
+  const fs = __builtins.get("fs");
 
   class SQLQuery {
     constructor(client, strings, values, unsafe = false) {
@@ -67,7 +68,14 @@
     if (url === ":memory:" || url === "sqlite::memory:" || url === "sqlite://:memory:") return ":memory:";
     if (url.startsWith("sqlite://")) return decodeURIComponent(url.slice(9));
     if (url.startsWith("sqlite:")) return decodeURIComponent(url.slice(7));
+    if (url.startsWith("file://")) return decodeURIComponent(new URL(url).pathname);
+    if (url.startsWith("file:")) return decodeURIComponent(url.slice(5));
     return null;
+  }
+
+  function attachFileQuery(sql) {
+    sql.file = (path, params = []) => new SQLQuery(sql, fs.readFileSync(String(path), "utf8"), Array.from(params), true);
+    return sql;
   }
 
   function makeClient(url, options = {}) {
@@ -116,7 +124,7 @@
     sql.reserve = async () => { sql.release = () => {}; return sql; };
     sql.close = async () => { if (!sql._closed) { sql._closed = true; database.close(); } };
     sql.flush = async () => {};
-    return sql;
+    return attachFileQuery(sql);
   }
 
   function makePostgresClient(config, options) {
@@ -145,7 +153,7 @@
     sql.reserve = async () => { sql.release = () => {}; return sql; };
     sql.close = async () => { sql._closed = true; await connection.close(); };
     sql.flush = async () => {};
-    return sql;
+    return attachFileQuery(sql);
   }
 
   function makeMySQLClient(config, options) {
@@ -172,7 +180,7 @@
     sql.reserve = async () => { sql.release = () => {}; return sql; };
     sql.close = async () => { sql._closed = true; await connection.close(); };
     sql.flush = async () => {};
-    return sql;
+    return attachFileQuery(sql);
   }
 
   function SQL(url, options) { return makeClient(url, options); }
