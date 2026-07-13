@@ -134,6 +134,22 @@ fn classes_inheritance() {
 }
 
 #[test]
+fn instanceof_default_intrinsic_and_override() {
+    assert_eq!(
+        run("function A(){} function B(){} B.prototype=Object.create(A.prototype); var b=new B(); [b instanceof B,b instanceof A,b instanceof Array].join(',')"),
+        "true,true,false"
+    );
+    assert_eq!(
+        run("var calls=0; var rhs={[Symbol.hasInstance](v){calls++;return v===7}}; [(7 instanceof rhs),(8 instanceof rhs),calls].join(',')"),
+        "true,false,2"
+    );
+    assert_eq!(
+        run("function C(){} var calls=0; var p=new Proxy({}, {getPrototypeOf(){calls++;return C.prototype}}); [(p instanceof C),calls].join(',')"),
+        "true,1"
+    );
+}
+
+#[test]
 fn class_methods_non_enumerable() {
     assert_eq!(run("class C { m(){} } Object.keys(new C()).length"), "0");
     assert_eq!(run("class C { get x(){ return 8; } } new C().x"), "8");

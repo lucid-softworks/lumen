@@ -43,6 +43,17 @@ fn ab<T>(r: Result<T, Abrupt>) -> Result<T, Value> {
     })
 }
 
+/// The default `Function.prototype[@@hasInstance]` intrinsic. Kept as a named native so the
+/// `instanceof` fast path can recognize the unmodified intrinsic by function identity and call
+/// `OrdinaryHasInstance` directly, without building a second native-call frame.
+pub(crate) fn default_has_instance(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+) -> Result<Value, Value> {
+    Ok(Value::Bool(ab(i.ordinary_has_instance(&this, &arg(a, 0)))?))
+}
+
 fn this_obj(this: &Value) -> Option<Gc> {
     this.as_obj().cloned()
 }
@@ -2178,9 +2189,7 @@ pub fn install(it: &mut Interp) {
     // Function.prototype[@@hasInstance] (default OrdinaryHasInstance) — installed after Symbol so the
     // well-known key exists; non-writable/non-configurable.
     if let Some(key) = well_known_key(it, "hasInstance") {
-        let f = it.make_native("[Symbol.hasInstance]", 1, |i, this, a| {
-            Ok(Value::Bool(ab(i.ordinary_has_instance(&this, &arg(a, 0)))?))
-        });
+        let f = it.make_native("[Symbol.hasInstance]", 1, default_has_instance);
         it.function_proto
             .borrow_mut()
             .props

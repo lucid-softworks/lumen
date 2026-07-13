@@ -6333,6 +6333,22 @@ impl Interp {
         if let Some(key) = crate::builtins::well_known_key(self, "hasInstance") {
             let handler = self.get_member(r, &key)?;
             if handler.is_callable() {
+                // The overwhelmingly common handler is the immutable intrinsic inherited from
+                // Function.prototype. Calling that native would only turn around and invoke this
+                // same abstract operation, while paying call-frame and GC polling overhead.
+                let is_default = matches!(
+                    &handler,
+                    Value::Obj(o)
+                        if matches!(
+                            o.borrow().call,
+                            Callable::Native(f)
+                                if f as usize
+                                    == crate::builtins::default_has_instance as NativeFn as usize
+                        )
+                );
+                if is_default {
+                    return Ok(Value::Bool(self.ordinary_has_instance(r, l)?));
+                }
                 let res = self.call(handler, r.clone(), std::slice::from_ref(l))?;
                 return Ok(Value::Bool(self.to_boolean(&res)));
             }
@@ -6366,6 +6382,25 @@ impl Interp {
             Value::Obj(p) => p,
             _ => return Err(self.throw("TypeError", "prototype property is not an object")),
         };
+        // With no proxies in the realm, [[GetPrototypeOf]] is a direct field read for every hop.
+        // Keep the walk in `Gc`s so the common `instanceof` path avoids a proxy-table probe and
+        // two `Value` constructions per prototype level. The moment a realm contains any proxy,
+        // retain the fully observable path below (a proxy may appear anywhere in the chain).
+        if self.proxies.is_empty() {
+            let mut cur = o_obj;
+            loop {
+                let next = cur.borrow().proto.clone();
+                match next {
+                    Some(x) => {
+                        if Rc::ptr_eq(&x, &proto) {
+                            return Ok(true);
+                        }
+                        cur = x;
+                    }
+                    None => return Ok(false),
+                }
+            }
+        }
         // Walk O's prototype chain via [[GetPrototypeOf]] (so a proxy's trap participates).
         let mut cur = Value::Obj(o_obj);
         loop {
