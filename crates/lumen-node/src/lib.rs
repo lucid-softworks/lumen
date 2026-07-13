@@ -59,6 +59,9 @@ pub fn extension() -> Extension {
                     "realpath" (1) => op_realpath,
                     "loadNativeAddon" (1) => napi::op_load_addon,
                     "isProxy" (1) => op_is_proxy,
+                    "collectGarbage" (0) => op_collect_garbage,
+                    "heapObjectCount" (0) => op_heap_object_count,
+                    "drainMicrotasks" (0) => op_drain_microtasks,
                     "stat" (1) => op_stat,
                     "lstat" (1) => op_lstat,
                     "rm" (3) => op_rm,
@@ -184,6 +187,19 @@ fn op_is_proxy(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Val
     Ok(Value::Bool(
         ctx.is_proxy_value(args.first().unwrap_or(&Value::Undefined)),
     ))
+}
+
+fn op_collect_garbage(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(ctx.collect_garbage_for_host() as f64))
+}
+
+fn op_heap_object_count(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Num(ctx.live_object_count() as f64))
+}
+
+fn op_drain_microtasks(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    ctx.drain_microtasks_for_host();
+    Ok(Value::Undefined)
 }
 
 fn op_is_dir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {

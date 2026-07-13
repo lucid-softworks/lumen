@@ -310,6 +310,41 @@ fn node_util_types_detects_proxies_and_key_objects() {
 }
 
 #[test]
+fn bun_jsc_uses_live_heap_gc_and_microtask_instrumentation() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const jsc = require("bun:jsc");
+        const stats = jsc.heapStats(), memory = jsc.memoryUsage();
+        console.log(stats.objectCount > 0, stats.heapSize > 0, memory.current > 0);
+        console.log(jsc.estimateShallowMemoryUsageOf("hello") === 10, jsc.estimateShallowMemoryUsageOf(new Uint8Array(20)) >= 20);
+        const fn = () => 42;
+        console.log(jsc.noFTL(fn) === fn, jsc.noInline(fn)());
+        let drained = false;
+        Promise.resolve().then(() => { drained = true; });
+        jsc.drainMicrotasks();
+        console.log(drained);
+        const profile = jsc.profile((a, b) => a + b, 100, 2, 3);
+        console.log(typeof profile.functions, Array.isArray(profile.stackTraces));
+        let cycle = {}; cycle.self = cycle; cycle = null;
+        console.log(jsc.fullGC() >= 0, Array.isArray(jsc.getProtectedObjects()));
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "true true true",
+            "true true",
+            "true 42",
+            "true",
+            "string true",
+            "true true",
+        ]
+    );
+}
+
+#[test]
 fn async_await_settles_before_loop_exit() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

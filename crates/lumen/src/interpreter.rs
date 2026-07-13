@@ -1900,6 +1900,23 @@ impl Interp {
             .is_some_and(|ptr| self.proxies.contains_key(&ptr))
     }
 
+    /// Run lumen's cycle collector and return the number of reclaimed heap objects.
+    pub fn collect_garbage_for_host(&mut self) -> i64 {
+        let before = crate::value::live_objects();
+        self.gc_collect();
+        before.saturating_sub(crate::value::live_objects())
+    }
+
+    /// Current number of heap objects tracked by the engine.
+    pub fn live_object_count(&self) -> i64 {
+        crate::value::live_objects()
+    }
+
+    /// Execute all currently queued promise reaction jobs synchronously.
+    pub fn drain_microtasks_for_host(&mut self) {
+        self.drain_microtasks();
+    }
+
     /// `Object.getPrototypeOf(v)` — the value's `[[Prototype]]` (`null` when there is none).
     pub fn prototype_of(&self, v: &Value) -> Value {
         match v.as_obj().and_then(|o| o.borrow().proto.clone()) {
