@@ -99,10 +99,14 @@
   // return. A cstring return is rewrapped in a CString.
   const makeCaller = (fnPtr, retCode, argCodes) => {
     const isCString = retCode === CSTRING;
-    return (...args) => {
+    const caller = (...args) => {
       const r = __ffi.call(fnPtr, retCode, argCodes, args);
       return isCString ? new CString(r) : r;
     };
+    Object.defineProperty(caller, "__ffiSource", {
+      value: `native function @ 0x${Number(fnPtr).toString(16)} (${argCodes.join(",")}) -> ${retCode}`,
+    });
+    return caller;
   };
 
   const defToCodes = (def) => ({
@@ -222,8 +226,9 @@
     return library;
   };
 
-  const unsupported = (what, why) => () => {
-    throw new Error(`bun:ffi ${what} is not supported in lumen${why ? ` (${why})` : ""}`);
+  const viewSource = (fn) => {
+    if (typeof fn !== "function") throw new TypeError("bun:ffi viewSource expects a function");
+    return fn.__ffiSource || Function.prototype.toString.call(fn);
   };
 
   __builtins.set("bun:ffi", {
@@ -241,11 +246,10 @@
     dlopen,
     linkSymbols,
     cc,
-    viewSource: unsupported("viewSource", "no JIT source to disassemble"),
+    viewSource,
     native: {
-      // Bun's internal fast-path hooks; the public dlopen/JSCallback above are the supported entry.
-      dlopen: unsupported("native.dlopen"),
-      callback: unsupported("native.callback"),
+      dlopen,
+      callback: (fn, definition) => new JSCallback(fn, definition),
     },
   });
 }
