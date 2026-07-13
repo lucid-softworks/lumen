@@ -1793,13 +1793,18 @@ function isProbablePrime(n, rounds) {
   }
   return true;
 }
-function randomPrime(bits, safe) {
+function randomPrime(bits, safe, add, rem) {
   if (!Number.isInteger(bits) || bits < 2) throw new RangeError("prime size must be an integer >= 2 bits");
   for (;;) {
     let cand = randomBigIntBits(bits);
     cand |= 1n;
     cand |= 1n << BigInt(bits - 1);
     if (bits >= 3) cand |= 1n << BigInt(bits - 2); // full-size products for RSA
+    if (add !== undefined) {
+      cand += (rem - cand % add + add) % add;
+      if ((cand & 1n) === 0n && (add & 1n) === 1n) cand += add;
+      if (bitLength(cand) !== bits) continue;
+    }
     if (safe) {
       if ((cand & 3n) !== 3n) continue; // safe primes are ≡ 3 (mod 4)
       if (isProbablePrime((cand - 1n) >> 1n, 8) && isProbablePrime(cand, 20)) return cand;
@@ -1825,10 +1830,16 @@ function checkPrime(candidate, options, cb) {
 }
 function generatePrimeSync(size, options) {
   options = options || {};
-  if (options.add !== undefined || options.rem !== undefined) {
-    throw new Error("generatePrime options 'add'/'rem' are not supported in lumen");
+  let add, rem;
+  if (options.add !== undefined) {
+    add = typeof options.add === "bigint" ? options.add : bytesToBigIntBE(toBytes(options.add));
+    rem = options.rem === undefined ? (options.safe ? 3n : 1n)
+      : typeof options.rem === "bigint" ? options.rem : bytesToBigIntBE(toBytes(options.rem));
+    if (add <= 0n) throw new RangeError("generatePrime option 'add' must be greater than zero");
+    if (rem < 0n || rem >= add) throw new RangeError("generatePrime option 'rem' must be non-negative and less than 'add'");
+    if (size > 2 && (add & 1n) === 0n && (rem & 1n) === 0n) throw new RangeError("generatePrime add/rem constraints cannot produce an odd prime");
   }
-  const p = randomPrime(size, !!options.safe);
+  const p = randomPrime(size, !!options.safe, add, rem);
   if (options.bigint) return p;
   return bigIntToBytesBE(p, Math.ceil(size / 8)).buffer; // Node returns an ArrayBuffer
 }
