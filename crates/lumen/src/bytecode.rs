@@ -6145,21 +6145,6 @@ pub(crate) unsafe extern "C" fn jit_direct_finish(
     threw as u64
 }
 
-/// The direct-call sequence's due GC poll. The assembly has already advanced the logical call
-/// tick and validated every other entry gate; on success it resumes the direct call instead of
-/// re-entering the layered call helper. Returns 1 on throw with `ctx.error` populated.
-pub(crate) unsafe extern "C" fn jit_gc_poll(ctx: *mut crate::jit::JitCtx) -> u64 {
-    let ctx = &mut *ctx;
-    let i = &mut *ctx.interp;
-    match i.gc_check() {
-        Ok(()) => 0,
-        Err(e) => {
-            ctx.error = Some(e);
-            1
-        }
-    }
-}
-
 /// The call template's inline-probe HIT entry: the emitted code already validated one way
 /// (callee identity + epoch + realm — the way index rides in bits 16.. of `pc`, the pc itself
 /// in the low 16), so this skips the probe loop — it re-reads that entry (nothing ran between
