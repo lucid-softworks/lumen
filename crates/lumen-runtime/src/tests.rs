@@ -380,6 +380,30 @@ fn bun_transpiler_transforms_typescript_jsx_and_scans_modules() {
 }
 
 #[test]
+fn bun_mmap_tracks_file_reads_and_shared_writes() {
+    let dir = TempDir::new("bun-mmap");
+    let path = dir.path("mapped.bin");
+    std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const fs = require("fs");
+            const mapped = Bun.mmap({path:?});
+            console.log(mapped instanceof Uint8Array, mapped.length, mapped[1]);
+            fs.writeFileSync({path:?}, Uint8Array.of(9, 8, 7, 6));
+            console.log(mapped[1]);
+            mapped[2] = 42;
+            mapped.close();
+            console.log(fs.readFileSync({path:?})[2]);
+            "#,
+        ),
+    );
+    assert_eq!(out.lines(), ["true 4 2", "8", "42"]);
+}
+
+#[test]
 fn bun_sqlite_file_control_reaches_native_sqlite() {
     let dir = TempDir::new("sqlite-file-control");
     let database = dir.path("control.sqlite");

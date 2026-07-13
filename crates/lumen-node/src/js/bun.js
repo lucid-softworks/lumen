@@ -1754,6 +1754,61 @@ function generateHeapSnapshot(format = "jsc", outputFormat) {
   };
 }
 globalThis.__lumenGenerateHeapSnapshot = generateHeapSnapshot;
+
+function mmap(path, options = {}) {
+  if (options === null || typeof options !== "object") throw new TypeError("Bun.mmap options must be an object");
+  const filePath = path instanceof URL ? nodeUrl.fileURLToPath(path) : String(path);
+  const offset = options.offset === undefined ? 0 : Number(options.offset);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError("mmap offset must be a non-negative integer");
+  const size = nodeFs.statSync(filePath).size;
+  const length = options.length === undefined ? size - offset : Number(options.length);
+  if (!Number.isSafeInteger(length) || length < 0 || offset + length > size) throw new RangeError("mmap range is outside the file");
+  const shared = options.shared !== false;
+  const fd = nodeFs.openSync(filePath, shared ? "r+" : "r");
+  const bytes = new Uint8Array(length);
+  if (length) nodeFs.readSync(fd, bytes, 0, length, offset);
+  let closed = false;
+  const refresh = () => {
+    if (!closed && length) nodeFs.readSync(fd, bytes, 0, length, offset);
+  };
+  const flush = () => {
+    if (!closed && shared && length) nodeFs.writeSync(fd, bytes, 0, length, offset);
+  };
+  const mutators = new Set(["set", "fill", "copyWithin", "reverse", "sort"]);
+  const numeric = key => typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key);
+  const proxy = new Proxy(bytes, {
+    get(target, key) {
+      if (numeric(key)) {
+        if (!closed) {
+          const one = new Uint8Array(1);
+          nodeFs.readSync(fd, one, 0, 1, offset + Number(key));
+          target[Number(key)] = one[0];
+        }
+        return target[Number(key)];
+      }
+      if (key === "close") return () => { if (!closed) { flush(); nodeFs.closeSync(fd); closed = true; } };
+      if (key === "flush") return flush;
+      if (key === "refresh") return refresh;
+      const value = target[key];
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        refresh();
+        const result = value.apply(target, args);
+        if (mutators.has(key)) flush();
+        return result;
+      };
+    },
+    set(target, key, value) {
+      target[key] = value;
+      if (numeric(key) && shared && !closed) {
+        const one = Uint8Array.of(target[Number(key)]);
+        nodeFs.writeSync(fd, one, 0, 1, offset + Number(key));
+      }
+      return true;
+    },
+  });
+  return proxy;
+}
 // bun:ffi is registered before this module; Bun.FFI is the same live surface.
 const FFI = __builtins.get("bun:ffi");
 
@@ -2022,7 +2077,7 @@ const Bun = {
   // honest stubs
   password, secrets, CSRF, FFI,
   openInEditor,
-  mmap: notImpl("Bun.mmap"),
+  mmap,
   generateHeapSnapshot,
   plugin,
   build,
