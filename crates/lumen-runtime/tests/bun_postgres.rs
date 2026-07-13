@@ -97,3 +97,42 @@ fn postgres_adapter_uses_extended_protocol_and_decodes_rows() {
     peer.join().unwrap();
     assert_eq!(String::from_utf8(out.0.borrow().clone()).unwrap().trim(), "row {\"id\":42,\"name\":\"Alice\",\"active\":true} SELECT 1");
 }
+
+#[test]
+fn postgres_adapter_authenticates_with_scram_sha_256() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut length = [0u8; 4]; stream.read_exact(&mut length).unwrap();
+        let mut startup = vec![0; u32::from_be_bytes(length) as usize - 4]; stream.read_exact(&mut startup).unwrap();
+        let mut sasl = 10u32.to_be_bytes().to_vec(); sasl.extend(b"SCRAM-SHA-256\0\0"); send(&mut stream, b'R', &sasl);
+        let (kind, first) = message(&mut stream); assert_eq!(kind, b'p');
+        let mechanism_end = first.iter().position(|byte| *byte == 0).unwrap(); assert_eq!(&first[..mechanism_end], b"SCRAM-SHA-256");
+        let first_message = String::from_utf8(first[mechanism_end + 5..].to_vec()).unwrap();
+        assert_eq!(first_message, "n,,n=user,r=fixed-client-nonce");
+        let server_first = "r=fixed-client-nonceserver,s=c2NyYW0tdGVzdC1zYWx0,i=1";
+        let mut continuation = 11u32.to_be_bytes().to_vec(); continuation.extend(server_first.as_bytes()); send(&mut stream, b'R', &continuation);
+        let (kind, final_message) = message(&mut stream); assert_eq!(kind, b'p');
+        assert_eq!(String::from_utf8(final_message).unwrap(), "c=biws,r=fixed-client-nonceserver,p=NiA39R0NbjqSoWjdqDtWyuNcv/Umenu8XmqVHCo1RBo=");
+        let mut final_auth = 12u32.to_be_bytes().to_vec(); final_auth.extend(b"v=/znrhjluposUbXiPmX2gG7TFu1ft/gF/hw7xhWY+Orw=");
+        send(&mut stream, b'R', &final_auth); send(&mut stream, b'R', &0u32.to_be_bytes()); send(&mut stream, b'Z', b"I");
+        loop { if message(&mut stream).0 == b'S' { break; } }
+        send(&mut stream, b'C', b"SELECT 0\0"); send(&mut stream, b'Z', b"I");
+        assert_eq!(message(&mut stream).0, b'X');
+    });
+    let mut runtime = Runtime::new(); let out = Captured::default();
+    runtime.engine().ctx().op_state().put(ConsoleOut { out: Box::new(out.clone()), err: Box::new(Captured::default()) });
+    let source = format!(r#"
+      (async () => {{
+        require("node:crypto").randomBytes = () => ({{ toString: () => "fixed-client-nonce" }});
+        const sql = Bun.SQL("postgres://user:pencil@127.0.0.1:{port}/database?sslmode=disable");
+        const rows = await sql`SELECT 1`;
+        console.log("scram", rows.command, rows.count);
+        await sql.close();
+      }})();
+    "#);
+    match runtime.eval(&source).unwrap() { Completion::Value(_) => {}, Completion::Throw { name, message } => panic!("uncaught {name}: {message}") }
+    peer.join().unwrap();
+    assert_eq!(String::from_utf8(out.0.borrow().clone()).unwrap().trim(), "scram SELECT 0");
+}

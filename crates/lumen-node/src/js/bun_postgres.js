@@ -43,6 +43,13 @@
     if ([1082, 1114, 1184].includes(oid)) return new Date(value);
     return value;
   }
+  function scramFields(message) {
+    const fields = {};
+    for (const part of String(message).split(",")) fields[part.slice(0, 1)] = part.slice(2);
+    return fields;
+  }
+  function scramHmac(key, value) { return Buffer.from(crypto.createHmac("sha256", key).update(value).digest()); }
+  function scramXor(left, right) { return Buffer.from(left.map((value, index) => value ^ right[index])); }
 
   class PgConnection {
     constructor(config) {
@@ -80,6 +87,7 @@
       return new Promise((resolve, reject) => this.socket.write(bytes, error => error ? reject(error) : resolve()));
     }
     async _handshake() {
+      let scram = null;
       for (;;) {
         const message = await this._next();
         if (message.type === "R") {
@@ -90,6 +98,40 @@
             const first = crypto.createHash("md5").update(this.config.password + this.config.user).digest("hex");
             const response = "md5" + crypto.createHash("md5").update(Buffer.concat([Buffer.from(first), message.payload.subarray(4, 8)])).digest("hex");
             await this._write(packet("p", cstring(response)));
+          } else if (method === 10) {
+            const mechanisms = message.payload.toString("utf8", 4).split("\0");
+            if (!mechanisms.includes("SCRAM-SHA-256")) { const error = new Error("PostgreSQL server does not offer SCRAM-SHA-256"); error.code = "ERR_POSTGRES_UNSUPPORTED_AUTHENTICATION_METHOD"; throw error; }
+            const nonce = crypto.randomBytes(18).toString("base64url");
+            const user = this.config.user.replace(/=/g, "=3D").replace(/,/g, "=2C");
+            const bare = `n=${user},r=${nonce}`, first = `n,,${bare}`;
+            scram = { nonce, bare, expectedServerSignature: null };
+            await this._write(packet("p", Buffer.concat([cstring("SCRAM-SHA-256"), i32(Buffer.byteLength(first)), Buffer.from(first)])));
+          } else if (method === 11) {
+            if (!scram) throw new Error("Unexpected PostgreSQL SCRAM continuation");
+            const serverFirst = message.payload.toString("utf8", 4), fields = scramFields(serverFirst);
+            const iterations = Number(fields.i);
+            if (!fields.r || !fields.r.startsWith(scram.nonce) || fields.r.length <= scram.nonce.length) { const error = new Error("PostgreSQL SCRAM server nonce is invalid"); error.code = "ERR_POSTGRES_INVALID_SERVER_NONCE"; throw error; }
+            if (!Number.isInteger(iterations) || iterations < 1 || iterations > 10000000) { const error = new Error("PostgreSQL SCRAM iteration count is invalid"); error.code = "ERR_POSTGRES_AUTHENTICATION_FAILED_PBKDF2"; throw error; }
+            let salt;
+            try { salt = Buffer.from(fields.s, "base64"); } catch (_) { salt = null; }
+            if (!salt || !salt.length) { const error = new Error("PostgreSQL SCRAM salt is invalid"); error.code = "ERR_POSTGRES_AUTHENTICATION_FAILED_PBKDF2"; throw error; }
+            const finalWithoutProof = `c=biws,r=${fields.r}`;
+            const authMessage = `${scram.bare},${serverFirst},${finalWithoutProof}`;
+            const salted = crypto.pbkdf2Sync(this.config.password, salt, iterations, 32, "sha256");
+            const clientKey = scramHmac(salted, "Client Key");
+            const storedKey = crypto.createHash("sha256").update(clientKey).digest();
+            const proof = scramXor(clientKey, scramHmac(storedKey, authMessage)).toString("base64");
+            const serverKey = scramHmac(salted, "Server Key");
+            scram.expectedServerSignature = scramHmac(serverKey, authMessage);
+            await this._write(packet("p", Buffer.from(`${finalWithoutProof},p=${proof}`)));
+          } else if (method === 12) {
+            if (!scram || !scram.expectedServerSignature) throw new Error("Unexpected PostgreSQL SCRAM final response");
+            const fields = scramFields(message.payload.toString("utf8", 4));
+            if (fields.e) { const error = new Error(`PostgreSQL SCRAM authentication failed: ${fields.e}`); error.code = "ERR_POSTGRES_AUTHENTICATION_FAILED"; throw error; }
+            const signature = Buffer.from(fields.v || "", "base64");
+            if (signature.length !== scram.expectedServerSignature.length || !crypto.timingSafeEqual(signature, scram.expectedServerSignature)) {
+              const error = new Error("PostgreSQL SCRAM server signature mismatch"); error.code = "ERR_POSTGRES_SASL_SIGNATURE_MISMATCH"; throw error;
+            }
           } else { const error = new Error(`Unsupported PostgreSQL authentication method ${method}`); error.code = "ERR_POSTGRES_UNSUPPORTED_AUTHENTICATION_METHOD"; throw error; }
         } else if (message.type === "E") throw postgresError(parseFields(message.payload));
         else if (message.type === "Z") return;
