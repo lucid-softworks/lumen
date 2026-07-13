@@ -112,7 +112,7 @@ pub struct JitCtx {
     /// against the per-site name cache (see `bytecode::NameIc`).
     pub env_raw: *const u8,
     /// [48] Points at `this_val` below (set after construction): the inline LoadThis template
-    /// copies the 24-byte Value and bumps its refcount from machine code.
+    /// copies the 16-byte Value and bumps its refcount from machine code.
     pub this_raw: *const Value,
     /// [56] The current realm's global `Object` (through the Rc and RefCell): the LoadName
     /// templates' global-mode path validates the cached shape/slot against it.
@@ -210,11 +210,11 @@ pub const COND_PEEK_TRUTHY: u32 = 1;
 pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 
 // The inline fast paths read Value directly: repr(u8) tag byte at offset 0, payload at
-// offset 8, 24 bytes total on 64-bit. Tags 0..=4 (Undefined/Empty/Null/Bool/Num) are trivially
+// offset 8, 16 bytes total on 64-bit. Tags 0..=4 (Undefined/Empty/Null/Bool/Num) are trivially
 // copyable. Only the JIT (aarch64-macos) depends on this, so the layout is only asserted there —
 // on a 32-bit target (wasm) `Value` is smaller and the JIT does not exist.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-const _: () = assert!(std::mem::size_of::<Value>() == 24);
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
 // The offsets below bake 8-byte pointers into the emitted templates: JIT-platform only (on
@@ -991,15 +991,15 @@ pub fn compile(
                     };
                     let slow = a.new_label();
                     let done = a.new_label();
-                    a.ldurb(9, 20, -48);
+                    a.ldurb(9, 20, -32);
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_NE, slow);
-                    a.ldurb(9, 20, -24);
+                    a.ldurb(9, 20, -16);
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_NE, slow);
-                    a.ldur_d(0, 20, -40);
-                    a.ldur_d(1, 20, -16);
-                    a.sub_imm(20, 20, 48); // pop both operands (no bool pushed)
+                    a.ldur_d(0, 20, -24);
+                    a.ldur_d(1, 20, -8);
+                    a.sub_imm(20, 20, 32); // pop both operands (no bool pushed)
                     a.fcmp(0, 1);
                     a.b_cond(neg, pc_labels[*t as usize]);
                     a.b(done);
@@ -1019,17 +1019,17 @@ pub fn compile(
         // before any state is written (the pre-increment commits with the element copy), so the
         // slow path can re-run both ops through the helper cleanly.
         if fast & 1024 != 0 && elem_inlinable(layout) && !targeted[pc + 1] {
-            let in_range = |s: u16| (s as u32) * 24 + 16 < 4096;
+            let in_range = |s: u16| (s as u32) * 16 + 16 < 4096;
             let pair = match (op, ops.get(pc + 1)) {
                 (Op::LoadLocal(k), Some(Op::GetElemLocal(x))) if in_range(*k) && in_range(*x) => {
-                    Some((*x as u32 * 24, KeySrc::Slot(*k as u32 * 24)))
+                    Some((*x as u32 * 16, KeySrc::Slot(*k as u32 * 16)))
                 }
                 (
                     Op::UpdateLocal(k, kind @ (UpdKind::PreInc | UpdKind::PreDec)),
                     Some(Op::GetElemLocal(x)),
                 ) if in_range(*k) && in_range(*x) => Some((
-                    *x as u32 * 24,
-                    KeySrc::SlotPre(*k as u32 * 24, matches!(kind, UpdKind::PreDec)),
+                    *x as u32 * 16,
+                    KeySrc::SlotPre(*k as u32 * 16, matches!(kind, UpdKind::PreDec)),
                 )),
                 _ => None,
             };
@@ -1055,11 +1055,11 @@ pub fn compile(
                 // Bool on top (the compare fast paths produce one): branch on its payload byte.
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 3);
                 a.b_cond(C_NE, slow);
-                a.ldurb(9, 20, -23); // bool payload at offset 1
-                a.sub_imm(20, 20, 24);
+                a.ldurb(9, 20, -15); // bool payload at offset 1
+                a.sub_imm(20, 20, 16);
                 a.cbz(9, false, pc_labels[*t as usize]);
                 a.b(done);
                 a.bind(slow);
@@ -1146,7 +1146,7 @@ pub fn compile(
             Op::GetPropLocal(s, n, cache)
                 if fast & 256 != 0
                     && get_method_inlinable(layout)
-                    && (*s as u32) * 24 + 16 < 4096 =>
+                    && (*s as u32) * 16 + 16 < 4096 =>
             {
                 let arr_ok = !chunk
                     .jit_name(*n)
@@ -1163,7 +1163,7 @@ pub fn compile(
                     l_unwind,
                     false,
                     arr_ok,
-                    PropRecv::Slot(*s as u32 * 24),
+                    PropRecv::Slot(*s as u32 * 16),
                 );
             }
             Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
@@ -1171,7 +1171,7 @@ pub fn compile(
                 // anything else — real coercion plus the nullish-base check — takes the helper.
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_EQ, done);
                 a.cmp_imm_w(9, 6);
@@ -1185,15 +1185,13 @@ pub fn compile(
                 // Copy the top value; refcounted payloads bump inline, BigInt takes the helper.
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 5);
                 a.b_cond(C_EQ, slow);
-                a.ldur(10, 20, -24);
-                a.ldur(11, 20, -16);
-                a.ldur(12, 20, -8);
+                a.ldur(10, 20, -16);
+                a.ldur(11, 20, -8);
                 a.stur(10, 20, 0);
                 a.stur(11, 20, 8);
-                a.stur(12, 20, 16);
                 let nobump = a.new_label();
                 a.cmp_imm_w(9, 6);
                 a.b_cond(C_LO, nobump);
@@ -1201,14 +1199,14 @@ pub fn compile(
                 a.add_imm(13, 13, 1);
                 a.stur(13, 11, rc_strong);
                 a.bind(nobump);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
             Op::LoadThis if fast & 32768 != 0 && rc_ok => {
-                // Copy ctx.this_val (24 bytes) and bump its refcount inline; only a BigInt
+                // Copy ctx.this_val (16 bytes) and bump its refcount inline; only a BigInt
                 // `this` (impossible in practice, but be safe) takes the helper.
                 let slow = a.new_label();
                 let done = a.new_label();
@@ -1218,10 +1216,8 @@ pub fn compile(
                 a.b_cond(C_EQ, slow);
                 a.ldr_imm(11, 9, 0);
                 a.ldr_imm(12, 9, 8);
-                a.ldr_imm(13, 9, 16);
                 a.stur(11, 20, 0);
                 a.stur(12, 20, 8);
-                a.stur(13, 20, 16);
                 let nobump = a.new_label();
                 a.cmp_imm_w(10, 6);
                 a.b_cond(C_LO, nobump);
@@ -1229,7 +1225,7 @@ pub fn compile(
                 a.add_imm(14, 14, 1);
                 a.stur(14, 12, rc_strong);
                 a.bind(nobump);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -1270,12 +1266,12 @@ pub fn compile(
             Op::GetElemLocal(slot)
                 if fast & 1024 != 0
                     && elem_inlinable(layout)
-                    && (*slot as u32) * 24 + 16 < 4096 =>
+                    && (*slot as u32) * 16 + 16 < 4096 =>
             {
                 emit_elem_local_inline(
                     &mut a,
                     layout,
-                    *slot as u32 * 24,
+                    *slot as u32 * 16,
                     pc as u32,
                     l_unwind,
                     ElemLocalKind::Get,
@@ -1284,12 +1280,12 @@ pub fn compile(
             Op::SetElemLocalDrop(slot)
                 if fast & 2048 != 0
                     && elem_inlinable(layout)
-                    && (*slot as u32) * 24 + 16 < 4096 =>
+                    && (*slot as u32) * 16 + 16 < 4096 =>
             {
                 emit_elem_local_inline(
                     &mut a,
                     layout,
-                    *slot as u32 * 24,
+                    *slot as u32 * 16,
                     pc as u32,
                     l_unwind,
                     ElemLocalKind::SetDrop,
@@ -1298,12 +1294,12 @@ pub fn compile(
             Op::SetElemLocal(slot)
                 if fast & 4096 != 0
                     && elem_inlinable(layout)
-                    && (*slot as u32) * 24 + 16 < 4096 =>
+                    && (*slot as u32) * 16 + 16 < 4096 =>
             {
                 emit_elem_local_inline(
                     &mut a,
                     layout,
-                    *slot as u32 * 24,
+                    *slot as u32 * 16,
                     pc as u32,
                     l_unwind,
                     ElemLocalKind::SetKeep,
@@ -1329,7 +1325,7 @@ pub fn compile(
                     PropRecv::Stack,
                 );
             }
-            // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 24) ----
+            // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 16) ----
             Op::Add | Op::Sub | Op::Mul | Op::Div if fast & 1 != 0 => {
                 let f_op = match op {
                     Op::Add => 0,
@@ -1339,17 +1335,17 @@ pub fn compile(
                 };
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -48);
+                a.ldurb(9, 20, -32);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldur_d(0, 20, -40);
-                a.ldur_d(1, 20, -16);
+                a.ldur_d(0, 20, -24);
+                a.ldur_d(1, 20, -8);
                 a.f_arith(f_op, 0, 0, 1);
-                a.stur_d(0, 20, -40);
-                a.sub_imm(20, 20, 24);
+                a.stur_d(0, 20, -24);
+                a.sub_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -1362,14 +1358,14 @@ pub fn compile(
             Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr if fast & 1 != 0 => {
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -48);
+                a.ldurb(9, 20, -32);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldur_d(0, 20, -40); // lhs
-                a.ldur_d(1, 20, -16); // rhs
+                a.ldur_d(0, 20, -24); // lhs
+                a.ldur_d(1, 20, -8); // rhs
                 a.fcvtzs_x_d(9, 0);
                 a.scvtf_d_x(2, 9);
                 a.frintz(3, 0);
@@ -1399,8 +1395,8 @@ pub fn compile(
                 } else {
                     a.scvtf_d_w(0, 11);
                 }
-                a.stur_d(0, 20, -40);
-                a.sub_imm(20, 20, 24);
+                a.stur_d(0, 20, -24);
+                a.sub_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -1452,7 +1448,7 @@ pub fn compile(
                 if fast & 65536 != 0
                     && rc_ok
                     && set_prop_inlinable(layout)
-                    && (*s as u32) * 24 + 16 < 4096 =>
+                    && (*s as u32) * 16 + 16 < 4096 =>
             {
                 emit_set_prop_inline(
                     &mut a,
@@ -1460,7 +1456,7 @@ pub fn compile(
                     chunk.jit_cache_ptr(*cache),
                     pc as u32,
                     l_unwind,
-                    PropRecv::Slot(*s as u32 * 24),
+                    PropRecv::Slot(*s as u32 * 16),
                 );
             }
             Op::UpdateProp(_, cache, kind)
@@ -1497,27 +1493,27 @@ pub fn compile(
                 };
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -48);
+                a.ldurb(9, 20, -32);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cmp_imm_w(9, 4);
                 a.b_cond(C_NE, slow);
-                a.ldur_d(0, 20, -40);
-                a.ldur_d(1, 20, -16);
+                a.ldur_d(0, 20, -24);
+                a.ldur_d(1, 20, -8);
                 a.fcmp(0, 1);
                 a.cset_w(9, cond);
                 a.movz(10, 3, 0); // Bool tag word (payload byte 1 zeroed by the 64-bit store)
-                a.sub_imm(20, 20, 24);
-                a.stur(10, 20, -24);
-                a.sturb(9, 20, -23); // bool payload at offset 1
+                a.sub_imm(20, 20, 16);
+                a.stur(10, 20, -16);
+                a.sturb(9, 20, -15); // bool payload at offset 1
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
-            Op::LoadLocal(slot) if fast & 8 != 0 && (*slot as u32) * 24 + 16 < 4096 => {
-                let off = *slot as u32 * 24;
+            Op::LoadLocal(slot) if fast & 8 != 0 && (*slot as u32) * 16 + 16 < 4096 => {
+                let off = *slot as u32 * 16;
                 let slow = a.new_label();
                 let done = a.new_label();
                 a.ldrb_imm(9, 22, off);
@@ -1530,10 +1526,8 @@ pub fn compile(
                     a.b_cond(C_EQ, slow);
                     a.ldr_imm(10, 22, off);
                     a.ldr_imm(11, 22, off + 8);
-                    a.ldr_imm(12, 22, off + 16);
                     a.stur(10, 20, 0);
                     a.stur(11, 20, 8);
-                    a.stur(12, 20, 16);
                     let nobump = a.new_label();
                     a.cmp_imm_w(9, 6);
                     a.b_cond(C_LO, nobump);
@@ -1549,14 +1543,14 @@ pub fn compile(
                     a.stur(10, 20, 0);
                     a.stur(11, 20, 8);
                 }
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
-            Op::StoreLocal(slot) if fast & 16 != 0 && (*slot as u32) * 24 + 16 < 4096 => {
-                let off = *slot as u32 * 24;
+            Op::StoreLocal(slot) if fast & 16 != 0 && (*slot as u32) * 16 + 16 < 4096 => {
+                let off = *slot as u32 * 16;
                 let slow = a.new_label();
                 let done = a.new_label();
                 a.ldrb_imm(9, 22, off);
@@ -1579,21 +1573,19 @@ pub fn compile(
                     a.cmp_imm_w(9, 4); // old value refcounted → slow (must drop)
                     a.b_cond(C_HI, slow);
                 }
-                // Move the popped value (all 24 bytes — a refcounted payload moves, not clones).
-                a.ldur(9, 20, -24);
-                a.ldur(10, 20, -16);
-                a.ldur(11, 20, -8);
+                // Move the popped value (all 16 bytes — a refcounted payload moves, not clones).
+                a.ldur(9, 20, -16);
+                a.ldur(10, 20, -8);
                 a.str_imm(9, 22, off);
                 a.str_imm(10, 22, off + 8);
-                a.str_imm(11, 22, off + 16);
-                a.sub_imm(20, 20, 24);
+                a.sub_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
-            Op::UpdateLocal(slot, kind) if fast & 32 != 0 && (*slot as u32) * 24 + 8 < 4096 => {
-                let off = *slot as u32 * 24;
+            Op::UpdateLocal(slot, kind) if fast & 32 != 0 && (*slot as u32) * 16 + 8 < 4096 => {
+                let off = *slot as u32 * 16;
                 let slow = a.new_label();
                 let done = a.new_label();
                 a.ldrb_imm(9, 22, off);
@@ -1612,13 +1604,13 @@ pub fn compile(
                         a.movz(10, 4, 0);
                         a.stur(10, 20, 0);
                         a.stur_d(2, 20, 8);
-                        a.add_imm(20, 20, 24);
+                        a.add_imm(20, 20, 16);
                     }
                     UpdKind::PostInc | UpdKind::PostDec => {
                         a.movz(10, 4, 0);
                         a.stur(10, 20, 0);
                         a.stur_d(0, 20, 8);
-                        a.add_imm(20, 20, 24);
+                        a.add_imm(20, 20, 16);
                     }
                     UpdKind::IncDiscard | UpdKind::DecDiscard => {}
                 }
@@ -1630,7 +1622,7 @@ pub fn compile(
             Op::Pop if fast & 64 != 0 => {
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 if rc_ok {
                     // A refcounted top drops inline (strong--) unless it is the last reference
                     // (real destructor) or a BigInt (compound payload) — those take the helper.
@@ -1639,7 +1631,7 @@ pub fn compile(
                     let plain = a.new_label();
                     a.cmp_imm_w(9, 6);
                     a.b_cond(C_LO, plain);
-                    a.ldur(10, 20, -16);
+                    a.ldur(10, 20, -8);
                     a.ldur(9, 10, rc_strong);
                     a.cmp_imm_x(9, 1);
                     a.b_cond(C_LS, slow);
@@ -1650,7 +1642,7 @@ pub fn compile(
                     a.cmp_imm_w(9, 4);
                     a.b_cond(C_HI, slow); // refcounted → slow (must drop)
                 }
-                a.sub_imm(20, 20, 24);
+                a.sub_imm(20, 20, 16);
                 a.b(done);
                 a.bind(slow);
                 emit_exec(&mut a, pc as u32, l_unwind);
@@ -1659,8 +1651,7 @@ pub fn compile(
             Op::Undef if fast & 128 != 0 => {
                 a.stur(31, 20, 0);
                 a.stur(31, 20, 8);
-                a.stur(31, 20, 16);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
             }
             Op::Const(k) if fast & 128 != 0 && chunk.jit_const_copyable(*k) => {
                 let (word0, word1) = chunk.jit_const_bits(*k);
@@ -1668,9 +1659,9 @@ pub fn compile(
                 a.stur(9, 20, 0);
                 a.mov_imm64(9, word1);
                 a.stur(9, 20, 8);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
             }
-            // String consts: copy the 24-byte Value from its stable chunk slot and bump the
+            // String consts: copy the 16-byte Value from its stable chunk slot and bump the
             // LStr strong count — parser-shaped code pushes literal strings millions of times
             // (meriyah's token kinds, astring's syntax fragments).
             Op::Const(k)
@@ -1680,14 +1671,12 @@ pub fn compile(
                 a.mov_imm64(9, chunk.jit_const_ptr(*k) as u64);
                 a.ldr_imm(10, 9, 0);
                 a.ldr_imm(11, 9, 8);
-                a.ldr_imm(12, 9, 16);
                 a.stur(10, 20, 0);
                 a.stur(11, 20, 8);
-                a.stur(12, 20, 16);
                 a.ldur(13, 11, 0); // strong (payload+0)
                 a.add_imm(13, 13, 1);
                 a.stur(13, 11, 0);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
             }
             // TDZ entry: the slot becomes `Empty` (tag 1). The old value drops in place —
             // trivially for tags < 5, by a bare shared-reference decrement for refcounted
@@ -1699,7 +1688,7 @@ pub fn compile(
             Op::DestructureGuard => {
                 let slow = a.new_label();
                 let done = a.new_label();
-                a.ldurb(9, 20, -24);
+                a.ldurb(9, 20, -16);
                 a.cbz(9, false, slow); // Undefined
                 a.cmp_imm_w(9, 2);
                 a.b_cond(C_NE, done); // anything but Null
@@ -1707,8 +1696,8 @@ pub fn compile(
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
-            Op::Tdz(slot) if fast & 16 != 0 && rc_ok && (*slot as u32) * 24 + 16 < 4096 => {
-                let off = *slot as u32 * 24;
+            Op::Tdz(slot) if fast & 16 != 0 && rc_ok && (*slot as u32) * 16 + 16 < 4096 => {
+                let off = *slot as u32 * 16;
                 let slow = a.new_label();
                 let done = a.new_label();
                 let plain = a.new_label();
@@ -1735,12 +1724,12 @@ pub fn compile(
             // bignum kernel, typically) decrement inline while shared. Only a last-reference
             // drop (or a string-ish tag 5) re-runs the whole (idempotent) op via the helper.
             Op::ResetSlots(start, count)
-                if rc_ok && (*start as u32 + *count as u32) * 24 < 4096 =>
+                if rc_ok && (*start as u32 + *count as u32) * 16 < 4096 =>
             {
                 let slow = a.new_label();
                 let done = a.new_label();
                 for k in *start..*start + *count {
-                    let off = k as u32 * 24;
+                    let off = k as u32 * 16;
                     let plain = a.new_label();
                     a.ldrb_imm(9, 22, off);
                     a.cmp_imm_w(9, 5);
@@ -1775,7 +1764,7 @@ pub fn compile(
                 match stored {
                     None => a.b(pc_labels[*target as usize]),
                     Some(s) => {
-                        let dm = (it.argc as i32 + 1) * 24;
+                        let dm = (it.argc as i32 + 1) * 16;
                         a.ldurb(9, 20, -dm);
                         a.cmp_imm_w(9, 8);
                         a.b_cond(C_NE, pc_labels[*target as usize]);
@@ -1784,7 +1773,7 @@ pub fn compile(
                         a.cmp_reg_x(9, 10);
                         a.b_cond(C_NE, pc_labels[*target as usize]);
                         if it.check_this {
-                            a.ldurb(9, 20, -dm - 24);
+                            a.ldurb(9, 20, -dm - 16);
                             a.cmp_imm_w(9, 8);
                             a.b_cond(C_NE, pc_labels[*target as usize]);
                         }
@@ -1804,7 +1793,7 @@ pub fn compile(
                 let done = a.new_label();
                 if inline_probe {
                     let depth = *argc as u32 + 1; // callee sits under the args
-                    let off = depth as i32 * -24;
+                    let off = depth as i32 * -16;
                     if (-256..0).contains(&off) {
                         let ic0 = chunk.jit_call_cache_ptr(*c);
                         a.ldurb(9, 20, off);
@@ -1863,18 +1852,18 @@ pub fn compile(
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_CODE_AT as u32);
                             a.b_cond(C_NE, no_intr);
                             // receiver: Str with the ASCII hint
-                            a.ldurb(9, 20, -72);
+                            a.ldurb(9, 20, -48);
                             a.cmp_imm_w(9, 6);
                             a.b_cond(C_NE, hit_slow);
-                            a.ldur(11, 20, -64);
+                            a.ldur(11, 20, -40);
                             a.ldr_w_imm(14, 11, crate::lstr::CAP_OFF as u32);
                             a.lsr_imm(14, 14, 31);
                             a.cbz(14, false, hit_slow);
                             // index: exact u32 Num
-                            a.ldurb(9, 20, -24);
+                            a.ldurb(9, 20, -16);
                             a.cmp_imm_w(9, 4);
                             a.b_cond(C_NE, hit_slow);
-                            a.ldur_d(0, 20, -16);
+                            a.ldur_d(0, 20, -8);
                             a.fcvtzu_w_d(9, 0);
                             a.ucvtf_d_w(1, 9);
                             a.fcmp(0, 1);
@@ -1900,10 +1889,9 @@ pub fn compile(
                             a.sub_imm(13, 13, 1);
                             a.stur(13, 10, 0);
                             a.movz(9, 4, 0);
-                            a.stur(9, 20, -72);
-                            a.stur_d(0, 20, -64);
-                            a.stur(31, 20, -56);
-                            a.sub_imm(20, 20, 48);
+                            a.stur(9, 20, -48);
+                            a.stur_d(0, 20, -40);
+                            a.sub_imm(20, 20, 32);
                             a.b(done);
                             a.bind(no_intr);
                         }
@@ -2211,7 +2199,7 @@ fn emit_prop_load_inline(
         && !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit());
     match recv {
         PropRecv::Stack => {
-            a.ldurb(9, 20, -24);
+            a.ldurb(9, 20, -16);
             if str_ok {
                 let obj_recv = a.new_label();
                 let probe_go = a.new_label();
@@ -2223,12 +2211,12 @@ fn emit_prop_load_inline(
                 a.ldr_imm(10, 10, il.string_proto as u32);
                 a.b(probe_go);
                 a.bind(obj_recv);
-                a.ldur(10, 20, -16);
+                a.ldur(10, 20, -8);
                 a.bind(probe_go);
             } else {
                 a.cmp_imm_w(9, 8);
                 a.b_cond(C_NE, slow);
-                a.ldur(10, 20, -16);
+                a.ldur(10, 20, -8);
             }
             if !method {
                 // receiver refcount > 1 (so the pop-drop below never frees)
@@ -2451,7 +2439,6 @@ fn emit_prop_load_inline(
     // --- commit: everything validated; from here only writes ---
     a.ldur(12, 15, ev);
     a.ldur(13, 15, ev + 8); // payload word (the Rc pointer for tags 6..8)
-    a.ldur(14, 15, ev + 16);
     // clone: a refcounted value (tag ≥ 6) needs its strong count bumped
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
@@ -2464,14 +2451,12 @@ fn emit_prop_load_inline(
         // this/slot receivers were never on the stack: just push the value.
         a.stur(12, 20, 0);
         a.stur(13, 20, 8);
-        a.stur(14, 20, 16);
-        a.add_imm(20, 20, 24);
+        a.add_imm(20, 20, 16);
     } else if method {
-        // receiver stays at [-24]; push the method above it
+        // receiver stays at [-16]; push the method above it
         a.stur(12, 20, 0);
         a.stur(13, 20, 8);
-        a.stur(14, 20, 16);
-        a.add_imm(20, 20, 24);
+        a.add_imm(20, 20, 16);
     } else {
         // drop the receiver (strong was > 1: decrement, no free). If the value IS the receiver
         // the bump above already balanced this (the count is re-read).
@@ -2479,9 +2464,8 @@ fn emit_prop_load_inline(
         a.sub_imm(9, 9, 1);
         a.stur(9, 10, strong);
         // overwrite the receiver slot with the value (pop obj + push value = same depth)
-        a.stur(12, 20, -24);
-        a.stur(13, 20, -16);
-        a.stur(14, 20, -8);
+        a.stur(12, 20, -16);
+        a.stur(13, 20, -8);
     }
     a.b(done);
     // 6kc. Key-checked landing (out of the hit path's fall-through line): same bounds + entry
@@ -2546,11 +2530,11 @@ fn emit_prop_load_inline(
                 a.ldur(14, 10, strong);
                 a.sub_imm(14, 14, 1);
                 a.stur(14, 10, strong);
-                a.sturb(9, 20, -24);
+                a.sturb(9, 20, -16);
             }
             PropRecv::This | PropRecv::Slot(_) => {
                 a.strb_imm(9, 20, 0);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
             }
         }
         a.b(done);
@@ -2596,7 +2580,7 @@ fn emit_direct_call(
 ) -> bool {
     use std::mem::offset_of;
     // Emission gates: probed Interp offsets must exist and fit the addressing modes used.
-    // argc caps at 8: the sequence addresses the receiver at -((argc + 2) * 24), and the
+    // argc caps at 8: the sequence addresses the receiver at -((argc + 2) * 16), and the
     // unscaled ldur/stur immediate is a signed 9-bit (±256) field — argc 9 would already be
     // out of range (encoding silently corrupts, there is no release-mode assert).
     if !ilayout.valid || argc > 8 || gc_data_off >= 4096 {
@@ -2615,7 +2599,7 @@ fn emit_direct_call(
         && fits8(il.fn_frames + il.fnf_cap_word)
         && fits8(il.frame_pool + il.fp_ptr_word)
         && fits8(il.frame_pool + il.fp_len_word)
-        && fits8(il.new_target + 16))
+        && fits8(il.new_target + 8))
     {
         return false;
     }
@@ -2699,7 +2683,7 @@ fn emit_direct_call(
     a.ldrb_imm(9, 12, IC_STRICT);
     a.cbnz(9, false, this_ok);
     if with_this {
-        a.ldurb(9, 20, -((argc as i32 + 2) * 24));
+        a.ldurb(9, 20, -((argc as i32 + 2) * 16));
         a.cmp_imm_w(9, 8);
         a.b_cond(C_NE, hit_slow);
     } else {
@@ -2751,21 +2735,19 @@ fn emit_direct_call(
     a.str_imm(7, 14, (il.frame_pool + il.fp_len_word) as u32);
     a.ldr_imm(5, 14, (il.frame_pool + il.fp_ptr_word) as u32);
     a.ldr_x_lsl3(9, 5, 7);
-    // move the argc arguments (24B each) off the caller stack into the callee slots
+    // Move the argc arguments (16B each) off the caller stack into the callee slots.
     for k in 0..argc {
-        let s = (k as i32 - argc as i32) * 24;
-        let d = (k * 24) as i32;
+        let s = (k as i32 - argc as i32) * 16;
+        let d = (k * 16) as i32;
         a.ldur(4, 20, s);
         a.ldur(5, 20, s + 8);
-        a.ldur(6, 20, s + 16);
         a.stur(4, 9, d);
         a.stur(5, 9, d + 8);
-        a.stur(6, 9, d + 16);
     }
     // tag-init the remaining slots (Undefined = tag byte 0)
     a.ldrh_imm(5, 12, IC_NSLOTS); // w5 = n_slots (stays live for stack_base below)
     a.movz(6, argc as u32, 0);
-    a.movz(4, 24, 0);
+    a.movz(4, 16, 0);
     let init_loop = a.new_label();
     let init_done = a.new_label();
     a.bind(init_loop);
@@ -2783,10 +2765,10 @@ fn emit_direct_call(
     a.ldr_imm(4, 19, cx_slots);
     a.stur(4, 31, 0);
     a.str_imm(9, 19, cx_slots);
-    // stack_base = slots + n_slots*24
+    // stack_base = slots + n_slots*16
     a.ldr_imm(4, 19, cx_stack_base);
     a.stur(4, 31, 8);
-    a.movz(4, 24, 0);
+    a.movz(4, 16, 0);
     a.madd(3, 5, 4, 9);
     a.str_imm(3, 19, cx_stack_base);
     // env_raw
@@ -2818,25 +2800,21 @@ fn emit_direct_call(
     a.stur(4, 31, 56);
     a.ldr_imm(4, 19, handlers_len_off as u32);
     a.str_imm(4, 19, cx_floor);
-    // this_val (24B): save old, install the callee's
+    // this_val (16B): save old, install the callee's
     a.ldr_imm(4, 19, cx_this);
     a.ldr_imm(5, 19, cx_this + 8);
-    a.ldr_imm(6, 19, cx_this + 16);
     a.stur(4, 31, 64);
     a.stur(5, 31, 72);
-    a.stur(6, 31, 80);
     if with_this {
         // ALWAYS move the receiver into ctx.this_val — even when the callee never reads
         // `this` — because the finish helper's `this_val = Undefined` is what consumes it
         // (skipping the caller-stack slot at cleanup without this move leaked the receiver
         // on every this-less method call; Splay OOM'd on exactly that).
-        let s = -((argc as i32 + 2) * 24);
+        let s = -((argc as i32 + 2) * 16);
         a.ldur(4, 20, s);
         a.ldur(5, 20, s + 8);
-        a.ldur(6, 20, s + 16);
         a.str_imm(4, 19, cx_this);
         a.str_imm(5, 19, cx_this + 8);
-        a.str_imm(6, 19, cx_this + 16);
     } else {
         a.strb_imm(31, 19, cx_this); // Undefined tag (payload stale; tag-only reads)
     }
@@ -2846,10 +2824,8 @@ fn emit_direct_call(
     a.strb_imm(31, 14, il.constructing as u32);
     a.ldr_imm(4, 14, il.new_target as u32);
     a.ldr_imm(5, 14, (il.new_target + 8) as u32);
-    a.ldr_imm(6, 14, (il.new_target + 16) as u32);
     a.stur(4, 31, 96);
     a.stur(5, 31, 104);
-    a.stur(6, 31, 112);
     a.strb_imm(31, 14, il.new_target as u32); // Undefined tag
 
     // ---- run the callee on the shared ctx ----
@@ -2883,22 +2859,18 @@ fn emit_direct_call(
     a.str_imm(4, 19, cx_floor);
     a.ldur(4, 31, 64);
     a.ldur(5, 31, 72);
-    a.ldur(6, 31, 80);
     a.str_imm(4, 19, cx_this);
     a.str_imm(5, 19, cx_this + 8);
-    a.str_imm(6, 19, cx_this + 16);
     a.ldur(4, 31, 88);
     a.strb_imm(4, 14, il.constructing as u32);
     a.ldur(4, 31, 96);
     a.ldur(5, 31, 104);
-    a.ldur(6, 31, 112);
     a.str_imm(4, 14, il.new_target as u32);
     a.str_imm(5, 14, (il.new_target + 8) as u32);
-    a.str_imm(6, 14, (il.new_target + 16) as u32);
     a.add_imm(31, 31, 128);
 
     // ---- pop the callee (and skip the consumed this slot); dispatch on threw ----
-    let callee_off = -((argc as i32 + 1) * 24);
+    let callee_off = -((argc as i32 + 1) * 16);
     a.ldur(5, 20, callee_off + 8);
     a.ldur(6, 5, strong);
     a.sub_imm(6, 6, 1);
@@ -2908,23 +2880,21 @@ fn emit_direct_call(
     // last reference (binding deleted during the call): real drop via helper
     a.mov(0, 19);
     a.movz(1, 0, 0);
-    a.mov_imm64(6, (argc as u64 + 1) * 24);
+    a.mov_imm64(6, (argc as u64 + 1) * 16);
     a.sub_reg(2, 20, 6);
     a.ldr_imm(16, 21, (H_DROP_AT * 8) as u32);
     a.blr(16);
     a.bind(no_free);
-    let popped = ((argc + 1 + with_this as usize) * 24) as u32;
+    let popped = ((argc + 1 + with_this as usize) * 16) as u32;
     a.sub_imm(20, 20, popped);
     a.cbnz(8, true, l_unwind); // threw → caller unwind (fields restored)
     // push ctx.ret (move: reset its tag to Undefined)
     a.ldr_imm(4, 19, cx_ret);
     a.ldr_imm(5, 19, cx_ret + 8);
-    a.ldr_imm(6, 19, cx_ret + 16);
     a.stur(4, 20, 0);
     a.stur(5, 20, 8);
-    a.stur(6, 20, 16);
     a.strb_imm(31, 19, cx_ret);
-    a.add_imm(20, 20, 24);
+    a.add_imm(20, 20, 16);
     a.b(done);
     true
 }
@@ -3017,7 +2987,7 @@ fn emit_direct_finish_stub(
             a.blr(16);
             a.ldp_post(9, 5, 16);
         };
-        // callee `this` (the caller's restore overwrites the 24 bytes right after the stub)
+        // callee `this` (the caller's restore overwrites the 16 bytes right after the stub)
         let this_done = a.new_label();
         let this_drop = a.new_label();
         a.ldrb_imm(9, 19, cx_this);
@@ -3058,7 +3028,7 @@ fn emit_direct_finish_stub(
         a.bind(c_drop);
         drop_at(a, 9);
         a.bind(c_next);
-        a.add_imm(9, 9, 24);
+        a.add_imm(9, 9, 16);
         a.sub_imm(5, 5, 1);
         a.b(c_loop);
         a.bind(c_done);
@@ -3139,11 +3109,11 @@ fn emit_update_prop_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. stack: [obj @ -24] — receiver must be an Obj with refcount > 1
-    a.ldurb(9, 20, -24);
+    // 1. stack: [obj @ -16] — receiver must be an Obj with refcount > 1
+    a.ldurb(9, 20, -16);
     a.cmp_imm_w(9, 8);
     a.b_cond(C_NE, slow);
-    a.ldur(10, 20, -16);
+    a.ldur(10, 20, -8);
     a.ldur(9, 10, strong);
     a.cmp_imm_x(9, 1);
     a.b_cond(C_LS, slow);
@@ -3196,16 +3166,16 @@ fn emit_update_prop_inline(
     match kind {
         UpdKind::PreInc | UpdKind::PreDec => {
             a.movz(9, 4, 0);
-            a.stur(9, 20, -24);
-            a.stur_d(2, 20, -16);
+            a.stur(9, 20, -16);
+            a.stur_d(2, 20, -8);
         }
         UpdKind::PostInc | UpdKind::PostDec => {
             a.movz(9, 4, 0);
-            a.stur(9, 20, -24);
-            a.stur_d(0, 20, -16);
+            a.stur(9, 20, -16);
+            a.stur_d(0, 20, -8);
         }
         UpdKind::IncDiscard | UpdKind::DecDiscard => {
-            a.sub_imm(20, 20, 24);
+            a.sub_imm(20, 20, 16);
         }
     }
     a.b(done);
@@ -3229,7 +3199,7 @@ fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// Inline own-property store (`this.x = v`, statement position → `SetPropDrop`): the machine-code
 /// mirror of `Interp::try_ic_set`'s shape fast path. Validates the receiver by shape (a match
 /// proves the cached slot still maps this name), re-checks `accessor`/`writable`, then *moves*
-/// the 24-byte value off the operand stack into the slot — a pure value overwrite never changes
+/// the 16-byte value off the operand stack into the slot — a pure value overwrite never changes
 /// the shape, so no cache invalidation is needed. The old value drops inline (strong-- when
 /// refcounted and not the last reference); a BigInt old value (compound drop), a last-reference
 /// old value or receiver, an accessor/non-writable slot, a shape or depth miss, and any exotic
@@ -3259,14 +3229,14 @@ fn emit_set_prop_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. receiver must be an Obj (tag 8). Stack form: [obj @ -48, v @ -24], refcount-managed;
-    // this/slot forms: [v @ -24] only, the frame owns the receiver.
+    // 1. receiver must be an Obj (tag 8). Stack form: [obj @ -32, v @ -16], refcount-managed;
+    // this/slot forms: [v @ -16] only, the frame owns the receiver.
     match recv {
         PropRecv::Stack => {
-            a.ldurb(9, 20, -48);
+            a.ldurb(9, 20, -32);
             a.cmp_imm_w(9, 8);
             a.b_cond(C_NE, slow);
-            a.ldur(10, 20, -40); // receiver rc_ptr
+            a.ldur(10, 20, -24); // receiver rc_ptr
                                  // receiver refcount > 1 (so the pop-drop below never frees)
             a.ldur(9, 10, strong);
             a.cmp_imm_x(9, 1);
@@ -3362,13 +3332,11 @@ fn emit_set_prop_inline(
     }
     a.bind(commit);
     // --- commit: everything validated; from here only writes ---
-    // move v into the entry (24 bytes; a refcounted payload moves, not clones)
-    a.ldur(13, 20, -24);
-    a.ldur(16, 20, -16);
-    a.ldur(17, 20, -8);
+    // move v into the entry (16 bytes; a refcounted payload moves, not clones)
+    a.ldur(13, 20, -16);
+    a.ldur(16, 20, -8);
     a.stur(13, 15, ev);
     a.stur(16, 15, ev + 8);
-    a.stur(17, 15, ev + 16);
     // drop the old value (refcounted: strong was > 1, so this never frees)
     let no_old_dec = a.new_label();
     a.cmp_imm_w(9, 6);
@@ -3382,10 +3350,10 @@ fn emit_set_prop_inline(
         a.sub_imm(9, 9, 1);
         a.stur(9, 10, strong);
         // pop both operands, push nothing
-        a.sub_imm(20, 20, 48);
+        a.sub_imm(20, 20, 32);
     } else {
         // pop just the value
-        a.sub_imm(20, 20, 24);
+        a.sub_imm(20, 20, 16);
     }
     a.b(done);
     a.bind(slow);
@@ -3427,9 +3395,9 @@ fn emit_eq_inline(
     let l_true = a.new_label();
     let l_false = a.new_label();
     let l_have = a.new_label();
-    // stack: [a @ -48, b @ -24]; w9 = tag_a, w10 = tag_b
-    a.ldurb(9, 20, -48);
-    a.ldurb(10, 20, -24);
+    // stack: [a @ -32, b @ -16]; w9 = tag_a, w10 = tag_b
+    a.ldurb(9, 20, -32);
+    a.ldurb(10, 20, -16);
     let l_notnum = a.new_label();
     a.cmp_imm_w(9, 4);
     a.b_cond(C_NE, l_notnum);
@@ -3460,7 +3428,7 @@ fn emit_eq_inline(
         a.b_cond(C_EQ, slow); // BigInt → helper
         a.cmp_imm_w(10, 6);
         a.b_cond(C_LO, l_false); // Bool/Num: no drop needed
-        a.ldur(13, 20, -16);
+        a.ldur(13, 20, -8);
         let la_drop = a.new_label();
         a.cmp_imm_w(10, 8);
         a.b_cond(C_NE, la_drop);
@@ -3481,7 +3449,7 @@ fn emit_eq_inline(
         a.b_cond(C_EQ, slow);
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, l_false);
-        a.ldur(12, 20, -40);
+        a.ldur(12, 20, -24);
         let lb_drop = a.new_label();
         a.cmp_imm_w(9, 8);
         a.b_cond(C_NE, lb_drop);
@@ -3513,16 +3481,16 @@ fn emit_eq_inline(
     a.b_cond(C_HS, l_ptr); // Sym/Obj: identity
     a.b(slow); // BigInt
     a.bind(l_bool);
-    a.ldurb(12, 20, -47);
-    a.ldurb(13, 20, -23);
+    a.ldurb(12, 20, -31);
+    a.ldurb(13, 20, -15);
     a.cmp_reg_w(12, 13);
     a.cset_w(11, C_EQ);
     a.b(l_have);
     // Sym/Obj identity: same pointer → equal (dec by 2; both stack handles die), different →
     // unequal (dec each; both guarded > 1 first so neither dec frees).
     a.bind(l_ptr);
-    a.ldur(12, 20, -40);
-    a.ldur(13, 20, -16);
+    a.ldur(12, 20, -24);
+    a.ldur(13, 20, -8);
     a.cmp_reg_x(12, 13);
     a.b_cond(C_EQ, l_ptr_same);
     a.ldur(14, 12, strong);
@@ -3545,8 +3513,8 @@ fn emit_eq_inline(
     a.b(l_true);
     // Str: identity → equal; different lengths → unequal; same length → helper (content).
     a.bind(l_str);
-    a.ldur(12, 20, -40);
-    a.ldur(13, 20, -16);
+    a.ldur(12, 20, -24);
+    a.ldur(13, 20, -8);
     a.cmp_reg_x(12, 13);
     a.b_cond(C_EQ, l_ptr_same);
     a.ldr_w_imm(14, 12, len_off);
@@ -3575,7 +3543,7 @@ fn emit_eq_inline(
         let ga = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, ga);
-        a.ldur(12, 20, -40);
+        a.ldur(12, 20, -24);
         a.ldur(14, 12, strong);
         a.cmp_imm_x(14, 1);
         a.b_cond(C_LS, slow);
@@ -3583,7 +3551,7 @@ fn emit_eq_inline(
         let gb = a.new_label();
         a.cmp_imm_w(10, 6);
         a.b_cond(C_LO, gb);
-        a.ldur(13, 20, -16);
+        a.ldur(13, 20, -8);
         a.ldur(15, 13, strong);
         a.cmp_imm_x(15, 1);
         a.b_cond(C_LS, slow);
@@ -3603,12 +3571,12 @@ fn emit_eq_inline(
         a.b(l_false);
     }
     a.bind(l_num);
-    a.ldur_d(0, 20, -40);
-    a.ldur_d(1, 20, -16);
+    a.ldur_d(0, 20, -24);
+    a.ldur_d(1, 20, -8);
     if let Some(target) = branch {
         // Straight-line fused numeric compare — branch on the negated condition, matching the
         // ordered-relation fusion (IEEE unordered must jump for == and fall through for !=).
-        a.sub_imm(20, 20, 48);
+        a.sub_imm(20, 20, 32);
         a.fcmp(0, 1);
         a.b_cond(if negate { C_EQ } else { C_NE }, target);
         a.b(done);
@@ -3623,7 +3591,7 @@ fn emit_eq_inline(
     a.bind(l_false);
     a.movz(11, 0, 0);
     a.bind(l_have);
-    a.sub_imm(20, 20, 48);
+    a.sub_imm(20, 20, 32);
     match branch {
         Some(target) => {
             // JumpIfFalse jumps when `eq ^ negate` is 0 — fold the negate into branch polarity.
@@ -3642,7 +3610,7 @@ fn emit_eq_inline(
             a.movz(10, 3, 0); // Bool tag word (payload byte 1 patched below)
             a.stur(10, 20, 0);
             a.sturb(11, 20, 1);
-            a.add_imm(20, 20, 24);
+            a.add_imm(20, 20, 16);
             a.b(done);
         }
     }
@@ -3673,7 +3641,7 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
     let l_objsym = a.new_label();
     let l_true = a.new_label();
     let l_have = a.new_label();
-    a.ldurb(9, 20, -24);
+    a.ldurb(9, 20, -16);
     a.cmp_imm_w(9, 2);
     a.b_cond(C_LS, l_true); // undefined/null → !falsy = true
     a.cmp_imm_w(9, 3);
@@ -3686,12 +3654,12 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
     a.b_cond(C_HS, l_objsym);
     a.b(slow); // BigInt
     a.bind(l_bool);
-    a.ldurb(11, 20, -23);
+    a.ldurb(11, 20, -15);
     a.movz(12, 1, 0);
     a.logic_w(2, 11, 11, 12); // eor: flip
     a.b(l_have);
     a.bind(l_num);
-    a.ldur_d(0, 20, -16);
+    a.ldur_d(0, 20, -8);
     a.movz(12, 0, 0);
     a.fmov_d_x(1, 12); // d1 = +0.0
     a.fcmp(0, 1);
@@ -3700,7 +3668,7 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
     a.logic_w(1, 11, 11, 12); // orr
     a.b(l_have);
     a.bind(l_str);
-    a.ldur(12, 20, -16);
+    a.ldur(12, 20, -8);
     a.ldur(14, 12, strong);
     a.cmp_imm_x(14, 1);
     a.b_cond(C_LS, slow); // last reference: the drop runs a destructor
@@ -3711,7 +3679,7 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
     a.stur(14, 12, strong);
     a.b(l_have);
     a.bind(l_objsym);
-    a.ldur(12, 20, -16);
+    a.ldur(12, 20, -8);
     let os_drop = a.new_label();
     a.cmp_imm_w(9, 8);
     a.b_cond(C_NE, os_drop);
@@ -3731,8 +3699,8 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
     a.movz(11, 1, 0);
     a.bind(l_have);
     a.movz(10, 3, 0);
-    a.stur(10, 20, -24);
-    a.sturb(11, 20, -23);
+    a.stur(10, 20, -16);
+    a.sturb(11, 20, -15);
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
@@ -3775,13 +3743,12 @@ fn emit_load_name_inline(
     let done = a.new_label();
     // Validate the cache and leave a pointer to the resolved Value in x14 (either mode).
     emit_name_ic_value_ptr(a, layout, cache_ptr, slow);
-    // Value not a BigInt → copy the 24 bytes, bump if refcounted, push.
+    // Value not a BigInt → copy the 16 bytes, bump if refcounted, push.
     a.ldurb(9, 14, 0);
     a.cmp_imm_w(9, 5);
     a.b_cond(C_EQ, slow);
     a.ldur(10, 14, 0);
     a.ldur(11, 14, 8);
-    a.ldur(13, 14, 16);
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, nobump);
@@ -3792,13 +3759,11 @@ fn emit_load_name_inline(
     if for_call {
         a.stur(31, 20, 0);
         a.stur(31, 20, 8);
-        a.stur(31, 20, 16);
-        a.add_imm(20, 20, 24);
+        a.add_imm(20, 20, 16);
     }
     a.stur(10, 20, 0);
     a.stur(11, 20, 8);
-    a.stur(13, 20, 16);
-    a.add_imm(20, 20, 24);
+    a.add_imm(20, 20, 16);
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
@@ -3913,21 +3878,21 @@ fn emit_get_elem_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. stack: [obj @ -48, key @ -24] — receiver must be Obj, key must be Num
-    a.ldurb(9, 20, -48);
+    // 1. stack: [obj @ -32, key @ -16] — receiver must be Obj, key must be Num
+    a.ldurb(9, 20, -32);
     a.cmp_imm_w(9, 8);
     a.b_cond(C_NE, slow);
-    a.ldurb(9, 20, -24);
+    a.ldurb(9, 20, -16);
     a.cmp_imm_w(9, 4);
     a.b_cond(C_NE, slow);
     // 2. key must be exactly a u32 (round-trip compare; NaN/negative/fractional/huge all miss)
-    a.ldur_d(0, 20, -16);
+    a.ldur_d(0, 20, -8);
     a.fcvtzu_w_d(9, 0);
     a.ucvtf_d_w(1, 9);
     a.fcmp(0, 1);
     a.b_cond(C_NE, slow);
     // 3. receiver refcount > 1 (so the pop-drop below never frees)
-    a.ldur(10, 20, -40);
+    a.ldur(10, 20, -24);
     a.ldur(11, 10, strong);
     a.cmp_imm_x(11, 1);
     a.b_cond(C_LS, slow);
@@ -3991,7 +3956,6 @@ fn emit_get_elem_inline(
     // --- commit: everything validated; from here only writes ---
     a.ldur(12, 15, ev);
     a.ldur(13, 15, ev + 8);
-    a.ldur(14, 15, ev + 16);
     let nobump = a.new_label();
     a.cmp_imm_w(9, 6);
     a.b_cond(C_LO, nobump);
@@ -4005,10 +3969,9 @@ fn emit_get_elem_inline(
     a.sub_imm(9, 9, 1);
     a.stur(9, 10, strong);
     // pop obj+key, push value → value lands at the obj slot, sp drops one
-    a.stur(12, 20, -48);
-    a.stur(13, 20, -40);
-    a.stur(14, 20, -32);
-    a.sub_imm(20, 20, 24);
+    a.stur(12, 20, -32);
+    a.stur(13, 20, -24);
+    a.sub_imm(20, 20, 16);
     a.b(done);
     a.bind(slow);
     emit_exec(a, pc, l_unwind);
@@ -4150,27 +4113,27 @@ fn emit_set_elem_inline(
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
     let done = a.new_label();
-    // 1. stack: [obj @ -72, key @ -48, v @ -24]
-    a.ldurb(9, 20, -72);
+    // 1. stack: [obj @ -48, key @ -32, v @ -16]
+    a.ldurb(9, 20, -48);
     a.cmp_imm_w(9, 8);
     a.b_cond(C_NE, slow);
-    a.ldurb(9, 20, -48);
+    a.ldurb(9, 20, -32);
     a.cmp_imm_w(9, 4);
     a.b_cond(C_NE, slow);
     if keep {
         // v is also the expression result: a BigInt can't clone inline.
-        a.ldurb(9, 20, -24);
+        a.ldurb(9, 20, -16);
         a.cmp_imm_w(9, 5);
         a.b_cond(C_EQ, slow);
     }
     // 2. key must be exactly a u32
-    a.ldur_d(0, 20, -40);
+    a.ldur_d(0, 20, -24);
     a.fcvtzu_w_d(9, 0);
     a.ucvtf_d_w(1, 9);
     a.fcmp(0, 1);
     a.b_cond(C_NE, slow);
     // 3. receiver refcount > 1
-    a.ldur(10, 20, -64);
+    a.ldur(10, 20, -40);
     a.ldur(11, 10, strong);
     a.cmp_imm_x(11, 1);
     a.b_cond(C_LS, slow);
@@ -4220,13 +4183,11 @@ fn emit_set_elem_inline(
     a.b_cond(C_LS, slow);
     a.bind(old_plain);
     // --- commit ---
-    // move v into the entry (24 bytes; a refcounted payload moves, not clones)
-    a.ldur(14, 20, -24);
-    a.ldur(16, 20, -16);
-    a.ldur(17, 20, -8);
+    // move v into the entry (16 bytes; a refcounted payload moves, not clones)
+    a.ldur(14, 20, -16);
+    a.ldur(16, 20, -8);
     a.stur(14, 15, ev);
     a.stur(16, 15, ev + 8);
-    a.stur(17, 15, ev + 16);
     // drop the old value (refcounted: strong was > 1, so this never frees)
     let no_old_dec = a.new_label();
     a.cmp_imm_w(9, 6);
@@ -4241,12 +4202,12 @@ fn emit_set_elem_inline(
         a,
         layout,
         11,
-        MirrorKey::StackF64(-40),
-        MirrorVal::Stack(-24),
+        MirrorKey::StackF64(-24),
+        MirrorVal::Stack(-16),
     );
     if keep {
         // v now lives in the slot AND stays on the stack as the result: one bump.
-        a.ldurb(9, 20, -24);
+        a.ldurb(9, 20, -16);
         let nb = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, nb);
@@ -4261,12 +4222,11 @@ fn emit_set_elem_inline(
     a.stur(13, 10, strong);
     if keep {
         // [obj, key, v] → [v]: the result lands at the obj slot
-        a.stur(14, 20, -72);
-        a.stur(16, 20, -64);
-        a.stur(17, 20, -56);
-        a.sub_imm(20, 20, 48);
+        a.stur(14, 20, -48);
+        a.stur(16, 20, -40);
+        a.sub_imm(20, 20, 32);
     } else {
-        a.sub_imm(20, 20, 72);
+        a.sub_imm(20, 20, 48);
     }
     a.b(done);
     a.bind(slow);
@@ -4346,8 +4306,8 @@ fn emit_elem_local_keyed(
     let arr_tag = layout.exotic_array_tag as u32;
     let get = kind == ElemLocalKind::Get;
     debug_assert!(get || key == KeySrc::Stack);
-    // Stack-keyed layout: Get → [key @ -24]; Set* → [key @ -48, v @ -24].
-    let key_off = if get { -24 } else { -48 };
+    // Stack-keyed layout: Get → [key @ -16]; Set* → [key @ -32, v @ -16].
+    let key_off = if get { -16 } else { -32 };
 
     let plain = layout.obj_ic_plain as u32;
     let slow = a.new_label();
@@ -4447,7 +4407,6 @@ fn emit_elem_local_keyed(
         a.b_cond(C_EQ, slow);
         a.ldur(12, 15, ev);
         a.ldur(13, 15, ev + 8);
-        a.ldur(14, 15, ev + 16);
         let nobump = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, nobump);
@@ -4459,9 +4418,8 @@ fn emit_elem_local_keyed(
         match key {
             KeySrc::Stack => {
                 // pop key, push value → result replaces the key slot
-                a.stur(12, 20, -24);
-                a.stur(13, 20, -16);
-                a.stur(14, 20, -8);
+                a.stur(12, 20, -16);
+                a.stur(13, 20, -8);
             }
             KeySrc::Slot(_) | KeySrc::SlotPre(..) => {
                 if let KeySrc::SlotPre(k_off, _) = key {
@@ -4470,15 +4428,14 @@ fn emit_elem_local_keyed(
                 // nothing was on the stack: push the value
                 a.stur(12, 20, 0);
                 a.stur(13, 20, 8);
-                a.stur(14, 20, 16);
-                a.add_imm(20, 20, 24);
+                a.add_imm(20, 20, 16);
             }
         }
     } else {
         guard_prop_writable(a, 9, 15, ew, slow);
         if kind == ElemLocalKind::SetKeep {
             // v is also the expression result: a BigInt can't clone inline.
-            a.ldurb(9, 20, -24);
+            a.ldurb(9, 20, -16);
             a.cmp_imm_w(9, 5);
             a.b_cond(C_EQ, slow);
         }
@@ -4495,12 +4452,10 @@ fn emit_elem_local_keyed(
         a.b_cond(C_LS, slow);
         a.bind(old_plain);
         // --- commit: move v into the entry, drop the old value ---
-        a.ldur(14, 20, -24);
-        a.ldur(16, 20, -16);
-        a.ldur(17, 20, -8);
+        a.ldur(14, 20, -16);
+        a.ldur(16, 20, -8);
         a.stur(14, 15, ev);
         a.stur(16, 15, ev + 8);
-        a.stur(17, 15, ev + 16);
         let no_old_dec = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, no_old_dec);
@@ -4514,11 +4469,11 @@ fn emit_elem_local_keyed(
             layout,
             11,
             MirrorKey::F64InDreg(0),
-            MirrorVal::Stack(-24),
+            MirrorVal::Stack(-16),
         );
         if kind == ElemLocalKind::SetKeep {
             // v now lives in the slot AND stays on the stack: one bump, result at the key slot.
-            a.ldurb(9, 20, -24);
+            a.ldurb(9, 20, -16);
             let nb = a.new_label();
             a.cmp_imm_w(9, 6);
             a.b_cond(C_LO, nb);
@@ -4526,12 +4481,11 @@ fn emit_elem_local_keyed(
             a.add_imm(13, 13, 1);
             a.stur(13, 16, strong);
             a.bind(nb);
-            a.stur(14, 20, -48);
-            a.stur(16, 20, -40);
-            a.stur(17, 20, -32);
-            a.sub_imm(20, 20, 24);
+            a.stur(14, 20, -32);
+            a.stur(16, 20, -24);
+            a.sub_imm(20, 20, 16);
         } else {
-            a.sub_imm(20, 20, 48);
+            a.sub_imm(20, 20, 32);
         }
     }
     a.b(done);
@@ -4595,7 +4549,7 @@ fn build_chain(
     fast: u32,
 ) -> Option<(Vec<(ChainOp, usize)>, usize)> {
     use crate::bytecode::Op;
-    let in_range = |s: u16| (s as u32) * 24 + 16 < 4096;
+    let in_range = |s: u16| (s as u32) * 16 + 16 < 4096;
     let elem_ok = fast & 1024 != 0 && elem_inlinable(layout);
     let name_ok = fast & 8192 != 0 && load_name_inlinable(layout);
     let mut chain: Vec<(ChainOp, usize)> = Vec::new();
@@ -4610,19 +4564,19 @@ fn build_chain(
                 Some(bits) => (ChainOp::ConstNum(bits), 1, 0),
                 None => break,
             },
-            Op::LoadLocal(s) if in_range(*s) => (ChainOp::Load(*s as u32 * 24), 1, 0),
+            Op::LoadLocal(s) if in_range(*s) => (ChainOp::Load(*s as u32 * 16), 1, 0),
             Op::UpdateLocal(s, kind) if in_range(*s) => {
                 let pushes = !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard);
-                (ChainOp::Update(*s as u32 * 24, *kind), pushes as usize, 0)
+                (ChainOp::Update(*s as u32 * 16, *kind), pushes as usize, 0)
             }
             Op::GetElemLocal(x) if elem_ok && in_range(*x) && vdepth >= 1 => {
-                (ChainOp::GetElem(*x as u32 * 24), 1, 1)
+                (ChainOp::GetElem(*x as u32 * 16), 1, 1)
             }
             Op::SetElemLocal(x) if elem_ok && in_range(*x) && vdepth >= 2 => {
-                (ChainOp::SetElem(*x as u32 * 24, true), 1, 2)
+                (ChainOp::SetElem(*x as u32 * 16, true), 1, 2)
             }
             Op::SetElemLocalDrop(x) if elem_ok && in_range(*x) && vdepth >= 2 => {
-                (ChainOp::SetElem(*x as u32 * 24, false), 0, 2)
+                (ChainOp::SetElem(*x as u32 * 16, false), 0, 2)
             }
             Op::Add | Op::Sub | Op::Mul | Op::Div if vdepth >= 2 => {
                 let f = match ops[pc] {
@@ -4647,7 +4601,7 @@ fn build_chain(
             Op::Neg if vdepth >= 1 => (ChainOp::Neg, 1, 1),
             Op::StoreLocal(s) if in_range(*s) => {
                 if vdepth >= 1 {
-                    (ChainOp::Store(*s as u32 * 24), 0, 1)
+                    (ChainOp::Store(*s as u32 * 16), 0, 1)
                 } else {
                     break;
                 }
@@ -5127,11 +5081,10 @@ fn emit_chain(
                     a.cmp_imm_x(13, 1);
                     a.b_cond(C_LS, guard!());
                     a.bind(old_plain);
-                    // commit: entry = Num(dv); zero the third word; drop the old value
+                    // commit: entry = Num(dv); drop the old value
                     a.movz(9, 4, 0);
                     a.stur(9, 15, ev);
                     a.stur_d(dv, 15, ev + 8);
-                    a.stur(31, 15, ev + 16);
                     let no_dec = a.new_label();
                     a.cmp_imm_w(14, 6);
                     a.b_cond(C_LO, no_dec);
@@ -5238,7 +5191,6 @@ fn emit_chain(
                 a.movz(9, 4, 0);
                 a.str_imm(9, 22, off);
                 a.str_d_imm(dv, 22, off + 8);
-                a.str_imm(31, 22, off + 16);
                 free.push(dv);
             }
             ChainOp::Pop => {
@@ -5281,8 +5233,7 @@ fn emit_chain(
         a.movz(9, 4, 0);
         a.stur(9, 20, 0);
         a.stur_d(r, 20, 8);
-        a.stur(31, 20, 16);
-        a.add_imm(20, 20, 24);
+        a.add_imm(20, 20, 16);
     }
     a.b(done);
     // ---- bail paths: spill the pre-op virtual stack, then re-run the rest via the helper ----
@@ -5292,8 +5243,7 @@ fn emit_chain(
             a.movz(9, 4, 0);
             a.stur(9, 20, 0);
             a.stur_d(r, 20, 8);
-            a.stur(31, 20, 16);
-            a.add_imm(20, 20, 24);
+            a.add_imm(20, 20, 16);
         }
         for (cop2, pc2) in &chain[idx..] {
             match cop2 {
@@ -5505,7 +5455,7 @@ fn plan_loop(
             return None;
         }};
     }
-    let in_range = |s: u16| (s as u32) * 24 + 16 < 4096;
+    let in_range = |s: u16| (s as u32) * 16 + 16 < 4096;
     let name_ok = fast & 8192 != 0 && load_name_inlinable(layout);
 
     // ---- region discovery: a unique back-edge Jump(head), nothing else targeting the interior
@@ -5544,19 +5494,19 @@ fn plan_loop(
                 Some(bits) => (ChainOp::ConstNum(bits), 1, 0),
                 None => return None,
             },
-            Op::LoadLocal(s) if in_range(*s) => (ChainOp::Load(*s as u32 * 24), 1, 0),
+            Op::LoadLocal(s) if in_range(*s) => (ChainOp::Load(*s as u32 * 16), 1, 0),
             Op::UpdateLocal(s, kind) if in_range(*s) => {
                 let pushes = !matches!(kind, UpdKind::IncDiscard | UpdKind::DecDiscard);
-                (ChainOp::Update(*s as u32 * 24, *kind), pushes as usize, 0)
+                (ChainOp::Update(*s as u32 * 16, *kind), pushes as usize, 0)
             }
             Op::GetElemLocal(x) if in_range(*x) && vdepth >= 1 => {
-                (ChainOp::GetElem(*x as u32 * 24), 1, 1)
+                (ChainOp::GetElem(*x as u32 * 16), 1, 1)
             }
             Op::SetElemLocal(x) if in_range(*x) && vdepth >= 2 => {
-                (ChainOp::SetElem(*x as u32 * 24, true), 1, 2)
+                (ChainOp::SetElem(*x as u32 * 16, true), 1, 2)
             }
             Op::SetElemLocalDrop(x) if in_range(*x) && vdepth >= 2 => {
-                (ChainOp::SetElem(*x as u32 * 24, false), 0, 2)
+                (ChainOp::SetElem(*x as u32 * 16, false), 0, 2)
             }
             Op::Add | Op::Sub | Op::Mul | Op::Div if vdepth >= 2 => {
                 let f = match ops[pc] {
@@ -5580,7 +5530,7 @@ fn plan_loop(
             }
             Op::Neg if vdepth >= 1 => (ChainOp::Neg, 1, 1),
             Op::StoreLocal(s) if in_range(*s) && vdepth >= 1 => {
-                (ChainOp::Store(*s as u32 * 24), 0, 1)
+                (ChainOp::Store(*s as u32 * 16), 0, 1)
             }
             Op::Pop if vdepth >= 1 => (ChainOp::Pop, 0, 1),
             Op::Dup if vdepth >= 1 => (ChainOp::Dup, 1, 0),
@@ -6340,7 +6290,7 @@ fn plan_loop(
             match demote {
                 Some(off) => {
                     if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
-                        eprintln!("[jit-loop] head {head}: demote I slot {}", off / 24);
+                        eprintln!("[jit-loop] head {head}: demote I slot {}", off / 16);
                     }
                     i_slots.retain(|&o| o != off);
                     slot_exp_head.remove(&off);
@@ -6390,7 +6340,7 @@ fn plan_loop(
                     if std::env::var_os("LUMEN_JIT_LOOPLOG").is_some() {
                         eprintln!(
                             "[jit-loop] head {head}: demote I slot {} ({})",
-                            v / 24,
+                            v / 16,
                             if over { "pressure" } else { "pin" }
                         );
                     }
@@ -7325,7 +7275,6 @@ fn emit_loop_chain(
                             a.movz(9, 4, 0);
                             a.stur(9, 15, ev);
                             a.stur_d(2, 15, ev + 8);
-                            a.stur(31, 15, ev + 16);
                             let no_dec = a.new_label();
                             a.cmp_imm_w(14, 6);
                             a.b_cond(C_LO, no_dec);
@@ -7528,7 +7477,6 @@ fn emit_loop_chain(
                                 a.movz(9, 4, 0);
                                 a.str_imm(9, 22, off);
                                 a.str_d_imm(dv, 22, off + 8);
-                                a.str_imm(31, 22, off + 16);
                                 dead.push(LV::D(dv, false));
                             }
                         }
@@ -7690,7 +7638,6 @@ fn emit_loop_chain(
                 a.movz(9, 4, 0);
                 a.str_imm(9, 22, s.off);
                 a.str_d_imm(d, 22, s.off + 8);
-                a.str_imm(31, 22, s.off + 16);
             } else {
                 a.str_d_imm(d, 22, s.off + 8);
             }
@@ -7736,8 +7683,7 @@ fn emit_loop_chain(
                     a.stur_d(d, 20, 8);
                 }
             }
-            a.stur(31, 20, 16);
-            a.add_imm(20, 20, 24);
+            a.add_imm(20, 20, 16);
         }
         emit_flush(a, &seen);
         if plan.uses_ext {

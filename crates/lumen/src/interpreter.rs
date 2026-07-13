@@ -1194,7 +1194,7 @@ pub const MAX_EVAL_DEPTH: u32 = 128;
 pub const MAX_LIVE: i64 = 3_000_000;
 
 /// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
-pub const GC_TRIGGER: i64 = 200_000;
+pub const GC_TRIGGER: i64 = 100_000;
 /// Scope-registry entry count that arms a registry prune.
 const SCOPE_GC_TRIGGER: usize = 65_536;
 
@@ -4450,8 +4450,14 @@ impl Interp {
         // Sweep: clear unmarked (garbage) objects to break their cycles; once `live` drops, their
         // refcounts hit zero and they are freed. Also evict them from pointer-keyed side tables so a
         // future object reusing the address can't inherit stale metadata.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut garbage = 0usize;
         for o in &live {
             if !o.borrow().gc_mark.get() {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    garbage += 1;
+                }
                 let ptr = Rc::as_ptr(o) as usize;
                 self.class_info.remove(&ptr);
                 self.map_data.remove(&ptr);
@@ -4488,6 +4494,15 @@ impl Interp {
                 b.parent = None;
                 b.with_obj = None;
             }
+        }
+        // Release the snapshot handles first: only then do swept objects and their property
+        // buffers reach the allocator's free lists. A high threshold confines the expensive
+        // platform pressure-relief call to phase changes, not ordinary generational churn.
+        drop(live);
+        drop(scopes);
+        #[cfg(not(target_arch = "wasm32"))]
+        if garbage >= 50_000 {
+            crate::fastalloc::trim();
         }
     }
 

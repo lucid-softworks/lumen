@@ -6,11 +6,14 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
-pub struct JsBigInt {
+pub struct JsBigInt(Rc<BigIntData>);
+
+#[derive(Debug)]
+struct BigIntData {
     /// True for negative values. Zero is always non-negative with an empty magnitude.
     neg: bool,
     /// Little-endian base-2^64 digits, no trailing zero limbs.
-    mag: Rc<Vec<u64>>,
+    mag: Vec<u64>,
 }
 
 fn trim(mut mag: Vec<u64>) -> Vec<u64> {
@@ -128,17 +131,17 @@ fn mag_divmod(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
 
 impl JsBigInt {
     pub fn zero() -> Self {
-        JsBigInt {
+        JsBigInt(Rc::new(BigIntData {
             neg: false,
-            mag: Rc::new(Vec::new()),
-        }
+            mag: Vec::new(),
+        }))
     }
     fn make(neg: bool, mag: Vec<u64>) -> Self {
         let mag = trim(mag);
-        JsBigInt {
+        JsBigInt(Rc::new(BigIntData {
             neg: neg && !mag.is_empty(),
-            mag: Rc::new(mag),
-        }
+            mag,
+        }))
     }
     pub fn from_i128(v: i128) -> Self {
         let neg = v < 0;
@@ -150,13 +153,13 @@ impl JsBigInt {
     }
     /// The value as an i128, if it fits.
     pub fn to_i128(&self) -> Option<i128> {
-        if self.mag.len() > 2 {
+        if self.0.mag.len() > 2 {
             return None;
         }
-        let lo = *self.mag.first().unwrap_or(&0) as u128;
-        let hi = *self.mag.get(1).unwrap_or(&0) as u128;
+        let lo = *self.0.mag.first().unwrap_or(&0) as u128;
+        let hi = *self.0.mag.get(1).unwrap_or(&0) as u128;
         let u = (hi << 64) | lo;
-        if self.neg {
+        if self.0.neg {
             if u > 1u128 << 127 {
                 return None;
             }
@@ -170,40 +173,40 @@ impl JsBigInt {
     }
     /// The low 128 bits, two's-complement wrapped (for fixed-width storage like BigInt64Array).
     pub fn to_i128_wrapping(&self) -> i128 {
-        let lo = *self.mag.first().unwrap_or(&0) as u128;
-        let hi = *self.mag.get(1).unwrap_or(&0) as u128;
+        let lo = *self.0.mag.first().unwrap_or(&0) as u128;
+        let hi = *self.0.mag.get(1).unwrap_or(&0) as u128;
         let u = (hi << 64) | lo;
         let v = u as i128;
-        if self.neg {
+        if self.0.neg {
             v.wrapping_neg()
         } else {
             v
         }
     }
     pub fn is_zero(&self) -> bool {
-        self.mag.is_empty()
+        self.0.mag.is_empty()
     }
     pub fn is_negative(&self) -> bool {
-        self.neg
+        self.0.neg
     }
     pub fn bit_len(&self) -> usize {
-        match self.mag.last() {
+        match self.0.mag.last() {
             None => 0,
-            Some(&top) => (self.mag.len() - 1) * 64 + (64 - top.leading_zeros() as usize),
+            Some(&top) => (self.0.mag.len() - 1) * 64 + (64 - top.leading_zeros() as usize),
         }
     }
 
     pub fn neg(&self) -> Self {
-        Self::make(!self.neg, self.mag.as_ref().clone())
+        Self::make(!self.0.neg, self.0.mag.clone())
     }
     pub fn add(&self, o: &Self) -> Self {
-        if self.neg == o.neg {
-            Self::make(self.neg, mag_add(&self.mag, &o.mag))
+        if self.0.neg == o.0.neg {
+            Self::make(self.0.neg, mag_add(&self.0.mag, &o.0.mag))
         } else {
-            match mag_cmp(&self.mag, &o.mag) {
+            match mag_cmp(&self.0.mag, &o.0.mag) {
                 Ordering::Equal => Self::zero(),
-                Ordering::Greater => Self::make(self.neg, mag_sub(&self.mag, &o.mag)),
-                Ordering::Less => Self::make(o.neg, mag_sub(&o.mag, &self.mag)),
+                Ordering::Greater => Self::make(self.0.neg, mag_sub(&self.0.mag, &o.0.mag)),
+                Ordering::Less => Self::make(o.0.neg, mag_sub(&o.0.mag, &self.0.mag)),
             }
         }
     }
@@ -211,27 +214,27 @@ impl JsBigInt {
         self.add(&o.neg())
     }
     pub fn mul(&self, o: &Self) -> Self {
-        Self::make(self.neg != o.neg, mag_mul(&self.mag, &o.mag))
+        Self::make(self.0.neg != o.0.neg, mag_mul(&self.0.mag, &o.0.mag))
     }
     /// Truncating division; `None` on division by zero.
     pub fn div(&self, o: &Self) -> Option<Self> {
         if o.is_zero() {
             return None;
         }
-        let (q, _) = mag_divmod(&self.mag, &o.mag);
-        Some(Self::make(self.neg != o.neg, q))
+        let (q, _) = mag_divmod(&self.0.mag, &o.0.mag);
+        Some(Self::make(self.0.neg != o.0.neg, q))
     }
     /// Remainder with the dividend's sign; `None` on division by zero.
     pub fn rem(&self, o: &Self) -> Option<Self> {
         if o.is_zero() {
             return None;
         }
-        let (_, r) = mag_divmod(&self.mag, &o.mag);
-        Some(Self::make(self.neg, r))
+        let (_, r) = mag_divmod(&self.0.mag, &o.0.mag);
+        Some(Self::make(self.0.neg, r))
     }
     /// Exponentiation; `None` for a negative exponent.
     pub fn pow(&self, o: &Self) -> Option<Self> {
-        if o.neg {
+        if o.0.neg {
             return None;
         }
         let mut e = o.to_i128().unwrap_or(i128::MAX) as u128;
@@ -257,7 +260,7 @@ impl JsBigInt {
         let bits = (count % 64) as u32;
         let mut mag = vec![0u64; limbs];
         let mut carry = 0u64;
-        for &d in self.mag.iter() {
+        for &d in self.0.mag.iter() {
             if bits == 0 {
                 mag.push(d);
             } else {
@@ -268,21 +271,21 @@ impl JsBigInt {
         if carry != 0 {
             mag.push(carry);
         }
-        Self::make(self.neg, mag)
+        Self::make(self.0.neg, mag)
     }
     /// Arithmetic right shift (floors toward negative infinity).
     pub fn shr(&self, count: u64) -> Self {
         let limbs = (count / 64) as usize;
         let bits = (count % 64) as u32;
-        if limbs >= self.mag.len() {
-            return if self.neg {
+        if limbs >= self.0.mag.len() {
+            return if self.0.neg {
                 Self::from_i128(-1)
             } else {
                 Self::zero()
             };
         }
-        let mut mag: Vec<u64> = self.mag[limbs..].to_vec();
-        let mut lost = self.mag[..limbs].iter().any(|&d| d != 0);
+        let mut mag: Vec<u64> = self.0.mag[limbs..].to_vec();
+        let mut lost = self.0.mag[..limbs].iter().any(|&d| d != 0);
         if bits != 0 {
             let mut prev = 0u64;
             if mag.first().map(|d| d & ((1 << bits) - 1) != 0) == Some(true) {
@@ -294,9 +297,9 @@ impl JsBigInt {
                 prev = cur;
             }
         }
-        let out = Self::make(self.neg, mag);
+        let out = Self::make(self.0.neg, mag);
         // Negative values floor: any lost bit rounds away from zero.
-        if self.neg && lost {
+        if self.0.neg && lost {
             out.sub(&Self::from_u64(1))
         } else {
             out
@@ -318,7 +321,7 @@ impl JsBigInt {
     }
     /// Bitwise op over two's-complement representations of arbitrary width.
     fn bitop(&self, o: &Self, f: fn(u64, u64) -> u64) -> Self {
-        let n = self.mag.len().max(o.mag.len()) + 1;
+        let n = self.0.mag.len().max(o.0.mag.len()) + 1;
         let a = self.twos(n);
         let b = o.twos(n);
         let out: Vec<u64> = (0..n).map(|i| f(a[i], b[i])).collect();
@@ -326,10 +329,10 @@ impl JsBigInt {
     }
     fn twos(&self, n: usize) -> Vec<u64> {
         let mut v = vec![0u64; n];
-        for (i, &d) in self.mag.iter().enumerate() {
+        for (i, &d) in self.0.mag.iter().enumerate() {
             v[i] = d;
         }
-        if self.neg {
+        if self.0.neg {
             for d in v.iter_mut() {
                 *d = !*d;
             }
@@ -366,11 +369,11 @@ impl JsBigInt {
     }
 
     pub fn cmp(&self, o: &Self) -> Ordering {
-        match (self.neg, o.neg) {
+        match (self.0.neg, o.0.neg) {
             (false, true) => Ordering::Greater,
             (true, false) => Ordering::Less,
-            (false, false) => mag_cmp(&self.mag, &o.mag),
-            (true, true) => mag_cmp(&o.mag, &self.mag),
+            (false, false) => mag_cmp(&self.0.mag, &o.0.mag),
+            (true, true) => mag_cmp(&o.0.mag, &self.0.mag),
         }
     }
     /// Exact comparison with a finite f64 (NaN/±∞ handled by the caller).
@@ -433,19 +436,16 @@ impl JsBigInt {
         if bl == 0 {
             return 0.0;
         }
-        let sign = if self.neg { -1.0 } else { 1.0 };
+        let sign = if self.0.neg { -1.0 } else { 1.0 };
         if bl <= 64 {
-            return self.mag[0] as f64 * sign;
+            return self.0.mag[0] as f64 * sign;
         }
         // Work on the magnitude (`shr`/`shl` are arithmetic and would skew a negative value).
-        let mag = Self {
-            neg: false,
-            mag: self.mag.clone(),
-        };
+        let mag = Self::make(false, self.0.mag.clone());
         // Take the top 54 bits; round to 53 with a sticky bit for the rest.
         let shift = (bl - 54) as u64;
         let head_big = mag.shr(shift);
-        let head = *head_big.mag.first().unwrap_or(&0); // 54 bits
+        let head = *head_big.0.mag.first().unwrap_or(&0); // 54 bits
         let sticky = head_big.shl(shift).cmp(&mag) != std::cmp::Ordering::Equal;
         let q = head >> 1;
         let round = head & 1 == 1;
@@ -483,7 +483,7 @@ impl JsBigInt {
             return "0".to_string();
         }
         let mut digits = Vec::new();
-        let mut cur = self.mag.as_ref().clone();
+        let mut cur = self.0.mag.clone();
         let r = vec![radix as u64];
         while !cur.is_empty() {
             let (q, rem) = mag_divmod(&cur, &r);
@@ -491,7 +491,7 @@ impl JsBigInt {
             digits.push(std::char::from_digit(d, radix).unwrap());
             cur = q;
         }
-        if self.neg {
+        if self.0.neg {
             digits.push('-');
         }
         digits.iter().rev().collect()
@@ -506,15 +506,15 @@ impl std::fmt::Display for JsBigInt {
 
 impl PartialEq for JsBigInt {
     fn eq(&self, other: &Self) -> bool {
-        self.neg == other.neg && self.mag == other.mag
+        self.0.neg == other.0.neg && self.0.mag == other.0.mag
     }
 }
 impl Eq for JsBigInt {}
 
 impl std::hash::Hash for JsBigInt {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.neg.hash(state);
-        self.mag.hash(state);
+        self.0.neg.hash(state);
+        self.0.mag.hash(state);
     }
 }
 

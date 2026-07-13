@@ -104,7 +104,7 @@ pub struct JitLayout {
     pub obj_ic_plain: usize,
     /// `Rc::as_ptr(env)` → the scope's `VarMap` generation counter (through the `RefCell`).
     pub scope_gen: usize,
-    /// `value` within a `Binding` (the LoadName template's 24-byte copy source).
+    /// `value` within a `Binding` (the LoadName template's 16-byte copy source).
     pub binding_value: usize,
     /// `initialized` bool within a `Binding` (TDZ check).
     pub binding_init: usize,

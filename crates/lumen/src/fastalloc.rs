@@ -40,16 +40,7 @@ struct Cache {
 
 impl Drop for Cache {
     fn drop(&mut self) {
-        for (k, head) in self.heads.iter().enumerate() {
-            let layout = class_layout(k);
-            let mut p = head.get();
-            while !p.is_null() {
-                let next = unsafe { *(p as *mut *mut u8) };
-                unsafe { System.dealloc(p, layout) };
-                p = next;
-            }
-            head.set(std::ptr::null_mut());
-        }
+        drain(self);
     }
 }
 
@@ -78,6 +69,35 @@ fn class_layout(class: usize) -> Layout {
 #[inline]
 fn class_cap(class: usize) -> usize {
     BYTES_PER_CLASS / ((class + 1) * STEP)
+}
+
+fn drain(cache: &Cache) {
+    for (k, head) in cache.heads.iter().enumerate() {
+        let layout = class_layout(k);
+        let mut p = head.replace(std::ptr::null_mut());
+        cache.counts[k].set(0);
+        while !p.is_null() {
+            let next = unsafe { *(p as *mut *mut u8) };
+            unsafe { System.dealloc(p, layout) };
+            p = next;
+        }
+    }
+}
+
+/// Return cached small blocks to the system and ask the platform allocator to release unused
+/// pages. Called only after a major GC: doing this on every collection would throw away the hot
+/// allocation cache and turn steady-state churn back into malloc/free traffic.
+pub(crate) fn trim() {
+    let _ = CACHE.try_with(drain);
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        // A null zone requests pressure relief from every registered malloc zone (including the
+        // nano/tiny zones that may own allocations returned by `System`).
+        let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
 }
 
 /// See the module docs.
