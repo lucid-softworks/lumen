@@ -103,6 +103,14 @@ type SerializeFn = unsafe extern "C" fn(*mut c_void, *const c_char, *mut i64, c_
 type DeserializeFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut u8, i64, i64, c_int) -> c_int;
 type Malloc64 = unsafe extern "C" fn(u64) -> *mut c_void;
+type EnableLoadExtension = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
+type LoadExtension = unsafe extern "C" fn(
+    *mut c_void,
+    *const c_char,
+    *const c_char,
+    *mut *mut c_char,
+) -> c_int;
+type FileControl = unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *mut c_void) -> c_int;
 
 /// Every libsqlite3 entry point we resolve, kept alongside the [`DynLib`] that owns them (dropping
 /// the lib would dangle every pointer, so it lives as long as the API).
@@ -143,6 +151,9 @@ struct Api {
     serialize: Option<SerializeFn>,
     deserialize: Option<DeserializeFn>,
     malloc64: Option<Malloc64>,
+    enable_load_extension: Option<EnableLoadExtension>,
+    load_extension: Option<LoadExtension>,
+    file_control: FileControl,
 }
 
 /// Resolve `$name` from `$lib` and `transmute` it to type `$t`, or bail with a message naming the
@@ -161,7 +172,7 @@ impl Api {
     /// `dlopen` the system libsqlite3 and resolve every entry point. The candidate list is the
     /// platform's canonical install location(s); a miss (no SQLite on the box, or too old) is an
     /// honest error the constructor surfaces.
-    fn load() -> Result<Api, String> {
+    fn load(custom_path: Option<&str>) -> Result<Api, String> {
         #[cfg(target_os = "macos")]
         let candidates: &[&str] = &["/usr/lib/libsqlite3.dylib", "libsqlite3.dylib"];
         #[cfg(target_os = "linux")]
@@ -171,15 +182,19 @@ impl Api {
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let candidates: &[&str] = &["libsqlite3.so.0", "libsqlite3.so", "libsqlite3.dylib"];
 
-        let mut last_err = String::from("no candidate paths");
-        let lib = 'found: {
-            for path in candidates {
-                match DynLib::open(path) {
-                    Ok(l) => break 'found l,
-                    Err(e) => last_err = e,
+        let lib = if let Some(path) = custom_path {
+            DynLib::open(path)
+                .map_err(|error| format!("could not load custom libsqlite3 '{path}' ({error})"))?
+        } else {
+            let mut last_err = String::from("no candidate paths");
+            let found = candidates.iter().find_map(|path| match DynLib::open(path) {
+                Ok(lib) => Some(lib),
+                Err(error) => {
+                    last_err = error;
+                    None
                 }
-            }
-            return Err(format!("could not load the system libsqlite3 ({last_err})"));
+            });
+            found.ok_or_else(|| format!("could not load the system libsqlite3 ({last_err})"))?
         };
 
         Ok(Api {
@@ -226,6 +241,13 @@ impl Api {
             malloc64: lib
                 .symbol("sqlite3_malloc64")
                 .map(|p| unsafe { std::mem::transmute::<*mut c_void, Malloc64>(p) }),
+            enable_load_extension: lib.symbol("sqlite3_enable_load_extension").map(|p| unsafe {
+                std::mem::transmute::<*mut c_void, EnableLoadExtension>(p)
+            }),
+            load_extension: lib.symbol("sqlite3_load_extension").map(|p| unsafe {
+                std::mem::transmute::<*mut c_void, LoadExtension>(p)
+            }),
+            file_control: sym!(lib, "sqlite3_file_control", FileControl),
             _lib: lib,
         })
     }
@@ -248,6 +270,7 @@ struct Stmt {
 #[derive(Default)]
 struct SqliteState {
     api: Option<Api>,
+    custom_path: Option<String>,
     next: u32,
     dbs: HashMap<u32, Db>,
     stmts: HashMap<u32, Stmt>,
@@ -271,7 +294,8 @@ fn state(ctx: &mut Ctx) -> &mut SqliteState {
 /// Ensure the libsqlite3 API is loaded, returning an honest JS error if it cannot be.
 fn ensure_api(ctx: &mut Ctx) -> Result<(), Value> {
     if state(ctx).api.is_none() {
-        match Api::load() {
+        let custom_path = state(ctx).custom_path.clone();
+        match Api::load(custom_path.as_deref()) {
             Ok(api) => state(ctx).api = Some(api),
             Err(e) => return Err(ctx.make_error("Error", format!("bun:sqlite unavailable: {e}"))),
         }
@@ -301,6 +325,9 @@ pub const SQLITE_OPS: &[OpDecl] = ops![
     "libversion" (0) => op_libversion,
     "serialize" (1) => op_serialize,
     "deserialize" (1) => op_deserialize,
+    "setCustomSQLite" (1) => op_set_custom_sqlite,
+    "loadExtension" (2) => op_load_extension,
+    "fileControl" (3) => op_file_control,
 ];
 
 // ---- helpers ---------------------------------------------------------------------------------
@@ -858,6 +885,95 @@ fn op_libversion(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Val
     let api = state(ctx).api.as_ref().unwrap();
     let v = unsafe { cstr((api.libversion)()) };
     Ok(Value::from_string(v))
+}
+
+fn op_set_custom_sqlite(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let path = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    if !std::path::Path::new(&path).is_file() {
+        return Err(ctx.make_error(
+            "Error",
+            format!("Database.setCustomSQLite library not found: {path}"),
+        ));
+    }
+    let sqlite = state(ctx);
+    if sqlite.api.is_some() || !sqlite.dbs.is_empty() {
+        return Err(ctx.make_error(
+            "Error",
+            "Database.setCustomSQLite must be called before opening a database",
+        ));
+    }
+    sqlite.custom_path = Some(path);
+    Ok(Value::Undefined)
+}
+
+fn op_load_extension(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = arg_u32(args, 0);
+    let db = db_ptr(ctx, id)?;
+    let path = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let path = std::ffi::CString::new(path)
+        .map_err(|_| ctx.make_error("TypeError", "extension path contains a null byte"))?;
+    let (enable, load, free) = {
+        let api = state(ctx).api.as_ref().unwrap();
+        (api.enable_load_extension, api.load_extension, api.free)
+    };
+    let (Some(enable), Some(load)) = (enable, load) else {
+        return Err(ctx.make_error(
+            "Error",
+            "the loaded SQLite library does not support extensions",
+        ));
+    };
+    let enabled = unsafe { enable(db, 1) };
+    if enabled != SQLITE_OK {
+        return Err(db_error(ctx, db, "unable to enable SQLite extensions"));
+    }
+    let mut message: *mut c_char = std::ptr::null_mut();
+    let rc = unsafe { load(db, path.as_ptr(), std::ptr::null(), &mut message) };
+    if rc != SQLITE_OK {
+        let text = unsafe { cstr(message) };
+        if !message.is_null() {
+            unsafe { free(message as *mut c_void) };
+        }
+        return Err(sqlite_err(
+            ctx,
+            rc,
+            if text.is_empty() {
+                "unable to load SQLite extension".to_string()
+            } else {
+                text
+            },
+        ));
+    }
+    Ok(Value::Undefined)
+}
+
+fn op_file_control(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = arg_u32(args, 0);
+    let command = arg_i32(args, 1);
+    let db = db_ptr(ctx, id)?;
+    let file_control = state(ctx).api.as_ref().unwrap().file_control;
+    let value = args.get(2).unwrap_or(&Value::Undefined);
+    let mut number = value.as_num_opt().unwrap_or(0.0) as i32;
+    let pointer = if matches!(value, Value::Undefined | Value::Null) {
+        std::ptr::null_mut()
+    } else if value.as_num_opt().is_some() {
+        &mut number as *mut i32 as *mut c_void
+    } else if let Some((_kind, _len, ptr)) = ctx.typed_array_raw(value) {
+        ptr as *mut c_void
+    } else {
+        return Err(ctx.make_error(
+            "TypeError",
+            "Database.fileControl value must be a number, TypedArray, null, or undefined",
+        ));
+    };
+    let rc = unsafe { file_control(db, std::ptr::null(), command, pointer) };
+    if rc != SQLITE_OK {
+        return Err(db_error(ctx, db, "sqlite3_file_control failed"));
+    }
+    Ok(Value::Undefined)
 }
 
 /// `serialize(dbId) -> Uint8Array` — a byte-for-byte snapshot of the main database (what a

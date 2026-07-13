@@ -345,6 +345,28 @@ fn bun_jsc_uses_live_heap_gc_and_microtask_instrumentation() {
 }
 
 #[test]
+fn bun_sqlite_file_control_reaches_native_sqlite() {
+    let dir = TempDir::new("sqlite-file-control");
+    let database = dir.path("control.sqlite");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const {{ Database, constants }} = require("bun:sqlite");
+            const db = new Database({database:?}, {{ create: true }});
+            db.run("PRAGMA journal_mode=WAL");
+            console.log(db.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, 0) === undefined);
+            try {{ db.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, {{}}); }}
+            catch (error) {{ console.log(error.name); }}
+            db.close();
+            "#,
+        ),
+    );
+    assert_eq!(out.lines(), ["true", "TypeError"]);
+}
+
+#[test]
 fn async_await_settles_before_loop_exit() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

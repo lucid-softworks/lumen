@@ -375,10 +375,8 @@
       return new Database(bytes);
     }
 
-    static setCustomSQLite(_path) {
-      throw new Error(
-        "Database.setCustomSQLite is not supported in lumen (the system libsqlite3 is always used)",
-      );
+    static setCustomSQLite(path) {
+      return S.setCustomSQLite(String(path));
     }
 
     query(sql) {
@@ -468,14 +466,14 @@
       return typeof Buffer !== "undefined" ? Buffer.from(bytes) : bytes;
     }
 
-    loadExtension(_name) {
-      throw new Error(
-        "Database.loadExtension is not supported in lumen (the system libsqlite3 disables extension loading)",
-      );
+    loadExtension(name) {
+      if (!this._open) throw new Error("Database has closed");
+      try { return S.loadExtension(this._id, String(name)); } catch (e) { rethrow(e); }
     }
 
-    fileControl() {
-      throw new Error("Database.fileControl is not supported in lumen");
+    fileControl(command, value) {
+      if (!this._open) throw new Error("Database has closed");
+      try { return S.fileControl(this._id, Number(command), value); } catch (e) { rethrow(e); }
     }
 
     close() {
