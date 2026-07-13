@@ -723,9 +723,11 @@ pub struct Props {
     entries: Vec<(Rc<str>, Property)>,
     /// Allocated only after the small-map threshold is crossed. Keeping the empty hash table
     /// inline cost every object 32 bytes even though nearly all objects stay on linear lookup;
-    /// boxing the rare large-map case also leaves room for compact dense-element storage without
-    /// growing `Object` out of its allocator size class.
+    /// boxing keeps that rare large-map cost off ordinary objects.
     index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
+    /// Dense properties without per-element key/slot metadata. Used for small numeric literals;
+    /// `Value::Empty` marks a hole. Named and far-index properties remain in `entries`.
+    packed: Option<Box<Vec<Property>>>,
     /// This object serves (or once served) as some object's prototype: structural changes to it
     /// bump the global [`proto_epoch`], invalidating every property-*creation* inline cache
     /// (their fill-time chain walks proved "no hop shadows this name" — see
@@ -949,6 +951,7 @@ impl Props {
         Props {
             entries: Vec::new(),
             index: None,
+            packed: None,
             shape: SHAPE_EMPTY,
             elems: Vec::new(),
             mirror: Vec::new(),
@@ -967,9 +970,16 @@ impl Props {
     /// also keep the raw-f64 mirror; object arrays invalidate it on their first element, so
     /// reserving mirror storage for those would be pure waste.
     pub(crate) fn reserve_dense_exact(&mut self, len: usize, numeric: bool) {
-        self.entries.reserve_exact(len.saturating_add(1));
-        self.elems.reserve_exact(len);
-        if numeric {
+        // Keep the range narrow so large numeric work arrays retain the JIT mirror fast path.
+        if numeric && (8..=32).contains(&len) {
+            self.entries.reserve_exact(1); // own `length`
+            self.packed = Some(Box::new(Vec::with_capacity(len)));
+            self.mirror_flags = 0;
+        } else {
+            self.entries.reserve_exact(len.saturating_add(1));
+            self.elems.reserve_exact(len);
+        }
+        if numeric && self.packed.is_none() {
             self.mirror.reserve_exact(len);
         }
     }
@@ -1019,6 +1029,9 @@ impl Props {
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
     #[inline]
     pub(crate) fn get_index(&self, n: u32) -> Option<&Property> {
+        if let Some(packed) = &self.packed {
+            return packed.get(n as usize).filter(|p| !matches!(p.value, Value::Empty));
+        }
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
@@ -1031,6 +1044,9 @@ impl Props {
     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
         // A raw &mut escape can rewrite the value behind the mirror's back.
         self.mirror_invalidate();
+        if let Some(packed) = &mut self.packed {
+            return packed.get_mut(n as usize).filter(|p| !matches!(p.value, Value::Empty));
+        }
         let slot = *self.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
@@ -1126,6 +1142,14 @@ impl Props {
     /// generic path.
     #[inline]
     pub(crate) fn set_index_value(&mut self, n: u32, v: Value) -> Result<(), Value> {
+        if let Some(packed) = &mut self.packed {
+            let Some(p) = packed.get_mut(n as usize) else { return Err(v) };
+            if matches!(p.value, Value::Empty) || p.accessor || !p.writable {
+                return Err(v);
+            }
+            p.value = v;
+            return Ok(());
+        }
         let Some(&slot) = self.elems.get(n as usize) else {
             return Err(v);
         };
@@ -1216,6 +1240,14 @@ impl Props {
     /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
     /// the gates don't hold; the caller runs the generic path.
     pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
+        if let Some(packed) = &self.packed {
+            if self.has_far.get() || !self.elem_mode.get() || n as usize != packed.len() {
+                return false;
+            }
+            self.note_structural();
+            self.packed.as_mut().unwrap().push(prop);
+            return true;
+        }
         if self.has_far.get() || !self.elem_mode.get() || n as usize != self.elems.len() {
             return false;
         }
@@ -1239,6 +1271,17 @@ impl Props {
     pub(crate) fn pop_last_element(&mut self, n: u32) -> Option<Value> {
         if self.has_far.get() || !self.elem_mode.get() {
             return None;
+        }
+        if let Some(packed) = &self.packed {
+            if n as usize + 1 != packed.len() {
+                return None;
+            }
+            let p = packed.last()?;
+            if matches!(p.value, Value::Empty) || p.accessor || !p.configurable {
+                return None;
+            }
+            self.note_structural();
+            return self.packed.as_mut().unwrap().pop().map(|p| p.value);
         }
         if n as usize + 1 != self.elems.len() {
             return None;
@@ -1319,9 +1362,21 @@ impl Props {
         self.index = Some(index);
     }
     pub(crate) fn get(&self, key: &str) -> Option<&Property> {
+        if let Some(n) = canonical_index(key) {
+            if let Some(p) = self.get_index(n) {
+                return Some(p);
+            }
+        }
         self.find(key).map(|i| &self.entries[i].1)
     }
     pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut Property> {
+        if let Some(n) = canonical_index(key) {
+            if self.packed.as_ref().and_then(|p| p.get(n as usize))
+                .is_some_and(|p| !matches!(p.value, Value::Empty))
+            {
+                return self.packed.as_mut().and_then(|p| p.get_mut(n as usize));
+            }
+        }
         if key.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
             self.mirror_invalidate(); // could be an element (see `mirror`)
         }
@@ -1331,7 +1386,7 @@ impl Props {
         }
     }
     pub(crate) fn contains(&self, key: &str) -> bool {
-        self.find(key).is_some()
+        self.get(key).is_some()
     }
     /// The `entries` slot for `key`, or `None`. Backs the bytecode property inline cache: a hit
     /// records the slot so the next access can skip the lookup (see `Interp::try_ic_get`).
@@ -1362,6 +1417,7 @@ impl Props {
         self.note_structural();
         self.entries.clear();
         self.index = None;
+        self.packed = None;
         self.elems.clear();
         self.mirror.clear();
         self.mirror_flags = MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES;
@@ -1375,6 +1431,10 @@ impl Props {
     /// key-string allocation. Only valid on a Props whose entries so far are exactly the dense
     /// elements 0..len.
     pub(crate) fn push_dense(&mut self, prop: Property) {
+        if let Some(packed) = &mut self.packed {
+            packed.push(prop);
+            return;
+        }
         let slot = self.entries.len();
         let key = index_key(slot);
         if let Some(index) = self.index.as_mut() {
@@ -1405,6 +1465,22 @@ impl Props {
 
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
+        if let (Some(n), Some(packed)) = (canonical_index(&key), self.packed.as_ref()) {
+            let n = n as usize;
+            if n < packed.len() {
+                self.note_structural();
+                self.packed.as_mut().unwrap()[n] = prop;
+                return;
+            }
+            if n <= packed.len() + 256 {
+                self.note_structural();
+                let packed = self.packed.as_mut().unwrap();
+                packed.resize_with(n, || Property::plain(Value::Empty));
+                packed.push(prop);
+                return;
+            }
+            self.has_far.set(true);
+        }
         if let Some(i) = self.find(&key) {
             self.entries[i].1 = prop;
             if self.mirror_flags & MIRROR_OK != 0
@@ -1451,10 +1527,16 @@ impl Props {
             Some(n) => (n as usize) < from,
             None => true,
         };
-        if self.entries.iter().all(|(k, _)| keep(k)) {
+        let packed_remove = self.packed.as_ref().is_some_and(|p| {
+            p.len() > from && p[from..].iter().any(|p| !matches!(p.value, Value::Empty))
+        });
+        if !packed_remove && self.entries.iter().all(|(k, _)| keep(k)) {
             return;
         }
         self.note_structural();
+        if let Some(packed) = &mut self.packed {
+            packed.truncate(from);
+        }
         self.entries.retain(|(k, _)| keep(k));
         self.len_slot.set(NO_SLOT);
         self.proto_slot.set(NO_SLOT);
@@ -1474,6 +1556,13 @@ impl Props {
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
+        if let (Some(n), Some(packed)) = (canonical_index(key), self.packed.as_ref()) {
+            if packed.get(n as usize).is_some_and(|p| !matches!(p.value, Value::Empty)) {
+                self.note_structural();
+                self.packed.as_mut().unwrap()[n as usize] = Property::plain(Value::Empty);
+                return true;
+            }
+        }
         let Some(i) = self.find(key) else {
             return false;
         };
@@ -1522,9 +1611,10 @@ impl Props {
     /// Keys in insertion order. Private-name slots (`#x`) are never enumerable/observable, so they
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub(crate) fn keys(&self) -> Vec<Rc<str>> {
-        self.entries
-            .iter()
-            .map(|(k, _)| k.clone())
+        self.packed.iter().flat_map(|p| p.iter().enumerate())
+            .filter(|(_, p)| !matches!(p.value, Value::Empty))
+            .map(|(n, _)| index_key(n))
+            .chain(self.entries.iter().map(|(k, _)| k.clone()))
             .filter(|k| !crate::interpreter::Interp::is_private_key(k))
             .collect()
     }
@@ -1534,6 +1624,11 @@ impl Props {
         let mut ints: Vec<(u32, Rc<str>)> = Vec::new();
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
+        if let Some(packed) = &self.packed {
+            ints.extend(packed.iter().enumerate()
+                .filter(|(_, p)| !matches!(p.value, Value::Empty))
+                .map(|(n, _)| (n as u32, index_key(n))));
+        }
         for (k, _) in &self.entries {
             if crate::interpreter::Interp::is_private_key(k) {
                 continue; // private-element slot — not an observable own key
@@ -1555,6 +1650,33 @@ impl Props {
     }
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Property)> {
         self.entries.iter().map(|(k, p)| (k, p))
+    }
+
+    /// Every live property value, including keyless packed elements (for GC tracing).
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Property> {
+        self.packed.iter().flat_map(|p| p.iter())
+            .filter(|p| !matches!(p.value, Value::Empty))
+            .chain(self.entries.iter().map(|(_, p)| p))
+    }
+
+    pub(crate) fn highest_nonconfig_index_from(&self, from: usize) -> Option<usize> {
+        let packed = self.packed.iter().flat_map(|p| p.iter().enumerate()).filter_map(|(n, p)| {
+            (!matches!(p.value, Value::Empty) && !p.configurable && n >= from).then_some(n)
+        });
+        let entries = self.entries.iter().filter_map(|(k, p)| {
+            (!p.configurable).then(|| canonical_index(k).map(|n| n as usize)).flatten()
+                .filter(|&n| n >= from)
+        });
+        packed.chain(entries).max()
+    }
+
+    pub(crate) fn integrity_ok(&self, frozen: bool) -> bool {
+        let valid = |p: &Property| !p.configurable && (!frozen || p.accessor || !p.writable);
+        self.packed.iter().flat_map(|p| p.iter())
+            .filter(|p| !matches!(p.value, Value::Empty)).all(valid)
+            && self.entries.iter().all(|(k, p)| {
+                crate::interpreter::Interp::is_private_key(k) || valid(p)
+            })
     }
 }
 

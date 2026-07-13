@@ -2807,13 +2807,15 @@ fn promise_keyed_combinator(
                 }
             } else if let Value::Obj(o) = &input {
                 // Enumerable own keys — strings AND symbols, in [[OwnPropertyKeys]] order.
+                let borrowed = o.borrow();
                 let mut strs: Vec<String> = Vec::new();
                 let mut syms: Vec<String> = Vec::new();
-                for (k, p) in o.borrow().props.iter() {
+                for k in borrowed.props.ordered_keys() {
+                    let Some(p) = borrowed.props.get(&k) else { continue };
                     if !p.enumerable {
                         continue;
                     }
-                    if Interp::is_sym_key(k) {
+                    if Interp::is_sym_key(&k) {
                         syms.push(k.to_string());
                     } else {
                         strs.push(k.to_string());
@@ -3770,11 +3772,8 @@ fn test_integrity_level(i: &mut Interp, v: &Value, frozen: bool) -> Result<bool,
         return Ok(true);
     }
     let o = v.as_obj().unwrap();
-    let ok = o.borrow().props.iter().all(|(k, p)| {
-        // Private fields are invisible to integrity levels (they stay mutable on a frozen
-        // object and never count against isSealed/isFrozen).
-        Interp::is_private_key(k) || (!p.configurable && (!frozen || p.accessor || !p.writable))
-    });
+    // Private fields are invisible to integrity levels (they stay mutable on a frozen object).
+    let ok = o.borrow().props.integrity_ok(frozen);
     Ok(ok)
 }
 

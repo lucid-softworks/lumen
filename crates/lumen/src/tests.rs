@@ -1420,6 +1420,27 @@ fn array_length_index() {
     assert_eq!(run("[1,2,3].length"), "3");
     assert_eq!(run("var a=[]; a[4294967295]=1; a[4294967295]"), "1"); // still stored as prop
 }
+
+#[test]
+fn packed_dense_numeric_array_semantics() {
+    let literal = "[0,1,2,3,4,5,6,7,8,9]";
+    assert_eq!(
+        run(&format!(
+            "let a={literal}; delete a[3]; let hole=Object.hasOwn(a,3); \
+             a[3]=33; a.push(10); let popped=a.pop(); \
+             [hole,a[3],popped,Object.keys(a).join(','),Reflect.ownKeys(a).at(-1)].join('|')"
+        )),
+        "false|33|10|0,1,2,3,4,5,6,7,8,9|length"
+    );
+    assert_eq!(
+        run(&format!(
+            "let a={literal}; Object.defineProperty(a,'8',{{value:88,writable:false,\
+             configurable:false,enumerable:true}}); a.length=5; \
+             [a.length,a[8],Object.isSealed(Object.seal(a)),Object.isFrozen(Object.freeze(a))].join(',')"
+        )),
+        "9,88,true,true"
+    );
+}
 #[test]
 fn species_getters() {
     assert_eq!(run("Array[Symbol.species]===Array"), "true");

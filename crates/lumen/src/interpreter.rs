@@ -3909,18 +3909,7 @@ impl Interp {
                 // non-configurable one. Equivalent bulk form: everything above the *highest*
                 // non-configurable out-of-range index (all necessarily configurable) is removed
                 // in one O(n) compaction; length settles just past the blocker (strict throws).
-                let blocker: Option<usize> = obj
-                    .borrow()
-                    .props
-                    .iter()
-                    .filter(|(_, p)| !p.configurable)
-                    .filter_map(|(k, _)| {
-                        // Only array-index keys (canonical, < 2^32-1) participate in truncation;
-                        // "4294967296" and friends are ordinary properties.
-                        crate::value::canonical_index(k).map(|n| n as usize)
-                    })
-                    .filter(|&idx| idx >= new_len)
-                    .max();
+                let blocker = obj.borrow().props.highest_nonconfig_index_from(new_len);
                 match blocker {
                     None => obj.borrow_mut().props.remove_indices_from(new_len),
                     Some(b) => {
@@ -4244,7 +4233,7 @@ impl Interp {
         if let Some(p) = &b.proto {
             refs.push(p.clone());
         }
-        for (_, prop) in b.props.iter() {
+        for prop in b.props.values() {
             if let Value::Obj(p) = &prop.value {
                 refs.push(p.clone());
             }
