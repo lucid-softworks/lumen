@@ -1,7 +1,7 @@
 // PostgreSQL v3 wire transport for Bun.SQL. Queries use the extended protocol so interpolated
 // values remain protocol parameters rather than escaped SQL text.
 {
-  const net = __builtins.get("net"), crypto = __builtins.get("crypto");
+  const net = __builtins.get("net"), tls = __builtins.get("tls"), crypto = __builtins.get("crypto");
   const cstring = value => Buffer.concat([Buffer.from(String(value)), Buffer.from([0])]);
   const i16 = value => Buffer.from([(value >>> 8) & 255, value & 255]);
   const i32 = value => Buffer.from([(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]);
@@ -60,14 +60,26 @@
       if (this.connected) return Promise.resolve(this);
       if (this.connecting) return this.connecting;
       this.connecting = new Promise((resolve, reject) => {
-        const socket = this.socket = new net.Socket();
-        socket.on("data", chunk => this._data(chunk));
-        socket.once("error", reject);
-        socket.connect(this.config.port, this.config.host, () => {
-          const params = Buffer.concat([cstring("user"), cstring(this.config.user), cstring("database"), cstring(this.config.database), cstring("client_encoding"), cstring("UTF8"), Buffer.from([0])]);
-          this._write(Buffer.concat([i32(params.length + 8), i32(196608), params]))
-            .then(() => this._handshake())
-            .then(() => { this.connected = true; resolve(this); }, reject);
+        const raw = new net.Socket({ _deferRead: this.config.tls });
+        raw.once("error", reject);
+        raw.connect(this.config.port, this.config.host, () => {
+          (async () => {
+            let socket = raw;
+            if (this.config.tls) {
+              await new Promise((done, fail) => raw.write(Buffer.concat([i32(8), i32(80877103)]), error => error ? fail(error) : done()));
+              const response = await raw._readRaw();
+              if (!response || response[0] !== 83) { const error = new Error("PostgreSQL server refused TLS negotiation"); error.code = "ERR_POSTGRES_TLS_NOT_AVAILABLE"; throw error; }
+              socket = await new Promise((done, fail) => {
+                const secure = tls.connect({ socket: raw, servername: this.config.servername, rejectUnauthorized: this.config.rejectUnauthorized }, () => done(secure));
+                secure.once("error", fail);
+              });
+            }
+            this.socket = socket;
+            socket.on("data", chunk => this._data(chunk)); socket.once("error", reject);
+            const params = Buffer.concat([cstring("user"), cstring(this.config.user), cstring("database"), cstring(this.config.database), cstring("client_encoding"), cstring("UTF8"), Buffer.from([0])]);
+            await this._write(Buffer.concat([i32(params.length + 8), i32(196608), params]));
+            await this._handshake(); this.connected = true; resolve(this);
+          })().catch(reject);
         });
       });
       return this.connecting;
@@ -183,10 +195,10 @@
   function pgConfig(url, options = {}) {
     if (!/^postgres(?:ql)?:/i.test(String(url))) return null;
     const target = new URL(String(url));
-    if (options.tls || !["disable", "false"].includes(target.searchParams.get("sslmode") || "disable")) {
-      const error = new Error("PostgreSQL TLS negotiation is not supported in lumen yet"); error.code = "ERR_POSTGRES_TLS_UNSUPPORTED"; throw error;
-    }
-    return { host: target.hostname || "localhost", port: Number(target.port || 5432), user: decodeURIComponent(target.username || process.env.USER || "postgres"), password: decodeURIComponent(target.password || ""), database: decodeURIComponent(target.pathname.slice(1) || target.username || "postgres") };
+    const sslmode = String(target.searchParams.get("sslmode") || "disable").toLowerCase();
+    const tlsOptions = options.tls && typeof options.tls === "object" ? options.tls : {};
+    const useTls = !!options.tls || (options.tls !== false && !["disable", "false"].includes(sslmode));
+    return { host: target.hostname || "localhost", port: Number(target.port || 5432), user: decodeURIComponent(target.username || process.env.USER || "postgres"), password: decodeURIComponent(target.password || ""), database: decodeURIComponent(target.pathname.slice(1) || target.username || "postgres"), tls: useTls, servername: tlsOptions.servername || target.hostname || "localhost", rejectUnauthorized: tlsOptions.rejectUnauthorized !== false && !["require", "allow", "prefer"].includes(sslmode) };
   }
   Object.defineProperty(globalThis, "__lumenPostgres", { value: { PgConnection, pgConfig }, configurable: true });
 }

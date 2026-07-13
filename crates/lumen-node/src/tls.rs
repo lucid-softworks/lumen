@@ -8,6 +8,7 @@ use lumen_host::{ops, CallbackQueue, CompletionSender, Ctx, OpDecl, TaskRegistry
 
 pub const TLS_OPS: &[OpDecl] = ops![
     "connect" (7) => op_connect,
+    "upgrade" (6) => op_upgrade,
     "read" (3) => op_read,
     "write" (4) => op_write,
     "close" (1) => op_close,
@@ -15,6 +16,29 @@ pub const TLS_OPS: &[OpDecl] = ops![
     "accept" (3) => op_accept,
     "closeServer" (1) => op_close_server,
 ];
+
+fn op_upgrade(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let socket_id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u64;
+    let servername = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let alpn: Vec<String> = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string()
+        .split(',').filter(|value| !value.is_empty()).map(str::to_string).collect();
+    let verify_peer = !matches!(args.get(3), Some(Value::Bool(false)));
+    let (resolve, reject) = callbacks(ctx, args.get(4), args.get(5))?;
+    let tcp = crate::net::take_stream(ctx, socket_id)?;
+    let local = tcp.local_addr().map_err(|error| ctx.make_error("Error", error.to_string()))?;
+    let peer = tcp.peer_addr().map_err(|error| ctx.make_error("Error", error.to_string()))?;
+    tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(30))).ok();
+    let task = ctx.host_mut::<TaskRegistry>().expect("task registry").register(resolve, Some(reject), decode_connect);
+    completions(ctx).run_blocking(task, move || {
+        let result = lumen_tls::TlsStream::connect_with_options(tcp, &servername, &alpn, verify_peer).map(|stream| {
+            let protocol = stream.protocol(); let cipher = stream.cipher(); let negotiated_alpn = stream.alpn_protocol();
+            Connected { stream, local, peer, protocol, cipher, alpn: negotiated_alpn }
+        });
+        Box::new(result)
+    });
+    Ok(Value::Undefined)
+}
 
 struct Entry {
     stream: Arc<Mutex<lumen_tls::TlsStream>>,

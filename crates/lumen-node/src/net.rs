@@ -265,6 +265,13 @@ fn register_stream(ctx: &mut Ctx, stream: TcpStream) -> Result<Vec<Value>, Value
     ])
 }
 
+pub(crate) fn take_stream(ctx: &mut Ctx, id: u64) -> Result<TcpStream, Value> {
+    let entry = ctx.host_mut::<NetRegistry>().expect("net registry installed").sockets.remove(&id)
+        .ok_or_else(|| ctx.make_error("Error", "TCP socket is not available for TLS upgrade"))?;
+    Arc::try_unwrap(entry.stream)
+        .map_err(|_| ctx.make_error("Error", "TCP socket has an active read and cannot be upgraded to TLS"))
+}
+
 // ---- TCP client ops -----------------------------------------------------------------------------
 
 /// `(host, port, resolve, reject)` — resolve the host, connect, and settle with the socket

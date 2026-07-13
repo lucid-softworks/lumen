@@ -57,6 +57,20 @@
       return this;
     }
 
+    _upgrade(socket, options, callback) {
+      if (!socket || socket._id === null || !socket._deferRead) throw new Error("TLS socket upgrade requires a paused net.Socket");
+      const id = socket._id, servername = String(options.servername || options.host || "localhost");
+      const alpn = (options.ALPNProtocols || []).map(value => Buffer.isBuffer(value) ? value.toString() : String(value)).join(",");
+      if (callback) this.once("secureConnect", callback);
+      socket._id = null; socket.destroyed = true; socket.readable = false; socket.writable = false;
+      this.connecting = true; this.servername = servername; this._rejectUnauthorized = options.rejectUnauthorized !== false;
+      new Promise((resolve, reject) => __tls.upgrade(id, servername, alpn, options.rejectUnauthorized !== false, (...descriptor) => resolve(descriptor), reject)).then(
+        descriptor => { this._adopt(descriptor); this.emit("connect"); this.emit("secureConnect"); this.emit("ready"); },
+        error => this.destroy(error),
+      );
+      return this;
+    }
+
     _adopt(descriptor, serverSide = false) {
       this._id = descriptor[0];
       this.localAddress = descriptor[1];
@@ -162,7 +176,7 @@
 
   function connect(...args) {
     const [options, callback] = normalizeConnectArgs(args);
-    return new TLSSocket()._connect(options, callback);
+    return options.socket ? new TLSSocket()._upgrade(options.socket, options, callback) : new TLSSocket()._connect(options, callback);
   }
 
   class SecureContext {

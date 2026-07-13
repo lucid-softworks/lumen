@@ -212,6 +212,7 @@ class Socket extends Duplex {
     this._timeoutTimer = null;
     this._pendingNoDelay = undefined;
     this._pendingKeepAlive = undefined;
+    this._deferRead = !!options._deferRead;
   }
 
   // Adopt an already-connected native descriptor (server accept / finished connect).
@@ -227,7 +228,12 @@ class Socket extends Duplex {
     this.connecting = false;
     if (this._pendingNoDelay !== undefined) __net.setNoDelay(this._id, this._pendingNoDelay);
     if (this._pendingKeepAlive !== undefined) __net.setKeepAlive(this._id, this._pendingKeepAlive[0], this._pendingKeepAlive[1]);
-    pumpSocket(this);
+    if (!this._deferRead) pumpSocket(this);
+  }
+
+  _readRaw() {
+    if (this._id === null) return Promise.reject(new Error("Socket is not connected"));
+    return new Promise((resolve, reject) => __net.read(this._id, value => resolve(value === null ? null : Buffer.from(value)), reject));
   }
 
   connect(...args) {
