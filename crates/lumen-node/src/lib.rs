@@ -30,6 +30,8 @@ mod crypto;
 mod dns;
 mod dylib;
 mod ffi;
+#[path = "../../lumen-runtime/src/jsx.rs"]
+mod jsx;
 mod napi;
 mod net;
 mod password;
@@ -62,6 +64,7 @@ pub fn extension() -> Extension {
                     "collectGarbage" (0) => op_collect_garbage,
                     "heapObjectCount" (0) => op_heap_object_count,
                     "drainMicrotasks" (0) => op_drain_microtasks,
+                    "transformJsx" (1) => op_transform_jsx,
                     "stat" (1) => op_stat,
                     "lstat" (1) => op_lstat,
                     "rm" (3) => op_rm,
@@ -200,6 +203,15 @@ fn op_heap_object_count(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<
 fn op_drain_microtasks(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
     ctx.drain_microtasks_for_host();
     Ok(Value::Undefined)
+}
+
+fn op_transform_jsx(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let source = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    jsx::transform(&source)
+        .map(Value::from_string)
+        .map_err(|message| ctx.make_error("SyntaxError", message))
 }
 
 fn op_is_dir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {

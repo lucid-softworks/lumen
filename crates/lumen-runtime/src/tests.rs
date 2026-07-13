@@ -345,6 +345,34 @@ fn bun_jsc_uses_live_heap_gc_and_microtask_instrumentation() {
 }
 
 #[test]
+fn bun_transpiler_transforms_typescript_jsx_and_scans_modules() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const { Transpiler } = require("bun");
+        const ts = new Transpiler({ loader: "ts", define: { DEBUG: "false" } });
+        const js = ts.transformSync("const answer: number = 42; if (DEBUG) throw 1;");
+        console.log(js.includes(": number"), js.includes("if (false)"), Function(`${js}; return answer`)());
+        const jsx = new Transpiler({ loader: "jsx" }).transformSync("const el = <div id=\"x\">hello</div>;");
+        console.log(jsx.includes('React.createElement("div"'), jsx.includes('"hello"'));
+        const scan = ts.scan('import value from "pkg"; export { value as result }; const lazy = import("later");');
+        console.log(scan.exports.join(","), scan.imports.map(item => `${item.kind}:${item.path}`).join(","));
+        ts.transform("const value: string = 'ok'").then(code => console.log(!code.includes(": string")));
+        "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "false true 42",
+            "true true",
+            "result import-statement:pkg,dynamic-import:later",
+            "true",
+        ]
+    );
+}
+
+#[test]
 fn bun_sqlite_file_control_reaches_native_sqlite() {
     let dir = TempDir::new("sqlite-file-control");
     let database = dir.path("control.sqlite");

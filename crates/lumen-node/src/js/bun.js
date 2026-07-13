@@ -1545,7 +1545,148 @@ const CSRF = {
     }
   },
 };
-const throwClass = (name) => class { constructor() { throw new Error(`${name} is not supported in lumen`); } };
+
+// ---- source transforms / builds ---------------------------------------------------------------
+function sourceLoader(value, fallback = "js") {
+  const loader = String(value || fallback).replace(/^\./, "").toLowerCase();
+  if (!["js", "jsx", "ts", "tsx", "json", "text", "file"].includes(loader)) {
+    throw new TypeError(`Unsupported loader '${loader}'`);
+  }
+  return loader;
+}
+
+function replaceDefines(source, define) {
+  if (!define || typeof define !== "object") return source;
+  const keys = Object.keys(define).sort((a, b) => b.length - a.length);
+  if (!keys.length) return source;
+  let out = "", i = 0, quote = "", lineComment = false, blockComment = false;
+  const isWord = c => /[A-Za-z0-9_$]/.test(c || "");
+  while (i < source.length) {
+    const c = source[i], n = source[i + 1];
+    if (lineComment) { out += c; i++; if (c === "\n") lineComment = false; continue; }
+    if (blockComment) { out += c; i++; if (c === "*" && n === "/") { out += n; i++; blockComment = false; } continue; }
+    if (quote) {
+      out += c; i++;
+      if (c === "\\" && i < source.length) out += source[i++];
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "/" && n === "/") { out += "//"; i += 2; lineComment = true; continue; }
+    if (c === "/" && n === "*") { out += "/*"; i += 2; blockComment = true; continue; }
+    if (c === "'" || c === '"' || c === "`") { quote = c; out += c; i++; continue; }
+    let matched = false;
+    for (const key of keys) {
+      if (!source.startsWith(key, i)) continue;
+      if (isWord(key[0]) && isWord(source[i - 1])) continue;
+      if (isWord(key[key.length - 1]) && isWord(source[i + key.length])) continue;
+      out += String(define[key]); i += key.length; matched = true; break;
+    }
+    if (!matched) out += source[i++];
+  }
+  return out;
+}
+
+function scanImports(source) {
+  const imports = [];
+  const add = (path, kind) => imports.push({ path, kind });
+  const patterns = [
+    [/\bimport\s+(?:[^'";]*?\s+from\s*)?["']([^"']+)["']/g, "import-statement"],
+    [/\bexport\s+[^'";]*?\s+from\s*["']([^"']+)["']/g, "import-statement"],
+    [/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g, "dynamic-import"],
+    [/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g, "require-call"],
+    [/\brequire\.resolve\s*\(\s*["']([^"']+)["']\s*\)/g, "require-resolve"],
+  ];
+  for (const [pattern, kind] of patterns) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(source))) add(match[1], kind);
+  }
+  return imports;
+}
+
+function scanExports(source) {
+  const names = new Set();
+  let match;
+  const declarations = /\bexport\s+(?:default\s+)?(?:async\s+)?(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+  while ((match = declarations.exec(source))) names.add(match[1]);
+  if (/\bexport\s+default\b/.test(source)) names.add("default");
+  const lists = /\bexport\s*\{([^}]*)\}/g;
+  while ((match = lists.exec(source))) {
+    for (const item of match[1].split(",")) {
+      const parts = item.trim().split(/\s+as\s+/);
+      if (parts[0]) names.add(parts[1] || parts[0]);
+    }
+  }
+  return [...names];
+}
+
+class Transpiler {
+  constructor(options = {}) {
+    if (options === null || typeof options !== "object") throw new TypeError("Bun.Transpiler options must be an object");
+    this.options = { ...options };
+    this.loader = sourceLoader(options.loader, "js");
+  }
+  transformSync(input, loaderOrContext) {
+    let source = typeof input === "string" ? input : new TextDecoder().decode(toU8(input));
+    const context = typeof loaderOrContext === "string" ? { loader: loaderOrContext } : (loaderOrContext || {});
+    const loader = sourceLoader(context.loader, this.loader);
+    source = replaceDefines(source, { ...(this.options.define || {}), ...(context.define || {}) });
+    if (loader === "ts" || loader === "tsx") source = globalThis.__lumenStripTypeScriptTypes(source);
+    if (loader === "jsx" || loader === "tsx") source = __node.transformJsx(source);
+    if (loader === "json") source = `export default ${source.trim()};`;
+    if (loader === "text") source = `export default ${JSON.stringify(source)};`;
+    return source;
+  }
+  transform(input, loaderOrContext) {
+    return Promise.resolve().then(() => this.transformSync(input, loaderOrContext));
+  }
+  scan(input) {
+    const source = typeof input === "string" ? input : new TextDecoder().decode(toU8(input));
+    return { exports: scanExports(source), imports: scanImports(source) };
+  }
+  scanImports(input) { return this.scan(input).imports; }
+}
+
+function buildArtifact(contents, path, loader, kind = "entry-point") {
+  const blob = new Blob([contents], { type: loader === "css" ? "text/css" : "text/javascript" });
+  Object.defineProperties(blob, {
+    path: { value: path, enumerable: true },
+    loader: { value: loader, enumerable: true },
+    kind: { value: kind, enumerable: true },
+    hash: { value: nodeCrypto.createHash("sha256").update(contents).digest("hex").slice(0, 16), enumerable: true },
+    sourcemap: { value: null, enumerable: true },
+  });
+  return blob;
+}
+
+async function build(options) {
+  if (!options || typeof options !== "object") throw new TypeError("Bun.build expects an options object");
+  const entries = options.entrypoints || options.entryPoints;
+  if (!Array.isArray(entries) || entries.length === 0) throw new TypeError("Bun.build entrypoints must be a non-empty array");
+  const outputs = [], logs = [];
+  for (const entryValue of entries) {
+    const entry = nodePath.resolve(String(entryValue));
+    try {
+      const extension = nodePath.extname(entry).slice(1).toLowerCase();
+      const loader = sourceLoader(options.loader && options.loader[`.${extension}`], extension || "js");
+      const transpiler = new Transpiler({ ...options, loader });
+      let contents = transpiler.transformSync(nodeFs.readFileSync(entry, "utf8"));
+      if (options.banner) contents = `${options.banner}\n${contents}`;
+      if (options.footer) contents = `${contents}\n${options.footer}`;
+      let outputPath = entry;
+      if (options.outdir) {
+        nodeFs.mkdirSync(options.outdir, { recursive: true });
+        const extensionOut = ["ts", "tsx", "jsx"].includes(loader) ? ".js" : nodePath.extname(entry);
+        outputPath = nodePath.join(options.outdir, `${nodePath.basename(entry, nodePath.extname(entry))}${extensionOut}`);
+        nodeFs.writeFileSync(outputPath, contents);
+      }
+      outputs.push(buildArtifact(contents, outputPath, ["ts", "tsx", "jsx"].includes(loader) ? "js" : loader));
+    } catch (error) {
+      logs.push({ level: "error", message: String(error && error.message || error), position: null });
+    }
+  }
+  return { success: logs.length === 0, outputs, logs };
+}
 // bun:ffi is registered before this module; Bun.FFI is the same live surface.
 const FFI = __builtins.get("bun:ffi");
 
@@ -1817,8 +1958,8 @@ const Bun = {
   mmap: notImpl("Bun.mmap"),
   generateHeapSnapshot: notImpl("Bun.generateHeapSnapshot"),
   plugin,
-  build: notImpl("Bun.build"),
-  Transpiler: throwClass("Bun.Transpiler"),
+  build,
+  Transpiler,
   FileSystemRouter: globalThis.__lumenFileSystemRouter,
   connect: bunConnect,
   listen: bunListen,
