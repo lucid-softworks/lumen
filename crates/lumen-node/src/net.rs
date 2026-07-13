@@ -80,6 +80,8 @@ pub const UDP_OPS: &[OpDecl] = ops![
     "setMulticastInterface" (2) => op_udp_set_multicast_interface,
     "addMembership" (3) => op_udp_add_membership,
     "dropMembership" (3) => op_udp_drop_membership,
+    "addSourceMembership" (4) => op_udp_add_source_membership,
+    "dropSourceMembership" (4) => op_udp_drop_source_membership,
     "getBufferSize" (2) => op_udp_get_buffer_size,
     "setBufferSize" (3) => op_udp_set_buffer_size,
     "udpRef" (2) => op_udp_ref,
@@ -1203,6 +1205,78 @@ fn op_udp_add_membership(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Val
 }
 fn op_udp_drop_membership(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     udp_membership(ctx, args, false)
+}
+
+fn op_udp_add_source_membership(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    udp_source_membership(ctx, args, true)
+}
+
+fn op_udp_drop_source_membership(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    udp_source_membership(ctx, args, false)
+}
+
+fn udp_source_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Value> {
+    let sid = arg_u64(args, 0);
+    let source_text = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let group_text = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string();
+    let interface_text = match args.get(3) {
+        Some(Value::Undefined) | Some(Value::Null) | None => String::new(),
+        Some(value) => ctx.coerce_string(value)?.to_string(),
+    };
+    let source = parse_v4(&source_text)
+        .map_err(|_| ctx.make_error("TypeError", format!("Invalid source address: {source_text}")))?;
+    let group = parse_v4(&group_text)
+        .map_err(|_| ctx.make_error("TypeError", format!("Invalid multicast address: {group_text}")))?;
+    if !group.is_multicast() {
+        return Err(ctx.make_error("TypeError", format!("Invalid multicast address: {group_text}")));
+    }
+    let interface = if interface_text.is_empty() { Ipv4Addr::UNSPECIFIED } else {
+        parse_v4(&interface_text)
+            .map_err(|_| ctx.make_error("TypeError", format!("Invalid interface address: {interface_text}")))?
+    };
+    let kind6 = ctx.host_mut::<DgramRegistry>()
+        .and_then(|registry| registry.sockets.get(&sid))
+        .map(|entry| entry.kind6)
+        .unwrap_or(false);
+    if kind6 {
+        return Err(ctx.make_error("Error", "source-specific multicast is only supported for udp4 sockets"));
+    }
+    let syscall = if join { "addSourceSpecificMembership" } else { "dropSourceSpecificMembership" };
+    with_udp(ctx, sid, syscall, |socket, _| set_source_membership(socket, source, group, interface, join))
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
+fn set_source_membership(socket: &UdpSocket, source: Ipv4Addr, group: Ipv4Addr, interface: Ipv4Addr, join: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct IpMreqSource { group: u32, source: u32, interface: u32 }
+    const IPPROTO_IP: i32 = 0;
+    #[cfg(target_os = "linux")]
+    const IP_ADD_SOURCE_MEMBERSHIP: i32 = 39;
+    #[cfg(target_os = "linux")]
+    const IP_DROP_SOURCE_MEMBERSHIP: i32 = 40;
+    #[cfg(target_os = "macos")]
+    const IP_ADD_SOURCE_MEMBERSHIP: i32 = 70;
+    #[cfg(target_os = "macos")]
+    const IP_DROP_SOURCE_MEMBERSHIP: i32 = 71;
+    extern "C" {
+        fn setsockopt(socket: i32, level: i32, name: i32, value: *const std::os::raw::c_void, length: u32) -> i32;
+    }
+    let request = IpMreqSource {
+        group: u32::from_ne_bytes(group.octets()),
+        source: u32::from_ne_bytes(source.octets()),
+        interface: u32::from_ne_bytes(interface.octets()),
+    };
+    let option = if join { IP_ADD_SOURCE_MEMBERSHIP } else { IP_DROP_SOURCE_MEMBERSHIP };
+    let result = unsafe {
+        setsockopt(socket.as_raw_fd(), IPPROTO_IP, option, &request as *const IpMreqSource as *const _, std::mem::size_of::<IpMreqSource>() as u32)
+    };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
+fn set_source_membership(_socket: &UdpSocket, _source: Ipv4Addr, _group: Ipv4Addr, _interface: Ipv4Addr, _join: bool) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "source-specific multicast is unavailable on this platform"))
 }
 
 fn udp_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Value> {

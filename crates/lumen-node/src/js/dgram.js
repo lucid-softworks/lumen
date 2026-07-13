@@ -252,11 +252,12 @@ class Socket extends EventEmitter {
   dropMembership(multicastAddress, multicastInterface) {
     this._op("dropMembership", String(multicastAddress), multicastInterface === undefined ? undefined : String(multicastInterface));
   }
-  addSourceSpecificMembership() {
-    throw new Error("dgram.addSourceSpecificMembership is not supported in lumen (std exposes no source-specific multicast)");
+  addSourceSpecificMembership(sourceAddress, groupAddress, multicastInterface) {
+    this._ensureBound();
+    this._op("addSourceMembership", String(sourceAddress), String(groupAddress), multicastInterface === undefined ? undefined : String(multicastInterface));
   }
-  dropSourceSpecificMembership() {
-    throw new Error("dgram.dropSourceSpecificMembership is not supported in lumen (std exposes no source-specific multicast)");
+  dropSourceSpecificMembership(sourceAddress, groupAddress, multicastInterface) {
+    this._op("dropSourceMembership", String(sourceAddress), String(groupAddress), multicastInterface === undefined ? undefined : String(multicastInterface));
   }
   ref() { if (this._id !== null) __udp.udpRef(this._id, false); return this; }
   unref() { if (this._id !== null) __udp.udpRef(this._id, true); return this; }

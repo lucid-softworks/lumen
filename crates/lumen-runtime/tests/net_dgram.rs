@@ -513,6 +513,9 @@ fn dgram_errors_and_option_paths() {
             u.setMulticastLoopback(true);
             u.addMembership("224.0.0.114");
             u.dropMembership("224.0.0.114");
+            u.addSourceSpecificMembership("127.0.0.1", "232.0.0.114", "127.0.0.1");
+            u.dropSourceSpecificMembership("127.0.0.1", "232.0.0.114", "127.0.0.1");
+            console.log("source membership: true");
             console.log("mcast iface:", u.setMulticastInterface("0.0.0.0") === u);
             try { u.setTTL(0); } catch (e) { console.log("ttl range:", e.code); }
             u.close(() => {
@@ -528,6 +531,7 @@ fn dgram_errors_and_option_paths() {
             "bad type: ERR_SOCKET_BAD_TYPE",
             "ttl: 32",
             "mttl: 2",
+            "source membership: true",
             "mcast iface: true",
             "ttl range: ERR_OUT_OF_RANGE",
             "send after close: ERR_SOCKET_DGRAM_NOT_RUNNING",
