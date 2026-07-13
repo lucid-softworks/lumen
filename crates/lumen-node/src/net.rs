@@ -83,7 +83,7 @@ pub const UDP_OPS: &[OpDecl] = ops![
 // ---- registries ---------------------------------------------------------------------------------
 
 struct SockEntry {
-    stream: Arc<TcpStream>,
+    stream: Arc<NetStream>,
     /// The socket was `unref`'d: its pending read must not by itself keep the loop alive.
     unref: bool,
     /// The in-flight read task, so `ref`/`unref` can retroactively toggle it.
@@ -91,11 +91,70 @@ struct SockEntry {
 }
 
 struct ServerEntry {
-    listener: Arc<TcpListener>,
+    listener: Arc<NetListener>,
     closed: Arc<AtomicBool>,
-    local_addr: SocketAddr,
+    local_addr: ServerAddress,
     unref: bool,
     pending: Option<TaskId>,
+}
+
+enum NetStream {
+    Tcp(TcpStream),
+}
+
+impl NetStream {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self { Self::Tcp(stream) => stream.local_addr() }
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        match self { Self::Tcp(stream) => stream.peer_addr() }
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        match self { Self::Tcp(stream) => stream.shutdown(how) }
+    }
+
+    fn set_nodelay(&self, on: bool) -> std::io::Result<()> {
+        match self { Self::Tcp(stream) => stream.set_nodelay(on) }
+    }
+
+    fn tcp(&self) -> &TcpStream {
+        match self { Self::Tcp(stream) => stream }
+    }
+}
+
+impl Read for &NetStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self { NetStream::Tcp(stream) => (&*stream).read(buf) }
+    }
+}
+
+impl Write for &NetStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self { NetStream::Tcp(stream) => (&*stream).write(buf) }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self { NetStream::Tcp(stream) => (&*stream).flush() }
+    }
+}
+
+enum NetListener {
+    Tcp(TcpListener),
+}
+
+impl NetListener {
+    fn accept(&self) -> std::io::Result<NetStream> {
+        match self {
+            Self::Tcp(listener) => listener.accept().map(|(stream, _)| NetStream::Tcp(stream)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ServerAddress {
+    Tcp(SocketAddr),
 }
 
 #[derive(Default)]
@@ -237,7 +296,7 @@ fn arg_u64(args: &[Value], i: usize) -> u64 {
 
 /// Insert a freshly connected `TcpStream` into the registry and produce the JS descriptor
 /// `[socketId, localAddress, localPort, remoteAddress, remotePort, family]`.
-fn register_stream(ctx: &mut Ctx, stream: TcpStream) -> Result<Vec<Value>, Value> {
+fn register_stream(ctx: &mut Ctx, stream: NetStream) -> Result<Vec<Value>, Value> {
     let local = stream
         .local_addr()
         .map_err(|e| ctx.make_error("Error", format!("local_addr: {e}")))?;
@@ -268,8 +327,11 @@ fn register_stream(ctx: &mut Ctx, stream: TcpStream) -> Result<Vec<Value>, Value
 pub(crate) fn take_stream(ctx: &mut Ctx, id: u64) -> Result<TcpStream, Value> {
     let entry = ctx.host_mut::<NetRegistry>().expect("net registry installed").sockets.remove(&id)
         .ok_or_else(|| ctx.make_error("Error", "TCP socket is not available for TLS upgrade"))?;
-    Arc::try_unwrap(entry.stream)
-        .map_err(|_| ctx.make_error("Error", "TCP socket has an active read and cannot be upgraded to TLS"))
+    match Arc::try_unwrap(entry.stream)
+        .map_err(|_| ctx.make_error("Error", "TCP socket has an active read and cannot be upgraded to TLS"))?
+    {
+        NetStream::Tcp(stream) => Ok(stream),
+    }
 }
 
 // ---- TCP client ops -----------------------------------------------------------------------------
@@ -288,7 +350,7 @@ fn op_connect(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
         .expect("registry")
         .register(resolve, Some(reject), decode_connect);
     completions(ctx).run_blocking(id, move || {
-        let result: Result<TcpStream, NetErr> = (|| {
+        let result: Result<NetStream, NetErr> = (|| {
             let addrs: Vec<SocketAddr> = match (host.as_str(), port).to_socket_addrs() {
                 Ok(it) => it.collect(),
                 Err(e) => {
@@ -304,7 +366,7 @@ fn op_connect(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
             let mut last = None;
             for addr in addrs {
                 match TcpStream::connect(addr) {
-                    Ok(s) => return Ok(s),
+                    Ok(s) => return Ok(NetStream::Tcp(s)),
                     Err(e) => last = Some(e),
                 }
             }
@@ -323,7 +385,7 @@ fn decode_connect(
     ctx: &mut Ctx,
     payload: Box<dyn std::any::Any + Send>,
 ) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<TcpStream, NetErr>>().expect("connect payload") {
+    match *payload.downcast::<Result<NetStream, NetErr>>().expect("connect payload") {
         Ok(stream) => register_stream(ctx, stream),
         Err(e) => Err(net_error_value(ctx, &e)),
     }
@@ -356,7 +418,7 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     }
     completions(ctx).run_blocking(id, move || {
         let mut buf = vec![0u8; 65536];
-        let mut s: &TcpStream = &stream;
+        let mut s: &NetStream = &stream;
         let result: Result<Vec<u8>, NetErr> = match s.read(&mut buf) {
             Ok(0) => Ok(Vec::new()),
             Ok(n) => {
@@ -410,7 +472,7 @@ fn op_write(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         .expect("registry")
         .register(resolve, Some(reject), decode_write);
     completions(ctx).run_blocking(id, move || {
-        let mut s: &TcpStream = &stream;
+        let mut s: &NetStream = &stream;
         let result: Result<(), NetErr> = s
             .write_all(&data)
             .and_then(|()| s.flush())
@@ -472,7 +534,7 @@ fn op_set_keep_alive(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, 
     let Some(stream) = stream else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(set_keep_alive(&stream, on, (delay_ms / 1000.0) as i32)))
+    Ok(Value::Bool(set_keep_alive(stream.tcp(), on, (delay_ms / 1000.0) as i32)))
 }
 
 /// `(socketId)` — `socket.address()`; `null` if the socket is gone.
@@ -540,9 +602,9 @@ fn op_listen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     reg.servers.insert(
         id,
         ServerEntry {
-            listener: Arc::new(listener),
+            listener: Arc::new(NetListener::Tcp(listener)),
             closed: Arc::new(AtomicBool::new(false)),
-            local_addr,
+            local_addr: ServerAddress::Tcp(local_addr),
             unref: false,
             pending: None,
         },
@@ -585,7 +647,7 @@ fn op_accept(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     }
     completions(ctx).run_blocking(id, move || {
         let result: AcceptResult = match listener.accept() {
-            Ok((stream, _peer)) => {
+            Ok(stream) => {
                 if closed.load(Ordering::SeqCst) {
                     AcceptResult::Closed // woken by closeServer()'s throwaway connect
                 } else {
@@ -600,7 +662,7 @@ fn op_accept(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 enum AcceptResult {
-    Conn(TcpStream),
+    Conn(NetStream),
     Closed,
 }
 
@@ -622,7 +684,7 @@ fn op_close_server(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Va
         .host_mut::<NetRegistry>()
         .and_then(|r| r.servers.remove(&sid))
         .map(|e| (e.closed, e.local_addr));
-    if let Some((closed, local_addr)) = target {
+    if let Some((closed, ServerAddress::Tcp(local_addr))) = target {
         closed.store(true, Ordering::SeqCst);
         let wake = if local_addr.ip().is_unspecified() {
             let ip = if local_addr.is_ipv6() {
@@ -647,7 +709,7 @@ fn op_server_address(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, 
         .and_then(|r| r.servers.get(&sid))
         .map(|e| e.local_addr);
     Ok(match addr {
-        Some(a) => addr_object(ctx, &a),
+        Some(ServerAddress::Tcp(a)) => addr_object(ctx, &a),
         None => Value::Null,
     })
 }
