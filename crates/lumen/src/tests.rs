@@ -748,6 +748,34 @@ fn gc_keeps_reachable_cycles() {
 }
 
 #[test]
+fn gc_registry_reuses_dead_object_slots() {
+    use std::rc::Rc;
+
+    let (slots_before, _) = crate::value::gc_registry_stats();
+    for _ in 0..200_000 {
+        drop(crate::value::Object::new(None));
+    }
+    let (slots_after, free_after) = crate::value::gc_registry_stats();
+    assert!(
+        slots_after <= slots_before + 1,
+        "registry grew with cumulative churn: {slots_before} -> {slots_after}"
+    );
+    assert!(free_after > 0);
+
+    // A live raw slot must become a strong snapshot handle, then tombstone synchronously when
+    // the final owner disappears; the same slot can be reused without retaining the dead RcBox.
+    let object = crate::value::Object::new(None);
+    let ptr = Rc::as_ptr(&object);
+    let snapshot = crate::value::gc_snapshot();
+    assert!(snapshot.iter().any(|o| Rc::as_ptr(o) == ptr));
+    drop(snapshot);
+    drop(object);
+    let (slots_final, free_final) = crate::value::gc_registry_stats();
+    assert_eq!(slots_final, slots_after);
+    assert_eq!(free_final, free_after);
+}
+
+#[test]
 fn unicode_ident_escapes() {
     assert_eq!(run("var \\u0061 = 5; a"), "5");
     assert_eq!(run("var a\\u0062c = 7; abc"), "7");
@@ -9959,6 +9987,41 @@ fn run_jit(src: &str) -> String {
         Completion::Value(v) => v,
         Completion::Throw { name, message } => panic!("threw {name}: {message}"),
     }
+}
+
+#[test]
+fn jit_moved_frames_preserve_activations_and_arguments() {
+    // Hot environment-bearing calls move their owned arguments into the fixed JIT frame after
+    // seeding captured bindings. Escaped closures must keep that activation alive, lexical
+    // `this` must see the bound method receiver, and an `arguments` object must include surplus
+    // arguments even though those source stack values are consumed by the moved entry.
+    assert_eq!(
+        run_jit(
+            "function make(x) {
+               return function step(y) { x = x + y; return x; };
+             }
+             function makeArrow(x) {
+               return (y) => this.base + x + y;
+             }
+             function args(a) {
+               return arguments.length + ':' + arguments[0] + ':' + arguments[2];
+             }
+             function hot(n) {
+               var sum = 0, keep;
+               for (var i = 0; i < n; i++) {
+                 keep = make(i);
+                 sum = sum + keep(1) + keep(2);
+               }
+               var obj = { base: 40, makeArrow: makeArrow };
+               var arrow = obj.makeArrow(2);
+               return sum + ':' + keep(3) + ':' + arrow(5) + ':' + args(7, 8, 9);
+             }
+             var out;
+             for (var r = 0; r < 80; r++) out = hot(40);
+             out"
+        ),
+        "1720:45:47:3:7:9"
+    );
 }
 
 #[test]

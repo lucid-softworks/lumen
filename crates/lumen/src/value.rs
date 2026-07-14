@@ -5,7 +5,7 @@
 use crate::ast::Function;
 use crate::interpreter::{Env, Interp};
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 pub type Gc = Rc<RefCell<Object>>;
 
@@ -603,7 +603,9 @@ pub struct Object {
     pub(crate) ic_plain: Cell<bool>,
     /// The construct-time prototype handed to instances (`F.prototype`), cached for `new`.
     pub(crate) is_constructor: bool,
-    /// GC scratch: mark bit (reachability) and a count of references from other heap objects.
+    /// GC scratch: mark bit and internal-reference count while collection runs. Between
+    /// collections `gc_internal` holds this object's raw-registry slot; the collector restores
+    /// every slot before sweeping can drop an object.
     pub(crate) gc_mark: Cell<bool>,
     pub(crate) gc_internal: Cell<u32>,
 }
@@ -631,15 +633,19 @@ impl Object {
         }));
         GC_REGISTRY.with(|r| {
             let mut reg = r.borrow_mut();
-            reg.entries.push(Rc::downgrade(&obj));
-            // A dead Weak still owns the RcBox allocation. Workloads with heavy object churn but
-            // a small live set may never arm the cycle collector, so prune the weak registry on
-            // its own volume instead of allowing millions of dead boxes to accumulate.
-            if reg.entries.len() > reg.next_prune {
-                reg.entries.retain(|w| w.strong_count() > 0);
-                let live = reg.entries.len();
-                reg.next_prune = live.saturating_add((live / 4).max(GC_REGISTRY_PRUNE_TRIGGER));
-            }
+            let slot = match reg.free.pop() {
+                Some(slot) => {
+                    reg.entries[slot] = Rc::as_ptr(&obj);
+                    slot
+                }
+                None => {
+                    let slot = reg.entries.len();
+                    reg.entries.push(Rc::as_ptr(&obj));
+                    slot
+                }
+            };
+            let slot: u32 = slot.try_into().expect("object registry exceeded u32 slots");
+            obj.borrow().gc_internal.set(slot);
         });
         obj
     }
@@ -647,26 +653,36 @@ impl Object {
 
 impl Drop for Object {
     fn drop(&mut self) {
+        // Remove the raw registry pointer before the surrounding RcBox is freed. Tombstone reuse
+        // is O(1), does not touch another (possibly borrowed) object, and bounds registry memory
+        // by peak simultaneously-live objects instead of cumulative allocation count.
+        let slot = self.gc_internal.get() as usize;
+        let _ = GC_REGISTRY.try_with(|r| {
+            let mut reg = r.borrow_mut();
+            if slot < reg.entries.len() && !reg.entries[slot].is_null() {
+                reg.entries[slot] = std::ptr::null();
+                reg.free.push(slot);
+            }
+        });
         // `try_with` so a drop during thread-local teardown at process exit can't panic.
         let _ = LIVE_OBJECTS.try_with(|c| c.set(c.get() - 1));
     }
 }
 
 // The GC is a refcount-based cycle collector (lumen has no tracing GC). Every heap object is
-// registered (as a Weak) and the live count is maintained via Object::new / Drop. `Interp::gc_collect`
-// reclaims objects referenced only by other (also-unreachable) objects — see interpreter.rs.
-const GC_REGISTRY_PRUNE_TRIGGER: usize = 65_536;
-
+// registered through a non-owning raw slot and the live count is maintained via Object::new /
+// Drop. `Interp::gc_collect` reclaims objects referenced only by other (also-unreachable)
+// objects — see interpreter.rs.
 struct GcRegistry {
-    entries: Vec<Weak<RefCell<Object>>>,
-    next_prune: usize,
+    entries: Vec<*const RefCell<Object>>,
+    free: Vec<usize>,
 }
 
 thread_local! {
     static GC_REGISTRY: RefCell<GcRegistry> = const {
         RefCell::new(GcRegistry {
             entries: Vec::new(),
-            next_prune: GC_REGISTRY_PRUNE_TRIGGER,
+            free: Vec::new(),
         })
     };
     static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
@@ -677,21 +693,46 @@ pub fn live_objects() -> i64 {
     LIVE_OBJECTS.with(|c| c.get())
 }
 
-/// Strong handles to every currently-live heap object, pruning dead registry entries in passing.
+/// Strong handles to every currently-live heap object. Registry slots are non-owning raw
+/// pointers tombstoned synchronously by `Object::drop`; while this thread-local borrow is held no
+/// object can disappear between reading a slot and incrementing its strong count.
 pub fn gc_snapshot() -> Vec<Gc> {
     GC_REGISTRY.with(|r| {
-        let mut reg = r.borrow_mut();
-        let mut live = Vec::with_capacity(reg.entries.len());
-        reg.entries.retain(|w| match w.upgrade() {
-            Some(o) => {
-                live.push(o);
-                true
+        let reg = r.borrow();
+        let mut live = Vec::with_capacity(reg.entries.len() - reg.free.len());
+        for &ptr in &reg.entries {
+            if ptr.is_null() {
+                continue;
             }
-            None => false,
-        });
-        let count = reg.entries.len();
-        reg.next_prune = count.saturating_add((count / 4).max(GC_REGISTRY_PRUNE_TRIGGER));
+            unsafe {
+                Rc::increment_strong_count(ptr);
+                live.push(Rc::from_raw(ptr));
+            }
+        }
         live
+    })
+}
+
+/// Restore `gc_internal` from scratch reference counts to registry-slot ids. Collection calls
+/// this after marking and before sweeping side tables/properties can release the final owner of
+/// any object, so `Object::drop` always sees its stable slot.
+pub(crate) fn gc_restore_registry_slots() {
+    GC_REGISTRY.with(|r| {
+        let reg = r.borrow();
+        for (slot, &ptr) in reg.entries.iter().enumerate() {
+            if !ptr.is_null() {
+                let slot: u32 = slot.try_into().expect("object registry exceeded u32 slots");
+                unsafe { (*ptr).borrow().gc_internal.set(slot) };
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn gc_registry_stats() -> (usize, usize) {
+    GC_REGISTRY.with(|r| {
+        let reg = r.borrow();
+        (reg.entries.len(), reg.free.len())
     })
 }
 
