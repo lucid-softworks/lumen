@@ -1600,6 +1600,29 @@ fn jit_writes_packed_dense_values_without_losing_ownership() {
 }
 
 #[test]
+fn jit_compact_warmed_property_probes_deopt_cleanly() {
+    assert_eq!(
+        run_jit(
+            "function read(o) { return o.x; }
+             var a = { x: 1 };
+             var otherShape = { pad: 0, x: 2 };
+             for (var i = 0; i < 300; i++) read(a);
+             var alternate = read(otherShape);
+             Object.defineProperty(a, 'x', {
+               get: function () { return 7; }, configurable: true
+             });
+             var accessor = read(a);
+             var p1 = { x: 4 }, p2 = { x: 9 };
+             var child = Object.create(p1);
+             for (var i = 0; i < 300; i++) read(child);
+             Object.setPrototypeOf(child, p2);
+             alternate + ':' + accessor + ':' + read(child)"
+        ),
+        "2:7:9"
+    );
+}
+
+#[test]
 fn species_getters() {
     assert_eq!(run("Array[Symbol.species]===Array"), "true");
     assert_eq!(run("Map[Symbol.species]===Map"), "true");

@@ -5691,6 +5691,12 @@ impl Chunk {
         self.caches.as_ptr() as usize
             + idx as usize * std::mem::size_of::<std::cell::Cell<IcState>>()
     }
+    /// The hottest property-cache way observed during bytecode warmup. A compact JIT site may
+    /// bake this state behind full shape/prototype guards and route misses to the checked helper.
+    pub(crate) fn jit_cache_preferred(&self, idx: u32) -> Option<IcState> {
+        let st = self.caches[idx as usize].get();
+        (st.depth != IC_EMPTY).then_some(st)
+    }
     /// The stable address of call site `idx`'s way-1 `Cell<CallIc>` (same contract as
     /// [`Chunk::jit_cache_ptr`]: `call_caches` is fixed once compilation finishes and the Chunk
     /// outlives its JIT code).

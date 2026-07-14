@@ -1130,6 +1130,7 @@ pub fn compile(
                     layout,
                     ilayout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_cache_preferred(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
@@ -1151,6 +1152,7 @@ pub fn compile(
                     layout,
                     ilayout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_cache_preferred(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
@@ -1174,6 +1176,7 @@ pub fn compile(
                     layout,
                     ilayout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_cache_preferred(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
@@ -1333,6 +1336,7 @@ pub fn compile(
                     layout,
                     ilayout,
                     chunk.jit_cache_ptr(*cache),
+                    chunk.jit_cache_preferred(*cache),
                     chunk.jit_name(*n),
                     pc as u32,
                     l_unwind,
@@ -2178,6 +2182,7 @@ fn emit_prop_load_inline(
     // realm's String.prototype through ctx.interp.
     il: &crate::interpreter::InterpLayout,
     cache_ptr: usize,
+    preferred: Option<crate::bytecode::IcState>,
     // The site's interned name (`chunk.jit_name(n)`): its data pointer keys the stub-cache
     // arm, and its bytes are the key-checked arm's compare immediates. Pinned by the chunk
     // the emitted code belongs to.
@@ -2274,6 +2279,59 @@ fn emit_prop_load_inline(
             a.b_cond(C_NE, slow);
             a.ldr_imm(10, 22, off + 8);
         }
+    }
+    // After bytecode warmup, ordinary OO sites overwhelmingly have one stable depth/shape/slot.
+    // Bake that state into a compact probe instead of embedding the full four-way/deep/exotic
+    // state machine at every site. Every fact that made the cached slot authoritative is guarded
+    // live; a miss goes to the checked helper, which observes mutations and arbitrary alternate
+    // shapes exactly like the generic JIT miss path.
+    let compact = preferred.filter(|st| st.depth <= 2 && (st.depth < 2 || st.mid_ok & 1 != 0));
+    if let Some(st) = compact {
+        a.add_imm(11, 10, rcv);
+        a.ldrb_imm(14, 11, ex);
+        a.cmp_imm_w(14, none_tag);
+        a.b_cond(C_NE, slow);
+        a.ldrb_imm(14, 11, plain);
+        a.cbz(14, false, slow);
+        a.ldr_w_imm(14, 11, sh);
+        a.mov_imm64(16, st.recv_shape as u64);
+        a.cmp_reg_w(14, 16);
+        a.b_cond(C_NE, slow);
+        if st.depth >= 1 {
+            a.ldr_imm(17, 11, pr);
+            a.cbz(17, true, slow);
+            a.add_imm(11, 17, rcv);
+            a.ldrb_imm(14, 11, ex);
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_NE, slow);
+            a.ldrb_imm(14, 11, plain);
+            a.cbz(14, false, slow);
+            a.ldr_w_imm(14, 11, sh);
+            let expected = if st.depth == 1 {
+                st.holder_shape
+            } else {
+                st.mid_shape
+            };
+            a.mov_imm64(16, expected as u64);
+            a.cmp_reg_w(14, 16);
+            a.b_cond(C_NE, slow);
+        }
+        if st.depth == 2 {
+            a.ldr_imm(17, 11, pr);
+            a.cbz(17, true, slow);
+            a.add_imm(11, 17, rcv);
+            a.ldrb_imm(14, 11, ex);
+            a.cmp_imm_w(14, none_tag);
+            a.b_cond(C_NE, slow);
+            a.ldrb_imm(14, 11, plain);
+            a.cbz(14, false, slow);
+            a.ldr_w_imm(14, 11, sh);
+            a.mov_imm64(16, st.holder_shape as u64);
+            a.cmp_reg_w(14, 16);
+            a.b_cond(C_NE, slow);
+        }
+        a.mov_imm64(13, st.slot as u64);
+        a.b(load);
     }
     // 2-5. probe every cache way (sites allocate PROP_IC_WAYS consecutive cells; the fill path
     // demotes ways one step, so a site rotating through up to that many shapes stabilizes with
@@ -2442,19 +2500,21 @@ fn emit_prop_load_inline(
     // Loop the self-contained probe over every way (x8 = way cursor, w7 = ways left — both
     // untouched by the probe body; a hit exits through `load`/`load_kc`). One emitted body
     // instead of PROP_IC_WAYS unrolled copies keeps per-site code size flat.
-    let l_way = a.new_label();
-    let l_way_next = a.new_label();
-    a.mov_imm64(8, cache_ptr as u64);
-    a.movz(7, crate::bytecode::PROP_IC_WAYS as u32, 0);
-    a.bind(l_way);
-    a.mov(12, 8);
-    probe(a, 0, l_way_next);
-    a.bind(l_way_next);
-    let ic_stride = std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>();
-    a.add_imm(8, 8, ic_stride as u32);
-    a.sub_imm(7, 7, 1);
-    a.cbnz(7, false, l_way);
-    a.b(slow);
+    if compact.is_none() {
+        let l_way = a.new_label();
+        let l_way_next = a.new_label();
+        a.mov_imm64(8, cache_ptr as u64);
+        a.movz(7, crate::bytecode::PROP_IC_WAYS as u32, 0);
+        a.bind(l_way);
+        a.mov(12, 8);
+        probe(a, 0, l_way_next);
+        a.bind(l_way_next);
+        let ic_stride = std::mem::size_of::<std::cell::Cell<crate::bytecode::IcState>>();
+        a.add_imm(8, 8, ic_stride as u32);
+        a.sub_imm(7, 7, 1);
+        a.cbnz(7, false, l_way);
+        a.b(slow);
+    }
     // 6. x11 = holder base: bounds-check the cached slot against the live entries length
     //    (defense in depth — fills only record exact-slot holders, but an OOB read through a
     //    stale cache would be memory-unsafe, so verify), then entry = entries + slot*size;
