@@ -688,15 +688,54 @@ mod asm {
 
         /// Resolve all label patches. Panics on an unbound label (a compiler bug).
         pub fn finish(mut self) -> Vec<u32> {
+            // Relax imm19 branches that cannot reach after final layout. Invert the local
+            // condition over an imm26 B and update every later label/patch for the inserted word.
+            // Iteration matters: one insertion can push another branch just over its limit.
+            loop {
+                let Some(k) = self.patches.iter().position(|(at, label, kind)| {
+                    if !matches!(kind, PatchKind::Cb) {
+                        return false;
+                    }
+                    let target = self.labels[*label].expect("unbound jit label");
+                    let delta = target as i64 - *at as i64;
+                    !(-(1 << 18)..(1 << 18)).contains(&delta)
+                }) else {
+                    break;
+                };
+                let (at, label, _) = self.patches[k];
+                let insn = self.buf[at];
+                self.buf[at] = if insn & 0xff00_0000 == 0x5400_0000 {
+                    insn ^ 1 // B.cond: invert the low condition bit
+                } else {
+                    insn ^ 0x0100_0000 // CBZ <-> CBNZ
+                } | (2 << 5); // skip the following B
+                self.buf.insert(at + 1, 0x1400_0000);
+                for bound in self.labels.iter_mut().flatten() {
+                    if *bound > at {
+                        *bound += 1;
+                    }
+                }
+                for (patch_at, _, _) in &mut self.patches {
+                    if *patch_at > at {
+                        *patch_at += 1;
+                    }
+                }
+                self.patches[k] = (at + 1, label, PatchKind::B);
+            }
             for (at, label, kind) in std::mem::take(&mut self.patches) {
                 let target = self.labels[label].expect("unbound jit label");
                 let delta = target as i64 - at as i64; // in instructions
                 match kind {
                     PatchKind::B => {
+                        assert!(
+                            (-(1 << 25)..(1 << 25)).contains(&delta),
+                            "JIT imm26 branch out of range: {delta} instructions"
+                        );
                         let imm26 = (delta as u32) & 0x03FF_FFFF;
                         self.buf[at] |= imm26;
                     }
                     PatchKind::Cb => {
+                        debug_assert!((-(1 << 18)..(1 << 18)).contains(&delta));
                         let imm19 = ((delta as u32) & 0x7FFFF) << 5;
                         self.buf[at] |= imm19;
                     }
@@ -822,6 +861,23 @@ mod asm {
             assert!(super::logical_imm_w(0).is_none());
             assert!(super::logical_imm_w(u32::MAX).is_none());
             assert!(super::logical_imm_w(0x12345678).is_none());
+        }
+
+        #[test]
+        fn far_condition_uses_an_unconditional_veneer() {
+            let mut a = super::Asm::new();
+            let target = a.new_label();
+            a.b_cond(super::super::C_EQ, target);
+            // Exceed imm19's positive limit (262,143 instructions). A raw conditional branch
+            // would wrap into unrelated generated code; the veneer keeps its conditional local.
+            for _ in 0..270_000 {
+                a.mov(0, 0);
+            }
+            a.bind(target);
+            let code = a.finish();
+            assert_eq!((code[0] >> 5) & 0x7ffff, 2); // inverted condition skips the B
+            assert_eq!(code[0] & 0xf, super::super::C_NE);
+            assert_eq!(code[1] >> 26, 0b000101); // unconditional B (imm26)
         }
     }
 }
@@ -1943,6 +1999,7 @@ pub fn compile(
                                 *argc as usize,
                                 with_this,
                                 hit_slow,
+                                slow,
                                 l_unwind,
                                 done,
                                 l_direct_finish,
@@ -2733,6 +2790,7 @@ fn emit_direct_call(
     argc: usize,
     with_this: bool,
     hit_slow: usize,
+    gc_slow: usize,
     l_unwind: usize,
     done: usize,
     // Label of the chunk's shared direct-finish stub (`emit_direct_finish_stub`).
@@ -2751,6 +2809,7 @@ fn emit_direct_call(
     let il = ilayout;
     if !(fits4(il.depth)
         && fits4(il.gc_tick)
+        && fits8(il.gc_next)
         && fits4(il.cur_coro)
         && il.constructing < 4096
         && fits8(il.new_target)
@@ -2861,11 +2920,19 @@ fn emit_direct_call(
     a.mov_imm64(13, crate::interpreter::MAX_EVAL_DEPTH as u64);
     a.cmp_reg_x(11, 13); // w-load zero-extends; the compare stays 64-bit
     a.b_cond(C_HS, hit_slow);
+    // Check actual allocation pressure in generated code. Collection-due calls take the full
+    // cache-reprobing helper because a collection can invalidate validated raw call state.
+    a.mov_imm64(4, crate::value::live_objects_ptr() as u64);
+    a.ldr_imm(4, 4, 0);
+    a.ldr_imm(13, 14, il.gc_next as u32);
+    let gc_due = a.new_label();
+    a.cmp_reg_x(4, 13);
+    a.b_cond(C_GT, gc_due);
     a.ldr_w_imm(13, 14, il.gc_tick as u32);
     a.add_imm(13, 13, 1);
-    let poll_mask = asm::logical_imm_w(crate::interpreter::GC_CALL_POLL_MASK).unwrap();
-    a.logic_imm_w(0, 4, 13, poll_mask);
-    a.cbz(4, false, hit_slow); // GC may invalidate validated raw call state
+    let maint_mask = asm::logical_imm_w(crate::interpreter::GC_DIRECT_MAINT_MASK).unwrap();
+    a.logic_imm_w(0, 4, 13, maint_mask);
+    a.cbz(4, false, hit_slow);
     a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
     a.ldr_imm(17, 14, (il.fn_frames + il.fnf_cap_word) as u32);
     a.cmp_reg_x(16, 17);
@@ -3056,6 +3123,10 @@ fn emit_direct_call(
     a.strb_imm(31, 19, cx_ret);
     a.add_imm(20, 20, 16);
     a.b(done);
+    a.bind(gc_due);
+    a.movz(13, crate::interpreter::GC_CALL_POLL_MASK, 0);
+    a.str_w_imm(13, 14, il.gc_tick as u32);
+    a.b(gc_slow);
     true
 }
 

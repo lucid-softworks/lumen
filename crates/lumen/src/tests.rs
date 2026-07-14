@@ -10322,6 +10322,7 @@ fn interp_layout_probes() {
     let mut offs = [
         l.depth,
         l.gc_tick,
+        l.gc_next,
         l.cur_coro,
         l.constructing,
         l.new_target,

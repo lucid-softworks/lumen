@@ -746,6 +746,7 @@ fn stub_slot(shape: u32, name: &str) -> usize {
 pub(crate) struct InterpLayout {
     pub depth: usize,
     pub gc_tick: usize,
+    pub gc_next: usize,
     pub cur_coro: usize,
     pub constructing: usize,
     pub new_target: usize,
@@ -819,6 +820,7 @@ pub(crate) fn interp_layout(i: &mut Interp) -> InterpLayout {
     InterpLayout {
         depth: off(&i.depth as *const _ as usize),
         gc_tick: off(&i.gc_tick as *const _ as usize),
+        gc_next: off(&i.gc_next as *const _ as usize),
         cur_coro: off(&i.cur_coro as *const _ as usize),
         constructing: off(&i.constructing as *const _ as usize),
         new_target: off(&i.new_target as *const _ as usize),
@@ -1072,9 +1074,9 @@ pub struct Interp {
     pub(crate) generators: crate::fasthash::FastMap<usize, crate::coroutine::Coroutine>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub(crate) gc_next: i64,
-    /// Call counter for [`Interp::gc_check_amortized`]: the JIT fast call polls the (TLS-backed)
-    /// live-object counters only every 256th call — a bounded delay that costs at most 256 calls'
-    /// worth of allocation slack against `gc_next`'s doubling schedule.
+    /// Call counter for [`Interp::gc_check_amortized`]. Layered calls poll every 256 calls; direct
+    /// JIT calls compare live objects with `gc_next` exactly and use this only for sparse scope-
+    /// registry maintenance.
     pub(crate) gc_tick: u32,
     /// Prune the scope registry once its entry count passes this floating threshold.
     pub(crate) scope_gc_next: usize,
@@ -1217,9 +1219,12 @@ pub const MAX_LIVE: i64 = 3_000_000;
 
 /// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
 pub const GC_TRIGGER: i64 = 100_000;
-/// Direct JIT calls check the allocation counters once per 256 calls. The mask form is shared
-/// with the generated direct-call gate and must remain `2^n - 1`.
+/// Layered calls check allocation counters once per 256 calls. Direct JIT calls compare object
+/// pressure exactly; this mask also arms a forced full check when that comparison is due.
 pub(crate) const GC_CALL_POLL_MASK: u32 = 255;
+/// Direct calls compare object pressure exactly. This sparser cadence only maintains the scope
+/// weak registry, bounding dead-header slack without forcing frequent Rust transitions.
+pub(crate) const GC_DIRECT_MAINT_MASK: u32 = 4095;
 /// Scope-registry entry count that arms a registry prune.
 const SCOPE_GC_TRIGGER: usize = 65_536;
 
@@ -4201,8 +4206,8 @@ impl Interp {
         }
     }
 
-    /// [`gc_check`] amortized for the JIT fast call: the real check reads two thread-local
-    /// counters, which is measurable at millions of calls per second — poll every 256th call.
+    /// [`gc_check`] amortized for layered calls. Direct JIT calls perform the cheap live-object
+    /// comparison in machine code and enter this path only when collection is actually due.
     #[inline]
     pub(crate) fn gc_check_amortized(&mut self) -> Result<(), Abrupt> {
         self.gc_tick = self.gc_tick.wrapping_add(1);

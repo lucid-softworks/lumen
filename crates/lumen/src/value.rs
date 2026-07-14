@@ -693,6 +693,13 @@ pub fn live_objects() -> i64 {
     LIVE_OBJECTS.with(|c| c.get())
 }
 
+/// Stable address of this thread's live-object counter. The Rc-based runtime and its compiled
+/// chunks are `!Send`, so generated code executes on the thread that baked this TLS address.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub(crate) fn live_objects_ptr() -> *const i64 {
+    LIVE_OBJECTS.with(Cell::as_ptr)
+}
+
 /// Strong handles to every currently-live heap object. Registry slots are non-owning raw
 /// pointers tombstoned synchronously by `Object::drop`; while this thread-local borrow is held no
 /// object can disappear between reading a slot and incrementing its strong count.
