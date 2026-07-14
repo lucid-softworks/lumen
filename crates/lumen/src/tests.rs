@@ -1519,6 +1519,28 @@ fn packed_dense_numeric_array_semantics() {
         "9,88,true,true"
     );
 }
+
+#[test]
+fn jit_reads_packed_dense_values_without_losing_identity() {
+    assert_eq!(
+        run_jit(
+            "var obj={x:7}, sym=Symbol('s');
+             var a=[obj,'text',true,null,undefined,sym,13.5];
+             function local(a,i){return a[i];}
+             function expr(a,i){return (i<99 ? a : [])[i];}
+             for(var n=0;n<1000;n++) {
+               local(a,n%7); expr(a,n%7);
+             }
+             var hole=[1,,3];
+             Array.prototype[1]='inherited';
+             var out=[local(a,0)===obj,local(a,1),local(a,2),local(a,3)===null,
+                      local(a,4)===undefined,local(a,5)===sym,local(a,6),local(hole,1)];
+             delete Array.prototype[1];
+             out.join('|')"
+        ),
+        "true|text|true|true|true|true|13.5|inherited"
+    );
+}
 #[test]
 fn species_getters() {
     assert_eq!(run("Array[Symbol.species]===Array"), "true");

@@ -4601,9 +4601,6 @@ fn emit_get_elem_inline(
     a.movz(14, 0, 0);
     a.b(mirror_hit); // a Num: skip the refcount-bump block
     a.bind(classic);
-    if layout.entry_accessor == layout.entry_value + 8 {
-        a.b(slow);
-    }
     // 5b. dense bounds: n < elems.len (x9's upper bits are zero from the w-form fcvtzu)
     a.ldr_imm(12, 11, el);
     a.cbz(12, true, slow);
@@ -4622,20 +4619,27 @@ fn emit_get_elem_inline(
     a.madd(15, 13, 16, 15);
     // 8. not an accessor
     guard_prop_data(a, 9, 15, ea, slow);
-    // 9. value tag: BigInt (5) is a compound payload — helper. Others copy (+ bump for 6..8).
-    a.ldurb(9, 15, ev);
-    a.cmp_imm_w(9, 5);
-    a.b_cond(C_EQ, slow);
+    // 9. Decode the heap's packed Value into the execution stack's wide `{tag,payload}` pair.
+    // Numbers and objects dominate dense reads; test them first. BigInt remains checked because
+    // its compound payload is not a one-word clone. Refcounted values clone by incrementing the
+    // untagged stored pointer before the receiver's balancing decrement below.
+    if layout.entry_accessor == layout.entry_value + 8 {
+        emit_packed_entry_decode(a, layout, 15, slow);
+    } else {
+        a.ldurb(9, 15, ev);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, slow);
+        a.ldur(12, 15, ev);
+        a.ldur(13, 15, ev + 8);
+        let nobump = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, nobump);
+        a.ldur(16, 13, strong);
+        a.add_imm(16, 16, 1);
+        a.stur(16, 13, strong);
+        a.bind(nobump);
+    }
     // --- commit: everything validated; from here only writes ---
-    a.ldur(12, 15, ev);
-    a.ldur(13, 15, ev + 8);
-    let nobump = a.new_label();
-    a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, nobump);
-    a.ldur(16, 13, strong);
-    a.add_imm(16, 16, 1);
-    a.stur(16, 13, strong);
-    a.bind(nobump);
     a.bind(mirror_hit);
     // drop the receiver (strong was > 1; if the value IS the receiver the bump balanced it)
     a.ldur(9, 10, strong);
@@ -4939,6 +4943,80 @@ enum KeySrc {
     SlotPre(u32, bool),
 }
 
+/// Decode one NaN-boxed heap property into the execution stack's wide x12/x13 Value pair.
+/// `entry` points at `(Rc<str>, Property)` and all guards branch to `slow` before mutation.
+/// BigInt stays checked; strings, symbols and objects clone by incrementing their Rc count.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_packed_entry_decode(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    entry: u32,
+    slow: usize,
+) {
+    let strong = layout.rc_strong_off as i32;
+    let ev = layout.entry_value as i32;
+    a.ldur(13, entry, ev);
+    a.lsr_imm(9, 13, 48);
+    let decoded = a.new_label();
+    let is_number = a.new_label();
+    let is_obj = a.new_label();
+    let is_str = a.new_label();
+    let is_sym = a.new_label();
+    let is_bool = a.new_label();
+    let is_undefined = a.new_label();
+    let is_empty = a.new_label();
+    let is_null = a.new_label();
+    a.movz(16, (crate::value::PACK_OBJ >> 48) as u32, 0);
+    a.cmp_reg_x(9, 16);
+    a.b_cond(C_EQ, is_obj);
+    a.movz(16, (crate::value::PACK_UNDEFINED >> 48) as u32, 0);
+    a.cmp_reg_x(9, 16);
+    a.b_cond(C_LO, is_number);
+    a.movz(16, (crate::value::PACK_SYM >> 48) as u32, 0);
+    a.cmp_reg_x(9, 16);
+    a.b_cond(C_HI, is_number);
+    for (tag, label) in [
+        (crate::value::PACK_UNDEFINED, is_undefined),
+        (crate::value::PACK_EMPTY, is_empty),
+        (crate::value::PACK_NULL, is_null),
+        (crate::value::PACK_BOOL, is_bool),
+        (crate::value::PACK_STR, is_str),
+        (crate::value::PACK_SYM, is_sym),
+        (crate::value::PACK_BIGINT, slow),
+    ] {
+        a.movz(16, (tag >> 48) as u32, 0);
+        a.cmp_reg_x(9, 16);
+        a.b_cond(C_EQ, label);
+    }
+    a.b(slow);
+    a.bind(is_number);
+    a.movz(12, 4, 0);
+    a.b(decoded);
+    for (label, tag) in [(is_undefined, 0), (is_empty, 1), (is_null, 2)] {
+        a.bind(label);
+        a.movz(12, tag, 0);
+        a.movz(13, 0, 0);
+        a.b(decoded);
+    }
+    a.bind(is_bool);
+    a.movz(12, 3, 0);
+    a.lsl_imm_w(13, 13, 8);
+    a.logic_w(1, 12, 12, 13);
+    a.movz(13, 0, 0);
+    a.b(decoded);
+    for (label, tag) in [(is_str, 6), (is_sym, 7), (is_obj, 8)] {
+        a.bind(label);
+        a.movz(12, tag, 0);
+        a.lsl_imm(13, 13, 16);
+        a.lsr_imm(13, 13, 16);
+        a.ldur(16, 13, strong);
+        a.add_imm(16, 16, 1);
+        a.stur(16, 13, strong);
+        a.b(decoded);
+    }
+    a.bind(decoded);
+}
+
 /// Inline fused element access where the receiver lives in a *parameter* slot
 /// ([`crate::bytecode::Op::GetElemLocal`] and friends): like [`emit_get_elem_inline`] /
 /// [`emit_set_elem_inline`] but the receiver is read straight out of the slot — it never crosses
@@ -5067,7 +5145,7 @@ fn emit_elem_local_keyed(
         a.b(mirror_hit);
     }
     a.bind(classic);
-    if layout.entry_accessor == layout.entry_value + 8 {
+    if layout.entry_accessor == layout.entry_value + 8 && !get {
         a.b(slow);
     }
     // 5b. dense bounds
@@ -5089,19 +5167,23 @@ fn emit_elem_local_keyed(
     // 8. data property (+ writable for the set forms)
     guard_prop_data(a, 9, 15, ea, slow);
     if get {
-        // 9. value tag: BigInt → helper; commit: copy + bump, then place the result
-        a.ldurb(9, 15, ev);
-        a.cmp_imm_w(9, 5);
-        a.b_cond(C_EQ, slow);
-        a.ldur(12, 15, ev);
-        a.ldur(13, 15, ev + 8);
-        let nobump = a.new_label();
-        a.cmp_imm_w(9, 6);
-        a.b_cond(C_LO, nobump);
-        a.ldur(16, 13, strong);
-        a.add_imm(16, 16, 1);
-        a.stur(16, 13, strong);
-        a.bind(nobump);
+        // 9. clone the element into the execution stack representation.
+        if layout.entry_accessor == layout.entry_value + 8 {
+            emit_packed_entry_decode(a, layout, 15, slow);
+        } else {
+            a.ldurb(9, 15, ev);
+            a.cmp_imm_w(9, 5);
+            a.b_cond(C_EQ, slow);
+            a.ldur(12, 15, ev);
+            a.ldur(13, 15, ev + 8);
+            let nobump = a.new_label();
+            a.cmp_imm_w(9, 6);
+            a.b_cond(C_LO, nobump);
+            a.ldur(16, 13, strong);
+            a.add_imm(16, 16, 1);
+            a.stur(16, 13, strong);
+            a.bind(nobump);
+        }
         a.bind(mirror_hit);
         match key {
             KeySrc::Stack => {
