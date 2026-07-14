@@ -4486,6 +4486,10 @@ impl Interp {
             }
         }
 
+        // `gc_internal` doubles as the O(1) raw-registry slot outside collection. Restore it
+        // before the sweep clears any property/side-table edge that could drop an object.
+        crate::value::gc_restore_registry_slots();
+
         // Sweep: clear unmarked (garbage) objects to break their cycles; once `live` drops, their
         // refcounts hit zero and they are freed. Also evict them from pointer-keyed side tables so a
         // future object reusing the address can't inherit stale metadata.
@@ -5410,10 +5414,9 @@ impl Interp {
     }
 
     /// A needs-env IC hit ([`crate::bytecode::CALL_IC_NEEDS_ENV`]): same guards and frame
-    /// bookkeeping as [`Interp::call_jit_committed`], entering through [`crate::jit::run`] —
-    /// which builds the activation environment — instead of `run_moved`. The arguments and
-    /// `*this_slot` are consumed unconditionally (the run borrows the argument slice; they
-    /// drop after it returns).
+    /// bookkeeping as [`Interp::call_jit_committed`]. The activation is built before the owned
+    /// arguments move into a fixed JIT frame, so captured values are cloned only where required
+    /// and the ordinary frame slots do not duplicate the caller's arguments.
     ///
     /// # Safety
     /// Same contract as `call_jit_committed`.
@@ -5471,9 +5474,18 @@ impl Interp {
                 prim => crate::builtins::box_primitive_pub(self, prim),
             }
         };
-        let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
-        let mut r = crate::jit::run(self, chunk, code, &env, this_val, args_ref);
-        drop_args();
+        let mut r = unsafe {
+            crate::jit::run_moved_env(
+                self,
+                chunk,
+                code,
+                &*env as *const Env,
+                this_val,
+                args,
+                argc,
+                (ic.n_params as usize, ic.n_slots as usize),
+            )
+        };
         self.fn_frames.pop();
         self.constructing = saved_ctor;
         self.new_target = saved_nt;
@@ -6076,16 +6088,18 @@ impl Interp {
         });
         let this_val = self.bind_compiled_this(&func, chunk, unsafe { this_slot.read() }, false);
         let mut r = if needs_env {
-            // The run borrows the arguments (its activation seeds by clone); consume them
-            // afterwards to keep the committed ownership contract.
-            let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
-            let r = crate::jit::run(self, chunk, code, &env, this_val, args_ref);
             unsafe {
-                for k in 0..argc {
-                    std::ptr::drop_in_place(args.add(k));
-                }
+                crate::jit::run_moved_env(
+                    self,
+                    chunk,
+                    code,
+                    &env as *const Env,
+                    this_val,
+                    args,
+                    argc,
+                    chunk.jit_frame(),
+                )
             }
-            r
         } else {
             unsafe {
                 crate::jit::run_moved(

@@ -8845,7 +8845,60 @@ pub(crate) unsafe fn run_moved(
     args: *mut Value,
     argc: usize,
     // `chunk.jit_frame()`, precomputed by the caller (the cached call reads it from its IC).
+    frame: (usize, usize),
+) -> Result<Value, Abrupt> {
+    unsafe { run_moved_inner(i, chunk, code, env, this_val, args, argc, frame, None) }
+}
+
+/// Moved-frame entry for a callee that needs a real activation environment. Captured parameter
+/// values are cloned exactly once into that environment; the call's owned argument values still
+/// move into the fixed frame buffer, avoiding the second full clone and both growable `Vec`s used
+/// by [`run`]. An `arguments` exotic is materialized before the move and installed into its slot.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub(crate) unsafe fn run_moved_env(
+    i: &mut Interp,
+    chunk: &Rc<Chunk>,
+    code: &JitCode,
+    definition_env: *const Env,
+    this_val: Value,
+    args: *mut Value,
+    argc: usize,
+    frame: (usize, usize),
+) -> Result<Value, Abrupt> {
+    let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
+    let activation = chunk.jit_make_run_env(i, unsafe { &*definition_env }, &this_val, args_ref);
+    let arguments = chunk.jit_arguments_slot().map(|slot| {
+        (
+            slot as usize,
+            Value::Obj(i.make_compiled_arguments_object(args_ref, &activation)),
+        )
+    });
+    unsafe {
+        run_moved_inner(
+            i,
+            chunk,
+            code,
+            &activation as *const Env,
+            this_val,
+            args,
+            argc,
+            frame,
+            arguments,
+        )
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+unsafe fn run_moved_inner(
+    i: &mut Interp,
+    chunk: &Rc<Chunk>,
+    code: &JitCode,
+    env: *const Env,
+    this_val: Value,
+    args: *mut Value,
+    argc: usize,
     (n_params, n_slots): (usize, usize),
+    arguments: Option<(usize, Value)>,
 ) -> Result<Value, Abrupt> {
     let seed = n_params.min(argc);
     // Frame memory: one fixed-size raw buffer from the freelist ([slots | operand stack]);
@@ -8877,6 +8930,12 @@ pub(crate) unsafe fn run_moved(
         // no consumer reads a Value's payload behind tag 0, so stale payload bytes are dead.
         for k in seed..n_slots {
             *(slots_ptr.add(k) as *mut u8) = 0;
+        }
+        if let Some((slot, value)) = arguments {
+            if slot < seed {
+                std::ptr::drop_in_place(slots_ptr.add(slot));
+            }
+            slots_ptr.add(slot).write(value);
         }
         for &s in chunk.jit_var_force_resets() {
             let s = s as usize;
@@ -8994,6 +9053,21 @@ pub fn run(
 /// See the aarch64-macos definition; without machine code the fast call never commits.
 #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
 pub(crate) unsafe fn run_moved(
+    _i: &mut Interp,
+    _chunk: &Rc<Chunk>,
+    _code: &JitCode,
+    _env: *const Env,
+    _this_val: Value,
+    _args: *mut Value,
+    _argc: usize,
+    _frame: (usize, usize),
+) -> Result<Value, Abrupt> {
+    unreachable!("jit code cannot exist on this platform")
+}
+
+/// See the aarch64-macos definition; without machine code the fast call never commits.
+#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+pub(crate) unsafe fn run_moved_env(
     _i: &mut Interp,
     _chunk: &Rc<Chunk>,
     _code: &JitCode,
