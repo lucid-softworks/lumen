@@ -1541,6 +1541,36 @@ fn jit_reads_packed_dense_values_without_losing_identity() {
         "true|text|true|true|true|true|13.5|inherited"
     );
 }
+
+#[test]
+fn jit_writes_packed_dense_values_without_losing_ownership() {
+    assert_eq!(
+        run_jit(
+            "var obj={x:7}, sym=Symbol('s'), a=[0,1,2,3,4,5,6,7];
+             function drop(a,i,v){a[i]=v;}
+             function keep(a,i,v){return a[i]=v;}
+             function expr(a,i,v){return (i<99?a:[])[i]=v;}
+             function read(a,i){return a[i];}
+             for(var n=0;n<1000;n++) {
+               drop(a,n&7,n); keep(a,n&7,n+1); expr(a,n&7,n+2); read(a,n&7);
+             }
+             drop(a,0,obj); drop(a,1,'text'); drop(a,2,true); drop(a,3,null);
+             drop(a,4,undefined); drop(a,5,sym); drop(a,6,13.5);
+             var kept=keep(a,7,obj); drop(a,6,2); var mirrored=read(a,6)===2;
+             var expressed=expr(a,6,sym);
+             a[1]=a; drop(a,1,obj);
+             drop(a,2,9n);
+             Object.defineProperty(a,'3',{value:33,writable:false}); drop(a,3,44);
+             var seen=0; Object.defineProperty(a,'4',{set(v){seen=v}}); drop(a,4,55);
+             var b=new ArrayBuffer(8), d=new DataView(b);
+             d.setUint32(0,0x7ff90000); d.setUint32(4,1); drop(a,7,d.getFloat64(0));
+              [a[0]===obj,a[1]===obj,a[2]===9n,a[3],seen,a[5]===sym,a[6]===sym,
+              kept===obj,expressed===sym,mirrored,Number.isNaN(a[7])].join('|')"
+        ),
+        "true|true|true|33|55|true|true|true|true|true|true"
+    );
+}
+
 #[test]
 fn species_getters() {
     assert_eq!(run("Array[Symbol.species]===Array"), "true");

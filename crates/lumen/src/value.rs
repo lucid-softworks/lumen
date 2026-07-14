@@ -57,7 +57,7 @@ pub(crate) const PACK_BIGINT: u64 = 0x7ffd_0000_0000_0000;
 pub(crate) const PACK_STR: u64 = 0x7ffe_0000_0000_0000;
 pub(crate) const PACK_SYM: u64 = 0x7fff_0000_0000_0000;
 pub(crate) const PACK_OBJ: u64 = 0xfff9_0000_0000_0000;
-const PACK_CANON_NAN: u64 = 0x7ff8_0000_0000_0000;
+pub(crate) const PACK_CANON_NAN: u64 = 0x7ff8_0000_0000_0000;
 
 impl PackedValue {
     #[inline]

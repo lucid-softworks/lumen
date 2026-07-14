@@ -4485,7 +4485,8 @@ fn emit_name_ic_value_ptr(
 fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elems = layout.obj_props + layout.props_elems;
     get_prop_inlinable(layout)
-        && layout.entry_accessor >= layout.entry_value + 16
+        && (layout.entry_accessor == layout.entry_value + 8
+            || layout.entry_accessor >= layout.entry_value + 16)
         && [
             elems,
             layout.dense_elems + layout.vec_ptr_off,
@@ -4851,26 +4852,35 @@ fn emit_set_elem_inline(
     // 9. old value: trivially droppable (tag ≤ 4), or refcounted with strong > 1 (inline dec);
     //    BigInt or a last reference → helper. An old value that IS the receiver (`a[0] === a`)
     //    also bails: its dec plus the receiver dec below would take the shared counter to 0
-    //    without running the destructor. w9 = old tag, x12 = old payload, both live below.
-    a.ldurb(9, 15, ev);
-    a.cmp_imm_w(9, 5);
-    a.b_cond(C_EQ, slow);
-    let old_plain = a.new_label();
-    a.cmp_imm_w(9, 6);
-    a.b_cond(C_LO, old_plain);
-    a.ldur(12, 15, ev + 8);
-    a.cmp_reg_x(12, 10);
-    a.b_cond(C_EQ, slow);
-    a.ldur(13, 12, strong);
-    a.cmp_imm_x(13, 1);
-    a.b_cond(C_LS, slow);
-    a.bind(old_plain);
+    //    without running the destructor. w9 = old drop marker, x12 = old payload.
+    if layout.entry_accessor == layout.entry_value + 8 {
+        emit_packed_number_drop_guard(a, layout, 15, slow);
+    } else {
+        a.ldurb(9, 15, ev);
+        a.cmp_imm_w(9, 5);
+        a.b_cond(C_EQ, slow);
+        let old_plain = a.new_label();
+        a.cmp_imm_w(9, 6);
+        a.b_cond(C_LO, old_plain);
+        a.ldur(12, 15, ev + 8);
+        a.cmp_reg_x(12, 10);
+        a.b_cond(C_EQ, slow);
+        a.ldur(13, 12, strong);
+        a.cmp_imm_x(13, 1);
+        a.b_cond(C_LS, slow);
+        a.bind(old_plain);
+    }
     // --- commit ---
-    // move v into the entry (16 bytes; a refcounted payload moves, not clones)
+    // Move v into the entry; a refcounted payload transfers ownership without a clone.
     a.ldur(14, 20, -16);
-    a.ldur(16, 20, -8);
-    a.stur(14, 15, ev);
-    a.stur(16, 15, ev + 8);
+    a.ldur(17, 20, -8);
+    if layout.entry_accessor == layout.entry_value + 8 {
+        emit_packed_stack_encode(a, -16, slow);
+        a.stur(16, 15, ev);
+    } else {
+        a.stur(14, 15, ev);
+        a.stur(17, 15, ev + 8);
+    }
     // drop the old value (refcounted: strong was > 1, so this never frees)
     let no_old_dec = a.new_label();
     a.cmp_imm_w(9, 6);
@@ -4879,7 +4889,7 @@ fn emit_set_elem_inline(
     a.sub_imm(13, 13, 1);
     a.stur(13, 12, strong);
     a.bind(no_old_dec);
-    // Keep the element mirror coherent (x9/x12/x13/d0/d1 are dead here; v words in 14/16/17,
+    // Keep the element mirror coherent (x9/x12/x13/d0/d1 are dead here; v words in 14/17,
     // bases in 10/11/15 stay live).
     emit_mirror_store(
         a,
@@ -4894,9 +4904,9 @@ fn emit_set_elem_inline(
         let nb = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, nb);
-        a.ldur(13, 16, strong);
+        a.ldur(13, 17, strong);
         a.add_imm(13, 13, 1);
-        a.stur(13, 16, strong);
+        a.stur(13, 17, strong);
         a.bind(nb);
     }
     // drop the receiver (strong was > 1)
@@ -4905,8 +4915,9 @@ fn emit_set_elem_inline(
     a.stur(13, 10, strong);
     if keep {
         // [obj, key, v] → [v]: the result lands at the obj slot
+        a.ldur(14, 20, -16);
         a.stur(14, 20, -48);
-        a.stur(16, 20, -40);
+        a.stur(17, 20, -40);
         a.sub_imm(20, 20, 32);
     } else {
         a.sub_imm(20, 20, 48);
@@ -4941,6 +4952,53 @@ enum KeySrc {
     /// (peephole-fused `UpdateLocal(k, Pre*); GetElemLocal x`). The slot store is deferred to
     /// the commit point so a slow-path re-run never sees a half-applied update.
     SlotPre(u32, bool),
+}
+
+/// Guard that a packed property's old value is a Number, whose overwrite needs no destructor.
+/// Keeping this numeric-only makes the emitted template small; other packed values use the
+/// checked helper. On success w9 is the zero old-drop marker and x12 is scratch.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_packed_number_drop_guard(
+    a: &mut asm::Asm,
+    layout: &crate::value::JitLayout,
+    entry: u32,
+    slow: usize,
+) {
+    a.ldur(12, entry, layout.entry_value as i32);
+    a.lsr_imm(9, 12, 48);
+    // PACK_OBJ sorts above the tagged scalar range, so reject it before the two numeric ranges.
+    a.movz(14, (crate::value::PACK_OBJ >> 48) as u32, 0);
+    a.cmp_reg_x(9, 14);
+    a.b_cond(C_EQ, slow);
+    let number = a.new_label();
+    a.movz(14, (crate::value::PACK_UNDEFINED >> 48) as u32, 0);
+    a.cmp_reg_x(9, 14);
+    a.b_cond(C_LO, number);
+    a.movz(14, (crate::value::PACK_SYM >> 48) as u32, 0);
+    a.cmp_reg_x(9, 14);
+    a.b_cond(C_LS, slow);
+    a.bind(number);
+    a.movz(9, 0, 0);
+}
+
+/// Encode a wide Number at `off` into x16. Other kinds stay on the checked path, keeping the
+/// per-site packed-write template compact; Number payload bits are already NaN-box compatible.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn emit_packed_stack_encode(a: &mut asm::Asm, off: i32, slow: usize) {
+    a.ldurb(13, 20, off);
+    a.cmp_imm_w(13, 4);
+    a.b_cond(C_NE, slow);
+    a.ldur(16, 20, off + 8);
+    // Any NaN payload could overlap a boxed tag. Match PackedValue::pack by canonicalizing it.
+    a.ldur_d(1, 20, off + 8);
+    a.fcmp(1, 1);
+    let nan = a.new_label();
+    let encoded = a.new_label();
+    a.b_cond(C_VS, nan);
+    a.b(encoded);
+    a.bind(nan);
+    a.mov_imm64(16, crate::value::PACK_CANON_NAN);
+    a.bind(encoded);
 }
 
 /// Decode one NaN-boxed heap property into the execution stack's wide x12/x13 Value pair.
@@ -5145,9 +5203,6 @@ fn emit_elem_local_keyed(
         a.b(mirror_hit);
     }
     a.bind(classic);
-    if layout.entry_accessor == layout.entry_value + 8 && !get {
-        a.b(slow);
-    }
     // 5b. dense bounds
     a.ldr_imm(12, 11, el);
     a.cbz(12, true, slow);
@@ -5209,23 +5264,32 @@ fn emit_elem_local_keyed(
             a.cmp_imm_w(9, 5);
             a.b_cond(C_EQ, slow);
         }
-        // 9. old value: trivially droppable, or refcounted with strong > 1
-        a.ldurb(9, 15, ev);
-        a.cmp_imm_w(9, 5);
-        a.b_cond(C_EQ, slow);
-        let old_plain = a.new_label();
-        a.cmp_imm_w(9, 6);
-        a.b_cond(C_LO, old_plain);
-        a.ldur(12, 15, ev + 8);
-        a.ldur(13, 12, strong);
-        a.cmp_imm_x(13, 1);
-        a.b_cond(C_LS, slow);
-        a.bind(old_plain);
+        // 9. old value: trivially droppable, or refcounted with strong > 1.
+        if layout.entry_accessor == layout.entry_value + 8 {
+            emit_packed_number_drop_guard(a, layout, 15, slow);
+        } else {
+            a.ldurb(9, 15, ev);
+            a.cmp_imm_w(9, 5);
+            a.b_cond(C_EQ, slow);
+            let old_plain = a.new_label();
+            a.cmp_imm_w(9, 6);
+            a.b_cond(C_LO, old_plain);
+            a.ldur(12, 15, ev + 8);
+            a.ldur(13, 12, strong);
+            a.cmp_imm_x(13, 1);
+            a.b_cond(C_LS, slow);
+            a.bind(old_plain);
+        }
         // --- commit: move v into the entry, drop the old value ---
         a.ldur(14, 20, -16);
-        a.ldur(16, 20, -8);
-        a.stur(14, 15, ev);
-        a.stur(16, 15, ev + 8);
+        a.ldur(17, 20, -8);
+        if layout.entry_accessor == layout.entry_value + 8 {
+            emit_packed_stack_encode(a, -16, slow);
+            a.stur(16, 15, ev);
+        } else {
+            a.stur(14, 15, ev);
+            a.stur(17, 15, ev + 8);
+        }
         let no_old_dec = a.new_label();
         a.cmp_imm_w(9, 6);
         a.b_cond(C_LO, no_old_dec);
@@ -5247,12 +5311,13 @@ fn emit_elem_local_keyed(
             let nb = a.new_label();
             a.cmp_imm_w(9, 6);
             a.b_cond(C_LO, nb);
-            a.ldur(13, 16, strong);
+            a.ldur(13, 17, strong);
             a.add_imm(13, 13, 1);
-            a.stur(13, 16, strong);
+            a.stur(13, 17, strong);
             a.bind(nb);
+            a.ldur(14, 20, -16);
             a.stur(14, 20, -32);
-            a.stur(16, 20, -24);
+            a.stur(17, 20, -24);
             a.sub_imm(20, 20, 16);
         } else {
             a.sub_imm(20, 20, 32);
