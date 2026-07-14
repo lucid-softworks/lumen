@@ -1,0 +1,33 @@
+name: JIT targets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/lumen/**'
+      - '.github/workflows/jit.yml'
+  pull_request:
+    paths:
+      - 'crates/lumen/**'
+      - '.github/workflows/jit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p lumen

@@ -5891,7 +5891,7 @@ impl Chunk {
         if self.jit_var_force_resets().is_empty() {
             f |= 1;
         }
-        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        #[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             if code.needs_global {
                 f |= 2;
@@ -5904,7 +5904,7 @@ impl Chunk {
                 f |= 8;
             }
         }
-        #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+        #[cfg(not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
         let _ = code;
         f
     }

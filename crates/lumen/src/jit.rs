@@ -1,4 +1,4 @@
-//! ARM64 template JIT (macOS/Apple Silicon): the third execution tier.
+//! Native template JIT: the third execution tier.
 //!
 //! A compiled [`crate::bytecode::Chunk`] lowers to machine code one bytecode op at a time. Most
 //! ops become a call into [`crate::bytecode::jit_exec`] — the single slow-path helper that runs
@@ -12,27 +12,31 @@
 //! signal a throw, which routes through a shared unwind block that consults the try-handler
 //! stack recorded by `PushHandler` templates.
 //!
-//! Everything is `cfg`-gated to aarch64 + macOS; elsewhere `compile` returns `None` and the
-//! bytecode VM runs as before.
+//! The mature backend emits ARM64 on desktop operating systems. A correctness-first x86-64
+//! backend emits native control flow on Intel macOS, Linux, and Windows while its hot inline
+//! templates are filled in. Other targets retain the bytecode VM.
 
 #![cfg_attr(
-    not(all(target_arch = "aarch64", target_os = "macos")),
+    not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows"))),
     allow(dead_code)
 )]
 
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 use crate::bytecode::UpdKind;
 use crate::interpreter::{Abrupt, Env, Interp};
 use crate::value::Value;
 
 // ---------------------------------------------------------------------------------------------
-// Executable memory (macOS MAP_JIT)
+// Executable memory (platform W^X policy)
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_os = "macos"
+))]
 mod sys {
     extern "C" {
         pub fn mmap(
@@ -43,12 +47,190 @@ mod sys {
             fd: i32,
             offset: i64,
         ) -> *mut u8;
-        pub fn munmap(addr: *mut u8, len: usize) -> i32;
-        pub fn pthread_jit_write_protect_np(enabled: i32);
-        pub fn sys_icache_invalidate(start: *mut u8, len: usize);
+        fn munmap(addr: *mut u8, len: usize) -> i32;
+        fn pthread_jit_write_protect_np(enabled: i32);
+        fn sys_icache_invalidate(start: *mut u8, len: usize);
     }
-    pub const PROT_RWX: i32 = 0x1 | 0x2 | 0x4;
-    pub const MAP_PRIVATE_ANON_JIT: i32 = 0x0002 | 0x1000 | 0x0800;
+    const PROT_RWX: i32 = 0x1 | 0x2 | 0x4;
+    const MAP_PRIVATE_ANON_JIT: i32 = 0x0002 | 0x1000 | 0x0800;
+
+    pub unsafe fn alloc_exec(src: *const u8, len: usize) -> *mut u8 {
+        let mem = mmap(
+            std::ptr::null_mut(),
+            len,
+            PROT_RWX,
+            MAP_PRIVATE_ANON_JIT,
+            -1,
+            0,
+        );
+        if mem as isize == -1 {
+            return std::ptr::null_mut();
+        }
+        pthread_jit_write_protect_np(0);
+        std::ptr::copy_nonoverlapping(src, mem, len);
+        pthread_jit_write_protect_np(1);
+        sys_icache_invalidate(mem, len);
+        mem
+    }
+
+    pub unsafe fn free_exec(mem: *mut u8, len: usize) {
+        munmap(mem, len);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+mod sys {
+    extern "C" {
+        fn mmap(
+            addr: *mut u8,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut u8;
+        fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+        fn munmap(addr: *mut u8, len: usize) -> i32;
+    }
+    const PROT_READ: i32 = 1;
+    const PROT_WRITE: i32 = 2;
+    const PROT_EXEC: i32 = 4;
+    const MAP_PRIVATE_ANON: i32 = 0x02 | 0x20;
+
+    pub unsafe fn alloc_exec(src: *const u8, len: usize) -> *mut u8 {
+        let mem = mmap(
+            std::ptr::null_mut(),
+            len,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE_ANON,
+            -1,
+            0,
+        );
+        if mem as isize == -1 {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(src, mem, len);
+        if mprotect(mem, len, PROT_READ | PROT_EXEC) != 0 {
+            munmap(mem, len);
+            return std::ptr::null_mut();
+        }
+        mem
+    }
+
+    pub unsafe fn free_exec(mem: *mut u8, len: usize) {
+        munmap(mem, len);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+mod sys {
+    use core::arch::asm;
+
+    extern "C" {
+        fn mmap(
+            addr: *mut u8,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut u8;
+        fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+        fn munmap(addr: *mut u8, len: usize) -> i32;
+    }
+    const PROT_READ: i32 = 1;
+    const PROT_WRITE: i32 = 2;
+    const PROT_EXEC: i32 = 4;
+    const MAP_PRIVATE_ANON: i32 = 0x02 | 0x20;
+
+    unsafe fn flush_icache(start: *mut u8, len: usize) {
+        let ctr: usize;
+        asm!("mrs {ctr}, ctr_el0", ctr = out(reg) ctr, options(nostack, preserves_flags));
+        let dline = 4usize << ((ctr >> 16) & 0xf);
+        let iline = 4usize << (ctr & 0xf);
+        let end = start as usize + len;
+        let mut p = (start as usize) & !(dline - 1);
+        while p < end {
+            asm!("dc cvau, {p}", p = in(reg) p, options(nostack, preserves_flags));
+            p += dline;
+        }
+        asm!("dsb ish", options(nostack, preserves_flags));
+        p = (start as usize) & !(iline - 1);
+        while p < end {
+            asm!("ic ivau, {p}", p = in(reg) p, options(nostack, preserves_flags));
+            p += iline;
+        }
+        asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+
+    pub unsafe fn alloc_exec(src: *const u8, len: usize) -> *mut u8 {
+        let mem = mmap(
+            std::ptr::null_mut(),
+            len,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE_ANON,
+            -1,
+            0,
+        );
+        if mem as isize == -1 {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(src, mem, len);
+        flush_icache(mem, len);
+        if mprotect(mem, len, PROT_READ | PROT_EXEC) != 0 {
+            munmap(mem, len);
+            return std::ptr::null_mut();
+        }
+        mem
+    }
+
+    pub unsafe fn free_exec(mem: *mut u8, len: usize) {
+        munmap(mem, len);
+    }
+}
+
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_os = "windows"
+))]
+mod sys {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn VirtualAlloc(addr: *mut u8, len: usize, kind: u32, protect: u32) -> *mut u8;
+        fn VirtualProtect(addr: *mut u8, len: usize, protect: u32, old: *mut u32) -> i32;
+        fn VirtualFree(addr: *mut u8, len: usize, kind: u32) -> i32;
+        fn FlushInstructionCache(process: *mut u8, addr: *const u8, len: usize) -> i32;
+        fn GetCurrentProcess() -> *mut u8;
+    }
+    const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const PAGE_READWRITE: u32 = 0x04;
+    const PAGE_EXECUTE_READ: u32 = 0x20;
+
+    pub unsafe fn alloc_exec(src: *const u8, len: usize) -> *mut u8 {
+        let mem = VirtualAlloc(
+            std::ptr::null_mut(),
+            len,
+            MEM_COMMIT_RESERVE,
+            PAGE_READWRITE,
+        );
+        if mem.is_null() {
+            return mem;
+        }
+        std::ptr::copy_nonoverlapping(src, mem, len);
+        let mut old = 0;
+        if VirtualProtect(mem, len, PAGE_EXECUTE_READ, &mut old) == 0
+            || FlushInstructionCache(GetCurrentProcess(), mem, len) == 0
+        {
+            VirtualFree(mem, 0, MEM_RELEASE);
+            return std::ptr::null_mut();
+        }
+        mem
+    }
+
+    pub unsafe fn free_exec(mem: *mut u8, _len: usize) {
+        VirtualFree(mem, 0, MEM_RELEASE);
+    }
 }
 
 /// A finished JIT compilation: executable code plus the pc→code-offset table the unwinder uses
@@ -80,9 +262,18 @@ impl JitCode {
 
 impl Drop for JitCode {
     fn drop(&mut self) {
-        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        #[cfg(any(
+            all(
+                target_arch = "aarch64",
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            ),
+            all(
+                target_arch = "x86_64",
+                any(target_os = "macos", target_os = "linux", target_os = "windows")
+            )
+        ))]
         unsafe {
-            sys::munmap(self.mem, self.len);
+            sys::free_exec(self.mem, self.len);
         }
     }
 }
@@ -183,25 +374,25 @@ pub const H_GET_PROP: usize = 12;
 pub const N_HELPERS: usize = 13;
 
 /// ARM64 condition codes used by the inline templates.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_EQ: u32 = 0;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_NE: u32 = 1;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_HS: u32 = 2;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_LO: u32 = 3;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_MI: u32 = 4;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_HI: u32 = 8;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_LS: u32 = 9;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_GE: u32 = 10;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_GT: u32 = 12;
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const C_VS: u32 = 6;
 
 /// Condition-helper modes (the `w1` immediate for `H_COND`).
@@ -211,15 +402,20 @@ pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 
 // The inline fast paths read Value directly: repr(u8) tag byte at offset 0, payload at
 // offset 8, 16 bytes total on 64-bit. Tags 0..=4 (Undefined/Empty/Null/Bool/Num) are trivially
-// copyable. Only the JIT (aarch64-macos) depends on this, so the layout is only asserted there —
-// on a 32-bit target (wasm) `Value` is smaller and the JIT does not exist.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+// copyable. Only 64-bit desktop JIT targets depend on this; on wasm32 `Value` is smaller.
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const _: () = assert!(std::mem::size_of::<Value>() == 16);
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
 // The offsets below bake 8-byte pointers into the emitted templates: JIT-platform only (on
 // wasm32 pointers are 4 bytes and none of this code exists).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod layout_asserts {
     use super::JitCtx;
     // The call template's inline way-1 probe reads these CallIc fields by fixed offset.
@@ -260,7 +456,7 @@ pub struct SpFlag {
 // ARM64 assembler (the ~20 encodings the templates need)
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod asm {
     /// Instruction buffer with label/patch support. Registers are plain u32 numbers (x0..x30,
     /// sp=31 where encodable); labels are indices into `patches`.
@@ -888,7 +1084,7 @@ mod asm {
 
 /// Compile `chunk` to machine code, or `None` when unsupported (non-macOS/ARM64, async bodies,
 /// or an op stream whose stack depths don't line up — a compiler bug caught defensively).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn compile(
     chunk: &Chunk,
     layout: &crate::value::JitLayout,
@@ -2116,21 +2312,10 @@ pub fn compile(
     }
     let len = words.len() * 4;
     unsafe {
-        let mem = sys::mmap(
-            std::ptr::null_mut(),
-            len,
-            sys::PROT_RWX,
-            sys::MAP_PRIVATE_ANON_JIT,
-            -1,
-            0,
-        );
-        if mem as isize == -1 {
+        let mem = sys::alloc_exec(words.as_ptr() as *const u8, len);
+        if mem.is_null() {
             return None;
         }
-        sys::pthread_jit_write_protect_np(0);
-        std::ptr::copy_nonoverlapping(words.as_ptr() as *const u8, mem, len);
-        sys::pthread_jit_write_protect_np(1);
-        sys::sys_icache_invalidate(mem, len);
         if codedump_pat.is_some() {
             let head: Vec<&str> = chunk
                 .jit_slot_names()
@@ -2156,7 +2341,35 @@ pub fn compile(
     }
 }
 
-#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "jit_x64.rs"]
+mod x64;
+
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+pub fn compile(
+    chunk: &Chunk,
+    layout: &crate::value::JitLayout,
+    ilayout: &crate::interpreter::InterpLayout,
+) -> Option<JitCode> {
+    x64::compile(chunk, layout, ilayout)
+}
+
+#[cfg(not(any(
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
+)))]
 pub fn compile(
     _chunk: &Chunk,
     _layout: &crate::value::JitLayout,
@@ -2167,7 +2380,7 @@ pub fn compile(
 
 /// Whether `layout` is usable for the inline GetProp template: valid (probed std layouts hold)
 /// and every offset it bakes fits its instruction's immediate range.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let sh = layout.obj_props + layout.props_shape;
     let en = layout.obj_props + layout.props_entries + layout.vec_ptr_off;
@@ -2192,7 +2405,7 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.entry_size < 0x1_0000
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn guard_prop_data(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
     a.ldrb_imm(reg, base, flags);
     let bit = asm::logical_imm_w(crate::value::PROP_ACCESSOR as u32).unwrap();
@@ -2200,7 +2413,7 @@ fn guard_prop_data(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usiz
     a.cbnz(reg, false, slow);
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn guard_prop_writable(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
     a.ldrb_imm(reg, base, flags);
     let bit = asm::logical_imm_w(crate::value::PROP_WRITABLE as u32).unwrap();
@@ -2218,9 +2431,9 @@ fn guard_prop_writable(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: 
 /// (`mid_ok`). Every guard branches to `slow` before any state is written, so the fallback
 /// re-runs the op cleanly. A BigInt value (compound payload), an accessor, any guard miss, or a
 /// last-reference receiver (whose pop-drop would free) falls to the checked helper.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 /// Where a property read's receiver comes from.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Copy, PartialEq)]
 enum PropRecv {
     /// Operand stack top (classic GetProp/GetMethod): consumed, refcount-managed.
@@ -2231,7 +2444,7 @@ enum PropRecv {
     Slot(u32),
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -2774,7 +2987,7 @@ fn emit_prop_load_inline(
 ///
 /// Returns false (nothing emitted) when an emission-time precondition fails — the caller then
 /// emits only the probe + H_CALL_HIT form.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_direct_call(
     a: &mut asm::Asm,
     ilayout: &crate::interpreter::InterpLayout,
@@ -3139,7 +3352,7 @@ fn emit_direct_call(
 /// `this`) either trivially droppable (tag < 5) or a shared reference (bare strong-count
 /// decrement) — in two passes: validate everything with NO mutation, then commit. Any
 /// deviation falls to the H_DIRECT_FINISH helper with state untouched.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_direct_finish_stub(
     a: &mut asm::Asm,
     il: &crate::interpreter::InterpLayout,
@@ -3298,14 +3511,14 @@ fn emit_direct_finish_stub(
 
 /// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
 /// one prototype hop).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
     get_prop_inlinable(layout) && layout.obj_proto < 4096
 }
 
 /// Same gate as [`get_prop_inlinable`] plus the `writable` byte (the store re-checks it — an
 /// in-place defineProperty can flip attributes without changing the shape).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let cap = layout.obj_props + layout.props_entries + layout.vec_cap_off;
     get_prop_inlinable(layout)
@@ -3330,7 +3543,7 @@ fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// one FP add. Anything else (accessor, non-writable, non-Num old value, shape/depth miss,
 /// exotic receiver, last-reference receiver) falls to the checked helper before any state is
 /// written.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_update_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -3463,7 +3676,7 @@ fn emit_update_prop_inline(
 
 /// Gate for the inline equality / Not templates: the Obj arms read the receiver's `ic_plain`
 /// byte, so those offsets must fit their instructions' immediate ranges.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
     layout.valid
         && layout.rc_strong_off < 256
@@ -3476,7 +3689,7 @@ fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// Gate for the ordinary-constructor `instanceof` template. The current heap property layout is
 /// NaN-boxed; require that exact form so decoding `.prototype` remains fail-closed if storage is
 /// changed again.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn instanceof_inlinable(
     layout: &crate::value::JitLayout,
     il: &crate::interpreter::InterpLayout,
@@ -3512,7 +3725,7 @@ fn instanceof_inlinable(
 /// additionally validate constructor identity facts and decode its current `.prototype` value.
 /// The LHS prototype walk is raw only while the realm-wide proxy latch remains clear. Every miss
 /// occurs before stack/refcount mutation and therefore cleanly replays through `jit_exec`.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_instanceof_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -3652,7 +3865,7 @@ fn emit_instanceof_inline(
 /// old value or receiver, an accessor/non-writable slot, a shape or depth miss, and any exotic
 /// receiver all fall to the checked helper. Every guard branches to `slow` before any state is
 /// written, so the fallback re-runs the op cleanly.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_set_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4073,7 +4286,7 @@ fn emit_set_prop_inline(
 /// which includes the `[[IsHTMLDDA]]` object) — takes the helper. Every guard branches to `slow`
 /// before any state is written. With `branch`, the result drives a fused `JumpIfFalse` directly
 /// (no Bool materializes); otherwise the Bool pushes in place of the operands.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_eq_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4330,7 +4543,7 @@ fn emit_eq_inline(
 /// are truthy — except a possible `[[IsHTMLDDA]]` object, so the Obj arm requires the
 /// receiver's `ic_plain` byte. BigInt and any refcounted operand that is a last reference take
 /// the helper. Guards all branch to `slow` before any state is written.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, l_unwind: usize) {
     let strong = layout.rc_strong_off as i32;
     let len_off = crate::lstr::LEN_OFF as u32;
@@ -4410,7 +4623,7 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
 
 /// Gate for the inline LoadName template: probed layouts hold and every baked offset fits its
 /// instruction's immediate range.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
     // The global-mode path additionally bakes the property-IC offsets (shape/entries/accessor),
     // so it shares that gate.
@@ -4428,7 +4641,7 @@ fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// binding's value straight out of the scope — no hashing, no helper call. The cache is filled
 /// by the VM slow path (`Chunk::name_ic_fill`, depth-0 resolutions only); any mismatch — cold
 /// cache, different env, structural scope change, TDZ, BigInt value — takes the checked helper.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_load_name_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4539,7 +4752,7 @@ fn emit_load_name_inline(
 /// Shared LoadName cache validation: on success x14 points at the resolved `Value` (the binding's
 /// value in scope mode, the global entry's value in global mode) and execution falls through; any
 /// mismatch branches to `slow`. Clobbers x9-x17.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_name_ic_value_ptr(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4612,7 +4825,7 @@ fn emit_name_ic_value_ptr(
 
 /// Same gate as [`get_prop_inlinable`] plus the dense-element (`Props::elems`) and
 /// writable-flag offsets the element templates bake in.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elems = layout.obj_props + layout.props_elems;
     get_prop_inlinable(layout)
@@ -4631,7 +4844,7 @@ fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
 }
 
 /// Packed entries can still use the numeric mirror read; the classic entry chase falls back.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn get_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elems = layout.obj_props + layout.props_elems;
     get_prop_inlinable(layout)
@@ -4652,7 +4865,7 @@ fn get_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// Num key that is exactly a u32 in dense bounds, a non-accessor slot, and a non-BigInt value on
 /// a receiver that is not the last reference; the live `inline_ic_safe` flag rules out proxies /
 /// typed arrays / module namespaces existing at all. Everything else falls to the checked helper.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_get_elem_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4795,7 +5008,7 @@ fn emit_get_elem_inline(
 /// BigInt `v` under `keep` (compound clone), a last-reference old value or receiver, an accessor
 /// or non-writable slot, or any dense miss falls to the checked helper.
 /// Where a mirror store's key index comes from.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 enum MirrorKey {
     /// Exact u32 already in an x register.
     U32InReg(u32),
@@ -4808,7 +5021,7 @@ enum MirrorKey {
 }
 
 /// What a mirror store writes.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 enum MirrorVal {
     /// A Value at `[x20 + off]` (tag at `off`, payload at `off+8`); tag unknown — a non-Num
     /// invalidates the mirror.
@@ -4822,7 +5035,7 @@ enum MirrorVal {
 /// unproven values, and invalidate outright on a non-Num or the hole sentinel. Bounds are
 /// re-checked against the mirror's own length as corruption insurance (the lockstep invariant
 /// should make it redundant). Clobbers x9, x12, x13 and d1 only.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_mirror_store(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4901,7 +5114,7 @@ fn emit_mirror_store(
     a.bind(done);
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_set_elem_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5060,7 +5273,7 @@ fn emit_set_elem_inline(
 }
 
 /// Which fused parameter-slot element op to emit.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Copy, PartialEq)]
 enum ElemLocalKind {
     /// `x[k]` → pops the key, pushes the element (net stack unchanged).
@@ -5072,7 +5285,7 @@ enum ElemLocalKind {
 }
 
 /// Where a fused element read's key comes from.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Copy, PartialEq)]
 enum KeySrc {
     /// On the operand stack (the plain op forms).
@@ -5088,7 +5301,7 @@ enum KeySrc {
 /// Guard that a packed property's old value is a Number, whose overwrite needs no destructor.
 /// Keeping this numeric-only makes the emitted template small; other packed values use the
 /// checked helper. On success w9 is the zero old-drop marker and x12 is scratch.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_packed_number_drop_guard(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5114,7 +5327,7 @@ fn emit_packed_number_drop_guard(
 
 /// Encode a wide Number at `off` into x16. Other kinds stay on the checked path, keeping the
 /// per-site packed-write template compact; Number payload bits are already NaN-box compatible.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_packed_stack_encode(a: &mut asm::Asm, off: i32, slow: usize) {
     a.ldurb(13, 20, off);
     a.cmp_imm_w(13, 4);
@@ -5135,7 +5348,7 @@ fn emit_packed_stack_encode(a: &mut asm::Asm, off: i32, slow: usize) {
 /// Decode one NaN-boxed heap property into the execution stack's wide x12/x13 Value pair.
 /// `entry` points at `(Rc<str>, Property)` and all guards branch to `slow` before mutation.
 /// BigInt stays checked; strings, symbols and objects clone by incrementing their Rc count.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_packed_entry_decode(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5212,7 +5425,7 @@ fn emit_packed_entry_decode(
 /// the operand stack, so there is no receiver clone/drop refcounting at all (the slot's own
 /// reference keeps it alive; no user code runs inside the fast path). A non-Obj slot (including
 /// a defensive TDZ Empty) falls to the checked helper, which re-runs the op generically.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_elem_local_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5228,7 +5441,7 @@ fn emit_elem_local_inline(
 /// pairs fuse the key-producing op into the element read, so their slow path re-runs *both*
 /// original ops via the helper (`pcs` lists them in order; every guard runs before any state
 /// is written, so the re-run is always clean).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_elem_local_keyed(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5464,7 +5677,7 @@ fn emit_elem_local_keyed(
 
 /// One op of a numeric register chain (see [`build_chain`]). Every value the chain produces is a
 /// proven Num held in a callee-saved FP register (d8..d15) instead of the operand stack.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Copy)]
 enum ChainOp {
     /// Push a Num constant (f64 bits).
@@ -5505,7 +5718,7 @@ enum ChainOp {
 /// proven Num in a register: arithmetic needs no tag checks at all and the compare+branch needs
 /// no guards whatsoever. Returns the chain and how many bytecode ops it covers (`None` if
 /// shorter than 3 ops — plain templates are fine for those).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn build_chain(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -5697,7 +5910,7 @@ fn build_chain(
 /// through the generic helper, so semantics are identical on every path. Side-effecting ops
 /// (slot stores, element writes) commit only after all their guards pass, which is what makes
 /// the spill-and-rerun always clean.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_chain(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6296,7 +6509,7 @@ fn emit_chain(
 // to the plain loop if they hold a refcounted value, so every later flush is a plain overwrite.
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 /// What a chain op pushes, precomputed by the planner (see the module comment above).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PushKind {
@@ -6306,7 +6519,7 @@ enum PushKind {
     D { iv: bool },
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 /// Where a loop-touched numeric slot lives during the run.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SlotRes {
@@ -6318,7 +6531,7 @@ enum SlotRes {
     None,
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Debug)]
 struct SlotPlan {
     off: u32,
@@ -6335,7 +6548,7 @@ struct SlotPlan {
     int_checked: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 struct LoopPlan {
     head: usize,
     jump_pc: usize,
@@ -6372,7 +6585,7 @@ struct LoopPlan {
     uses_ext: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 struct NamePlan {
     /// The `NameIc` cell address (`Chunk::jit_name_cache_ptr`).
     ptr: usize,
@@ -6382,9 +6595,9 @@ struct NamePlan {
     int_checked: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 /// How a loop-chain receiver is cached (see `LoopPlan::receivers`).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 struct ReceiverPlan {
     off: u32,
     /// x16/x17 (receivers 3-4 draw from the pin pool): the validated object base.
@@ -6424,14 +6637,14 @@ fn op_jump_target(op: &crate::bytecode::Op) -> Option<usize> {
 /// Integer-range bookkeeping for iv decisions: |v| ≤ 2^exp and integral. 255 = unknown/not
 /// integral. Kept crude on purpose — it only has to prove products/sums of masked values stay
 /// under 2^62.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Copy)]
 struct NumInfo {
     integral: bool,
     exp: u32,
     neg: bool,
 }
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 impl NumInfo {
     fn unknown() -> NumInfo {
         NumInfo {
@@ -6445,7 +6658,7 @@ impl NumInfo {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn plan_loop(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -7627,7 +7840,7 @@ fn plan_loop(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 /// A virtual value during loop-chain emission.
 #[derive(Clone, Copy)]
 enum LV {
@@ -7638,7 +7851,7 @@ enum LV {
 
 /// Emit the loop chain for `plan`. Returns the label for the plain fallback of the head op —
 /// the caller binds it immediately after and continues emitting the plain region.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_loop_chain(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -8768,14 +8981,14 @@ fn emit_loop_chain(
 /// The generic per-op helper call: `jit_exec(ctx, pc, sp)` → (new sp, threw?). The sp is taken
 /// unconditionally — it reflects consumed operands even when the op threw, which is what keeps
 /// the unwinder's cleanup from re-dropping moved-out slots.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_exec(a: &mut asm::Asm, pc: u32, l_unwind: usize) {
     emit_op_helper(a, H_EXEC, pc, l_unwind);
 }
 
 /// [`emit_exec`] through a DEDICATED helper slot (same `(ctx, pc, sp) → SpFlag` contract):
 /// hot op families skip the generic decode.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_op_helper(a: &mut asm::Asm, idx: usize, pc: u32, l_unwind: usize) {
     a.mov(0, 19);
     a.movz(1, pc, 0);
@@ -8787,7 +9000,7 @@ fn emit_op_helper(a: &mut asm::Asm, idx: usize, pc: u32, l_unwind: usize) {
 }
 
 /// An infallible helper (returns the new sp): return/handler bookkeeping.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_helper(a: &mut asm::Asm, idx: usize, imm: u32) {
     a.mov(0, 19);
     a.movz(1, imm, 0);
@@ -8798,7 +9011,7 @@ fn emit_helper(a: &mut asm::Asm, idx: usize, imm: u32) {
 }
 
 /// Condition helper: leaves the flag in w1, new sp in x0 (null = threw during ToBoolean).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn emit_cond(a: &mut asm::Asm, mode: u32, l_unwind: usize) {
     a.mov(0, 19);
     a.movz(1, mode, 0);
@@ -8864,7 +9077,10 @@ fn stack_depths(chunk: &Chunk) -> Option<usize> {
 /// `needs_global` CALLEE if the caller's ctx already carries the pointer — a null here forces
 /// every such call through the layered path. Falls back to null (never needed) or the original
 /// panicking borrow (needed, but the global is mutably borrowed — same failure as before).
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 fn jit_global_body(i: &Interp, code: &JitCode) -> *const u8 {
     if let Ok(b) = i.global.try_borrow() {
         &*b as *const crate::value::Object as *const u8
@@ -8878,7 +9094,10 @@ fn jit_global_body(i: &Interp, code: &JitCode) -> *const u8 {
 
 /// Execute a JIT-compiled chunk: mirrors `bytecode::run` (activation env, pooled slot buffer),
 /// with the operand stack in a pooled flat buffer sized by the static analysis.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 pub fn run(
     i: &mut Interp,
     chunk: &Rc<Chunk>,
@@ -8966,7 +9185,10 @@ pub(crate) const FRAME_BUF: usize = 256;
 /// # Safety
 /// `args..args+argc` must be initialized `Value`s the caller relinquishes entirely; `*env` must
 /// outlive the run.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 pub(crate) unsafe fn run_moved(
     i: &mut Interp,
     chunk: &Rc<Chunk>,
@@ -8985,7 +9207,10 @@ pub(crate) unsafe fn run_moved(
 /// values are cloned exactly once into that environment; the call's owned argument values still
 /// move into the fixed frame buffer, avoiding the second full clone and both growable `Vec`s used
 /// by [`run`]. An `arguments` exotic is materialized before the move and installed into its slot.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 pub(crate) unsafe fn run_moved_env(
     i: &mut Interp,
     chunk: &Rc<Chunk>,
@@ -9019,7 +9244,10 @@ pub(crate) unsafe fn run_moved_env(
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 unsafe fn run_moved_inner(
     i: &mut Interp,
     chunk: &Rc<Chunk>,
@@ -9169,7 +9397,10 @@ unsafe fn run_moved_inner(
     }
 }
 
-#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+)))]
 pub fn run(
     _i: &mut Interp,
     _chunk: &Rc<Chunk>,
@@ -9182,7 +9413,10 @@ pub fn run(
 }
 
 /// See the aarch64-macos definition; without machine code the fast call never commits.
-#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+)))]
 pub(crate) unsafe fn run_moved(
     _i: &mut Interp,
     _chunk: &Rc<Chunk>,
@@ -9197,7 +9431,10 @@ pub(crate) unsafe fn run_moved(
 }
 
 /// See the aarch64-macos definition; without machine code the fast call never commits.
-#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+)))]
 pub(crate) unsafe fn run_moved_env(
     _i: &mut Interp,
     _chunk: &Rc<Chunk>,

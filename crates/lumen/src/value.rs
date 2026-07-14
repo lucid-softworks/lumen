@@ -695,7 +695,10 @@ pub fn live_objects() -> i64 {
 
 /// Stable address of this thread's live-object counter. The Rc-based runtime and its compiled
 /// chunks are `!Send`, so generated code executes on the thread that baked this TLS address.
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 pub(crate) fn live_objects_ptr() -> *const i64 {
     LIVE_OBJECTS.with(Cell::as_ptr)
 }

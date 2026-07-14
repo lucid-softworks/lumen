@@ -15,11 +15,13 @@ A lexer, parser, and **three execution tiers**:
 - an opt-in **bytecode VM** — functions compile whole (or not at all — no deoptimization) to
   a stack machine with slot-homed locals, per-site inline caches for property and free-name
   access backed by object shapes (hidden classes), and dense-array element fast paths;
-- an **ARM64 template JIT** (macOS/Apple Silicon) — bytecode lowers to real machine code:
+- a **native template JIT** — bytecode lowers to real ARM64 machine code on macOS, Linux,
+  and Windows, with a correctness-first x86-64 backend on Intel macOS, Linux, and Windows:
   per-op templates with the interpreter as the shared slow path, inline-cache reads baked
   into the instruction stream, fused compare-and-branch, exact-`ToInt32` bitops, and numeric
-  *register chains* that keep runs of arithmetic entirely in FP registers. On other
-  platforms the JIT tier degrades to the bytecode VM.
+  *register chains* that keep runs of arithmetic entirely in FP registers. The full set of
+  inline fast paths currently lives in the ARM64 backend; x86-64 starts with native control
+  flow and checked per-op helpers. Other architectures degrade to the bytecode VM.
 
 Tier selection: `--tier=interp|bytecode|jit` (**jit is the default**; where the JIT is
 unavailable it degrades to the bytecode VM). Functions tier up after a call-count threshold —
@@ -37,8 +39,10 @@ the largest single contributor to binary size (~3 MB of the release binary). Bui
 methods degrade to their locale-independent forms, the way engines built without i18n do.
 
 On dependencies and `unsafe`: the workspace stays std-only — the JIT maps executable memory
-through raw `extern "C"` declarations of `mmap`/`pthread_jit_write_protect_np` rather than
-libc. The interpreter and bytecode VM are safe Rust; `unsafe` is concentrated where machine
+through raw platform declarations (`mmap`/`mprotect`, macOS `MAP_JIT`, or Windows
+`VirtualAlloc`/`VirtualProtect`) rather than libc. Pages are writable only while code is copied,
+then executable/read-only, and instruction caches are synchronized where required. The
+interpreter and bytecode VM are safe Rust; `unsafe` is concentrated where machine
 code meets the object graph (the JIT's executable pages and its templates' raw reads — every
 baked offset is *measured at runtime* against the live types and fails closed to the checked
 helper if anything doesn't hold) and in the N-API addon loader's `dlopen` bridge.
@@ -139,7 +143,8 @@ lumen-repl ← lumen-cli` — so each op crate can be worked on in isolation.
 
 ## Install
 
-Grab a prebuilt runtime for your platform (macOS arm64, Linux x86_64/arm64):
+Grab a nightly prebuilt runtime on macOS arm64/x86_64 or Linux x86_64/arm64 (tagged releases
+also publish Windows x86_64 binaries):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lucid-softworks/lumen/main/scripts/install.sh | bash
