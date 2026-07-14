@@ -1073,7 +1073,7 @@ pub struct Interp {
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub(crate) gc_next: i64,
     /// Call counter for [`Interp::gc_check_amortized`]: the JIT fast call polls the (TLS-backed)
-    /// live-object counters only every 32nd call — a bounded delay that costs at most 32 calls'
+    /// live-object counters only every 256th call — a bounded delay that costs at most 256 calls'
     /// worth of allocation slack against `gc_next`'s doubling schedule.
     pub(crate) gc_tick: u32,
     /// Prune the scope registry once its entry count passes this floating threshold.
@@ -1217,9 +1217,9 @@ pub const MAX_LIVE: i64 = 3_000_000;
 
 /// Live-object count at which the collector first runs; the threshold then floats (see `gc_check`).
 pub const GC_TRIGGER: i64 = 100_000;
-/// Direct JIT calls check the allocation counters once per 32 calls. The mask form is shared
+/// Direct JIT calls check the allocation counters once per 256 calls. The mask form is shared
 /// with the generated direct-call gate and must remain `2^n - 1`.
-pub(crate) const GC_CALL_POLL_MASK: u32 = 31;
+pub(crate) const GC_CALL_POLL_MASK: u32 = 255;
 /// Scope-registry entry count that arms a registry prune.
 const SCOPE_GC_TRIGGER: usize = 65_536;
 
@@ -4202,7 +4202,7 @@ impl Interp {
     }
 
     /// [`gc_check`] amortized for the JIT fast call: the real check reads two thread-local
-    /// counters, which is measurable at millions of calls per second — poll every 32nd call.
+    /// counters, which is measurable at millions of calls per second — poll every 256th call.
     #[inline]
     pub(crate) fn gc_check_amortized(&mut self) -> Result<(), Abrupt> {
         self.gc_tick = self.gc_tick.wrapping_add(1);
