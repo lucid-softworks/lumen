@@ -10157,6 +10157,34 @@ fn loop_chain_elem_dedup_and_aliasing() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+fn inline_four_way_nested_dispatch_and_deopt() {
+    assert_eq!(
+        run_jit(
+            "function A() {} function B() {} function C() {} function D() {}
+             A.prototype.bump = function (x) { return x + 1; };
+             B.prototype.bump = function (x) { return x + 2; };
+             C.prototype.bump = function (x) { return x + 3; };
+             D.prototype.bump = function (x) { return x + 4; };
+             A.prototype.run = function (x) { return this.bump(x); };
+             B.prototype.run = function (x) { return this.bump(x); };
+             C.prototype.run = function (x) { return this.bump(x); };
+             D.prototype.run = function (x) { return this.bump(x); };
+             var xs = [new A(), new B(), new C(), new D()];
+             function dispatch(xs, n) {
+               var sum = 0;
+               for (var i = 0; i < n; i++) sum += xs[i & 3].run(i);
+               return sum;
+             }
+             for (var r = 0; r < 300; r++) dispatch(xs, 8);
+             var before = dispatch(xs, 8);
+             B.prototype.run = function (x) { return x * 10; };
+             before + ':' + dispatch(xs, 8)"
+        ),
+        "48:98"
+    );
+}
+
+#[test]
 fn inline_deopt_on_method_reassignment() {
     assert_eq!(
         run_jit(

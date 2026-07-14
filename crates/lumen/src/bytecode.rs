@@ -1922,7 +1922,19 @@ pub(crate) fn plan_inlines(
     caller: &Function,
     global_env: &crate::interpreter::Env,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
-    plan_inlines_at(chunk, caller, global_env, 0)
+    // Bound the *whole* optimized body rather than stopping after one arbitrary nesting level.
+    // OO hot loops tend to be call chains (dispatcher -> virtual method -> small scheduler
+    // helper); a depth-one cap leaves the most valuable dispatch intact.  The shared source-op
+    // budget prevents four-way polymorphic sites from growing exponentially.  It is deliberately
+    // conservative: an inline property op can expand to substantially more machine code than a
+    // simple arithmetic op.
+    const INLINE_SOURCE_OP_BUDGET: usize = 320;
+    let limit = std::env::var("LUMEN_INLINE_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(INLINE_SOURCE_OP_BUDGET);
+    let mut budget = limit.saturating_sub(chunk.ops.len());
+    plan_inlines_at(chunk, caller, global_env, 0, &mut budget)
 }
 
 fn plan_inlines_at(
@@ -1930,7 +1942,10 @@ fn plan_inlines_at(
     caller: &Function,
     global_env: &crate::interpreter::Env,
     depth: u32,
+    budget: &mut usize,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
+    const INLINE_MAX_DEPTH: u32 = 3;
+    const INLINE_MAX_WAYS: usize = 4;
     let mut plan: crate::fasthash::FastMap<u32, InlinePlanEntry> = Default::default();
     let log = std::env::var_os("LUMEN_TIER_LOG").is_some();
     macro_rules! skip {
@@ -1949,11 +1964,12 @@ fn plan_inlines_at(
             .map(|e| e.get())
             .filter(|c| c.callee != 0)
             .collect();
-        // Distinct callees (refills may duplicate one across ways); up to two splice behind
-        // chained guards — polymorphic dispatch sites are the whole game in OO code.
+        // Distinct callees (refills may duplicate one across ways).  Call ICs retain four ways,
+        // so consume all four when the body budget permits: Richards' central task dispatcher is
+        // exactly four-way polymorphic, and leaving half of it as real calls dominates runtime.
         filled.dedup_by_key(|c| c.callee);
         let mut ways: Vec<InlineWay> = Vec::new();
-        for ic in filled.iter().take(2) {
+        for ic in filled.iter().take(INLINE_MAX_WAYS) {
             let Some(weak) = pins.get(&ic.callee) else {
                 skip!(idx, "no pin")
             };
@@ -2014,12 +2030,17 @@ fn plan_inlines_at(
             if !free_names.is_empty() && !global_closure {
                 skip!(idx, "free names in a non-global closure");
             }
+            let inline_cost = callee_chunk.ops.len();
+            if inline_cost > *budget {
+                skip!(idx, "optimized-body budget");
+            }
+            *budget -= inline_cost;
             let uses_this = callee_chunk.uses_this();
-            // One level of nesting: the spliced body's own hot monomorphic callees splice too
-            // (an OO benchmark's helpers call helpers — without this, every call inside a splice
-            // stays a real call).
-            let nested = if depth < 1 {
-                plan_inlines_at(callee_chunk, f, global_env, depth + 1)
+            // Follow small hot call chains under the shared body budget.  This reaches through a
+            // dispatcher into its virtual target and then into leaf helpers without allowing
+            // unbounded recursive expansion.
+            let nested = if depth < INLINE_MAX_DEPTH && *budget > 0 {
+                plan_inlines_at(callee_chunk, f, global_env, depth + 1, budget)
             } else {
                 Default::default()
             };
