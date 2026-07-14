@@ -6697,7 +6697,7 @@ unsafe fn jit_callstat(
         if i.depth >= crate::interpreter::MAX_EVAL_DEPTH {
             break 'r "gate: depth";
         }
-        if (i.gc_tick + 1) % 16 == 0 {
+        if (i.gc_tick + 1) & crate::interpreter::GC_CALL_POLL_MASK == 0 {
             break 'r "gate: gc tick due";
         }
         if i.fn_frames.len() == i.fn_frames.capacity() {

@@ -2803,8 +2803,8 @@ fn emit_direct_call(
     a.b_cond(C_HS, hit_slow);
     a.ldr_w_imm(13, 14, il.gc_tick as u32);
     a.add_imm(13, 13, 1);
-    let field15 = asm::logical_imm_w(15).unwrap();
-    a.logic_imm_w(0, 4, 13, field15); // and w4, w13, #15
+    let poll_mask = asm::logical_imm_w(crate::interpreter::GC_CALL_POLL_MASK).unwrap();
+    a.logic_imm_w(0, 4, 13, poll_mask);
     a.cbz(4, false, hit_slow); // GC may invalidate validated raw call state
     a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
     a.ldr_imm(17, 14, (il.fn_frames + il.fnf_cap_word) as u32);
